@@ -5,7 +5,9 @@ volumes:
 services:
   # docker compose run --build -t agent-yes
   agent-yes:
-    build: .
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
     # image: snomiao/agent-yes
     stdin_open: true
     tty: true
@@ -35,4 +37,4 @@ services:
         - action: rebuild
           path: docker-compose.yaml
         - action: rebuild
-          path: ./Dockerfile
+          path: ./docker/Dockerfile

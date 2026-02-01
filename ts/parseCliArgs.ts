@@ -17,6 +17,7 @@ export function parseCliArgs(argv: string[]) {
       .at(-1)
       ?.replace(/(\.[jt]s)?$/, "")
       .replace(/^(cli|agent)(-yes$)?/, "")
+      .replace(/^ay$/, "") // treat standalone "ay" same as "agent-yes"
       .replace(/-yes$/, "") || undefined;
 
   // Parse args with yargs (same logic as cli.ts:16-73)
@@ -25,6 +26,10 @@ export function parseCliArgs(argv: string[]) {
     .example(
       "$0 claude --idle=30s -- solve all todos in my codebase, commit one by one",
       "Run Claude with a 30 seconds idle timeout, and the prompt is everything after `--`",
+    )
+    .example(
+      "$0 claude --stdpush",
+      "Run Claude with external stdin input enabled via --append-prompt",
     )
     // TODO: add a --docker option, will tell cli.ts to start docker process with tty and handles all stdio forwarding
 
@@ -87,6 +92,16 @@ export function parseCliArgs(argv: string[]) {
         "Resume previous session in current cwd if any, note: will exit if no previous session found",
       default: false,
       alias: "c",
+    })
+    .option("append-prompt", {
+      type: "string",
+      description: "Send a prompt to the active agent's stdin in current directory",
+    })
+    .option("stdpush", {
+      type: "boolean",
+      description: "Enable external input stream to push additional data to stdin",
+      default: false,
+      alias: ["ipc", "fifo"], // backward compatibility
     })
     .positional("cli", {
       describe: "The AI CLI to run, e.g., claude, codex, copilot, cursor, gemini",
@@ -165,7 +180,7 @@ export function parseCliArgs(argv: string[]) {
     env: process.env as Record<string, string>,
     cli: (cliName ||
       parsedArgv.cli ||
-      parsedArgv._[0]?.toString()?.replace?.(/-yes$/, "")) as (typeof SUPPORTED_CLIS)[number],
+      (dashIndex !== 0 ? parsedArgv._[0]?.toString()?.replace?.(/-yes$/, "") : undefined)) as (typeof SUPPORTED_CLIS)[number],
     cliArgs: cliArgsForSpawn,
     prompt: [parsedArgv.prompt, dashPrompt].filter(Boolean).join(" ") || undefined,
     install: parsedArgv.install,
@@ -180,5 +195,7 @@ export function parseCliArgs(argv: string[]) {
     verbose: parsedArgv.verbose,
     resume: parsedArgv.continue, // Note: intentional use resume here to avoid preserved keyword (continue)
     useSkills: parsedArgv.useSkills,
+    appendPrompt: parsedArgv.appendPrompt,
+    useFifo: Boolean(parsedArgv.stdpush || parsedArgv.ipc || parsedArgv.fifo), // Support --stdpush, --ipc, and --fifo (backward compatibility)
   };
 }
