@@ -130,8 +130,7 @@ export function spawnAgent(options: SpawnOptions): IPty {
   const spawn = () => {
     const cliCommand = cliConf?.binary || cli;
     let [bin, ...args] = [...parseCommandString(cliCommand), ...cliArgs];
-    if (verbose) logger.info(`Spawning ${bin} with args: ${JSON.stringify(args)}`);
-    logger.info(`Spawning ${bin} with args: ${JSON.stringify(args)}`);
+    logger.debug(`Spawning ${bin} with args: ${JSON.stringify(args)}`);
     const spawned = pty.spawn(bin!, args, ptyOptions);
     logger.info(`[${cli}-yes] Spawned ${bin} with PID ${spawned.pid}`);
     return spawned;
