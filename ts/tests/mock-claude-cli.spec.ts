@@ -56,14 +56,14 @@ describe("IPC cross-platform functionality", () => {
 
     // Test that --stdpush flag is correctly parsed
     const config1 = parseCliArgs(["node", "agent-yes", "--stdpush", "claude"]);
-    expect(config1.useFifo).toBe(true);
+    expect(config1.useStdinAppend).toBe(true);
 
     // Test backward compatibility with --fifo and --ipc
     const config2 = parseCliArgs(["node", "agent-yes", "--fifo", "claude"]);
-    expect(config2.useFifo).toBe(true);
+    expect(config2.useStdinAppend).toBe(true);
 
     const config3 = parseCliArgs(["node", "agent-yes", "--ipc", "claude"]);
-    expect(config3.useFifo).toBe(true);
+    expect(config3.useStdinAppend).toBe(true);
 
     // Test that platform detection works
     const originalPlatform = process.platform;

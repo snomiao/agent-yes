@@ -199,6 +199,6 @@ export function parseCliArgs(argv: string[]) {
     resume: parsedArgv.continue, // Note: intentional use resume here to avoid preserved keyword (continue)
     useSkills: parsedArgv.useSkills,
     appendPrompt: parsedArgv.appendPrompt,
-    useFifo: Boolean(parsedArgv.stdpush || parsedArgv.ipc || parsedArgv.fifo), // Support --stdpush, --ipc, and --fifo (backward compatibility)
+    useStdinAppend: Boolean(parsedArgv.stdpush || parsedArgv.ipc || parsedArgv.fifo), // Support --stdpush, --ipc, and --fifo (backward compatibility)
   };
 }

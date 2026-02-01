@@ -114,7 +114,7 @@ export default async function agentYes({
   install = false,
   resume = false,
   useSkills = false,
-  useFifo = false,
+  useStdinAppend = false,
 }: {
   cli: SUPPORTED_CLIS;
   cliArgs?: string[];
@@ -130,7 +130,7 @@ export default async function agentYes({
   install?: boolean; // if true, install the cli tool if not installed, e.g. will run `npm install -g cursor-agent`
   resume?: boolean; // if true, resume previous session in current cwd if any
   useSkills?: boolean; // if true, prepend SKILL.md header to the prompt for non-Claude agents
-  useFifo?: boolean; // if true, enable FIFO input stream on Linux for additional stdin input
+  useStdinAppend?: boolean; // if true, enable FIFO input stream on Linux,  for additional stdin input
 }) {
   if (!cli) throw new Error(`cli is required`);
   const conf =
@@ -494,7 +494,7 @@ export default async function agentYes({
 
     // TODO(sno): Read from IPC stream if available (FIFO on Linux, Named Pipes on Windows)
     // .by(async (s) => {
-    //   if (!useFifo) return s;
+    //   if (!useStdinAppend) return s;
     //   const fifoPath = pidStore.getFifoPath(shell.pid);
     //   if (!fifoPath) return s; // Skip if no valid path
     //   const ipcResult = await createFifoStream(cli, fifoPath);
