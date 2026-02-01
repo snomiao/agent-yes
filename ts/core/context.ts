@@ -1,10 +1,10 @@
-import type { IPty } from "node-pty";
 import { ReadyManager } from "../ReadyManager.ts";
 import { IdleWaiter } from "../idleWaiter.ts";
 import type { PidStore } from "../pidStore.ts";
 import type { AgentCliConfig } from "../index.ts";
 import type { SUPPORTED_CLIS } from "../SUPPORTED_CLIS.ts";
 import type { LogPaths } from "./logging.ts";
+import type { IPty } from "../pty.ts";
 
 /**
  * Shared context for agent session

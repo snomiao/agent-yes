@@ -71,7 +71,7 @@ export async function createAutoResponseHandler(
 
   // enter matchers: send Enter when any enter regex matches
   if (conf.enter?.some((rx: RegExp) => line.match(rx))) {
-    logger.debug(`enter |${line}`);
+    logger.debug(`sendEnter matched|${line}`);
     return await sendEnter(ctx.messageContext, 400); // wait for idle for a short while and then send Enter
   }
 

@@ -1,7 +1,7 @@
 import type { TerminalTextRender } from "terminal-render";
 import { logger } from "../logger.ts";
-import type { IPty } from "node-pty";
 import type { SUPPORTED_CLIS } from "../SUPPORTED_CLIS.ts";
+import type { IPty } from "../pty.ts";
 
 /**
  * Stream processing utilities for terminal I/O

@@ -7,7 +7,6 @@ import { PidStore } from "../pidStore.ts";
 /**
  * Log path management for agent sessions
  */
-
 export interface LogPaths {
   logPath: string | false;
   rawLogPath: string | false;
@@ -21,14 +20,15 @@ export interface LogPaths {
  * @param pid Process ID
  * @returns Object containing all log paths
  */
-export function initializeLogPaths(pidStore: PidStore, pid: number): LogPaths {
-  const logPath = pidStore.getLogPath(pid);
-  const rawLogPath = path.resolve(path.dirname(logPath), `${pid}.raw.log`);
-  const rawLinesLogPath = path.resolve(path.dirname(logPath), `${pid}.lines.log`);
-  const debuggingLogsPath = path.resolve(path.dirname(logPath), `${pid}.debug.log`);
+export async function initializeLogPaths(pidStore: PidStore, pid: number): Promise<LogPaths> {
+  const logDir = pidStore.getLogDir();
+  await mkdir(logDir, { recursive: true });
+  const rawLogPath = path.resolve(path.dirname(logDir), `${pid}.raw.log`);
+  const rawLinesLogPath = path.resolve(path.dirname(logDir), `${pid}.lines.log`);
+  const debuggingLogsPath = path.resolve(path.dirname(logDir), `${pid}.debug.log`);
 
   return {
-    logPath,
+    logPath: logDir,
     rawLogPath,
     rawLinesLogPath,
     debuggingLogsPath,

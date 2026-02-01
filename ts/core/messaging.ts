@@ -23,10 +23,11 @@ export async function sendEnter(context: MessageContext, waitms = 1000) {
   const st = Date.now();
   await context.idleWaiter.wait(waitms); // wait for idle a while
   const et = Date.now();
-  logger.debug(`sendEn| idleWaiter.wait(${String(waitms)}) took ${String(et - st)}ms`);
+  logger.debug(`sendingEnter| idleWaiter.wait(${String(waitms)}) took ${String(et - st)}ms`);
   context.nextStdout.unready();
   // send the enter key
   context.shell.write("\r");
+  logger.debug(`enterSent| idleWaiter.wait(${String(waitms)}) took ${String(et - st)}ms`);
 
   // retry once if not received any output in 1 second after sending Enter
   await Promise.race([
