@@ -1,10 +1,9 @@
 import { execaCommandSync, parseCommandString } from "execa";
 import { logger } from "../logger.ts";
 import { catcher } from "../catcher.ts";
-import pty from "../pty.ts";
+import pty, { type IPty } from "../pty.ts";
 import type { AgentCliConfig } from "../index.ts";
 import type { SUPPORTED_CLIS } from "../SUPPORTED_CLIS.ts";
-import type { IPty } from "node-pty";
 
 /**
  * Agent spawning utilities
@@ -176,15 +175,3 @@ export function spawnAgent(options: SpawnOptions): IPty {
   )();
 }
 
-/**
- * Get terminal dimensions with defaults for non-TTY environments
- */
-export function getTerminalDimensions(): { cols: number; rows: number } {
-  if (!process.stdout.isTTY) return { cols: 80, rows: 30 }; // default size when not tty
-  return {
-    // TODO: enforce minimum cols/rows to avoid layout issues
-    // cols: Math.max(process.stdout.columns, 80),
-    cols: Math.min(Math.max(20, process.stdout.columns), 80),
-    rows: process.stdout.rows,
-  };
-}

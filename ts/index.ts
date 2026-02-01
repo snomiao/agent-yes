@@ -20,7 +20,7 @@ import {
   saveLogFile,
   saveDeprecatedLogFile,
 } from "./core/logging.ts";
-import { spawnAgent, getTerminalDimensions } from "./core/spawner.ts";
+import { spawnAgent } from "./core/spawner.ts";
 import { AgentContext } from "./core/context.ts";
 import { createAutoResponseHandler } from "./core/responders.ts";
 import {
@@ -28,6 +28,7 @@ import {
   createTerminateSignalHandler,
   createTerminatorStream,
 } from "./core/streamHelpers.ts";
+import { ReadyManager } from "./ReadyManager.ts";
 
 export { removeControlCharacters };
 
@@ -329,7 +330,7 @@ export default async function agentYes({
 
   // Register process in pidStore and compute log paths
   await pidStore.registerProcess({ pid: shell.pid, cli, args: cliArgs, prompt });
-  const logPaths = initializeLogPaths(pidStore, shell.pid);
+  const logPaths = await initializeLogPaths(pidStore, shell.pid);
   setupDebugLogging(logPaths.debuggingLogsPath);
 
   // Create agent context
@@ -478,11 +479,12 @@ export default async function agentYes({
 
   // Message streaming with stdin and optional FIFO (Linux only)
 
+  // read stdin stream
   await sflow(fromReadable<Buffer>(process.stdin))
-  
     .map((buffer) => buffer.toString())
 
-    .by(function handleTerminateSignals(s) {
+    // early abort on Ctrl+C, kills shell and exit.
+    .forkTo(function handleTerminateSignals(s) {
       const handler = createTerminateSignalHandler(ctx.stdinReady, (exitCode) => {
         shell.kill("SIGINT");
         pendingExitCode.resolve(exitCode);
@@ -490,17 +492,18 @@ export default async function agentYes({
       return s.map(handler);
     })
 
-    // read from IPC stream if available (FIFO on Linux, Named Pipes on Windows)
-    .by((s) => {
-      if (!useFifo) return s;
-      const fifoPath = pidStore.getFifoPath(shell.pid);
-      if (!fifoPath) return s; // Skip if no valid path
-      const ipcResult = createFifoStream(cli, fifoPath);
-      if (!ipcResult) return s;
-      pendingExitCode.promise.finally(() => ipcResult.cleanup());
-      process.stderr.write(`\n  Append prompts: ${cli}-yes --append-prompt '...'\n\n`);
-      return s.merge(ipcResult.stream);
-    })
+    // TODO(sno): Read from IPC stream if available (FIFO on Linux, Named Pipes on Windows)
+    // .by(async (s) => {
+    //   if (!useFifo) return s;
+    //   const fifoPath = pidStore.getFifoPath(shell.pid);
+    //   if (!fifoPath) return s; // Skip if no valid path
+    //   const ipcResult = await createFifoStream(cli, fifoPath);
+    //   if (!ipcResult) return s;
+    //   pendingExitCode.promise.finally(async() => await ipcResult[Symbol.asyncDispose]());
+    //   process.stderr.write(`\n  Append prompts: ${cli}-yes --append-prompt '...'\n\n`);
+    //   return s.merge(ipcResult.stream);
+    // })
+    // .confluenceByConcat() // necessary when .by() above is async
 
     // .map((e) => e.replaceAll('\x1a', '')) // remove ctrl+z from user's input, to prevent bug (but this seems bug)
     // .forEach(e => appendFile('.cache/io.log', "input |" + JSON.stringify(e) + '\n')) // for debugging
@@ -525,7 +528,7 @@ export default async function agentYes({
     .forEach(() => {
       ctx.idleWaiter.ping();
       pidStore.updateStatus(shell.pid, "active").catch(() => null);
-      ctx.nextStdout.ready()
+      ctx.nextStdout.ready();
     })
     .forkTo(async function rawLogger(f) {
       const rawLogPath = ctx.logPaths.rawLogPath;
@@ -548,7 +551,9 @@ export default async function agentYes({
     .by(function consoleResponder(e) {
       // wait for cli ready and send prompt if provided
       if (cli === "codex") shell.write(`\u001b[1;1R`); // send cursor position response when stdin is not tty
-      return e.forEach((text) => handleConsoleControlCodes(text, shell, terminalRender, cli, verbose));
+      return e.forEach((text) =>
+        handleConsoleControlCodes(text, shell, terminalRender, cli, verbose),
+      );
     })
 
     // auto-response
@@ -615,7 +620,7 @@ export default async function agentYes({
   }
 
   function getTerminalDimensions() {
-    if (!process.stdout.isTTY) return { cols: 80, rows: 30 }; // default size when not tty
+    if (!process.stdout.isTTY) return { cols: 80, rows: 24 }; // default size when not tty
     return {
       // Enforce minimum 20 columns to avoid layout issues
       cols: Math.max(20, process.stdout.columns),
