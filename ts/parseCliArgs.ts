@@ -24,8 +24,8 @@ export function parseCliArgs(argv: string[]) {
   const parsedArgv = yargs(hideBin(argv))
     .usage("Usage: $0 [cli] [agent-yes args] [agent-cli args] [--] [prompts...]")
     .example(
-      "$0 claude --idle=30s -- solve all todos in my codebase, commit one by one",
-      "Run Claude with a 30 seconds idle timeout, and the prompt is everything after `--`",
+      "$0 claude --timeout=30s -- solve all todos in my codebase, commit one by one",
+      "Run Claude with a 30 seconds idle timeout (will type /exit when timeout), everything after `--` will be treated as the prompt",
     )
     .example(
       "$0 claude --stdpush",
