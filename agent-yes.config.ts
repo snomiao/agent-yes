@@ -81,7 +81,7 @@ function getDefaultConfig() {
           /\? for shortcuts/,
           /\u00A0Try "/, // regex matcher for stdin ready (note: \u00A0 is non-breaking space)
           /^\? for shortcuts/,
-          /^> /,
+          /^>[ \u00A0]/,
           /──────────+/,
         ], // regex matcher for stdin ready
         typingRespond: {

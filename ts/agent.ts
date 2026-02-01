@@ -1,5 +1,4 @@
 #!/usr/bin/env bun --watch
-
 import {
   dynamicTool,
   jsonSchema,
