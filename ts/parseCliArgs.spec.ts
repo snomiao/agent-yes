@@ -228,4 +228,21 @@ describe("CLI argument parsing", () => {
     expect(result.cli).toBe("codex");
     expect(result.prompt).toBe("Implement feature");
   });
+
+  it("should parse ay -- hello command (ay is wrapper, so CLI is undefined)", () => {
+    const result = parseCliArgs([
+      "node",
+      "/path/to/ay",
+      "--",
+      "hello",
+    ]);
+
+    // "ay" is a wrapper script like "agent-yes", so cliName is stripped to undefined
+    // cli.ts will default this to "claude" at runtime
+    expect(result.cli).toBeUndefined();
+    expect(result.cliArgs).toEqual([]);
+    expect(result.prompt).toBe("hello");
+    expect(result.verbose).toBe(false);
+    expect(result.robust).toBe(true);
+  });
 });
