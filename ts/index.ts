@@ -5,28 +5,37 @@ import path from "path";
 import DIE from "phpdie";
 import sflow from "sflow";
 import { TerminalTextRender } from "terminal-render";
-import { catcher } from "./catcher.ts";
-import {
-  extractSessionId,
-  getSessionForCwd,
-  storeSessionForCwd,
-} from "./resume/codexSessionManager.ts";
-import { IdleWaiter } from "./idleWaiter.ts";
+import { getSessionForCwd } from "./resume/codexSessionManager.ts";
 import pty, { ptyPackage } from "./pty.ts";
-import { ReadyManager } from "./ReadyManager.ts";
 import { removeControlCharacters } from "./removeControlCharacters.ts";
 import { acquireLock, releaseLock, shouldUseLock } from "./runningLock.ts";
 import { logger } from "./logger.ts";
 import { createFifoStream } from "./beta/fifo.ts";
+import { PidStore } from "./pidStore.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
-import winston from "winston";
-import { mapObject, pipe } from "rambda";
+import { sendMessage } from "./core/messaging.ts";
+import {
+  initializeLogPaths,
+  setupDebugLogging,
+  saveLogFile,
+  saveDeprecatedLogFile,
+} from "./core/logging.ts";
+import { spawnAgent, getTerminalDimensions } from "./core/spawner.ts";
+import { AgentContext } from "./core/context.ts";
+import { createAutoResponseHandler } from "./core/responders.ts";
+import {
+  handleConsoleControlCodes,
+  createTerminateSignalHandler,
+  createTerminatorStream,
+} from "./core/streamHelpers.ts";
 
 export { removeControlCharacters };
 
 export type AgentCliConfig = {
   // cli
-  install?: string; // hint user for install command if not installed
+  install?:
+    | string
+    | { powershell?: string; bash?: string; npm?: string; unix?: string; windows?: string }; // hint user for install command if not installed
   version?: string; // hint user for version command to check if installed
   binary?: string; // actual binary name if different from cli, e.g. cursor -> cursor-agent
   defaultArgs?: string[]; // function to ensure certain args are present
@@ -122,19 +131,6 @@ export default async function agentYes({
   useSkills?: boolean; // if true, prepend SKILL.md header to the prompt for non-Claude agents
   useFifo?: boolean; // if true, enable FIFO input stream on Linux for additional stdin input
 }) {
-  // those overrides seems only works in bun
-  // await Promise.allSettled([
-  //   import(path.join(process.cwd(), "agent-yes.config")),
-  // ])
-  //   .then((e) => e.flatMap((e) => (e.status === "fulfilled" ? [e.value] : [])))
-  //   .then(e=>e.at(0))
-  //   .then((e) => e.default as ReturnType<typeof defineAgentYesConfig>)
-  //   .then(async (override) => deepMixin(config, override || {}))
-  //   .catch((error) => {
-  //     if (process.env.VERBOSE)
-  //       console.warn("Fail to load agent-yes.config.ts", error);
-  //   });
-
   if (!cli) throw new Error(`cli is required`);
   const conf =
     CLIS_CONFIG[cli] ||
@@ -167,10 +163,9 @@ export default async function agentYes({
     });
   }
 
-  process.stdin.setRawMode?.(true); // must be called any stdout/stdin usage
-
-  let isFatal = false; // when true, do not restart on crash, and exit agent
-  let shouldRestartWithoutContinue = false; // when true, restart without continue args
+  // Initialize process registry
+  const pidStore = new PidStore(workingDir);
+  await pidStore.init();
 
   const stdinReady = new ReadyManager();
   const stdinFirstReady = new ReadyManager(); // if user send ctrl+c before
@@ -187,44 +182,17 @@ export default async function agentYes({
     if (!stdinFirstReady.isReady) stdinFirstReady.ready();
   });
   const nextStdout = new ReadyManager();
+  process.stdin.setRawMode?.(true); // must be called any stdout/stdin usage
 
   const shellOutputStream = new TransformStream<string, string>();
   const outputWriter = shellOutputStream.writable.getWriter();
 
   logger.debug(`Using ${ptyPackage} for pseudo terminal management.`);
 
-  const datetime = new Date().toISOString().replace(/\D/g, "").slice(0, 17);
-  const logPath = config.logsDir && path.resolve(config.logsDir, `${cli}-yes-${datetime}.log`);
-  const rawLogPath =
-    config.logsDir && path.resolve(config.logsDir, `${cli}-yes-${datetime}.raw.log`);
-  const rawLinesLogPath =
-    config.logsDir && path.resolve(config.logsDir, `${cli}-yes-${datetime}.lines.log`);
-  const debuggingLogsPath =
-    config.logsDir && path.resolve(config.logsDir, `${cli}-yes-${datetime}.debug.log`);
-
-  // add
-  if (debuggingLogsPath)
-    logger.add(
-      new winston.transports.File({
-        filename: debuggingLogsPath,
-        level: "debug",
-      }),
-    );
-
   // Detect if running as sub-agent
   const isSubAgent = !!process.env.CLAUDE_PPID;
   if (isSubAgent)
     logger.info(`[${cli}-yes] Running as sub-agent (CLAUDE_PPID=${process.env.CLAUDE_PPID})`);
-
-  const getPtyOptions = () => {
-    const ptyEnv = { ...(env ?? (process.env as Record<string, string>)) };
-    return {
-      name: "xterm-color",
-      ...getTerminalDimensions(),
-      cwd: cwd ?? process.cwd(),
-      env: ptyEnv,
-    };
-  };
 
   // Apply CLI specific configurations (moved to CLI_CONFIGURES)
   const cliConf = (CLIS_CONFIG as Record<string, AgentCliConfig>)[cli] || {};
@@ -340,64 +308,47 @@ export default async function agentYes({
       logger.warn(`Unknown promptArg format: ${cliConf.promptArg}`);
     }
   }
-  // Determine the actual cli command to run
 
-  const spawn = () => {
-    const cliCommand = cliConf?.binary || cli;
-    let [bin, ...args] = [...parseCommandString(cliCommand), ...cliArgs];
-    if (verbose) logger.info(`Spawning ${bin} with args: ${JSON.stringify(args)}`);
-    logger.info(`Spawning ${bin} with args: ${JSON.stringify(args)}`);
-    // throw new Error(JSON.stringify([bin!, args, getPtyOptions()]))
-    const spawned = pty.spawn(bin!, args, getPtyOptions());
-    logger.info(`[${cli}-yes] Spawned ${bin} with PID ${spawned.pid}`);
-    // if (globalThis.Bun)
-    //   args = args.map((arg) => `'${arg.replace(/'/g, "\\'")}'`);
-    return spawned;
+  // Spawn the agent CLI process
+  const ptyEnv = { ...(env ?? (process.env as Record<string, string>)) };
+  const ptyOptions = {
+    name: "xterm-color",
+    ...getTerminalDimensions(),
+    cwd: cwd ?? process.cwd(),
+    env: ptyEnv,
   };
 
-  let shell = catcher(
-    // error handler
-    (error: unknown, _fn, ..._args) => {
-      logger.error(`Fatal: Failed to start ${cli}.`);
+  let shell = spawnAgent({
+    cli,
+    cliConf,
+    cliArgs,
+    verbose,
+    install,
+    ptyOptions,
+  });
 
-      const isNotFound = isCommandNotFoundError(error);
-      if (cliConf?.install && isNotFound) {
-        logger.info(`Please install the cli by run ${cliConf.install}`);
+  // Register process in pidStore and compute log paths
+  await pidStore.registerProcess({ pid: shell.pid, cli, args: cliArgs, prompt });
+  const logPaths = initializeLogPaths(pidStore, shell.pid);
+  setupDebugLogging(logPaths.debuggingLogsPath);
 
-        if (install) {
-          logger.info(`Attempting to install ${cli}...`);
-          execaCommandSync(cliConf.install, { stdio: "inherit" });
-          logger.info(`${cli} installed successfully. Please rerun the command.`);
-          return spawn();
-        } else {
-          logger.error(
-            `If you did not installed it yet, Please install it first: ${cliConf.install}`,
-          );
-          throw error;
-        }
-      }
+  // Create agent context
+  const ctx = new AgentContext({
+    shell,
+    pidStore,
+    logPaths,
+    cli,
+    cliConf,
+    verbose,
+    robust,
+  });
 
-      if (globalThis.Bun && error instanceof Error && error.stack?.includes("bun-pty")) {
-        // try to fix bun-pty issues
-        logger.error(`Detected bun-pty issue, attempted to fix it. Please try again.`);
-        require("./pty-fix");
-        // unable to retry with same process, so exit here.
-      }
-      throw error;
+  // force ready after 10s to avoid stuck forever if the ready-word mismatched
+  sleep(10e3).then(() => {
+    if (!ctx.stdinReady.isReady) ctx.stdinReady.ready();
+    if (!ctx.stdinFirstReady.isReady) ctx.stdinFirstReady.ready();
+  });
 
-      function isCommandNotFoundError(e: unknown) {
-        if (e instanceof Error) {
-          return (
-            e.message.includes("command not found") || // unix
-            e.message.includes("ENOENT") || // unix
-            e.message.includes("spawn") // windows
-          );
-        }
-        return false;
-      }
-    },
-    spawn,
-  )();
   const pendingExitCode = Promise.withResolvers<number | null>();
 
   async function onData(data: string) {
@@ -407,14 +358,18 @@ export default async function agentYes({
 
   shell.onData(onData);
   shell.onExit(async function onExit({ exitCode }) {
-    stdinReady.unready(); // start buffer stdin
+    ctx.stdinReady.unready(); // start buffer stdin
     const agentCrashed = exitCode !== 0;
 
     // Handle restart without continue args (e.g., "No conversation found to continue")
     // logger.debug(``, { shouldRestartWithoutContinue, robust })
-    if (shouldRestartWithoutContinue) {
-      shouldRestartWithoutContinue = false; // reset flag
-      isFatal = false; // reset fatal flag to allow restart
+    if (ctx.shouldRestartWithoutContinue) {
+      await pidStore.updateStatus(shell.pid, "exited", {
+        exitReason: "restarted",
+        exitCode: exitCode ?? undefined,
+      });
+      ctx.shouldRestartWithoutContinue = false; // reset flag
+      ctx.isFatal = false; // reset fatal flag to allow restart
 
       // Restart without continue args - use original cliArgs without restoreArgs
       const cliCommand = cliConf?.binary || cli;
@@ -424,7 +379,14 @@ export default async function agentYes({
       ];
       logger.info(`Restarting ${cli} ${JSON.stringify([bin, ...args])}`);
 
-      shell = pty.spawn(bin!, args, getPtyOptions());
+      const restartPtyOptions = {
+        name: "xterm-color",
+        ...getTerminalDimensions(),
+        cwd: cwd ?? process.cwd(),
+        env: ptyEnv,
+      };
+      shell = pty.spawn(bin!, args, restartPtyOptions);
+      await pidStore.registerProcess({ pid: shell.pid, cli, args, prompt });
       shell.onData(onData);
       shell.onExit(onExit);
       return;
@@ -440,8 +402,18 @@ export default async function agentYes({
         );
         return;
       }
-      if (isFatal) return pendingExitCode.resolve(exitCode);
+      if (ctx.isFatal) {
+        await pidStore.updateStatus(shell.pid, "exited", {
+          exitReason: "fatal",
+          exitCode: exitCode ?? undefined,
+        });
+        return pendingExitCode.resolve(exitCode);
+      }
 
+      await pidStore.updateStatus(shell.pid, "exited", {
+        exitReason: "restarted",
+        exitCode: exitCode ?? undefined,
+      });
       logger.info(`${cli} crashed, restarting...`);
 
       // For codex, try to use stored session ID for this directory
@@ -457,18 +429,30 @@ export default async function agentYes({
         }
       }
 
-      shell = pty.spawn(cli, restoreArgs, getPtyOptions());
+      const restorePtyOptions = {
+        name: "xterm-color",
+        ...getTerminalDimensions(),
+        cwd: cwd ?? process.cwd(),
+        env: ptyEnv,
+      };
+      shell = pty.spawn(cli, restoreArgs, restorePtyOptions);
+      await pidStore.registerProcess({ pid: shell.pid, cli, args: restoreArgs, prompt });
       shell.onData(onData);
       shell.onExit(onExit);
       return;
     }
+    const exitReason = agentCrashed ? "crash" : "normal";
+    await pidStore.updateStatus(shell.pid, "exited", {
+      exitReason,
+      exitCode: exitCode ?? undefined,
+    });
     return pendingExitCode.resolve(exitCode);
   });
 
   // when current tty resized, resize the pty too
   process.stdout.on("resize", () => {
-    const { cols, rows } = getTerminalDimensions(); // minimum 80 columns to avoid layout issues
-    shell.resize(cols, rows); // minimum 80 columns to avoid layout issues
+    const { cols, rows } = getTerminalDimensions();
+    shell.resize(cols, rows);
   });
 
   const terminalRender = new TerminalTextRender();
@@ -478,9 +462,9 @@ export default async function agentYes({
       .replace(/\s+/g, " ")
       .match(/esc to interrupt|to run in background/);
 
-  const idleWaiter = new IdleWaiter();
   if (exitOnIdle)
-    idleWaiter.wait(exitOnIdle).then(async () => {
+    ctx.idleWaiter.wait(exitOnIdle).then(async () => {
+      await pidStore.updateStatus(shell.pid, "idle").catch(() => null);
       if (isStillWorkingQ()) {
         logger.warn("[${cli}-yes] ${cli} is idle, but seems still working, not exiting yet");
         return;
@@ -495,34 +479,27 @@ export default async function agentYes({
   // Message streaming with stdin and optional FIFO (Linux only)
 
   await sflow(fromReadable<Buffer>(process.stdin))
+  
     .map((buffer) => buffer.toString())
 
     .by(function handleTerminateSignals(s) {
-      let aborted = false;
-      return s.map((chunk) => {
-        // handle CTRL+Z and filter it out, as I dont know how to support it yet
-        if (!aborted && chunk === "\u001A") {
-          return "";
-        }
-        // handle CTRL+C, when stdin is not ready (no response from agent yet, usually this is when agent loading)
-        if (!aborted && !stdinReady.isReady && chunk === "\u0003") {
-          logger.error("User aborted: SIGINT");
-          shell.kill("SIGINT");
-          pendingExitCode.resolve(130); // SIGINT
-          aborted = true;
-          return chunk; // still pass into agent, but they prob be killed XD
-        }
-        return chunk; // normal inputs
+      const handler = createTerminateSignalHandler(ctx.stdinReady, (exitCode) => {
+        shell.kill("SIGINT");
+        pendingExitCode.resolve(exitCode);
       });
+      return s.map(handler);
     })
 
-    // read from FIFO if available, e.g. /tmp/agent-yes-*.stdin, which can be used to send additional input from other processes
+    // read from IPC stream if available (FIFO on Linux, Named Pipes on Windows)
     .by((s) => {
       if (!useFifo) return s;
-      const fifoResult = createFifoStream(cli);
-      if (!fifoResult) return s;
-      pendingExitCode.promise.finally(() => fifoResult.cleanup());
-      return s.merge(fifoResult.stream);
+      const fifoPath = pidStore.getFifoPath(shell.pid);
+      if (!fifoPath) return s; // Skip if no valid path
+      const ipcResult = createFifoStream(cli, fifoPath);
+      if (!ipcResult) return s;
+      pendingExitCode.promise.finally(() => ipcResult.cleanup());
+      process.stderr.write(`\n  Append prompts: ${cli}-yes --append-prompt '...'\n\n`);
+      return s.merge(ipcResult.stream);
     })
 
     // .map((e) => e.replaceAll('\x1a', '')) // remove ctrl+z from user's input, to prevent bug (but this seems bug)
@@ -531,24 +508,27 @@ export default async function agentYes({
     .onStart(async function promptOnStart() {
       // send prompt when start
       logger.debug("Sending prompt message: " + JSON.stringify(prompt));
-      if (prompt) await sendMessage(prompt);
+      if (prompt) await sendMessage(ctx.messageContext, prompt);
     })
 
     // pipe content by shell
     .by({
       writable: new WritableStream<string>({
         write: async (data) => {
-          await stdinReady.wait();
+          await ctx.stdinReady.wait();
           shell.write(data);
         },
       }),
       readable: shellOutputStream.readable,
     })
 
-    .forEach(() => idleWaiter.ping())
-    .forEach(() => nextStdout.ready())
-
+    .forEach(() => {
+      ctx.idleWaiter.ping();
+      pidStore.updateStatus(shell.pid, "active").catch(() => null);
+      ctx.nextStdout.ready()
+    })
     .forkTo(async function rawLogger(f) {
+      const rawLogPath = ctx.logPaths.rawLogPath;
       if (!rawLogPath) return f.run(); // no stream
 
       // try stream the raw log for realtime debugging, including control chars, note: it will be a huge file
@@ -568,36 +548,7 @@ export default async function agentYes({
     .by(function consoleResponder(e) {
       // wait for cli ready and send prompt if provided
       if (cli === "codex") shell.write(`\u001b[1;1R`); // send cursor position response when stdin is not tty
-      return e.forEach((text) => {
-        // render terminal output for log file
-        terminalRender.write(text);
-
-        // Handle Device Attributes query (DA) - ESC[c or ESC[0c
-        // This must be handled regardless of TTY status
-        if (text.includes("\u001b[c") || text.includes("\u001b[0c")) {
-          // Respond shell with VT100 with Advanced Video Option
-          shell.write("\u001b[?1;2c");
-          if (verbose) {
-            logger.debug("device|respond DA: VT100 with Advanced Video Option");
-          }
-          return;
-        }
-
-        // todo: .onStatus((msg)=> shell.write(msg))
-        if (process.stdin.isTTY) return; // only handle it when stdin is not tty, because tty already handled this
-
-        if (!text.includes("\u001b[6n")) return; // only asked for cursor position
-        // todo: use terminalRender API to get cursor position when new version is available
-        // xterm replies CSI row; column R if asked cursor position
-        // https://en.wikipedia.org/wiki/ANSI_escape_code#:~:text=citation%20needed%5D-,xterm%20replies,-CSI%20row%C2%A0%3B
-        // when agent asking position, respond with row; col
-        // const rendered = terminalRender.render();
-        const { col, row } = terminalRender.getCursorPosition();
-        shell.write(`\u001b[${row};${col}R`); // reply cli when getting cursor position
-        logger.debug(`cursor|respond position: row=${String(row)}, col=${String(col)}`);
-        // const row = rendered.split('\n').length + 1;
-        // const col = (rendered.split('\n').slice(-1)[0]?.length || 0) + 1;
-      });
+      return e.forEach((text) => handleConsoleControlCodes(text, shell, terminalRender, cli, verbose));
     })
 
     // auto-response
@@ -611,153 +562,41 @@ export default async function agentYes({
             return s.lines({ EOL: "NONE" }); // other clis use ink, which is rerendering the block based on \n lines
           })
 
-          // .forkTo(async function rawLinesLogger(f) {
-          //   if (!rawLinesLogPath) return f.run(); // no stream
-          //   // try stream the raw log for realtime debugging, including control chars, note: it will be a huge file
-          //   return await mkdir(path.dirname(rawLinesLogPath), { recursive: true })
-          //     .then(() => {
-          //       logger.debug(`[${cli}-yes] raw lines logs streaming to ${rawLinesLogPath}`);
-          //       return f
-          //         .forEach(async (chars, i) => {
-          //           await writeFile(rawLinesLogPath, `L${i}|` + chars, { flag: "a" }).catch(() => null);
-          //         })
-          //         .run();
-          //     })
-          //     .catch(() => f.run());
-          // })
-
           // Generic auto-response handler driven by CLI_CONFIGURES
-          .forEach(async function autoResponseOnChunk(e, i) {
-            logger.debug(`stdout|${e}`);
-            // ready matcher: if matched, mark stdin ready
-            if (conf.ready?.some((rx: RegExp) => e.match(rx))) {
-              logger.debug(`ready |${e}`);
-              if (cli === "gemini" && i <= 80) return; // gemini initial noise, only after many lines
-              stdinReady.ready();
-              stdinFirstReady.ready();
-            }
-            // enter matchers: send Enter when any enter regex matches
-
-            if (conf.enter?.some((rx: RegExp) => e.match(rx))) {
-              logger.debug(`enter |${e}`);
-              return await sendEnter(400); // wait for idle for a short while and then send Enter
-            }
-
-            // typingRespond matcher: if matched, send the specified message
-            const typingResponded = await sflow(Object.entries(conf.typingRespond ?? {}))
-              .filter(([_sendString, onThePatterns]) => onThePatterns.some((rx) => e.match(rx)))
-              .map(async ([sendString]) => await sendMessage(sendString, { waitForReady: false }))
-              .toCount();
-            if (typingResponded) return;
-
-            // fatal matchers: set isFatal flag when matched
-            if (conf.fatal?.some((rx: RegExp) => e.match(rx))) {
-              logger.debug(`fatal |${e}`);
-              isFatal = true;
-              await exitAgent();
-            }
-
-            // restartWithoutContinueArg matchers: set flag to restart without continue args
-            if (conf.restartWithoutContinueArg?.some((rx: RegExp) => e.match(rx))) {
-              await logger.debug(`restart-without-continue|${e}`);
-              shouldRestartWithoutContinue = true;
-              isFatal = true; // also set fatal to trigger exit
-              await exitAgent();
-            }
-
-            // session ID capture for codex
-            if (cli === "codex") {
-              const sessionId = extractSessionId(e);
-              if (sessionId) {
-                await logger.debug(`session|captured session ID: ${sessionId}`);
-                await storeSessionForCwd(workingDir, sessionId);
-              }
-            }
-          })
+          .forEach(async (line, lineIndex) =>
+            createAutoResponseHandler(line, lineIndex, { ctx, conf, cli, workingDir, exitAgent }),
+          )
           .run()
       );
     })
     .by((s) => (removeControlCharactersFromStdout ? s.map((e) => removeControlCharacters(e)) : s))
 
     // terminate whole stream when shell did exited (already crash-handled)
-    .by(
-      new TransformStream({
-        start: function terminator(ctrl) {
-          pendingExitCode.promise.then(() => ctrl.terminate());
-        },
-        transform: (e, ctrl) => ctrl.enqueue(e),
-        flush: (ctrl) => ctrl.terminate(),
-      }),
-    )
+    .by(createTerminatorStream(pendingExitCode.promise))
     .to(fromWritable(process.stdout));
 
-  if (logPath) {
-    await mkdir(path.dirname(logPath), { recursive: true }).catch(() => null);
-    await writeFile(logPath, terminalRender.render()).catch(() => null);
-    logger.info(`[${cli}-yes] Full logs saved to ${logPath}`);
-  }
+  await saveLogFile(ctx.logPaths.logPath, terminalRender.render());
 
   // and then get its exitcode
   const exitCode = await pendingExitCode.promise;
   logger.info(`[${cli}-yes] ${cli} exited with code ${exitCode}`);
 
+  // Final pidStore cleanup
+  await pidStore.close();
+
   // Update task status.writable release lock
   await outputWriter.close();
 
   // deprecated logFile option, we have logPath now, but keep for backward compatibility
-  if (logFile) {
-    if (verbose) logger.info(`[${cli}-yes] Writing rendered logs to ${logFile}`);
-    const logFilePath = path.resolve(logFile);
-    await mkdir(path.dirname(logFilePath), { recursive: true }).catch(() => null);
-    await writeFile(logFilePath, terminalRender.render());
-  }
+  await saveDeprecatedLogFile(logFile, terminalRender.render(), verbose);
 
   return { exitCode, logs: terminalRender.render() };
 
-  async function sendEnter(waitms = 1000) {
-    // wait for idle for a bit to let agent cli finish rendering
-    const st = Date.now();
-    await idleWaiter.wait(waitms); // wait for idle a while
-    const et = Date.now();
-    // process.stdout.write(`\ridleWaiter.wait(${waitms}) took ${et - st}ms\r`);
-    logger.debug(`sendEn| idleWaiter.wait(${String(waitms)}) took ${String(et - st)}ms`);
-    nextStdout.unready();
-    // send the enter key
-    shell.write("\r");
-
-    // retry once if not received any output in 1 second after sending Enter
-    await Promise.race([
-      nextStdout.wait(),
-      new Promise<void>((resolve) =>
-        setTimeout(() => {
-          if (!nextStdout.ready) {
-            shell.write("\r");
-          }
-          resolve();
-        }, 1000),
-      ),
-    ]);
-  }
-
-  async function sendMessage(message: string, { waitForReady = true } = {}) {
-    if (waitForReady) await stdinReady.wait();
-    // show in-place message: write msg and move cursor back start
-    logger.debug(`send  |${message}`);
-    nextStdout.unready();
-    shell.write(message);
-    idleWaiter.ping(); // just sent a message, wait for echo
-    logger.debug(`waiting next stdout|${message}`);
-    await nextStdout.wait();
-    logger.debug(`sending enter`);
-    await sendEnter(1000);
-    logger.debug(`sent enter`);
-  }
-
   async function exitAgent() {
-    robust = false; // disable robust to avoid auto restart
+    ctx.robust = false; // disable robust to avoid auto restart
 
     // send exit command to the shell, must sleep a bit to avoid claude treat it as pasted input
-    for (const cmd of cliConf.exitCommands ?? ["/exit"]) await sendMessage(cmd);
+    for (const cmd of cliConf.exitCommands ?? ["/exit"]) await sendMessage(ctx.messageContext, cmd);
 
     // wait for shell to exit or kill it with a timeout
     let exited = false;
@@ -778,9 +617,8 @@ export default async function agentYes({
   function getTerminalDimensions() {
     if (!process.stdout.isTTY) return { cols: 80, rows: 30 }; // default size when not tty
     return {
-      // TODO: enforce minimum cols/rows to avoid layout issues
-      // cols: Math.max(process.stdout.columns, 80),
-      cols: Math.min(Math.max(20, process.stdout.columns), 80),
+      // Enforce minimum 20 columns to avoid layout issues
+      cols: Math.max(20, process.stdout.columns),
       rows: process.stdout.rows,
     };
   }

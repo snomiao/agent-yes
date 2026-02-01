@@ -77,16 +77,23 @@ function getDefaultConfig() {
       },
       claude: {
         promptArg: "last-arg",
-        install: "npm install -g @anthropic-ai/claude-code@latest",
+        install: {
+          // try this first if powershell available and its windows
+          powershell: "irm https://claude.ai/install.ps1 | iex", // powershell
+          // or bash if found
+          bash: "curl -fsSL https://claude.ai/install.sh | bash",
+          // fallback to npm if bash not found
+          npm: "npm i -g @anthropic-ai/claude-code@latest",
+        },
         // ready: [/^> /], // regex matcher for stdin ready
-        ready: [/\? for shortcuts/], // regex matcher for stdin ready
+        ready: [/^\? for shortcuts/, /^> /, /──────────+/], // regex matcher for stdin ready
         typingRespond: {
           "1\n": [/│ Do you want to use this API key\?/],
         },
         enter: [
-          /^.{0,3} 1\. Yes/m,
-          /^.{0,3} 1\. Yes, continue/m,
-          /^.{0,3} 1\. Dark mode ?✔/m,
+          /^.{0,4} 1\. Yes/m,
+          /^.{0,4} 1\. Yes, continue/m,
+          /^.{0,4} 1\. Dark mode ?✔/m,
           /❯ 1\. Yes/m,
           /❯ 1\. Yes, continue/m,
           /❯ 1\. Dark mode ?✔/m,
@@ -131,10 +138,12 @@ function getDefaultConfig() {
         noEOL: true, // codex use cursor moving instead of EOL when rendering output
       },
       copilot: {
-        // promptArg: '--prompt', // use stdin to prompt or it will reject all bash commands
+        promptArg: "-i", // use stdin to prompt or it will reject all bash commands
         install: "npm install -g @github/copilot",
         ready: [/^ +> /, /Ctrl\+c Exit/],
-        enter: [/ │ ❯ +1. Yes, proceed/, /❯ +1. Yes/],
+        enter: [/ │ ❯ +1. Yes, proceed/, / ❯ +1. Yes/],
+        system:
+          "IMPORTANT: USE TOOLS TO RESEARCH/EXPLORE/WORKAROUND your self, except you need approve on DESTRUCTIVE OPERATIONS, DONT ASK QUESTIONS ON USERS REQUEST, JUST SOLVE IT.", //copilot asks too much
         fatal: [],
       },
       cursor: {
@@ -151,12 +160,27 @@ function getDefaultConfig() {
         install: "npm install -g @augmentcode/auggie",
         promptArg: "first-arg",
         ready: [/ > /, /\? to show shortcuts/],
+        typingRespond: {
+          "y\n": [/\[Y\] Enable indexing - Unlock full workspace understanding/],
+        },
         enter: [], // auggie seems not to ask for permission currently, which is super nice
         fatal: [], // no fatal patterns known yet
       },
       amp: {
-        help: "",
-        install: "npm i -g @sourcegraph/amp",
+        help: "https://ampcode.com/",
+        install: {
+          bash: "curl -fsSL https://ampcode.com/install.sh | bash",
+          npm: "npm i -g @sourcegraph/amp",
+        },
+        enter: [/^.{0,4} Approve /],
+      },
+      opencode: {
+        help: "https://opencode.ai/",
+        install: {
+          bash: "curl -fsSL https://opencode.ai/install | bash",
+          npm: "npm i -g opencode-ai",
+        },
+        enter: [],
       },
     },
   });

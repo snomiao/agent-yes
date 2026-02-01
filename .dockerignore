@@ -46,5 +46,6 @@ tsconfig.json
 .DS_Store
 
 # Docker files
-Dockerfile
+docker/Dockerfile
+docker/Dockerfile.mini
 docker-compose.yaml

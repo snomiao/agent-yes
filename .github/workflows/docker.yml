@@ -69,33 +69,25 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
+          file: ./docker/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          provenance: false
+          sbom: false
 
-      - name: Detect runner architecture
-        id: arch
-        run: |
-          ARCH=$(uname -m)
-          if [ "$ARCH" = "x86_64" ]; then
-            echo "platform=linux/amd64" >> $GITHUB_OUTPUT
-          elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-            echo "platform=linux/arm64" >> $GITHUB_OUTPUT
-          else
-            echo "platform=linux/amd64" >> $GITHUB_OUTPUT
-          fi
-          echo "Detected architecture: $ARCH, using platform: $(cat $GITHUB_OUTPUT | grep platform | cut -d= -f2)"
-
-      - name: Build local test image
+      - name: Build test image (native arch only)
         uses: docker/build-push-action@v5
         with:
           context: .
-          platforms: ${{ steps.arch.outputs.platform }}
+          file: ./docker/Dockerfile
+          platforms: linux/amd64
           load: true
           tags: claude-yes:test
+          cache-from: type=gha
 
       - name: Test Docker image
         run: docker run --rm --entrypoint sh claude-yes:test -c "test -f /src/agent-yes/dist/cli.js && echo 'Image built successfully'"
@@ -155,35 +147,25 @@ jobs:
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile.mini
+          file: ./docker/Dockerfile.mini
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta-mini.outputs.tags }}
           labels: ${{ steps.meta-mini.outputs.labels }}
           cache-from: type=gha,scope=mini
           cache-to: type=gha,mode=max,scope=mini
+          provenance: false
+          sbom: false
 
-      - name: Detect runner architecture
-        id: arch-mini
-        run: |
-          ARCH=$(uname -m)
-          if [ "$ARCH" = "x86_64" ]; then
-            echo "platform=linux/amd64" >> $GITHUB_OUTPUT
-          elif [ "$ARCH" = "aarch64" ] || [ "$ARCH" = "arm64" ]; then
-            echo "platform=linux/arm64" >> $GITHUB_OUTPUT
-          else
-            echo "platform=linux/amd64" >> $GITHUB_OUTPUT
-          fi
-          echo "Detected architecture: $ARCH, using platform: $(cat $GITHUB_OUTPUT | grep platform | cut -d= -f2)"
-
-      - name: Build local test mini image
+      - name: Build test mini image (native arch only)
         uses: docker/build-push-action@v5
         with:
           context: .
-          file: ./Dockerfile.mini
-          platforms: ${{ steps.arch-mini.outputs.platform }}
+          file: ./docker/Dockerfile.mini
+          platforms: linux/amd64
           load: true
           tags: claude-yes:test-mini
+          cache-from: type=gha,scope=mini
 
       - name: Test Docker mini image
         run: docker run --rm --entrypoint sh claude-yes:test-mini -c "test -f /src/agent-yes/dist/cli.js && echo 'Mini image built successfully'"
