@@ -41,7 +41,7 @@ export type AgentCliConfig = {
   defaultArgs?: string[]; // function to ensure certain args are present
 
   // status detect, and actions
-  ready?: RegExp[]; // regex matcher for stdin ready, or line index for gemini
+  ready?: RegExp[]; // regex matcher for stdin ready, or line index for gemini. Set to empty array [] to disable ready check entirely.
   fatal?: RegExp[]; // array of regex to match for fatal errors
   exitCommands?: string[]; // commands to exit the cli gracefully
   promptArg?: (string & {}) | "first-arg" | "last-arg"; // argument name to pass the prompt, e.g. --prompt, or first-arg for positional arg
@@ -167,6 +167,21 @@ export default async function agentYes({
   const pidStore = new PidStore(workingDir);
   await pidStore.init();
 
+  const stdinReady = new ReadyManager();
+  const stdinFirstReady = new ReadyManager(); // if user send ctrl+c before
+
+  // If ready check is disabled (empty array), mark stdin ready immediately
+  if (conf.ready && conf.ready.length === 0) {
+    stdinReady.ready();
+    stdinFirstReady.ready();
+  }
+
+  // force ready after 10s to avoid stuck forever if the ready-word mismatched
+  sleep(10e3).then(() => {
+    if (!stdinReady.isReady) stdinReady.ready();
+    if (!stdinFirstReady.isReady) stdinFirstReady.ready();
+  });
+  const nextStdout = new ReadyManager();
   process.stdin.setRawMode?.(true); // must be called any stdout/stdin usage
 
   const shellOutputStream = new TransformStream<string, string>();
