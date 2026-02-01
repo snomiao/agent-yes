@@ -217,6 +217,8 @@ fifo/
 `;
 
     try {
+      // Ensure parent directory exists before writing .gitignore
+      await mkdir(this.storeDir, { recursive: true });
       await writeFile(gitignorePath, gitignoreContent, { flag: "wx" }); // wx = create only if doesn't exist
       logger.debug(`[pidStore] Created .gitignore in ${this.storeDir}`);
     } catch (error: any) {
