@@ -436,8 +436,8 @@ export default async function agentYes({
 
   // when current tty resized, resize the pty too
   process.stdout.on("resize", () => {
-    const { cols, rows } = getTerminalDimensions(); // minimum 80 columns to avoid layout issues
-    shell.resize(cols, rows); // minimum 80 columns to avoid layout issues
+    const { cols, rows } = getTerminalDimensions();
+    shell.resize(cols, rows);
   });
 
   const terminalRender = new TerminalTextRender();
@@ -597,6 +597,15 @@ export default async function agentYes({
         }, 5000),
       ), // 5 seconds timeout
     ]);
+  }
+
+  function getTerminalDimensions() {
+    if (!process.stdout.isTTY) return { cols: 80, rows: 30 }; // default size when not tty
+    return {
+      // Enforce minimum 20 columns to avoid layout issues
+      cols: Math.max(20, process.stdout.columns),
+      rows: process.stdout.rows,
+    };
   }
 }
 
