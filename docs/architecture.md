@@ -34,6 +34,7 @@ ts/
 **Purpose:** Centralized state management for agent sessions
 
 **Responsibilities:**
+
 - Store PTY shell instance and configuration
 - Manage state flags (isFatal, shouldRestartWithoutContinue)
 - Provide ReadyManager instances (stdinReady, nextStdout)
@@ -46,11 +47,13 @@ ts/
 **Purpose:** Handle CLI process creation with error handling
 
 **Key Functions:**
+
 - `spawnAgent()` - Create PTY process with retry logic
 - `getInstallCommand()` - Platform-specific install command selection
 - `getTerminalDimensions()` - TTY size with fallbacks
 
 **Features:**
+
 - Auto-install missing CLIs (npm/platform-specific)
 - Command-not-found error detection
 - bun-pty compatibility fixes
@@ -60,6 +63,7 @@ ts/
 **Purpose:** Send messages and simulate keyboard input to agent
 
 **Key Functions:**
+
 - `sendMessage()` - Send text with Enter key, wait for response
 - `sendEnter()` - Send Enter with idle wait and retries
 
@@ -70,11 +74,13 @@ ts/
 **Purpose:** Manage log file paths and output
 
 **Key Functions:**
+
 - `initializeLogPaths()` - Generate log paths from PID
 - `setupDebugLogging()` - Configure winston file transport
 - `saveLogFile()` - Write rendered terminal output
 
 **Log Types:**
+
 - `.log` - Clean rendered output
 - `.raw.log` - Raw with control chars
 - `.debug.log` - Debug messages (winston)
@@ -84,6 +90,7 @@ ts/
 **Purpose:** Pattern-based CLI output analysis and auto-responses
 
 **Response Types:**
+
 1. **Ready signals** - Detect when agent is ready for input
 2. **Enter automation** - Auto-press Enter at prompts
 3. **Typing responses** - Send configured text to patterns
@@ -97,11 +104,13 @@ ts/
 **Purpose:** Terminal I/O stream transformations
 
 **Key Functions:**
+
 - `handleConsoleControlCodes()` - Cursor position, device attributes
 - `createTerminateSignalHandler()` - CTRL+C/CTRL+Z handling
 - `createTerminatorStream()` - Auto-terminate on exit
 
 **Control Codes Handled:**
+
 - `ESC[6n` - Cursor position request
 - `ESC[c` - Device attributes query
 - `\u0003` - SIGINT (CTRL+C)
@@ -190,6 +199,7 @@ if (stdinReady.isReady) { ... }
 ```
 
 **Usage:**
+
 - `stdinReady` - Agent is ready for input
 - `nextStdout` - Next output chunk received
 - `stdinFirstReady` - First ready signal (for initial prompt)
@@ -197,9 +207,9 @@ if (stdinReady.isReady) { ... }
 ### Context Flags
 
 ```typescript
-ctx.isFatal               // Fatal error detected, exit on crash
-ctx.shouldRestartWithoutContinue  // Restart without --continue flag
-ctx.robust                // Auto-restart on crash
+ctx.isFatal; // Fatal error detected, exit on crash
+ctx.shouldRestartWithoutContinue; // Restart without --continue flag
+ctx.robust; // Auto-restart on crash
 ```
 
 ## Session Management
@@ -217,6 +227,7 @@ When `robust: true`:
 ### Session Resumption
 
 **Codex:** Session IDs stored per-directory in `.claude/sessions.db`
+
 - Captured from output via regex
 - Restored on crash or explicit `--resume`
 
@@ -227,12 +238,14 @@ When `robust: true`:
 ## Testing Strategy
 
 **Unit Tests:**
+
 - `catcher.spec.ts` - Error handler wrapper
 - `idleWaiter.spec.ts` - Idle detection
 - `ReadyManager.spec.ts` - Ready state manager
 - `removeControlCharacters.spec.ts` - ANSI stripping
 
 **Integration Tests:**
+
 - `session-integration.spec.ts` - Session ID extraction
 - `codex-resume.spec.ts` - Session restoration
 - `runningLock.spec.ts` - Process locking
@@ -250,15 +263,16 @@ export default {
       ready: [/Ready for input/],
       fatal: [/Fatal error/],
       enter: [/Press Enter/],
-      exitCommands: ['/exit'],
-      promptArg: 'first-arg',
-      restoreArgs: ['--continue']
-    }
-  }
-}
+      exitCommands: ["/exit"],
+      promptArg: "first-arg",
+      restoreArgs: ["--continue"],
+    },
+  },
+};
 ```
 
 **Pattern Types:**
+
 - `ready: RegExp[]` - Mark stdin ready
 - `fatal: RegExp[]` - Trigger exit
 - `enter: RegExp[]` - Auto-press Enter
@@ -289,6 +303,7 @@ typingRespond: {
 ### Session Management
 
 Implement in `resume/` directory:
+
 - Extend `SessionManager` pattern from `codexSessionManager.ts`
 - Hook into `createAutoResponseHandler()` for ID capture
 
