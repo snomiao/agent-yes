@@ -79,7 +79,8 @@ export async function createAutoResponseHandler(
   const typingResponded = await sflow(Object.entries(conf.typingRespond ?? {}))
     .filter(([_sendString, onThePatterns]) => onThePatterns.some((rx) => line.match(rx)))
     .map(
-      async ([sendString]) => await sendMessage(ctx.messageContext, sendString, { waitForReady: false }),
+      async ([sendString]) =>
+        await sendMessage(ctx.messageContext, sendString, { waitForReady: false }),
     )
     .toCount();
   if (typingResponded) return;

@@ -24,20 +24,20 @@ if (config.appendPrompt) {
       const { connect } = await import("net");
       await new Promise<void>((resolve, reject) => {
         const client = connect(ipcPath);
-        client.on('connect', () => {
+        client.on("connect", () => {
           client.write(config.appendPrompt + "\r");
           client.end();
           console.log(`Sent prompt to Windows named pipe: ${ipcPath}`);
           resolve();
         });
-        client.on('error', (error) => {
+        client.on("error", (error) => {
           console.error(`Failed to connect to named pipe: ${error}`);
           reject(error);
         });
         // Timeout after 5 seconds
         setTimeout(() => {
           client.destroy();
-          reject(new Error('Connection timeout'));
+          reject(new Error("Connection timeout"));
         }, 5000);
       });
     } else {

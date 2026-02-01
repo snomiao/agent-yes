@@ -230,12 +230,7 @@ describe("CLI argument parsing", () => {
   });
 
   it("should parse ay -- hello command (ay is wrapper, so CLI is undefined)", () => {
-    const result = parseCliArgs([
-      "node",
-      "/path/to/ay",
-      "--",
-      "hello",
-    ]);
+    const result = parseCliArgs(["node", "/path/to/ay", "--", "hello"]);
 
     // "ay" is a wrapper script like "agent-yes", so cliName is stripped to undefined
     // cli.ts will default this to "claude" at runtime

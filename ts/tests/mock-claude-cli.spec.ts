@@ -20,7 +20,7 @@ describe("IPC cross-platform functionality", () => {
           attempts++;
           if (attempts < 3) {
             // Wait before retry to allow file handles to close
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            await new Promise((resolve) => setTimeout(resolve, 1000));
           } else {
             console.warn(`Failed to cleanup test directory after ${attempts} attempts:`, error);
           }
@@ -42,7 +42,7 @@ describe("IPC cross-platform functionality", () => {
           attempts++;
           if (attempts < 3) {
             // Wait before retry to allow file handles to close
-            await new Promise(resolve => setTimeout(resolve, 1000));
+            await new Promise((resolve) => setTimeout(resolve, 1000));
           } else {
             console.warn(`Failed to cleanup test directory after ${attempts} attempts:`, error);
           }
@@ -70,18 +70,18 @@ describe("IPC cross-platform functionality", () => {
 
     try {
       // Mock Windows
-      Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+      Object.defineProperty(process, "platform", { value: "win32", configurable: true });
       const { PidStore } = await import("../pidStore");
       const winStore = new PidStore("/test");
       expect(await winStore.getFifoPath(123)).toMatch(/\\\\\.\\pipe\\agent-yes-123/);
 
       // Mock Linux
-      Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
+      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
       const linStore = new PidStore("/test");
       expect(await linStore.getFifoPath(123)).toContain("123.stdin");
     } finally {
       // Restore original platform
-      Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });
+      Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
     }
   });
 
@@ -91,28 +91,30 @@ describe("IPC cross-platform functionality", () => {
       cwd: TEST_DIR,
     });
 
-    const result = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
-      let stdout = "";
-      let stderr = "";
+    const result = await new Promise<{ code: number; stdout: string; stderr: string }>(
+      (resolve) => {
+        let stdout = "";
+        let stderr = "";
 
-      appendProc.stdout?.on("data", (chunk) => {
-        stdout += chunk.toString();
-      });
+        appendProc.stdout?.on("data", (chunk) => {
+          stdout += chunk.toString();
+        });
 
-      appendProc.stderr?.on("data", (chunk) => {
-        stderr += chunk.toString();
-      });
+        appendProc.stderr?.on("data", (chunk) => {
+          stderr += chunk.toString();
+        });
 
-      appendProc.on("exit", (code) => {
-        resolve({ code: code || 0, stdout, stderr });
-      });
+        appendProc.on("exit", (code) => {
+          resolve({ code: code || 0, stdout, stderr });
+        });
 
-      // Timeout after 5 seconds
-      setTimeout(() => {
-        appendProc.kill();
-        resolve({ code: 1, stdout, stderr: stderr || "Timeout" });
-      }, 5000);
-    });
+        // Timeout after 5 seconds
+        setTimeout(() => {
+          appendProc.kill();
+          resolve({ code: 1, stdout, stderr: stderr || "Timeout" });
+        }, 5000);
+      },
+    );
 
     expect(result.code).toBe(1);
     expect(result.stderr).toContain("No active agent with IPC found");

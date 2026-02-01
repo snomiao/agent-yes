@@ -127,7 +127,9 @@ export function createTerminateSignalHandler(
  * exitPromise.resolve(0);
  * ```
  */
-export function createTerminatorStream(exitPromise: Promise<unknown>): TransformStream<string, string> {
+export function createTerminatorStream(
+  exitPromise: Promise<unknown>,
+): TransformStream<string, string> {
   return new TransformStream({
     start: function terminator(ctrl) {
       exitPromise.then(() => ctrl.terminate());

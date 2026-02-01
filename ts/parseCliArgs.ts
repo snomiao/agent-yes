@@ -190,7 +190,9 @@ export function parseCliArgs(argv: string[]) {
     env: process.env as Record<string, string>,
     cli: (cliName ||
       parsedArgv.cli ||
-      (dashIndex !== 0 ? parsedArgv._[0]?.toString()?.replace?.(/-yes$/, "") : undefined)) as (typeof SUPPORTED_CLIS)[number],
+      (dashIndex !== 0
+        ? parsedArgv._[0]?.toString()?.replace?.(/-yes$/, "")
+        : undefined)) as (typeof SUPPORTED_CLIS)[number],
     cliArgs: cliArgsForSpawn,
     prompt: [parsedArgv.prompt, dashPrompt].filter(Boolean).join(" ") || undefined,
     install: parsedArgv.install,
