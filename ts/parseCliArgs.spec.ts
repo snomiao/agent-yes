@@ -1,5 +1,5 @@
 #!/usr/bin/env bun test
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { parseCliArgs } from "./parseCliArgs";
 
 describe("CLI argument parsing", () => {
@@ -244,5 +244,57 @@ describe("CLI argument parsing", () => {
     expect(result.prompt).toBe("hello");
     expect(result.verbose).toBe(false);
     expect(result.robust).toBe(true);
+  });
+
+  it("should parse --timeout flag", () => {
+    const result = parseCliArgs(["node", "/path/to/cli", "--timeout", "45s", "claude"]);
+
+    expect(result.exitOnIdle).toBe(45000);
+  });
+
+  it("should prioritize --timeout over --exit-on-idle", () => {
+    const result = parseCliArgs(["node", "/path/to/cli", "--timeout", "30s", "--exit-on-idle", "1m", "claude"]);
+
+    expect(result.exitOnIdle).toBe(30000);
+  });
+
+  it("should prioritize --timeout over --idle", () => {
+    const result = parseCliArgs(["node", "/path/to/cli", "--timeout", "15s", "--idle", "1m", "claude"]);
+
+    expect(result.exitOnIdle).toBe(15000);
+  });
+
+  it("should show deprecation warning for --exit-on-idle", () => {
+    const warnSpy = vi.spyOn(console, "warn");
+
+    parseCliArgs(["node", "/path/to/cli", "--exit-on-idle", "1m", "claude"]);
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--exit-on-idle and -e are deprecated")
+    );
+
+    warnSpy.mockRestore();
+  });
+
+  it("should show deprecation warning for -e flag", () => {
+    const warnSpy = vi.spyOn(console, "warn");
+
+    parseCliArgs(["node", "/path/to/cli", "-e", "1m", "claude"]);
+
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("--exit-on-idle and -e are deprecated")
+    );
+
+    warnSpy.mockRestore();
+  });
+
+  it("should not show deprecation warning when using --timeout", () => {
+    const warnSpy = vi.spyOn(console, "warn");
+
+    parseCliArgs(["node", "/path/to/cli", "--timeout", "30s", "claude"]);
+
+    expect(warnSpy).not.toHaveBeenCalled();
+
+    warnSpy.mockRestore();
   });
 });

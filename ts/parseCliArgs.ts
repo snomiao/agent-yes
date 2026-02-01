@@ -177,6 +177,13 @@ export function parseCliArgs(argv: string[]) {
   const dashPrompt: string | undefined =
     dashIndex === undefined ? undefined : rawArgs.slice(dashIndex + 1).join(" ");
 
+  // Show deprecation warning for --exit-on-idle and -e flags
+  if (parsedArgv.exitOnIdle !== undefined) {
+    console.warn(
+      "\x1b[33m⚠ Warning: --exit-on-idle and -e are deprecated. Please use --timeout instead.\x1b[0m",
+    );
+  }
+
   // Return the config object that would be passed to cliYes (same logic as cli.ts:99-121)
   return {
     cwd: process.cwd(),
@@ -188,7 +195,7 @@ export function parseCliArgs(argv: string[]) {
     prompt: [parsedArgv.prompt, dashPrompt].filter(Boolean).join(" ") || undefined,
     install: parsedArgv.install,
     exitOnIdle: Number(
-      (parsedArgv.idle || parsedArgv.exitOnIdle)?.replace(/.*/, (e) =>
+      (parsedArgv.timeout || parsedArgv.idle || parsedArgv.exitOnIdle)?.replace(/.*/, (e) =>
         String(ms(e as ms.StringValue)),
       ) || 0,
     ),
