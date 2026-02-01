@@ -66,15 +66,6 @@ function getDefaultConfig() {
     configDir,
     logsDir: configDir && path.resolve(configDir, "logs"),
     clis: {
-      qwen: {
-        install: "npm install -g @qwen-code/qwen-code@latest",
-        version: "qwen --version",
-      },
-      grok: {
-        install: "npm install -g @vibe-kit/grok-cli@latest",
-        ready: [/^  │ ❯ +/],
-        enter: [/^   1. Yes/],
-      },
       claude: {
         promptArg: "last-arg",
         install: {
@@ -85,9 +76,14 @@ function getDefaultConfig() {
           // fallback to npm if bash not found
           npm: "npm i -g @anthropic-ai/claude-code@latest",
         },
-        // ready: [/^> /], // regex matcher for stdin ready
-        ready: [/\? for shortcuts/, /\u00A0Try "/, // regex matcher for stdin ready (note: \u00A0 is non-breaking space)
-        /^\? for shortcuts/, /^> /, /──────────+/], // regex matcher for stdin ready
+        // regex matcher for stdin ready
+        ready: [
+          /\? for shortcuts/,
+          /\u00A0Try "/, // regex matcher for stdin ready (note: \u00A0 is non-breaking space)
+          /^\? for shortcuts/,
+          /^> /,
+          /──────────+/,
+        ], // regex matcher for stdin ready
         typingRespond: {
           "1\n": [/│ Do you want to use this API key\?/],
         },
@@ -111,7 +107,7 @@ function getDefaultConfig() {
         install: "npm install -g @google/gemini-cli@latest",
         // match the agent prompt after initial lines; handled by index logic using line index
         ready: [/Type your message/], // used with line index check
-        enter: [/│ ● 1. Yes, allow once/, /│ ● 1. Allow once/],
+        enter: [/│ ● 1. Yes, allow once/, /│ ● 1. Allow once/, /│ ● 1. Allow once/],
         fatal: [/Error resuming session/, /No previous sessions found for this project./],
         restoreArgs: ["--resume"], // restart with --resume when crashed
         restartWithoutContinueArg: [
@@ -137,6 +133,16 @@ function getDefaultConfig() {
         // add to codex --search by default when not provided by the user
         defaultArgs: ["--search"],
         noEOL: true, // codex use cursor moving instead of EOL when rendering output
+      },
+      // below are experimental agents
+      qwen: {
+        install: "npm install -g @qwen-code/qwen-code@latest",
+        version: "qwen --version",
+      },
+      grok: {
+        install: "npm install -g @vibe-kit/grok-cli@latest",
+        ready: [/^  │ ❯ +/],
+        enter: [/^   1. Yes/],
       },
       copilot: {
         promptArg: "-i", // use stdin to prompt or it will reject all bash commands
@@ -182,6 +188,7 @@ function getDefaultConfig() {
           npm: "npm i -g opencode-ai",
         },
         enter: [],
+        ready: []
       },
     },
   });

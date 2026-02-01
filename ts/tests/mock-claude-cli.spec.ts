@@ -73,12 +73,12 @@ describe("IPC cross-platform functionality", () => {
       Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
       const { PidStore } = await import("../pidStore");
       const winStore = new PidStore("/test");
-      expect(winStore.getFifoPath(123)).toMatch(/\\\\\.\\pipe\\agent-yes-123/);
+      expect(await winStore.getFifoPath(123)).toMatch(/\\\\\.\\pipe\\agent-yes-123/);
 
       // Mock Linux
       Object.defineProperty(process, 'platform', { value: 'linux', configurable: true });
       const linStore = new PidStore("/test");
-      expect(linStore.getFifoPath(123)).toContain("123.stdin");
+      expect(await linStore.getFifoPath(123)).toContain("123.stdin");
     } finally {
       // Restore original platform
       Object.defineProperty(process, 'platform', { value: originalPlatform, configurable: true });

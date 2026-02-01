@@ -13,14 +13,14 @@ import { createServer } from "net";
  * @param customPath - Optional custom path for the IPC file; if provided, uses this instead of generating a path
  * @returns An object with stream and cleanup function, or null if failed
  */
-export function createFifoStream(
+export async function createFifoStream(
   cli: string,
   customPath?: string,
-): { stream: ReadableStream<string>; cleanup: () => Promise<void> } | null {
+): Promise<(AsyncDisposable & { stream: ReadableStream<string> }) | null> {
   if (process.platform === "win32") {
-    return createWindowsNamedPipe(cli, customPath);
+    return await createWindowsNamedPipe(cli, customPath);
   } else if (process.platform === "linux") {
-    return createLinuxFifo(cli, customPath);
+    return await createLinuxFifo(cli, customPath);
   } else {
     logger.warn(`[${cli}-yes] IPC not supported on platform: ${process.platform}`);
     return null;
@@ -30,10 +30,10 @@ export function createFifoStream(
 /**
  * Creates a Windows named pipe for IPC
  */
-function createWindowsNamedPipe(
+async function createWindowsNamedPipe(
   cli: string,
   customPath?: string,
-): { stream: ReadableStream<string>; cleanup: () => Promise<void> } | null {
+): Promise<(AsyncDisposable & { stream: ReadableStream<string> }) | null> {
   try {
     // Use customPath directly if provided (should already be in Windows pipe format)
     // Otherwise generate a new pipe path
@@ -55,22 +55,22 @@ function createWindowsNamedPipe(
     // Create a ReadableStream that handles data from the named pipe
     const stream = new ReadableStream<string>({
       start(controller) {
-        server.on('connection', (socket) => {
+        server.on("connection", (socket) => {
           connection = socket;
           logger.info(`[${cli}-yes] Client connected to named pipe`);
 
-          socket.on('data', (chunk) => {
+          socket.on("data", (chunk) => {
             const data = chunk.toString();
             logger.debug(`[${cli}-yes] Received data via named pipe: ${data}`);
             controller.enqueue(data);
           });
 
-          socket.on('end', () => {
+          socket.on("end", () => {
             logger.debug(`[${cli}-yes] Client disconnected from named pipe`);
             connection = null;
           });
 
-          socket.on('error', (error) => {
+          socket.on("error", (error) => {
             logger.warn(`[${cli}-yes] Named pipe socket error:`, error);
             if (!isClosing) {
               controller.error(error);
@@ -78,7 +78,7 @@ function createWindowsNamedPipe(
           });
         });
 
-        server.on('error', (error) => {
+        server.on("error", (error) => {
           logger.warn(`[${cli}-yes] Named pipe server error:`, error);
           if (!isClosing) {
             controller.error(error);
@@ -96,7 +96,7 @@ function createWindowsNamedPipe(
           connection.end();
         }
         server.close();
-      }
+      },
     });
 
     const cleanup = async () => {
@@ -115,7 +115,7 @@ function createWindowsNamedPipe(
 
     return {
       stream: stream,
-      cleanup
+      [Symbol.asyncDispose]: cleanup,
     };
   } catch (error) {
     logger.warn(`[${cli}-yes] Failed to create Windows named pipe:`, error);
@@ -126,10 +126,10 @@ function createWindowsNamedPipe(
 /**
  * Creates a Linux FIFO for IPC (original implementation)
  */
-function createLinuxFifo(
+async function createLinuxFifo(
   cli: string,
   customPath?: string,
-): { stream: ReadableStream<string>; cleanup: () => Promise<void> } | null {
+): Promise<(AsyncDisposable & { stream: ReadableStream<string> }) | null> {
   let fifoPath: string | null = null;
   let fifoStream: ReturnType<typeof createReadStream> | null = null;
 
@@ -215,7 +215,7 @@ function createLinuxFifo(
 
       return {
         stream: sflow(fromReadable(fifoStream)).map((buffer) => buffer.toString()),
-        cleanup: cleanupFifo,
+        [Symbol.asyncDispose]: cleanupFifo,
       };
     } catch (error) {
       logger.warn(`[${cli}-yes] Failed to open FIFO at ${fifoPath}:`, {
