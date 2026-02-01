@@ -59,21 +59,24 @@ export function parseCliArgs(argv: string[]) {
         "Prepend SKILL.md header from current directory to the prompt (helpful for non-Claude agents)",
       default: false,
     })
-    .option("exit-on-idle", {
+    .option("timeout", {
       type: "string",
       description: 'Exit after a period of inactivity, e.g., "5s" or "1m"',
-      deprecated: "use --idle instead",
-      default: "60s",
-      alias: "e",
+      alias: "t",
+    })
+    .option("exit-on-idle", {
+      type: "string",
+      deprecated: "use --timeout instead",
+      alias: "e", // keep for backward compatibility, will be removed in future major versions
     })
     .option("idle", {
       type: "string",
       description: 'short idle time, will perform idle action when reached, e.g., "5s" or "1m"',
-      alias: "i",
+      alias: "i", // keep for backward compatibility, will be removed in future major versions
     })
     .option("idle-action", {
       type: "string",
-      description: 'Idle action to perform when idle time is reached, e.g., "exit" or "TODO.md"',
+      description: 'Idle action to perform when idle time is reached, e.g., "/exit" or "check TODO.md"',
     })
     .option("queue", {
       type: "boolean",
