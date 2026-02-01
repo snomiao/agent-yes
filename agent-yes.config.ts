@@ -86,7 +86,8 @@ function getDefaultConfig() {
           npm: "npm i -g @anthropic-ai/claude-code@latest",
         },
         // ready: [/^> /], // regex matcher for stdin ready
-        ready: [/^\? for shortcuts/, /^> /, /──────────+/], // regex matcher for stdin ready
+        ready: [/\? for shortcuts/, /\u00A0Try "/, // regex matcher for stdin ready (note: \u00A0 is non-breaking space)
+        /^\? for shortcuts/, /^> /, /──────────+/], // regex matcher for stdin ready
         typingRespond: {
           "1\n": [/│ Do you want to use this API key\?/],
         },
