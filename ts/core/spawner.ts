@@ -47,7 +47,7 @@ export interface SpawnOptions {
  * })
  * ```
  */
-export function getInstallCommand(
+function getInstallCommand(
   installConfig:
     | string
     | { powershell?: string; bash?: string; npm?: string; unix?: string; windows?: string },

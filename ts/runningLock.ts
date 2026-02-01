@@ -14,7 +14,7 @@ export interface Task {
   lockedAt: number;
 }
 
-export interface LockFile {
+interface LockFile {
   tasks: Task[];
 }
 
