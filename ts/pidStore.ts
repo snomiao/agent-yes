@@ -1,6 +1,7 @@
 import { mkdir, writeFile } from "fs/promises";
 import path from "path";
 import { logger } from "./logger.ts";
+import { SqliteAdapter } from "./SqliteAdapter.ts";
 
 export interface PidRecord {
   id?: number;
@@ -17,54 +18,6 @@ export interface PidRecord {
   updatedAt: number;
 }
 
-// Direct SQLite implementation to avoid Kysely compatibility issues
-class SqliteAdapter {
-  private db: any;
-
-  async init(dbPath: string) {
-    if (typeof globalThis.Bun !== "undefined") {
-      try {
-        const { Database } = await import("bun:sqlite");
-        this.db = new Database(dbPath);
-      } catch (error) {
-        logger.warn("[pidStore] bun:sqlite not available, falling back to better-sqlite3");
-        const Database = (await import("better-sqlite3")).default;
-        this.db = new Database(dbPath);
-      }
-    } else {
-      const Database = (await import("better-sqlite3")).default;
-      this.db = new Database(dbPath);
-    }
-  }
-
-  query(sql: string, params: any[] = []): any[] {
-    if (typeof this.db.prepare === "function") {
-      // better-sqlite3 style
-      return this.db.prepare(sql).all(params);
-    } else {
-      // bun:sqlite style
-      return this.db.query(sql).all(params);
-    }
-  }
-
-  run(sql: string, params: any[] = []): { lastInsertRowid?: number; changes?: number } {
-    if (typeof this.db.prepare === "function") {
-      // better-sqlite3 style
-      return this.db.prepare(sql).run(params);
-    } else {
-      // bun:sqlite style
-      this.db.run(sql, params);
-      return {}; // Bun doesn't return metadata in the same way
-    }
-  }
-
-  close() {
-    if (this.db.close) {
-      this.db.close();
-    }
-  }
-}
-
 export class PidStore {
   protected db!: SqliteAdapter;
   private storeDir: string;
@@ -76,40 +29,45 @@ export class PidStore {
   }
 
   async init(): Promise<void> {
-    await mkdir(path.join(this.storeDir, "logs"), { recursive: true });
-    await mkdir(path.join(this.storeDir, "fifo"), { recursive: true });
+    try {
+      // Auto-generate .gitignore for .agent-yes directory
+      await this.ensureGitignore();
 
-    // Auto-generate .gitignore for .agent-yes directory
-    await this.ensureGitignore();
+      this.db = new SqliteAdapter();
+      await this.db.init(this.dbPath);
 
-    this.db = new SqliteAdapter();
-    await this.db.init(this.dbPath);
+      if (this.db.isReady()) {
+        // Enable WAL mode for better concurrency and performance
+        this.db.run("PRAGMA journal_mode=WAL");
+        this.db.run("PRAGMA synchronous=NORMAL");
+        this.db.run("PRAGMA cache_size=1000");
+        this.db.run("PRAGMA temp_store=memory");
 
-    // Enable WAL mode for better concurrency and performance
-    this.db.run("PRAGMA journal_mode=WAL");
-    this.db.run("PRAGMA synchronous=NORMAL");
-    this.db.run("PRAGMA cache_size=1000");
-    this.db.run("PRAGMA temp_store=memory");
+        // Create table if it doesn't exist
+        this.db.run(`
+          CREATE TABLE IF NOT EXISTS pid_records (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pid INTEGER NOT NULL UNIQUE,
+            cli TEXT NOT NULL,
+            args TEXT NOT NULL,
+            prompt TEXT,
+            logFile TEXT NOT NULL,
+            fifoFile TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            exitReason TEXT NOT NULL DEFAULT '',
+            exitCode INTEGER,
+            startedAt INTEGER NOT NULL,
+            updatedAt INTEGER NOT NULL
+          )
+        `);
 
-    // Create table if it doesn't exist
-    this.db.run(`
-      CREATE TABLE IF NOT EXISTS pid_records (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        pid INTEGER NOT NULL UNIQUE,
-        cli TEXT NOT NULL,
-        args TEXT NOT NULL,
-        prompt TEXT,
-        logFile TEXT NOT NULL,
-        fifoFile TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'active',
-        exitReason TEXT NOT NULL DEFAULT '',
-        exitCode INTEGER,
-        startedAt INTEGER NOT NULL,
-        updatedAt INTEGER NOT NULL
-      )
-    `);
-
-    await this.cleanStaleRecords();
+        await this.cleanStaleRecords();
+      } else {
+        logger.warn("[pidStore] Database not ready, running in fallback mode");
+      }
+    } catch (error) {
+      logger.warn("[pidStore] Failed to initialize:", error);
+    }
   }
 
   async registerProcess({
@@ -125,22 +83,28 @@ export class PidStore {
   }): Promise<PidRecord> {
     const now = Date.now();
     const argsJson = JSON.stringify(args);
-    const logFile = this.getLogPath(pid);
+    const logFile = path.resolve(this.getLogDir(), `${pid}.log`);
     const fifoFile = this.getFifoPath(pid);
 
     try {
-      this.db.run(`
+      this.db.run(
+        `
         INSERT INTO pid_records (pid, cli, args, prompt, logFile, fifoFile, status, exitReason, startedAt, updatedAt)
         VALUES (?, ?, ?, ?, ?, ?, 'active', '', ?, ?)
-      `, [pid, cli, argsJson, prompt, logFile, fifoFile, now, now]);
+      `,
+        [pid, cli, argsJson, prompt, logFile, fifoFile, now, now],
+      );
     } catch (error: any) {
       // Handle unique constraint violation by updating existing record
       if (error.code === "SQLITE_CONSTRAINT_UNIQUE") {
-        this.db.run(`
+        this.db.run(
+          `
           UPDATE pid_records
           SET cli = ?, args = ?, prompt = ?, logFile = ?, fifoFile = ?, status = 'active', exitReason = '', startedAt = ?, updatedAt = ?
           WHERE pid = ?
-        `, [cli, argsJson, prompt, logFile, fifoFile, now, now, pid]);
+        `,
+          [cli, argsJson, prompt, logFile, fifoFile, now, now, pid],
+        );
       } else {
         throw error;
       }
@@ -172,28 +136,27 @@ export class PidStore {
     if (exitCode !== undefined) {
       this.db.run(
         "UPDATE pid_records SET status = ?, exitReason = ?, exitCode = ?, updatedAt = ? WHERE pid = ?",
-        [status, exitReason, exitCode, updatedAt, pid]
+        [status, exitReason, exitCode, updatedAt, pid],
       );
     } else {
       this.db.run(
         "UPDATE pid_records SET status = ?, exitReason = ?, updatedAt = ? WHERE pid = ?",
-        [status, exitReason, updatedAt, pid]
+        [status, exitReason, updatedAt, pid],
       );
     }
 
     logger.debug(`[pidStore] Updated process ${pid} status=${status}`);
   }
 
-  getLogPath(pid: number): string {
-    return path.resolve(this.storeDir, "logs", `${pid}.log`);
+  getLogDir() {
+    return path.resolve(this.storeDir, "logs");
   }
 
-  getFifoPath(pid: number): string {
+  getFifoPath(pid: number) {
     if (process.platform === "win32") {
       // Windows named pipe format
       return `\\\\.\\pipe\\agent-yes-${pid}`;
     } else {
-      // Linux FIFO file path
       return path.resolve(this.storeDir, "fifo", `${pid}.stdin`);
     }
   }
@@ -205,7 +168,7 @@ export class PidStore {
       if (!this.isProcessAlive(record.pid)) {
         this.db.run(
           "UPDATE pid_records SET status = 'exited', exitReason = 'stale-cleanup', updatedAt = ? WHERE pid = ?",
-          [Date.now(), record.pid]
+          [Date.now(), record.pid],
         );
 
         logger.debug(`[pidStore] Cleaned stale record for PID ${record.pid}`);
@@ -254,10 +217,10 @@ fifo/
 `;
 
     try {
-      await writeFile(gitignorePath, gitignoreContent, { flag: 'wx' }); // wx = create only if doesn't exist
+      await writeFile(gitignorePath, gitignoreContent, { flag: "wx" }); // wx = create only if doesn't exist
       logger.debug(`[pidStore] Created .gitignore in ${this.storeDir}`);
     } catch (error: any) {
-      if (error.code !== 'EEXIST') {
+      if (error.code !== "EEXIST") {
         logger.warn(`[pidStore] Failed to create .gitignore:`, error);
       }
       // If file exists, that's fine - don't overwrite existing gitignore
@@ -265,14 +228,19 @@ fifo/
   }
 
   static async findActiveFifo(workingDir: string): Promise<string | null> {
-    const store = new PidStore(workingDir);
-    await store.init();
+    try {
+      const store = new PidStore(workingDir);
+      await store.init();
 
-    const records = store.db.query(
-      "SELECT * FROM pid_records WHERE status != 'exited' ORDER BY startedAt DESC LIMIT 1"
-    );
+      const records = store.db.query(
+        "SELECT * FROM pid_records WHERE status != 'exited' ORDER BY startedAt DESC LIMIT 1",
+      );
 
-    await store.close();
-    return records[0]?.fifoFile ?? null;
+      await store.close();
+      return records[0]?.fifoFile ?? null;
+    } catch (error) {
+      logger.warn("[pidStore] findActiveFifo failed:", error);
+      return null;
+    }
   }
 }
