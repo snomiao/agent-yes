@@ -512,8 +512,6 @@ export default async function agentYes({
             if (cleanLine === "/auto") {
               out += "\x15"; // Ctrl+U instead of Enter
               ctx.autoYesEnabled = !ctx.autoYesEnabled;
-              const status = ctx.autoYesEnabled ? "\x1b[32mON\x1b[0m" : "\x1b[33mOFF\x1b[0m";
-              process.stderr.write(`[auto-yes: ${status}]\n`);
               line = "";
               continue;
             }
