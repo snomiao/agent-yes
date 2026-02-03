@@ -11,14 +11,20 @@ import pkg from "../package.json" with { type: "json" };
  */
 export function parseCliArgs(argv: string[]) {
   // Detect cli name from script name (same logic as cli.ts:10-14)
-  const cliName =
+  const scriptBaseName =
     argv[1]
       ?.split(/[/\\]/)
       .at(-1)
-      ?.replace(/(\.[jt]s)?$/, "")
-      .replace(/^(cli|agent)(-yes$)?/, "")
+      ?.replace(/(\.[jt]s)?$/, "") || "";
+
+  // Check if script name ends with -no (e.g., claude-no, agent-yes-no)
+  const scriptEndsWithNo = scriptBaseName.endsWith('-no');
+
+  const cliName =
+    scriptBaseName
+      .replace(/^(cli|agent)(-yes)?(-no)?$/, "")
       .replace(/^ay$/, "") // treat standalone "ay" same as "agent-yes"
-      .replace(/-yes$/, "") || undefined;
+      .replace(/-(yes|no)$/, "") || undefined;
 
   // Parse args with yargs (same logic as cli.ts:16-73)
   const parsedArgv = yargs(hideBin(argv))
@@ -105,6 +111,11 @@ export function parseCliArgs(argv: string[]) {
       description: "Enable external input stream to push additional data to stdin",
       default: false,
       alias: ["ipc", "fifo"], // backward compatibility
+    })
+    .option("manual", {
+      type: "boolean",
+      description: "Start with auto-yes disabled (manual mode), type /auto to toggle",
+      default: false,
     })
     .positional("cli", {
       describe: "The AI CLI to run, e.g., claude, codex, copilot, cursor, gemini",
@@ -209,5 +220,6 @@ export function parseCliArgs(argv: string[]) {
     useSkills: parsedArgv.useSkills,
     appendPrompt: parsedArgv.appendPrompt,
     useStdinAppend: Boolean(parsedArgv.stdpush || parsedArgv.ipc || parsedArgv.fifo), // Support --stdpush, --ipc, and --fifo (backward compatibility)
+    autoYes: !(parsedArgv.manual || scriptEndsWithNo), // auto-yes enabled by default, disabled by --manual, --no-auto, or script name ending with -no
   };
 }

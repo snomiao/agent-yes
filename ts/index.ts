@@ -115,6 +115,7 @@ export default async function agentYes({
   resume = false,
   useSkills = false,
   useStdinAppend = false,
+  autoYes = true,
 }: {
   cli: SUPPORTED_CLIS;
   cliArgs?: string[];
@@ -131,6 +132,7 @@ export default async function agentYes({
   resume?: boolean; // if true, resume previous session in current cwd if any
   useSkills?: boolean; // if true, prepend SKILL.md header to the prompt for non-Claude agents
   useStdinAppend?: boolean; // if true, enable FIFO input stream on Linux,  for additional stdin input
+  autoYes?: boolean; // if true, auto-yes is enabled (default), toggle with Ctrl+Y during session
 }) {
   if (!cli) throw new Error(`cli is required`);
   const conf =
@@ -342,7 +344,13 @@ export default async function agentYes({
     cliConf,
     verbose,
     robust,
+    autoYes,
   });
+
+  // Show startup mode if not default (i.e., when starting in manual mode)
+  if (!autoYes) {
+    process.stderr.write("\x1b[33m[auto-yes: OFF]\x1b[0m Type /auto to toggle\n");
+  }
 
   // force ready after 10s to avoid stuck forever if the ready-word mismatched
   sleep(10e3).then(() => {
@@ -491,6 +499,41 @@ export default async function agentYes({
       });
       return s.map(handler);
     })
+
+    // Detect /auto command to toggle auto-yes mode
+    .map((() => {
+      let line = "";
+      return (data: string) => {
+        let out = "";
+        for (const ch of data) {
+          // Handle Enter
+          if (ch === "\r" || ch === "\n") {
+            const cleanLine = line.replace(/[\x00-\x1f]|\x1b\[[0-9;]*[A-Za-z]|\[[A-Z]/g, '').trim();
+            if (cleanLine === "/auto") {
+              out += "\x15"; // Ctrl+U instead of Enter
+              ctx.autoYesEnabled = !ctx.autoYesEnabled;
+              const status = ctx.autoYesEnabled ? "\x1b[32mON\x1b[0m" : "\x1b[33mOFF\x1b[0m";
+              process.stderr.write(`[auto-yes: ${status}]\n`);
+              line = "";
+              continue;
+            }
+            line = "";
+            out += ch;
+            continue;
+          }
+          // Handle backspace
+          if (ch === "\x7f" || ch === "\b") {
+            line = line.slice(0, -1);
+            out += ch;
+            continue;
+          }
+          // Track only printable ASCII for line
+          if (ch >= " " && ch <= "~") line += ch;
+          out += ch;
+        }
+        return out;
+      };
+    })())
 
     // TODO(sno): Read from IPC stream if available (FIFO on Linux, Named Pipes on Windows)
     // .by(async (s) => {

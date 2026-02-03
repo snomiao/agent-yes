@@ -292,4 +292,36 @@ describe("CLI argument parsing", () => {
 
     warnSpy.mockRestore();
   });
+
+  it("should have autoYes enabled by default", () => {
+    const result = parseCliArgs(["node", "/path/to/cli", "claude"]);
+
+    expect(result.autoYes).toBe(true);
+  });
+
+  it("should parse --manual flag to disable autoYes", () => {
+    const result = parseCliArgs(["node", "/path/to/cli", "--manual", "claude"]);
+
+    expect(result.autoYes).toBe(false);
+  });
+
+  it("should detect -no suffix in script name to disable autoYes", () => {
+    const result = parseCliArgs(["node", "/usr/local/bin/claude-no", "--prompt", "test"]);
+
+    expect(result.cli).toBe("claude");
+    expect(result.autoYes).toBe(false);
+  });
+
+  it("should detect -no suffix in agent-yes-no script", () => {
+    const result = parseCliArgs(["node", "/usr/local/bin/agent-yes-no", "claude"]);
+
+    expect(result.autoYes).toBe(false);
+  });
+
+  it("should have autoYes enabled for -yes suffix", () => {
+    const result = parseCliArgs(["node", "/usr/local/bin/claude-yes", "--prompt", "test"]);
+
+    expect(result.cli).toBe("claude");
+    expect(result.autoYes).toBe(true);
+  });
 });
