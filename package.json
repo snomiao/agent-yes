@@ -30,6 +30,7 @@
   },
   "bin": {
     "agent-yes": "./dist/agent-yes.js",
+    "ay": "./dist/agent-yes.js",
     "amp-yes": "./dist/amp-yes.js",
     "auggie-yes": "./dist/auggie-yes.js",
     "claude-yes": "./dist/claude-yes.js",
