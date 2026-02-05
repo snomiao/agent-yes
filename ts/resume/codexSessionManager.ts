@@ -3,17 +3,17 @@ import { homedir } from "os";
 import path from "path";
 
 // Allow overriding for testing
-export const getSessionsFile = () =>
+const getSessionsFile = () =>
   process.env.CLI_YES_TEST_HOME
     ? path.join(process.env.CLI_YES_TEST_HOME, ".config", "agent-yes", "codex-sessions.json")
     : path.join(homedir(), ".config", "agent-yes", "codex-sessions.json");
 
-export const getCodexSessionsDir = () =>
+const getCodexSessionsDir = () =>
   process.env.CLI_YES_TEST_HOME
     ? path.join(process.env.CLI_YES_TEST_HOME, ".codex", "sessions")
     : path.join(homedir(), ".codex", "sessions");
 
-export interface CodexSessionMap {
+interface CodexSessionMap {
   [cwd: string]: {
     sessionId: string;
     lastUsed: string; // ISO timestamp
@@ -35,7 +35,7 @@ export interface CodexSession {
 /**
  * Load the session map from the config file
  */
-export async function loadSessionMap(): Promise<CodexSessionMap> {
+async function loadSessionMap(): Promise<CodexSessionMap> {
   try {
     const content = await readFile(getSessionsFile(), "utf-8");
     return JSON.parse(content);
@@ -48,7 +48,7 @@ export async function loadSessionMap(): Promise<CodexSessionMap> {
 /**
  * Save the session map to the config file
  */
-export async function saveSessionMap(sessionMap: CodexSessionMap): Promise<void> {
+async function saveSessionMap(sessionMap: CodexSessionMap): Promise<void> {
   try {
     const sessionsFile = getSessionsFile();
     // Ensure the directory exists
@@ -258,7 +258,7 @@ export async function getAllWorkingDirectories(): Promise<
 /**
  * Clean up old sessions (keep only the most recent 10 per directory)
  */
-export async function cleanupOldSessions(): Promise<void> {
+async function cleanupOldSessions(): Promise<void> {
   const sessionMap = await loadSessionMap();
 
   // Group sessions by directory and keep only the most recent ones
