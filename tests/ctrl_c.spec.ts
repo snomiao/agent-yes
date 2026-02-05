@@ -14,19 +14,30 @@ import pty from "../ts/pty";
  * which allows Ctrl+C handling to work correctly (unlike piped stdin).
  */
 describe("Ctrl+C abort tests", () => {
-  const mockClaudePath = path.resolve(__dirname, "claude");
+  const mockClaudePath = path.resolve(__dirname, process.platform === "win32" ? "claude.cmd" : "claude");
 
   beforeAll(() => {
     // Create a mock claude script that simulates claude but NEVER shows the ready pattern
     // This keeps stdin in "not ready" state so Ctrl+C triggers the abort handler
-    const mockScript = `#!/usr/bin/env bash
+    if (process.platform === "win32") {
+      // Windows: Create a .cmd batch file
+      const mockScript = `@echo off
+echo Starting Claude...
+echo Loading...
+timeout /t 10000 /nobreak >nul
+`;
+      writeFileSync(mockClaudePath, mockScript);
+    } else {
+      // Unix: Create a bash script
+      const mockScript = `#!/usr/bin/env bash
 # Mock Claude CLI for testing - keeps loading forever without showing ready pattern
 echo "Starting Claude..."
 echo "Loading..."
 # Sleep forever to simulate a loading agent (never becomes ready)
 sleep 10000
 `;
-    writeFileSync(mockClaudePath, mockScript, { mode: 0o755 });
+      writeFileSync(mockClaudePath, mockScript, { mode: 0o755 });
+    }
   });
 
   afterAll(() => {
