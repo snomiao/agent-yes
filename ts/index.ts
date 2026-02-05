@@ -379,16 +379,18 @@ export default async function agentYes({
   const pendingExitCode = Promise.withResolvers<number | null>();
 
   async function onData(data: string) {
+    const currentPid = shell.pid; // Capture PID before any potential shell reassignment
     // append data to the buffer, so we can process it later
     await outputWriter.write(data);
     // append to agent registry for MCP server
-    globalAgentRegistry.appendStdout(shell.pid, data);
+    globalAgentRegistry.appendStdout(currentPid, data);
   }
 
   shell.onData(onData);
   shell.onExit(async function onExit({ exitCode }) {
+    const exitedPid = shell.pid; // Capture PID immediately before any shell reassignment
     // Unregister from agent registry
-    globalAgentRegistry.unregister(shell.pid);
+    globalAgentRegistry.unregister(exitedPid);
     ctx.stdinReady.unready(); // start buffer stdin
     const agentCrashed = exitCode !== 0;
 
@@ -397,12 +399,12 @@ export default async function agentYes({
     if (ctx.shouldRestartWithoutContinue) {
       // Update status (non-blocking)
       try {
-        await pidStore.updateStatus(shell.pid, "exited", {
+        await pidStore.updateStatus(exitedPid, "exited", {
           exitReason: "restarted",
           exitCode: exitCode ?? undefined,
         });
       } catch (error) {
-        logger.warn(`[pidStore] Failed to update status for PID ${shell.pid}:`, error);
+        logger.warn(`[pidStore] Failed to update status for PID ${exitedPid}:`, error);
       }
       ctx.shouldRestartWithoutContinue = false; // reset flag
       ctx.isFatal = false; // reset fatal flag to allow restart
@@ -462,24 +464,24 @@ export default async function agentYes({
       if (ctx.isFatal) {
         // Update status (non-blocking)
         try {
-          await pidStore.updateStatus(shell.pid, "exited", {
+          await pidStore.updateStatus(exitedPid, "exited", {
             exitReason: "fatal",
             exitCode: exitCode ?? undefined,
           });
         } catch (error) {
-          logger.warn(`[pidStore] Failed to update status for PID ${shell.pid}:`, error);
+          logger.warn(`[pidStore] Failed to update status for PID ${exitedPid}:`, error);
         }
         return pendingExitCode.resolve(exitCode);
       }
 
       // Update status (non-blocking)
       try {
-        await pidStore.updateStatus(shell.pid, "exited", {
+        await pidStore.updateStatus(exitedPid, "exited", {
           exitReason: "restarted",
           exitCode: exitCode ?? undefined,
         });
       } catch (error) {
-        logger.warn(`[pidStore] Failed to update status for PID ${shell.pid}:`, error);
+        logger.warn(`[pidStore] Failed to update status for PID ${exitedPid}:`, error);
       }
       logger.info(`${cli} crashed, restarting...`);
 
@@ -532,12 +534,12 @@ export default async function agentYes({
     const exitReason = agentCrashed ? "crash" : "normal";
     // Update status (non-blocking)
     try {
-      await pidStore.updateStatus(shell.pid, "exited", {
+      await pidStore.updateStatus(exitedPid, "exited", {
         exitReason,
         exitCode: exitCode ?? undefined,
       });
     } catch (error) {
-      logger.warn(`[pidStore] Failed to update status for PID ${shell.pid}:`, error);
+      logger.warn(`[pidStore] Failed to update status for PID ${exitedPid}:`, error);
     }
     return pendingExitCode.resolve(exitCode);
   });
