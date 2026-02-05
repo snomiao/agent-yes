@@ -170,21 +170,6 @@ export default async function agentYes({
   const pidStore = new PidStore(workingDir);
   await pidStore.init();
 
-  const stdinReady = new ReadyManager();
-  const stdinFirstReady = new ReadyManager(); // if user send ctrl+c before
-
-  // If ready check is disabled (empty array) or manual mode, mark stdin ready immediately
-  // Manual mode needs immediate stdin so user can respond to trust prompts
-  if ((conf.ready && conf.ready.length === 0) || !autoYes) {
-    stdinReady.ready();
-    stdinFirstReady.ready();
-  }
-
-  // force ready after 10s to avoid stuck forever if the ready-word mismatched
-  sleep(10e3).then(() => {
-    if (!stdinReady.isReady) stdinReady.ready();
-    if (!stdinFirstReady.isReady) stdinFirstReady.ready();
-  });
   const nextStdout = new ReadyManager();
   process.stdin.setRawMode?.(true); // must be called any stdout/stdin usage
 
@@ -351,6 +336,13 @@ export default async function agentYes({
   // Show startup mode if not default (i.e., when starting in manual mode)
   if (!autoYes) {
     process.stderr.write("\x1b[33m[auto-yes: OFF]\x1b[0m Type /auto to toggle\n");
+  }
+
+  // If ready check is disabled (empty array) or manual mode, mark stdin ready immediately
+  // Manual mode needs immediate stdin so user can respond to trust prompts
+  if ((cliConf.ready && cliConf.ready.length === 0) || !autoYes) {
+    ctx.stdinReady.ready();
+    ctx.stdinFirstReady.ready();
   }
 
   // force ready after 10s to avoid stuck forever if the ready-word mismatched
