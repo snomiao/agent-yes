@@ -173,8 +173,9 @@ export default async function agentYes({
   const stdinReady = new ReadyManager();
   const stdinFirstReady = new ReadyManager(); // if user send ctrl+c before
 
-  // If ready check is disabled (empty array), mark stdin ready immediately
-  if (conf.ready && conf.ready.length === 0) {
+  // If ready check is disabled (empty array) or manual mode, mark stdin ready immediately
+  // Manual mode needs immediate stdin so user can respond to trust prompts
+  if ((conf.ready && conf.ready.length === 0) || !autoYes) {
     stdinReady.ready();
     stdinFirstReady.ready();
   }
@@ -508,12 +509,15 @@ export default async function agentYes({
         for (const ch of data) {
           // Handle Enter
           if (ch === "\r" || ch === "\n") {
-            const cleanLine = line.replace(/[\x00-\x1f]|\x1b\[[0-9;]*[A-Za-z]|\[[A-Z]/g, '').trim();
-            if (cleanLine === "/auto") {
-              out += "\x15"; // Ctrl+U instead of Enter
-              ctx.autoYesEnabled = !ctx.autoYesEnabled;
-              line = "";
-              continue;
+            // Only check for /auto if line is short enough
+            if (line.length <= 20) {
+              const cleanLine = line.replace(/[\x00-\x1f]|\x1b\[[0-9;]*[A-Za-z]|\[[A-Z]/g, '').trim();
+              if (cleanLine === "/auto") {
+                out += "\x15"; // Ctrl+U instead of Enter
+                ctx.autoYesEnabled = !ctx.autoYesEnabled;
+                line = "";
+                continue;
+              }
             }
             line = "";
             out += ch;
@@ -521,12 +525,12 @@ export default async function agentYes({
           }
           // Handle backspace
           if (ch === "\x7f" || ch === "\b") {
-            line = line.slice(0, -1);
+            if (line.length > 0) line = line.slice(0, -1);
             out += ch;
             continue;
           }
-          // Track only printable ASCII for line
-          if (ch >= " " && ch <= "~") line += ch;
+          // Track only printable ASCII for line, with size limit
+          if (ch >= " " && ch <= "~" && line.length < 50) line += ch;
           out += ch;
         }
         return out;
