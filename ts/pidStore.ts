@@ -9,6 +9,7 @@ export interface PidRecord {
   cli: string;
   args: string;
   prompt?: string;
+  cwd: string;
   logFile: string;
   fifoFile: string;
   status: "idle" | "active" | "exited";
@@ -51,6 +52,7 @@ export class PidStore {
             cli TEXT NOT NULL,
             args TEXT NOT NULL,
             prompt TEXT,
+            cwd TEXT NOT NULL,
             logFile TEXT NOT NULL,
             fifoFile TEXT NOT NULL,
             status TEXT NOT NULL DEFAULT 'active',
@@ -75,11 +77,13 @@ export class PidStore {
     cli,
     args,
     prompt,
+    cwd,
   }: {
     pid: number;
     cli: string;
     args: string[];
     prompt?: string;
+    cwd: string;
   }): Promise<PidRecord> {
     const now = Date.now();
     const argsJson = JSON.stringify(args);
@@ -89,10 +93,10 @@ export class PidStore {
     try {
       this.db.run(
         `
-        INSERT INTO pid_records (pid, cli, args, prompt, logFile, fifoFile, status, exitReason, startedAt, updatedAt)
-        VALUES (?, ?, ?, ?, ?, ?, 'active', '', ?, ?)
+        INSERT INTO pid_records (pid, cli, args, prompt, cwd, logFile, fifoFile, status, exitReason, startedAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'active', '', ?, ?)
       `,
-        [pid, cli, argsJson, prompt, logFile, fifoFile, now, now],
+        [pid, cli, argsJson, prompt, cwd, logFile, fifoFile, now, now],
       );
     } catch (error: any) {
       // Handle unique constraint violation by updating existing record
@@ -100,10 +104,10 @@ export class PidStore {
         this.db.run(
           `
           UPDATE pid_records
-          SET cli = ?, args = ?, prompt = ?, logFile = ?, fifoFile = ?, status = 'active', exitReason = '', startedAt = ?, updatedAt = ?
+          SET cli = ?, args = ?, prompt = ?, cwd = ?, logFile = ?, fifoFile = ?, status = 'active', exitReason = '', startedAt = ?, updatedAt = ?
           WHERE pid = ?
         `,
-          [cli, argsJson, prompt, logFile, fifoFile, now, now, pid],
+          [cli, argsJson, prompt, cwd, logFile, fifoFile, now, now, pid],
         );
       } else {
         throw error;
@@ -146,6 +150,10 @@ export class PidStore {
     }
 
     logger.debug(`[pidStore] Updated process ${pid} status=${status}`);
+  }
+
+  getAllRecords(): PidRecord[] {
+    return this.db.query("SELECT * FROM pid_records");
   }
 
   getLogDir() {
