@@ -63,6 +63,18 @@ export class PidStore {
           )
         `);
 
+        // Migrate: Add cwd column if it doesn't exist
+        try {
+          const tableInfo = this.db.query("PRAGMA table_info(pid_records)");
+          const hasCwd = tableInfo.some((col: any) => col.name === 'cwd');
+          if (!hasCwd) {
+            logger.info("[pidStore] Migrating database: adding cwd column");
+            this.db.run("ALTER TABLE pid_records ADD COLUMN cwd TEXT NOT NULL DEFAULT ''");
+          }
+        } catch (error) {
+          logger.warn("[pidStore] Migration check failed:", error);
+        }
+
         await this.cleanStaleRecords();
       } else {
         logger.warn("[pidStore] Database not ready, running in fallback mode");

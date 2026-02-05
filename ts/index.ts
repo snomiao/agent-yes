@@ -659,6 +659,8 @@ export default async function agentYes({
       // Set up stdin in flowing mode so 'data' events fire
       process.stdin.resume();
 
+      let closed = false;
+
       // Handle data events
       const dataHandler = (chunk: Buffer) => {
         try {
@@ -668,13 +670,25 @@ export default async function agentYes({
         }
       };
 
-      // Handle end/close
+      // Handle end/close - both events can fire, so track state
       const endHandler = () => {
-        controller.close();
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch (err) {
+          // Ignore close errors (already closed)
+        }
       };
 
       const errorHandler = (err: Error) => {
-        controller.error(err);
+        if (closed) return;
+        closed = true;
+        try {
+          controller.error(err);
+        } catch (err) {
+          // Ignore error after close
+        }
       };
 
       process.stdin.on('data', dataHandler);
