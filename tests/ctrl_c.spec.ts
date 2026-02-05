@@ -58,6 +58,9 @@ sleep 10000
     // Use pty.spawn to create a proper pseudo-terminal (not a pipe)
     // This allows raw mode and proper Ctrl+C handling
     // Note: We spawn bun directly (not "bun run") and disable robust mode
+    // Use platform-specific PATH separator
+    const pathSep = process.platform === "win32" ? ";" : ":";
+
     const proc = pty.spawn("bun", [cliPath, "--verbose", "--no-robust", "claude", "--", "hello"], {
       name: "xterm-color",
       cols: 80,
@@ -65,7 +68,7 @@ sleep 10000
       cwd: testDir,
       env: {
         ...process.env,
-        PATH: `${testDir}:${process.env.PATH}`, // Prepend test dir so our mock 'claude' is found
+        PATH: `${testDir}${pathSep}${process.env.PATH}`, // Prepend test dir so our mock 'claude' is found
         VERBOSE: "1",
       },
     });
