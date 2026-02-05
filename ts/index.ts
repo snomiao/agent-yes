@@ -115,6 +115,7 @@ export default async function agentYes({
   resume = false,
   useSkills = false,
   useStdinAppend = false,
+  autoYes = true,
 }: {
   cli: SUPPORTED_CLIS;
   cliArgs?: string[];
@@ -131,6 +132,7 @@ export default async function agentYes({
   resume?: boolean; // if true, resume previous session in current cwd if any
   useSkills?: boolean; // if true, prepend SKILL.md header to the prompt for non-Claude agents
   useStdinAppend?: boolean; // if true, enable FIFO input stream on Linux,  for additional stdin input
+  autoYes?: boolean; // if true, auto-yes is enabled (default), toggle with Ctrl+Y during session
 }) {
   if (!cli) throw new Error(`cli is required`);
   const conf =
@@ -168,20 +170,6 @@ export default async function agentYes({
   const pidStore = new PidStore(workingDir);
   await pidStore.init();
 
-  const stdinReady = new ReadyManager();
-  const stdinFirstReady = new ReadyManager(); // if user send ctrl+c before
-
-  // If ready check is disabled (empty array), mark stdin ready immediately
-  if (conf.ready && conf.ready.length === 0) {
-    stdinReady.ready();
-    stdinFirstReady.ready();
-  }
-
-  // force ready after 10s to avoid stuck forever if the ready-word mismatched
-  sleep(10e3).then(() => {
-    if (!stdinReady.isReady) stdinReady.ready();
-    if (!stdinFirstReady.isReady) stdinFirstReady.ready();
-  });
   const nextStdout = new ReadyManager();
   process.stdin.setRawMode?.(true); // must be called any stdout/stdin usage
 
@@ -342,7 +330,20 @@ export default async function agentYes({
     cliConf,
     verbose,
     robust,
+    autoYes,
   });
+
+  // Show startup mode if not default (i.e., when starting in manual mode)
+  if (!autoYes) {
+    process.stderr.write("\x1b[33m[auto-yes: OFF]\x1b[0m Type /auto to toggle\n");
+  }
+
+  // If ready check is disabled (empty array) or manual mode, mark stdin ready immediately
+  // Manual mode needs immediate stdin so user can respond to trust prompts
+  if ((cliConf.ready && cliConf.ready.length === 0) || !autoYes) {
+    ctx.stdinReady.ready();
+    ctx.stdinFirstReady.ready();
+  }
 
   // force ready after 10s to avoid stuck forever if the ready-word mismatched
   sleep(10e3).then(() => {
@@ -390,6 +391,11 @@ export default async function agentYes({
       await pidStore.registerProcess({ pid: shell.pid, cli, args, prompt });
       shell.onData(onData);
       shell.onExit(onExit);
+      // Re-mark stdin ready for manual mode after restart
+      if ((cliConf.ready && cliConf.ready.length === 0) || !autoYes) {
+        ctx.stdinReady.ready();
+        ctx.stdinFirstReady.ready();
+      }
       return;
     }
 
@@ -440,6 +446,11 @@ export default async function agentYes({
       await pidStore.registerProcess({ pid: shell.pid, cli, args: restoreArgs, prompt });
       shell.onData(onData);
       shell.onExit(onExit);
+      // Re-mark stdin ready for manual mode after restart
+      if ((cliConf.ready && cliConf.ready.length === 0) || !autoYes) {
+        ctx.stdinReady.ready();
+        ctx.stdinFirstReady.ready();
+      }
       return;
     }
     const exitReason = agentCrashed ? "crash" : "normal";
@@ -491,6 +502,42 @@ export default async function agentYes({
       });
       return s.map(handler);
     })
+
+    // Detect /auto command to toggle auto-yes mode
+    .map((() => {
+      let line = "";
+      return (data: string) => {
+        let out = "";
+        for (const ch of data) {
+          // Handle Enter
+          if (ch === "\r" || ch === "\n") {
+            // Only check for /auto if line is short enough
+            if (line.length <= 20) {
+              const cleanLine = line.replace(/[\x00-\x1f]|\x1b\[[0-9;]*[A-Za-z]|\[[A-Z]/g, '').trim();
+              if (cleanLine === "/auto") {
+                out += "\x15"; // Ctrl+U instead of Enter
+                ctx.autoYesEnabled = !ctx.autoYesEnabled;
+                line = "";
+                continue;
+              }
+            }
+            line = "";
+            out += ch;
+            continue;
+          }
+          // Handle backspace
+          if (ch === "\x7f" || ch === "\b") {
+            if (line.length > 0) line = line.slice(0, -1);
+            out += ch;
+            continue;
+          }
+          // Track only printable ASCII for line, with size limit
+          if (ch >= " " && ch <= "~" && line.length < 50) line += ch;
+          out += ch;
+        }
+        return out;
+      };
+    })())
 
     // TODO(sno): Read from IPC stream if available (FIFO on Linux, Named Pipes on Windows)
     // .by(async (s) => {

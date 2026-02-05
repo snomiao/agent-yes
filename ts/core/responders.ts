@@ -69,10 +69,14 @@ export async function createAutoResponseHandler(
     ctx.stdinFirstReady.ready();
   }
 
-  // enter matchers: send Enter when any enter regex matches
+  // enter matchers: send Enter when any enter regex matches (only if auto-yes enabled)
   if (conf.enter?.some((rx: RegExp) => line.match(rx))) {
     logger.debug(`sendEnter matched|${line}`);
-    return await sendEnter(ctx.messageContext, 400); // wait for idle for a short while and then send Enter
+    if (ctx.autoYesEnabled) {
+      return await sendEnter(ctx.messageContext, 400); // wait for idle for a short while and then send Enter
+    }
+    // In manual mode, let user respond manually
+    return;
   }
 
   // typingRespond matcher: if matched, send the specified message
