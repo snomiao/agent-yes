@@ -5,7 +5,11 @@ import path from "path";
 import DIE from "phpdie";
 import sflow from "sflow";
 import { TerminalTextRender } from "terminal-render";
-import { getSessionForCwd } from "./resume/codexSessionManager.ts";
+import {
+  extractSessionId,
+  getSessionForCwd,
+  storeSessionForCwd,
+} from "./resume/codexSessionManager.ts";
 import pty, { ptyPackage } from "./pty.ts";
 import { removeControlCharacters } from "./removeControlCharacters.ts";
 import { acquireLock, releaseLock, shouldUseLock } from "./runningLock.ts";
@@ -13,7 +17,7 @@ import { logger } from "./logger.ts";
 import { createFifoStream } from "./beta/fifo.ts";
 import { PidStore } from "./pidStore.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
-import { sendMessage } from "./core/messaging.ts";
+import { sendEnter, sendMessage } from "./core/messaging.ts";
 import {
   initializeLogPaths,
   setupDebugLogging,
@@ -23,14 +27,12 @@ import {
 import { spawnAgent } from "./core/spawner.ts";
 import { AgentContext } from "./core/context.ts";
 import { createAutoResponseHandler } from "./core/responders.ts";
-import {
-  handleConsoleControlCodes,
-  createTerminateSignalHandler,
-  createTerminatorStream,
-} from "./core/streamHelpers.ts";
+import { createTerminatorStream } from "./core/streamHelpers.ts";
+import { globalAgentRegistry } from "./agentRegistry.ts";
 import { ReadyManager } from "./ReadyManager.ts";
 
 export { removeControlCharacters };
+export { AgentContext };
 
 export type AgentCliConfig = {
   // cli
@@ -44,6 +46,7 @@ export type AgentCliConfig = {
   // status detect, and actions
   ready?: RegExp[]; // regex matcher for stdin ready, or line index for gemini. Set to empty array [] to disable ready check entirely.
   fatal?: RegExp[]; // array of regex to match for fatal errors
+  working?: RegExp[]; // regex matcher for working status
   exitCommands?: string[]; // commands to exit the cli gracefully
   promptArg?: (string & {}) | "first-arg" | "last-arg"; // argument name to pass the prompt, e.g. --prompt, or first-arg for positional arg
 
@@ -183,7 +186,9 @@ export default async function agentYes({
     if (!stdinFirstReady.isReady) stdinFirstReady.ready();
   });
   const nextStdout = new ReadyManager();
+  if (verbose) logger.debug(`[stdin] isTTY: ${process.stdin.isTTY}, setRawMode available: ${!!process.stdin.setRawMode}`);
   process.stdin.setRawMode?.(true); // must be called any stdout/stdin usage
+  if (verbose) logger.debug(`[stdin] Raw mode set, isRaw: ${(process.stdin as any).isRaw}`);
 
   const shellOutputStream = new TransformStream<string, string>();
   const outputWriter = shellOutputStream.writable.getWriter();
@@ -328,8 +333,14 @@ export default async function agentYes({
     ptyOptions,
   });
 
-  // Register process in pidStore and compute log paths
-  await pidStore.registerProcess({ pid: shell.pid, cli, args: cliArgs, prompt });
+  // Register process in pidStore (non-blocking - failures should not prevent agent from running)
+  try {
+    await pidStore.registerProcess({ pid: shell.pid, cli, args: cliArgs, prompt, cwd: workingDir });
+  } catch (error) {
+    logger.warn(`[pidStore] Failed to register process ${shell.pid}:`, error);
+  }
+
+  // Initialize log paths (independent of registration)
   const logPaths = await initializeLogPaths(pidStore, shell.pid);
   setupDebugLogging(logPaths.debuggingLogsPath);
 
@@ -344,6 +355,21 @@ export default async function agentYes({
     robust,
   });
 
+  // Register agent in global registry (non-blocking)
+  try {
+    globalAgentRegistry.register(shell.pid, {
+      pid: shell.pid,
+      context: ctx,
+      cwd: workingDir,
+      cli,
+      prompt,
+      startTime: Date.now(),
+      stdoutBuffer: []
+    });
+  } catch (error) {
+    logger.warn(`[agentRegistry] Failed to register agent ${shell.pid}:`, error);
+  }
+
   // force ready after 10s to avoid stuck forever if the ready-word mismatched
   sleep(10e3).then(() => {
     if (!ctx.stdinReady.isReady) ctx.stdinReady.ready();
@@ -355,20 +381,29 @@ export default async function agentYes({
   async function onData(data: string) {
     // append data to the buffer, so we can process it later
     await outputWriter.write(data);
+    // append to agent registry for MCP server
+    globalAgentRegistry.appendStdout(shell.pid, data);
   }
 
   shell.onData(onData);
   shell.onExit(async function onExit({ exitCode }) {
+    // Unregister from agent registry
+    globalAgentRegistry.unregister(shell.pid);
     ctx.stdinReady.unready(); // start buffer stdin
     const agentCrashed = exitCode !== 0;
 
     // Handle restart without continue args (e.g., "No conversation found to continue")
     // logger.debug(``, { shouldRestartWithoutContinue, robust })
     if (ctx.shouldRestartWithoutContinue) {
-      await pidStore.updateStatus(shell.pid, "exited", {
-        exitReason: "restarted",
-        exitCode: exitCode ?? undefined,
-      });
+      // Update status (non-blocking)
+      try {
+        await pidStore.updateStatus(shell.pid, "exited", {
+          exitReason: "restarted",
+          exitCode: exitCode ?? undefined,
+        });
+      } catch (error) {
+        logger.warn(`[pidStore] Failed to update status for PID ${shell.pid}:`, error);
+      }
       ctx.shouldRestartWithoutContinue = false; // reset flag
       ctx.isFatal = false; // reset fatal flag to allow restart
 
@@ -387,7 +422,28 @@ export default async function agentYes({
         env: ptyEnv,
       };
       shell = pty.spawn(bin!, args, restartPtyOptions);
-      await pidStore.registerProcess({ pid: shell.pid, cli, args, prompt });
+      // Register process in pidStore (non-blocking)
+      try {
+        await pidStore.registerProcess({ pid: shell.pid, cli, args, prompt, cwd: workingDir });
+      } catch (error) {
+        logger.warn(`[pidStore] Failed to register restarted process ${shell.pid}:`, error);
+      }
+      // Update context with new shell
+      ctx.shell = shell;
+      // Register new agent in registry (non-blocking)
+      try {
+        globalAgentRegistry.register(shell.pid, {
+          pid: shell.pid,
+          context: ctx,
+          cwd: workingDir,
+          cli,
+          prompt,
+          startTime: Date.now(),
+          stdoutBuffer: []
+        });
+      } catch (error) {
+        logger.warn(`[agentRegistry] Failed to register restarted agent ${shell.pid}:`, error);
+      }
       shell.onData(onData);
       shell.onExit(onExit);
       return;
@@ -404,17 +460,27 @@ export default async function agentYes({
         return;
       }
       if (ctx.isFatal) {
-        await pidStore.updateStatus(shell.pid, "exited", {
-          exitReason: "fatal",
-          exitCode: exitCode ?? undefined,
-        });
+        // Update status (non-blocking)
+        try {
+          await pidStore.updateStatus(shell.pid, "exited", {
+            exitReason: "fatal",
+            exitCode: exitCode ?? undefined,
+          });
+        } catch (error) {
+          logger.warn(`[pidStore] Failed to update status for PID ${shell.pid}:`, error);
+        }
         return pendingExitCode.resolve(exitCode);
       }
 
-      await pidStore.updateStatus(shell.pid, "exited", {
-        exitReason: "restarted",
-        exitCode: exitCode ?? undefined,
-      });
+      // Update status (non-blocking)
+      try {
+        await pidStore.updateStatus(shell.pid, "exited", {
+          exitReason: "restarted",
+          exitCode: exitCode ?? undefined,
+        });
+      } catch (error) {
+        logger.warn(`[pidStore] Failed to update status for PID ${shell.pid}:`, error);
+      }
       logger.info(`${cli} crashed, restarting...`);
 
       // For codex, try to use stored session ID for this directory
@@ -437,16 +503,42 @@ export default async function agentYes({
         env: ptyEnv,
       };
       shell = pty.spawn(cli, restoreArgs, restorePtyOptions);
-      await pidStore.registerProcess({ pid: shell.pid, cli, args: restoreArgs, prompt });
+      // Register process in pidStore (non-blocking)
+      try {
+        await pidStore.registerProcess({ pid: shell.pid, cli, args: restoreArgs, prompt, cwd: workingDir });
+      } catch (error) {
+        logger.warn(`[pidStore] Failed to register restored process ${shell.pid}:`, error);
+      }
+      // Update context with new shell
+      ctx.shell = shell;
+      // Register new agent in registry (non-blocking)
+      try {
+        globalAgentRegistry.register(shell.pid, {
+          pid: shell.pid,
+          context: ctx,
+          cwd: workingDir,
+          cli,
+          prompt,
+          startTime: Date.now(),
+          stdoutBuffer: []
+        });
+      } catch (error) {
+        logger.warn(`[agentRegistry] Failed to register restored agent ${shell.pid}:`, error);
+      }
       shell.onData(onData);
       shell.onExit(onExit);
       return;
     }
     const exitReason = agentCrashed ? "crash" : "normal";
-    await pidStore.updateStatus(shell.pid, "exited", {
-      exitReason,
-      exitCode: exitCode ?? undefined,
-    });
+    // Update status (non-blocking)
+    try {
+      await pidStore.updateStatus(shell.pid, "exited", {
+        exitReason,
+        exitCode: exitCode ?? undefined,
+      });
+    } catch (error) {
+      logger.warn(`[pidStore] Failed to update status for PID ${shell.pid}:`, error);
+    }
     return pendingExitCode.resolve(exitCode);
   });
 
@@ -457,21 +549,98 @@ export default async function agentYes({
   });
 
   const terminalRender = new TerminalTextRender();
-  const isStillWorkingQ = () =>
-    terminalRender
-      .render()
-      .replace(/\s+/g, " ")
-      .match(/esc to interrupt|to run in background/);
+  const isStillWorkingQ = () => {
+    const rendered = terminalRender.tail(24).replace(/\s+/g, " ");
+    return conf.working?.some((rgx) => rgx.test(rendered));
+  };
+
+  // Heartbeat for auto-response on rendered terminal output
+  // This catches patterns that appear via CSI positioning instead of newlines
+  let lastHeartbeatRendered = "";
+  const heartbeatInterval = setInterval(async () => {
+    try {
+      const rendered = removeControlCharacters(terminalRender.tail(12));
+
+      // Skip if output hasn't changed since last heartbeat
+      if (rendered === lastHeartbeatRendered) return;
+      lastHeartbeatRendered = rendered;
+
+      const lines = rendered.split("\n").filter((line) => line.trim());
+
+      for (const line of lines) {
+        // ready matcher: if matched, mark stdin ready
+        if (conf.ready?.some((rx: RegExp) => rx.test(line))) {
+          logger.debug(`heartbeat|ready |${line}`);
+          ctx.stdinReady.ready();
+          ctx.stdinFirstReady.ready();
+        }
+
+        // enter matchers: send Enter when any enter regex matches
+        if (conf.enter?.some((rx: RegExp) => rx.test(line))) {
+          logger.debug(`heartbeat|sendEnter matched|${line}`);
+          await sendEnter(ctx.messageContext, 400);
+          continue;
+        }
+
+        // typingRespond matcher: if matched, send the specified message
+        const typeingRespondMatched = Object.entries(conf.typingRespond ?? {}).filter(
+          ([_sendString, onThePatterns]) => onThePatterns.some((rx) => rx.test(line)),
+        );
+        if (typeingRespondMatched.length) {
+          await sflow(typeingRespondMatched)
+            .map(
+              async ([sendString]) =>
+                await sendMessage(ctx.messageContext, sendString, { waitForReady: false }),
+            )
+            .toCount();
+          continue;
+        }
+
+        // fatal matchers: set isFatal flag when matched
+        if (conf.fatal?.some((rx: RegExp) => rx.test(line))) {
+          logger.debug(`heartbeat|fatal |${line}`);
+          ctx.isFatal = true;
+          await exitAgent();
+          break;
+        }
+
+        // restartWithoutContinueArg matchers: set flag to restart without continue args
+        if (conf.restartWithoutContinueArg?.some((rx: RegExp) => rx.test(line))) {
+          logger.debug(`heartbeat|restart-without-continue|${line}`);
+          ctx.shouldRestartWithoutContinue = true;
+          ctx.isFatal = true;
+          await exitAgent();
+          break;
+        }
+
+        // session ID capture for codex
+        if (cli === "codex") {
+          const sessionId = extractSessionId(line);
+          if (sessionId) {
+            logger.debug(`heartbeat|session|captured session ID: ${sessionId}`);
+            await storeSessionForCwd(workingDir, sessionId);
+          }
+        }
+      }
+    } catch (error) {
+      // Silently ignore heartbeat errors to avoid disrupting main flow
+      logger.debug(`heartbeat|error: ${error}`);
+    }
+  }, 800); // Run every 800ms
+
+  // Clear heartbeat on exit
+  const cleanupHeartbeat = () => clearInterval(heartbeatInterval);
+  shell.onExit(cleanupHeartbeat);
 
   if (exitOnIdle)
     ctx.idleWaiter.wait(exitOnIdle).then(async () => {
       await pidStore.updateStatus(shell.pid, "idle").catch(() => null);
       if (isStillWorkingQ()) {
-        logger.warn("[${cli}-yes] ${cli} is idle, but seems still working, not exiting yet");
+        logger.warn(`[${cli}-yes] ${cli} is idle, but seems still working, not exiting yet`);
         return;
       }
 
-      logger.info("[${cli}-yes] ${cli} is idle, exiting...");
+      logger.info(`[${cli}-yes] ${cli} is idle, exiting...`);
       await exitAgent();
     });
 
@@ -480,16 +649,68 @@ export default async function agentYes({
   // Message streaming with stdin and optional FIFO (Linux only)
 
   // read stdin stream
-  await sflow(fromReadable<Buffer>(process.stdin))
-    .map((buffer) => buffer.toString())
+  // CRITICAL FIX: fromReadable() from 'from-node-stream' doesn't work properly with stdin
+  // because it doesn't handle Node.js stream modes correctly. We create a custom ReadableStream
+  // that properly manages stdin's flowing mode and event listeners.
+  const stdinStream = new ReadableStream<Buffer>({
+    start(controller) {
+      // Set up stdin in flowing mode so 'data' events fire
+      process.stdin.resume();
 
-    // early abort on Ctrl+C, kills shell and exit.
-    .forkTo(function handleTerminateSignals(s) {
-      const handler = createTerminateSignalHandler(ctx.stdinReady, (exitCode) => {
+      // Handle data events
+      const dataHandler = (chunk: Buffer) => {
+        try {
+          controller.enqueue(chunk);
+        } catch (err) {
+          // Ignore enqueue errors (stream may be closed)
+        }
+      };
+
+      // Handle end/close
+      const endHandler = () => {
+        controller.close();
+      };
+
+      const errorHandler = (err: Error) => {
+        controller.error(err);
+      };
+
+      process.stdin.on('data', dataHandler);
+      process.stdin.on('end', endHandler);
+      process.stdin.on('close', endHandler);
+      process.stdin.on('error', errorHandler);
+    },
+    cancel(reason) {
+      process.stdin.pause();
+    }
+  });
+
+  let aborted = false;
+  await sflow(stdinStream)
+    .map((buffer) => {
+      const str = buffer.toString();
+
+      // CRITICAL FIX: Handle Ctrl+C directly in map instead of forkTo
+      // The previous implementation used .forkTo() which created a separate stream branch
+      // that wasn't being consumed properly, causing Ctrl+C to never be detected.
+      const CTRL_Z = "\u001A";
+      const CTRL_C = "\u0003";
+
+      // handle CTRL+Z and filter it out (not supported yet)
+      if (!aborted && str === CTRL_Z) {
+        return "";
+      }
+
+      // handle CTRL+C when stdin is not ready (agent is loading)
+      if (!aborted && !ctx.stdinReady.isReady && str === CTRL_C) {
+        logger.error("User aborted: SIGINT");
         shell.kill("SIGINT");
-        pendingExitCode.resolve(exitCode);
-      });
-      return s.map(handler);
+        pendingExitCode.resolve(130); // SIGINT exit code
+        aborted = true;
+        return str; // still pass to agent, but they'll probably be killed
+      }
+
+      return str;
     })
 
     // TODO(sno): Read from IPC stream if available (FIFO on Linux, Named Pipes on Windows)
@@ -549,31 +770,119 @@ export default async function agentYes({
 
     // handle cursor position requests and render terminal output
     .by(function consoleResponder(e) {
-      // wait for cli ready and send prompt if provided
-      if (cli === "codex") shell.write(`\u001b[1;1R`); // send cursor position response when stdin is not tty
-      return e.forEach((text) =>
-        handleConsoleControlCodes(text, shell, terminalRender, cli, verbose),
-      );
+      // TODO: wait for cli ready and send prompt if provided
+      // if (cli === "codex" && !process.stdin.isTTY) shell.write(`\u001b[1;1R`); // send cursor position response when stdin is not tty
+
+      let lastRendered = "";
+      return e
+        .forEach((chunk) => {
+          // Render terminal output for log file
+          terminalRender.write(chunk);
+          // ============ HANDLE special control sequences
+          // Handle Device Attributes query (DA) - ESC[c or ESC[0c
+          // This must be handled regardless of TTY status
+          if (chunk.includes("\u001b[c") || chunk.includes("\u001b[0c")) {
+            // Respond shell with VT100 with Advanced Video Option
+            shell.write("\u001b[?1;2c");
+            if (verbose) {
+              logger.debug("device|respond DA: VT100 with Advanced Video Option");
+            }
+            return;
+          }
+
+          // Only handle cursor position when stdin is not tty, because tty already handled this
+          if (process.stdin.isTTY) return;
+
+          // Handle cursor position request - ESC[6n
+          if (!chunk.includes("\u001b[6n")) return;
+
+          // xterm replies CSI row; column R if asked cursor position
+          // https://en.wikipedia.org/wiki/ANSI_escape_code#:~:text=citation%20needed%5D-,xterm%20replies,-CSI%20row%C2%A0%3B
+          const { col, row } = terminalRender.getCursorPosition();
+          shell.write(`\u001b[${row};${col}R`); // reply cli when getting cursor position
+
+          logger.debug(`cursor|respond position: row=${String(row)}, col=${String(col)}`);
+        })
+        .forEach(async (line, lineIndex) => {
+          // ============ respond on rendered screen
+          const rendered = terminalRender.tail(24);
+          // Skip processing if output hasn't changed
+          if (rendered === lastRendered) return;
+
+          logger.debug(`stdout|${line}`);
+
+          // ready matcher: if matched, mark stdin ready
+          if (conf.ready?.some((rx: RegExp) => line.match(rx))) {
+            logger.debug(`ready |${line}`);
+            if (cli === "gemini" && lineIndex <= 80) return; // gemini initial noise, only after many lines
+            ctx.stdinReady.ready();
+            ctx.stdinFirstReady.ready();
+          }
+
+          // enter matchers: send Enter when any enter regex matches
+          if (conf.enter?.some((rx: RegExp) => line.match(rx))) {
+            logger.debug(`sendEnter matched|${line}`);
+            return await sendEnter(ctx.messageContext, 400); // wait for idle for a short while and then send Enter
+          }
+
+          // typingRespond matcher: if matched, send the specified message
+          const typeingRespondMatched = Object.entries(conf.typingRespond ?? {}).filter(
+            ([_sendString, onThePatterns]) => onThePatterns.some((rx) => line.match(rx)),
+          );
+          const typingResponded =
+            typeingRespondMatched.length &&
+            (await sflow(typeingRespondMatched)
+              .map(
+                async ([sendString]) =>
+                  await sendMessage(ctx.messageContext, sendString, { waitForReady: false }),
+              )
+              .toCount());
+          if (typingResponded) return;
+
+          // fatal matchers: set isFatal flag when matched
+          if (conf.fatal?.some((rx: RegExp) => line.match(rx))) {
+            logger.debug(`fatal |${line}`);
+            ctx.isFatal = true;
+            await exitAgent();
+          }
+
+          // restartWithoutContinueArg matchers: set flag to restart without continue args
+          if (conf.restartWithoutContinueArg?.some((rx: RegExp) => line.match(rx))) {
+            logger.debug(`restart-without-continue|${line}`);
+            ctx.shouldRestartWithoutContinue = true;
+            ctx.isFatal = true; // also set fatal to trigger exit
+            await exitAgent();
+          }
+
+          // session ID capture for codex
+          if (cli === "codex") {
+            const sessionId = extractSessionId(line);
+            if (sessionId) {
+              logger.debug(`session|captured session ID: ${sessionId}`);
+              await storeSessionForCwd(workingDir, sessionId);
+            }
+          }
+        });
     })
 
     // auto-response
-    .forkTo(function autoResponse(e) {
-      return (
-        e
-          .map((e) => removeControlCharacters(e))
-          // .map((e) => e.replaceAll("\r", "")) // remove carriage return
-          .by((s) => {
-            if (conf.noEOL) return s; // codex use cursor-move csi code insteadof \n to move lines, so the output have no \n at all, this hack prevents stuck on unended line
-            return s.lines({ EOL: "NONE" }); // other clis use ink, which is rerendering the block based on \n lines
-          })
+    // .forkTo(function autoResponse(e) {
+    //   return (
+    //     e
+    //       .map((e) => removeControlCharacters(e))
+    //       // .map((e) => e.replaceAll("\r", "")) // remove carriage return
+    //       .by((s) => {
+    //         if (conf.noEOL) return s; // codex use cursor-move csi code insteadof \n to move lines, so the output have no \n at all, this hack prevents stuck on unended line
+    //         return s.lines({ EOL: "NONE" }); // other clis use ink, which is rerendering the block based on \n lines
+    //       })
 
-          // Generic auto-response handler driven by CLI_CONFIGURES
-          .forEach(async (line, lineIndex) =>
-            createAutoResponseHandler(line, lineIndex, { ctx, conf, cli, workingDir, exitAgent }),
-          )
-          .run()
-      );
-    })
+    //       // Generic auto-response handler driven by CLI_CONFIGURES
+    //       .forEach(async (line, lineIndex) =>
+    //         createAutoResponseHandler(line, lineIndex, { ctx, conf, cli, workingDir, exitAgent }),
+    //       )
+    //       .run()
+    //   );
+    // })
     .by((s) => (removeControlCharactersFromStdout ? s.map((e) => removeControlCharacters(e)) : s))
 
     // terminate whole stream when shell did exited (already crash-handled)
