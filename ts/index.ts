@@ -391,6 +391,11 @@ export default async function agentYes({
       await pidStore.registerProcess({ pid: shell.pid, cli, args, prompt });
       shell.onData(onData);
       shell.onExit(onExit);
+      // Re-mark stdin ready for manual mode after restart
+      if ((cliConf.ready && cliConf.ready.length === 0) || !autoYes) {
+        ctx.stdinReady.ready();
+        ctx.stdinFirstReady.ready();
+      }
       return;
     }
 
@@ -441,6 +446,11 @@ export default async function agentYes({
       await pidStore.registerProcess({ pid: shell.pid, cli, args: restoreArgs, prompt });
       shell.onData(onData);
       shell.onExit(onExit);
+      // Re-mark stdin ready for manual mode after restart
+      if ((cliConf.ready && cliConf.ready.length === 0) || !autoYes) {
+        ctx.stdinReady.ready();
+        ctx.stdinFirstReady.ready();
+      }
       return;
     }
     const exitReason = agentCrashed ? "crash" : "normal";
