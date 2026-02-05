@@ -7,6 +7,14 @@ import { PidStore } from "./pidStore.ts";
 
 // Import the CLI module
 
+// Check for MCP server subcommand
+const rawArgs = process.argv.slice(2);
+if (rawArgs[0] === 'mcp' && rawArgs[1] === 'serve') {
+  const { startMcpServer } = await import('./mcp-server.ts');
+  await startMcpServer();
+  process.exit(0);
+}
+
 // Parse CLI arguments
 const config = parseCliArgs(process.argv);
 
