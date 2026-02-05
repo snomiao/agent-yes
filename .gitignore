@@ -40,3 +40,4 @@ bin
 
 # .agent-yes cache files
 .agent-yes
+/tmp
