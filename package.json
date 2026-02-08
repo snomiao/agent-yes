@@ -63,8 +63,10 @@
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
+    "prebuild": "node ./scripts/patch-mcp-sdk.js",
     "build": "bun build ./ts/cli.ts ./ts/index.ts --outdir=dist --target=node --sourcemap --external=@snomiao/bun-pty --external=bun-pty --external=node-pty --external=from-node-stream --external=bun --external=@modelcontextprotocol/sdk",
     "postbuild": "bun ./ts/postbuild.ts",
+    "postinstall": "node ./scripts/patch-mcp-sdk.js",
     "demo": "bun run build && bun link && claude-yes -- demo",
     "dev": "bun ts/index.ts",
     "typecheck": "tsgo --noEmit --skipLibCheck",
@@ -97,6 +99,7 @@
     "node-pty": "^1.1.0",
     "oxfmt": "^0.26.0",
     "oxlint": "^1.41.0",
+    "patch-package": "^8.0.1",
     "phpdie": "^1.7.0",
     "rambda": "^11.0.1",
     "semantic-release": "^25.0.2",
