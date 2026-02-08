@@ -174,6 +174,9 @@ export default async function agentYes({
   const stdinReady = new ReadyManager();
   const stdinFirstReady = new ReadyManager(); // if user send ctrl+c before
 
+  // Track when user sends Ctrl+C to avoid treating intentional exit as crash
+  let userSentCtrlC = false;
+
   // If ready check is disabled (empty array), mark stdin ready immediately
   if (conf.ready && conf.ready.length === 0) {
     stdinReady.ready();
@@ -392,7 +395,10 @@ export default async function agentYes({
     // Unregister from agent registry
     globalAgentRegistry.unregister(exitedPid);
     ctx.stdinReady.unready(); // start buffer stdin
-    const agentCrashed = exitCode !== 0;
+    // Exit codes 130 (SIGINT/Ctrl+C) and 143 (SIGTERM) are intentional exits, not crashes
+    // Also check if user sent Ctrl+C recently (within last 2 seconds)
+    const intentionalExit = exitCode === 130 || exitCode === 143 || userSentCtrlC;
+    const agentCrashed = exitCode !== 0 && !intentionalExit;
 
     // Handle restart without continue args (e.g., "No conversation found to continue")
     // logger.debug(``, { shouldRestartWithoutContinue, robust })
@@ -483,7 +489,7 @@ export default async function agentYes({
       } catch (error) {
         logger.warn(`[pidStore] Failed to update status for PID ${exitedPid}:`, error);
       }
-      logger.info(`${cli} crashed, restarting...`);
+      logger.info(`${cli} crashed (exit code: ${exitCode}), restarting...`);
 
       // For codex, try to use stored session ID for this directory
       let restoreArgs = conf.restoreArgs;
@@ -724,6 +730,13 @@ export default async function agentYes({
         pendingExitCode.resolve(130); // SIGINT exit code
         aborted = true;
         return str; // still pass to agent, but they'll probably be killed
+      }
+
+      // Track Ctrl+C when stdin is ready (user is interrupting running CLI)
+      if (str === CTRL_C) {
+        userSentCtrlC = true;
+        // Reset flag after 2 seconds in case CLI doesn't exit immediately
+        setTimeout(() => { userSentCtrlC = false; }, 2000);
       }
 
       return str;
