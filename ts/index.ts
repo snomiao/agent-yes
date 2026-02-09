@@ -55,6 +55,7 @@ export type AgentCliConfig = {
 
   // auto responds
   enter?: RegExp[]; // array of regex to match for sending Enter
+  enterExclude?: RegExp[]; // array of regex to exclude from auto-enter (even if enter matches)
   typingRespond?: { [message: string]: RegExp[] }; // type specified message to a specified pattern
 
   // crash/resuming-session behaviour
