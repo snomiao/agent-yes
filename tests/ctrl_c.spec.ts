@@ -51,7 +51,7 @@ sleep 10000
     }
   });
 
-  it("should exit with 'User aborted: SIGINT' message when Ctrl+C is sent after 0.2s", async () => {
+  it.skipIf(process.platform === "win32")("should exit with 'User aborted: SIGINT' message when Ctrl+C is sent after 0.2s", async () => {
     const cliPath = path.resolve(__dirname, "../ts/cli.ts");
     const testDir = path.resolve(__dirname);
 
