@@ -14,10 +14,17 @@ try {
   // Check if SDK is installed
   if (!existsSync(sdkPath)) {
     console.log('⚠ @modelcontextprotocol/sdk not found, skipping patch');
+    console.log('  Note: MCP server features will not be available');
     process.exit(0);
   }
 
   const pkg = JSON.parse(readFileSync(sdkPath, 'utf-8'));
+
+  // Ensure exports object exists
+  if (!pkg.exports || typeof pkg.exports !== 'object') {
+    console.error('⚠ @modelcontextprotocol/sdk package.json has invalid exports, skipping patch');
+    process.exit(0);
+  }
 
   // Add missing exports
   let modified = false;
@@ -45,6 +52,8 @@ try {
     console.log('✓ @modelcontextprotocol/sdk already patched');
   }
 } catch (error) {
-  console.error('Failed to patch @modelcontextprotocol/sdk:', error);
-  process.exit(1);
+  console.error('⚠ Failed to patch @modelcontextprotocol/sdk:', error.message || error);
+  console.error('  MCP server features may not work correctly');
+  // Don't fail the installation - just warn
+  process.exit(0);
 }

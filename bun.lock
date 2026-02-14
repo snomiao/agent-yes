@@ -5,13 +5,13 @@
     "": {
       "name": "main",
       "dependencies": {
+        "@modelcontextprotocol/sdk": "^1.26.0",
         "@snomiao/bun-pty": "^0.3.4",
         "@snomiao/keyv-sqlite": "^5.0.4",
         "bun-pty": "^0.4.8",
         "from-node-stream": "^0.1.2",
       },
       "devDependencies": {
-        "@modelcontextprotocol/sdk": "^1.26.0",
         "@semantic-release/exec": "^7.1.0",
         "@types/bun": "^1.3.6",
         "@types/jest": "^30.0.0",
