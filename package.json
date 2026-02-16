@@ -63,10 +63,8 @@
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
-    "prebuild": "node ./scripts/patch-mcp-sdk.js",
-    "build": "bun build ./ts/cli.ts ./ts/index.ts --outdir=dist --target=node --sourcemap --external=@snomiao/bun-pty --external=bun-pty --external=node-pty --external=from-node-stream --external=bun --external=@modelcontextprotocol/sdk",
+    "build": "bun build ./ts/cli.ts ./ts/index.ts --outdir=dist --target=node --sourcemap --external=@snomiao/bun-pty --external=bun-pty --external=node-pty --external=from-node-stream --external=bun",
     "postbuild": "bun ./ts/postbuild.ts",
-    "postinstall": "node ./scripts/patch-mcp-sdk.js",
     "demo": "bun run build && bun link && claude-yes -- demo",
     "dev": "bun ts/index.ts",
     "typecheck": "tsgo --noEmit --skipLibCheck",
@@ -80,7 +78,6 @@
     "test": "bun test --coverage"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.26.0",
     "@snomiao/bun-pty": "^0.3.4",
     "@snomiao/keyv-sqlite": "^5.0.4",
     "bun-pty": "^0.4.8",

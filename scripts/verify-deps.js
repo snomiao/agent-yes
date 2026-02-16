@@ -22,7 +22,7 @@ console.log('🔍 Verifying agent-yes package configuration...\n');
 
 // Check 1: Verify critical runtime dependencies are in dependencies, not devDependencies
 const runtimeImports = [
-  { module: '@modelcontextprotocol/sdk', reason: 'MCP server functionality (mcp-server.ts)' },
+  // No critical runtime dependencies to verify currently
 ];
 
 for (const { module, reason } of runtimeImports) {

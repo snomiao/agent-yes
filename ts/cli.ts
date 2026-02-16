@@ -4,37 +4,16 @@ import cliYesConfig from "../agent-yes.config.ts";
 import { parseCliArgs } from "./parseCliArgs.ts";
 import { logger } from "./logger.ts";
 import { PidStore } from "./pidStore.ts";
-
-// Import the CLI module
-
-// Check for MCP server subcommand
-const rawArgs = process.argv.slice(2);
-if (rawArgs[0] === 'mcp' && rawArgs[1] === 'serve') {
-  try {
-    // Verify MCP SDK is available before attempting to start server
-    await import('@modelcontextprotocol/sdk/server');
-    const { startMcpServer } = await import('./mcp-server.ts');
-    await startMcpServer();
-    process.exit(0);
-  } catch (error: any) {
-    if (error?.code === 'MODULE_NOT_FOUND' || error?.message?.includes('@modelcontextprotocol/sdk')) {
-      console.error('\n❌ MCP Server Error: @modelcontextprotocol/sdk is not installed.\n');
-      console.error('This is likely because:');
-      console.error('  1. The package was installed globally without dependencies');
-      console.error('  2. A corrupt or incomplete installation\n');
-      console.error('To fix this, try:');
-      console.error('  npm install -g agent-yes --force');
-      console.error('  OR');
-      console.error('  npm install -g @modelcontextprotocol/sdk\n');
-      process.exit(1);
-    }
-    // Re-throw if it's a different error
-    throw error;
-  }
-}
+import { displayVersion } from "./versionChecker.ts";
 
 // Parse CLI arguments
 const config = parseCliArgs(process.argv);
+
+// Handle --version: display version and exit
+if (config.showVersion) {
+  await displayVersion();
+  process.exit(0);
+}
 
 // Handle --append-prompt: write to active IPC (FIFO/Named Pipe) and exit
 if (config.appendPrompt) {
