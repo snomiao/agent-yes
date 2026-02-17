@@ -335,7 +335,7 @@ export default async function agentYes({
 
   // Show startup mode if not default (i.e., when starting in manual mode)
   if (!autoYes) {
-    process.stderr.write("\x1b[33m[auto-yes: OFF]\x1b[0m Type /auto to toggle\n");
+    process.stderr.write("\x1b[33m[auto-yes: OFF]\x1b[0m Press Ctrl+Y to toggle\n");
   }
 
   // If ready check is disabled (empty array) or manual mode, mark stdin ready immediately
@@ -503,20 +503,31 @@ export default async function agentYes({
       return s.map(handler);
     })
 
-    // Detect /auto command to toggle auto-yes mode
+    // Detect Ctrl+Y or /auto command to toggle auto-yes mode
     .map((() => {
       let line = "";
+      const toggleAutoYes = () => {
+        ctx.autoYesEnabled = !ctx.autoYesEnabled;
+        const status = ctx.autoYesEnabled ? "\x1b[32m[auto-yes: ON]\x1b[0m" : "\x1b[33m[auto-yes: OFF]\x1b[0m";
+        process.stderr.write(`\r${status} (Ctrl+Y to toggle)\n`);
+      };
       return (data: string) => {
         let out = "";
         for (const ch of data) {
+          // Ctrl+Y (\x19) toggles auto-yes immediately
+          if (ch === "\x19") {
+            toggleAutoYes();
+            // Do not forward Ctrl+Y to the PTY
+            continue;
+          }
           // Handle Enter
           if (ch === "\r" || ch === "\n") {
             // Only check for /auto if line is short enough
             if (line.length <= 20) {
               const cleanLine = line.replace(/[\x00-\x1f]|\x1b\[[0-9;]*[A-Za-z]|\[[A-Z]/g, '').trim();
               if (cleanLine === "/auto") {
-                out += "\x15"; // Ctrl+U instead of Enter
-                ctx.autoYesEnabled = !ctx.autoYesEnabled;
+                out += "\x15"; // Ctrl+U to clear the /auto text from shell input
+                toggleAutoYes();
                 line = "";
                 continue;
               }
