@@ -67,7 +67,10 @@ function getDefaultConfig() {
     logsDir: configDir && path.resolve(configDir, "logs"),
     clis: {
       claude: {
+        // args
         promptArg: "last-arg",
+        systemPrompt: "--append-system-prompt",
+        //
         install: {
           // try this first if powershell available and its windows
           powershell: "irm https://claude.ai/install.ps1 | iex", // powershell
@@ -84,6 +87,7 @@ function getDefaultConfig() {
           /^>[ \u00A0]/,
           /──────────+/,
         ], // regex matcher for stdin ready
+        working: [/esc to interrupt/, /to run in background/],
         typingRespond: {
           "1\n": [/│ Do you want to use this API key\?/],
         },
@@ -187,7 +191,7 @@ function getDefaultConfig() {
           npm: "npm i -g opencode-ai",
         },
         enter: [],
-        ready: []
+        ready: [],
       },
     },
   });

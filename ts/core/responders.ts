@@ -70,7 +70,10 @@ export async function createAutoResponseHandler(
   }
 
   // enter matchers: send Enter when any enter regex matches (only if auto-yes enabled)
-  if (conf.enter?.some((rx: RegExp) => line.match(rx))) {
+  // Skip if line matches any enterExclude pattern
+  const matchesEnter = conf.enter?.some((rx: RegExp) => line.match(rx));
+  const matchesExclude = conf.enterExclude?.some((rx: RegExp) => line.match(rx));
+  if (matchesEnter && !matchesExclude) {
     logger.debug(`sendEnter matched|${line}`);
     if (ctx.autoYesEnabled) {
       return await sendEnter(ctx.messageContext, 400); // wait for idle for a short while and then send Enter

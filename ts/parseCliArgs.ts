@@ -125,7 +125,12 @@ export function parseCliArgs(argv: string[]) {
       default: cliName,
     })
     .help()
-    .version(pkg.version)
+    .version(false) // Disable yargs default version handling
+    .option("version", {
+      type: "boolean",
+      description: "Show version number",
+      alias: "v",
+    })
     .parserConfiguration({
       "unknown-options-as-args": true,
       "halt-at-non-option": true,
@@ -221,5 +226,6 @@ export function parseCliArgs(argv: string[]) {
     appendPrompt: parsedArgv.appendPrompt,
     useStdinAppend: Boolean(parsedArgv.stdpush || parsedArgv.ipc || parsedArgv.fifo), // Support --stdpush, --ipc, and --fifo (backward compatibility)
     autoYes: !(parsedArgv.manual || scriptEndsWithNo), // auto-yes enabled by default, disabled by --manual, --no-auto, or script name ending with -no
+    showVersion: parsedArgv.version,
   };
 }

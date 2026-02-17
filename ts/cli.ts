@@ -4,11 +4,16 @@ import cliYesConfig from "../agent-yes.config.ts";
 import { parseCliArgs } from "./parseCliArgs.ts";
 import { logger } from "./logger.ts";
 import { PidStore } from "./pidStore.ts";
-
-// Import the CLI module
+import { displayVersion } from "./versionChecker.ts";
 
 // Parse CLI arguments
 const config = parseCliArgs(process.argv);
+
+// Handle --version: display version and exit
+if (config.showVersion) {
+  await displayVersion();
+  process.exit(0);
+}
 
 // Handle --append-prompt: write to active IPC (FIFO/Named Pipe) and exit
 if (config.appendPrompt) {
