@@ -62,7 +62,8 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
-            type=sha,prefix={{branch}}-
+            type=sha,prefix={{branch}}-,enable=${{ github.event_name != 'pull_request' }}
+            type=sha,prefix=pr-${{ github.event.pull_request.number }}-,enable=${{ github.event_name == 'pull_request' }}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - name: Build and push Docker image
@@ -140,7 +141,8 @@ jobs:
             type=semver,pattern={{version}},suffix=-mini
             type=semver,pattern={{major}}.{{minor}},suffix=-mini
             type=semver,pattern={{major}},suffix=-mini
-            type=sha,prefix={{branch}}-,suffix=-mini
+            type=sha,prefix={{branch}}-,suffix=-mini,enable=${{ github.event_name != 'pull_request' }}
+            type=sha,prefix=pr-${{ github.event.pull_request.number }}-,suffix=-mini,enable=${{ github.event_name == 'pull_request' }}
             type=raw,value=mini,enable={{is_default_branch}}
 
       - name: Build and push Docker mini image
