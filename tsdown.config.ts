@@ -8,4 +8,5 @@ export default defineConfig({
   external: ["@snomiao/bun-pty", "bun-pty", "node-pty", "from-node-stream", "bun"],
   format: "esm",
   outExtensions: () => ({ js: ".js" }),
+  inlineOnly: false,
 });
