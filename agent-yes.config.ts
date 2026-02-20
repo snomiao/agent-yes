@@ -106,7 +106,7 @@ function getDefaultConfig() {
         restartWithoutContinueArg: [/No conversation found to continue/],
         exitCommand: ["/exit"],
         bunx: true, // use bunx to run the binary, start time is 5s faster than node
-        defaultArgs: ["--model=sonnet"], // default to sonnet, to prevent opus model overload
+        defaultArgs: [],
       },
       gemini: {
         install: "npm install -g @google/gemini-cli@latest",
