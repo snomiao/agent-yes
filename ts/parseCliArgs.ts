@@ -11,12 +11,15 @@ import pkg from "../package.json" with { type: "json" };
  */
 export function parseCliArgs(argv: string[]) {
   // Detect cli name from script name (same logic as cli.ts:10-14)
-  const cliName =
+  const scriptBaseName =
     argv[1]
       ?.split(/[/\\]/)
       .at(-1)
-      ?.replace(/(\.[jt]s)?$/, "")
-      .replace(/^(cli|agent)(-yes$)?/, "")
+      ?.replace(/(\.[jt]s)?$/, "") || "";
+
+  const cliName =
+    scriptBaseName
+      .replace(/^(cli|agent)(-yes)?$/, "")
       .replace(/^ay$/, "") // treat standalone "ay" same as "agent-yes"
       .replace(/-yes$/, "") || undefined;
 
@@ -105,6 +108,12 @@ export function parseCliArgs(argv: string[]) {
       description: "Enable external input stream to push additional data to stdin",
       default: false,
       alias: ["ipc", "fifo"], // backward compatibility
+    })
+    .option("auto", {
+      type: "string",
+      description: "Control auto-yes mode: 'yes' to auto-approve prompts (default), 'no' to start in manual mode. Press Ctrl+Y during the session to toggle at any time.",
+      choices: ["yes", "no"] as const,
+      default: "yes",
     })
     .positional("cli", {
       describe: "The AI CLI to run, e.g., claude, codex, copilot, cursor, gemini",
@@ -215,5 +224,6 @@ export function parseCliArgs(argv: string[]) {
     appendPrompt: parsedArgv.appendPrompt,
     useStdinAppend: Boolean(parsedArgv.stdpush || parsedArgv.ipc || parsedArgv.fifo), // Support --stdpush, --ipc, and --fifo (backward compatibility)
     showVersion: parsedArgv.version,
+    autoYes: parsedArgv.auto !== "no", // auto-yes enabled by default, disabled with --auto=no
   };
 }

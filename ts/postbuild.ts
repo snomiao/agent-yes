@@ -8,10 +8,13 @@ import { CLIS_CONFIG } from "./index.ts";
 import sflow from "sflow";
 import pkg from "../package.json";
 
-// Create copies for each CLI variant (all use the same wrapper logic)
-await sflow([...Object.keys(CLIS_CONFIG), "agent"])
-  .map(async (cli) => {
-    const cliName = `${cli}-yes`;
+// Create copies for each CLI variant (-yes versions only; use --auto=no flag to disable auto-yes)
+const cliNames = [...Object.keys(CLIS_CONFIG), "agent"];
+const suffixes = ["-yes"];
+
+await sflow(cliNames.flatMap((cli) => suffixes.map((suffix) => ({ cli, suffix }))))
+  .map(async ({ cli, suffix }) => {
+    const cliName = `${cli}${suffix}`;
 
     const wrapperPath = `./dist/${cliName}.js`;
     await writeFile(
@@ -23,7 +26,8 @@ await import('./cli.js')
     );
     await chmod(wrapperPath, 0o755);
 
-    if (!(pkg.bin as Record<string, string>)?.[cliName]) {
+    // Only register -yes variants in package.json bin
+    if (suffix === "-yes" && !(pkg.bin as Record<string, string>)?.[cliName]) {
       await Bun.$`npm pkg set ${"bin." + cliName}=${wrapperPath}`;
       console.log(`${wrapperPath} created`);
     }

@@ -79,6 +79,6 @@ if (config.verbose) {
 }
 
 const { default: cliYes } = await import("./index.ts");
-const { exitCode } = await cliYes(config);
+const { exitCode } = await cliYes({ ...config, autoYes: config.autoYes });
 console.log("exiting process");
 process.exit(exitCode ?? 1);

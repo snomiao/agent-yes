@@ -292,4 +292,29 @@ describe("CLI argument parsing", () => {
 
     warnSpy.mockRestore();
   });
+
+  it("should have autoYes enabled by default", () => {
+    const result = parseCliArgs(["node", "/path/to/cli", "claude"]);
+
+    expect(result.autoYes).toBe(true);
+  });
+
+  it("should parse --auto=no to disable autoYes", () => {
+    const result = parseCliArgs(["node", "/path/to/cli", "--auto=no", "claude"]);
+
+    expect(result.autoYes).toBe(false);
+  });
+
+  it("should parse --auto=yes to keep autoYes enabled", () => {
+    const result = parseCliArgs(["node", "/path/to/cli", "--auto=yes", "claude"]);
+
+    expect(result.autoYes).toBe(true);
+  });
+
+  it("should have autoYes enabled for -yes suffix", () => {
+    const result = parseCliArgs(["node", "/usr/local/bin/claude-yes", "--prompt", "test"]);
+
+    expect(result.cli).toBe("claude");
+    expect(result.autoYes).toBe(true);
+  });
 });
