@@ -73,7 +73,7 @@ function getDefaultConfig() {
         //
         install: {
           // try this first if powershell available and its windows
-          powershell: "irm https://claude.ai/install.ps1 | iex", // powershell
+          powershell: "powershell -Command \"irm https://claude.ai/install.ps1 | iex\"", // powershell
           // or bash if found
           bash: "curl -fsSL https://claude.ai/install.sh | bash",
           // fallback to npm if bash not found
