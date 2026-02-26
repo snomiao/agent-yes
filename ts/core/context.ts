@@ -55,6 +55,7 @@ export class AgentContext {
   // Flags
   isFatal = false;
   shouldRestartWithoutContinue = false;
+  autoYesEnabled = true;
 
   constructor(params: {
     shell: IPty;
@@ -64,6 +65,7 @@ export class AgentContext {
     cliConf: AgentCliConfig;
     verbose: boolean;
     robust: boolean;
+    autoYes?: boolean;
   }) {
     this.shell = params.shell;
     this.pidStore = params.pidStore;
@@ -72,6 +74,7 @@ export class AgentContext {
     this.cliConf = params.cliConf;
     this.verbose = params.verbose;
     this.robust = params.robust;
+    this.autoYesEnabled = params.autoYes ?? true;
   }
 
   /**
