@@ -1,5 +1,8 @@
 #!/usr/bin/env bun
 import { argv } from "process";
+import { spawn } from "child_process";
+import { existsSync } from "fs";
+import path from "path";
 import cliYesConfig from "../agent-yes.config.ts";
 import { parseCliArgs } from "./parseCliArgs.ts";
 import { logger } from "./logger.ts";
@@ -8,6 +11,74 @@ import { displayVersion } from "./versionChecker.ts";
 
 // Parse CLI arguments
 const config = parseCliArgs(process.argv);
+
+// Handle --rust: spawn the Rust binary instead
+if (config.useRust) {
+  const rustBinaryName = config.cli ? `${config.cli}-yes` : "agent-yes";
+  const rustBinaryPaths = [
+    // Check relative to this script (in the repo)
+    path.resolve(import.meta.dir, "../rs/target/release/agent-yes"),
+    path.resolve(import.meta.dir, "../rs/target/debug/agent-yes"),
+    // Check in PATH
+    rustBinaryName,
+    "agent-yes",
+  ];
+
+  let rustBinary: string | undefined;
+  for (const p of rustBinaryPaths) {
+    if (p.includes("/") && existsSync(p)) {
+      rustBinary = p;
+      break;
+    } else if (!p.includes("/")) {
+      // For PATH lookup, just use it directly
+      rustBinary = p;
+      break;
+    }
+  }
+
+  if (!rustBinary) {
+    console.error("Rust binary not found. Please build with: cd rs && cargo build --release");
+    process.exit(1);
+  }
+
+  // Build args for Rust binary (filter out --rust flag)
+  const rustArgs = process.argv.slice(2).filter((arg) => arg !== "--rust" && !arg.startsWith("--rust="));
+
+  if (config.verbose) {
+    console.log(`[rust] Using binary: ${rustBinary}`);
+    console.log(`[rust] Args: ${rustArgs.join(" ")}`);
+  }
+
+  // Spawn the Rust process with stdio inheritance
+  const child = spawn(rustBinary, rustArgs, {
+    stdio: "inherit",
+    env: process.env,
+    cwd: process.cwd(),
+  });
+
+  child.on("error", (err) => {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      console.error(`Rust binary '${rustBinary}' not found in PATH. Please build with: cd rs && cargo build --release`);
+    } else {
+      console.error(`Failed to spawn Rust binary: ${err.message}`);
+    }
+    process.exit(1);
+  });
+
+  child.on("exit", (code, signal) => {
+    if (signal) {
+      process.exit(128 + (signal === "SIGINT" ? 2 : signal === "SIGTERM" ? 15 : 1));
+    }
+    process.exit(code ?? 1);
+  });
+
+  // Forward signals to child
+  process.on("SIGINT", () => child.kill("SIGINT"));
+  process.on("SIGTERM", () => child.kill("SIGTERM"));
+
+  // Keep the process alive while child is running
+  await new Promise(() => {}); // Never resolves, exits via child.on("exit")
+}
 
 // Handle --version: display version and exit
 if (config.showVersion) {

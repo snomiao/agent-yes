@@ -115,6 +115,11 @@ export function parseCliArgs(argv: string[]) {
       choices: ["yes", "no"] as const,
       default: "yes",
     })
+    .option("rust", {
+      type: "boolean",
+      description: "Use the Rust implementation instead of TypeScript",
+      default: false,
+    })
     .positional("cli", {
       describe: "The AI CLI to run, e.g., claude, codex, copilot, cursor, gemini",
       type: "string",
@@ -225,5 +230,6 @@ export function parseCliArgs(argv: string[]) {
     useStdinAppend: Boolean(parsedArgv.stdpush || parsedArgv.ipc || parsedArgv.fifo), // Support --stdpush, --ipc, and --fifo (backward compatibility)
     showVersion: parsedArgv.version,
     autoYes: parsedArgv.auto !== "no", // auto-yes enabled by default, disabled with --auto=no
+    useRust: parsedArgv.rust,
   };
 }
