@@ -258,6 +258,7 @@ impl AgentContext {
         // Keep buffer size reasonable
         if self.output_buffer.len() > 100000 {
             self.output_buffer = self.output_buffer.split_off(50000);
+            self.rendered_output = self.rendered_output.split_off(50000.min(self.rendered_output.len()));
         }
 
         // Mark stdout received
@@ -300,7 +301,8 @@ impl AgentContext {
 
     /// Check patterns and respond accordingly
     async fn check_patterns(&mut self, msg_ctx: &mut MessageContext) -> Result<()> {
-        let buffer = &self.output_buffer;
+        // Use rendered output (ANSI codes stripped) for pattern matching
+        let buffer = &self.rendered_output;
 
         // Check fatal patterns first
         for pattern in &self.cli_config.fatal {
@@ -344,6 +346,7 @@ impl AgentContext {
                     send_text(msg_ctx, response).await?;
                     // Clear buffer to prevent re-triggering
                     self.output_buffer.clear();
+                    self.rendered_output.clear();
                     return Ok(());
                 }
             }
@@ -356,6 +359,7 @@ impl AgentContext {
                 send_enter(msg_ctx, 1000).await?;
                 // Clear buffer to prevent re-triggering
                 self.output_buffer.clear();
+                self.rendered_output.clear();
                 return Ok(());
             }
         }
