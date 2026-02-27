@@ -8,36 +8,20 @@ import { parseCliArgs } from "./parseCliArgs.ts";
 import { logger } from "./logger.ts";
 import { PidStore } from "./pidStore.ts";
 import { displayVersion } from "./versionChecker.ts";
+import { getRustBinary } from "./rustBinary.ts";
 
 // Parse CLI arguments
 const config = parseCliArgs(process.argv);
 
 // Handle --rust: spawn the Rust binary instead
 if (config.useRust) {
-  const rustBinaryName = config.cli ? `${config.cli}-yes` : "agent-yes";
-  const rustBinaryPaths = [
-    // Check relative to this script (in the repo)
-    path.resolve(import.meta.dir, "../rs/target/release/agent-yes"),
-    path.resolve(import.meta.dir, "../rs/target/debug/agent-yes"),
-    // Check in PATH
-    rustBinaryName,
-    "agent-yes",
-  ];
+  let rustBinary: string;
 
-  let rustBinary: string | undefined;
-  for (const p of rustBinaryPaths) {
-    if (p.includes("/") && existsSync(p)) {
-      rustBinary = p;
-      break;
-    } else if (!p.includes("/")) {
-      // For PATH lookup, just use it directly
-      rustBinary = p;
-      break;
-    }
-  }
-
-  if (!rustBinary) {
-    console.error("Rust binary not found. Please build with: cd rs && cargo build --release");
+  try {
+    // Get or download the Rust binary for the current platform
+    rustBinary = await getRustBinary({ verbose: config.verbose });
+  } catch (err) {
+    console.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
 
@@ -58,7 +42,7 @@ if (config.useRust) {
 
   child.on("error", (err) => {
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      console.error(`Rust binary '${rustBinary}' not found in PATH. Please build with: cd rs && cargo build --release`);
+      console.error(`Rust binary '${rustBinary}' not found. Try: npx agent-yes --rust --verbose`);
     } else {
       console.error(`Failed to spawn Rust binary: ${err.message}`);
     }

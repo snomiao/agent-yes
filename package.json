@@ -49,7 +49,8 @@
     "scripts",
     "ts/*.ts",
     "!dist/**/*.map",
-    "dist/**/*.js"
+    "dist/**/*.js",
+    "bin"
   ],
   "type": "module",
   "module": "ts/index.ts",

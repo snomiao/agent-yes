@@ -1,0 +1,185 @@
+name: Build Rust Binaries
+
+on:
+  push:
+    branches: [main, beta]
+    paths:
+      - 'rs/**'
+      - '.github/workflows/rust-build.yml'
+    tags:
+      - 'v*'  # Build on version tags (created by semantic-release)
+  pull_request:
+    branches: [main]
+    paths:
+      - 'rs/**'
+  workflow_dispatch:
+  release:
+    types: [created, published]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x64
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: agent-yes-linux-x64
+            ext: ""
+
+          # Linux x64 (musl - static)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: agent-yes-linux-x64-musl
+            ext: ""
+
+          # Linux ARM64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: agent-yes-linux-arm64
+            ext: ""
+            cross: true
+
+          # Linux ARM64 (musl - static)
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            artifact: agent-yes-linux-arm64-musl
+            ext: ""
+            cross: true
+
+          # macOS x64 (Intel)
+          - target: x86_64-apple-darwin
+            os: macos-13
+            artifact: agent-yes-darwin-x64
+            ext: ""
+
+          # macOS ARM64 (Apple Silicon)
+          - target: aarch64-apple-darwin
+            os: macos-14
+            artifact: agent-yes-darwin-arm64
+            ext: ""
+
+          # Windows x64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: agent-yes-win32-x64
+            ext: ".exe"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install musl tools (Linux musl)
+        if: contains(matrix.target, 'musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.cross && contains(matrix.target, 'linux')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+
+      - name: Install cross (for cross-compilation)
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build with cross
+        if: matrix.cross
+        working-directory: rs
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Build with cargo
+        if: "!matrix.cross"
+        working-directory: rs
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp rs/target/${{ matrix.target }}/release/agent-yes${{ matrix.ext }} artifacts/${{ matrix.artifact }}${{ matrix.ext }}
+          chmod +x artifacts/${{ matrix.artifact }}${{ matrix.ext }} || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/${{ matrix.artifact }}${{ matrix.ext }}
+          if-no-files-found: error
+
+  # Create a combined artifact with all binaries
+  combine:
+    name: Combine Artifacts
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+
+      - name: Combine into single directory
+        run: |
+          mkdir -p combined
+          for dir in binaries/*/; do
+            cp "$dir"* combined/ || true
+          done
+          ls -la combined/
+
+      - name: Upload combined artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-yes-all-platforms
+          path: combined/
+          if-no-files-found: error
+
+  # Upload to GitHub Release (on release event or version tag)
+  release:
+    name: Upload to Release
+    needs: build
+    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+
+      - name: Create release archives
+        run: |
+          cd binaries
+          for dir in agent-yes-*/; do
+            name="${dir%/}"
+            if [[ "$name" == *"win32"* ]]; then
+              zip -j "../${name}.zip" "$dir"*
+            else
+              tar -czvf "../${name}.tar.gz" -C "$dir" .
+            fi
+          done
+          cd ..
+          ls -la *.tar.gz *.zip 2>/dev/null || true
+
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.tar.gz
+            *.zip
+          # For tag pushes, create a release if it doesn't exist
+          tag_name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ contains(github.ref, 'beta') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
