@@ -5,13 +5,15 @@ use anyhow::{anyhow, Result};
 use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize, SlavePty};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::sync::{Arc, Mutex};
+use std::thread;
+use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
 /// PTY process context
 pub struct PtyContext {
     pub master: Box<dyn MasterPty + Send>,
     pub child: Box<dyn portable_pty::Child + Send + Sync>,
-    reader: Arc<Mutex<Box<dyn Read + Send>>>,
+    output_rx: mpsc::Receiver<String>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
 }
 
@@ -24,21 +26,9 @@ impl PtyContext {
         Ok(())
     }
 
-    /// Read available data from the PTY (non-blocking)
-    pub fn try_read(&self) -> Result<Option<String>> {
-        let mut reader = self.reader.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
-        let mut buf = vec![0u8; 4096];
-        match reader.read(&mut buf) {
-            Ok(0) => Ok(None),
-            Ok(n) => Ok(Some(String::from_utf8_lossy(&buf[..n]).to_string())),
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
-            Err(e) => Err(e.into()),
-        }
-    }
-
-    /// Get a cloned reader for async reading
-    pub fn get_reader(&self) -> Arc<Mutex<Box<dyn Read + Send>>> {
-        self.reader.clone()
+    /// Read available data from the PTY (non-blocking via channel)
+    pub fn try_recv(&mut self) -> Option<String> {
+        self.output_rx.try_recv().ok()
     }
 
     /// Get a cloned writer for async writing
@@ -115,13 +105,36 @@ pub async fn spawn_agent(
     let child = pair.slave.spawn_command(cmd)?;
 
     // Get reader and writer
-    let reader = pair.master.try_clone_reader()?;
+    let mut reader = pair.master.try_clone_reader()?;
     let writer = pair.master.take_writer()?;
+
+    // Create channel for PTY output
+    let (output_tx, output_rx) = mpsc::channel::<String>(1000);
+
+    // Spawn reader thread
+    thread::spawn(move || {
+        let mut buf = [0u8; 8192];  // 8KB buffer like bun-pty
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if output_tx.blocking_send(data).is_err() {
+                        break; // Channel closed
+                    }
+                }
+                Err(e) => {
+                    debug!("PTY read error: {}", e);
+                    break;
+                }
+            }
+        }
+    });
 
     Ok(PtyContext {
         master: pair.master,
         child,
-        reader: Arc::new(Mutex::new(reader)),
+        output_rx,
         writer: Arc::new(Mutex::new(writer)),
     })
 }

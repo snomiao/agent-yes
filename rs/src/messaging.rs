@@ -62,45 +62,23 @@ pub async fn send_message(ctx: &mut MessageContext, message: &str, wait_for_read
     Ok(())
 }
 
-/// Send Enter key to the agent
-pub async fn send_enter(ctx: &mut MessageContext, wait_ms: u64) -> Result<()> {
+/// Send Enter key to the agent (non-blocking)
+pub async fn send_enter(ctx: &mut MessageContext, _wait_ms: u64) -> Result<()> {
     debug!("Sending Enter");
 
-    // Write Enter
+    // Write Enter (use \r for PTY - carriage return)
     {
         let mut writer = ctx.writer.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-        writer.write_all(b"\n")?;
+        writer.write_all(b"\r")?;
         writer.flush()?;
     }
 
     // Ping activity
     ctx.idle_waiter.ping();
 
-    // Wait for idle
-    ctx.idle_waiter.wait(wait_ms).await;
-
-    // If no response after 1 second, try again
-    let mut retries = 0;
-    while retries < 2 {
-        // Check if we got stdout
-        if ctx.next_stdout.wait_timeout(std::time::Duration::from_millis(1000)).await {
-            break;
-        }
-
-        debug!("No response after Enter, retrying...");
-        {
-            let mut writer = ctx.writer.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
-            writer.write_all(b"\n")?;
-            writer.flush()?;
-        }
-        retries += 1;
-
-        if retries == 1 {
-            sleep_ms(1000).await;
-        } else {
-            sleep_ms(3000).await;
-        }
-    }
+    // Don't block - let the main loop continue reading PTY output
+    // The retry logic would cause a deadlock since we can't read PTY
+    // output while blocked here
 
     Ok(())
 }
