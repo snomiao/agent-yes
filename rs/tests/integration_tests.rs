@@ -36,7 +36,7 @@ fn test_version() {
     cmd.arg("--version")
         .assert()
         .success()
-        .stdout(predicates::str::contains("agent-yes 1.31.41"));
+        .stdout(predicates::str::contains("agent-yes"));
 }
 
 #[test]

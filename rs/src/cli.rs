@@ -90,10 +90,21 @@ pub fn parse_args() -> Result<CliArgs> {
 
     let args = Args::parse();
 
-    // Use detected CLI if not explicitly set
-    let cli = if cli_from_name.is_some() && args.cli == "claude" {
-        cli_from_name.unwrap()
+    // Parse trailing args - first arg might be CLI name
+    let (trailing_cli, remaining_args) = extract_cli_from_args(&args.args);
+
+    // Determine CLI: priority is explicit --cli, then trailing positional, then binary name
+    let cli = if args.cli != "claude" {
+        // Explicit --cli flag was used
+        args.cli.clone()
+    } else if let Some(ref tc) = trailing_cli {
+        // First positional arg is a valid CLI name
+        tc.clone()
+    } else if let Some(ref cn) = cli_from_name {
+        // Detected from binary name (e.g., claude-yes)
+        cn.clone()
     } else {
+        // Default to claude
         args.cli.clone()
     };
 
@@ -110,8 +121,8 @@ pub fn parse_args() -> Result<CliArgs> {
     let timeout_str = args.timeout.or(args.exit_on_idle);
     let timeout_ms = timeout_str.map(|s| parse_duration(&s)).transpose()?;
 
-    // Parse prompt from trailing args (after --)
-    let (cli_args, prompt) = extract_prompt_from_args(args.args, args.prompt);
+    // Parse prompt from remaining args (after --)
+    let (cli_args, prompt) = extract_prompt_from_args(remaining_args, args.prompt);
 
     Ok(CliArgs {
         cli,
@@ -126,6 +137,18 @@ pub fn parse_args() -> Result<CliArgs> {
         queue: args.queue,
         use_skills: args.use_skills,
     })
+}
+
+/// Extract CLI name from first positional argument if it's a valid CLI
+fn extract_cli_from_args(args: &[String]) -> (Option<String>, Vec<String>) {
+    if let Some(first) = args.first() {
+        // Check if first arg is a supported CLI name (without -yes suffix handling)
+        let cli_name = first.strip_suffix("-yes").unwrap_or(first);
+        if SUPPORTED_CLIS.contains(&cli_name) {
+            return (Some(cli_name.to_string()), args[1..].to_vec());
+        }
+    }
+    (None, args.to_vec())
 }
 
 /// Detect CLI tool from binary name (e.g., "claude-yes" -> "claude")
@@ -204,5 +227,32 @@ mod tests {
         let (cli_args, prompt) = extract_prompt_from_args(args, None);
         assert_eq!(cli_args, vec!["--flag"]);
         assert_eq!(prompt, Some("my prompt".into()));
+    }
+
+    #[test]
+    fn test_extract_cli_from_args() {
+        // CLI as first arg
+        let args = vec!["codex".into(), "hello".into(), "world".into()];
+        let (cli, remaining) = extract_cli_from_args(&args);
+        assert_eq!(cli, Some("codex".into()));
+        assert_eq!(remaining, vec!["hello", "world"]);
+
+        // CLI with -yes suffix
+        let args = vec!["codex-yes".into(), "hello".into()];
+        let (cli, remaining) = extract_cli_from_args(&args);
+        assert_eq!(cli, Some("codex".into()));
+        assert_eq!(remaining, vec!["hello"]);
+
+        // No CLI in args
+        let args = vec!["--flag".into(), "value".into()];
+        let (cli, remaining) = extract_cli_from_args(&args);
+        assert_eq!(cli, None);
+        assert_eq!(remaining, vec!["--flag", "value"]);
+
+        // Empty args
+        let args: Vec<String> = vec![];
+        let (cli, remaining) = extract_cli_from_args(&args);
+        assert_eq!(cli, None);
+        assert!(remaining.is_empty());
     }
 }
