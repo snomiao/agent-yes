@@ -1,28 +1,26 @@
 name: Build Rust Binaries
 
 on:
-  # Trigger after release workflow completes (to get updated version)
-  workflow_run:
-    workflows: [".github/workflows/release.yml"]
-    types: [completed]
-    branches: [main, beta]
-
   # PR builds for testing (no release upload)
   pull_request:
     branches: [main]
     paths:
       - 'rs/**'
 
-  # Manual trigger
+  # Triggered by release.yml after semantic-release creates a new tag
   workflow_dispatch:
     inputs:
+      tag:
+        description: 'Release tag to build (e.g., v1.46.5)'
+        required: false
+        type: string
       upload_release:
         description: 'Upload to GitHub release'
         required: false
         default: 'true'
         type: boolean
 
-  # Direct release event (backup)
+  # Direct release event (backup for manual releases)
   release:
     types: [published]
 
@@ -32,8 +30,6 @@ env:
 jobs:
   build:
     name: Build ${{ matrix.target }}
-    # Skip if triggered by workflow_run but the release workflow failed
-    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -86,21 +82,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # For workflow_run, checkout the commit that triggered the release
-          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
 
-      - name: Get latest tag (for workflow_run)
-        if: github.event_name == 'workflow_run'
+      - name: Checkout release tag
+        if: github.event_name == 'workflow_dispatch' && inputs.tag != ''
         shell: bash
         run: |
-          git fetch --tags
-          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-          echo "RELEASE_TAG=$LATEST_TAG" >> $GITHUB_ENV
-          if [ -n "$LATEST_TAG" ]; then
-            echo "Checking out tag: $LATEST_TAG"
-            git checkout "$LATEST_TAG"
-          fi
+          echo "Building from tag: ${{ inputs.tag }}"
+          echo "RELEASE_TAG=${{ inputs.tag }}" >> $GITHUB_ENV
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -177,8 +167,7 @@ jobs:
     needs: build
     if: |
       github.event_name == 'release' ||
-      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
-      (github.event_name == 'workflow_dispatch' && inputs.upload_release == 'true')
+      (github.event_name == 'workflow_dispatch' && inputs.upload_release == true)
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -210,10 +199,8 @@ jobs:
         id: get_tag
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "workflow_run" ]; then
-            git fetch --tags
-            TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
-            echo "tag=$TAG" >> $GITHUB_OUTPUT
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> $GITHUB_OUTPUT
           elif [ "${{ github.event_name }}" = "release" ]; then
             echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
           else

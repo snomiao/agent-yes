@@ -1,8 +1,11 @@
+name: Release
+
 on:
   push:
     branches:
       - main
       - beta
+
 jobs:
   release:
     runs-on: ubuntu-latest
@@ -11,6 +14,7 @@ jobs:
       issues: write # to be able to comment on released issues
       pull-requests: write # to be able to comment on released pull requests
       id-token: write # to enable use of OIDC for trusted publishing and npm provenance
+      actions: write # to trigger rust-build workflow
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-node@v5
@@ -26,4 +30,22 @@ jobs:
           # reminder to setup read/write permission for this token
           # here: REPO_URL/settings/actions
           # for publishing to GitHub releases
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Get new release tag
+        id: get_tag
+        run: |
+          git fetch --tags
+          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+          echo "New release tag: $TAG"
+
+      - name: Trigger Rust build workflow
+        if: steps.get_tag.outputs.tag != ''
+        run: |
+          gh workflow run rust-build.yml \
+            --ref "${{ steps.get_tag.outputs.tag }}" \
+            -f tag="${{ steps.get_tag.outputs.tag }}" \
+            -f upload_release=true
+        env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
