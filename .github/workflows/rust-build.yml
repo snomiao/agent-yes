@@ -92,6 +92,7 @@ jobs:
 
       - name: Get latest tag (for workflow_run)
         if: github.event_name == 'workflow_run'
+        shell: bash
         run: |
           git fetch --tags
           LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
@@ -207,6 +208,7 @@ jobs:
 
       - name: Get release tag
         id: get_tag
+        shell: bash
         run: |
           if [ "${{ github.event_name }}" = "workflow_run" ]; then
             git fetch --tags
