@@ -53,9 +53,9 @@ jobs:
             ext: ""
             cross: true
 
-          # macOS x64 (Intel)
+          # macOS x64 (Intel) - cross-compile from ARM64
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-14
             artifact: agent-yes-darwin-x64
             ext: ""
 
