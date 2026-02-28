@@ -1,5 +1,6 @@
 mod cli;
 mod config;
+mod config_loader;
 mod context;
 mod idle_waiter;
 mod logger;

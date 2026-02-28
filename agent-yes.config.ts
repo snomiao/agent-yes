@@ -4,28 +4,20 @@ import path from "node:path";
 import { defineCliYesConfig } from "./ts/defineConfig.ts";
 import { deepMixin } from "./ts/utils.ts";
 import { logger } from "./ts/logger.ts";
+import { loadCascadingConfig } from "./ts/configLoader.ts";
 
 logger.debug("loading cli-yes.config.ts from " + import.meta.url);
 
-// For config path,
-// 0. default value is defined here, auto imported
-// 2. can override by ~/.agent-yes config, try to mkdir logs to that to find out if we have permission to write it
-// 3. can override by workspace-local temporary ./node_modules/.agent-yes config directory so it works in sandboxed envs
-// 3. can override by workspace-local ./.agent-yes project-specific config
-
-// Helper function to test if we can write to a directory
+// Config loading priority (highest to lowest):
+// 1. [project-dir]/.agent-yes.config.[json/yml/yaml]
+// 2. [home-dir]/.agent-yes.config.[json/yml/yaml]
+// 3. [package-dir]/.agent-yes.config.[json/yml/yaml]
+// 4. Legacy TS configs: ~/.agent-yes/config.ts, ./node_modules/.agent-yes/config.ts, ./.agent-yes/config.ts
+// 5. Default config (defined below)
 
 // Determine config directory with 3-tier fallback
 const configDir = await (async () => {
-  // 1. If running in dev mode (ts file), use current directory
-  // const isDevMode = import.meta.url.endsWith(".ts");
-  // if (isDevMode) {
-  //   const devConfigDir = path.resolve(process.cwd(), ".agent-yes");
-  //   if (process.env.VERBOSE) console.log("[config] Dev mode detected, using:", devConfigDir);
-  //   return devConfigDir;
-  // }
-
-  // 2. Try ~/.agent-yes as default
+  // 1. Try ~/.agent-yes as default
   const homeConfigDir = path.resolve(os.homedir(), ".agent-yes");
   const isHomeWritable = await mkdir(homeConfigDir, { recursive: true })
     .then(() => true)
@@ -35,7 +27,7 @@ const configDir = await (async () => {
     return homeConfigDir;
   }
 
-  // 3. Fallback to tmp dir
+  // 2. Fallback to tmp dir
   const tmpConfigDir = path.resolve("/tmp/.agent-yes");
   const isWritable = await mkdir(tmpConfigDir, { recursive: true });
   if (isWritable) {
@@ -46,19 +38,27 @@ const configDir = await (async () => {
   return undefined;
 })();
 
-// For logs, use configDir/logs
+// Load cascading JSON/YAML configs (new style)
+const cascadingConfig = await loadCascadingConfig();
 
+// For backwards compatibility: also load legacy TS configs
+const legacyConfigs = await Promise.all([
+  import(path.resolve(os.homedir(), ".agent-yes/config.ts"))
+    .catch(() => ({ default: {} }))
+    .then((mod) => mod.default),
+  import(path.resolve(process.cwd(), "node_modules/.agent-yes/config.ts"))
+    .catch(() => ({ default: {} }))
+    .then((mod) => mod.default),
+  import(path.resolve(process.cwd(), ".agent-yes/config.ts"))
+    .catch(() => ({ default: {} }))
+    .then((mod) => mod.default),
+]);
+
+// Merge all configs: default -> cascading -> legacy TS
 export default deepMixin(
   await getDefaultConfig(),
-  await import(path.resolve(os.homedir(), ".agent-yes/config.ts"))
-    .catch(() => ({ default: {} }))
-    .then((mod) => mod.default),
-  await import(path.resolve(process.cwd(), "node_modules/.agent-yes/config.ts"))
-    .catch(() => ({ default: {} }))
-    .then((mod) => mod.default),
-  await import(path.resolve(process.cwd(), ".agent-yes/config.ts"))
-    .catch(() => ({ default: {} }))
-    .then((mod) => mod.default),
+  cascadingConfig,
+  ...legacyConfigs,
 );
 
 function getDefaultConfig() {
