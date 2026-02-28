@@ -1,0 +1,16 @@
+{
+  "$schema": "https://raw.githubusercontent.com/snomiao/agent-yes/main/agent-yes.config.schema.json",
+  "configDir": "~/.agent-yes",
+  "logsDir": "~/.agent-yes/logs",
+  "clis": {
+    "claude": {
+      "defaultArgs": ["--verbose"],
+      "ready": ["\\? for shortcuts", "^>[ \\u00A0]"],
+      "enter": ["> 1\\. Yes", "Press Enter to continue"]
+    },
+    "codex": {
+      "defaultArgs": ["--search"],
+      "ready": ["\\? for shortcuts"]
+    }
+  }
+}

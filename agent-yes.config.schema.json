@@ -1,0 +1,163 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/snomiao/agent-yes/blob/main/agent-yes.config.schema.json",
+  "title": "agent-yes configuration",
+  "description": "Configuration schema for agent-yes - automated interaction wrapper for AI coding assistants",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "JSON Schema reference for IDE support"
+    },
+    "configDir": {
+      "type": "string",
+      "description": "Directory to store agent-yes config files (e.g., session store)"
+    },
+    "logsDir": {
+      "type": "string",
+      "description": "Directory to store agent-yes log files"
+    },
+    "clis": {
+      "type": "object",
+      "description": "CLI-specific configurations",
+      "additionalProperties": {
+        "$ref": "#/definitions/AgentCliConfig"
+      },
+      "properties": {
+        "claude": { "$ref": "#/definitions/AgentCliConfig" },
+        "gemini": { "$ref": "#/definitions/AgentCliConfig" },
+        "codex": { "$ref": "#/definitions/AgentCliConfig" },
+        "copilot": { "$ref": "#/definitions/AgentCliConfig" },
+        "cursor": { "$ref": "#/definitions/AgentCliConfig" },
+        "grok": { "$ref": "#/definitions/AgentCliConfig" },
+        "qwen": { "$ref": "#/definitions/AgentCliConfig" },
+        "auggie": { "$ref": "#/definitions/AgentCliConfig" },
+        "amp": { "$ref": "#/definitions/AgentCliConfig" },
+        "opencode": { "$ref": "#/definitions/AgentCliConfig" }
+      }
+    }
+  },
+  "definitions": {
+    "AgentCliConfig": {
+      "type": "object",
+      "description": "Configuration for a specific CLI tool",
+      "properties": {
+        "install": {
+          "description": "Install command(s) for the CLI tool",
+          "oneOf": [
+            { "type": "string" },
+            {
+              "type": "object",
+              "properties": {
+                "powershell": { "type": "string", "description": "PowerShell install command (Windows)" },
+                "bash": { "type": "string", "description": "Bash install command (Unix/macOS)" },
+                "npm": { "type": "string", "description": "npm install command (fallback)" },
+                "unix": { "type": "string", "description": "Unix-specific install command" },
+                "windows": { "type": "string", "description": "Windows-specific install command" }
+              },
+              "additionalProperties": false
+            }
+          ]
+        },
+        "version": {
+          "type": "string",
+          "description": "Command to check if CLI is installed (e.g., 'claude --version')"
+        },
+        "binary": {
+          "type": "string",
+          "description": "Actual binary name if different from CLI name (e.g., 'cursor-agent' for cursor)"
+        },
+        "defaultArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Default arguments to always pass to the CLI"
+        },
+        "ready": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Regex patterns to detect when CLI is ready for input. Set to [] to disable ready check."
+        },
+        "fatal": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Regex patterns to detect fatal errors that should stop execution"
+        },
+        "working": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Regex patterns to detect when CLI is currently processing"
+        },
+        "exitCommands": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Commands to exit the CLI gracefully (e.g., '/exit', '/quit')"
+        },
+        "promptArg": {
+          "type": "string",
+          "description": "How to pass the prompt: 'first-arg', 'last-arg', or a flag like '--prompt'",
+          "examples": ["first-arg", "last-arg", "--prompt", "-p"]
+        },
+        "noEOL": {
+          "type": "boolean",
+          "description": "If true, don't split lines by newline (for CLIs using cursor movement like codex)"
+        },
+        "enter": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Regex patterns that trigger automatic Enter key press"
+        },
+        "enterExclude": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Regex patterns to exclude from auto-enter (even if 'enter' matches)"
+        },
+        "typingRespond": {
+          "type": "object",
+          "description": "Map of responses to type when specific patterns are matched",
+          "additionalProperties": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Regex patterns that trigger this response"
+          },
+          "examples": [
+            { "y\\n": ["Do you want to continue\\?"] },
+            { "1\\n": ["Select an option:"] }
+          ]
+        },
+        "restoreArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Arguments to add when restarting after a crash (e.g., ['--continue'])"
+        },
+        "restartWithoutContinueArg": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Regex patterns for errors that require restart WITHOUT continue args"
+        },
+        "bunx": {
+          "type": "boolean",
+          "description": "Use bunx instead of npx to run the CLI (faster startup)"
+        },
+        "help": {
+          "type": "string",
+          "description": "URL to documentation or help page for this CLI"
+        },
+        "systemPrompt": {
+          "type": "string",
+          "description": "Flag to pass system prompt (e.g., '--append-system-prompt')"
+        },
+        "system": {
+          "type": "string",
+          "description": "System prompt content to inject"
+        },
+        "updateAvailable": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Regex patterns to detect update available messages"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

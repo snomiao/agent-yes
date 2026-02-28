@@ -50,7 +50,9 @@
     "ts/*.ts",
     "!dist/**/*.map",
     "dist/**/*.js",
-    "bin"
+    "bin",
+    "agent-yes.config.schema.json",
+    "examples"
   ],
   "type": "module",
   "module": "ts/index.ts",

@@ -1,0 +1,55 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/snomiao/agent-yes/main/agent-yes.config.schema.json
+
+# agent-yes configuration
+# Place this file in your project root or home directory
+
+configDir: ~/.agent-yes
+logsDir: ~/.agent-yes/logs
+
+clis:
+  # Claude Code configuration
+  claude:
+    defaultArgs:
+      - --verbose
+    # Patterns to detect when Claude is ready for input
+    ready:
+      - "\\? for shortcuts"
+      - "^>[ \\u00A0]"
+    # Patterns that trigger automatic Enter
+    enter:
+      - "> 1\\. Yes"
+      - "Press Enter to continue"
+    # Auto-type responses
+    typingRespond:
+      "1\n":
+        - "Do you want to use this API key\\?"
+
+  # Codex configuration
+  codex:
+    defaultArgs:
+      - --search
+    ready:
+      - "\\? for shortcuts"
+    enter:
+      - "> 1\\. Yes,"
+      - "> 1\\. Approve and run now"
+
+  # Gemini configuration
+  gemini:
+    ready:
+      - "Type your message"
+    enter:
+      - "│ ● 1\\. Yes, allow once"
+    restoreArgs:
+      - --resume
+
+  # Custom CLI example
+  # my-custom-cli:
+  #   binary: my-cli-binary
+  #   install:
+  #     npm: "npm install -g my-cli"
+  #     bash: "curl -fsSL https://example.com/install.sh | bash"
+  #   ready:
+  #     - "Ready>"
+  #   enter:
+  #     - "Confirm\\? \\[y/N\\]"

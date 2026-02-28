@@ -1,0 +1,16 @@
+{
+  "json.schemas": [
+    {
+      "fileMatch": [".agent-yes.config.json", "agent-yes.config.json"],
+      "url": "./agent-yes.config.schema.json"
+    }
+  ],
+  "yaml.schemas": {
+    "./agent-yes.config.schema.json": [
+      ".agent-yes.config.yaml",
+      ".agent-yes.config.yml",
+      "agent-yes.config.yaml",
+      "agent-yes.config.yml"
+    ]
+  }
+}
