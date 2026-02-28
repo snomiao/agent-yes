@@ -4,9 +4,15 @@ import path from "node:path";
 import { defineCliYesConfig } from "./ts/defineConfig.ts";
 import { deepMixin } from "./ts/utils.ts";
 import { logger } from "./ts/logger.ts";
-import { loadCascadingConfig } from "./ts/configLoader.ts";
+import { loadCascadingConfig, ensureSchemaInConfigFiles } from "./ts/configLoader.ts";
 
 logger.debug("loading cli-yes.config.ts from " + import.meta.url);
+
+// Auto-inject schema reference into config files for IDE support
+// This runs in the background and doesn't block startup
+ensureSchemaInConfigFiles().catch(() => {
+  // Silently ignore errors - this is a nice-to-have feature
+});
 
 // Config loading priority (highest to lowest):
 // 1. [project-dir]/.agent-yes.config.[json/yml/yaml]

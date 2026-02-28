@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "bun:test";
-import { loadCascadingConfig, getConfigPaths } from "./configLoader.ts";
-import { mkdir, writeFile, rm } from "node:fs/promises";
+import { loadCascadingConfig, getConfigPaths, ensureSchemaInConfigFiles } from "./configLoader.ts";
+import { mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 
@@ -123,5 +123,70 @@ logsDir: /custom/logs
     const config = await loadCascadingConfig({ projectDir, homeDir });
     expect(config.configDir).toBe("/project/config"); // Project takes precedence
     expect(config.logsDir).toBe("/home/logs"); // Home is used when not overridden
+  });
+
+  it("should add schema reference to JSON config without one", async () => {
+    const configPath = path.join(testDir, ".agent-yes.config.json");
+    await writeFile(
+      configPath,
+      JSON.stringify({ configDir: "/test" })
+    );
+
+    const result = await ensureSchemaInConfigFiles({ projectDir: testDir, homeDir: testDir });
+    expect(result.modified).toContain(configPath);
+
+    const content = await readFile(configPath, "utf-8");
+    const parsed = JSON.parse(content);
+    expect(parsed.$schema).toContain("agent-yes.config.schema.json");
+    expect(parsed.configDir).toBe("/test"); // Original content preserved
+  });
+
+  it("should add schema comment to YAML config without one", async () => {
+    const configPath = path.join(testDir, ".agent-yes.config.yaml");
+    await writeFile(
+      configPath,
+      `configDir: /test
+clis:
+  claude:
+    defaultArgs:
+      - --verbose
+`
+    );
+
+    const result = await ensureSchemaInConfigFiles({ projectDir: testDir, homeDir: testDir });
+    expect(result.modified).toContain(configPath);
+
+    const content = await readFile(configPath, "utf-8");
+    expect(content).toContain("yaml-language-server:");
+    expect(content).toContain("$schema=");
+    expect(content).toContain("configDir: /test"); // Original content preserved
+  });
+
+  it("should skip JSON config that already has schema", async () => {
+    const configPath = path.join(testDir, ".agent-yes.config.json");
+    const originalContent = JSON.stringify({
+      $schema: "https://example.com/schema.json",
+      configDir: "/test",
+    }, null, 2);
+    await writeFile(configPath, originalContent);
+
+    const result = await ensureSchemaInConfigFiles({ projectDir: testDir, homeDir: testDir });
+    expect(result.skipped).toContain(configPath);
+    expect(result.modified).not.toContain(configPath);
+
+    const content = await readFile(configPath, "utf-8");
+    expect(content).toBe(originalContent); // Unchanged
+  });
+
+  it("should skip YAML config that already has schema comment", async () => {
+    const configPath = path.join(testDir, ".agent-yes.config.yaml");
+    const originalContent = `# yaml-language-server: $schema=https://example.com/schema.json
+configDir: /test
+`;
+    await writeFile(configPath, originalContent);
+
+    const result = await ensureSchemaInConfigFiles({ projectDir: testDir, homeDir: testDir });
+    expect(result.skipped).toContain(configPath);
+    expect(result.modified).not.toContain(configPath);
   });
 });
