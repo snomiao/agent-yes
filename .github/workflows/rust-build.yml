@@ -1,20 +1,30 @@
 name: Build Rust Binaries
 
 on:
-  push:
+  # Trigger after release workflow completes (to get updated version)
+  workflow_run:
+    workflows: [".github/workflows/release.yml"]
+    types: [completed]
     branches: [main, beta]
-    paths:
-      - 'rs/**'
-      - '.github/workflows/rust-build.yml'
-    tags:
-      - 'v*'  # Build on version tags (created by semantic-release)
+
+  # PR builds for testing (no release upload)
   pull_request:
     branches: [main]
     paths:
       - 'rs/**'
+
+  # Manual trigger
   workflow_dispatch:
+    inputs:
+      upload_release:
+        description: 'Upload to GitHub release'
+        required: false
+        default: 'true'
+        type: boolean
+
+  # Direct release event (backup)
   release:
-    types: [created, published]
+    types: [published]
 
 env:
   CARGO_TERM_COLOR: always
@@ -22,6 +32,8 @@ env:
 jobs:
   build:
     name: Build ${{ matrix.target }}
+    # Skip if triggered by workflow_run but the release workflow failed
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -73,6 +85,21 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # For workflow_run, checkout the commit that triggered the release
+          ref: ${{ github.event.workflow_run.head_sha || github.ref }}
+          fetch-depth: 0
+
+      - name: Get latest tag (for workflow_run)
+        if: github.event_name == 'workflow_run'
+        run: |
+          git fetch --tags
+          LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "RELEASE_TAG=$LATEST_TAG" >> $GITHUB_ENV
+          if [ -n "$LATEST_TAG" ]; then
+            echo "Checking out tag: $LATEST_TAG"
+            git checkout "$LATEST_TAG"
+          fi
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -143,15 +170,22 @@ jobs:
           path: combined/
           if-no-files-found: error
 
-  # Upload to GitHub Release (on release event or version tag)
+  # Upload to GitHub Release
   release:
     name: Upload to Release
     needs: build
-    if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+    if: |
+      github.event_name == 'release' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success') ||
+      (github.event_name == 'workflow_dispatch' && inputs.upload_release == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
@@ -171,15 +205,28 @@ jobs:
           cd ..
           ls -la *.tar.gz *.zip 2>/dev/null || true
 
+      - name: Get release tag
+        id: get_tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            git fetch --tags
+            TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            echo "tag=$TAG" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
       - name: Upload release assets
+        if: steps.get_tag.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
           files: |
             *.tar.gz
             *.zip
-          # For tag pushes, create a release if it doesn't exist
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ steps.get_tag.outputs.tag }}
           draft: false
-          prerelease: ${{ contains(github.ref, 'beta') }}
+          prerelease: ${{ contains(steps.get_tag.outputs.tag, 'beta') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
