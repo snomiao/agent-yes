@@ -1,6 +1,6 @@
 {
   "name": "agent-yes",
-  "version": "1.46.4",
+  "version": "1.46.5",
   "description": "A wrapper tool that automates interactions with various AI CLI tools by automatically handling common prompts and responses.",
   "keywords": [
     "ai",
