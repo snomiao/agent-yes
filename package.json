@@ -67,6 +67,7 @@
   },
   "scripts": {
     "build": "tsdown",
+    "build:rs": "cd rs && cargo build --release --features swarm",
     "postbuild": "bun ./ts/postbuild.ts",
     "demo": "bun run build && bun link && claude-yes -- demo",
     "dev": "bun ts/index.ts",
