@@ -208,19 +208,36 @@ async fn run_swarm_mode(args: CliArgs) -> Result<i32> {
                 Ok(0) => break, // EOF
                 Ok(_) => {
                     let line = line.trim();
-                    if line.starts_with("/task ") {
-                        let prompt = line.strip_prefix("/task ").unwrap_or("").to_string();
-                        let _ = cmd_tx_clone.send(SwarmCommand::BroadcastTask { prompt }).await;
-                    } else if line.starts_with("/chat ") {
-                        let message = line.strip_prefix("/chat ").unwrap_or("").to_string();
-                        let _ = cmd_tx_clone.send(SwarmCommand::Chat { message }).await;
-                    } else if line == "/status" {
+                    if line.starts_with("/task") {
+                        let prompt = line.strip_prefix("/task").unwrap_or("").trim().to_string();
+                        if prompt.is_empty() {
+                            println!("Usage: /task <prompt>");
+                        } else {
+                            let _ = cmd_tx_clone.send(SwarmCommand::BroadcastTask { prompt }).await;
+                        }
+                    } else if line.starts_with("/chat") {
+                        let message = line.strip_prefix("/chat").unwrap_or("").trim().to_string();
+                        if message.is_empty() {
+                            println!("Usage: /chat <message>");
+                        } else {
+                            let _ = cmd_tx_clone.send(SwarmCommand::Chat { message }).await;
+                        }
+                    } else if line == "/status" || line == "/s" {
                         let _ = cmd_tx_clone.send(SwarmCommand::GetStatus).await;
-                    } else if line == "/quit" || line == "/exit" {
+                    } else if line == "/quit" || line == "/exit" || line == "/q" {
                         let _ = cmd_tx_clone.send(SwarmCommand::Shutdown).await;
                         break;
+                    } else if line == "/help" || line == "/?" || line == "?" {
+                        println!("\n[Swarm Mode Commands]");
+                        println!("  /task <prompt>  - Broadcast a task to the swarm");
+                        println!("  /chat <msg>     - Send a chat message");
+                        println!("  /status         - Get swarm status");
+                        println!("  /quit           - Exit swarm mode");
+                    } else if !line.is_empty() && !line.starts_with("/") {
+                        // Treat non-command input as chat
+                        let _ = cmd_tx_clone.send(SwarmCommand::Chat { message: line.to_string() }).await;
                     } else if !line.is_empty() {
-                        println!("Unknown command. Try /task, /chat, /status, or /quit");
+                        println!("Unknown command: {}. Try /help", line);
                     }
                 }
                 Err(e) => {
