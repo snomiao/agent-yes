@@ -95,11 +95,6 @@ pub async fn spawn_agent(
         cmd.cwd(cwd);
     }
 
-    // Fallback TERM if not set in parent environment
-    if std::env::var("TERM").is_err() {
-        cmd.env("TERM", "xterm-256color");
-    }
-
     if verbose {
         debug!("Spawning {} with args: {:?}", binary, args);
     }
