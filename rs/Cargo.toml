@@ -52,6 +52,10 @@ strip-ansi-escapes = "0.2"
 # Directories
 dirs = "5"
 
+# Unix-specific
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Misc
 lazy_static = "1"
 once_cell = "1"

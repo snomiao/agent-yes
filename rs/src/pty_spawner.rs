@@ -9,6 +9,32 @@ use std::thread;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info};
 
+/// Get terminal dimensions from parent TTY, with fallback defaults
+fn get_terminal_size() -> (u16, u16) {
+    // Try to get from environment first (for pipes/non-TTY)
+    if let (Ok(cols), Ok(rows)) = (std::env::var("COLUMNS"), std::env::var("LINES")) {
+        if let (Ok(cols), Ok(rows)) = (cols.parse::<u16>(), rows.parse::<u16>()) {
+            return (cols.max(20), rows);
+        }
+    }
+
+    // Try to get from TTY
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = std::io::stdout().as_raw_fd();
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) } == 0 {
+            if size.ws_col > 0 && size.ws_row > 0 {
+                return (size.ws_col.max(20), size.ws_row);
+            }
+        }
+    }
+
+    // Default fallback
+    (80, 24)
+}
+
 /// PTY process context
 pub struct PtyContext {
     pub master: Box<dyn MasterPty + Send>,
@@ -73,18 +99,26 @@ pub async fn spawn_agent(
 ) -> Result<PtyContext> {
     let pty_system = native_pty_system();
 
-    // Create PTY with reasonable size
+    // Get terminal size from parent or use defaults
+    let (cols, rows) = get_terminal_size();
+    debug!("Using terminal size: {}x{}", cols, rows);
+
+    // Create PTY with actual terminal size
     let pair = pty_system.openpty(PtySize {
-        rows: 24,
-        cols: 80,
+        rows,
+        cols,
         pixel_width: 0,
         pixel_height: 0,
     })?;
 
+    // Destructure to get separate ownership of master and slave
+    let master = pair.master;
+    let slave = pair.slave;
+
     // Determine the binary to run
     let binary = config.binary.as_ref().map(|s| s.as_str()).unwrap_or(cli);
 
-    // Build command
+    // Build command - inherits parent environment by default
     let mut cmd = CommandBuilder::new(binary);
     for arg in args {
         cmd.arg(arg);
@@ -102,11 +136,17 @@ pub async fn spawn_agent(
     info!("Starting {} agent...", cli);
 
     // Spawn the child
-    let child = pair.slave.spawn_command(cmd)?;
+    let child = slave.spawn_command(cmd)?;
 
-    // Get reader and writer
-    let mut reader = pair.master.try_clone_reader()?;
-    let writer = pair.master.take_writer()?;
+    // CRITICAL: Drop the slave after spawning!
+    // On Unix, keeping the slave open in the parent can cause writes to fail
+    // in the child because the parent still holds references to the slave PTY.
+    // This is the classic PTY programming pattern: fork, then close slave in parent.
+    drop(slave);
+
+    // Get reader and writer from master
+    let mut reader = master.try_clone_reader()?;
+    let writer = master.take_writer()?;
 
     // Create channel for PTY output
     let (output_tx, output_rx) = mpsc::channel::<String>(1000);
@@ -132,7 +172,7 @@ pub async fn spawn_agent(
     });
 
     Ok(PtyContext {
-        master: pair.master,
+        master,
         child,
         output_rx,
         writer: Arc::new(Mutex::new(writer)),

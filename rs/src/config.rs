@@ -168,9 +168,10 @@ fn codex_config() -> CliConfig {
         working: vec![],
         typing_respond: HashMap::new(),
         enter: vec![
+            Regex::new(r"› 1\. Yes,").unwrap(),
             Regex::new(r"> 1\. Yes,").unwrap(),
-            Regex::new(r"> 1\. Yes, allow Codex to work in this folder").unwrap(),
             Regex::new(r"> 1\. Approve and run now").unwrap(),
+            Regex::new(r"› 1\. Approve and run now").unwrap(),
         ],
         fatal: vec![Regex::new(r"Error: The cursor position could not be read within").unwrap()],
         restore_args: vec![],

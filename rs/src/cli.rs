@@ -42,15 +42,15 @@ struct Args {
     prompt: Option<String>,
 
     /// Exit on idle (e.g., "60s", "1m", "5m")
-    #[arg(short, long, alias = "idle-timeout")]
+    #[arg(short, long)]
     timeout: Option<String>,
 
-    /// Deprecated: Exit on idle
-    #[arg(long, hide = true)]
+    /// Deprecated: Exit on idle (alias for --timeout)
+    #[arg(long = "exit-on-idle", hide = true)]
     exit_on_idle: Option<String>,
 
     /// Deprecated: Alias for --timeout
-    #[arg(long, hide = true)]
+    #[arg(long = "idle-timeout", hide = true)]
     idle_timeout: Option<String>,
 
     /// Auto-restart on crash
