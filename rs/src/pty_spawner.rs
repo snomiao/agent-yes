@@ -90,10 +90,15 @@ pub async fn spawn_agent(
         cmd.arg(arg);
     }
 
-    // Set environment
-    cmd.env("TERM", "xterm-256color");
-    cmd.env("FORCE_COLOR", "1");
-    cmd.env("COLORTERM", "truecolor");
+    // Set working directory to current directory
+    if let Ok(cwd) = std::env::current_dir() {
+        cmd.cwd(cwd);
+    }
+
+    // Fallback TERM if not set in parent environment
+    if std::env::var("TERM").is_err() {
+        cmd.env("TERM", "xterm-256color");
+    }
 
     if verbose {
         debug!("Spawning {} with args: {:?}", binary, args);
