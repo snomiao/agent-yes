@@ -5,6 +5,7 @@ import { existsSync } from "fs";
 import path from "path";
 import cliYesConfig from "../agent-yes.config.ts";
 import { parseCliArgs } from "./parseCliArgs.ts";
+import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { logger } from "./logger.ts";
 import { PidStore } from "./pidStore.ts";
 import { displayVersion } from "./versionChecker.ts";
@@ -26,7 +27,16 @@ if (config.useRust) {
   }
 
   // Build args for Rust binary (filter out --rust flag)
-  const rustArgs = process.argv.slice(2).filter((arg) => arg !== "--rust" && !arg.startsWith("--rust="));
+  const rawRustArgs = process.argv.slice(2).filter((arg) => arg !== "--rust" && !arg.startsWith("--rust="));
+
+  // Prepend CLI name if detected from script name but not already in args
+  // This ensures codex-yes --rust passes "codex" to the Rust binary
+  const cliFromScript = config.cli;
+  const hasCliArg = rawRustArgs.some(arg => arg.startsWith('--cli=') || arg === '--cli') ||
+                    rawRustArgs.some(arg => SUPPORTED_CLIS.includes(arg));
+  const rustArgs = cliFromScript && !hasCliArg
+    ? [cliFromScript, ...rawRustArgs]
+    : rawRustArgs;
 
   if (config.verbose) {
     console.log(`[rust] Using binary: ${rustBinary}`);
