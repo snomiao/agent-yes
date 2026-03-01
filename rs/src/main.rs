@@ -7,6 +7,7 @@ mod logger;
 mod messaging;
 mod pty_spawner;
 mod ready_manager;
+mod swarm;
 mod utils;
 
 use anyhow::Result;
@@ -22,6 +23,21 @@ async fn main() -> Result<()> {
     logger::init(args.verbose);
 
     info!("agent-yes v{}", env!("CARGO_PKG_VERSION"));
+
+    // Check for swarm mode
+    if args.experimental_swarm {
+        #[cfg(feature = "swarm")]
+        {
+            let exit_code = run_swarm_mode(args).await?;
+            std::process::exit(exit_code);
+        }
+
+        #[cfg(not(feature = "swarm"))]
+        {
+            swarm::swarm_not_available();
+            std::process::exit(1);
+        }
+    }
 
     // Run the agent
     let exit_code = run_agent(args).await?;
@@ -93,4 +109,156 @@ async fn run_agent(args: CliArgs) -> Result<i32> {
 
         return Ok(exit_code);
     }
+}
+
+/// Run in swarm mode - P2P agent networking
+#[cfg(feature = "swarm")]
+async fn run_swarm_mode(args: CliArgs) -> Result<i32> {
+    use crate::swarm::{SwarmConfig, SwarmNode, SwarmEvent2, SwarmCommand};
+    use tokio::sync::mpsc;
+    use tracing::{info, warn};
+
+    info!("Starting in experimental swarm mode");
+    info!("  Topic: {}", args.swarm_topic);
+    if !args.swarm_bootstrap.is_empty() {
+        info!("  Bootstrap peers: {:?}", args.swarm_bootstrap);
+    }
+
+    let config = SwarmConfig {
+        listen_addr: args.swarm_listen.unwrap_or_else(|| "/ip4/0.0.0.0/tcp/0".to_string()),
+        topic: args.swarm_topic.clone(),
+        bootstrap_peers: args.swarm_bootstrap.clone(),
+        cli: args.cli.clone(),
+        cwd: std::env::current_dir()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string(),
+    };
+
+    let node = SwarmNode::new(config).await?;
+
+    // Create channels for communication
+    let (cmd_tx, cmd_rx) = mpsc::channel::<SwarmCommand>(100);
+    let (event_tx, mut event_rx) = mpsc::channel::<SwarmEvent2>(100);
+
+    // Spawn the swarm node
+    let swarm_handle = tokio::spawn(async move {
+        if let Err(e) = node.run(cmd_rx, event_tx).await {
+            tracing::error!("Swarm error: {}", e);
+        }
+    });
+
+    // Handle stdin for commands (only if we have a TTY)
+    let cmd_tx_clone = cmd_tx.clone();
+    let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+
+    let stdin_handle = tokio::spawn(async move {
+        if !is_tty {
+            // Not a TTY, just wait forever
+            info!("Running in non-interactive mode (no TTY)");
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
+            }
+        }
+
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let stdin = tokio::io::stdin();
+        let mut reader = BufReader::new(stdin);
+        let mut line = String::new();
+
+        println!("\n[Swarm Mode Commands]");
+        println!("  /task <prompt>  - Broadcast a task to the swarm");
+        println!("  /chat <msg>     - Send a chat message");
+        println!("  /status         - Get swarm status");
+        println!("  /quit           - Exit swarm mode");
+        println!("");
+
+        loop {
+            line.clear();
+            print!("> ");
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+
+            match reader.read_line(&mut line).await {
+                Ok(0) => break, // EOF
+                Ok(_) => {
+                    let line = line.trim();
+                    if line.starts_with("/task ") {
+                        let prompt = line.strip_prefix("/task ").unwrap_or("").to_string();
+                        let _ = cmd_tx_clone.send(SwarmCommand::BroadcastTask { prompt }).await;
+                    } else if line.starts_with("/chat ") {
+                        let message = line.strip_prefix("/chat ").unwrap_or("").to_string();
+                        let _ = cmd_tx_clone.send(SwarmCommand::Chat { message }).await;
+                    } else if line == "/status" {
+                        let _ = cmd_tx_clone.send(SwarmCommand::GetStatus).await;
+                    } else if line == "/quit" || line == "/exit" {
+                        let _ = cmd_tx_clone.send(SwarmCommand::Shutdown).await;
+                        break;
+                    } else if !line.is_empty() {
+                        println!("Unknown command. Try /task, /chat, /status, or /quit");
+                    }
+                }
+                Err(e) => {
+                    warn!("Stdin error: {}", e);
+                    break;
+                }
+            }
+        }
+    });
+
+    // Handle events
+    let event_handle = tokio::spawn(async move {
+        while let Some(event) = event_rx.recv().await {
+            match event {
+                SwarmEvent2::PeerDiscovered { peer_id } => {
+                    println!("\n[+] Peer discovered: {}", peer_id);
+                }
+                SwarmEvent2::PeerLeft { peer_id } => {
+                    println!("\n[-] Peer left: {}", peer_id);
+                }
+                SwarmEvent2::TaskReceived { task_id, prompt } => {
+                    println!("\n[Task] {}: {}", task_id, prompt);
+                }
+                SwarmEvent2::TaskUpdate { task_id, status } => {
+                    println!("\n[Task Update] {}: {}", task_id, status);
+                }
+                SwarmEvent2::ChatReceived { agent_id, message } => {
+                    println!("\n[{}] {}", agent_id, message);
+                }
+                SwarmEvent2::BecameCoordinator => {
+                    println!("\n[*] You are now the coordinator!");
+                }
+                SwarmEvent2::NewCoordinator { coordinator_id } => {
+                    println!("\n[*] New coordinator: {}", coordinator_id);
+                }
+                SwarmEvent2::Status { peer_count, is_coordinator, coordinator_id } => {
+                    println!("\n[Status]");
+                    println!("  Peers: {}", peer_count);
+                    println!("  Coordinator: {}", if is_coordinator { "You" } else { coordinator_id.as_deref().unwrap_or("Unknown") });
+                }
+            }
+            print!("> ");
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+        }
+    });
+
+    // Wait for any task to complete
+    tokio::select! {
+        _ = swarm_handle => {
+            info!("Swarm node stopped");
+        }
+        _ = stdin_handle => {
+            info!("Stdin handler stopped");
+        }
+        _ = event_handle => {
+            info!("Event handler stopped");
+        }
+        _ = tokio::signal::ctrl_c() => {
+            info!("Received Ctrl+C, shutting down");
+            let _ = cmd_tx.send(SwarmCommand::Shutdown).await;
+        }
+    }
+
+    Ok(0)
 }

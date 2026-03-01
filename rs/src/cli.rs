@@ -22,6 +22,10 @@ pub struct CliArgs {
     pub install: bool,
     pub queue: bool,
     pub use_skills: bool,
+    pub experimental_swarm: bool,
+    pub swarm_listen: Option<String>,
+    pub swarm_topic: String,
+    pub swarm_bootstrap: Vec<String>,
 }
 
 #[derive(Parser, Debug)]
@@ -76,6 +80,22 @@ struct Args {
     /// Prepend SKILL.md context
     #[arg(long, default_value = "false")]
     use_skills: bool,
+
+    /// Enable experimental swarm mode for multi-agent networking
+    #[arg(long, default_value = "false")]
+    experimental_swarm: bool,
+
+    /// Swarm listen address (default: /ip4/0.0.0.0/tcp/0)
+    #[arg(long)]
+    swarm_listen: Option<String>,
+
+    /// Swarm topic for agent communication (default: agent-yes-swarm)
+    #[arg(long, default_value = "agent-yes-swarm")]
+    swarm_topic: String,
+
+    /// Bootstrap peer address for swarm (can be specified multiple times)
+    #[arg(long)]
+    swarm_bootstrap: Vec<String>,
 
     /// Additional arguments for the CLI tool
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -140,6 +160,10 @@ pub fn parse_args() -> Result<CliArgs> {
         install: args.install,
         queue: args.queue,
         use_skills: args.use_skills,
+        experimental_swarm: args.experimental_swarm,
+        swarm_listen: args.swarm_listen,
+        swarm_topic: args.swarm_topic,
+        swarm_bootstrap: args.swarm_bootstrap,
     })
 }
 

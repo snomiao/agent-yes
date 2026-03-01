@@ -120,6 +120,25 @@ export function parseCliArgs(argv: string[]) {
       description: "Use the Rust implementation instead of TypeScript",
       default: false,
     })
+    .option("experimental-swarm", {
+      type: "boolean",
+      description: "Enable experimental swarm mode for multi-agent P2P networking (requires --rust)",
+      default: false,
+    })
+    .option("swarm-topic", {
+      type: "string",
+      description: "Topic for swarm communication",
+      default: "agent-yes-swarm",
+    })
+    .option("swarm-listen", {
+      type: "string",
+      description: "Listen address for swarm (e.g., /ip4/0.0.0.0/tcp/4001)",
+    })
+    .option("swarm-bootstrap", {
+      type: "array",
+      description: "Bootstrap peer addresses for swarm",
+      default: [] as string[],
+    })
     .positional("cli", {
       describe: "The AI CLI to run, e.g., claude, codex, copilot, cursor, gemini",
       type: "string",
@@ -231,5 +250,9 @@ export function parseCliArgs(argv: string[]) {
     showVersion: parsedArgv.version,
     autoYes: parsedArgv.auto !== "no", // auto-yes enabled by default, disabled with --auto=no
     useRust: parsedArgv.rust,
+    experimentalSwarm: parsedArgv.experimentalSwarm,
+    swarmTopic: parsedArgv.swarmTopic,
+    swarmListen: parsedArgv.swarmListen,
+    swarmBootstrap: parsedArgv.swarmBootstrap as string[],
   };
 }
