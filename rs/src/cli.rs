@@ -22,9 +22,16 @@ pub struct CliArgs {
     pub install: bool,
     pub queue: bool,
     pub use_skills: bool,
+    /// Swarm mode: None = disabled, Some(value) = enabled with optional config
+    /// Value can be: topic name, room code (XXX-XXX), ay:// URL, or multiaddr
+    pub swarm: Option<String>,
+    /// Deprecated: use --swarm instead
     pub experimental_swarm: bool,
+    /// Deprecated: listen address override (use ay:// URL listen param instead)
     pub swarm_listen: Option<String>,
+    /// Deprecated: use --swarm <topic> instead
     pub swarm_topic: String,
+    /// Deprecated: use --swarm ay://...?peer=... instead
     pub swarm_bootstrap: Vec<String>,
 }
 
@@ -81,20 +88,30 @@ struct Args {
     #[arg(long, default_value = "false")]
     use_skills: bool,
 
-    /// Enable experimental swarm mode for multi-agent networking
-    #[arg(long, default_value = "false")]
+    /// Enable swarm mode for multi-agent P2P networking
+    ///
+    /// Value formats:
+    ///   --swarm my-project       Topic name (LAN auto-discovery)
+    ///   --swarm ABC-123          Room code (6-char, easy to share)
+    ///   --swarm "ay://..."       Swarm URL (for internet)
+    ///   --swarm "/ip4/..."       Raw multiaddr (direct connect)
+    #[arg(long, num_args = 0..=1, default_missing_value = "agent-yes-swarm")]
+    swarm: Option<String>,
+
+    /// Deprecated: use --swarm instead
+    #[arg(long, default_value = "false", hide = true)]
     experimental_swarm: bool,
 
-    /// Swarm listen address (default: /ip4/0.0.0.0/tcp/0)
-    #[arg(long)]
+    /// Deprecated: use ay:// URL with listen param
+    #[arg(long, hide = true)]
     swarm_listen: Option<String>,
 
-    /// Swarm topic for agent communication (default: agent-yes-swarm)
-    #[arg(long, default_value = "agent-yes-swarm")]
+    /// Deprecated: use --swarm <topic> instead
+    #[arg(long, default_value = "agent-yes-swarm", hide = true)]
     swarm_topic: String,
 
-    /// Bootstrap peer address for swarm (can be specified multiple times)
-    #[arg(long)]
+    /// Deprecated: use --swarm ay://...?peer=... instead
+    #[arg(long, hide = true)]
     swarm_bootstrap: Vec<String>,
 
     /// Additional arguments for the CLI tool
@@ -148,6 +165,16 @@ pub fn parse_args() -> Result<CliArgs> {
     // Parse prompt from remaining args (after --)
     let (cli_args, prompt) = extract_prompt_from_args(remaining_args, args.prompt);
 
+    // Handle swarm mode: new --swarm flag takes precedence over deprecated flags
+    let swarm = if args.swarm.is_some() {
+        args.swarm.clone()
+    } else if args.experimental_swarm {
+        // Backwards compat: convert old flags to new format
+        Some(args.swarm_topic.clone())
+    } else {
+        None
+    };
+
     Ok(CliArgs {
         cli,
         cli_args,
@@ -160,6 +187,7 @@ pub fn parse_args() -> Result<CliArgs> {
         install: args.install,
         queue: args.queue,
         use_skills: args.use_skills,
+        swarm,
         experimental_swarm: args.experimental_swarm,
         swarm_listen: args.swarm_listen,
         swarm_topic: args.swarm_topic,

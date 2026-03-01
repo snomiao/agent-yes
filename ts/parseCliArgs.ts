@@ -120,24 +120,37 @@ export function parseCliArgs(argv: string[]) {
       description: "Use the Rust implementation instead of TypeScript",
       default: false,
     })
+    .option("swarm", {
+      type: "string",
+      description: `Enable swarm mode for multi-agent P2P networking (requires --rust).
+        Formats:
+          --swarm my-project       Topic name (LAN auto-discovery)
+          --swarm ABC-123          Room code (6-char, easy to share)
+          --swarm "ay://..."       Swarm URL (for internet)
+          --swarm "/ip4/..."       Raw multiaddr (direct connect)`,
+    })
     .option("experimental-swarm", {
       type: "boolean",
-      description: "Enable experimental swarm mode for multi-agent P2P networking (requires --rust)",
+      description: "Deprecated: use --swarm instead",
       default: false,
+      hidden: true,
     })
     .option("swarm-topic", {
       type: "string",
-      description: "Topic for swarm communication",
+      description: "Deprecated: use --swarm <topic> instead",
       default: "agent-yes-swarm",
+      hidden: true,
     })
     .option("swarm-listen", {
       type: "string",
-      description: "Listen address for swarm (e.g., /ip4/0.0.0.0/tcp/4001)",
+      description: "Deprecated: use ay:// URL with listen param",
+      hidden: true,
     })
     .option("swarm-bootstrap", {
       type: "array",
-      description: "Bootstrap peer addresses for swarm",
+      description: "Deprecated: use --swarm ay://...?peer=... instead",
       default: [] as string[],
+      hidden: true,
     })
     .positional("cli", {
       describe: "The AI CLI to run, e.g., claude, codex, copilot, cursor, gemini",
@@ -250,6 +263,9 @@ export function parseCliArgs(argv: string[]) {
     showVersion: parsedArgv.version,
     autoYes: parsedArgv.auto !== "no", // auto-yes enabled by default, disabled with --auto=no
     useRust: parsedArgv.rust,
+    // New unified --swarm flag (takes precedence over deprecated flags)
+    swarm: parsedArgv.swarm ?? (parsedArgv.experimentalSwarm ? parsedArgv.swarmTopic : undefined),
+    // Deprecated flags (kept for backwards compatibility)
     experimentalSwarm: parsedArgv.experimentalSwarm,
     swarmTopic: parsedArgv.swarmTopic,
     swarmListen: parsedArgv.swarmListen,

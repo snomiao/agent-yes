@@ -11,6 +11,8 @@ mod coordinator;
 mod messages;
 #[cfg(feature = "swarm")]
 mod node;
+#[cfg(feature = "swarm")]
+mod url;
 
 #[cfg(feature = "swarm")]
 pub use behaviour::AgentBehaviour;
@@ -20,6 +22,8 @@ pub use coordinator::CoordinatorState;
 pub use messages::{AgentMessage, AgentRequest, AgentResponse, TaskStatus};
 #[cfg(feature = "swarm")]
 pub use node::{SwarmCommand, SwarmConfig, SwarmEvent2, SwarmNode};
+#[cfg(feature = "swarm")]
+pub use url::{format_room_code, generate_room_code, is_room_code, SwarmUrlConfig};
 
 #[cfg(not(feature = "swarm"))]
 pub fn swarm_not_available() {

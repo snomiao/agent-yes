@@ -24,8 +24,8 @@ async fn main() -> Result<()> {
 
     info!("agent-yes v{}", env!("CARGO_PKG_VERSION"));
 
-    // Check for swarm mode
-    if args.experimental_swarm {
+    // Check for swarm mode (new --swarm flag or deprecated --experimental-swarm)
+    if args.swarm.is_some() {
         #[cfg(feature = "swarm")]
         {
             let exit_code = run_swarm_mode(args).await?;
@@ -114,25 +114,50 @@ async fn run_agent(args: CliArgs) -> Result<i32> {
 /// Run in swarm mode - P2P agent networking
 #[cfg(feature = "swarm")]
 async fn run_swarm_mode(args: CliArgs) -> Result<i32> {
-    use crate::swarm::{SwarmConfig, SwarmNode, SwarmEvent2, SwarmCommand};
+    use crate::swarm::{SwarmConfig, SwarmNode, SwarmEvent2, SwarmCommand, SwarmUrlConfig, generate_room_code};
     use tokio::sync::mpsc;
     use tracing::{info, warn};
 
-    info!("Starting in experimental swarm mode");
-    info!("  Topic: {}", args.swarm_topic);
-    if !args.swarm_bootstrap.is_empty() {
-        info!("  Bootstrap peers: {:?}", args.swarm_bootstrap);
+    // Parse swarm value using new URL parser
+    let swarm_value = args.swarm.as_deref();
+    let mut url_config = SwarmUrlConfig::parse(swarm_value);
+
+    // Merge deprecated flags (for backwards compatibility)
+    if !args.swarm_bootstrap.is_empty() && url_config.bootstrap_peers.is_empty() {
+        url_config.bootstrap_peers = args.swarm_bootstrap.clone();
+    }
+    if args.swarm_topic != "agent-yes-swarm" && url_config.topic == "agent-yes-swarm" {
+        url_config.topic = args.swarm_topic.clone();
     }
 
+    // Generate room code for this session
+    let room_code = generate_room_code();
+
+    info!("Starting swarm mode");
+    info!("  Topic: {}", url_config.topic);
+    info!("  Room Code: {}", room_code);
+    if !url_config.bootstrap_peers.is_empty() {
+        info!("  Bootstrap peers: {:?}", url_config.bootstrap_peers);
+    }
+    if let Some(ref code) = url_config.room_code {
+        info!("  Resolving room code: {}", code);
+    }
+
+    let listen_addr = url_config.listen_addr
+        .or(args.swarm_listen)
+        .unwrap_or_else(|| "/ip4/0.0.0.0/tcp/0".to_string());
+
     let config = SwarmConfig {
-        listen_addr: args.swarm_listen.unwrap_or_else(|| "/ip4/0.0.0.0/tcp/0".to_string()),
-        topic: args.swarm_topic.clone(),
-        bootstrap_peers: args.swarm_bootstrap.clone(),
+        listen_addr,
+        topic: url_config.topic.clone(),
+        bootstrap_peers: url_config.bootstrap_peers.clone(),
         cli: args.cli.clone(),
         cwd: std::env::current_dir()
             .unwrap_or_default()
             .to_string_lossy()
             .to_string(),
+        room_code: Some(room_code.clone()),
+        room_code_to_resolve: url_config.room_code.clone(),
     };
 
     let node = SwarmNode::new(config).await?;

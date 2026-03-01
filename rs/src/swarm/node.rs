@@ -33,6 +33,10 @@ pub struct SwarmConfig {
     pub cli: String,
     /// Current working directory
     pub cwd: String,
+    /// Room code for this session (generated fresh each time)
+    pub room_code: Option<String>,
+    /// Room code to resolve via DHT (when connecting via room code)
+    pub room_code_to_resolve: Option<String>,
 }
 
 impl Default for SwarmConfig {
@@ -46,6 +50,8 @@ impl Default for SwarmConfig {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .to_string(),
+            room_code: None,
+            room_code_to_resolve: None,
         }
     }
 }
@@ -97,6 +103,8 @@ pub struct SwarmNode {
     coordinator: CoordinatorState,
     known_peers: HashSet<PeerId>,
     topic: IdentTopic,
+    /// Collected listen addresses for sharing
+    listen_addrs: Vec<String>,
 }
 
 impl SwarmNode {
@@ -141,6 +149,7 @@ impl SwarmNode {
             coordinator,
             known_peers: HashSet::new(),
             topic,
+            listen_addrs: Vec::new(),
         })
     }
 
@@ -164,9 +173,18 @@ impl SwarmNode {
             }
         }
 
+        // Resolve room code via DHT if provided
+        if let Some(ref code) = self.config.room_code_to_resolve {
+            info!("Looking up room code {} in DHT...", code);
+            let key = format!("room:{}", code);
+            let record_key = kad::RecordKey::new(&key);
+            self.swarm.behaviour_mut().kademlia.get_record(record_key);
+        }
+
         // Announce ourselves after a short delay
         let mut announce_timer = tokio::time::interval(Duration::from_secs(5));
         let mut heartbeat_timer = tokio::time::interval(Duration::from_secs(1));
+        let mut connection_info_printed = false;
 
         info!("Swarm node started, entering event loop");
 
@@ -174,7 +192,7 @@ impl SwarmNode {
             tokio::select! {
                 // Handle swarm events
                 event = self.swarm.select_next_some() => {
-                    if let Err(e) = self.handle_swarm_event(event, &event_tx).await {
+                    if let Err(e) = self.handle_swarm_event(event, &event_tx, &mut connection_info_printed).await {
                         error!("Error handling swarm event: {}", e);
                     }
                 }
@@ -265,10 +283,24 @@ impl SwarmNode {
         &mut self,
         event: SwarmEvent<AgentBehaviourEvent>,
         event_tx: &mpsc::Sender<SwarmEvent2>,
+        connection_info_printed: &mut bool,
     ) -> Result<()> {
         match event {
             SwarmEvent::NewListenAddr { address, .. } => {
-                info!("Listening on {}/p2p/{}", address, self.peer_id);
+                let full_addr = format!("{}/p2p/{}", address, self.peer_id);
+                info!("Listening on {}", full_addr);
+                self.listen_addrs.push(full_addr.clone());
+
+                // Print connection info after we have at least one address
+                if !*connection_info_printed && !self.listen_addrs.is_empty() {
+                    *connection_info_printed = true;
+                    self.print_connection_info();
+
+                    // Publish room code to DHT
+                    if let Some(code) = self.config.room_code.clone() {
+                        self.publish_room_code(&code);
+                    }
+                }
             }
 
             SwarmEvent::Behaviour(AgentBehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
@@ -323,6 +355,39 @@ impl SwarmNode {
                 peer, ..
             })) => {
                 debug!("Kademlia routing updated for peer: {}", peer);
+            }
+
+            SwarmEvent::Behaviour(AgentBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                result: kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(record))),
+                ..
+            })) => {
+                // Room code resolution: found a record
+                let key_str = String::from_utf8_lossy(record.record.key.as_ref());
+                if key_str.starts_with("room:") {
+                    if let Ok(peer_addr) = String::from_utf8(record.record.value.clone()) {
+                        info!("Resolved room code to peer: {}", peer_addr);
+                        // Dial the resolved peer
+                        if let Ok(addr) = peer_addr.parse::<Multiaddr>() {
+                            if let Err(e) = self.swarm.dial(addr) {
+                                warn!("Failed to dial resolved peer: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+
+            SwarmEvent::Behaviour(AgentBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                result: kad::QueryResult::GetRecord(Err(err)),
+                ..
+            })) => {
+                warn!("Room code lookup failed: {:?}", err);
+            }
+
+            SwarmEvent::Behaviour(AgentBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
+                result: kad::QueryResult::PutRecord(Ok(_)),
+                ..
+            })) => {
+                debug!("Room code published to DHT successfully");
             }
 
             SwarmEvent::ConnectionEstablished { peer_id, .. } => {
@@ -469,6 +534,78 @@ impl SwarmNode {
                 // Don't treat InsufficientPeers as a fatal error
                 debug!("Publish failed (may be normal if no peers): {:?}", e);
                 Ok(())
+            }
+        }
+    }
+
+    /// Print connection info banner
+    fn print_connection_info(&self) {
+        use crate::swarm::url::SwarmUrlConfig;
+
+        let separator = "=".repeat(80);
+
+        println!();
+        println!("{}", separator);
+        println!("SWARM STARTED");
+        println!("{}", separator);
+        println!("Topic:     {}", self.config.topic);
+
+        if let Some(ref code) = self.config.room_code {
+            println!("Room Code: {}", code);
+        }
+
+        println!("Peer ID:   {}", self.peer_id);
+        println!();
+        println!("Share with teammates:");
+        println!();
+
+        // Same network (LAN) - just topic
+        println!("  Same network (LAN):");
+        println!("    agent-yes --swarm {}", self.config.topic);
+        println!();
+
+        // Remote (Internet) - full URL with peer addresses
+        if !self.listen_addrs.is_empty() {
+            let url_config = SwarmUrlConfig {
+                topic: self.config.topic.clone(),
+                ..Default::default()
+            };
+            let swarm_url = url_config.to_swarm_url(&self.listen_addrs);
+            println!("  Remote (Internet):");
+            println!("    agent-yes --swarm \"{}\"", swarm_url);
+            println!();
+        }
+
+        // Room code
+        if let Some(ref code) = self.config.room_code {
+            println!("  Short code:");
+            println!("    agent-yes --swarm {}", code);
+            println!();
+        }
+
+        println!("{}", separator);
+        println!();
+    }
+
+    /// Publish room code to DHT for resolution
+    fn publish_room_code(&mut self, code: &str) {
+        // Use the first listen address (prefer non-localhost)
+        let addr = self.listen_addrs.iter()
+            .find(|a| !a.contains("127.0.0.1") && !a.contains("::1"))
+            .or(self.listen_addrs.first());
+
+        if let Some(addr) = addr {
+            let key = format!("room:{}", code.to_uppercase().replace('-', ""));
+            let record = kad::Record {
+                key: kad::RecordKey::new(&key),
+                value: addr.as_bytes().to_vec(),
+                publisher: Some(self.peer_id),
+                expires: Some(std::time::Instant::now() + std::time::Duration::from_secs(3600)),
+            };
+
+            debug!("Publishing room code {} -> {} to DHT", code, addr);
+            if let Err(e) = self.swarm.behaviour_mut().kademlia.put_record(record, kad::Quorum::One) {
+                warn!("Failed to publish room code to DHT: {:?}", e);
             }
         }
     }

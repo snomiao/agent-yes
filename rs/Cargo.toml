@@ -75,12 +75,18 @@ libp2p = { version = "0.54", features = [
     "yamux",
 ], optional = true }
 
+# URL encoding for swarm URLs
+urlencoding = { version = "2", optional = true }
+
+# Random number generation for room codes
+rand = { version = "0.8", optional = true }
+
 # UUID for agent identification
 uuid = { version = "1", features = ["v4"] }
 
 [features]
 default = []
-swarm = ["libp2p"]
+swarm = ["libp2p", "urlencoding", "rand"]
 
 [dev-dependencies]
 tempfile = "3"
