@@ -38,12 +38,16 @@ struct Args {
     prompt: Option<String>,
 
     /// Exit on idle (e.g., "60s", "1m", "5m")
-    #[arg(short, long)]
+    #[arg(short, long, alias = "idle-timeout")]
     timeout: Option<String>,
 
     /// Deprecated: Exit on idle
     #[arg(long, hide = true)]
     exit_on_idle: Option<String>,
+
+    /// Deprecated: Alias for --timeout
+    #[arg(long, hide = true)]
+    idle_timeout: Option<String>,
 
     /// Auto-restart on crash
     #[arg(short, long, default_value = "true", action = ArgAction::Set)]
@@ -117,8 +121,8 @@ pub fn parse_args() -> Result<CliArgs> {
         ));
     }
 
-    // Parse timeout
-    let timeout_str = args.timeout.or(args.exit_on_idle);
+    // Parse timeout (check all aliases)
+    let timeout_str = args.timeout.or(args.idle_timeout).or(args.exit_on_idle);
     let timeout_ms = timeout_str.map(|s| parse_duration(&s)).transpose()?;
 
     // Parse prompt from remaining args (after --)

@@ -65,7 +65,7 @@ export function parseCliArgs(argv: string[]) {
     .option("timeout", {
       type: "string",
       description: 'Exit after a period of inactivity, e.g., "5s" or "1m"',
-      alias: "t",
+      alias: ["t", "idle-timeout"],
     })
     .option("exit-on-idle", {
       type: "string",

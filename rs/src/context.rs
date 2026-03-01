@@ -209,6 +209,10 @@ impl AgentContext {
                     // Check for idle timeout
                     if let Some(timeout) = timeout_ms {
                         let idle = self.idle_waiter.idle_time_ms();
+                        // Log idle time every 2 seconds for debugging
+                        if self.start_time.elapsed().as_secs() % 2 == 0 {
+                            debug!("Idle time: {}ms / {}ms timeout", idle, timeout);
+                        }
                         if idle > timeout {
                             // Check if still working
                             let is_working = self.cli_config.working.iter()
