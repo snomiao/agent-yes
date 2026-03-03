@@ -95,6 +95,7 @@ pub async fn spawn_agent(
     cli: &str,
     args: &[String],
     config: &CliConfig,
+    cwd: &str,
     verbose: bool,
 ) -> Result<PtyContext> {
     let pty_system = native_pty_system();
@@ -124,16 +125,14 @@ pub async fn spawn_agent(
         cmd.arg(arg);
     }
 
-    // Set working directory to current directory
-    if let Ok(cwd) = std::env::current_dir() {
-        cmd.cwd(cwd);
-    }
+    // Set working directory (passed from main to ensure consistency)
+    cmd.cwd(cwd);
 
     if verbose {
-        debug!("Spawning {} with args: {:?}", binary, args);
+        debug!("Spawning {} with args: {:?} in directory: {}", binary, args, cwd);
     }
 
-    info!("Starting {} agent...", cli);
+    info!("Starting {} agent in {}...", cli, cwd);
 
     // Spawn the child
     let child = slave.spawn_command(cmd)?;

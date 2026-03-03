@@ -24,11 +24,17 @@ async fn main() -> Result<()> {
 
     info!("agent-yes v{}", env!("CARGO_PKG_VERSION"));
 
+    // Capture current working directory early
+    let cwd = std::env::current_dir()
+        .map_err(|e| anyhow::anyhow!("Failed to get current working directory: {}", e))?
+        .to_string_lossy()
+        .to_string();
+
     // Check for swarm mode (new --swarm flag or deprecated --experimental-swarm)
     if args.swarm.is_some() {
         #[cfg(feature = "swarm")]
         {
-            let exit_code = run_swarm_mode(args).await?;
+            let exit_code = run_swarm_mode(args, &cwd).await?;
             std::process::exit(exit_code);
         }
 
@@ -40,12 +46,12 @@ async fn main() -> Result<()> {
     }
 
     // Run the agent
-    let exit_code = run_agent(args).await?;
+    let exit_code = run_agent(args, &cwd).await?;
 
     std::process::exit(exit_code);
 }
 
-async fn run_agent(args: CliArgs) -> Result<i32> {
+async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     use crate::config::get_cli_config;
     use crate::context::AgentContext;
     use crate::messaging::send_message;
@@ -83,7 +89,7 @@ async fn run_agent(args: CliArgs) -> Result<i32> {
 
     loop {
         // Spawn the agent process
-        let mut ctx = spawn_agent(&args.cli, &cmd_args, &cli_config, args.verbose).await?;
+        let mut ctx = spawn_agent(&args.cli, &cmd_args, &cli_config, cwd, args.verbose).await?;
 
         // Create context
         let mut agent_ctx = AgentContext::new(
@@ -113,7 +119,7 @@ async fn run_agent(args: CliArgs) -> Result<i32> {
 
 /// Run in swarm mode - P2P agent networking
 #[cfg(feature = "swarm")]
-async fn run_swarm_mode(args: CliArgs) -> Result<i32> {
+async fn run_swarm_mode(args: CliArgs, cwd: &str) -> Result<i32> {
     use crate::swarm::{SwarmConfig, SwarmNode, SwarmEvent2, SwarmCommand, SwarmUrlConfig, generate_room_code};
     use tokio::sync::mpsc;
     use tracing::{info, warn};
@@ -152,10 +158,7 @@ async fn run_swarm_mode(args: CliArgs) -> Result<i32> {
         topic: url_config.topic.clone(),
         bootstrap_peers: url_config.bootstrap_peers.clone(),
         cli: args.cli.clone(),
-        cwd: std::env::current_dir()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string(),
+        cwd: cwd.to_string(),
         room_code: Some(room_code.clone()),
         room_code_to_resolve: url_config.room_code.clone(),
     };
