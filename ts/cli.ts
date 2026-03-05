@@ -10,6 +10,7 @@ import { logger } from "./logger.ts";
 import { PidStore } from "./pidStore.ts";
 import { displayVersion } from "./versionChecker.ts";
 import { getRustBinary } from "./rustBinary.ts";
+import { buildRustArgs } from "./buildRustArgs.ts";
 
 // Parse CLI arguments
 const config = parseCliArgs(process.argv);
@@ -26,23 +27,8 @@ if (config.useRust) {
     process.exit(1);
   }
 
-  // Build args for Rust binary (filter out --rust flag)
-  const rawRustArgs = process.argv.slice(2).filter((arg) => arg !== "--rust" && !arg.startsWith("--rust="));
-
-  // Check if swarm mode is requested (don't prepend CLI name for swarm mode)
-  const hasSwarmArg = rawRustArgs.some(arg => arg === '--swarm' || arg.startsWith('--swarm='));
-
-  // Prepend CLI name if detected from script name but not already in args
-  // This ensures codex-yes --rust passes "codex" to the Rust binary
-  // Skip prepending for swarm mode since it doesn't spawn a CLI
-  const cliFromScript = config.cli;
-  const hasCliArg = rawRustArgs.some(arg => arg.startsWith('--cli=') || arg === '--cli') ||
-                    rawRustArgs.some(arg => SUPPORTED_CLIS.includes(arg));
-  // Append CLI name at the end so it doesn't trigger trailing_var_arg in clap,
-  // which would cause all subsequent args (like --timeout) to be treated as positional
-  const rustArgs = cliFromScript && !hasCliArg && !hasSwarmArg
-    ? [...rawRustArgs, cliFromScript]
-    : rawRustArgs;
+  // Build args for Rust binary
+  const rustArgs = buildRustArgs(process.argv, config.cli, SUPPORTED_CLIS);
 
   if (config.verbose) {
     console.log(`[rust] Using binary: ${rustBinary}`);
