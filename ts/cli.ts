@@ -38,8 +38,10 @@ if (config.useRust) {
   const cliFromScript = config.cli;
   const hasCliArg = rawRustArgs.some(arg => arg.startsWith('--cli=') || arg === '--cli') ||
                     rawRustArgs.some(arg => SUPPORTED_CLIS.includes(arg));
+  // Append CLI name at the end so it doesn't trigger trailing_var_arg in clap,
+  // which would cause all subsequent args (like --timeout) to be treated as positional
   const rustArgs = cliFromScript && !hasCliArg && !hasSwarmArg
-    ? [cliFromScript, ...rawRustArgs]
+    ? [...rawRustArgs, cliFromScript]
     : rawRustArgs;
 
   if (config.verbose) {
