@@ -264,8 +264,11 @@ impl AgentContext {
 
         // Keep buffer size reasonable
         if self.output_buffer.len() > 100000 {
-            self.output_buffer = self.output_buffer.split_off(50000);
-            self.rendered_output = self.rendered_output.split_off(50000.min(self.rendered_output.len()));
+            let split_at = find_char_boundary(&self.output_buffer, 50000);
+            self.output_buffer = self.output_buffer.split_off(split_at);
+            let rendered_len = self.rendered_output.len();
+            let rendered_split = find_char_boundary(&self.rendered_output, 50000.min(rendered_len));
+            self.rendered_output = self.rendered_output.split_off(rendered_split);
         }
 
         // Mark stdout received
@@ -435,5 +438,78 @@ impl AgentContext {
         }
 
         Ok(())
+    }
+}
+
+/// Find the nearest char boundary at or after `at`, so split_off won't panic on multi-byte UTF-8.
+fn find_char_boundary(s: &str, at: usize) -> usize {
+    if at >= s.len() {
+        return s.len();
+    }
+    let mut pos = at;
+    while !s.is_char_boundary(pos) {
+        pos += 1;
+    }
+    pos
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_char_boundary_ascii() {
+        let s = "hello world";
+        assert_eq!(find_char_boundary(s, 5), 5);
+    }
+
+    #[test]
+    fn test_find_char_boundary_multibyte_exact() {
+        // 门 is 3 bytes in UTF-8: E9 97 A8
+        let s = "门";
+        assert_eq!(find_char_boundary(s, 0), 0); // start of char
+        assert_eq!(find_char_boundary(s, 3), 3); // end of char = len
+    }
+
+    #[test]
+    fn test_find_char_boundary_multibyte_mid() {
+        // "a门b" = [61, E9, 97, A8, 62]
+        let s = "a门b";
+        assert_eq!(find_char_boundary(s, 1), 1); // start of 门
+        assert_eq!(find_char_boundary(s, 2), 4); // mid 门 -> skip to b
+        assert_eq!(find_char_boundary(s, 3), 4); // mid 门 -> skip to b
+        assert_eq!(find_char_boundary(s, 4), 4); // start of b
+    }
+
+    #[test]
+    fn test_find_char_boundary_beyond_len() {
+        let s = "hello";
+        assert_eq!(find_char_boundary(s, 100), 5);
+    }
+
+    #[test]
+    fn test_find_char_boundary_emoji() {
+        // 🦀 is 4 bytes in UTF-8
+        let s = "a🦀b";
+        assert_eq!(find_char_boundary(s, 1), 1); // start of 🦀
+        assert_eq!(find_char_boundary(s, 2), 5); // mid 🦀 -> skip to b
+        assert_eq!(find_char_boundary(s, 3), 5);
+        assert_eq!(find_char_boundary(s, 4), 5);
+        assert_eq!(find_char_boundary(s, 5), 5); // start of b
+    }
+
+    #[test]
+    fn test_split_off_with_find_char_boundary() {
+        // Simulate the buffer truncation with Chinese characters
+        let mut buf = String::new();
+        for _ in 0..20000 {
+            buf.push('门'); // 3 bytes each = 60000 bytes
+        }
+        let split_at = find_char_boundary(&buf, 50000);
+        // Should not panic
+        let tail = buf.split_off(split_at);
+        assert!(!tail.is_empty());
+        // split_at should be on a char boundary (multiple of 3 for 门)
+        assert_eq!(split_at % 3, 0);
     }
 }
