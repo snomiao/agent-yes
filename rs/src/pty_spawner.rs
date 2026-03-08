@@ -153,14 +153,31 @@ pub async fn spawn_agent(
     // Spawn reader thread
     thread::spawn(move || {
         let mut buf = [0u8; 8192];  // 8KB buffer like bun-pty
+        let mut partial = Vec::new(); // Buffer for incomplete UTF-8 sequences
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
                 Ok(n) => {
-                    let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                    if output_tx.blocking_send(data).is_err() {
-                        break; // Channel closed
+                    // Prepend any leftover partial bytes from previous read
+                    let combined;
+                    let bytes: &[u8] = if partial.is_empty() {
+                        &buf[..n]
+                    } else {
+                        partial.extend_from_slice(&buf[..n]);
+                        combined = std::mem::take(&mut partial);
+                        &combined
+                    };
+
+                    let (valid, leftover) = extract_valid_utf8(bytes);
+
+                    if !valid.is_empty() {
+                        if output_tx.blocking_send(valid.to_string()).is_err() {
+                            break; // Channel closed
+                        }
                     }
+
+                    // Save any trailing incomplete bytes for next read
+                    partial = leftover.to_vec();
                 }
                 Err(e) => {
                     debug!("PTY read error: {}", e);
@@ -186,6 +203,29 @@ pub fn is_command_not_found_error(error: &str) -> bool {
         || error.contains("not found")
 }
 
+/// Extract valid UTF-8 from a byte slice, returning (valid_string, leftover_bytes).
+/// Incomplete multi-byte sequences at the end are returned as leftover.
+/// Invalid bytes in the middle are skipped.
+pub fn extract_valid_utf8(bytes: &[u8]) -> (&str, &[u8]) {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => (s, &[]),
+        Err(e) => {
+            let valid_up_to = e.valid_up_to();
+            let valid_str = unsafe { std::str::from_utf8_unchecked(&bytes[..valid_up_to]) };
+            match e.error_len() {
+                // Incomplete sequence at end — return as leftover for next read
+                None => (valid_str, &bytes[valid_up_to..]),
+                // Invalid byte in the middle — skip it, no leftover
+                Some(len) => {
+                    // We return just the valid prefix; the caller will discard the bad byte
+                    // on next iteration via the partial buffer logic
+                    (valid_str, &bytes[valid_up_to + len..])
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,5 +236,101 @@ mod tests {
         assert!(is_command_not_found_error("'foo' is not recognized"));
         assert!(is_command_not_found_error("No such file or directory"));
         assert!(!is_command_not_found_error("Some other error"));
+    }
+
+    #[test]
+    fn test_extract_valid_utf8_ascii() {
+        let bytes = b"hello world";
+        let (valid, leftover) = extract_valid_utf8(bytes);
+        assert_eq!(valid, "hello world");
+        assert!(leftover.is_empty());
+    }
+
+    #[test]
+    fn test_extract_valid_utf8_complete_multibyte() {
+        // 门 = E9 97 A8 (3 bytes)
+        let bytes = "hello门world".as_bytes();
+        let (valid, leftover) = extract_valid_utf8(bytes);
+        assert_eq!(valid, "hello门world");
+        assert!(leftover.is_empty());
+    }
+
+    #[test]
+    fn test_extract_valid_utf8_split_at_first_byte() {
+        // 门 = E9 97 A8 — only first byte present
+        let bytes = &[b'h', b'i', 0xE9];
+        let (valid, leftover) = extract_valid_utf8(bytes);
+        assert_eq!(valid, "hi");
+        assert_eq!(leftover, &[0xE9]);
+    }
+
+    #[test]
+    fn test_extract_valid_utf8_split_at_second_byte() {
+        // 门 = E9 97 A8 — first two bytes present
+        let bytes = &[b'h', b'i', 0xE9, 0x97];
+        let (valid, leftover) = extract_valid_utf8(bytes);
+        assert_eq!(valid, "hi");
+        assert_eq!(leftover, &[0xE9, 0x97]);
+    }
+
+    #[test]
+    fn test_extract_valid_utf8_reassemble() {
+        // Simulate split read: first chunk has partial 门, second has the rest
+        let full = "hi门bye";
+        let full_bytes = full.as_bytes();
+
+        // Split at byte 3 (middle of 门: bytes 2,3,4 = E9,97,A8)
+        let chunk1 = &full_bytes[..3]; // b"hi" + 0xE9
+        let chunk2 = &full_bytes[3..]; // 0x97, 0xA8, b"bye"
+
+        // First read
+        let (valid1, leftover1) = extract_valid_utf8(chunk1);
+        assert_eq!(valid1, "hi");
+        assert_eq!(leftover1, &[0xE9]);
+
+        // Second read: prepend leftover
+        let mut combined = leftover1.to_vec();
+        combined.extend_from_slice(chunk2);
+        let (valid2, leftover2) = extract_valid_utf8(&combined);
+        assert_eq!(valid2, "门bye");
+        assert!(leftover2.is_empty());
+    }
+
+    #[test]
+    fn test_extract_valid_utf8_emoji_split() {
+        // 🦀 = F0 9F A6 80 (4 bytes)
+        let full = "a🦀b";
+        let full_bytes = full.as_bytes();
+
+        // Split after 2 bytes of the emoji
+        let chunk1 = &full_bytes[..3]; // b"a" + F0 9F
+        let chunk2 = &full_bytes[3..]; // A6 80 b"b"
+
+        let (valid1, leftover1) = extract_valid_utf8(chunk1);
+        assert_eq!(valid1, "a");
+        assert_eq!(leftover1, &[0xF0, 0x9F]);
+
+        let mut combined = leftover1.to_vec();
+        combined.extend_from_slice(chunk2);
+        let (valid2, leftover2) = extract_valid_utf8(&combined);
+        assert_eq!(valid2, "🦀b");
+        assert!(leftover2.is_empty());
+    }
+
+    #[test]
+    fn test_extract_valid_utf8_multiple_chinese_chars() {
+        // Simulate the album 门 scenario with mixed CJK
+        let text = "The album 门 loaded with 1 photo";
+        let bytes = text.as_bytes();
+        let (valid, leftover) = extract_valid_utf8(bytes);
+        assert_eq!(valid, text);
+        assert!(leftover.is_empty());
+    }
+
+    #[test]
+    fn test_extract_valid_utf8_empty() {
+        let (valid, leftover) = extract_valid_utf8(&[]);
+        assert_eq!(valid, "");
+        assert!(leftover.is_empty());
     }
 }
