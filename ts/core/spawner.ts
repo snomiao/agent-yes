@@ -1,9 +1,12 @@
 import { execaCommandSync, parseCommandString } from "execa";
 import { logger } from "../logger.ts";
-import { catcher } from "../catcher.ts";
+import { tryCatch } from "../tryCatch.ts";
 import pty, { type IPty } from "../pty.ts";
 import type { AgentCliConfig } from "../index.ts";
 import type { SUPPORTED_CLIS } from "../SUPPORTED_CLIS.ts";
+import { exec, execSync } from "node:child_process";
+import { fromReadable, fromStdio, fromWritable } from "from-node-stream";
+import sflow from "sflow";
 
 /**
  * Agent spawning utilities
@@ -136,9 +139,9 @@ export function spawnAgent(options: SpawnOptions): IPty {
     return spawned;
   };
 
-  return catcher(
+  return tryCatch(
     // error handler
-    (error: unknown, _fn, ..._args) => {
+     (error: unknown, attempts: number, spawn, ...args) => {
       logger.error(`Fatal: Failed to start ${cli}.`);
 
       const isNotFound = isCommandNotFoundError(error);
@@ -152,10 +155,15 @@ export function spawnAgent(options: SpawnOptions): IPty {
         logger.info(`Please install the cli by run ${installCmd}`);
 
         if (install) {
-          logger.info(`Attempting to install ${cli}...`);
-          execaCommandSync(installCmd, { stdio: "inherit" });
+          logger.debug(`Attempting to install ${cli}...`);
+          // Note: using execSync for simplicity, but this will block the event loop.
+          // maybe in future we should refactor whole spawnAgent to be async and use exec instead.
+          // but this would be a bigger change, so we can consider it in future if needed.
+          execSync(installCmd, { stdio: 'inherit' });
+
+          // Note: If the process times out or has a non-zero exit code, execSync will throw.
           logger.info(`${cli} installed successfully. Please rerun the command.`);
-          return spawn();
+          return spawn(...args); // retry spawning after installation
         } else {
           logger.error(`If you did not installed it yet, Please install it first: ${installCmd}`);
           throw error;

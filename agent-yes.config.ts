@@ -105,9 +105,8 @@ function getDefaultConfig() {
           /^.{0,4} ?1\. ?Yes/m,
           /Press Enter to continue…/m,
         ],
-        fatal: [/⎿  Claude usage limit reached\./, /^error: unknown option/],
+        fatal: [/⎿  Claude usage limit reached\./, /^error: unknown option/, /No conversation found to continue/],
         restoreArgs: ["--continue"], // restart with --continue when crashed
-        restartWithoutContinueArg: [/No conversation found to continue/],
         exitCommand: ["/exit"],
         bunx: true, // use bunx to run the binary, start time is 5s faster than node
         defaultArgs: [],
@@ -119,10 +118,6 @@ function getDefaultConfig() {
         enter: [/│ ● 1. Yes, allow once/, /│ ● 1. Allow once/, /│ ● 1. Allow once/],
         fatal: [/Error resuming session/, /No previous sessions found for this project./],
         restoreArgs: ["--resume"], // restart with --resume when crashed
-        restartWithoutContinueArg: [
-          /No previous sessions found for this project\./,
-          /Error resuming session/,
-        ],
         exitCommand: ["/chat save ${PWD}", "/quit"],
       },
       codex: {
