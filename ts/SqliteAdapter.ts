@@ -72,7 +72,7 @@ export class SqliteAdapter {
         return this.db.prepare(sql).all(...params);
       }
     } catch (error) {
-      logger.warn("[SqliteAdapter] Query failed:", error);
+      logger.debug("[SqliteAdapter] Query failed:", error);
       return [];
     }
   }
@@ -88,7 +88,7 @@ export class SqliteAdapter {
         return this.db.prepare(sql).run(...params);
       }
     } catch (error) {
-      logger.warn("[SqliteAdapter] Run failed:", error);
+      logger.debug("[SqliteAdapter] Run failed:", error);
       return {};
     }
   }
@@ -99,7 +99,7 @@ export class SqliteAdapter {
         this.db.close();
       }
     } catch (error) {
-      logger.warn("[SqliteAdapter] Close failed:", error);
+      logger.debug("[SqliteAdapter] Close failed:", error);
     }
   }
 
