@@ -83,9 +83,9 @@
   },
   "dependencies": {
     "@snomiao/bun-pty": "^0.3.4",
-    "@snomiao/keyv-sqlite": "^5.0.4",
     "bun-pty": "^0.4.8",
     "from-node-stream": "^0.1.2",
+    "proper-lockfile": "^4.1.2",
     "yaml": "^2.8.2"
   },
   "devDependencies": {
@@ -95,6 +95,7 @@
     "@types/jest": "^30.0.0",
     "@types/ms": "^2.1.0",
     "@types/node": "^25.0.10",
+    "@types/proper-lockfile": "^4.1.4",
     "@types/yargs": "^17.0.35",
     "@typescript/native-preview": "^7.0.0-dev.20260124.1",
     "execa": "^9.6.1",
