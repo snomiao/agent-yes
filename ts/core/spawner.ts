@@ -7,6 +7,7 @@ import type { SUPPORTED_CLIS } from "../SUPPORTED_CLIS.ts";
 import { exec, execSync } from "node:child_process";
 import { fromReadable, fromStdio, fromWritable } from "from-node-stream";
 import sflow from "sflow";
+import pkg from "../../package.json" with { type: "json" };
 
 /**
  * Agent spawning utilities
@@ -135,7 +136,7 @@ export function spawnAgent(options: SpawnOptions): IPty {
     let [bin, ...args] = [...parseCommandString(cliCommand), ...cliArgs];
     logger.debug(`Spawning ${bin} with args: ${JSON.stringify(args)}`);
     const spawned = pty.spawn(bin!, args, ptyOptions);
-    logger.info(`[${cli}-yes] Spawned ${bin} with PID ${spawned.pid}`);
+    logger.info(`[${cli}-yes] Spawned ${bin} with PID ${spawned.pid} (agent-yes v${pkg.version})`);
     return spawned;
   };
 
