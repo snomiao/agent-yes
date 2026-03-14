@@ -20,6 +20,7 @@ const FORCE_READY_TIMEOUT_MS: u64 = 10000;
 const ENTER_IDLE_WAIT_MS: u64 = 50;     // Wait for 50ms idle before sending Enter (reduced from 1000 due to cursor control sequences)
 const ENTER_RETRY_1_MS: u64 = 500;      // Retry after 500ms if no response
 const ENTER_RETRY_2_MS: u64 = 1500;     // Retry after 1500ms if no response
+const IDLE_SCAN_INTERVAL_MS: u64 = 60000; // Re-scan rendered screen every 60s of idle
 
 /// Agent context - centralized session state
 pub struct AgentContext {
@@ -48,6 +49,9 @@ pub struct AgentContext {
     pending_enter_detected_at: Option<Instant>,
     enter_sent_at: Option<Instant>,
     enter_retry_count: u8,
+
+    // Idle screen scanner - re-checks enter patterns after prolonged idle
+    last_idle_scan_at: Option<Instant>,
 }
 
 impl AgentContext {
@@ -78,6 +82,7 @@ impl AgentContext {
             pending_enter_detected_at: None,
             enter_sent_at: None,
             enter_retry_count: 0,
+            last_idle_scan_at: None,
         }
     }
 
@@ -307,6 +312,32 @@ impl AgentContext {
         // Check patterns on heartbeat (for no-EOL CLIs)
         if self.cli_config.no_eol {
             self.check_patterns(msg_ctx).await?;
+        }
+
+        // Idle screen scanner: re-check enter patterns after prolonged idle
+        // This catches prompts that appeared but were missed (e.g. after buffer clear)
+        if self.auto_yes_enabled && !self.pending_enter {
+            let idle_ms = self.idle_waiter.idle_time_ms();
+            if idle_ms >= IDLE_SCAN_INTERVAL_MS {
+                let should_scan = match self.last_idle_scan_at {
+                    Some(last) => last.elapsed().as_millis() as u64 >= IDLE_SCAN_INTERVAL_MS,
+                    None => true,
+                };
+                if should_scan {
+                    self.last_idle_scan_at = Some(Instant::now());
+                    let buffer = &self.rendered_output;
+                    for pattern in &self.cli_config.enter {
+                        if pattern.is_match(buffer) {
+                            debug!("Idle scan: enter pattern matched after {}ms idle", idle_ms);
+                            self.pending_enter = true;
+                            self.pending_enter_detected_at = Some(Instant::now());
+                            self.enter_sent_at = None;
+                            self.enter_retry_count = 0;
+                            break;
+                        }
+                    }
+                }
+            }
         }
 
         // Handle pending Enter with idle wait and retry logic
