@@ -30,6 +30,7 @@ import { createAutoResponseHandler } from "./core/responders.ts";
 import { createTerminatorStream } from "./core/streamHelpers.ts";
 import { globalAgentRegistry } from "./agentRegistry.ts";
 import { ReadyManager } from "./ReadyManager.ts";
+import { notifyWebhook } from "./webhookNotifier.ts";
 
 export { removeControlCharacters };
 export { AgentContext };
@@ -330,6 +331,7 @@ export default async function agentYes({
   } catch (error) {
     logger.warn(`[pidStore] Failed to register process ${shell.pid}:`, error);
   }
+  notifyWebhook("RUNNING", prompt ?? "", workingDir).catch(() => null);
 
   // Initialize log paths (independent of registration)
   const logPaths = await initializeLogPaths(pidStore, shell.pid);
@@ -483,6 +485,7 @@ export default async function agentYes({
         } catch (error) {
           logger.warn(`[pidStore] Failed to update status for PID ${exitedPid}:`, error);
         }
+        notifyWebhook("EXIT", `fatal exitCode=${exitCode ?? "?"}`, workingDir).catch(() => null);
         return pendingExitCode.resolve(exitCode);
       }
 
@@ -558,6 +561,7 @@ export default async function agentYes({
     } catch (error) {
       logger.warn(`[pidStore] Failed to update status for PID ${exitedPid}:`, error);
     }
+    notifyWebhook("EXIT", `${exitReason} exitCode=${exitCode ?? "?"}`, workingDir).catch(() => null);
     return pendingExitCode.resolve(exitCode);
   });
 
@@ -660,6 +664,7 @@ export default async function agentYes({
       }
 
       logger.info(`[${cli}-yes] ${cli} is idle, exiting...`);
+      notifyWebhook("IDLE", "", workingDir).catch(() => null);
       await exitAgent();
     });
 
