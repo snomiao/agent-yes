@@ -20,6 +20,7 @@ docker network create agent-swarm
 ### 3. Run Multiple Agents
 
 **Agent 1:**
+
 ```bash
 docker run -d --rm \
   --name agent-1 \
@@ -30,6 +31,7 @@ docker run -d --rm \
 ```
 
 **Agent 2:**
+
 ```bash
 docker run -d --rm \
   --name agent-2 \
@@ -47,6 +49,7 @@ docker logs agent-2
 ```
 
 You should see peer discovery messages:
+
 ```
 [+] Peer discovered: 12D3KooW...
 ```
@@ -79,6 +82,7 @@ When agents run on the same Docker network, they discover each other via **mDNS*
 ## Real Example Output
 
 ### Agent 1 Startup
+
 ```
 $ docker logs agent-1
 
@@ -118,6 +122,7 @@ Share with teammates:
 ```
 
 ### Agent 2 Startup (discovers Agent 1 instantly)
+
 ```
 $ docker logs agent-2
 
@@ -152,6 +157,7 @@ docker run -d --rm \
 ```
 
 Output:
+
 ```
 [INFO] Starting swarm mode
 [INFO]   Topic: docker-test
@@ -172,7 +178,7 @@ SWARM STARTED
 
 ```yaml
 # docker-compose.swarm.yml
-version: '3.8'
+version: "3.8"
 
 networks:
   swarm:
@@ -211,6 +217,7 @@ services:
 ```
 
 Run with:
+
 ```bash
 docker-compose -f docker-compose.swarm.yml up
 ```
@@ -220,6 +227,7 @@ docker-compose -f docker-compose.swarm.yml up
 ### Bridge Network (Default)
 
 Works out of the box with mDNS:
+
 ```bash
 docker network create agent-swarm
 docker run --network agent-swarm ...
@@ -228,6 +236,7 @@ docker run --network agent-swarm ...
 ### Host Network
 
 Shares the host's network stack (mDNS works like bare metal):
+
 ```bash
 docker run --network host ...
 ```
@@ -235,6 +244,7 @@ docker run --network host ...
 ### Cross-Host (Docker Swarm / Kubernetes)
 
 Use explicit peer addresses since mDNS won't work across hosts:
+
 ```bash
 # On host A
 docker run ... /agent-yes --swarm my-project
@@ -249,15 +259,18 @@ docker run ... /agent-yes --swarm "ay://my-project?peer=/ip4/<host-a-ip>/tcp/<po
 ### Peers not discovering each other
 
 1. **Same Docker network?**
+
    ```bash
    docker network inspect agent-swarm
    ```
+
    Both containers should be listed.
 
 2. **mDNS working?**
    mDNS requires multicast support. Bridge networks support this by default.
 
 3. **Use explicit peer:**
+
    ```bash
    # Get peer address from agent-1 logs
    docker logs agent-1 | grep "Listening on"
@@ -273,6 +286,7 @@ This is normal for the first agent. It will discover peers once others join.
 ### Container exits immediately
 
 Add `-it` for interactive mode or ensure the swarm keeps running:
+
 ```bash
 docker run -it --rm ... /agent-yes --swarm my-project
 ```

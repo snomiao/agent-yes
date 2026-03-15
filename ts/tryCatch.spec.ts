@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import { tryCatch } from "./tryCatch";
 
 describe("tryCatch", () => {
-
   describe("direct overload", () => {
     it("should catch errors and call catchFn with error, attempts, robustFn, and args", () => {
       let catchedError: unknown;
@@ -213,11 +212,11 @@ describe("tryCatch", () => {
       };
 
       const wrappedFn = tryCatch(catchFn, sometimesFails);
-      expect(wrappedFn()).toBe(1);   // attempt 1, success
-      expect(wrappedFn()).toBe(-1);  // attempt 2, fail
+      expect(wrappedFn()).toBe(1); // attempt 1, success
+      expect(wrappedFn()).toBe(-1); // attempt 2, fail
       expect(lastAttempts).toBe(2);
-      expect(wrappedFn()).toBe(3);   // attempt 3, success
-      expect(wrappedFn()).toBe(-1);  // attempt 4, fail
+      expect(wrappedFn()).toBe(3); // attempt 3, success
+      expect(wrappedFn()).toBe(-1); // attempt 4, fail
       expect(lastAttempts).toBe(4);
     });
 
@@ -242,7 +241,8 @@ describe("tryCatch", () => {
 
   describe("type safety", () => {
     it("should maintain function signature", () => {
-      const catchFn = (_error: unknown, _attempts: number, _fn: unknown, ..._args: unknown[]) => "error";
+      const catchFn = (_error: unknown, _attempts: number, _fn: unknown, ..._args: unknown[]) =>
+        "error";
       const originalFn = (a: number, b: string): string => `${a}-${b}`;
 
       const wrappedFn = tryCatch(catchFn, originalFn);

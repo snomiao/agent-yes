@@ -178,7 +178,10 @@ export default async function agentYes({
   // Track when user sends Ctrl+C to avoid treating intentional exit as crash
   let userSentCtrlC = false;
 
-  if (verbose) logger.debug(`[stdin] isTTY: ${process.stdin.isTTY}, setRawMode available: ${!!process.stdin.setRawMode}`);
+  if (verbose)
+    logger.debug(
+      `[stdin] isTTY: ${process.stdin.isTTY}, setRawMode available: ${!!process.stdin.setRawMode}`,
+    );
   process.stdin.setRawMode?.(true); // must be called any stdout/stdin usage
   if (verbose) logger.debug(`[stdin] Raw mode set, isRaw: ${(process.stdin as any).isRaw}`);
 
@@ -358,7 +361,7 @@ export default async function agentYes({
       cli,
       prompt,
       startTime: Date.now(),
-      stdoutBuffer: []
+      stdoutBuffer: [],
     });
   } catch (error) {
     logger.warn(`[agentRegistry] Failed to register agent ${shell.pid}:`, error);
@@ -450,7 +453,7 @@ export default async function agentYes({
           cli,
           prompt,
           startTime: Date.now(),
-          stdoutBuffer: []
+          stdoutBuffer: [],
         });
       } catch (error) {
         logger.warn(`[agentRegistry] Failed to register restarted agent ${shell.pid}:`, error);
@@ -522,7 +525,13 @@ export default async function agentYes({
       shell = pty.spawn(cli, restoreArgs, restorePtyOptions);
       // Register process in pidStore (non-blocking)
       try {
-        await pidStore.registerProcess({ pid: shell.pid, cli, args: restoreArgs, prompt, cwd: workingDir });
+        await pidStore.registerProcess({
+          pid: shell.pid,
+          cli,
+          args: restoreArgs,
+          prompt,
+          cwd: workingDir,
+        });
       } catch (error) {
         logger.warn(`[pidStore] Failed to register restored process ${shell.pid}:`, error);
       }
@@ -537,7 +546,7 @@ export default async function agentYes({
           cli,
           prompt,
           startTime: Date.now(),
-          stdoutBuffer: []
+          stdoutBuffer: [],
         });
       } catch (error) {
         logger.warn(`[agentRegistry] Failed to register restored agent ${shell.pid}:`, error);
@@ -561,7 +570,9 @@ export default async function agentYes({
     } catch (error) {
       logger.warn(`[pidStore] Failed to update status for PID ${exitedPid}:`, error);
     }
-    notifyWebhook("EXIT", `${exitReason} exitCode=${exitCode ?? "?"}`, workingDir).catch(() => null);
+    notifyWebhook("EXIT", `${exitReason} exitCode=${exitCode ?? "?"}`, workingDir).catch(
+      () => null,
+    );
     return pendingExitCode.resolve(exitCode);
   });
 
@@ -713,14 +724,14 @@ export default async function agentYes({
         }
       };
 
-      process.stdin.on('data', dataHandler);
-      process.stdin.on('end', endHandler);
-      process.stdin.on('close', endHandler);
-      process.stdin.on('error', errorHandler);
+      process.stdin.on("data", dataHandler);
+      process.stdin.on("end", endHandler);
+      process.stdin.on("close", endHandler);
+      process.stdin.on("error", errorHandler);
     },
     cancel(reason) {
       process.stdin.pause();
-    }
+    },
   });
 
   let aborted = false;
@@ -752,63 +763,71 @@ export default async function agentYes({
       if (str === CTRL_C) {
         userSentCtrlC = true;
         // Reset flag after 2 seconds in case CLI doesn't exit immediately
-        setTimeout(() => { userSentCtrlC = false; }, 2000);
+        setTimeout(() => {
+          userSentCtrlC = false;
+        }, 2000);
       }
 
       return str;
     })
 
     // Detect Ctrl+Y or /auto command to toggle auto-yes mode
-    .map((() => {
-      let line = "";
-      const toggleAutoYes = () => {
-        ctx.autoYesEnabled = !ctx.autoYesEnabled;
-        // When switching to manual mode, mark stdin ready so user keystrokes are not blocked
-        if (!ctx.autoYesEnabled) {
-          ctx.stdinReady.ready();
-          ctx.stdinFirstReady.ready();
-        }
-        const status = ctx.autoYesEnabled ? "\x1b[32m[auto-yes: ON]\x1b[0m" : "\x1b[33m[auto-yes: OFF]\x1b[0m";
-        process.stderr.write(`\r${status} (Ctrl+Y to toggle)\n`);
-      };
-      return (data: string) => {
-        let out = "";
-        for (const ch of data) {
-          // Ctrl+Y (\x19) toggles auto-yes immediately
-          if (ch === "\x19") {
-            toggleAutoYes();
-            // Do not forward Ctrl+Y to the PTY
-            continue;
+    .map(
+      (() => {
+        let line = "";
+        const toggleAutoYes = () => {
+          ctx.autoYesEnabled = !ctx.autoYesEnabled;
+          // When switching to manual mode, mark stdin ready so user keystrokes are not blocked
+          if (!ctx.autoYesEnabled) {
+            ctx.stdinReady.ready();
+            ctx.stdinFirstReady.ready();
           }
-          // Handle Enter
-          if (ch === "\r" || ch === "\n") {
-            // Only check for /auto if line is short enough
-            if (line.length <= 20) {
-              const cleanLine = line.replace(/[\x00-\x1f]|\x1b\[[0-9;]*[A-Za-z]|\[[A-Z]/g, '').trim();
-              if (cleanLine === "/auto") {
-                out += "\x15"; // Ctrl+U to clear the /auto text from shell input
-                toggleAutoYes();
-                line = "";
-                continue;
-              }
+          const status = ctx.autoYesEnabled
+            ? "\x1b[32m[auto-yes: ON]\x1b[0m"
+            : "\x1b[33m[auto-yes: OFF]\x1b[0m";
+          process.stderr.write(`\r${status} (Ctrl+Y to toggle)\n`);
+        };
+        return (data: string) => {
+          let out = "";
+          for (const ch of data) {
+            // Ctrl+Y (\x19) toggles auto-yes immediately
+            if (ch === "\x19") {
+              toggleAutoYes();
+              // Do not forward Ctrl+Y to the PTY
+              continue;
             }
-            line = "";
+            // Handle Enter
+            if (ch === "\r" || ch === "\n") {
+              // Only check for /auto if line is short enough
+              if (line.length <= 20) {
+                const cleanLine = line
+                  .replace(/[\x00-\x1f]|\x1b\[[0-9;]*[A-Za-z]|\[[A-Z]/g, "")
+                  .trim();
+                if (cleanLine === "/auto") {
+                  out += "\x15"; // Ctrl+U to clear the /auto text from shell input
+                  toggleAutoYes();
+                  line = "";
+                  continue;
+                }
+              }
+              line = "";
+              out += ch;
+              continue;
+            }
+            // Handle backspace
+            if (ch === "\x7f" || ch === "\b") {
+              if (line.length > 0) line = line.slice(0, -1);
+              out += ch;
+              continue;
+            }
+            // Track only printable ASCII for line, with size limit
+            if (ch >= " " && ch <= "~" && line.length < 50) line += ch;
             out += ch;
-            continue;
           }
-          // Handle backspace
-          if (ch === "\x7f" || ch === "\b") {
-            if (line.length > 0) line = line.slice(0, -1);
-            out += ch;
-            continue;
-          }
-          // Track only printable ASCII for line, with size limit
-          if (ch >= " " && ch <= "~" && line.length < 50) line += ch;
-          out += ch;
-        }
-        return out;
-      };
-    })())
+          return out;
+        };
+      })(),
+    )
 
     // TODO(sno): Read from IPC stream if available (FIFO on Linux, Named Pipes on Windows)
     // .by(async (s) => {

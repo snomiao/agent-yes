@@ -248,13 +248,29 @@ describe("CLI argument parsing", () => {
   });
 
   it("should prioritize --timeout over --exit-on-idle", () => {
-    const result = parseCliArgs(["node", "/path/to/cli", "--timeout", "30s", "--exit-on-idle", "1m", "claude"]);
+    const result = parseCliArgs([
+      "node",
+      "/path/to/cli",
+      "--timeout",
+      "30s",
+      "--exit-on-idle",
+      "1m",
+      "claude",
+    ]);
 
     expect(result.exitOnIdle).toBe(30000);
   });
 
   it("should prioritize --timeout over --idle", () => {
-    const result = parseCliArgs(["node", "/path/to/cli", "--timeout", "15s", "--idle", "1m", "claude"]);
+    const result = parseCliArgs([
+      "node",
+      "/path/to/cli",
+      "--timeout",
+      "15s",
+      "--idle",
+      "1m",
+      "claude",
+    ]);
 
     expect(result.exitOnIdle).toBe(15000);
   });
@@ -265,7 +281,7 @@ describe("CLI argument parsing", () => {
     parseCliArgs(["node", "/path/to/cli", "--exit-on-idle", "1m", "claude"]);
 
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("--exit-on-idle and -e are deprecated")
+      expect.stringContaining("--exit-on-idle and -e are deprecated"),
     );
 
     warnSpy.mockRestore();
@@ -277,7 +293,7 @@ describe("CLI argument parsing", () => {
     parseCliArgs(["node", "/path/to/cli", "-e", "1m", "claude"]);
 
     expect(warnSpy).toHaveBeenCalledWith(
-      expect.stringContaining("--exit-on-idle and -e are deprecated")
+      expect.stringContaining("--exit-on-idle and -e are deprecated"),
     );
 
     warnSpy.mockRestore();

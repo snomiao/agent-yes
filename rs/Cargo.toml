@@ -62,17 +62,17 @@ once_cell = "1"
 
 # P2P networking (experimental swarm mode)
 libp2p = { version = "0.54", features = [
-    "gossipsub",
-    "identify",
-    "kad",
-    "macros",
-    "mdns",
-    "noise",
-    "ping",
-    "request-response",
-    "tcp",
-    "tokio",
-    "yamux",
+  "gossipsub",
+  "identify",
+  "kad",
+  "macros",
+  "mdns",
+  "noise",
+  "ping",
+  "request-response",
+  "tcp",
+  "tokio",
+  "yamux",
 ], optional = true }
 
 # URL encoding for swarm URLs

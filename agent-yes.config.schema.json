@@ -49,7 +49,10 @@
             {
               "type": "object",
               "properties": {
-                "powershell": { "type": "string", "description": "PowerShell install command (Windows)" },
+                "powershell": {
+                  "type": "string",
+                  "description": "PowerShell install command (Windows)"
+                },
                 "bash": { "type": "string", "description": "Bash install command (Unix/macOS)" },
                 "npm": { "type": "string", "description": "npm install command (fallback)" },
                 "unix": { "type": "string", "description": "Unix-specific install command" },

@@ -13,7 +13,7 @@ export async function fetchLatestVersion(): Promise<string | null> {
       return null;
     }
 
-    const data = await response.json() as { version: string };
+    const data = (await response.json()) as { version: string };
     return data.version;
   } catch (error) {
     // Silently fail if network is unavailable or request times out
@@ -26,8 +26,8 @@ export async function fetchLatestVersion(): Promise<string | null> {
  * Returns: 1 if v1 > v2, -1 if v1 < v2, 0 if equal
  */
 export function compareVersions(v1: string, v2: string): number {
-  const parts1 = v1.split('.').map(Number);
-  const parts2 = v2.split('.').map(Number);
+  const parts1 = v1.split(".").map(Number);
+  const parts2 = v2.split(".").map(Number);
 
   for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
     const part1 = parts1[i] || 0;

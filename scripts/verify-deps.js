@@ -3,10 +3,10 @@
  * Pre-publish verification script
  * Checks that critical runtime dependencies are properly configured
  */
-import { readFileSync, existsSync } from 'fs';
-import { join } from 'path';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
+import { readFileSync, existsSync } from "fs";
+import { join } from "path";
+import { fileURLToPath } from "url";
+import { dirname } from "path";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -15,10 +15,10 @@ const errors = [];
 const warnings = [];
 
 // Load package.json
-const pkgPath = join(__dirname, '..', 'package.json');
-const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
+const pkgPath = join(__dirname, "..", "package.json");
+const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
 
-console.log('🔍 Verifying agent-yes package configuration...\n');
+console.log("🔍 Verifying agent-yes package configuration...\n");
 
 // Check 1: Verify critical runtime dependencies are in dependencies, not devDependencies
 const runtimeImports = [
@@ -41,16 +41,16 @@ for (const { module, reason } of runtimeImports) {
 }
 
 // Check 2: Verify build script externalizes the right dependencies
-const buildScript = pkg.scripts?.build || '';
+const buildScript = pkg.scripts?.build || "";
 const externals = buildScript.match(/--external=[^\s]+/g) || [];
 
-console.log('\n📦 Build externals:');
+console.log("\n📦 Build externals:");
 for (const ext of externals) {
   console.log(`  ${ext}`);
-  const modName = ext.replace('--external=', '');
+  const modName = ext.replace("--external=", "");
 
   // Check if externalized module is in dependencies
-  if (modName.startsWith('@') || modName.includes('/')) {
+  if (modName.startsWith("@") || modName.includes("/")) {
     const inDeps = pkg.dependencies?.[modName];
     const inOptionalDeps = pkg.optionalDependencies?.[modName];
 
@@ -62,22 +62,22 @@ for (const ext of externals) {
 }
 
 // Check 3: Verify files field includes necessary runtime files
-console.log('\n📁 Package files configuration:');
+console.log("\n📁 Package files configuration:");
 const files = pkg.files || [];
-console.log(`  Files patterns: ${files.join(', ')}`);
+console.log(`  Files patterns: ${files.join(", ")}`);
 
-if (!files.includes('dist/**/*.js') && !files.includes('dist')) {
-  errors.push('❌ dist directory not included in package files');
+if (!files.includes("dist/**/*.js") && !files.includes("dist")) {
+  errors.push("❌ dist directory not included in package files");
 }
 
-if (!files.includes('scripts') && pkg.scripts?.postinstall?.includes('scripts/')) {
-  warnings.push('⚠️  postinstall references scripts/ but it may not be included');
+if (!files.includes("scripts") && pkg.scripts?.postinstall?.includes("scripts/")) {
+  warnings.push("⚠️  postinstall references scripts/ but it may not be included");
 }
 
 // Check 4: Verify bin entries point to existing files (after build)
-console.log('\n🔗 Binary entries:');
+console.log("\n🔗 Binary entries:");
 for (const [name, path] of Object.entries(pkg.bin || {})) {
-  const fullPath = join(__dirname, '..', path);
+  const fullPath = join(__dirname, "..", path);
   if (existsSync(fullPath)) {
     console.log(`  ✓ ${name} → ${path}`);
   } else {
@@ -87,26 +87,26 @@ for (const [name, path] of Object.entries(pkg.bin || {})) {
 }
 
 // Summary
-console.log('\n' + '='.repeat(60));
+console.log("\n" + "=".repeat(60));
 if (errors.length === 0 && warnings.length === 0) {
-  console.log('✅ All checks passed! Package is ready for publish.\n');
+  console.log("✅ All checks passed! Package is ready for publish.\n");
   process.exit(0);
 } else {
   if (errors.length > 0) {
-    console.error('\n❌ ERRORS FOUND:');
-    errors.forEach(err => console.error(`  ${err}`));
+    console.error("\n❌ ERRORS FOUND:");
+    errors.forEach((err) => console.error(`  ${err}`));
   }
 
   if (warnings.length > 0) {
-    console.warn('\n⚠️  WARNINGS:');
-    warnings.forEach(warn => console.warn(`  ${warn}`));
+    console.warn("\n⚠️  WARNINGS:");
+    warnings.forEach((warn) => console.warn(`  ${warn}`));
   }
 
   if (errors.length > 0) {
-    console.error('\n❌ Fix errors before publishing!\n');
+    console.error("\n❌ Fix errors before publishing!\n");
     process.exit(1);
   } else {
-    console.warn('\n⚠️  Review warnings before publishing.\n');
+    console.warn("\n⚠️  Review warnings before publishing.\n");
     process.exit(0);
   }
 }

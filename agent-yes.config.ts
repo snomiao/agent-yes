@@ -61,11 +61,7 @@ const legacyConfigs = await Promise.all([
 ]);
 
 // Merge all configs: default -> cascading -> legacy TS
-export default deepMixin(
-  await getDefaultConfig(),
-  cascadingConfig,
-  ...legacyConfigs,
-);
+export default deepMixin(await getDefaultConfig(), cascadingConfig, ...legacyConfigs);
 
 function getDefaultConfig() {
   return defineCliYesConfig({
@@ -79,7 +75,7 @@ function getDefaultConfig() {
         //
         install: {
           // try this first if powershell available and its windows
-          powershell: "powershell -Command \"irm https://claude.ai/install.ps1 | iex\"", // powershell
+          powershell: 'powershell -Command "irm https://claude.ai/install.ps1 | iex"', // powershell
           // or bash if found
           bash: "curl -fsSL https://claude.ai/install.sh | bash",
           // fallback to npm if bash not found
@@ -105,7 +101,11 @@ function getDefaultConfig() {
           /^.{0,4} ?1\. ?Yes/m,
           /Press Enter to continue…/m,
         ],
-        fatal: [/⎿  Claude usage limit reached\./, /^error: unknown option/, /No conversation found to continue/],
+        fatal: [
+          /⎿  Claude usage limit reached\./,
+          /^error: unknown option/,
+          /No conversation found to continue/,
+        ],
         restoreArgs: ["--continue"], // restart with --continue when crashed
         exitCommand: ["/exit"],
         bunx: true, // use bunx to run the binary, start time is 5s faster than node

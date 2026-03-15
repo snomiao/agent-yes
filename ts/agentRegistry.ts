@@ -53,7 +53,7 @@ class AgentRegistry {
     }
 
     // Split by lines and add to buffer
-    const lines = data.split('\n');
+    const lines = data.split("\n");
     instance.stdoutBuffer.push(...lines);
 
     // Maintain circular buffer size

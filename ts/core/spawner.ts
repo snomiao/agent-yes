@@ -142,7 +142,7 @@ export function spawnAgent(options: SpawnOptions): IPty {
 
   return tryCatch(
     // error handler
-     (error: unknown, attempts: number, spawn, ...args) => {
+    (error: unknown, attempts: number, spawn, ...args) => {
       logger.error(`Fatal: Failed to start ${cli}.`);
 
       const isNotFound = isCommandNotFoundError(error);
@@ -160,7 +160,7 @@ export function spawnAgent(options: SpawnOptions): IPty {
           // Note: using execSync for simplicity, but this will block the event loop.
           // maybe in future we should refactor whole spawnAgent to be async and use exec instead.
           // but this would be a bigger change, so we can consider it in future if needed.
-          execSync(installCmd, { stdio: 'inherit' });
+          execSync(installCmd, { stdio: "inherit" });
 
           // Note: If the process times out or has a non-zero exit code, execSync will throw.
           logger.info(`${cli} installed successfully. Please rerun the command.`);
@@ -182,4 +182,3 @@ export function spawnAgent(options: SpawnOptions): IPty {
     spawn,
   )();
 }
-

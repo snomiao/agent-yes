@@ -27,7 +27,7 @@ export function getBinaryName(): string {
   if (!binaryName) {
     throw new Error(
       `Unsupported platform: ${platform}-${arch}. ` +
-        `Supported: ${Object.keys(PLATFORM_MAP).join(", ")}`
+        `Supported: ${Object.keys(PLATFORM_MAP).join(", ")}`,
     );
   }
 
@@ -49,7 +49,7 @@ export function getBinDir(): string {
     process.env.AGENT_YES_CACHE_DIR ||
     path.join(
       process.env.XDG_CACHE_HOME || path.join(process.env.HOME || "/tmp", ".cache"),
-      "agent-yes"
+      "agent-yes",
     );
 
   return path.join(cacheDir, "bin");
@@ -136,8 +136,12 @@ export async function downloadBinary(verbose = false): Promise<string> {
 
     // Use PowerShell to extract zip
     const proc = Bun.spawn(
-      ["powershell", "-Command", `Expand-Archive -Path '${tempZipPath}' -DestinationPath '${binDir}' -Force`],
-      { cwd: binDir, stdio: ["ignore", "pipe", "pipe"] }
+      [
+        "powershell",
+        "-Command",
+        `Expand-Archive -Path '${tempZipPath}' -DestinationPath '${binDir}' -Force`,
+      ],
+      { cwd: binDir, stdio: ["ignore", "pipe", "pipe"] },
     );
     await proc.exited;
 
@@ -191,10 +195,12 @@ export async function downloadBinary(verbose = false): Promise<string> {
 /**
  * Get or download the Rust binary
  */
-export async function getRustBinary(options: {
-  verbose?: boolean;
-  forceDownload?: boolean;
-} = {}): Promise<string> {
+export async function getRustBinary(
+  options: {
+    verbose?: boolean;
+    forceDownload?: boolean;
+  } = {},
+): Promise<string> {
   const { verbose = false, forceDownload = false } = options;
 
   // First try to find existing binary
@@ -218,7 +224,7 @@ export async function getRustBinary(options: {
   } catch (err) {
     throw new Error(
       `Failed to get Rust binary: ${err instanceof Error ? err.message : err}\n` +
-        `You can build manually with: cd rs && cargo build --release`
+        `You can build manually with: cd rs && cargo build --release`,
     );
   }
 }

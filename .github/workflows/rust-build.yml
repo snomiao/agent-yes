@@ -5,19 +5,19 @@ on:
   pull_request:
     branches: [main]
     paths:
-      - 'rs/**'
+      - "rs/**"
 
   # Triggered by release.yml after semantic-release creates a new tag
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag to build (e.g., v1.46.5)'
+        description: "Release tag to build (e.g., v1.46.5)"
         required: false
         type: string
       upload_release:
-        description: 'Upload to GitHub release'
+        description: "Upload to GitHub release"
         required: false
-        default: 'true'
+        default: "true"
         type: boolean
 
   # Direct release event (backup for manual releases)

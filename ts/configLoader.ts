@@ -12,7 +12,8 @@ import { deepMixin } from "./utils.ts";
 
 const CONFIG_FILENAME = ".agent-yes.config";
 const CONFIG_EXTENSIONS = [".json", ".yml", ".yaml"] as const;
-const SCHEMA_URL = "https://raw.githubusercontent.com/snomiao/agent-yes/main/agent-yes.config.schema.json";
+const SCHEMA_URL =
+  "https://raw.githubusercontent.com/snomiao/agent-yes/main/agent-yes.config.schema.json";
 const YAML_SCHEMA_COMMENT = `# yaml-language-server: $schema=${SCHEMA_URL}`;
 
 /**
@@ -97,7 +98,7 @@ export interface ConfigLoadOptions {
  * Higher priority configs override lower priority ones
  */
 export async function loadCascadingConfig(
-  options: ConfigLoadOptions = {}
+  options: ConfigLoadOptions = {},
 ): Promise<Partial<AgentYesConfig>> {
   const projectDir = options.projectDir ?? process.cwd();
   const homeDir = options.homeDir ?? os.homedir();
@@ -114,9 +115,7 @@ export async function loadCascadingConfig(
   ]);
 
   // Filter out empty configs and merge
-  const nonEmptyConfigs = configs.filter(
-    (c) => c && Object.keys(c).length > 0
-  );
+  const nonEmptyConfigs = configs.filter((c) => c && Object.keys(c).length > 0);
 
   if (nonEmptyConfigs.length === 0) {
     logger.debug("[config] No config files found in any location");
@@ -212,7 +211,7 @@ function addSchemaReference(content: string, ext: string): string {
  * Modifies files in-place if they don't have a schema reference
  */
 export async function ensureSchemaInConfigFiles(
-  options: ConfigLoadOptions = {}
+  options: ConfigLoadOptions = {},
 ): Promise<{ modified: string[]; skipped: string[] }> {
   const projectDir = options.projectDir ?? process.cwd();
   const homeDir = options.homeDir ?? os.homedir();

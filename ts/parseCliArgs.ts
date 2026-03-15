@@ -79,7 +79,8 @@ export function parseCliArgs(argv: string[]) {
     })
     .option("idle-action", {
       type: "string",
-      description: 'Idle action to perform when idle time is reached, e.g., "/exit" or "check TODO.md"',
+      description:
+        'Idle action to perform when idle time is reached, e.g., "/exit" or "check TODO.md"',
     })
     .option("queue", {
       type: "boolean",
@@ -111,7 +112,8 @@ export function parseCliArgs(argv: string[]) {
     })
     .option("auto", {
       type: "string",
-      description: "Control auto-yes mode: 'yes' to auto-approve prompts (default), 'no' to start in manual mode. Press Ctrl+Y during the session to toggle at any time.",
+      description:
+        "Control auto-yes mode: 'yes' to auto-approve prompts (default), 'no' to start in manual mode. Press Ctrl+Y during the session to toggle at any time.",
       choices: ["yes", "no"] as const,
       default: "yes",
     })

@@ -21,6 +21,7 @@ agent-yes --swarm my-project
 ```
 
 This will:
+
 - Start listening for connections
 - Enable mDNS for LAN discovery
 - Generate a shareable room code
@@ -29,16 +30,19 @@ This will:
 ### 3. Join the Swarm
 
 **Same network (LAN)** - peers auto-discover via mDNS:
+
 ```bash
 agent-yes --swarm my-project
 ```
 
 **Remote (Internet)** - use the ay:// URL:
+
 ```bash
 agent-yes --swarm "ay://my-project?peer=/ip4/203.0.113.1/tcp/4001/p2p/12D3KooW..."
 ```
 
 **Short code** - easy to share verbally:
+
 ```bash
 agent-yes --swarm ABC-234
 ```
@@ -47,17 +51,18 @@ agent-yes --swarm ABC-234
 
 The `--swarm` flag intelligently parses different value formats:
 
-| Format | Example | Use Case |
-|--------|---------|----------|
-| Topic name | `--swarm my-project` | LAN auto-discovery via mDNS |
-| Room code | `--swarm ABC-234` | Easy verbal sharing (6-char) |
-| Swarm URL | `--swarm "ay://topic?peer=..."` | Internet sharing (like magnet links) |
-| Multiaddr | `--swarm "/ip4/.../p2p/..."` | Direct connection to a peer |
-| No value | `--swarm` | Uses default topic `agent-yes-swarm` |
+| Format     | Example                         | Use Case                             |
+| ---------- | ------------------------------- | ------------------------------------ |
+| Topic name | `--swarm my-project`            | LAN auto-discovery via mDNS          |
+| Room code  | `--swarm ABC-234`               | Easy verbal sharing (6-char)         |
+| Swarm URL  | `--swarm "ay://topic?peer=..."` | Internet sharing (like magnet links) |
+| Multiaddr  | `--swarm "/ip4/.../p2p/..."`    | Direct connection to a peer          |
+| No value   | `--swarm`                       | Uses default topic `agent-yes-swarm` |
 
 ### Room Codes
 
 Room codes are 6-character codes (format: `XXX-XXX`) that are:
+
 - Generated fresh each session
 - Case-insensitive
 - No ambiguous characters (0/O, 1/I/L excluded)
@@ -103,6 +108,7 @@ Share with teammates:
 ## Demo Session
 
 ### Agent 1 (becomes coordinator)
+
 ```
 $ agent-yes --swarm dev-team
 
@@ -141,6 +147,7 @@ Room Code: PRJ-482
 ```
 
 ### Agent 2 (worker, same LAN)
+
 ```
 $ agent-yes --swarm dev-team
 
@@ -163,6 +170,7 @@ $ agent-yes --swarm dev-team
 ```
 
 ### Agent 3 (worker, remote via room code)
+
 ```
 $ agent-yes --swarm PRJ-482
 
@@ -178,11 +186,12 @@ $ agent-yes --swarm PRJ-482
 
 ### New Simplified API
 
-| Option | Description | Example |
-|--------|-------------|---------|
+| Option            | Description                            | Example              |
+| ----------------- | -------------------------------------- | -------------------- |
 | `--swarm [VALUE]` | Enable swarm mode with optional config | `--swarm my-project` |
 
 VALUE can be:
+
 - Topic name: `my-project`
 - Room code: `ABC-234`
 - Swarm URL: `ay://topic?peer=...`
@@ -191,11 +200,11 @@ VALUE can be:
 
 ### Deprecated Flags (still work for backwards compatibility)
 
-| Option | Replacement |
-|--------|-------------|
-| `--experimental-swarm` | `--swarm` |
-| `--swarm-topic <TOPIC>` | `--swarm <TOPIC>` |
-| `--swarm-listen <ADDR>` | Use ay:// URL with listen param |
+| Option                     | Replacement                        |
+| -------------------------- | ---------------------------------- |
+| `--experimental-swarm`     | `--swarm`                          |
+| `--swarm-topic <TOPIC>`    | `--swarm <TOPIC>`                  |
+| `--swarm-listen <ADDR>`    | Use ay:// URL with listen param    |
 | `--swarm-bootstrap <ADDR>` | `--swarm "ay://topic?peer=<ADDR>"` |
 
 ## Network Topologies
@@ -212,6 +221,7 @@ On the same LAN, agents discover each other automatically via mDNS:
 ```
 
 Just use the same topic:
+
 ```bash
 agent-yes --swarm my-project
 ```
@@ -268,27 +278,27 @@ agent-yes --swarm PRJ-482
 
 ### Broadcast Messages (Gossipsub)
 
-| Message | Description |
-|---------|-------------|
-| `Announce` | Agent advertises capabilities (CLI, cwd, skills) |
-| `Leave` | Agent is leaving the swarm |
-| `TaskBroadcast` | New task for agents to pick up |
-| `TaskClaim` | Agent claims a task |
-| `TaskUpdate` | Task status change (in_progress, completed, failed) |
-| `CoordinatorElection` | Election participation message |
-| `CoordinatorHeartbeat` | Coordinator liveness signal |
-| `Chat` | General chat message |
+| Message                | Description                                         |
+| ---------------------- | --------------------------------------------------- |
+| `Announce`             | Agent advertises capabilities (CLI, cwd, skills)    |
+| `Leave`                | Agent is leaving the swarm                          |
+| `TaskBroadcast`        | New task for agents to pick up                      |
+| `TaskClaim`            | Agent claims a task                                 |
+| `TaskUpdate`           | Task status change (in_progress, completed, failed) |
+| `CoordinatorElection`  | Election participation message                      |
+| `CoordinatorHeartbeat` | Coordinator liveness signal                         |
+| `Chat`                 | General chat message                                |
 
 ### Direct Messages (Request-Response)
 
-| Request | Response |
-|---------|----------|
-| `GetStatus` | Agent capabilities |
+| Request       | Response               |
+| ------------- | ---------------------- |
+| `GetStatus`   | Agent capabilities     |
 | `ExecuteTask` | Task accepted/rejected |
-| `CancelTask` | Task cancelled |
-| `Ping` | Pong |
-| `GetTasks` | List of tasks |
-| `JoinSwarm` | Join accepted/rejected |
+| `CancelTask`  | Task cancelled         |
+| `Ping`        | Pong                   |
+| `GetTasks`    | List of tasks          |
+| `JoinSwarm`   | Join accepted/rejected |
 
 ## Coordinator Election
 
@@ -371,6 +381,7 @@ async fn main() -> Result<()> {
 ### Room code not resolving
 
 Room codes require DHT connectivity to other peers. For the first connection, use:
+
 - Same topic on the same LAN (mDNS)
 - Full ay:// URL with peer address
 
@@ -383,6 +394,7 @@ This is normal when starting alone. The warning clears once peers connect.
 ### Connection refused
 
 Check that the peer address includes the full multiaddr with peer ID:
+
 ```
 /ip4/192.168.1.100/tcp/4001/p2p/12D3KooWJkDD9hXoFhV3pfHJS2KHyfC8W5bxeaeuM4zSMfk8AMaG
                                  └─────────────────────────────────────────────────────┘

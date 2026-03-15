@@ -40,18 +40,14 @@ describe("Rust binary working directory", () => {
 
     // Run agent-yes with --rust and --verbose from subdirectory
     // Use --version flag to make it exit immediately without waiting for input
-    const proc = spawn(
-      "bun",
-      [AGENT_YES_CLI, "--rust", "--verbose", "claude", "--version"],
-      {
-        cwd: subdir,
-        env: {
-          ...process.env,
-          // Use local Rust binary if available to speed up test
-          AGENT_YES_CACHE_DIR: join(TEST_DIR, ".cache"),
-        },
+    const proc = spawn("bun", [AGENT_YES_CLI, "--rust", "--verbose", "claude", "--version"], {
+      cwd: subdir,
+      env: {
+        ...process.env,
+        // Use local Rust binary if available to speed up test
+        AGENT_YES_CACHE_DIR: join(TEST_DIR, ".cache"),
       },
-    );
+    });
 
     const result = await new Promise<{ code: number; stdout: string; stderr: string }>(
       (resolve) => {

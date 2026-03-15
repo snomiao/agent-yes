@@ -27,23 +27,23 @@ console.log("(or type some text)\n");
 let dataCount = 0;
 
 // Use direct event listener instead of fromReadable
-process.stdin.on('data', (buffer: Buffer) => {
+process.stdin.on("data", (buffer: Buffer) => {
   dataCount++;
   console.log(`\n[DATA EVENT ${dataCount}] Received:`, {
     length: buffer.length,
-    hex: buffer.toString('hex'),
+    hex: buffer.toString("hex"),
     string: JSON.stringify(buffer.toString()),
-    isCtrlC: buffer.toString() === '\u0003',
+    isCtrlC: buffer.toString() === "\u0003",
   });
 
-  if (buffer.toString() === '\u0003') {
-    console.log('\n✓ Ctrl+C DETECTED via direct event listener!');
+  if (buffer.toString() === "\u0003") {
+    console.log("\n✓ Ctrl+C DETECTED via direct event listener!");
     process.exit(130);
   }
 });
 
-process.stdin.on('readable', () => {
-  console.log('[READABLE EVENT] stdin is readable, attempting to read...');
+process.stdin.on("readable", () => {
+  console.log("[READABLE EVENT] stdin is readable, attempting to read...");
 
   // In non-flowing mode, we need to manually read
   let chunk;
@@ -52,36 +52,36 @@ process.stdin.on('readable', () => {
     dataCount++;
     console.log(`\n[MANUAL READ ${dataCount}] Got data:`, {
       length: buffer.length,
-      hex: buffer.toString('hex'),
+      hex: buffer.toString("hex"),
       string: JSON.stringify(buffer.toString()),
-      isCtrlC: buffer.toString() === '\u0003',
+      isCtrlC: buffer.toString() === "\u0003",
     });
 
-    if (buffer.toString() === '\u0003') {
-      console.log('\n✓ Ctrl+C DETECTED via manual read!');
+    if (buffer.toString() === "\u0003") {
+      console.log("\n✓ Ctrl+C DETECTED via manual read!");
       process.exit(130);
     }
   }
 });
 
-process.stdin.on('pause', () => {
-  console.log('[PAUSE EVENT] stdin was paused');
+process.stdin.on("pause", () => {
+  console.log("[PAUSE EVENT] stdin was paused");
 });
 
-process.stdin.on('resume', () => {
-  console.log('[RESUME EVENT] stdin was resumed');
+process.stdin.on("resume", () => {
+  console.log("[RESUME EVENT] stdin was resumed");
 });
 
-process.stdin.on('end', () => {
-  console.log('[END EVENT] stdin ended');
+process.stdin.on("end", () => {
+  console.log("[END EVENT] stdin ended");
 });
 
-console.log('[DEBUG] Event listeners registered');
-console.log('[DEBUG] stdin.isPaused:', process.stdin.isPaused());
+console.log("[DEBUG] Event listeners registered");
+console.log("[DEBUG] stdin.isPaused:", process.stdin.isPaused());
 
 // Resume stdin if it's paused
 if (process.stdin.isPaused()) {
-  console.log('[DEBUG] Resuming paused stdin...');
+  console.log("[DEBUG] Resuming paused stdin...");
   process.stdin.resume();
 }
 

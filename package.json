@@ -30,29 +30,29 @@
   },
   "bin": {
     "agent-yes": "./dist/agent-yes.js",
-    "ay": "./dist/agent-yes.js",
     "amp-yes": "./dist/amp-yes.js",
     "auggie-yes": "./dist/auggie-yes.js",
+    "ay": "./dist/agent-yes.js",
     "claude-yes": "./dist/claude-yes.js",
     "codex-yes": "./dist/codex-yes.js",
     "copilot-yes": "./dist/copilot-yes.js",
     "cursor-yes": "./dist/cursor-yes.js",
     "gemini-yes": "./dist/gemini-yes.js",
     "grok-yes": "./dist/grok-yes.js",
-    "qwen-yes": "./dist/qwen-yes.js",
-    "opencode-yes": "./dist/opencode-yes.js"
+    "opencode-yes": "./dist/opencode-yes.js",
+    "qwen-yes": "./dist/qwen-yes.js"
   },
   "directories": {
     "doc": "docs"
   },
   "files": [
+    "agent-yes.config.schema.json",
+    "bin",
+    "examples",
     "scripts",
     "ts/*.ts",
     "!dist/**/*.map",
-    "dist/**/*.js",
-    "bin",
-    "agent-yes.config.schema.json",
-    "examples"
+    "dist/**/*.js"
   ],
   "type": "module",
   "module": "ts/index.ts",

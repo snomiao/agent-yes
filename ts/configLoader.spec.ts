@@ -26,7 +26,7 @@ describe("configLoader", () => {
             defaultArgs: ["--verbose"],
           },
         },
-      })
+      }),
     );
 
     const config = await loadCascadingConfig({ projectDir: testDir });
@@ -44,7 +44,7 @@ clis:
   gemini:
     defaultArgs:
       - --resume
-`
+`,
     );
 
     const config = await loadCascadingConfig({ projectDir: testDir });
@@ -58,7 +58,7 @@ clis:
       configPath,
       `
 logsDir: /custom/logs
-`
+`,
     );
 
     const config = await loadCascadingConfig({ projectDir: testDir });
@@ -68,12 +68,9 @@ logsDir: /custom/logs
   it("should prefer JSON over YAML when both exist", async () => {
     await writeFile(
       path.join(testDir, ".agent-yes.config.json"),
-      JSON.stringify({ configDir: "/json/config" })
+      JSON.stringify({ configDir: "/json/config" }),
     );
-    await writeFile(
-      path.join(testDir, ".agent-yes.config.yaml"),
-      `configDir: /yaml/config`
-    );
+    await writeFile(path.join(testDir, ".agent-yes.config.yaml"), `configDir: /yaml/config`);
 
     const config = await loadCascadingConfig({ projectDir: testDir });
     expect(config.configDir).toBe("/json/config");
@@ -110,14 +107,14 @@ logsDir: /custom/logs
       JSON.stringify({
         configDir: "/home/config",
         logsDir: "/home/logs",
-      })
+      }),
     );
 
     await writeFile(
       path.join(projectDir, ".agent-yes.config.json"),
       JSON.stringify({
         configDir: "/project/config",
-      })
+      }),
     );
 
     const config = await loadCascadingConfig({ projectDir, homeDir });
@@ -127,10 +124,7 @@ logsDir: /custom/logs
 
   it("should add schema reference to JSON config without one", async () => {
     const configPath = path.join(testDir, ".agent-yes.config.json");
-    await writeFile(
-      configPath,
-      JSON.stringify({ configDir: "/test" })
-    );
+    await writeFile(configPath, JSON.stringify({ configDir: "/test" }));
 
     const result = await ensureSchemaInConfigFiles({ projectDir: testDir, homeDir: testDir });
     expect(result.modified).toContain(configPath);
@@ -150,7 +144,7 @@ clis:
   claude:
     defaultArgs:
       - --verbose
-`
+`,
     );
 
     const result = await ensureSchemaInConfigFiles({ projectDir: testDir, homeDir: testDir });
@@ -164,10 +158,14 @@ clis:
 
   it("should skip JSON config that already has schema", async () => {
     const configPath = path.join(testDir, ".agent-yes.config.json");
-    const originalContent = JSON.stringify({
-      $schema: "https://example.com/schema.json",
-      configDir: "/test",
-    }, null, 2);
+    const originalContent = JSON.stringify(
+      {
+        $schema: "https://example.com/schema.json",
+        configDir: "/test",
+      },
+      null,
+      2,
+    );
     await writeFile(configPath, originalContent);
 
     const result = await ensureSchemaInConfigFiles({ projectDir: testDir, homeDir: testDir });

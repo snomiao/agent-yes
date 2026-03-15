@@ -2,7 +2,18 @@
 import { describe, expect, it } from "vitest";
 import { buildRustArgs } from "./buildRustArgs";
 
-const SUPPORTED_CLIS = ["claude", "gemini", "codex", "copilot", "cursor", "grok", "qwen", "auggie", "amp", "opencode"];
+const SUPPORTED_CLIS = [
+  "claude",
+  "gemini",
+  "codex",
+  "copilot",
+  "cursor",
+  "grok",
+  "qwen",
+  "auggie",
+  "amp",
+  "opencode",
+];
 
 // Helper: simulate argv as [node, script, ...userArgs]
 function argv(...userArgs: string[]): string[] {
@@ -21,7 +32,11 @@ describe("buildRustArgs", () => {
     });
 
     it("appends CLI name after multiple flags", () => {
-      const result = buildRustArgs(argv("--timeout", "30s", "--verbose", "--robust", "true"), "claude", SUPPORTED_CLIS);
+      const result = buildRustArgs(
+        argv("--timeout", "30s", "--verbose", "--robust", "true"),
+        "claude",
+        SUPPORTED_CLIS,
+      );
       expect(result).toEqual(["--timeout", "30s", "--verbose", "--robust", "true", "claude"]);
     });
 
@@ -89,7 +104,11 @@ describe("buildRustArgs", () => {
     });
 
     it("removes --rust regardless of position", () => {
-      const result = buildRustArgs(argv("--verbose", "--rust", "--timeout", "5m"), "claude", SUPPORTED_CLIS);
+      const result = buildRustArgs(
+        argv("--verbose", "--rust", "--timeout", "5m"),
+        "claude",
+        SUPPORTED_CLIS,
+      );
       expect(result).not.toContain("--rust");
       expect(result).toEqual(["--verbose", "--timeout", "5m", "claude"]);
     });
@@ -105,13 +124,21 @@ describe("buildRustArgs", () => {
     });
 
     it("skips appending when --cli= flag is used", () => {
-      const result = buildRustArgs(argv("--cli=gemini", "--timeout", "30s"), "claude", SUPPORTED_CLIS);
+      const result = buildRustArgs(
+        argv("--cli=gemini", "--timeout", "30s"),
+        "claude",
+        SUPPORTED_CLIS,
+      );
       expect(result).toEqual(["--cli=gemini", "--timeout", "30s"]);
       expect(result).not.toContain("claude");
     });
 
     it("skips appending when --cli flag is used (separate value)", () => {
-      const result = buildRustArgs(argv("--cli", "gemini", "--timeout", "30s"), "claude", SUPPORTED_CLIS);
+      const result = buildRustArgs(
+        argv("--cli", "gemini", "--timeout", "30s"),
+        "claude",
+        SUPPORTED_CLIS,
+      );
       expect(result).toEqual(["--cli", "gemini", "--timeout", "30s"]);
       expect(result).not.toContain("claude");
     });
@@ -218,7 +245,11 @@ describe("buildRustArgs", () => {
     });
 
     it("claude-yes --rust --timeout 30s --verbose", () => {
-      const result = buildRustArgs(argv("--rust", "--timeout", "30s", "--verbose"), "claude", SUPPORTED_CLIS);
+      const result = buildRustArgs(
+        argv("--rust", "--timeout", "30s", "--verbose"),
+        "claude",
+        SUPPORTED_CLIS,
+      );
       expect(result).toEqual(["--timeout", "30s", "--verbose", "claude"]);
     });
 
@@ -237,7 +268,11 @@ describe("buildRustArgs", () => {
     });
 
     it("agent-yes --rust claude --timeout 1h (explicit CLI in args)", () => {
-      const result = buildRustArgs(argv("--rust", "claude", "--timeout", "1h"), undefined, SUPPORTED_CLIS);
+      const result = buildRustArgs(
+        argv("--rust", "claude", "--timeout", "1h"),
+        undefined,
+        SUPPORTED_CLIS,
+      );
       // cliFromScript is undefined (agent-yes), CLI already in args
       expect(result).toEqual(["claude", "--timeout", "1h"]);
     });
