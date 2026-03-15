@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 set -e
 bun run fmt
+git add -u
 bunx lint-staged
 bun run build
 bun run test

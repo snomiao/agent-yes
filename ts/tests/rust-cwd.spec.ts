@@ -23,7 +23,7 @@ describe("Rust binary working directory", () => {
         try {
           rmSync(TEST_DIR, { recursive: true, force: true });
           break;
-        } catch (error) {
+        } catch {
           attempts++;
           if (attempts < 3) {
             await new Promise((resolve) => setTimeout(resolve, 1000));

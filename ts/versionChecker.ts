@@ -15,7 +15,7 @@ export async function fetchLatestVersion(): Promise<string | null> {
 
     const data = (await response.json()) as { version: string };
     return data.version;
-  } catch (error) {
+  } catch {
     // Silently fail if network is unavailable or request times out
     return null;
   }

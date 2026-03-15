@@ -698,7 +698,7 @@ export default async function agentYes({
       const dataHandler = (chunk: Buffer) => {
         try {
           controller.enqueue(chunk);
-        } catch (err) {
+        } catch {
           // Ignore enqueue errors (stream may be closed)
         }
       };
@@ -709,7 +709,7 @@ export default async function agentYes({
         closed = true;
         try {
           controller.close();
-        } catch (err) {
+        } catch {
           // Ignore close errors (already closed)
         }
       };
@@ -719,7 +719,7 @@ export default async function agentYes({
         closed = true;
         try {
           controller.error(err);
-        } catch (err) {
+        } catch {
           // Ignore error after close
         }
       };
