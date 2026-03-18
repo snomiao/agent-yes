@@ -11,7 +11,7 @@ use crossterm::terminal;
 use std::io::Write;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
@@ -97,6 +97,24 @@ impl AgentContext {
             self.stdin_ready.clone(),
             self.next_stdout.clone(),
         );
+
+        // Spawn background stdout writer — decoupled from main loop so stdout
+        // backpressure never blocks pattern matching or agent interaction.
+        // The agent keeps running even if nobody reads our stdout.
+        // Bounded at ~10MB (1250 × 8KB chunks) — if stdout is stuck, old output
+        // is dropped. The agent's operation matters more than display completeness.
+        let (stdout_tx, mut stdout_rx) = mpsc::channel::<String>(1250);
+        let stdout_handle = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            let mut stdout = tokio::io::stdout();
+            while let Some(data) = stdout_rx.recv().await {
+                // Best-effort write — if stdout is broken, just stop
+                if stdout.write_all(data.as_bytes()).await.is_err() {
+                    break;
+                }
+                let _ = stdout.flush().await;
+            }
+        });
 
         // Channel for stdin data
         let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(100);
@@ -197,7 +215,7 @@ impl AgentContext {
                 _ = sleep_ms(10) => {
                     // Try to read output from channel (non-blocking)
                     while let Some(output) = pty.try_recv() {
-                        self.handle_output(&output, &mut msg_ctx).await?;
+                        self.handle_output(&output, &mut msg_ctx, &stdout_tx).await?;
                     }
 
                     // Check if process has exited
@@ -244,8 +262,11 @@ impl AgentContext {
         // Restore terminal mode
         let _ = terminal::disable_raw_mode();
 
-        // Cancel stdin reader
+        // Cancel stdin reader and stdout writer
         stdin_handle.abort();
+        // Drop sender to signal stdout writer to finish, then wait briefly
+        drop(stdout_tx);
+        let _ = tokio::time::timeout(Duration::from_millis(500), stdout_handle).await;
 
         // Print final newline
         if self.is_user_abort {
@@ -256,11 +277,11 @@ impl AgentContext {
     }
 
     /// Handle PTY output
-    async fn handle_output(&mut self, output: &str, msg_ctx: &mut MessageContext) -> Result<()> {
-        // Write to stdout
-        let mut stdout = tokio::io::stdout();
-        stdout.write_all(output.as_bytes()).await?;
-        stdout.flush().await?;
+    async fn handle_output(&mut self, output: &str, msg_ctx: &mut MessageContext, stdout_tx: &mpsc::Sender<String>) -> Result<()> {
+        // Send to background stdout writer (never blocks main loop).
+        // If the channel is full (~10MB buffered), drop the output —
+        // agent operation is more important than display completeness.
+        let _ = stdout_tx.try_send(output.to_string());
 
         // Update buffers
         self.output_buffer.push_str(output);

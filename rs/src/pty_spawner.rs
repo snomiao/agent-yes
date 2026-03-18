@@ -39,7 +39,7 @@ fn get_terminal_size() -> (u16, u16) {
 pub struct PtyContext {
     pub master: Box<dyn MasterPty + Send>,
     pub child: Box<dyn portable_pty::Child + Send + Sync>,
-    output_rx: mpsc::Receiver<String>,
+    output_rx: mpsc::UnboundedReceiver<String>,
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
 }
 
@@ -147,8 +147,12 @@ pub async fn spawn_agent(
     let mut reader = master.try_clone_reader()?;
     let writer = master.take_writer()?;
 
-    // Create channel for PTY output
-    let (output_tx, output_rx) = mpsc::channel::<String>(1000);
+    // Create unbounded channel for PTY output.
+    // IMPORTANT: Must be unbounded so the reader thread never blocks —
+    // if stdout isn't being read, backpressure must NOT propagate to the
+    // agent CLI. The agent must keep running regardless.
+    // Memory is bounded by the 100KB output_buffer cap in context.rs.
+    let (output_tx, output_rx) = mpsc::unbounded_channel::<String>();
 
     // Spawn reader thread
     thread::spawn(move || {
@@ -171,7 +175,7 @@ pub async fn spawn_agent(
                     let (valid, leftover) = extract_valid_utf8(bytes);
 
                     if !valid.is_empty() {
-                        if output_tx.blocking_send(valid.to_string()).is_err() {
+                        if output_tx.send(valid.to_string()).is_err() {
                             break; // Channel closed
                         }
                     }
@@ -332,5 +336,23 @@ mod tests {
         let (valid, leftover) = extract_valid_utf8(&[]);
         assert_eq!(valid, "");
         assert!(leftover.is_empty());
+    }
+
+    /// Verify that the unbounded channel never blocks the sender,
+    /// even when the receiver isn't consuming messages.
+    /// This simulates the scenario where stdout isn't being read
+    /// but the agent CLI must keep running.
+    #[test]
+    fn test_unbounded_channel_no_backpressure() {
+        let (tx, _rx) = mpsc::unbounded_channel::<String>();
+
+        // Send many messages without reading — should never block
+        for i in 0..5000 {
+            tx.send(format!("output line {}\n", i))
+                .expect("unbounded send should never fail while receiver exists");
+        }
+
+        // Sender completes instantly — no blocking occurred
+        // (a bounded channel with blocking_send would stall here)
     }
 }
