@@ -47,10 +47,10 @@ describe("runningLock", () => {
       // Check lock file exists and contains task
       const lockData = await readLockFile();
       expect(lockData.tasks).toHaveLength(1);
-      expect(lockData.tasks[0].cwd).toBe(path.resolve(TEST_DIR));
-      expect(lockData.tasks[0].task).toBe("Test task");
-      expect(lockData.tasks[0].pid).toBe(process.pid);
-      expect(lockData.tasks[0].status).toBe("running");
+      expect(lockData.tasks[0]!.cwd).toBe(path.resolve(TEST_DIR));
+      expect(lockData.tasks[0]!.task).toBe("Test task");
+      expect(lockData.tasks[0]!.pid).toBe(process.pid);
+      expect(lockData.tasks[0]!.status).toBe("running");
 
       // Release lock
       await releaseLock();
@@ -79,8 +79,8 @@ describe("runningLock", () => {
       await acquireLock(TEST_DIR, longPrompt);
 
       const lockData = await readLockFile();
-      expect(lockData.tasks[0].task).toHaveLength(100);
-      expect(lockData.tasks[0].task).toBe("A".repeat(100));
+      expect(lockData.tasks[0]!.task).toHaveLength(100);
+      expect(lockData.tasks[0]!.task).toBe("A".repeat(100));
 
       await releaseLock();
     });
@@ -91,7 +91,7 @@ describe("runningLock", () => {
       const after = Date.now();
 
       const lockData = await readLockFile();
-      const task = lockData.tasks[0];
+      const task = lockData.tasks[0]!;
 
       expect(task.startedAt).toBeGreaterThanOrEqual(before);
       expect(task.startedAt).toBeLessThanOrEqual(after);
@@ -113,7 +113,7 @@ describe("runningLock", () => {
       await acquireLock(process.cwd(), "Git repo task");
 
       const lockData = await readLockFile();
-      expect(lockData.tasks[0].gitRoot).toBe(gitRoot);
+      expect(lockData.tasks[0]!.gitRoot).toBe(gitRoot);
 
       await releaseLock();
     });
@@ -128,8 +128,8 @@ describe("runningLock", () => {
       await acquireLock(subdir, "Subdirectory task");
 
       const lockData = await readLockFile();
-      expect(lockData.tasks[0].gitRoot).toBe(gitRoot);
-      expect(lockData.tasks[0].cwd).toBe(path.resolve(subdir));
+      expect(lockData.tasks[0]!.gitRoot).toBe(gitRoot);
+      expect(lockData.tasks[0]!.cwd).toBe(path.resolve(subdir));
 
       await releaseLock();
     });
@@ -143,8 +143,8 @@ describe("runningLock", () => {
         await acquireLock(tempDir, "Non-git task");
 
         const lockData = await readLockFile();
-        expect(lockData.tasks[0].gitRoot).toBeUndefined();
-        expect(lockData.tasks[0].cwd).toBe(path.resolve(tempDir));
+        expect(lockData.tasks[0]!.gitRoot).toBeUndefined();
+        expect(lockData.tasks[0]!.cwd).toBe(path.resolve(tempDir));
 
         await releaseLock();
       } finally {
@@ -161,13 +161,13 @@ describe("runningLock", () => {
       await updateCurrentTaskStatus("completed");
 
       let lockData = await readLockFile();
-      expect(lockData.tasks[0].status).toBe("completed");
+      expect(lockData.tasks[0]!.status).toBe("completed");
 
       // Update to failed
       await updateCurrentTaskStatus("failed");
 
       lockData = await readLockFile();
-      expect(lockData.tasks[0].status).toBe("failed");
+      expect(lockData.tasks[0]!.status).toBe("failed");
 
       await releaseLock();
     });
@@ -206,7 +206,7 @@ describe("runningLock", () => {
       let rawContent = await readFile(LOCK_FILE, "utf8");
       let rawData = JSON.parse(rawContent);
       expect(rawData.tasks).toHaveLength(1);
-      expect(rawData.tasks[0].pid).toBe(invalidPid);
+      expect(rawData.tasks[0]!.pid).toBe(invalidPid);
 
       // Now acquire a lock - this will trigger cleanup of stale locks
       await acquireLock(TEST_DIR, "New task");
@@ -214,8 +214,8 @@ describe("runningLock", () => {
       // The stale lock should be cleaned, and only our new task should remain
       const lockData = await readLockFile();
       expect(lockData.tasks).toHaveLength(1);
-      expect(lockData.tasks[0].pid).toBe(process.pid);
-      expect(lockData.tasks[0].task).toBe("New task");
+      expect(lockData.tasks[0]!.pid).toBe(process.pid);
+      expect(lockData.tasks[0]!.task).toBe("New task");
 
       await releaseLock();
     });
@@ -228,7 +228,7 @@ describe("runningLock", () => {
 
       const lockData = await readLockFile();
       expect(lockData.tasks).toHaveLength(1);
-      expect(lockData.tasks[0].pid).toBe(process.pid);
+      expect(lockData.tasks[0]!.pid).toBe(process.pid);
 
       await releaseLock();
     });
@@ -262,7 +262,7 @@ describe("runningLock", () => {
       // Verify the task exists
       let lockData = await readLockFile();
       expect(lockData.tasks).toHaveLength(1);
-      expect(lockData.tasks[0].task).toBe("Task 1");
+      expect(lockData.tasks[0]!.task).toBe("Task 1");
 
       // Acquire a second task with the same PID (should replace the first)
       await acquireLock("/tmp", "Task 2");
@@ -270,7 +270,7 @@ describe("runningLock", () => {
       // Should have only one task (the latest one)
       lockData = await readLockFile();
       expect(lockData.tasks).toHaveLength(1);
-      expect(lockData.tasks[0].task).toBe("Task 2");
+      expect(lockData.tasks[0]!.task).toBe("Task 2");
 
       await releaseLock();
 
@@ -288,7 +288,7 @@ describe("runningLock", () => {
       // Should only have one task
       const lockData = await readLockFile();
       expect(lockData.tasks).toHaveLength(1);
-      expect(lockData.tasks[0].task).toBe("Task 2"); // Latest task
+      expect(lockData.tasks[0]!.task).toBe("Task 2"); // Latest task
 
       await releaseLock();
     });
@@ -299,7 +299,7 @@ describe("runningLock", () => {
       await acquireLock(TEST_DIR, "Complete task");
 
       const lockData = await readLockFile();
-      const task = lockData.tasks[0];
+      const task = lockData.tasks[0]!;
 
       expect(task).toHaveProperty("cwd");
       expect(task).toHaveProperty("task");
@@ -326,7 +326,7 @@ describe("runningLock", () => {
         await updateCurrentTaskStatus(status);
 
         const lockData = await readLockFile();
-        expect(lockData.tasks[0].status).toBe(status);
+        expect(lockData.tasks[0]!.status).toBe(status);
 
         await releaseLock();
       }
@@ -338,7 +338,7 @@ describe("runningLock", () => {
       await acquireLock(TEST_DIR, "");
 
       const lockData = await readLockFile();
-      expect(lockData.tasks[0].task).toBe("");
+      expect(lockData.tasks[0]!.task).toBe("");
 
       await releaseLock();
     });
@@ -349,7 +349,7 @@ describe("runningLock", () => {
       await acquireLock(TEST_DIR, specialTask);
 
       const lockData = await readLockFile();
-      expect(lockData.tasks[0].task).toContain("quotes");
+      expect(lockData.tasks[0]!.task).toContain("quotes");
 
       await releaseLock();
     });
@@ -359,7 +359,7 @@ describe("runningLock", () => {
 
       const lockData = await readLockFile();
       // Should be an absolute path
-      expect(path.isAbsolute(lockData.tasks[0].cwd)).toBe(true);
+      expect(path.isAbsolute(lockData.tasks[0]!.cwd)).toBe(true);
 
       await releaseLock();
     });
@@ -429,7 +429,7 @@ describe("runningLock", () => {
       // Verify initial state
       let lockData = await readLockFile();
       expect(lockData.tasks).toHaveLength(1);
-      expect(lockData.tasks[0].task).toBe("Tmp task");
+      expect(lockData.tasks[0]!.task).toBe("Tmp task");
 
       // Acquire lock for different directory (should replace the existing task)
       await acquireLock(TEST_DIR, "Test task");
@@ -437,7 +437,7 @@ describe("runningLock", () => {
       // Should only have the new task
       lockData = await readLockFile();
       expect(lockData.tasks).toHaveLength(1);
-      expect(lockData.tasks[0].task).toBe("Test task");
+      expect(lockData.tasks[0]!.task).toBe("Test task");
 
       await releaseLock();
     });

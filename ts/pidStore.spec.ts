@@ -177,8 +177,8 @@ describe("PidStore", () => {
       // so just check it was loaded
       const all = store.getAllRecords();
       expect(all).toHaveLength(1);
-      expect(all[0].pid).toBe(12345);
-      expect(all[0].cli).toBe("claude");
+      expect(all[0]!.pid).toBe(12345);
+      expect(all[0]!.cli).toBe("claude");
     });
   });
 
@@ -215,12 +215,12 @@ describe("PidStore", () => {
       expect(lines).toHaveLength(2);
 
       // Each line should be valid JSON
-      const doc1 = JSON.parse(lines[0]);
+      const doc1 = JSON.parse(lines[0]!);
       expect(doc1.pid).toBe(1111);
       expect(doc1.cli).toBe("test-cli");
       expect(doc1.status).toBe("active");
 
-      const doc2 = JSON.parse(lines[1]);
+      const doc2 = JSON.parse(lines[1]!);
       expect(doc2.status).toBe("idle");
       expect(doc2._id).toBe(doc1._id);
     });
@@ -243,7 +243,7 @@ describe("PidStore", () => {
       const after = (await readFile(jsonlPath, "utf-8")).trim().split("\n");
       expect(after).toHaveLength(1);
 
-      const doc = JSON.parse(after[0]);
+      const doc = JSON.parse(after[0]!);
       expect(doc.pid).toBe(2222);
       expect(doc.status).toBe("exited");
       expect(doc.exitReason).toBe("done");
@@ -268,7 +268,7 @@ describe("PidStore", () => {
       await store.init();
       const all = store.getAllRecords();
       expect(all).toHaveLength(1);
-      expect(all[0].pid).toBe(3333);
+      expect(all[0]!.pid).toBe(3333);
     });
   });
 });

@@ -171,8 +171,8 @@ describe("codexSessionManager", () => {
 
       const recent = await getRecentSessionsForCwd(cwd, 2);
       expect(recent).toHaveLength(2);
-      expect(recent[0].id).toBe("session-1"); // Most recent first
-      expect(recent[1].id).toBe("session-2");
+      expect(recent[0]!.id).toBe("session-1"); // Most recent first
+      expect(recent[1]!.id).toBe("session-2");
     });
 
     it("should get all working directories with counts", async () => {
@@ -208,7 +208,7 @@ describe("codexSessionManager", () => {
       expect(projectB?.count).toBe(1);
 
       // Should be sorted by last session time (most recent first)
-      expect(directories[0].cwd).toBe("/project-a");
+      expect(directories[0]!.cwd).toBe("/project-a");
     });
   });
 
