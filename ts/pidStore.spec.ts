@@ -3,7 +3,10 @@ import { PidStore } from "./pidStore";
 import { rm, readFile } from "fs/promises";
 import path from "path";
 
-const TEST_DIR = "/tmp/pidstore-test-" + process.pid;
+const isWindows = process.platform === "win32";
+const TEST_DIR = isWindows
+  ? path.join(process.env.TEMP || "C:\\Temp", "pidstore-test-" + process.pid)
+  : "/tmp/pidstore-test-" + process.pid;
 
 describe("PidStore", () => {
   let store: PidStore;
@@ -84,7 +87,11 @@ describe("PidStore", () => {
       });
 
       expect(rec.logFile).toContain("42.log");
-      expect(rec.fifoFile).toContain("42.stdin");
+      if (isWindows) {
+        expect(rec.fifoFile).toContain("agent-yes-42");
+      } else {
+        expect(rec.fifoFile).toContain("42.stdin");
+      }
     });
   });
 
@@ -158,7 +165,11 @@ describe("PidStore", () => {
 
       const fifo = await PidStore.findActiveFifo(fifoTestDir);
       expect(fifo).toBeTypeOf("string");
-      expect(fifo!).toContain(`${process.pid}.stdin`);
+      if (isWindows) {
+        expect(fifo!).toContain(`agent-yes-${process.pid}`);
+      } else {
+        expect(fifo!).toContain(`${process.pid}.stdin`);
+      }
 
       await rm(fifoTestDir, { recursive: true, force: true });
     });
@@ -189,14 +200,18 @@ describe("PidStore", () => {
 
     it("getFifoPath should return correct path", () => {
       const fifo = store.getFifoPath(42);
-      expect(fifo).toBe(path.resolve(TEST_DIR, ".agent-yes", "fifo", "42.stdin"));
+      if (isWindows) {
+        expect(fifo).toBe(`\\\\.\\pipe\\agent-yes-42`);
+      } else {
+        expect(fifo).toBe(path.resolve(TEST_DIR, ".agent-yes", "fifo", "42.stdin"));
+      }
     });
   });
 
   describe("gitignore", () => {
     it("should create .gitignore in store dir", async () => {
       const gitignorePath = path.join(TEST_DIR, ".agent-yes", ".gitignore");
-      const content = await Bun.file(gitignorePath).text();
+      const content = await readFile(gitignorePath, "utf-8");
       expect(content).toContain("*.jsonl");
       expect(content).toContain("logs/");
     });

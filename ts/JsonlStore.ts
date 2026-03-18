@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, rename, writeFile } from "fs/promises";
+import { appendFile, mkdir, readFile, rename, unlink, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import { fsyncSync, openSync, closeSync } from "fs";
 import path from "path";
@@ -182,7 +182,12 @@ export class JsonlStore<T extends Record<string, any> = Record<string, any>> {
       const fd = openSync(this.tempPath, "r");
       fsyncSync(fd);
       closeSync(fd);
-      // Atomic rename
+      // Atomic rename (on Windows, rename may fail if target exists — unlink first)
+      if (process.platform === "win32") {
+        try {
+          await unlink(this.filePath);
+        } catch {}
+      }
       await rename(this.tempPath, this.filePath);
     });
   }

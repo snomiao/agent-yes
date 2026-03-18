@@ -2,11 +2,13 @@ import { spawn } from "child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { expect, it, describe, beforeEach, afterEach } from "bun:test";
+import { findRustBinary } from "../rustBinary";
 
 const TEST_DIR = join(process.cwd(), "tmp-test-rust-cwd");
 const AGENT_YES_CLI = join(process.cwd(), "ts/cli.ts");
+const hasRustBinary = !!findRustBinary();
 
-describe("Rust binary working directory", () => {
+describe.skipIf(!hasRustBinary)("Rust binary working directory", () => {
   beforeEach(async () => {
     // Create clean test directory
     if (existsSync(TEST_DIR)) {
