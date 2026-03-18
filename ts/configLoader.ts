@@ -123,7 +123,10 @@ export async function loadCascadingConfig(
   }
 
   // Merge configs with deepMixin (later configs override earlier ones)
-  const merged = deepMixin({}, ...nonEmptyConfigs);
+  const merged = nonEmptyConfigs.reduce(
+    (acc, c) => deepMixin(acc, c),
+    {} as Partial<AgentYesConfig>,
+  );
   logger.debug("[config] Merged config from", nonEmptyConfigs.length, "sources");
 
   return merged;
@@ -193,7 +196,7 @@ function addSchemaReference(content: string, ext: string): string {
   // Find the first non-empty, non-comment line to insert before actual content
   let insertIndex = 0;
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
+    const line = lines[i]?.trim();
     if (line && !line.startsWith("#")) {
       insertIndex = i;
       break;
