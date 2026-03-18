@@ -95,6 +95,7 @@ describe("utils", () => {
       const target = { a: 1, b: 2 };
       const source = { a: null, c: 3 };
 
+      // @ts-expect-error testing runtime null handling
       deepMixin(target, source);
 
       expect(target).toEqual({ a: null, b: 2, c: 3 });
