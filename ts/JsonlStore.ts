@@ -167,29 +167,29 @@ export class JsonlStore<T extends Record<string, any> = Record<string, any>> {
    * Acquires lock.
    */
   async compact(): Promise<void> {
-    await this.withLock(async () => {
-      const lines = Array.from(this.docs.values())
-        .map((doc) => {
-          const { _id, $$deleted, ...rest } = doc;
-          return JSON.stringify({ _id, ...rest });
-        })
-        .join("\n");
-      const content = lines ? lines + "\n" : "";
+    const lines = Array.from(this.docs.values())
+      .map((doc) => {
+        const { _id, $$deleted, ...rest } = doc;
+        return JSON.stringify({ _id, ...rest });
+      })
+      .join("\n");
+    const content = lines ? lines + "\n" : "";
 
-      // Write to temp file
-      await writeFile(this.tempPath, content);
-      // fsync temp file
-      const fd = openSync(this.tempPath, "r");
-      fsyncSync(fd);
-      closeSync(fd);
-      // Atomic rename (on Windows, rename may fail if target exists — unlink first)
-      if (process.platform === "win32") {
-        try {
-          await unlink(this.filePath);
-        } catch {}
-      }
-      await rename(this.tempPath, this.filePath);
-    });
+    try {
+      await this.withLock(async () => {
+        // Write to temp file
+        await writeFile(this.tempPath, content);
+        // fsync temp file
+        const fd = openSync(this.tempPath, "r");
+        fsyncSync(fd);
+        closeSync(fd);
+        // Atomic rename
+        await rename(this.tempPath, this.filePath);
+      });
+    } catch {
+      // Fallback: direct overwrite (e.g. rename fails on Windows, or lock unavailable)
+      await writeFile(this.filePath, content);
+    }
   }
 
   private async withLock<R>(fn: () => Promise<R>): Promise<R> {
