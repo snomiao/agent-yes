@@ -39,7 +39,7 @@ export function getBinaryName(): string {
  */
 export function getBinDir(): string {
   // First check for binaries in the npm package
-  const packageBinDir = path.resolve(import.meta.dir, "../bin");
+  const packageBinDir = path.resolve(import.meta.dirname ?? import.meta.dir, "../bin");
   if (existsSync(packageBinDir)) {
     return packageBinDir;
   }
@@ -67,8 +67,8 @@ export function findRustBinary(verbose = false): string | undefined {
     path.join(getBinDir(), binaryName),
 
     // 2. Check relative to this script (in the repo during development)
-    path.resolve(import.meta.dir, "../rs/target/release/agent-yes"),
-    path.resolve(import.meta.dir, "../rs/target/debug/agent-yes"),
+    path.resolve(import.meta.dirname ?? import.meta.dir, "../rs/target/release/agent-yes"),
+    path.resolve(import.meta.dirname ?? import.meta.dir, "../rs/target/debug/agent-yes"),
 
     // 3. Check in user's cache directory
     path.join(getBinDir(), binaryName),
