@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import DIE from "phpdie";
 import sflow from "sflow";
-import { TerminalTextRender } from "terminal-render";
+import { TerminalRenderStream, TerminalTextRender } from "terminal-render";
 import {
   extractSessionId,
   getSessionForCwd,
@@ -185,8 +185,9 @@ export default async function agentYes({
   process.stdin.setRawMode?.(true); // must be called any stdout/stdin usage
   if (verbose) logger.debug(`[stdin] Raw mode set, isRaw: ${(process.stdin as any).isRaw}`);
 
-  const shellOutputStream = new TransformStream<string, string>();
-  const outputWriter = shellOutputStream.writable.getWriter();
+  const terminalStream = new TerminalRenderStream({ mode: "raw" });
+  const terminalRender = terminalStream.getRenderer();
+  const outputWriter = terminalStream.writable.getWriter();
 
   logger.debug(`Using ${ptyPackage} for pseudo terminal management.`);
 
@@ -387,10 +388,11 @@ export default async function agentYes({
 
   const pendingExitCode = Promise.withResolvers<number | null>();
 
-  async function onData(data: string) {
+  function onData(data: string) {
     const currentPid = shell.pid; // Capture PID before any potential shell reassignment
-    // append data to the buffer, so we can process it later
-    await outputWriter.write(data);
+    // Write eagerly — TerminalRenderStream never exerts backpressure,
+    // so the PTY is always drained and the child process never blocks.
+    outputWriter.write(data);
     // append to agent registry for MCP server
     globalAgentRegistry.appendStdout(currentPid, data);
   }
@@ -582,7 +584,6 @@ export default async function agentYes({
     shell.resize(cols, rows);
   });
 
-  const terminalRender = new TerminalTextRender();
   const isStillWorkingQ = () => {
     const rendered = terminalRender.tail(24).replace(/\s+/g, " ");
     return conf.working?.some((rgx) => rgx.test(rendered));
@@ -859,7 +860,7 @@ export default async function agentYes({
           shell.write(data);
         },
       }),
-      readable: shellOutputStream.readable,
+      readable: terminalStream.readable,
     })
 
     .forEach(() => {
