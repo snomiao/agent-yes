@@ -112,7 +112,7 @@
     "semantic-release": "^25.0.2",
     "sflow": "^1.27.0",
     "standard-version": "^9.5.0",
-    "terminal-render": "github:snomiao/terminal-render#sno-stream",
+    "terminal-render": "^1.5.0",
     "tsdown": "^0.20.3",
     "vitest": "^4.0.17",
     "winston": "^3.19.0",
@@ -131,7 +131,5 @@
   "engines": {
     "node": ">=22.0.0"
   },
-  "trustedDependencies": [
-    "terminal-render"
-  ]
+  "trustedDependencies": []
 }
