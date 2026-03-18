@@ -7,7 +7,7 @@ describe("tryCatch", () => {
       let catchedError: unknown;
       let catchedAttempts: unknown;
       let catchedFn: unknown;
-      let catchedArgs: unknown[];
+      let catchedArgs!: unknown[];
       const catchFn = (error: unknown, attempts: number, fn: unknown, ...args: unknown[]) => {
         catchedError = error;
         catchedAttempts = attempts;
@@ -98,7 +98,7 @@ describe("tryCatch", () => {
       let caughtError: unknown;
       let caughtAttempts: unknown;
       let caughtFn: unknown;
-      let caughtArgs: unknown[];
+      let caughtArgs!: unknown[];
       const catchFn = (error: unknown, attempts: number, fn: unknown, ...args: unknown[]) => {
         caughtError = error;
         caughtAttempts = attempts;
@@ -133,7 +133,7 @@ describe("tryCatch", () => {
       let caughtError: unknown;
       let caughtAttempts: unknown;
       let caughtFn: unknown;
-      let caughtArgs: unknown[];
+      let caughtArgs!: unknown[];
       const catchFn = (error: unknown, attempts: number, fn: unknown, ...args: unknown[]) => {
         caughtError = error;
         caughtAttempts = attempts;
@@ -254,7 +254,7 @@ describe("tryCatch", () => {
 
     it("should pass function reference and arguments to catchFn", () => {
       let capturedFn: unknown;
-      let capturedArgs: unknown[];
+      let capturedArgs!: unknown[];
       const catchFn = (_error: unknown, _attempts: number, fn: unknown, ...args: unknown[]) => {
         capturedFn = fn;
         capturedArgs = args;
