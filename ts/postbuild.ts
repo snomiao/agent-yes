@@ -12,6 +12,9 @@ import pkg from "../package.json";
 const cliNames = [...Object.keys(CLIS_CONFIG), "agent"];
 const suffixes = ["-yes"];
 
+// Short aliases: maps alias name → target CLI name (alias resolves in parseCliArgs.ts)
+const shortAliases: Record<string, string> = { cy: "claude" };
+
 await sflow(cliNames.flatMap((cli) => suffixes.map((suffix) => ({ cli, suffix }))))
   .map(async ({ cli, suffix }) => {
     const cliName = `${cli}${suffix}`;
@@ -34,3 +37,20 @@ await import('./cli.js')
   })
 
   .run();
+
+// Generate short alias wrapper files
+for (const [alias] of Object.entries(shortAliases)) {
+  const wrapperPath = `./dist/${alias}.js`;
+  await writeFile(
+    wrapperPath,
+    `
+#!/usr/bin/env bun
+await import('./cli.js')
+`.trim(),
+  );
+  await chmod(wrapperPath, 0o755);
+  if (!(pkg.bin as Record<string, string>)?.[alias]) {
+    await Bun.$`npm pkg set ${"bin." + alias}=${wrapperPath}`;
+    console.log(`${wrapperPath} created`);
+  }
+}

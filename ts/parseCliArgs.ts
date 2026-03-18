@@ -17,11 +17,16 @@ export function parseCliArgs(argv: string[]) {
       .at(-1)
       ?.replace(/(\.[jt]s)?$/, "") || "";
 
-  const cliName =
-    scriptBaseName
-      .replace(/^(cli|agent)(-yes)?$/, "")
-      .replace(/^ay$/, "") // treat standalone "ay" same as "agent-yes"
-      .replace(/-yes$/, "") || undefined;
+  const CLI_ALIASES: Record<string, string> = { cy: "claude" };
+
+  const cliName = (() => {
+    const raw =
+      scriptBaseName
+        .replace(/^(cli|agent)(-yes)?$/, "")
+        .replace(/^ay$/, "") // treat standalone "ay" same as "agent-yes"
+        .replace(/-yes$/, "") || undefined;
+    return (raw && CLI_ALIASES[raw]) || raw;
+  })();
 
   // Parse args with yargs (same logic as cli.ts:16-73)
   const parsedArgv = yargs(hideBin(argv))

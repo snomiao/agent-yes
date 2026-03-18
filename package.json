@@ -37,6 +37,7 @@
     "codex-yes": "./dist/codex-yes.js",
     "copilot-yes": "./dist/copilot-yes.js",
     "cursor-yes": "./dist/cursor-yes.js",
+    "cy": "./dist/cy.js",
     "gemini-yes": "./dist/gemini-yes.js",
     "grok-yes": "./dist/grok-yes.js",
     "opencode-yes": "./dist/opencode-yes.js",

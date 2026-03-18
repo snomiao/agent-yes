@@ -42,3 +42,4 @@ bin
 .agent-yes
 /tmp
 TODO.md
+package-lock.json
