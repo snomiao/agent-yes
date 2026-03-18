@@ -54,7 +54,6 @@ async fn main() -> Result<()> {
 async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     use crate::config::get_cli_config;
     use crate::context::AgentContext;
-    use crate::messaging::send_message;
     use crate::pty_spawner::spawn_agent;
 
     let cli_config = get_cli_config(&args.cli)?;

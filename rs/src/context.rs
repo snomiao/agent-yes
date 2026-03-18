@@ -9,7 +9,6 @@ use crate::utils::{remove_control_characters, sleep_ms};
 use anyhow::Result;
 use crossterm::terminal;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;

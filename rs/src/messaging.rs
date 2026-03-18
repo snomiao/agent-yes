@@ -1,9 +1,7 @@
 //! Message sending and keyboard simulation module
 
 use crate::idle_waiter::IdleWaiter;
-use crate::pty_spawner::PtyContext;
 use crate::ready_manager::ReadyManager;
-use crate::utils::sleep_ms;
 use anyhow::Result;
 use std::io::Write;
 use std::sync::{Arc, Mutex};

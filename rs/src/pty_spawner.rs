@@ -2,12 +2,12 @@
 
 use crate::config::CliConfig;
 use anyhow::{anyhow, Result};
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize, SlavePty};
-use std::io::{BufRead, BufReader, Read, Write};
+use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use tokio::sync::mpsc;
-use tracing::{debug, error, info};
+use tracing::{debug, info};
 
 /// Get terminal dimensions from parent TTY, with fallback defaults
 fn get_terminal_size() -> (u16, u16) {
