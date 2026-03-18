@@ -2,7 +2,8 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 // Install dir is one level up from this file (ts/ -> package root)
-const installDir = path.join(import.meta.dir, "..");
+// import.meta.dirname works in Node >=21 and Bun; import.meta.dir is Bun-only
+const installDir = path.join(import.meta.dirname ?? import.meta.dir, "..");
 
 function parseEnvContent(content: string): Record<string, string> {
   const result: Record<string, string> = {};
