@@ -894,8 +894,10 @@ export default async function agentYes({
       let lastRendered = "";
       return e
         .forEach((chunk) => {
-          // Render terminal output for log file
-          terminalRender.write(chunk);
+          // NOTE: terminalRender is already updated by terminalStream.writable.write() in onData()
+          // (terminal-render v1.5+ calls renderer.write() as a side effect of the writable).
+          // Calling terminalRender.write(chunk) here again would double-process every chunk,
+          // corrupting cursor state and breaking all pattern matching.
           // ============ HANDLE special control sequences
           // Handle Device Attributes query (DA) - ESC[c or ESC[0c
           // This must be handled regardless of TTY status
