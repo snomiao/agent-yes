@@ -201,7 +201,7 @@ export function extractSessionId(output: string): string | null {
 export function extractSessionIdFromSessionMeta(sessionContent: string): string | null {
   try {
     // Parse the first line which should contain session metadata
-    const firstLine = sessionContent.split("\n")[0];
+    const firstLine = sessionContent.split("\n")[0]!;
     const sessionMeta = JSON.parse(firstLine);
 
     if (sessionMeta.type === "session_meta" && sessionMeta.payload?.id) {
