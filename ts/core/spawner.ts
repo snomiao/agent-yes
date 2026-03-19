@@ -1,12 +1,10 @@
-import { execaCommandSync, parseCommandString } from "execa";
+import { parseCommandString } from "execa";
 import { logger } from "../logger.ts";
 import { tryCatch } from "../tryCatch.ts";
 import pty, { type IPty } from "../pty.ts";
 import type { AgentCliConfig } from "../index.ts";
 import type { SUPPORTED_CLIS } from "../SUPPORTED_CLIS.ts";
-import { exec, execSync } from "node:child_process";
-import { fromReadable, fromStdio, fromWritable } from "from-node-stream";
-import sflow from "sflow";
+import { execSync } from "node:child_process";
 import pkg from "../../package.json" with { type: "json" };
 
 /**
@@ -129,7 +127,7 @@ function isCommandNotFoundError(e: unknown): boolean {
  * ```
  */
 export function spawnAgent(options: SpawnOptions): IPty {
-  const { cli, cliConf, cliArgs, verbose, install, ptyOptions } = options;
+  const { cli, cliConf, cliArgs, verbose: _verbose, install, ptyOptions } = options;
 
   const spawn = () => {
     const cliCommand = cliConf?.binary || cli;
@@ -142,7 +140,7 @@ export function spawnAgent(options: SpawnOptions): IPty {
 
   return tryCatch(
     // error handler
-    (error: unknown, attempts: number, spawn, ...args) => {
+    (error: unknown, _attempts: number, spawn, ...args) => {
       logger.error(`Fatal: Failed to start ${cli}.`);
 
       const isNotFound = isCommandNotFoundError(error);

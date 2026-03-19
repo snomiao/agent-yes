@@ -258,7 +258,7 @@ export async function getAllWorkingDirectories(): Promise<
 /**
  * Clean up old sessions (keep only the most recent 10 per directory)
  */
-async function cleanupOldSessions(): Promise<void> {
+async function _cleanupOldSessions(): Promise<void> {
   const sessionMap = await loadSessionMap();
 
   // Group sessions by directory and keep only the most recent ones

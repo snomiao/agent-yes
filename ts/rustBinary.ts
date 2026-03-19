@@ -2,8 +2,8 @@
  * Rust binary helper - finds or downloads the appropriate prebuilt binary
  */
 
-import { existsSync, mkdirSync, unlinkSync, renameSync, copyFileSync } from "fs";
-import { chmod, unlink, rename, copyFile } from "fs/promises";
+import { existsSync, mkdirSync, unlinkSync } from "fs";
+import { chmod, copyFile } from "fs/promises";
 import path from "path";
 
 // Platform/arch to binary name mapping
@@ -60,7 +60,7 @@ export function getBinDir(): string {
  */
 export function findRustBinary(verbose = false): string | undefined {
   const binaryName = getBinaryName();
-  const baseName = binaryName.replace(/\.exe$/, "");
+  const _baseName = binaryName.replace(/\.exe$/, "");
 
   const searchPaths = [
     // 1. Check in npm package bin directory

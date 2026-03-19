@@ -2,7 +2,6 @@ import ms from "ms";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
-import pkg from "../package.json" with { type: "json" };
 
 // const pkg = await JSON.parse(await readFile(path.resolve((import.meta.dir) + "/../package.json"), 'utf8'))
 /**

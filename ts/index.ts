@@ -1,10 +1,10 @@
 import { execaCommandSync, parseCommandString } from "execa";
-import { fromReadable, fromWritable } from "from-node-stream";
+import { fromWritable } from "from-node-stream";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import DIE from "phpdie";
 import sflow from "sflow";
-import { TerminalRenderStream, TerminalTextRender } from "terminal-render";
+import { TerminalRenderStream } from "terminal-render";
 import {
   extractSessionId,
   getSessionForCwd,
@@ -14,7 +14,7 @@ import pty, { ptyPackage } from "./pty.ts";
 import { removeControlCharacters } from "./removeControlCharacters.ts";
 import { acquireLock, releaseLock, shouldUseLock } from "./runningLock.ts";
 import { logger } from "./logger.ts";
-import { createFifoStream } from "./beta/fifo.ts";
+// import { createFifoStream } from "./beta/fifo.ts";
 import { PidStore } from "./pidStore.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { sendEnter, sendMessage } from "./core/messaging.ts";
@@ -26,10 +26,10 @@ import {
 } from "./core/logging.ts";
 import { spawnAgent } from "./core/spawner.ts";
 import { AgentContext } from "./core/context.ts";
-import { createAutoResponseHandler } from "./core/responders.ts";
+// import { createAutoResponseHandler } from "./core/responders.ts";
 import { createTerminatorStream } from "./core/streamHelpers.ts";
 import { globalAgentRegistry } from "./agentRegistry.ts";
-import { ReadyManager } from "./ReadyManager.ts";
+// import { ReadyManager } from "./ReadyManager.ts";
 import { notifyWebhook } from "./webhookNotifier.ts";
 
 export { removeControlCharacters };
@@ -119,7 +119,7 @@ export default async function agentYes({
   install = false,
   resume = false,
   useSkills = false,
-  useStdinAppend = false,
+  useStdinAppend: _useStdinAppend = false,
   autoYes = true,
 }: {
   cli: SUPPORTED_CLIS;
@@ -730,7 +730,7 @@ export default async function agentYes({
       process.stdin.on("close", endHandler);
       process.stdin.on("error", errorHandler);
     },
-    cancel(reason) {
+    cancel(_reason) {
       process.stdin.pause();
     },
   });
@@ -802,6 +802,7 @@ export default async function agentYes({
               // Only check for /auto if line is short enough
               if (line.length <= 20) {
                 const cleanLine = line
+                  // oxlint-disable-next-line no-control-regex
                   .replace(/[\x00-\x1f]|\x1b\[[0-9;]*[A-Za-z]|\[[A-Z]/g, "")
                   .trim();
                 if (cleanLine === "/auto") {

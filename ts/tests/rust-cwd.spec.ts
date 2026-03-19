@@ -1,5 +1,5 @@
 import { spawn } from "child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import { expect, it, describe, beforeEach, afterEach } from "bun:test";
 import { findRustBinary } from "../rustBinary";

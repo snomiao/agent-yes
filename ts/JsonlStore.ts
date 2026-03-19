@@ -1,8 +1,8 @@
-import { appendFile, mkdir, readFile, rename, unlink, writeFile } from "fs/promises";
+import { appendFile, mkdir, readFile, rename, writeFile } from "fs/promises";
 import { existsSync } from "fs";
 import { fsyncSync, openSync, closeSync } from "fs";
 import path from "path";
-import { lock, unlock } from "proper-lockfile";
+import { lock } from "proper-lockfile";
 import { logger } from "./logger.ts";
 
 export interface JsonlDoc {
@@ -24,14 +24,11 @@ export interface JsonlDoc {
 export class JsonlStore<T extends Record<string, any> = Record<string, any>> {
   private filePath: string;
   private tempPath: string;
-  private lockPath: string;
   private docs = new Map<string, T & JsonlDoc>();
 
   constructor(filePath: string) {
     this.filePath = filePath;
     this.tempPath = filePath + "~";
-    // Lock on the directory (proper-lockfile needs an existing path)
-    this.lockPath = path.dirname(filePath);
   }
 
   /**
@@ -169,7 +166,7 @@ export class JsonlStore<T extends Record<string, any> = Record<string, any>> {
   async compact(): Promise<void> {
     const lines = Array.from(this.docs.values())
       .map((doc) => {
-        const { _id, $$deleted, ...rest } = doc;
+        const { _id, $$deleted: _$$deleted, ...rest } = doc;
         return JSON.stringify({ _id, ...rest });
       })
       .join("\n");

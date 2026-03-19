@@ -1,9 +1,6 @@
 #!/usr/bin/env bun
 import { argv } from "process";
 import { spawn } from "child_process";
-import { existsSync } from "fs";
-import path from "path";
-import cliYesConfig from "../agent-yes.config.ts";
 import { parseCliArgs } from "./parseCliArgs.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { logger } from "./logger.ts";
