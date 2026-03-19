@@ -80,7 +80,7 @@
     "prepare": "husky",
     "release": "standard-version && npm publish",
     "release:beta": "standard-version && npm publish --tag beta",
-    "test": "bun test --coverage"
+    "test": "bun test --coverage ts/"
   },
   "dependencies": {
     "@snomiao/bun-pty": "^0.3.4",
