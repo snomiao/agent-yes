@@ -115,6 +115,20 @@ describe("PidStore", () => {
       expect(rec?.exitReason).toBe("crash");
       expect(rec?.exitCode).toBe(1);
     });
+
+    it("should no-op when updating non-existent pid", async () => {
+      await store.updateStatus(999888, "exited");
+      // Should not throw and records should be unchanged
+      expect(store.getAllRecords()).toHaveLength(0);
+    });
+
+    it("should update status without extra params", async () => {
+      await store.registerProcess({ pid: 333, cli: "test", args: [], cwd: "/tmp" });
+      await store.updateStatus(333, "idle");
+      const rec = store.getAllRecords().find((r) => r.pid === 333);
+      expect(rec?.status).toBe("idle");
+      expect(rec?.exitReason).toBe("");
+    });
   });
 
   describe("getAllRecords", () => {

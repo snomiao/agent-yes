@@ -52,4 +52,20 @@ describe("IdleWaiter", () => {
     const result = waiter.ping().ping().ping();
     expect(result).toBe(waiter);
   });
+
+  it("should wait until idle period has passed", async () => {
+    const waiter = new IdleWaiter();
+    waiter.checkInterval = 10;
+
+    // Ping right now so it's not idle
+    waiter.ping();
+
+    const start = Date.now();
+    // Wait for 50ms idle period — the wait loop should actually iterate
+    await waiter.wait(50);
+    const elapsed = Date.now() - start;
+
+    // Should have waited at least ~50ms
+    expect(elapsed).toBeGreaterThanOrEqual(40);
+  });
 });

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { spawn } from "child_process";
 import { mkdir, rm } from "fs/promises";
 import path from "path";

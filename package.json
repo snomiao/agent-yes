@@ -80,7 +80,8 @@
     "prepare": "husky",
     "release": "standard-version && npm publish",
     "release:beta": "standard-version && npm publish --tag beta",
-    "test": "bun test --coverage ts/"
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
   },
   "dependencies": {
     "@snomiao/bun-pty": "^0.3.4",
@@ -106,6 +107,7 @@
     "@types/proper-lockfile": "^4.1.4",
     "@types/yargs": "^17.0.35",
     "@typescript/native-preview": "^7.0.0-dev.20260124.1",
+    "@vitest/coverage-v8": "^4.1.0",
     "husky": "^9.1.7",
     "lint-staged": "^16.2.7",
     "node-pty": "^1.1.0",
@@ -116,7 +118,7 @@
     "semantic-release": "^25.0.2",
     "standard-version": "^9.5.0",
     "tsdown": "^0.20.3",
-    "vitest": "^4.0.17",
+    "vitest": "4.1.0",
     "zod": "^3.23.0"
   },
   "peerDependencies": {

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "bun:test";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { loadCascadingConfig, getConfigPaths, ensureSchemaInConfigFiles } from "./configLoader.ts";
 import { mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import path from "node:path";
@@ -186,5 +186,69 @@ configDir: /test
     const result = await ensureSchemaInConfigFiles({ projectDir: testDir, homeDir: testDir });
     expect(result.skipped).toContain(configPath);
     expect(result.modified).not.toContain(configPath);
+  });
+
+  it("should handle invalid JSON config gracefully", async () => {
+    const configPath = path.join(testDir, ".agent-yes.config.json");
+    await writeFile(configPath, "not valid json {{{");
+
+    const config = await loadCascadingConfig({ projectDir: testDir, homeDir: testDir });
+    // Should not throw, returns empty
+    expect(config).toEqual({});
+  });
+
+  it("should handle empty YAML config returning null", async () => {
+    const configPath = path.join(testDir, ".agent-yes.config.yaml");
+    await writeFile(configPath, "");
+
+    const config = await loadCascadingConfig({ projectDir: testDir, homeDir: testDir });
+    expect(config).toEqual({});
+  });
+
+  it("should add schema to YAML with leading comments", async () => {
+    const configPath = path.join(testDir, ".agent-yes.config.yaml");
+    await writeFile(
+      configPath,
+      `# My config comment
+# Another comment
+configDir: /test
+`,
+    );
+
+    const result = await ensureSchemaInConfigFiles({ projectDir: testDir, homeDir: testDir });
+    expect(result.modified).toContain(configPath);
+    const content = await readFile(configPath, "utf-8");
+    expect(content).toContain("yaml-language-server:");
+  });
+
+  it("should handle ensureSchema when no config files exist", async () => {
+    const emptyDir = path.join(testDir, "empty");
+    await mkdir(emptyDir, { recursive: true });
+
+    const result = await ensureSchemaInConfigFiles({ projectDir: emptyDir, homeDir: emptyDir });
+    expect(result.modified).toHaveLength(0);
+    expect(result.skipped).toHaveLength(0);
+  });
+
+  it("should handle addSchemaReference for JSON that already has schema", async () => {
+    const configPath = path.join(testDir, ".agent-yes.config.json");
+    const content = JSON.stringify({ $schema: "existing", configDir: "/test" }, null, 2);
+    await writeFile(configPath, content);
+
+    const result = await ensureSchemaInConfigFiles({ projectDir: testDir, homeDir: testDir });
+    expect(result.skipped).toContain(configPath);
+  });
+
+  it("should use defaults for getConfigPaths without options", () => {
+    const paths = getConfigPaths();
+    expect(paths.length).toBeGreaterThan(0);
+    expect(paths.some((p) => p.includes(".agent-yes.config.json"))).toBe(true);
+  });
+
+  it("should use defaults for loadCascadingConfig without options", async () => {
+    // This tests the default path (process.cwd() and os.homedir())
+    const config = await loadCascadingConfig();
+    // Should not throw, may or may not find configs
+    expect(config).toBeDefined();
   });
 });
