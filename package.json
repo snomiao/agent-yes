@@ -91,7 +91,7 @@
     "phpdie": "^1.7.0",
     "proper-lockfile": "^4.1.2",
     "sflow": "^1.27.0",
-    "terminal-render": "^1.5.0",
+    "terminal-render": "^1.5.1",
     "winston": "^3.19.0",
     "yaml": "^2.8.2",
     "yargs": "^18.0.0"
