@@ -81,7 +81,6 @@ mod tests {
         let mut manager = ReadyManager::new();
         manager.ready().await;
 
-        // Should not block
         let result = timeout(Duration::from_millis(100), manager.wait()).await;
         assert!(result.is_ok());
     }
@@ -90,7 +89,6 @@ mod tests {
     async fn test_wait_blocks_if_not_ready() {
         let mut manager = ReadyManager::new();
 
-        // Should timeout since not ready
         let result = timeout(Duration::from_millis(50), manager.wait()).await;
         assert!(result.is_err());
     }
@@ -100,19 +98,14 @@ mod tests {
         let manager = ReadyManager::new();
         let mut manager_clone = manager.clone();
 
-        // Spawn waiter
         let handle = tokio::spawn(async move {
             manager_clone.wait().await;
             true
         });
 
-        // Give waiter time to start waiting
         tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // Mark as ready
         manager.ready().await;
 
-        // Waiter should complete
         let result = timeout(Duration::from_millis(100), handle).await;
         assert!(result.is_ok());
         assert!(result.unwrap().unwrap());
@@ -126,5 +119,41 @@ mod tests {
 
         manager.unready().await;
         assert!(!manager.is_ready().await);
+    }
+
+    #[tokio::test]
+    async fn test_wait_timeout_success() {
+        let mut manager = ReadyManager::new();
+        let manager_clone = manager.clone();
+
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            manager_clone.ready().await;
+        });
+
+        let result = manager.wait_timeout(Duration::from_millis(200)).await;
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn test_wait_timeout_expires() {
+        let mut manager = ReadyManager::new();
+        let result = manager.wait_timeout(Duration::from_millis(50)).await;
+        assert!(!result);
+    }
+
+    #[tokio::test]
+    async fn test_wait_timeout_already_ready() {
+        let mut manager = ReadyManager::new();
+        manager.ready().await;
+        let result = manager.wait_timeout(Duration::from_millis(50)).await;
+        assert!(result);
+    }
+
+    #[test]
+    fn test_default() {
+        let manager = ReadyManager::default();
+        // Can't call is_ready() without async, but it should construct fine
+        let _ = manager;
     }
 }

@@ -100,7 +100,6 @@ mod tests {
         let waiter = IdleWaiter::new();
         waiter.ping();
 
-        // Wait for 50ms idle - should complete after ~50ms
         let result = timeout(Duration::from_millis(200), waiter.wait(50)).await;
         assert!(result.is_ok());
     }
@@ -110,7 +109,6 @@ mod tests {
         let waiter = IdleWaiter::new();
         let waiter_clone = waiter.clone();
 
-        // Keep pinging every 20ms
         let pinger = tokio::spawn(async move {
             for _ in 0..5 {
                 waiter_clone.ping();
@@ -118,10 +116,53 @@ mod tests {
             }
         });
 
-        // Try to wait for 100ms idle - should timeout before pinger stops
         let result = timeout(Duration::from_millis(80), waiter.wait(100)).await;
         assert!(result.is_err());
 
         pinger.abort();
+    }
+
+    #[tokio::test]
+    async fn test_wait_timeout_success() {
+        let waiter = IdleWaiter::new();
+        waiter.ping();
+        // Wait for 50ms idle with 500ms timeout - should succeed
+        let result = waiter.wait_timeout(50, 500).await;
+        assert!(result);
+    }
+
+    #[tokio::test]
+    async fn test_wait_timeout_expires() {
+        let waiter = IdleWaiter::new();
+        let waiter_clone = waiter.clone();
+
+        // Keep pinging to prevent idle
+        let pinger = tokio::spawn(async move {
+            loop {
+                waiter_clone.ping();
+                sleep(Duration::from_millis(10)).await;
+            }
+        });
+
+        // Wait for 500ms idle with 100ms timeout - should timeout
+        let result = waiter.wait_timeout(500, 100).await;
+        assert!(!result);
+
+        pinger.abort();
+    }
+
+    #[test]
+    fn test_default() {
+        let waiter = IdleWaiter::default();
+        assert!(waiter.idle_time_ms() < 10);
+    }
+
+    #[tokio::test]
+    async fn test_clone() {
+        let waiter = IdleWaiter::new();
+        let clone = waiter.clone();
+        waiter.ping();
+        // Clone shares the same atomic
+        assert!(clone.idle_time_ms() < 10);
     }
 }

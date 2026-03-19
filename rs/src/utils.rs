@@ -30,4 +30,23 @@ mod tests {
         let output = remove_control_characters(input);
         assert_eq!(output, "Clear and move");
     }
+
+    #[test]
+    fn test_remove_control_characters_plain() {
+        let input = "no ansi here";
+        let output = remove_control_characters(input);
+        assert_eq!(output, "no ansi here");
+    }
+
+    #[test]
+    fn test_remove_control_characters_empty() {
+        assert_eq!(remove_control_characters(""), "");
+    }
+
+    #[tokio::test]
+    async fn test_sleep_ms() {
+        let start = std::time::Instant::now();
+        sleep_ms(50).await;
+        assert!(start.elapsed().as_millis() >= 45);
+    }
 }

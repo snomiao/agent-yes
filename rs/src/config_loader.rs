@@ -300,6 +300,81 @@ clis:
     }
 
     #[test]
+    fn test_parse_yml_config() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join(".agent-yes.config.yml");
+        let mut file = fs::File::create(&config_path).unwrap();
+        writeln!(
+            file,
+            r#"
+logsDir: /custom/logs
+"#
+        )
+        .unwrap();
+
+        let config = load_config_from_dir(dir.path());
+        assert_eq!(config.logs_dir, Some("/custom/logs".to_string()));
+    }
+
+    #[test]
+    fn test_parse_invalid_json() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join(".agent-yes.config.json");
+        let mut file = fs::File::create(&config_path).unwrap();
+        writeln!(file, "{{invalid json}}").unwrap();
+
+        // Should return default config on parse error
+        let config = load_config_from_dir(dir.path());
+        assert!(config.config_dir.is_none());
+        assert!(config.clis.is_empty());
+    }
+
+    #[test]
+    fn test_parse_config_file_unsupported_ext() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config.toml");
+        fs::File::create(&config_path).unwrap();
+
+        let result = parse_config_file(&config_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_config_file_no_extension() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join("config");
+        let mut file = fs::File::create(&config_path).unwrap();
+        writeln!(file, "{{}}").unwrap();
+
+        let result = parse_config_file(&config_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_find_config_in_dir_none() {
+        let dir = tempdir().unwrap();
+        assert!(find_config_in_dir(dir.path()).is_none());
+    }
+
+    #[test]
+    fn test_find_config_in_dir_json_priority() {
+        let dir = tempdir().unwrap();
+        // Create .json config - should be found first
+        fs::File::create(dir.path().join(".agent-yes.config.json")).unwrap();
+        let found = find_config_in_dir(dir.path());
+        assert!(found.is_some());
+        assert!(found.unwrap().to_str().unwrap().ends_with(".json"));
+    }
+
+    #[test]
+    fn test_load_config_from_dir_missing() {
+        let dir = tempdir().unwrap();
+        let config = load_config_from_dir(dir.path());
+        assert!(config.config_dir.is_none());
+        assert!(config.clis.is_empty());
+    }
+
+    #[test]
     fn test_merge_configs() {
         let mut base = ConfigFile {
             config_dir: Some("/base".to_string()),
@@ -333,12 +408,193 @@ clis:
         base.merge(override_config);
 
         assert_eq!(base.config_dir, Some("/override".to_string()));
-        assert_eq!(base.logs_dir, Some("/base/logs".to_string())); // Not overridden
+        assert_eq!(base.logs_dir, Some("/base/logs".to_string()));
         let claude = base.clis.get("claude").unwrap();
-        assert_eq!(claude.binary, Some("claude-bin".to_string())); // Not overridden
+        assert_eq!(claude.binary, Some("claude-bin".to_string()));
         assert_eq!(
             claude.default_args,
             Some(vec!["--verbose".to_string()])
-        ); // Overridden
+        );
+    }
+
+    #[test]
+    fn test_merge_logs_dir_override() {
+        let mut base = ConfigFile {
+            config_dir: None,
+            logs_dir: Some("/old/logs".to_string()),
+            clis: HashMap::new(),
+        };
+        base.merge(ConfigFile {
+            config_dir: None,
+            logs_dir: Some("/new/logs".to_string()),
+            clis: HashMap::new(),
+        });
+        assert_eq!(base.logs_dir, Some("/new/logs".to_string()));
+    }
+
+    #[test]
+    fn test_merge_all_cli_fields() {
+        let mut base = ConfigFile::default();
+        base.clis.insert("test".to_string(), CliConfigOverride {
+            install: Some(InstallConfigOverride::Single("old".into())),
+            binary: Some("old-bin".into()),
+            default_args: Some(vec!["old-arg".into()]),
+            ready: Some(vec!["old-ready".into()]),
+            fatal: Some(vec!["old-fatal".into()]),
+            working: Some(vec!["old-working".into()]),
+            enter: Some(vec!["old-enter".into()]),
+            prompt_arg: Some("old-prompt".into()),
+            restore_args: Some(vec!["old-restore".into()]),
+            exit_command: Some(vec!["old-exit".into()]),
+            typing_respond: Some(HashMap::new()),
+            no_eol: Some(false),
+        });
+
+        let mut override_clis = HashMap::new();
+        let mut tr = HashMap::new();
+        tr.insert("y".into(), vec!["pattern".into()]);
+        override_clis.insert("test".to_string(), CliConfigOverride {
+            install: Some(InstallConfigOverride::Single("new".into())),
+            binary: Some("new-bin".into()),
+            default_args: Some(vec!["new-arg".into()]),
+            ready: Some(vec!["new-ready".into()]),
+            fatal: Some(vec!["new-fatal".into()]),
+            working: Some(vec!["new-working".into()]),
+            enter: Some(vec!["new-enter".into()]),
+            prompt_arg: Some("new-prompt".into()),
+            restore_args: Some(vec!["new-restore".into()]),
+            exit_command: Some(vec!["new-exit".into()]),
+            typing_respond: Some(tr),
+            no_eol: Some(true),
+        });
+
+        base.merge(ConfigFile {
+            config_dir: None,
+            logs_dir: None,
+            clis: override_clis,
+        });
+
+        let t = base.clis.get("test").unwrap();
+        assert_eq!(t.binary, Some("new-bin".into()));
+        assert_eq!(t.default_args, Some(vec!["new-arg".into()]));
+        assert_eq!(t.ready, Some(vec!["new-ready".into()]));
+        assert_eq!(t.fatal, Some(vec!["new-fatal".into()]));
+        assert_eq!(t.working, Some(vec!["new-working".into()]));
+        assert_eq!(t.enter, Some(vec!["new-enter".into()]));
+        assert_eq!(t.prompt_arg, Some("new-prompt".into()));
+        assert_eq!(t.restore_args, Some(vec!["new-restore".into()]));
+        assert_eq!(t.exit_command, Some(vec!["new-exit".into()]));
+        assert_eq!(t.no_eol, Some(true));
+        assert!(t.typing_respond.as_ref().unwrap().contains_key("y"));
+    }
+
+    #[test]
+    fn test_merge_new_cli() {
+        let mut base = ConfigFile::default();
+        let mut override_clis = HashMap::new();
+        override_clis.insert("newcli".to_string(), CliConfigOverride {
+            binary: Some("new-binary".into()),
+            ..Default::default()
+        });
+
+        base.merge(ConfigFile {
+            config_dir: None,
+            logs_dir: None,
+            clis: override_clis,
+        });
+
+        assert!(base.clis.contains_key("newcli"));
+        assert_eq!(base.clis.get("newcli").unwrap().binary, Some("new-binary".into()));
+    }
+
+    #[test]
+    fn test_config_file_default() {
+        let config = ConfigFile::default();
+        assert!(config.config_dir.is_none());
+        assert!(config.logs_dir.is_none());
+        assert!(config.clis.is_empty());
+    }
+
+    #[test]
+    fn test_get_config_paths() {
+        let paths = get_config_paths();
+        // Should have paths for exe dir, home dir, and cwd (3 extensions each)
+        assert!(!paths.is_empty());
+        // All paths should contain the config filename
+        for path in &paths {
+            assert!(path.to_str().unwrap().contains(".agent-yes.config"));
+        }
+    }
+
+    #[test]
+    fn test_load_cascading_config() {
+        // Just ensure it doesn't panic
+        let config = load_cascading_config();
+        // Returns a valid ConfigFile (may be empty/default)
+        let _ = config.config_dir;
+        let _ = config.clis;
+    }
+
+    #[test]
+    fn test_install_config_override_single() {
+        let json = r#""npm install -g something""#;
+        let parsed: InstallConfigOverride = serde_json::from_str(json).unwrap();
+        match parsed {
+            InstallConfigOverride::Single(s) => assert_eq!(s, "npm install -g something"),
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    #[test]
+    fn test_install_config_override_multiple() {
+        let json = r#"{"npm": "npm i -g foo", "bash": "curl install.sh"}"#;
+        let parsed: InstallConfigOverride = serde_json::from_str(json).unwrap();
+        match parsed {
+            InstallConfigOverride::Multiple { npm, bash, powershell } => {
+                assert_eq!(npm, Some("npm i -g foo".into()));
+                assert_eq!(bash, Some("curl install.sh".into()));
+                assert!(powershell.is_none());
+            }
+            _ => panic!("Expected Multiple variant"),
+        }
+    }
+
+    #[test]
+    fn test_full_json_config_with_all_fields() {
+        let dir = tempdir().unwrap();
+        let config_path = dir.path().join(".agent-yes.config.json");
+        let mut file = fs::File::create(&config_path).unwrap();
+        writeln!(
+            file,
+            r#"{{
+            "configDir": "/cfg",
+            "logsDir": "/logs",
+            "clis": {{
+                "claude": {{
+                    "binary": "claude-bin",
+                    "promptArg": "--prompt",
+                    "defaultArgs": ["-v"],
+                    "ready": ["ready$"],
+                    "fatal": ["fatal$"],
+                    "working": ["working$"],
+                    "enter": ["enter$"],
+                    "restoreArgs": ["--resume"],
+                    "exitCommand": ["/quit"],
+                    "noEol": true,
+                    "typingRespond": {{"y\\n": ["confirm"]}}
+                }}
+            }}
+        }}"#
+        )
+        .unwrap();
+
+        let config = load_config_from_dir(dir.path());
+        assert_eq!(config.config_dir, Some("/cfg".to_string()));
+        assert_eq!(config.logs_dir, Some("/logs".to_string()));
+        let claude = config.clis.get("claude").unwrap();
+        assert_eq!(claude.binary, Some("claude-bin".into()));
+        assert_eq!(claude.prompt_arg, Some("--prompt".into()));
+        assert_eq!(claude.no_eol, Some(true));
+        assert!(claude.typing_respond.is_some());
     }
 }

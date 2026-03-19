@@ -127,9 +127,13 @@ pub fn parse_args() -> Result<CliArgs> {
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
         .unwrap_or_default();
 
-    let cli_from_name = detect_cli_from_name(&exe_name);
-
     let args = Args::parse();
+    resolve_args(args, &exe_name)
+}
+
+/// Resolve parsed clap Args into CliArgs (testable without process args)
+fn resolve_args(args: Args, exe_name: &str) -> Result<CliArgs> {
+    let cli_from_name = detect_cli_from_name(exe_name);
 
     // Parse trailing args - first arg might be CLI name
     let (trailing_cli, remaining_args) = extract_cli_from_args(&args.args);
@@ -263,22 +267,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_detect_cli_from_name() {
+    fn test_detect_cli_from_name_all() {
         assert_eq!(detect_cli_from_name("claude-yes"), Some("claude".into()));
         assert_eq!(detect_cli_from_name("gemini-yes"), Some("gemini".into()));
+        assert_eq!(detect_cli_from_name("codex-yes"), Some("codex".into()));
+        assert_eq!(detect_cli_from_name("copilot-yes"), Some("copilot".into()));
+        assert_eq!(detect_cli_from_name("cursor-yes"), Some("cursor".into()));
+        assert_eq!(detect_cli_from_name("grok-yes"), Some("grok".into()));
+        assert_eq!(detect_cli_from_name("qwen-yes"), Some("qwen".into()));
+        assert_eq!(detect_cli_from_name("auggie-yes"), Some("auggie".into()));
+        assert_eq!(detect_cli_from_name("amp-yes"), Some("amp".into()));
+        assert_eq!(detect_cli_from_name("opencode-yes"), Some("opencode".into()));
         assert_eq!(detect_cli_from_name("agent-yes"), None);
+        assert_eq!(detect_cli_from_name("something"), None);
+        assert_eq!(detect_cli_from_name(""), None);
     }
 
     #[test]
-    fn test_parse_duration() {
+    fn test_parse_duration_valid() {
         assert_eq!(parse_duration("60s").unwrap(), 60000);
         assert_eq!(parse_duration("1m").unwrap(), 60000);
         assert_eq!(parse_duration("5m").unwrap(), 300000);
         assert_eq!(parse_duration("60").unwrap(), 60000);
+        assert_eq!(parse_duration("  30  ").unwrap(), 30000);
+        assert_eq!(parse_duration("2h").unwrap(), 7200000);
     }
 
     #[test]
-    fn test_extract_prompt() {
+    fn test_parse_duration_invalid() {
+        assert!(parse_duration("abc").is_err());
+        assert!(parse_duration("").is_err());
+    }
+
+    #[test]
+    fn test_extract_prompt_with_separator() {
         let args = vec!["--flag".into(), "--".into(), "my".into(), "prompt".into()];
         let (cli_args, prompt) = extract_prompt_from_args(args, None);
         assert_eq!(cli_args, vec!["--flag"]);
@@ -286,29 +308,229 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_prompt_explicit() {
+        let args = vec!["--flag".into()];
+        let (cli_args, prompt) =
+            extract_prompt_from_args(args, Some("explicit".into()));
+        assert_eq!(cli_args, vec!["--flag"]);
+        assert_eq!(prompt, Some("explicit".into()));
+    }
+
+    #[test]
+    fn test_extract_prompt_empty_after_separator() {
+        let args = vec!["--flag".into(), "--".into()];
+        let (cli_args, prompt) = extract_prompt_from_args(args, None);
+        assert_eq!(cli_args, vec!["--flag"]);
+        assert_eq!(prompt, None);
+    }
+
+    #[test]
+    fn test_extract_prompt_no_separator() {
+        let args = vec!["--flag".into(), "value".into()];
+        let (cli_args, prompt) = extract_prompt_from_args(args.clone(), None);
+        assert_eq!(cli_args, args);
+        assert_eq!(prompt, None);
+    }
+
+    #[test]
     fn test_extract_cli_from_args() {
-        // CLI as first arg
         let args = vec!["codex".into(), "hello".into(), "world".into()];
         let (cli, remaining) = extract_cli_from_args(&args);
         assert_eq!(cli, Some("codex".into()));
         assert_eq!(remaining, vec!["hello", "world"]);
 
-        // CLI with -yes suffix
         let args = vec!["codex-yes".into(), "hello".into()];
         let (cli, remaining) = extract_cli_from_args(&args);
         assert_eq!(cli, Some("codex".into()));
         assert_eq!(remaining, vec!["hello"]);
 
-        // No CLI in args
         let args = vec!["--flag".into(), "value".into()];
         let (cli, remaining) = extract_cli_from_args(&args);
         assert_eq!(cli, None);
         assert_eq!(remaining, vec!["--flag", "value"]);
 
-        // Empty args
         let args: Vec<String> = vec![];
         let (cli, remaining) = extract_cli_from_args(&args);
         assert_eq!(cli, None);
         assert!(remaining.is_empty());
+    }
+
+    #[test]
+    fn test_extract_cli_from_args_all_clis() {
+        for cli in SUPPORTED_CLIS {
+            let args = vec![cli.to_string(), "arg1".into()];
+            let (detected, remaining) = extract_cli_from_args(&args);
+            assert_eq!(detected, Some(cli.to_string()));
+            assert_eq!(remaining, vec!["arg1"]);
+        }
+    }
+
+    #[test]
+    fn test_supported_clis_count() {
+        assert_eq!(SUPPORTED_CLIS.len(), 10);
+    }
+
+    fn default_args() -> Args {
+        Args {
+            cli: "claude".into(),
+            prompt: None,
+            timeout: None,
+            exit_on_idle: None,
+            idle_timeout: None,
+            robust: true,
+            continue_session: false,
+            verbose: false,
+            auto: "yes".into(),
+            install: false,
+            queue: false,
+            use_skills: false,
+            swarm: None,
+            experimental_swarm: false,
+            swarm_listen: None,
+            swarm_topic: "agent-yes-swarm".into(),
+            swarm_bootstrap: vec![],
+            args: vec![],
+        }
+    }
+
+    #[test]
+    fn test_resolve_args_default() {
+        let result = resolve_args(default_args(), "agent-yes").unwrap();
+        assert_eq!(result.cli, "claude");
+        assert!(result.prompt.is_none());
+        assert!(result.timeout_ms.is_none());
+        assert!(result.robust);
+        assert!(!result.continue_session);
+        assert!(!result.verbose);
+        assert!(result.auto_yes);
+        assert!(!result.install);
+        assert!(!result.queue);
+        assert!(result.swarm.is_none());
+    }
+
+    #[test]
+    fn test_resolve_args_explicit_cli() {
+        let mut args = default_args();
+        args.cli = "gemini".into();
+        let result = resolve_args(args, "agent-yes").unwrap();
+        assert_eq!(result.cli, "gemini");
+    }
+
+    #[test]
+    fn test_resolve_args_trailing_cli() {
+        let mut args = default_args();
+        args.args = vec!["codex".into(), "hello".into()];
+        let result = resolve_args(args, "agent-yes").unwrap();
+        assert_eq!(result.cli, "codex");
+        assert_eq!(result.cli_args, vec!["hello"]);
+    }
+
+    #[test]
+    fn test_resolve_args_binary_name_cli() {
+        let result = resolve_args(default_args(), "gemini-yes").unwrap();
+        assert_eq!(result.cli, "gemini");
+    }
+
+    #[test]
+    fn test_resolve_args_unsupported_cli() {
+        let mut args = default_args();
+        args.cli = "unsupported".into();
+        assert!(resolve_args(args, "agent-yes").is_err());
+    }
+
+    #[test]
+    fn test_resolve_args_with_timeout() {
+        let mut args = default_args();
+        args.timeout = Some("5m".into());
+        let result = resolve_args(args, "agent-yes").unwrap();
+        assert_eq!(result.timeout_ms, Some(300000));
+    }
+
+    #[test]
+    fn test_resolve_args_idle_timeout_alias() {
+        let mut args = default_args();
+        args.idle_timeout = Some("60s".into());
+        let result = resolve_args(args, "agent-yes").unwrap();
+        assert_eq!(result.timeout_ms, Some(60000));
+    }
+
+    #[test]
+    fn test_resolve_args_exit_on_idle_alias() {
+        let mut args = default_args();
+        args.exit_on_idle = Some("30".into());
+        let result = resolve_args(args, "agent-yes").unwrap();
+        assert_eq!(result.timeout_ms, Some(30000));
+    }
+
+    #[test]
+    fn test_resolve_args_with_prompt() {
+        let mut args = default_args();
+        args.prompt = Some("hello world".into());
+        let result = resolve_args(args, "agent-yes").unwrap();
+        assert_eq!(result.prompt, Some("hello world".into()));
+    }
+
+    #[test]
+    fn test_resolve_args_prompt_from_trailing() {
+        let mut args = default_args();
+        args.args = vec!["--".into(), "my".into(), "prompt".into()];
+        let result = resolve_args(args, "agent-yes").unwrap();
+        assert_eq!(result.prompt, Some("my prompt".into()));
+    }
+
+    #[test]
+    fn test_resolve_args_auto_no() {
+        let mut args = default_args();
+        args.auto = "no".into();
+        let result = resolve_args(args, "agent-yes").unwrap();
+        assert!(!result.auto_yes);
+    }
+
+    #[test]
+    fn test_resolve_args_auto_yes_case_insensitive() {
+        let mut args = default_args();
+        args.auto = "NO".into();
+        let result = resolve_args(args, "agent-yes").unwrap();
+        assert!(!result.auto_yes);
+    }
+
+    #[test]
+    fn test_resolve_args_swarm() {
+        let mut args = default_args();
+        args.swarm = Some("my-topic".into());
+        let result = resolve_args(args, "agent-yes").unwrap();
+        assert_eq!(result.swarm, Some("my-topic".into()));
+    }
+
+    #[test]
+    fn test_resolve_args_experimental_swarm_compat() {
+        let mut args = default_args();
+        args.experimental_swarm = true;
+        args.swarm_topic = "custom-topic".into();
+        let result = resolve_args(args, "agent-yes").unwrap();
+        assert_eq!(result.swarm, Some("custom-topic".into()));
+    }
+
+    #[test]
+    fn test_resolve_args_continue_session() {
+        let mut args = default_args();
+        args.continue_session = true;
+        let result = resolve_args(args, "agent-yes").unwrap();
+        assert!(result.continue_session);
+    }
+
+    #[test]
+    fn test_resolve_args_verbose() {
+        let mut args = default_args();
+        args.verbose = true;
+        let result = resolve_args(args, "agent-yes").unwrap();
+        assert!(result.verbose);
+    }
+
+    #[test]
+    fn test_resolve_args_invalid_timeout() {
+        let mut args = default_args();
+        args.timeout = Some("invalid".into());
+        assert!(resolve_args(args, "agent-yes").is_err());
     }
 }

@@ -5,3 +5,7 @@ git add -u
 bunx lint-staged
 bun run build
 bun run test:coverage
+# Rust coverage (only if cargo-tarpaulin is installed)
+if command -v cargo-tarpaulin >/dev/null 2>&1; then
+  (cd rs && cargo tarpaulin --config tarpaulin.toml --skip-clean --fail-under 90)
+fi
