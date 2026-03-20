@@ -1,12 +1,12 @@
 [default]
 # Exclude modules that depend on PTY, OS integration, or networking
 exclude-files = [
-    "src/main.rs",
-    "src/context.rs",
-    "src/pty_spawner.rs",
-    "src/logger.rs",
-    "src/swarm/*",
-    "src/swarm.rs",
+  "src/main.rs",
+  "src/context.rs",
+  "src/pty_spawner.rs",
+  "src/logger.rs",
+  "src/swarm/*",
+  "src/swarm.rs",
 ]
 # Run with all features disabled (swarm requires libp2p build)
 run-types = ["Tests"]
