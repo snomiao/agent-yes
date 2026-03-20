@@ -1,6 +1,6 @@
-import { execaCommand, execaCommandSync } from "execa";
+import { execaCommandSync } from "execa";
 import { fromReadable } from "from-node-stream";
-import { createReadStream, mkdirSync } from "fs";
+import { closeSync, constants, createReadStream, mkdirSync, openSync } from "fs";
 import { unlink } from "fs/promises";
 import { dirname } from "path";
 import sflow from "sflow";
@@ -172,21 +172,25 @@ async function createLinuxFifo(
 
     logger.info(`[${cli}-yes] Created FIFO at ${fifoPath}`);
 
-    // Open the FIFO for reading
-    // Note: This will block until a writer opens the FIFO, so we use a dummy writer to unblock it
+    // Open the FIFO for reading.
+    // Use O_NONBLOCK so open() returns immediately without waiting for a writer.
+    // Then open the write-end in this process and keep it open for the session lifetime
+    // so that external writers closing does not deliver EOF to the reader.
     try {
-      // Open a dummy writer in background to prevent blocking
-      execaCommand(`exec 3>"${fifoPath}"`).catch(() => null);
+      const readFd = openSync(fifoPath, constants.O_RDONLY | constants.O_NONBLOCK);
+      fifoStream = createReadStream("", { fd: readFd, autoClose: true });
 
-      fifoStream = createReadStream(fifoPath, {
-        flags: "r",
-        autoClose: true,
-      });
+      // Keep write-end open in this process. O_NONBLOCK succeeds immediately because
+      // the read-end is already open above.
+      const dummyWriteFd = openSync(fifoPath, constants.O_WRONLY | constants.O_NONBLOCK);
 
       logger.info(`[${cli}-yes] FIFO opened for reading`);
 
       // Cleanup FIFO function
       const cleanupFifo = async () => {
+        try {
+          closeSync(dummyWriteFd);
+        } catch {}
         if (fifoStream) {
           try {
             fifoStream.close();
