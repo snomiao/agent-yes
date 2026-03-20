@@ -327,6 +327,15 @@ export default async function agentYes({
     ptyOptions,
   });
 
+  // Attach data handler IMMEDIATELY after spawn to avoid losing early PTY output.
+  // node-pty emits 'data' events eagerly — if no listener is attached, events are lost.
+  function onData(data: string) {
+    const currentPid = shell.pid;
+    outputWriter.write(data);
+    globalAgentRegistry.appendStdout(currentPid, data);
+  }
+  shell.onData(onData);
+
   // Register process in pidStore (non-blocking - failures should not prevent agent from running)
   try {
     await pidStore.registerProcess({ pid: shell.pid, cli, args: cliArgs, prompt, cwd: workingDir });
@@ -386,16 +395,6 @@ export default async function agentYes({
 
   const pendingExitCode = Promise.withResolvers<number | null>();
 
-  function onData(data: string) {
-    const currentPid = shell.pid; // Capture PID before any potential shell reassignment
-    // Write eagerly — TerminalRenderStream never exerts backpressure,
-    // so the PTY is always drained and the child process never blocks.
-    outputWriter.write(data);
-    // append to agent registry for MCP server
-    globalAgentRegistry.appendStdout(currentPid, data);
-  }
-
-  shell.onData(onData);
   shell.onExit(async function onExit({ exitCode }) {
     const exitedPid = shell.pid; // Capture PID immediately before any shell reassignment
     // Unregister from agent registry

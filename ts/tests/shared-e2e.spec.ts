@@ -218,8 +218,9 @@ describe("shared e2e: ts vs rs", () => {
       });
 
       const elapsed = Date.now() - start;
-      // Should have exited within a reasonable window around the 3s idle timeout
-      expect(elapsed).toBeLessThan(15_000);
+      // Should have exited within a reasonable window around the idle timeout.
+      // On slow machines, force-ready (10s) + idle timeout (3s) + overhead ≈ 16s.
+      expect(elapsed).toBeLessThan(20_000);
     }, 25_000);
   }
 

@@ -19,41 +19,24 @@ export interface MessageContext {
  * @param waitms Milliseconds to wait for idle before sending Enter (default: 1000)
  */
 export async function sendEnter(context: MessageContext, waitms = 1000) {
-  // wait for idle for a bit to let agent cli finish rendering
   const st = Date.now();
-  await context.idleWaiter.wait(waitms); // wait for idle a while
-  const et = Date.now();
-  logger.debug(`sendingEnter| idleWaiter.wait(${String(waitms)}) took ${String(et - st)}ms`);
+  await context.idleWaiter.wait(waitms);
+  logger.debug(`sendEnter| idleWait took ${String(Date.now() - st)}ms`);
   context.nextStdout.unready();
-  // send the enter key
   context.shell.write("\r");
-  logger.debug(`enterSent| idleWaiter.wait(${String(waitms)}) took ${String(et - st)}ms`);
 
-  // retry once if not received any output in 1 second after sending Enter
-  await Promise.race([
-    context.nextStdout.wait(),
-    new Promise<void>((resolve) =>
-      setTimeout(() => {
-        if (!context.nextStdout.isReady) {
-          context.shell.write("\r");
-        }
-        resolve();
-      }, 1000),
-    ),
-  ]);
-
-  // retry the second time if not received any output in 3 second after sending Enter
-  await Promise.race([
-    context.nextStdout.wait(),
-    new Promise<void>((resolve) =>
-      setTimeout(() => {
-        if (!context.nextStdout.isReady) {
-          context.shell.write("\r");
-        }
-        resolve();
-      }, 3000),
-    ),
-  ]);
+  // Retry Enter if no stdout received within escalating timeouts
+  for (const ms of [1000, 3000]) {
+    await Promise.race([
+      context.nextStdout.wait(),
+      new Promise<void>((resolve) =>
+        setTimeout(() => {
+          if (!context.nextStdout.isReady) context.shell.write("\r");
+          resolve();
+        }, ms),
+      ),
+    ]);
+  }
 }
 
 /**
