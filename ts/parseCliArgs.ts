@@ -2,8 +2,6 @@ import ms from "ms";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
-
-// const pkg = await JSON.parse(await readFile(path.resolve((import.meta.dir) + "/../package.json"), 'utf8'))
 /**
  * Parse CLI arguments the same way cli.ts does
  * This is a test helper that mirrors the parsing logic in cli.ts

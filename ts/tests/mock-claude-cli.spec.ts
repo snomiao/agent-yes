@@ -1,10 +1,9 @@
 import { spawn } from "child_process";
 import { existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
-import { expect, it, describe, beforeEach, afterEach } from "vitest";
+import { expect, it, describe, beforeEach, afterEach } from "bun:test";
 
 const TEST_DIR = join(process.cwd(), "tmp-test-fifo");
-const _MOCK_CLI_PATH = join(process.cwd(), "ts/tests/mock-claude-cli.ts");
 const AGENT_YES_CLI = join(process.cwd(), "ts/cli.ts");
 
 describe("IPC cross-platform functionality", () => {

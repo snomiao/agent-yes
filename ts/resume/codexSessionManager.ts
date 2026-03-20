@@ -254,32 +254,3 @@ export async function getAllWorkingDirectories(): Promise<
     .map(([cwd, data]) => ({ cwd, ...data }))
     .sort((a, b) => new Date(b.lastSession).getTime() - new Date(a.lastSession).getTime());
 }
-
-/**
- * Clean up old sessions (keep only the most recent 10 per directory)
- */
-async function _cleanupOldSessions(): Promise<void> {
-  const sessionMap = await loadSessionMap();
-
-  // Group sessions by directory and keep only the most recent ones
-  const cleaned: CodexSessionMap = {};
-
-  // Sort all sessions by lastUsed date (most recent first)
-  const sortedEntries = Object.entries(sessionMap).sort(
-    ([, a], [, b]) => new Date(b.lastUsed).getTime() - new Date(a.lastUsed).getTime(),
-  );
-
-  // Keep track of how many sessions we've kept per directory
-  const dirCounts: { [dir: string]: number } = {};
-
-  for (const [cwd, session] of sortedEntries) {
-    const count = dirCounts[cwd] || 0;
-    if (count < 5) {
-      // Keep up to 5 sessions per directory
-      cleaned[cwd] = session;
-      dirCounts[cwd] = count + 1;
-    }
-  }
-
-  await saveSessionMap(cleaned);
-}

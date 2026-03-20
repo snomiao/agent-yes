@@ -12,6 +12,9 @@ import { existsSync, mkdirSync, rmSync, writeFileSync, chmodSync } from "fs";
 import { join } from "path";
 import { expect, it, describe, beforeEach, afterEach } from "bun:test";
 
+const IS_WINDOWS = process.platform === "win32";
+const PATH_SEP = IS_WINDOWS ? ";" : ":";
+
 const ROOT = process.cwd();
 const AGENT_YES_CLI = join(ROOT, "ts/cli.ts");
 const TEST_DIR = join(ROOT, "tmp-test-shared-e2e");
@@ -50,8 +53,30 @@ function runAgentYes(
   });
 }
 
-/** Create an executable bash script inside dir. */
+/**
+ * Create an executable mock CLI script inside dir.
+ * On Windows: creates a .cmd batch file.
+ * On Unix: creates a bash script and marks it executable.
+ */
 function makeMockCli(dir: string, name: string, body: string): string {
+  if (IS_WINDOWS) {
+    const p = join(dir, `${name}.cmd`);
+    // Convert bash-style body to basic batch: echo statements, exit
+    const batchBody = body
+      .split("\n")
+      .map((line) => {
+        const trimmed = line.trim();
+        if (trimmed.startsWith("echo ")) return trimmed;
+        if (trimmed.startsWith("exit ")) return trimmed;
+        if (trimmed.startsWith("sleep "))
+          return `timeout /t ${trimmed.split(" ")[1]} /nobreak >nul`;
+        if (trimmed.startsWith("read ")) return "set /p _line=";
+        return `rem ${trimmed}`;
+      })
+      .join("\r\n");
+    writeFileSync(p, `@echo off\r\n${batchBody}\r\n`);
+    return p;
+  }
   const p = join(dir, name);
   writeFileSync(p, `#!/usr/bin/env bash\n${body}\n`);
   chmodSync(p, 0o755);
@@ -113,7 +138,7 @@ describe("shared e2e: ts vs rs", () => {
           cwd: workdir,
           env: {
             ...process.env,
-            PATH: `${binDir}:${process.env.PATH}`,
+            PATH: `${binDir}${PATH_SEP}${process.env.PATH}`,
           },
           timeoutMs: 20_000,
         },
@@ -150,7 +175,7 @@ describe("shared e2e: ts vs rs", () => {
           cwd: TEST_DIR,
           env: {
             ...process.env,
-            PATH: `${binDir}:${process.env.PATH}`,
+            PATH: `${binDir}${PATH_SEP}${process.env.PATH}`,
           },
           timeoutMs: 20_000,
         },
@@ -195,6 +220,44 @@ describe("shared e2e: ts vs rs", () => {
       const elapsed = Date.now() - start;
       // Should have exited within a reasonable window around the 3s idle timeout
       expect(elapsed).toBeLessThan(15_000);
+    }, 25_000);
+  }
+
+  // -------------------------------------------------------------------------
+  // 5. noEOL: ready pattern delivered via \r (no newline) is still detected
+  //    via the heartbeat's terminalRender.tail() poll
+  // -------------------------------------------------------------------------
+  for (const impl of IMPLS) {
+    it(`[${impl.name}] detects ready pattern written with \\r (noEOL-style)`, async () => {
+      if (IS_WINDOWS) return; // \r semantics differ in Windows batch; skip
+
+      // Mock CLI: writes the ready pattern using \r then \n (like a spinner that
+      // rewrites a line) so no clean \n-separated line ever appears in the raw
+      // chunk stream — only the rendered terminal has the clean text.
+      makeMockCli(
+        binDir,
+        "claude",
+        [
+          // Overwrite a line: first write noise, then carriage-return and write the
+          // actual ready text on the same line.
+          `printf 'loading...\\r? for shortcuts\\n'`,
+          "sleep 10000",
+        ].join("\n"),
+      );
+
+      const result = await runAgentYes(
+        impl.extraArgs,
+        ["--cli", "claude", "--timeout", "3s", "-p", "test"],
+        {
+          cwd: TEST_DIR,
+          env: { ...process.env, PATH: `${binDir}${PATH_SEP}${process.env.PATH}` },
+          timeoutMs: 20_000,
+        },
+      );
+
+      // If the ready pattern was detected the agent starts the idle timer and
+      // exits cleanly (code 0 or 1) within the timeout window — not killed by us.
+      expect(result.code).not.toBe(-1); // -1 means our outer kill fired
     }, 25_000);
   }
 });

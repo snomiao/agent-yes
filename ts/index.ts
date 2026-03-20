@@ -14,7 +14,8 @@ import pty, { ptyPackage } from "./pty.ts";
 import { removeControlCharacters } from "./removeControlCharacters.ts";
 import { acquireLock, releaseLock, shouldUseLock } from "./runningLock.ts";
 import { logger } from "./logger.ts";
-// import { createFifoStream } from "./beta/fifo.ts";
+// oxlint-disable-next-line no-unused-vars -- kept for FIFO re-enable (see TODO at index.ts:833)
+import { createFifoStream } from "./beta/fifo.ts";
 import { PidStore } from "./pidStore.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { sendEnter, sendMessage } from "./core/messaging.ts";
@@ -26,10 +27,8 @@ import {
 } from "./core/logging.ts";
 import { spawnAgent } from "./core/spawner.ts";
 import { AgentContext } from "./core/context.ts";
-// import { createAutoResponseHandler } from "./core/responders.ts";
 import { createTerminatorStream } from "./core/streamHelpers.ts";
 import { globalAgentRegistry } from "./agentRegistry.ts";
-// import { ReadyManager } from "./ReadyManager.ts";
 import { notifyWebhook } from "./webhookNotifier.ts";
 
 export { removeControlCharacters };
@@ -802,7 +801,7 @@ export default async function agentYes({
               // Only check for /auto if line is short enough
               if (line.length <= 20) {
                 const cleanLine = line
-                  // oxlint-disable-next-line no-control-regex
+                  // oxlint-disable-next-line no-control-regex -- intentional: strip ANSI/control chars
                   .replace(/[\x00-\x1f]|\x1b\[[0-9;]*[A-Za-z]|\[[A-Z]/g, "")
                   .trim();
                 if (cleanLine === "/auto") {

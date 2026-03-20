@@ -60,7 +60,6 @@ export function getBinDir(): string {
  */
 export function findRustBinary(verbose = false): string | undefined {
   const binaryName = getBinaryName();
-  const _baseName = binaryName.replace(/\.exe$/, "");
 
   const searchPaths = [
     // 1. Check in npm package bin directory

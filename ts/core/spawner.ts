@@ -127,7 +127,7 @@ function isCommandNotFoundError(e: unknown): boolean {
  * ```
  */
 export function spawnAgent(options: SpawnOptions): IPty {
-  const { cli, cliConf, cliArgs, verbose: _verbose, install, ptyOptions } = options;
+  const { cli, cliConf, cliArgs, install, ptyOptions } = options;
 
   const spawn = () => {
     const cliCommand = cliConf?.binary || cli;
@@ -140,7 +140,7 @@ export function spawnAgent(options: SpawnOptions): IPty {
 
   return tryCatch(
     // error handler
-    (error: unknown, _attempts: number, spawn, ...args) => {
+    (error: unknown, attempts: number, spawn, ...args) => {
       logger.error(`Fatal: Failed to start ${cli}.`);
 
       const isNotFound = isCommandNotFoundError(error);
