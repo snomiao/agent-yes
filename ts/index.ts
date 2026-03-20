@@ -14,7 +14,6 @@ import pty, { ptyPackage } from "./pty.ts";
 import { removeControlCharacters } from "./removeControlCharacters.ts";
 import { acquireLock, releaseLock, shouldUseLock } from "./runningLock.ts";
 import { logger } from "./logger.ts";
-// oxlint-disable-next-line no-unused-vars -- kept for FIFO re-enable (see TODO at index.ts:833)
 import { createFifoStream } from "./beta/fifo.ts";
 import { PidStore } from "./pidStore.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
@@ -118,7 +117,7 @@ export default async function agentYes({
   install = false,
   resume = false,
   useSkills = false,
-  useStdinAppend: _useStdinAppend = false,
+  useStdinAppend = false,
   autoYes = true,
 }: {
   cli: SUPPORTED_CLIS;
@@ -833,18 +832,17 @@ export default async function agentYes({
       })(),
     )
 
-    // TODO(sno): Read from IPC stream if available (FIFO on Linux, Named Pipes on Windows)
-    // .by(async (s) => {
-    //   if (!useStdinAppend) return s;
-    //   const fifoPath = pidStore.getFifoPath(shell.pid);
-    //   if (!fifoPath) return s; // Skip if no valid path
-    //   const ipcResult = await createFifoStream(cli, fifoPath);
-    //   if (!ipcResult) return s;
-    //   pendingExitCode.promise.finally(async() => await ipcResult[Symbol.asyncDispose]());
-    //   process.stderr.write(`\n  Append prompts: ${cli}-yes --append-prompt '...'\n\n`);
-    //   return s.merge(ipcResult.stream);
-    // })
-    // .confluenceByConcat() // necessary when .by() above is async
+    // Read from IPC stream if available (FIFO on Linux, Named Pipes on Windows)
+    .by(async (s) => {
+      if (!useStdinAppend) return s;
+      const fifoPath = pidStore.getFifoPath(shell.pid);
+      const ipcResult = await createFifoStream(cli, fifoPath);
+      if (!ipcResult) return s;
+      pendingExitCode.promise.finally(async () => await ipcResult[Symbol.asyncDispose]());
+      process.stderr.write(`\n  Append prompts: ${cli}-yes --append-prompt '...'\n\n`);
+      return s.merge(ipcResult.stream);
+    })
+    .confluenceByConcat() // necessary because .by() above is async
 
     // .map((e) => e.replaceAll('\x1a', '')) // remove ctrl+z from user's input, to prevent bug (but this seems bug)
     // .forEach(e => appendFile('.cache/io.log', "input |" + JSON.stringify(e) + '\n')) // for debugging
