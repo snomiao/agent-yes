@@ -1,7 +1,7 @@
 import { spawn } from "child_process";
 import { existsSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
-import { expect, it, describe, beforeEach, afterEach } from "bun:test";
+import { expect, it, describe, beforeEach, afterEach } from "vitest";
 
 const TEST_DIR = join(process.cwd(), "tmp-test-fifo");
 const AGENT_YES_CLI = join(process.cwd(), "ts/cli.ts");

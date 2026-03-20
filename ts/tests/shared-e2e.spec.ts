@@ -10,7 +10,7 @@
 import { spawn } from "child_process";
 import { existsSync, mkdirSync, rmSync, writeFileSync, chmodSync } from "fs";
 import { join } from "path";
-import { expect, it, describe, beforeEach, afterEach } from "bun:test";
+import { expect, it, describe, beforeEach, afterEach } from "vitest";
 
 const IS_WINDOWS = process.platform === "win32";
 const PATH_SEP = IS_WINDOWS ? ";" : ":";
