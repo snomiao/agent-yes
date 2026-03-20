@@ -34,7 +34,7 @@ export async function sendEnter(context: MessageContext, waitms = 1000) {
     context.nextStdout.wait(),
     new Promise<void>((resolve) =>
       setTimeout(() => {
-        if (!context.nextStdout.ready) {
+        if (!context.nextStdout.isReady) {
           context.shell.write("\r");
         }
         resolve();
@@ -47,7 +47,7 @@ export async function sendEnter(context: MessageContext, waitms = 1000) {
     context.nextStdout.wait(),
     new Promise<void>((resolve) =>
       setTimeout(() => {
-        if (!context.nextStdout.ready) {
+        if (!context.nextStdout.isReady) {
           context.shell.write("\r");
         }
         resolve();
@@ -74,7 +74,15 @@ export async function sendMessage(
   context.shell.write(message);
   context.idleWaiter.ping(); // just sent a message, wait for echo
   logger.debug(`waiting next stdout|${message}`);
-  await context.nextStdout.wait();
+  await Promise.race([
+    context.nextStdout.wait(),
+    new Promise<void>((resolve) =>
+      setTimeout(() => {
+        logger.warn(`nextStdout.wait() timed out after 30s for message: ${message}`);
+        resolve();
+      }, 30000),
+    ),
+  ]);
   logger.debug(`sending enter`);
   await sendEnter(context, 1000);
   logger.debug(`sent enter`);

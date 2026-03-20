@@ -51,6 +51,9 @@ pub struct AgentContext {
 
     // Idle screen scanner - re-checks enter patterns after prolonged idle
     last_idle_scan_at: Option<Instant>,
+
+    // Stdout overflow tracking
+    stdout_drop_count: u64,
 }
 
 impl AgentContext {
@@ -82,6 +85,7 @@ impl AgentContext {
             enter_sent_at: None,
             enter_retry_count: 0,
             last_idle_scan_at: None,
+            stdout_drop_count: 0,
         }
     }
 
@@ -280,7 +284,19 @@ impl AgentContext {
         // Send to background stdout writer (never blocks main loop).
         // If the channel is full (~10MB buffered), drop the output —
         // agent operation is more important than display completeness.
-        let _ = stdout_tx.try_send(output.to_string());
+        match stdout_tx.try_send(output.to_string()) {
+            Ok(_) => {}
+            Err(mpsc::error::TrySendError::Full(_)) => {
+                self.stdout_drop_count += 1;
+                // Warn on first drop, then every 100 drops to avoid log spam
+                if self.stdout_drop_count == 1 || self.stdout_drop_count % 100 == 0 {
+                    warn!("stdout channel full, dropped output ({} total drops)", self.stdout_drop_count);
+                }
+            }
+            Err(mpsc::error::TrySendError::Closed(_)) => {
+                // Channel closed, receiver gone — nothing to do
+            }
+        }
 
         // Update buffers
         self.output_buffer.push_str(output);

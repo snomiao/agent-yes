@@ -687,52 +687,55 @@ export default async function agentYes({
   // CRITICAL FIX: fromReadable() from 'from-node-stream' doesn't work properly with stdin
   // because it doesn't handle Node.js stream modes correctly. We create a custom ReadableStream
   // that properly manages stdin's flowing mode and event listeners.
-  const stdinStream = new ReadableStream<Buffer>({
-    start(controller) {
-      // Set up stdin in flowing mode so 'data' events fire
-      process.stdin.resume();
+  const stdinStream = new ReadableStream<Buffer>(
+    {
+      start(controller) {
+        // Set up stdin in flowing mode so 'data' events fire
+        process.stdin.resume();
 
-      let closed = false;
+        let closed = false;
 
-      // Handle data events
-      const dataHandler = (chunk: Buffer) => {
-        try {
-          controller.enqueue(chunk);
-        } catch {
-          // Ignore enqueue errors (stream may be closed)
-        }
-      };
+        // Handle data events
+        const dataHandler = (chunk: Buffer) => {
+          try {
+            controller.enqueue(chunk);
+          } catch {
+            // Ignore enqueue errors (stream may be closed)
+          }
+        };
 
-      // Handle end/close - both events can fire, so track state
-      const endHandler = () => {
-        if (closed) return;
-        closed = true;
-        try {
-          controller.close();
-        } catch {
-          // Ignore close errors (already closed)
-        }
-      };
+        // Handle end/close - both events can fire, so track state
+        const endHandler = () => {
+          if (closed) return;
+          closed = true;
+          try {
+            controller.close();
+          } catch {
+            // Ignore close errors (already closed)
+          }
+        };
 
-      const errorHandler = (err: Error) => {
-        if (closed) return;
-        closed = true;
-        try {
-          controller.error(err);
-        } catch {
-          // Ignore error after close
-        }
-      };
+        const errorHandler = (err: Error) => {
+          if (closed) return;
+          closed = true;
+          try {
+            controller.error(err);
+          } catch {
+            // Ignore error after close
+          }
+        };
 
-      process.stdin.on("data", dataHandler);
-      process.stdin.on("end", endHandler);
-      process.stdin.on("close", endHandler);
-      process.stdin.on("error", errorHandler);
+        process.stdin.on("data", dataHandler);
+        process.stdin.on("end", endHandler);
+        process.stdin.on("close", endHandler);
+        process.stdin.on("error", errorHandler);
+      },
+      cancel(_reason) {
+        process.stdin.pause();
+      },
     },
-    cancel(_reason) {
-      process.stdin.pause();
-    },
-  });
+    { highWaterMark: 16 },
+  );
 
   let aborted = false;
   await sflow(stdinStream)
