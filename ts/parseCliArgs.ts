@@ -255,10 +255,7 @@ export function parseCliArgs(argv: string[]) {
       (dashIndex !== 0
         ? parsedArgv._[0]?.toString()?.replace?.(/-yes$/, "")
         : undefined)) as (typeof SUPPORTED_CLIS)[number],
-    cliArgs: [
-      ...cliArgsForSpawn,
-      ...(parsedArgv.yes ? ["--dangerously-skip-permissions"] : []),
-    ],
+    cliArgs: [...cliArgsForSpawn, ...(parsedArgv.yes ? ["--dangerously-skip-permissions"] : [])],
     prompt: [parsedArgv.prompt, dashPrompt].filter(Boolean).join(" ") || undefined,
     install: parsedArgv.install,
     exitOnIdle: Number(
