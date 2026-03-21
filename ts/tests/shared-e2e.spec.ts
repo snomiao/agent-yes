@@ -66,10 +66,16 @@ function makeMockCli(dir: string, name: string, body: string): string {
       .split("\n")
       .map((line) => {
         const trimmed = line.trim();
-        if (trimmed.startsWith("echo ")) return trimmed;
+        if (trimmed.startsWith("echo ")) {
+          // Replace bash $(pwd) with batch %CD%, strip bash quotes
+          return trimmed.replace(/\$\(pwd\)/g, "%CD%").replace(/['"]/g, "");
+        }
         if (trimmed.startsWith("exit ")) return trimmed;
-        if (trimmed.startsWith("sleep "))
-          return `timeout /t ${trimmed.split(" ")[1]} /nobreak >nul`;
+        if (trimmed.startsWith("sleep ")) {
+          const secs = trimmed.split(" ")[1];
+          // Use ping trick to avoid conflict with GNU coreutils timeout on Git Bash PATH
+          return `ping -n ${Number(secs) + 1} 127.0.0.1 >nul`;
+        }
         if (trimmed.startsWith("read ")) return "set /p _line=";
         return `rem ${trimmed}`;
       })
@@ -106,7 +112,9 @@ describe("shared e2e: ts vs rs", () => {
     mkdirSync(binDir, { recursive: true });
   });
 
-  afterEach(() => {
+  afterEach(async () => {
+    // Give spawned processes time to release directory handles on Windows
+    if (IS_WINDOWS) await new Promise((r) => setTimeout(r, 500));
     if (existsSync(TEST_DIR)) {
       try {
         rmSync(TEST_DIR, { recursive: true, force: true });
@@ -212,7 +220,7 @@ describe("shared e2e: ts vs rs", () => {
         cwd: TEST_DIR,
         env: {
           ...process.env,
-          PATH: `${binDir}:${process.env.PATH}`,
+          PATH: `${binDir}${PATH_SEP}${process.env.PATH}`,
         },
         timeoutMs: 20_000,
       });

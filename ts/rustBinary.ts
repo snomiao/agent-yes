@@ -61,13 +61,14 @@ export function getBinDir(): string {
 export function findRustBinary(verbose = false): string | undefined {
   const binaryName = getBinaryName();
 
+  const ext = process.platform === "win32" ? ".exe" : "";
   const searchPaths = [
-    // 1. Check in npm package bin directory
-    path.join(getBinDir(), binaryName),
+    // 1. Check relative to this script (in the repo during development)
+    path.resolve(import.meta.dirname ?? import.meta.dir, `../rs/target/release/agent-yes${ext}`),
+    path.resolve(import.meta.dirname ?? import.meta.dir, `../rs/target/debug/agent-yes${ext}`),
 
-    // 2. Check relative to this script (in the repo during development)
-    path.resolve(import.meta.dirname ?? import.meta.dir, "../rs/target/release/agent-yes"),
-    path.resolve(import.meta.dirname ?? import.meta.dir, "../rs/target/debug/agent-yes"),
+    // 2. Check in npm package bin directory
+    path.join(getBinDir(), binaryName),
 
     // 3. Check in user's cache directory
     path.join(getBinDir(), binaryName),

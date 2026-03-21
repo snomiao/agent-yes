@@ -121,8 +121,8 @@ export function parseCliArgs(argv: string[]) {
     })
     .option("rust", {
       type: "boolean",
-      description: "Use the Rust implementation instead of TypeScript",
-      default: false,
+      description: "Use the Rust implementation (enabled by default, use --no-rust for TypeScript)",
+      default: true,
     })
     .option("swarm", {
       type: "string",
