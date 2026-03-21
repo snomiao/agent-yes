@@ -78,6 +78,11 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
         }
     }
 
+    // Add --dangerously-skip-permissions if -y was passed
+    if args.skip_permissions {
+        cmd_args.push("--dangerously-skip-permissions".to_string());
+    }
+
     // Add default args
     cmd_args.extend(cli_config.default_args.iter().cloned());
 

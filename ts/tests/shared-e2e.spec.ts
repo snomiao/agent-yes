@@ -94,7 +94,7 @@ function makeMockCli(dir: string, name: string, body: string): string {
 // ---------------------------------------------------------------------------
 
 const IMPLS: Array<{ name: string; extraArgs: string[] }> = [
-  { name: "ts", extraArgs: [] },
+  { name: "ts", extraArgs: ["--no-rust"] },
   { name: "rs", extraArgs: ["--rust"] },
 ];
 

@@ -119,6 +119,12 @@ export function parseCliArgs(argv: string[]) {
       choices: ["yes", "no"] as const,
       default: "yes",
     })
+    .option("yes", {
+      type: "boolean",
+      description: "Pass --dangerously-skip-permissions to the CLI (claude shortcut)",
+      default: false,
+      alias: "y",
+    })
     .option("rust", {
       type: "boolean",
       description: "Use the Rust implementation (enabled by default, use --no-rust for TypeScript)",
@@ -194,6 +200,7 @@ export function parseCliArgs(argv: string[]) {
       if (key === "robust") yargsConsumed.add("-r");
       if (key === "idle") yargsConsumed.add("-i");
       if (key === "exitOnIdle") yargsConsumed.add("-e");
+      if (key === "yes") yargsConsumed.add("-y");
       if (key === "continue") yargsConsumed.add("-c");
     }
   });
@@ -248,7 +255,10 @@ export function parseCliArgs(argv: string[]) {
       (dashIndex !== 0
         ? parsedArgv._[0]?.toString()?.replace?.(/-yes$/, "")
         : undefined)) as (typeof SUPPORTED_CLIS)[number],
-    cliArgs: cliArgsForSpawn,
+    cliArgs: [
+      ...cliArgsForSpawn,
+      ...(parsedArgv.yes ? ["--dangerously-skip-permissions"] : []),
+    ],
     prompt: [parsedArgv.prompt, dashPrompt].filter(Boolean).join(" ") || undefined,
     install: parsedArgv.install,
     exitOnIdle: Number(

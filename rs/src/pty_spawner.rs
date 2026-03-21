@@ -120,6 +120,15 @@ pub async fn spawn_agent(
     let binary = config.binary.as_ref().map(|s| s.as_str()).unwrap_or(cli);
 
     // Build command - inherits parent environment by default
+    // On Windows, use cmd.exe /c to resolve .cmd/.bat files via PATHEXT
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = CommandBuilder::new("cmd.exe");
+        c.arg("/c");
+        c.arg(binary);
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
     let mut cmd = CommandBuilder::new(binary);
     for arg in args {
         cmd.arg(arg);

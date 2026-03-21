@@ -22,6 +22,7 @@ pub struct CliArgs {
     pub install: bool,
     pub queue: bool,
     pub use_skills: bool,
+    pub skip_permissions: bool,
     /// Swarm mode: None = disabled, Some(value) = enabled with optional config
     /// Value can be: topic name, room code (XXX-XXX), ay:// URL, or multiaddr
     pub swarm: Option<String>,
@@ -87,6 +88,10 @@ struct Args {
     /// Prepend SKILL.md context
     #[arg(long, default_value = "false")]
     use_skills: bool,
+
+    /// Pass --dangerously-skip-permissions to the CLI
+    #[arg(short = 'y', long = "yes", default_value = "false")]
+    yes: bool,
 
     /// Enable swarm mode for multi-agent P2P networking
     ///
@@ -191,6 +196,7 @@ fn resolve_args(args: Args, exe_name: &str) -> Result<CliArgs> {
         install: args.install,
         queue: args.queue,
         use_skills: args.use_skills,
+        skip_permissions: args.yes,
         swarm,
         experimental_swarm: args.experimental_swarm,
         swarm_listen: args.swarm_listen,
@@ -384,6 +390,7 @@ mod tests {
             install: false,
             queue: false,
             use_skills: false,
+            yes: false,
             swarm: None,
             experimental_swarm: false,
             swarm_listen: None,
