@@ -119,6 +119,7 @@ export default async function agentYes({
   useSkills = false,
   useStdinAppend = false,
   autoYes = true,
+  idleAction,
 }: {
   cli: SUPPORTED_CLIS;
   cliArgs?: string[];
@@ -136,6 +137,7 @@ export default async function agentYes({
   useSkills?: boolean; // if true, prepend SKILL.md header to the prompt for non-Claude agents
   useStdinAppend?: boolean; // if true, enable FIFO input stream on Linux,  for additional stdin input
   autoYes?: boolean; // if true, auto-yes is enabled (default), toggle with Ctrl+Y during session
+  idleAction?: string; // if set, type this message when idle instead of exiting
 }) {
   if (!cli) throw new Error(`cli is required`);
   const conf =
@@ -689,17 +691,26 @@ export default async function agentYes({
   shell.onExit(cleanupHeartbeat);
 
   if (exitOnIdle)
-    ctx.idleWaiter.wait(exitOnIdle).then(async () => {
-      await pidStore.updateStatus(shell.pid, "idle").catch(() => null);
-      if (isStillWorkingQ()) {
-        logger.warn(`[${cli}-yes] ${cli} is idle, but seems still working, not exiting yet`);
-        return;
+    (async () => {
+      while (true) {
+        await ctx.idleWaiter.wait(exitOnIdle);
+        await pidStore.updateStatus(shell.pid, "idle").catch(() => null);
+        if (isStillWorkingQ()) {
+          logger.warn(`[${cli}-yes] ${cli} is idle, but seems still working, not exiting yet`);
+          continue;
+        }
+        if (idleAction) {
+          logger.info(`[${cli}-yes] ${cli} is idle, performing idle action: ${idleAction}`);
+          notifyWebhook("IDLE", `action=${idleAction}`, workingDir).catch(() => null);
+          await sendMessage(ctx.messageContext, idleAction);
+          continue;
+        }
+        logger.info(`[${cli}-yes] ${cli} is idle, exiting...`);
+        notifyWebhook("IDLE", "", workingDir).catch(() => null);
+        await exitAgent();
+        break;
       }
-
-      logger.info(`[${cli}-yes] ${cli} is idle, exiting...`);
-      notifyWebhook("IDLE", "", workingDir).catch(() => null);
-      await exitAgent();
-    });
+    })();
 
   // Message streaming
 

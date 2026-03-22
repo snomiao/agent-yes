@@ -90,7 +90,7 @@ impl AgentContext {
     }
 
     /// Run the main agent loop
-    pub async fn run(&mut self, pty: &mut PtyContext, timeout_ms: Option<u64>) -> Result<i32> {
+    pub async fn run(&mut self, pty: &mut PtyContext, timeout_ms: Option<u64>, idle_action: Option<&str>) -> Result<i32> {
         let writer = pty.get_writer();
 
         // Create message context
@@ -247,14 +247,20 @@ impl AgentContext {
                             debug!("Idle check: idle={}ms, timeout={}ms, is_working={}", idle, timeout, is_working);
 
                             if !is_working {
-                                info!("Idle timeout reached ({}ms > {}ms), exiting", idle, timeout);
-                                // Send exit command
-                                for cmd in &self.cli_config.exit_command {
-                                    send_text(&msg_ctx, cmd).await?;
+                                if let Some(action) = idle_action {
+                                    info!("Idle timeout reached, performing idle action: {}", action);
+                                    send_text(&msg_ctx, action).await?;
                                     send_text(&msg_ctx, "\n").await?;
+                                    self.idle_waiter.ping();
+                                } else {
+                                    info!("Idle timeout reached ({}ms > {}ms), exiting", idle, timeout);
+                                    for cmd in &self.cli_config.exit_command {
+                                        send_text(&msg_ctx, cmd).await?;
+                                        send_text(&msg_ctx, "\n").await?;
+                                    }
+                                    exit_code = 0;
+                                    break;
                                 }
-                                exit_code = 0;
-                                break;
                             }
                         }
                     }

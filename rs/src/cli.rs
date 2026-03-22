@@ -15,6 +15,7 @@ pub struct CliArgs {
     pub cli_args: Vec<String>,
     pub prompt: Option<String>,
     pub timeout_ms: Option<u64>,
+    pub idle_action: Option<String>,
     pub robust: bool,
     pub continue_session: bool,
     pub verbose: bool,
@@ -60,6 +61,10 @@ struct Args {
     /// Deprecated: Alias for --timeout
     #[arg(long = "idle-timeout", hide = true)]
     idle_timeout: Option<String>,
+
+    /// Action to perform when idle timeout is reached instead of exiting (e.g. "check TODO.md")
+    #[arg(long = "idle-action", short = 'a')]
+    idle_action: Option<String>,
 
     /// Auto-restart on crash
     #[arg(short, long, default_value = "true", action = ArgAction::Set)]
@@ -189,6 +194,7 @@ fn resolve_args(args: Args, exe_name: &str) -> Result<CliArgs> {
         cli_args,
         prompt,
         timeout_ms,
+        idle_action: args.idle_action,
         robust: args.robust,
         continue_session: args.continue_session,
         verbose: args.verbose,

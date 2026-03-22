@@ -83,6 +83,7 @@ export function parseCliArgs(argv: string[]) {
       type: "string",
       description:
         'Idle action to perform when idle time is reached, e.g., "/exit" or "check TODO.md"',
+      alias: "ia",
     })
     .option("queue", {
       type: "boolean",
@@ -273,6 +274,7 @@ export function parseCliArgs(argv: string[]) {
     useStdinAppend: Boolean(parsedArgv.stdpush || parsedArgv.ipc || parsedArgv.fifo), // Support --stdpush, --ipc, and --fifo (backward compatibility)
     showVersion: parsedArgv.version,
     autoYes: parsedArgv.auto !== "no", // auto-yes enabled by default, disabled with --auto=no
+    idleAction: parsedArgv.idleAction as string | undefined,
     useRust: parsedArgv.rust,
     // New unified --swarm flag (takes precedence over deprecated flags)
     swarm: parsedArgv.swarm ?? (parsedArgv.experimentalSwarm ? parsedArgv.swarmTopic : undefined),

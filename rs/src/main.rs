@@ -105,7 +105,7 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
         );
 
         // Run the main loop
-        let exit_code = agent_ctx.run(&mut ctx, args.timeout_ms).await?;
+        let exit_code = agent_ctx.run(&mut ctx, args.timeout_ms, args.idle_action.as_deref()).await?;
 
         // Check if we should restart
         if args.robust && exit_code != 0 && !agent_ctx.is_fatal && !agent_ctx.is_user_abort {
