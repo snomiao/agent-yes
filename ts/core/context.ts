@@ -56,6 +56,7 @@ export class AgentContext {
   isFatal = false;
   shouldRestartWithoutContinue = false;
   autoYesEnabled = true;
+  restartCount = 0;
 
   constructor(params: {
     shell: IPty;

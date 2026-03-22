@@ -420,6 +420,16 @@ export default async function agentYes({
       ctx.shouldRestartWithoutContinue = false; // reset flag
       ctx.isFatal = false; // reset fatal flag to allow restart
 
+      // Enforce restart limit with exponential backoff
+      if (ctx.restartCount >= 10) {
+        logger.error(`${cli} reached max restarts (10), giving up.`);
+        return pendingExitCode.resolve(exitCode);
+      }
+      const backoffMs = 1000 * Math.pow(2, ctx.restartCount);
+      logger.info(`Restart ${ctx.restartCount + 1}/10, waiting ${backoffMs}ms before restart...`);
+      await sleep(backoffMs);
+      ctx.restartCount++;
+
       // Restart without continue args - use original cliArgs without restoreArgs
       const cliCommand = cliConf?.binary || cli;
       let [bin, ...args] = [
@@ -491,6 +501,21 @@ export default async function agentYes({
         return pendingExitCode.resolve(exitCode);
       }
 
+      // Enforce restart limit with exponential backoff
+      if (ctx.restartCount >= 10) {
+        logger.error(`${cli} reached max restarts (10), giving up.`);
+        notifyWebhook("EXIT", `max-restarts exitCode=${exitCode ?? "?"}`, workingDir).catch(
+          () => null,
+        );
+        return pendingExitCode.resolve(exitCode);
+      }
+      const backoffMs = 1000 * Math.pow(2, ctx.restartCount);
+      logger.info(
+        `${cli} crashed (exit code: ${exitCode}), restart ${ctx.restartCount + 1}/10 in ${backoffMs}ms...`,
+      );
+      await sleep(backoffMs);
+      ctx.restartCount++;
+
       // Update status (non-blocking)
       try {
         await pidStore.updateStatus(exitedPid, "exited", {
@@ -500,7 +525,6 @@ export default async function agentYes({
       } catch (error) {
         logger.warn(`[pidStore] Failed to update status for PID ${exitedPid}:`, error);
       }
-      logger.info(`${cli} crashed (exit code: ${exitCode}), restarting...`);
 
       // For codex, try to use stored session ID for this directory
       let restoreArgs = conf.restoreArgs;
