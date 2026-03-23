@@ -18,19 +18,19 @@ This document tracks what TypeScript has that Rust still needs.
 
 ## Core Agent Loop
 
-| Feature                                             | Status | Notes                                                        |
-| --------------------------------------------------- | ------ | ------------------------------------------------------------ |
-| PTY spawning                                        | ✅     | Both use native PTY                                          |
-| Pattern matching (ready/enter/fatal/typing_respond) | ✅     |                                                              |
-| Auto-yes toggle (Ctrl+Y)                            | ✅     |                                                              |
-| Auto-yes toggle (`/auto` command)                   | 🟡     | RS detects `/auto` but doesn't send Ctrl+U to clear the line |
-| Device Attributes response (`ESC[c`)                | ✅     |                                                              |
-| Cursor position response (`ESC[6n`)                 | ✅     |                                                              |
-| Heartbeat for no-EOL CLIs                           | ✅     |                                                              |
-| Idle timeout + idle action                          | ✅     |                                                              |
-| Restart on crash (`--robust`)                       | ✅     |                                                              |
-| TTY resize / SIGWINCH propagation                   | ✅     | Fixed 2025-03-23                                             |
-| Raw mode + stdin passthrough                        | ✅     |                                                              |
+| Feature                                             | Status | Notes                                                 |
+| --------------------------------------------------- | ------ | ----------------------------------------------------- |
+| PTY spawning                                        | ✅     | Both use native PTY                                   |
+| Pattern matching (ready/enter/fatal/typing_respond) | ✅     |                                                       |
+| Auto-yes toggle (Ctrl+Y)                            | ✅     |                                                       |
+| Auto-yes toggle (`/auto` command)                   | ✅     | Fixed: stdin line buffer + Ctrl+U to clear shell line |
+| Device Attributes response (`ESC[c`)                | ✅     |                                                       |
+| Cursor position response (`ESC[6n`)                 | ✅     |                                                       |
+| Heartbeat for no-EOL CLIs                           | ✅     |                                                       |
+| Idle timeout + idle action                          | ✅     |                                                       |
+| Restart on crash (`--robust`)                       | ✅     |                                                       |
+| TTY resize / SIGWINCH propagation                   | ✅     | Fixed 2025-03-23                                      |
+| Raw mode + stdin passthrough                        | ✅     |                                                       |
 
 ---
 
@@ -56,17 +56,17 @@ This document tracks what TypeScript has that Rust still needs.
 
 ## Infrastructure
 
-| Feature                               | Status | TS file                            | Notes                                          |
-| ------------------------------------- | ------ | ---------------------------------- | ---------------------------------------------- |
-| PID store / process registry (SQLite) | ❌     | `ts/pidStore.ts`                   | Track all running agents, states, metadata     |
-| Webhook notifications                 | ❌     | `ts/webhookNotifier.ts`            | HTTP call on RUNNING/EXIT/IDLE                 |
-| Auto-update on startup                | ❌     | `ts/versionChecker.ts`             | Background version check, auto-installs latest |
-| File-based logging (raw + debug logs) | ❌     | `ts/core/logging.ts`               | Per-session log files in `.agent-yes/`         |
-| Global agent registry (in-memory)     | ❌     | `ts/agentRegistry.ts`              | Cross-process stdout inspection                |
-| Queue / run lock                      | ❌     | `ts/runningLock.ts`                | File-based lock per git root                   |
-| SKILL.md header injection             | ❌     | `ts/index.ts` ~170-245             | Walk dirs to git root, inject into prompt      |
-| FIFO / IPC named pipe                 | ❌     | `ts/beta/fifo.ts`                  | Append prompts to running session              |
-| Codex session ID extraction + storage | ❌     | `ts/resume/codexSessionManager.ts` | SQLite session store for crash resume          |
+| Feature                               | Status | TS file                            | Notes                                              |
+| ------------------------------------- | ------ | ---------------------------------- | -------------------------------------------------- |
+| PID store / process registry (JSONL)  | ✅     | `ts/pidStore.ts`                   | `rs/src/pid_store.rs`                              |
+| Webhook notifications                 | ✅     | `ts/webhookNotifier.ts`            | `rs/src/webhook.rs` (uses curl)                    |
+| Auto-update on startup                | 🚫     | `ts/versionChecker.ts`             | Not planned                                        |
+| File-based logging (raw logs)         | ✅     | `ts/core/logging.ts`               | `rs/src/log_files.rs` → `.agent-yes/<pid>.raw.log` |
+| Global agent registry (in-memory)     | 🚫     | `ts/agentRegistry.ts`              | Not planned                                        |
+| Queue / run lock                      | ✅     | `ts/runningLock.ts`                | `rs/src/running_lock.rs`                           |
+| SKILL.md header injection             | 🚫     | `ts/index.ts` ~170-245             | Not planned                                        |
+| FIFO / IPC named pipe                 | 🚫     | `ts/beta/fifo.ts`                  | Not planned                                        |
+| Codex session ID extraction + storage | ✅     | `ts/resume/codexSessionManager.ts` | `rs/src/codex_sessions.rs`                         |
 
 ---
 
@@ -80,15 +80,17 @@ This document tracks what TypeScript has that Rust still needs.
 
 ---
 
-## Priority Order for Rust Parity
+## Rust Parity Status
 
-1. **File logging** — debug `.agent-yes/<pid>.raw.log` files (medium effort, high value for debugging)
-2. **PID store** — SQLite registry of running agents (enables webhooks, queue, registry)
-3. **Webhook notifications** — HTTP calls on state change (depends on PID store)
-4. **`/auto` Ctrl+U fix** — Clear `/auto` from shell input after toggle (small fix)
-5. **Queue / run lock** — `--queue` flag, file lock per git root
-6. **Auto-update** — Background update check on startup
-7. **SKILL.md injection** — `--use-skills` flag
-8. **Codex session resume** — Extract + persist session IDs for crash recovery
-9. **`--install` flag** — Auto-install missing CLI tool
-10. **FIFO IPC** — `--use-stdin-append` named pipe (Linux only, beta)
+| #   | Feature                                      | Status                                     |
+| --- | -------------------------------------------- | ------------------------------------------ |
+| 1   | File logging — `.agent-yes/<pid>.raw.log`    | ✅ Done (`rs/src/log_files.rs`)            |
+| 2   | PID store — JSONL process registry           | ✅ Done (`rs/src/pid_store.rs`)            |
+| 3   | Webhook notifications — HTTP on RUNNING/EXIT | ✅ Done (`rs/src/webhook.rs`, uses `curl`) |
+| 4   | `/auto` Ctrl+U fix — clear line after toggle | ✅ Done (`context.rs` stdin line buffer)   |
+| 5   | Queue / run lock — `--queue` flag            | ✅ Done (`rs/src/running_lock.rs`)         |
+| 6   | Auto-update                                  | 🚫 Not planned                             |
+| 7   | SKILL.md injection — `--use-skills`          | 🚫 Not planned                             |
+| 8   | Codex session resume — persist session IDs   | ✅ Done (`rs/src/codex_sessions.rs`)       |
+| 9   | `--install` flag — auto-install CLI tool     | 🚫 Not planned                             |
+| 10  | FIFO IPC — `--use-stdin-append`              | 🚫 Not planned                             |

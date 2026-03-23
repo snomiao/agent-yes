@@ -1,7 +1,9 @@
 //! Agent context and main orchestrator
 
+use crate::codex_sessions;
 use crate::config::CliConfig;
 use crate::idle_waiter::IdleWaiter;
+use crate::log_files::LogWriter;
 use crate::messaging::{send_ctrl_c, send_text, MessageContext};
 use crate::pty_spawner::{get_terminal_size, PtyContext};
 use crate::ready_manager::ReadyManager;
@@ -54,6 +56,15 @@ pub struct AgentContext {
 
     // Stdout overflow tracking
     stdout_drop_count: u64,
+
+    // Per-session log file writer
+    log_writer: LogWriter,
+
+    // Working directory (for codex session storage)
+    cwd: String,
+
+    // Stdin line accumulator for /auto command detection
+    stdin_line_buffer: String,
 }
 
 impl AgentContext {
@@ -63,6 +74,8 @@ impl AgentContext {
         verbose: bool,
         robust: bool,
         auto_yes_enabled: bool,
+        cwd: String,
+        pid: u32,
     ) -> Self {
         Self {
             cli,
@@ -86,7 +99,15 @@ impl AgentContext {
             enter_retry_count: 0,
             last_idle_scan_at: None,
             stdout_drop_count: 0,
+            log_writer: LogWriter::new(pid),
+            cwd,
+            stdin_line_buffer: String::new(),
         }
+    }
+
+    /// Path to the raw log file for this session (for PID store registration)
+    pub fn raw_log_path(&self) -> Option<String> {
+        self.log_writer.raw_log_path.as_ref().map(|p| p.to_string_lossy().to_string())
     }
 
     /// Run the main agent loop
@@ -223,17 +244,30 @@ impl AgentContext {
                             self.stdin_ready.ready().await;
                         }
                     }
-                    // Check for /auto command
+                    // Text input: accumulate line buffer for /auto detection
                     else if let Ok(text) = String::from_utf8(data.clone()) {
-                        if text.trim() == "/auto" {
+                        self.stdin_line_buffer.push_str(&text);
+                        let has_enter = text.contains('\r') || text.contains('\n');
+                        let is_auto_cmd = has_enter && self.stdin_line_buffer.trim() == "/auto";
+                        if has_enter {
+                            self.stdin_line_buffer.clear();
+                        }
+
+                        if is_auto_cmd {
                             self.auto_yes_enabled = !self.auto_yes_enabled;
                             if self.auto_yes_enabled {
                                 eprintln!("\r\n[auto-yes: ON]\r");
                             } else {
                                 eprintln!("\r\n[auto-yes: OFF]\r");
+                                self.stdin_ready.ready().await;
                             }
+                            // Send Ctrl+U to clear the typed /auto from the shell line
+                            let mut w = writer.lock().map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
+                            w.write_all(b"\x15")?;
+                            w.flush()?;
                             continue;
                         }
+
                         // Forward to PTY if ready
                         if self.stdin_ready.is_ready().await || !self.auto_yes_enabled {
                             let mut w = writer.lock().map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
@@ -334,10 +368,20 @@ impl AgentContext {
             }
         }
 
+        // Write to raw log file
+        self.log_writer.write(output);
+
         // Update buffers
         self.output_buffer.push_str(output);
         let stripped = remove_control_characters(output);
         self.rendered_output.push_str(&stripped);
+
+        // Extract and store codex session ID
+        if self.cli == "codex" {
+            if let Some(session_id) = codex_sessions::extract_session_id(output) {
+                codex_sessions::store_session(&self.cwd, &session_id);
+            }
+        }
 
         // Keep buffer size reasonable
         if self.output_buffer.len() > 100000 {

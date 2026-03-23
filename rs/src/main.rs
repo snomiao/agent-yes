@@ -1,14 +1,19 @@
 mod cli;
+mod codex_sessions;
 mod config;
 mod config_loader;
 mod context;
 mod idle_waiter;
+mod log_files;
 mod logger;
 mod messaging;
+mod pid_store;
 mod pty_spawner;
 mod ready_manager;
+mod running_lock;
 mod swarm;
 mod utils;
+mod webhook;
 
 use anyhow::Result;
 use cli::CliArgs;
@@ -54,6 +59,7 @@ async fn main() -> Result<()> {
 async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     use crate::config::get_cli_config;
     use crate::context::AgentContext;
+    use crate::pid_store::PidStore;
     use crate::pty_spawner::spawn_agent;
 
     let cli_config = get_cli_config(&args.cli)?;
@@ -86,26 +92,69 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     // Add default args
     cmd_args.extend(cli_config.default_args.iter().cloned());
 
-    // Add restore args if continuing
-    if args.continue_session {
+    // Codex session resume: look up stored session ID for this cwd
+    if args.continue_session && args.cli == "codex" {
+        if let Some(session_id) = codex_sessions::get_session(cwd) {
+            info!("Resuming codex session: {}", session_id);
+            cmd_args.push("--session".to_string());
+            cmd_args.push(session_id);
+        } else {
+            cmd_args.extend(cli_config.restore_args.iter().cloned());
+        }
+    } else if args.continue_session {
         cmd_args.extend(cli_config.restore_args.iter().cloned());
     }
+
+    // Acquire run lock if --queue
+    let _lock = if args.queue {
+        let lock = running_lock::RunningLock::new(cwd);
+        lock.acquire(args.prompt.as_deref()).await?;
+        Some(lock)
+    } else {
+        None
+    };
+
+    let pid = std::process::id();
+
+    // Clean up stale PID records on startup
+    let pid_store = PidStore::new();
+    pid_store.clean_stale();
 
     loop {
         // Spawn the agent process
         let mut ctx = spawn_agent(&args.cli, &cmd_args, &cli_config, cwd, args.verbose).await?;
 
-        // Create context
+        // Create agent context (also initialises log file)
         let mut agent_ctx = AgentContext::new(
             args.cli.clone(),
             cli_config.clone(),
             args.verbose,
             args.robust,
             args.auto_yes,
+            cwd.to_string(),
+            pid,
         );
+
+        // Register in PID store and send RUNNING webhook
+        let log_file = agent_ctx.raw_log_path();
+        pid_store.register(pid, &args.cli, args.prompt.as_deref(), cwd, log_file.as_deref());
+        webhook::notify("RUNNING", args.prompt.as_deref().unwrap_or(""), cwd);
 
         // Run the main loop
         let exit_code = agent_ctx.run(&mut ctx, args.timeout_ms, args.idle_action.as_deref()).await?;
+
+        // Update PID store and send EXIT webhook
+        let exit_reason = if agent_ctx.is_user_abort {
+            "user_abort"
+        } else if agent_ctx.is_fatal {
+            "fatal"
+        } else if exit_code == 0 {
+            "completed"
+        } else {
+            "crashed"
+        };
+        pid_store.update_status(pid, "exited", Some(exit_code), Some(exit_reason));
+        webhook::notify("EXIT", &format!("{} exitCode={}", exit_reason, exit_code), cwd);
 
         // Handle restart-without-continue (e.g., "No conversation found to continue")
         // Must be checked before normal crash restart to avoid re-adding --continue
