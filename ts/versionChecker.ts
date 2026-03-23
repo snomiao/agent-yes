@@ -1,4 +1,85 @@
+import { execaCommand } from "execa";
+import { mkdir, readFile, writeFile } from "fs/promises";
+import { homedir } from "os";
+import path from "path";
 import pkg from "../package.json" with { type: "json" };
+
+const CACHE_DIR = path.join(homedir(), ".cache", "agent-yes");
+const CACHE_FILE = path.join(CACHE_DIR, "update-check.json");
+const TTL_MS = 60 * 60 * 1000; // 1 hour
+
+type UpdateCache = { checkedAt: number; latestVersion: string };
+
+async function readUpdateCache(): Promise<UpdateCache | null> {
+  try {
+    const raw = await readFile(CACHE_FILE, "utf8");
+    return JSON.parse(raw) as UpdateCache;
+  } catch {
+    return null;
+  }
+}
+
+async function writeUpdateCache(data: UpdateCache): Promise<void> {
+  await mkdir(CACHE_DIR, { recursive: true });
+  await writeFile(CACHE_FILE, JSON.stringify(data));
+}
+
+function detectPackageManager(): string {
+  if (process.env.BUN_INSTALL || process.env.npm_execpath?.includes("bun")) return "bun";
+  return "npm";
+}
+
+/**
+ * Check for updates and auto-install if a newer version is available.
+ * Uses a 1-hour TTL cache to avoid hitting the registry on every run.
+ * All errors are swallowed — network issues must never break the tool.
+ * Set AGENT_YES_NO_UPDATE=1 to opt out.
+ */
+export async function checkAndAutoUpdate(): Promise<void> {
+  if (process.env.AGENT_YES_NO_UPDATE) return;
+
+  try {
+    // Check cache TTL
+    const cache = await readUpdateCache();
+    if (cache && Date.now() - cache.checkedAt < TTL_MS) {
+      // Use cached result
+      if (compareVersions(pkg.version, cache.latestVersion) < 0) {
+        await runInstall(cache.latestVersion);
+      }
+      return;
+    }
+
+    // Fetch latest from registry
+    const latestVersion = await fetchLatestVersion();
+    if (!latestVersion) return;
+
+    await writeUpdateCache({ checkedAt: Date.now(), latestVersion });
+
+    if (compareVersions(pkg.version, latestVersion) < 0) {
+      await runInstall(latestVersion);
+    }
+  } catch {
+    // Silently ignore all errors
+  }
+}
+
+async function runInstall(latestVersion: string): Promise<void> {
+  const pm = detectPackageManager();
+  const installArgs =
+    pm === "bun"
+      ? `bun add -g agent-yes@${latestVersion}`
+      : `npm install -g agent-yes@${latestVersion}`;
+
+  process.stderr.write(`\x1b[33m[agent-yes] Updating ${pkg.version} → ${latestVersion}…\x1b[0m\n`);
+  try {
+    await execaCommand(installArgs, { stdio: "inherit" });
+    // Clear cache so next run re-checks
+    await writeUpdateCache({ checkedAt: 0, latestVersion });
+    process.stderr.write(`\x1b[32m[agent-yes] Updated to ${latestVersion}\x1b[0m\n`);
+  } catch {
+    process.stderr.write(`\x1b[31m[agent-yes] Auto-update failed. Run: ${installArgs}\x1b[0m\n`);
+  }
+}
 
 /**
  * Fetch the latest version of the package from npm registry

@@ -5,9 +5,12 @@ import { parseCliArgs } from "./parseCliArgs.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { logger } from "./logger.ts";
 import { PidStore } from "./pidStore.ts";
-import { displayVersion } from "./versionChecker.ts";
+import { checkAndAutoUpdate, displayVersion } from "./versionChecker.ts";
 import { getRustBinary } from "./rustBinary.ts";
 import { buildRustArgs } from "./buildRustArgs.ts";
+
+// Start update check in background immediately (runs in parallel with the agent session)
+const updateCheckPromise = checkAndAutoUpdate();
 
 // Parse CLI arguments
 const config = parseCliArgs(process.argv);
@@ -134,5 +137,9 @@ if (config.verbose) {
 
 const { default: cliYes } = await import("./index.ts");
 const { exitCode } = await cliYes({ ...config, autoYes: config.autoYes });
+
+// Apply update if one was found during the session
+await updateCheckPromise;
+
 console.log("exiting process");
 process.exit(exitCode ?? 1);

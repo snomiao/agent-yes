@@ -1,5 +1,17 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
-import { compareVersions, fetchLatestVersion, displayVersion } from "./versionChecker";
+import {
+  checkAndAutoUpdate,
+  compareVersions,
+  fetchLatestVersion,
+  displayVersion,
+} from "./versionChecker";
+
+vi.mock("execa", () => ({ execaCommand: vi.fn().mockResolvedValue({}) }));
+vi.mock("fs/promises", () => ({
+  mkdir: vi.fn().mockResolvedValue(undefined),
+  readFile: vi.fn(),
+  writeFile: vi.fn().mockResolvedValue(undefined),
+}));
 
 describe("versionChecker", () => {
   describe("compareVersions", () => {
@@ -61,6 +73,107 @@ describe("versionChecker", () => {
 
       const version = await fetchLatestVersion();
       expect(version).toBeNull();
+    });
+  });
+
+  describe("checkAndAutoUpdate", () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+      vi.stubGlobal("fetch", vi.fn());
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      delete process.env.AGENT_YES_NO_UPDATE;
+      delete process.env.BUN_INSTALL;
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("should skip when AGENT_YES_NO_UPDATE is set", async () => {
+      process.env.AGENT_YES_NO_UPDATE = "1";
+      await checkAndAutoUpdate();
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("should use cached result within TTL and not install when up-to-date", async () => {
+      const { readFile } = await import("fs/promises");
+      vi.mocked(readFile).mockResolvedValueOnce(
+        JSON.stringify({ checkedAt: Date.now(), latestVersion: "0.0.1" }) as any,
+      );
+      await checkAndAutoUpdate();
+      expect(fetch).not.toHaveBeenCalled();
+      expect(process.stderr.write).not.toHaveBeenCalled();
+    });
+
+    it("should install from cache when cached version is newer and within TTL", async () => {
+      const { readFile } = await import("fs/promises");
+      const { execaCommand } = await import("execa");
+      vi.mocked(readFile).mockResolvedValueOnce(
+        JSON.stringify({ checkedAt: Date.now(), latestVersion: "999.0.0" }) as any,
+      );
+      await checkAndAutoUpdate();
+      expect(execaCommand).toHaveBeenCalled();
+    });
+
+    it("should fetch and write cache when stale, install if behind", async () => {
+      const { readFile, writeFile } = await import("fs/promises");
+      const { execaCommand } = await import("execa");
+      vi.mocked(readFile).mockRejectedValueOnce(new Error("no cache"));
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ version: "999.0.0" }),
+      } as Response);
+      await checkAndAutoUpdate();
+      expect(writeFile).toHaveBeenCalled();
+      expect(execaCommand).toHaveBeenCalled();
+    });
+
+    it("should fetch and write cache but not install if up-to-date", async () => {
+      const { readFile, writeFile } = await import("fs/promises");
+      const { execaCommand } = await import("execa");
+      vi.mocked(readFile).mockRejectedValueOnce(new Error("no cache"));
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ version: "0.0.1" }),
+      } as Response);
+      await checkAndAutoUpdate();
+      expect(writeFile).toHaveBeenCalled();
+      expect(execaCommand).not.toHaveBeenCalled();
+    });
+
+    it("should silently handle fetch failure", async () => {
+      const { readFile } = await import("fs/promises");
+      vi.mocked(readFile).mockRejectedValueOnce(new Error("no cache"));
+      vi.mocked(fetch).mockRejectedValue(new Error("network error"));
+      await expect(checkAndAutoUpdate()).resolves.toBeUndefined();
+    });
+
+    it("should use bun when BUN_INSTALL is set", async () => {
+      process.env.BUN_INSTALL = "/home/user/.bun";
+      const { readFile } = await import("fs/promises");
+      const { execaCommand } = await import("execa");
+      vi.mocked(readFile).mockRejectedValueOnce(new Error("no cache"));
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ version: "999.0.0" }),
+      } as Response);
+      await checkAndAutoUpdate();
+      expect(vi.mocked(execaCommand).mock.calls[0]?.[0]).toContain("bun");
+    });
+
+    it("should print error and not throw when install fails", async () => {
+      const { readFile } = await import("fs/promises");
+      const { execaCommand } = await import("execa");
+      vi.mocked(readFile).mockRejectedValueOnce(new Error("no cache"));
+      vi.mocked(fetch).mockResolvedValue({
+        ok: true,
+        json: async () => ({ version: "999.0.0" }),
+      } as Response);
+      vi.mocked(execaCommand).mockRejectedValueOnce(new Error("install failed"));
+      await expect(checkAndAutoUpdate()).resolves.toBeUndefined();
+      expect(process.stderr.write).toHaveBeenCalledWith(
+        expect.stringContaining("Auto-update failed"),
+      );
     });
   });
 
