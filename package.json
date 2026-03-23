@@ -107,7 +107,7 @@
     "@types/proper-lockfile": "^4.1.4",
     "@types/yargs": "^17.0.35",
     "@typescript/native-preview": "^7.0.0-dev.20260124.1",
-    "@vitest/coverage-v8": "^4.1.0",
+    "@vitest/coverage-v8": "4.1.0",
     "husky": "^9.1.7",
     "lint-staged": "^16.2.7",
     "node-pty": "^1.1.0",

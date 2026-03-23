@@ -58,7 +58,7 @@ jobs:
 
       - name: Run tests (Bun)
         if: matrix.runtime == 'bun'
-        run: bun test
+        run: bunx vitest run
 
       - name: Test CLI execution (Node - Unix)
         if: matrix.runtime == 'node' && runner.os != 'Windows'
