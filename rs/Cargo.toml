@@ -1,6 +1,6 @@
 [package]
 name = "agent-yes"
-version = "1.68.2"
+version = "1.69.0"
 edition = "2021"
 description = "Automated interaction wrapper for AI coding assistants"
 authors = ["snomiao"]
