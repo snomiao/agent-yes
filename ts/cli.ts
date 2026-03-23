@@ -15,55 +15,55 @@ const updateCheckPromise = checkAndAutoUpdate();
 // Parse CLI arguments
 const config = parseCliArgs(process.argv);
 
-// Handle --rust: spawn the Rust binary instead
+// Handle --rust: spawn the Rust binary instead, fall back to TypeScript if unavailable
 if (config.useRust) {
-  let rustBinary: string;
+  let rustBinary: string | undefined;
 
   try {
-    // Get or download the Rust binary for the current platform
     rustBinary = await getRustBinary({ verbose: config.verbose });
   } catch (err) {
-    console.error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
+    // Rust binary unavailable (not yet released for this version, or network issue) — fall back to TypeScript
+    if (config.verbose) {
+      console.error(`[rust] ${err instanceof Error ? err.message : String(err)}`);
+      console.error("[rust] Falling back to TypeScript implementation.");
+    }
   }
 
-  // Build args for Rust binary
-  const rustArgs = buildRustArgs(process.argv, config.cli, SUPPORTED_CLIS);
+  if (rustBinary) {
+    const rustArgs = buildRustArgs(process.argv, config.cli, SUPPORTED_CLIS);
 
-  if (config.verbose) {
-    console.log(`[rust] Using binary: ${rustBinary}`);
-    console.log(`[rust] Args: ${rustArgs.join(" ")}`);
+    if (config.verbose) {
+      console.log(`[rust] Using binary: ${rustBinary}`);
+      console.log(`[rust] Args: ${rustArgs.join(" ")}`);
+    }
+
+    const child = spawn(rustBinary, rustArgs, {
+      stdio: "inherit",
+      env: process.env,
+      cwd: process.cwd(),
+    });
+
+    child.on("error", (err) => {
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+        console.error(`Rust binary '${rustBinary}' not found. Try: npx agent-yes --rust --verbose`);
+      } else {
+        console.error(`Failed to spawn Rust binary: ${err.message}`);
+      }
+      process.exit(1);
+    });
+
+    child.on("exit", (code, signal) => {
+      if (signal) {
+        process.exit(128 + (signal === "SIGINT" ? 2 : signal === "SIGTERM" ? 15 : 1));
+      }
+      process.exit(code ?? 1);
+    });
+
+    process.on("SIGINT", () => child.kill("SIGINT"));
+    process.on("SIGTERM", () => child.kill("SIGTERM"));
+
+    await new Promise(() => {}); // Never resolves, exits via child.on("exit")
   }
-
-  // Spawn the Rust process with stdio inheritance
-  const child = spawn(rustBinary, rustArgs, {
-    stdio: "inherit",
-    env: process.env,
-    cwd: process.cwd(),
-  });
-
-  child.on("error", (err) => {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      console.error(`Rust binary '${rustBinary}' not found. Try: npx agent-yes --rust --verbose`);
-    } else {
-      console.error(`Failed to spawn Rust binary: ${err.message}`);
-    }
-    process.exit(1);
-  });
-
-  child.on("exit", (code, signal) => {
-    if (signal) {
-      process.exit(128 + (signal === "SIGINT" ? 2 : signal === "SIGTERM" ? 15 : 1));
-    }
-    process.exit(code ?? 1);
-  });
-
-  // Forward signals to child
-  process.on("SIGINT", () => child.kill("SIGINT"));
-  process.on("SIGTERM", () => child.kill("SIGTERM"));
-
-  // Keep the process alive while child is running
-  await new Promise(() => {}); // Never resolves, exits via child.on("exit")
 }
 
 // Handle --version: display version and exit
