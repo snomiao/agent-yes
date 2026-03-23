@@ -25,12 +25,14 @@ jobs:
       - run: bun i
       - run: bun run build
       - run: bun run test
+
+      # semantic-release: bump version, update package.json + Cargo.toml,
+      # create GitHub release + tag. npm publish is disabled (npmPublish: false).
+      # Creating the GitHub release triggers rust-build.yml via `release: published`.
       - run: bunx semantic-release
         env:
-          # reminder to setup read/write permission for this token
-          # here: REPO_URL/settings/actions
-          # for publishing to GitHub releases
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Get new release tag
         id: get_tag
@@ -40,12 +42,32 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "New release tag: $TAG"
 
-      - name: Trigger Rust build workflow
+      # Wait for the rust-build workflow (triggered by `release: published`) to finish.
+      # This ensures Rust binaries are attached to the GitHub release before we publish to npm.
+      - name: Wait for Rust build to complete
         if: steps.get_tag.outputs.tag != ''
         run: |
-          gh workflow run rust-build.yml \
-            --ref "${{ steps.get_tag.outputs.tag }}" \
-            -f tag="${{ steps.get_tag.outputs.tag }}" \
-            -f upload_release=true
+          echo "Waiting for rust-build.yml triggered by release ${{ steps.get_tag.outputs.tag }}..."
+          # Give GitHub a moment to register the workflow run
+          sleep 15
+          RUN_ID=$(gh run list --workflow=rust-build.yml --limit=1 --json databaseId -q '.[0].databaseId')
+          echo "Watching run ID: $RUN_ID"
+          gh run watch "$RUN_ID" --exit-status
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Now publish to npm — binaries are guaranteed to be on the GitHub release.
+      - name: Publish agent-yes to npm
+        if: steps.get_tag.outputs.tag != ''
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish claude-yes to npm
+        if: steps.get_tag.outputs.tag != ''
+        run: |
+          npm pkg set name=claude-yes
+          npm publish --access public
+          npm pkg set name=agent-yes
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
