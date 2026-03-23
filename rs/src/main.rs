@@ -107,6 +107,15 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
         // Run the main loop
         let exit_code = agent_ctx.run(&mut ctx, args.timeout_ms, args.idle_action.as_deref()).await?;
 
+        // Handle restart-without-continue (e.g., "No conversation found to continue")
+        // Must be checked before normal crash restart to avoid re-adding --continue
+        if agent_ctx.should_restart_without_continue {
+            info!("Restarting without continue args...");
+            // Remove restore args (--continue, --resume) from cmd_args
+            cmd_args.retain(|a| !cli_config.restore_args.contains(a));
+            continue;
+        }
+
         // Check if we should restart
         if args.robust && exit_code != 0 && !agent_ctx.is_fatal && !agent_ctx.is_user_abort {
             info!("Agent crashed with code {}, restarting...", exit_code);
