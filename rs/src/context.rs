@@ -3,7 +3,7 @@
 use crate::config::CliConfig;
 use crate::idle_waiter::IdleWaiter;
 use crate::messaging::{send_ctrl_c, send_text, MessageContext};
-use crate::pty_spawner::PtyContext;
+use crate::pty_spawner::{get_terminal_size, PtyContext};
 use crate::ready_manager::ReadyManager;
 use crate::utils::{remove_control_characters, sleep_ms};
 use anyhow::Result;
@@ -150,6 +150,30 @@ impl AgentContext {
         // Set terminal to raw mode for proper signal handling
         let _raw_mode = terminal::enable_raw_mode();
 
+        // Channel for terminal resize events (SIGWINCH → child PTY)
+        let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(4);
+
+        // Spawn SIGWINCH listener — sends new (cols, rows) whenever terminal is resized
+        #[cfg(unix)]
+        let _sigwinch_handle = {
+            tokio::spawn(async move {
+                use tokio::signal::unix::{signal, SignalKind};
+                let mut sig = match signal(SignalKind::window_change()) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                loop {
+                    if sig.recv().await.is_none() {
+                        break;
+                    }
+                    let size = get_terminal_size();
+                    if resize_tx.send(size).await.is_err() {
+                        break;
+                    }
+                }
+            })
+        };
+
         loop {
             tokio::select! {
                 // Heartbeat for pattern detection
@@ -165,6 +189,12 @@ impl AgentContext {
                             force_ready_sent = true;
                         }
                     }
+                }
+
+                // Terminal resize: propagate SIGWINCH to child PTY
+                Some((cols, rows)) = resize_rx.recv() => {
+                    debug!("SIGWINCH: resizing PTY to {}x{}", cols, rows);
+                    let _ = pty.resize(cols, rows);
                 }
 
                 // Stdin data

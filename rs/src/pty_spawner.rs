@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, info};
 
 /// Get terminal dimensions from parent TTY, with fallback defaults
-fn get_terminal_size() -> (u16, u16) {
+pub fn get_terminal_size() -> (u16, u16) {
     // Try to get from environment first (for pipes/non-TTY)
     if let (Ok(cols), Ok(rows)) = (std::env::var("COLUMNS"), std::env::var("LINES")) {
         if let (Ok(cols), Ok(rows)) = (cols.parse::<u16>(), rows.parse::<u16>()) {
