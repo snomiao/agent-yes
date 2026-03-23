@@ -250,7 +250,7 @@ fn parse_duration(s: &str) -> Result<u64> {
     Err(anyhow!("Invalid duration format: {}", s))
 }
 
-/// Extract prompt from args (handles -- separator)
+/// Extract prompt from args (handles -- separator and bare words)
 fn extract_prompt_from_args(
     args: Vec<String>,
     explicit_prompt: Option<String>,
@@ -271,7 +271,40 @@ fn extract_prompt_from_args(
         return (cli_args, prompt);
     }
 
-    (args, None)
+    // No -- separator: treat non-flag bare words as prompt text.
+    // Flag-like args (starting with -) and their values stay as cli_args.
+    let mut cli_args = Vec::new();
+    let mut prompt_parts = Vec::new();
+    let mut skip_next = false;
+
+    for (i, arg) in args.iter().enumerate() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg.starts_with('-') {
+            cli_args.push(arg.clone());
+            // If it's a flag like --foo bar (not --foo=bar), consume next arg as its value
+            if !arg.contains('=') {
+                if let Some(next) = args.get(i + 1) {
+                    if !next.starts_with('-') {
+                        cli_args.push(next.clone());
+                        skip_next = true;
+                    }
+                }
+            }
+        } else {
+            prompt_parts.push(arg.clone());
+        }
+    }
+
+    let prompt = if prompt_parts.is_empty() {
+        None
+    } else {
+        Some(prompt_parts.join(" "))
+    };
+
+    (cli_args, prompt)
 }
 
 #[cfg(test)]
@@ -337,11 +370,30 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_prompt_no_separator() {
+    fn test_extract_prompt_no_separator_flag_with_value() {
+        // --flag value: "value" is consumed as flag's value, not prompt
         let args = vec!["--flag".into(), "value".into()];
-        let (cli_args, prompt) = extract_prompt_from_args(args.clone(), None);
-        assert_eq!(cli_args, args);
+        let (cli_args, prompt) = extract_prompt_from_args(args, None);
+        assert_eq!(cli_args, vec!["--flag", "value"]);
         assert_eq!(prompt, None);
+    }
+
+    #[test]
+    fn test_extract_prompt_bare_words_as_prompt() {
+        // Bare words without -- should become the prompt
+        let args = vec!["rebuild".into(), "and".into(), "analyze".into(), "problems".into()];
+        let (cli_args, prompt) = extract_prompt_from_args(args, None);
+        assert!(cli_args.is_empty());
+        assert_eq!(prompt, Some("rebuild and analyze problems".into()));
+    }
+
+    #[test]
+    fn test_extract_prompt_mixed_flags_and_bare_words() {
+        // Flags stay as cli_args, bare words become prompt
+        let args = vec!["--timeout".into(), "5m".into(), "solve".into(), "all".into(), "todos".into()];
+        let (cli_args, prompt) = extract_prompt_from_args(args, None);
+        assert_eq!(cli_args, vec!["--timeout", "5m"]);
+        assert_eq!(prompt, Some("solve all todos".into()));
     }
 
     #[test]
@@ -389,6 +441,7 @@ mod tests {
             timeout: None,
             exit_on_idle: None,
             idle_timeout: None,
+            idle_action: None,
             robust: true,
             continue_session: false,
             verbose: false,
@@ -435,7 +488,8 @@ mod tests {
         args.args = vec!["codex".into(), "hello".into()];
         let result = resolve_args(args, "agent-yes").unwrap();
         assert_eq!(result.cli, "codex");
-        assert_eq!(result.cli_args, vec!["hello"]);
+        assert!(result.cli_args.is_empty());
+        assert_eq!(result.prompt, Some("hello".into()));
     }
 
     #[test]

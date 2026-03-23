@@ -23,10 +23,10 @@ export function buildRustArgs(
     rawRustArgs.some((arg) => arg.startsWith("--cli=") || arg === "--cli") ||
     rawRustArgs.some((arg) => supportedClis.includes(arg));
 
-  // Append CLI name at the end so it doesn't trigger trailing_var_arg in clap,
-  // which would cause all subsequent args (like --timeout) to be treated as positional
+  // Pass CLI name via --cli= flag so it doesn't get mixed with trailing positional args
+  // (which are treated as prompt text or cli args for the target tool)
   if (cliFromScript && !hasCliArg && !hasSwarmArg) {
-    return [...rawRustArgs, cliFromScript];
+    return [`--cli=${cliFromScript}`, ...rawRustArgs];
   }
 
   return rawRustArgs;

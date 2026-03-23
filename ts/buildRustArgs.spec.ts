@@ -21,70 +21,60 @@ function argv(...userArgs: string[]): string[] {
 }
 
 describe("buildRustArgs", () => {
-  // ─── Core: CLI name positioning ────────────────────────────────────
-  // The CLI name MUST appear after all flags to avoid clap's trailing_var_arg
-  // swallowing named flags as positional args.
+  // ─── Core: CLI name passed via --cli= flag ─────────────────────────
+  // The CLI name is passed via --cli= flag at the start, so it doesn't
+  // get mixed with trailing positional args (which are prompt text).
 
-  describe("CLI name is always appended at the end (not prepended)", () => {
-    it("appends CLI name after flags", () => {
+  describe("CLI name is passed via --cli= flag", () => {
+    it("prepends --cli= flag before other args", () => {
       const result = buildRustArgs(argv("--timeout", "1h"), "claude", SUPPORTED_CLIS);
-      expect(result).toEqual(["--timeout", "1h", "claude"]);
+      expect(result).toEqual(["--cli=claude", "--timeout", "1h"]);
     });
 
-    it("appends CLI name after multiple flags", () => {
+    it("prepends --cli= flag before multiple flags", () => {
       const result = buildRustArgs(
         argv("--timeout", "30s", "--verbose", "--robust", "true"),
         "claude",
         SUPPORTED_CLIS,
       );
-      expect(result).toEqual(["--timeout", "30s", "--verbose", "--robust", "true", "claude"]);
+      expect(result).toEqual(["--cli=claude", "--timeout", "30s", "--verbose", "--robust", "true"]);
     });
 
-    it("CLI name is the last element", () => {
+    it("--cli= is the first element", () => {
       const result = buildRustArgs(argv("--timeout", "5m"), "codex", SUPPORTED_CLIS);
-      expect(result[result.length - 1]).toBe("codex");
+      expect(result[0]).toBe("--cli=codex");
     });
   });
 
-  // ─── The original bug: --timeout swallowed by trailing_var_arg ─────
+  // ─── Regression: flags must not be swallowed ───────────────────────
 
-  describe("regression: flags must not be swallowed by CLI name position", () => {
-    it("--timeout is preserved before CLI name (the original bug)", () => {
+  describe("regression: flags are preserved alongside --cli=", () => {
+    it("--timeout is preserved", () => {
       const result = buildRustArgs(argv("--timeout", "1h"), "claude", SUPPORTED_CLIS);
-      const timeoutIdx = result.indexOf("--timeout");
-      const cliIdx = result.indexOf("claude");
-      expect(timeoutIdx).toBeGreaterThanOrEqual(0);
-      expect(cliIdx).toBeGreaterThan(timeoutIdx);
+      expect(result).toContain("--timeout");
+      expect(result).toContain("1h");
     });
 
-    it("--verbose is preserved before CLI name", () => {
+    it("--verbose is preserved", () => {
       const result = buildRustArgs(argv("--verbose"), "claude", SUPPORTED_CLIS);
-      const verboseIdx = result.indexOf("--verbose");
-      const cliIdx = result.indexOf("claude");
-      expect(verboseIdx).toBeGreaterThanOrEqual(0);
-      expect(cliIdx).toBeGreaterThan(verboseIdx);
+      expect(result).toContain("--verbose");
     });
 
-    it("-c (continue) flag is preserved before CLI name", () => {
+    it("-c (continue) flag is preserved", () => {
       const result = buildRustArgs(argv("-c"), "claude", SUPPORTED_CLIS);
-      expect(result.indexOf("-c")).toBeLessThan(result.indexOf("claude"));
+      expect(result).toContain("-c");
     });
 
-    it("--robust flag is preserved before CLI name", () => {
-      const result = buildRustArgs(argv("--robust", "true"), "gemini", SUPPORTED_CLIS);
-      expect(result.indexOf("--robust")).toBeLessThan(result.indexOf("gemini"));
-    });
-
-    it("all flags come before CLI name in complex invocation", () => {
+    it("all flags are preserved in complex invocation", () => {
       const result = buildRustArgs(
         argv("--timeout", "1h", "--verbose", "-c", "--robust", "true"),
         "claude",
         SUPPORTED_CLIS,
       );
-      const cliIdx = result.indexOf("claude");
       for (const flag of ["--timeout", "--verbose", "-c", "--robust"]) {
-        expect(result.indexOf(flag)).toBeLessThan(cliIdx);
+        expect(result).toContain(flag);
       }
+      expect(result[0]).toBe("--cli=claude");
     });
   });
 
@@ -110,43 +100,43 @@ describe("buildRustArgs", () => {
         SUPPORTED_CLIS,
       );
       expect(result).not.toContain("--rust");
-      expect(result).toEqual(["--verbose", "--timeout", "5m", "claude"]);
+      expect(result).toEqual(["--cli=claude", "--verbose", "--timeout", "5m"]);
     });
   });
 
   // ─── CLI name detection in args ────────────────────────────────────
 
   describe("does not duplicate CLI name if already in args", () => {
-    it("skips appending when CLI name is already a positional arg", () => {
+    it("skips --cli= when CLI name is already a positional arg", () => {
       const result = buildRustArgs(argv("--timeout", "30s", "claude"), "claude", SUPPORTED_CLIS);
       expect(result).toEqual(["--timeout", "30s", "claude"]);
-      expect(result.filter((a) => a === "claude")).toHaveLength(1);
+      expect(result.filter((a) => a.includes("claude"))).toHaveLength(1);
     });
 
-    it("skips appending when --cli= flag is used", () => {
+    it("skips --cli= when --cli= flag is already used", () => {
       const result = buildRustArgs(
         argv("--cli=gemini", "--timeout", "30s"),
         "claude",
         SUPPORTED_CLIS,
       );
       expect(result).toEqual(["--cli=gemini", "--timeout", "30s"]);
-      expect(result).not.toContain("claude");
+      expect(result).not.toContain("--cli=claude");
     });
 
-    it("skips appending when --cli flag is used (separate value)", () => {
+    it("skips --cli= when --cli flag is used (separate value)", () => {
       const result = buildRustArgs(
         argv("--cli", "gemini", "--timeout", "30s"),
         "claude",
         SUPPORTED_CLIS,
       );
       expect(result).toEqual(["--cli", "gemini", "--timeout", "30s"]);
-      expect(result).not.toContain("claude");
+      expect(result).not.toContain("--cli=claude");
     });
 
     it("detects any supported CLI name in args", () => {
       for (const cli of ["gemini", "codex", "copilot", "cursor", "grok"]) {
         const result = buildRustArgs(argv("--timeout", "1m", cli), "claude", SUPPORTED_CLIS);
-        expect(result).not.toContain("claude");
+        expect(result).not.toContain("--cli=claude");
         expect(result).toContain(cli);
       }
     });
@@ -155,22 +145,22 @@ describe("buildRustArgs", () => {
   // ─── Swarm mode ────────────────────────────────────────────────────
 
   describe("swarm mode skips CLI name", () => {
-    it("does not append CLI name when --swarm is present", () => {
+    it("does not add --cli= when --swarm is present", () => {
       const result = buildRustArgs(argv("--swarm", "my-topic"), "claude", SUPPORTED_CLIS);
       expect(result).toEqual(["--swarm", "my-topic"]);
-      expect(result).not.toContain("claude");
+      expect(result).not.toContain("--cli=claude");
     });
 
-    it("does not append CLI name when --swarm= is present", () => {
+    it("does not add --cli= when --swarm= is present", () => {
       const result = buildRustArgs(argv("--swarm=my-topic"), "claude", SUPPORTED_CLIS);
       expect(result).toEqual(["--swarm=my-topic"]);
-      expect(result).not.toContain("claude");
+      expect(result).not.toContain("--cli=claude");
     });
 
-    it("does not append CLI name for bare --swarm", () => {
+    it("does not add --cli= for bare --swarm", () => {
       const result = buildRustArgs(argv("--swarm"), "claude", SUPPORTED_CLIS);
       expect(result).toEqual(["--swarm"]);
-      expect(result).not.toContain("claude");
+      expect(result).not.toContain("--cli=claude");
     });
   });
 
@@ -193,7 +183,7 @@ describe("buildRustArgs", () => {
   describe("edge cases", () => {
     it("handles no user args at all", () => {
       const result = buildRustArgs(["node", "/path/to/claude-yes"], "claude", SUPPORTED_CLIS);
-      expect(result).toEqual(["claude"]);
+      expect(result).toEqual(["--cli=claude"]);
     });
 
     it("handles -- prompt separator correctly", () => {
@@ -202,37 +192,43 @@ describe("buildRustArgs", () => {
         "claude",
         SUPPORTED_CLIS,
       );
-      expect(result).toEqual(["--timeout", "1h", "--", "do", "the", "thing", "claude"]);
-      expect(result.indexOf("--timeout")).toBeLessThan(result.lastIndexOf("claude"));
+      expect(result).toEqual(["--cli=claude", "--timeout", "1h", "--", "do", "the", "thing"]);
     });
 
     it("handles -p prompt flag", () => {
       const result = buildRustArgs(argv("-p", "hello world"), "claude", SUPPORTED_CLIS);
-      expect(result).toEqual(["-p", "hello world", "claude"]);
+      expect(result).toEqual(["--cli=claude", "-p", "hello world"]);
     });
 
     it("preserves args with hyphen values (e.g. negative numbers)", () => {
       const result = buildRustArgs(argv("--some-flag", "-1"), "claude", SUPPORTED_CLIS);
-      expect(result).toEqual(["--some-flag", "-1", "claude"]);
+      expect(result).toEqual(["--cli=claude", "--some-flag", "-1"]);
     });
 
     it("handles multiple --rust flags (all filtered)", () => {
       const result = buildRustArgs(argv("--rust", "--rust", "--verbose"), "claude", SUPPORTED_CLIS);
-      expect(result).toEqual(["--verbose", "claude"]);
+      expect(result).toEqual(["--cli=claude", "--verbose"]);
     });
 
     it("does not treat --swarm-topic as --swarm", () => {
       const result = buildRustArgs(argv("--swarm-topic", "my-topic"), "claude", SUPPORTED_CLIS);
-      // --swarm-topic is NOT --swarm, so CLI name should still be appended
-      expect(result).toContain("claude");
+      // --swarm-topic is NOT --swarm, so --cli= should still be added
+      expect(result[0]).toBe("--cli=claude");
     });
 
     it("does not treat --cli-like strings inside values as CLI names", () => {
-      // e.g. --prompt "use claude to ..." should not detect "claude" as a CLI arg
-      // because "use claude to ..." is a value, not a standalone arg
       const result = buildRustArgs(argv("-p", "use claude to fix"), undefined, SUPPORTED_CLIS);
-      // "claude" appears inside a value, but since cliFromScript is undefined, nothing appended
+      // "claude" appears inside a value, but since cliFromScript is undefined, nothing added
       expect(result).toEqual(["-p", "use claude to fix"]);
+    });
+
+    it("bare words (prompt without --) are passed through for Rust to handle", () => {
+      const result = buildRustArgs(
+        argv("rebuild", "and", "analyze", "problems"),
+        "claude",
+        SUPPORTED_CLIS,
+      );
+      expect(result).toEqual(["--cli=claude", "rebuild", "and", "analyze", "problems"]);
     });
   });
 
@@ -241,7 +237,7 @@ describe("buildRustArgs", () => {
   describe("real-world scenarios", () => {
     it("claude-yes --rust --timeout 1h (the original failing case)", () => {
       const result = buildRustArgs(argv("--rust", "--timeout", "1h"), "claude", SUPPORTED_CLIS);
-      expect(result).toEqual(["--timeout", "1h", "claude"]);
+      expect(result).toEqual(["--cli=claude", "--timeout", "1h"]);
     });
 
     it("claude-yes --rust --timeout 30s --verbose", () => {
@@ -250,12 +246,12 @@ describe("buildRustArgs", () => {
         "claude",
         SUPPORTED_CLIS,
       );
-      expect(result).toEqual(["--timeout", "30s", "--verbose", "claude"]);
+      expect(result).toEqual(["--cli=claude", "--timeout", "30s", "--verbose"]);
     });
 
     it("claude-yes --rust -c (continue session)", () => {
       const result = buildRustArgs(argv("--rust", "-c"), "claude", SUPPORTED_CLIS);
-      expect(result).toEqual(["-c", "claude"]);
+      expect(result).toEqual(["--cli=claude", "-c"]);
     });
 
     it("codex-yes --rust --timeout 5m -- fix all bugs", () => {
@@ -264,7 +260,7 @@ describe("buildRustArgs", () => {
         "codex",
         SUPPORTED_CLIS,
       );
-      expect(result).toEqual(["--timeout", "5m", "--", "fix", "all", "bugs", "codex"]);
+      expect(result).toEqual(["--cli=codex", "--timeout", "5m", "--", "fix", "all", "bugs"]);
     });
 
     it("agent-yes --rust claude --timeout 1h (explicit CLI in args)", () => {
@@ -283,9 +279,9 @@ describe("buildRustArgs", () => {
         "claude",
         SUPPORTED_CLIS,
       );
-      // Swarm mode: no CLI name appended
+      // Swarm mode: no CLI name added
       expect(result).toEqual(["--swarm", "my-project", "--timeout", "1h"]);
-      expect(result).not.toContain("claude");
+      expect(result).not.toContain("--cli=claude");
     });
 
     it("gemini-yes --rust --timeout 2m --verbose -p 'hello'", () => {
@@ -294,7 +290,7 @@ describe("buildRustArgs", () => {
         "gemini",
         SUPPORTED_CLIS,
       );
-      expect(result).toEqual(["--timeout", "2m", "--verbose", "-p", "hello", "gemini"]);
+      expect(result).toEqual(["--cli=gemini", "--timeout", "2m", "--verbose", "-p", "hello"]);
     });
 
     it("claude-yes --rust --auto=no --timeout 10m", () => {
@@ -303,7 +299,17 @@ describe("buildRustArgs", () => {
         "claude",
         SUPPORTED_CLIS,
       );
-      expect(result).toEqual(["--auto=no", "--timeout", "10m", "claude"]);
+      expect(result).toEqual(["--cli=claude", "--auto=no", "--timeout", "10m"]);
+    });
+
+    it("cy rebuild and analyze problems (bare prompt words)", () => {
+      const result = buildRustArgs(
+        argv("rebuild", "and", "analyze", "problems"),
+        "claude",
+        SUPPORTED_CLIS,
+      );
+      // CLI passed via --cli=, bare words passed through for Rust to interpret as prompt
+      expect(result).toEqual(["--cli=claude", "rebuild", "and", "analyze", "problems"]);
     });
   });
 });
