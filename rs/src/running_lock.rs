@@ -102,7 +102,9 @@ impl RunningLock {
     fn clean_stale(&self) {
         let mut lock = self.read().unwrap_or_default();
         lock.tasks.retain(|t| crate::pid_store::is_process_alive(t.pid));
-        let _ = self.write(&lock);
+        if let Err(e) = self.write(&lock) {
+            warn!("RunningLock: failed to write after clean_stale: {}", e);
+        }
     }
 
     fn read(&self) -> Result<LockFile> {

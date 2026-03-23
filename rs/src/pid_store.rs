@@ -100,7 +100,7 @@ impl PidStore {
             }
             match serde_json::from_str::<PidRecord>(&line) {
                 Ok(r) => records.push(r),
-                Err(e) => warn!("PidStore: failed to parse record: {}", e),
+                Err(e) => warn!("PidStore: skipping corrupt record ({}): {:?}", e, &line[..line.len().min(80)]),
             }
         }
         Ok(records)

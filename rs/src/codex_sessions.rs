@@ -19,8 +19,12 @@ struct SessionEntry {
 type SessionMap = HashMap<String, SessionEntry>;
 
 /// Extract the first UUID (v4 format) found in a chunk of output.
+/// Returns `None` quickly if the output contains no `-` characters.
 pub fn extract_session_id(output: &str) -> Option<String> {
-    // UUID pattern: 8-4-4-4-12 lowercase hex
+    // Fast path: UUIDs always contain dashes
+    if !output.contains('-') {
+        return None;
+    }
     let mut i = 0;
     let b = output.as_bytes();
     while i + 36 <= b.len() {
@@ -33,9 +37,8 @@ pub fn extract_session_id(output: &str) -> Option<String> {
 }
 
 fn is_uuid_at(b: &[u8], i: usize) -> bool {
-    // xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+    // xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx  (36 chars total, 4 dashes)
     let pattern = [8, 4, 4, 4, 12];
-    let dashes = [8, 13, 18, 23];
     let mut pos = i;
     for (seg, &len) in pattern.iter().enumerate() {
         for _ in 0..len {
@@ -51,10 +54,9 @@ fn is_uuid_at(b: &[u8], i: usize) -> bool {
             pos += 1;
         }
     }
-    // Ensure not surrounded by hex/alphanum (to avoid matching inside longer strings)
+    // Must not be adjacent to alphanumeric (avoid matching substrings of longer tokens)
     let before_ok = i == 0 || !b[i - 1].is_ascii_alphanumeric();
     let after_ok = pos >= b.len() || !b[pos].is_ascii_alphanumeric();
-    let _ = dashes; // verified inline above
     before_ok && after_ok
 }
 

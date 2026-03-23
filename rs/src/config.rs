@@ -3,6 +3,7 @@
 use anyhow::{anyhow, Result};
 use regex::Regex;
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 /// Configuration for a CLI tool
 #[derive(Debug, Clone)]
@@ -52,21 +53,25 @@ impl Default for InstallConfig {
     }
 }
 
-/// Get configuration for a specific CLI
+/// Get configuration for a specific CLI.
+/// All configs are compiled once and cached for the process lifetime.
 pub fn get_cli_config(cli: &str) -> Result<CliConfig> {
-    match cli {
-        "claude" => Ok(claude_config()),
-        "gemini" => Ok(gemini_config()),
-        "codex" => Ok(codex_config()),
-        "copilot" => Ok(copilot_config()),
-        "cursor" => Ok(cursor_config()),
-        "grok" => Ok(grok_config()),
-        "qwen" => Ok(qwen_config()),
-        "auggie" => Ok(auggie_config()),
-        "amp" => Ok(amp_config()),
-        "opencode" => Ok(opencode_config()),
-        _ => Err(anyhow!("Unknown CLI: {}", cli)),
-    }
+    static CONFIGS: OnceLock<HashMap<&'static str, CliConfig>> = OnceLock::new();
+    let configs = CONFIGS.get_or_init(|| {
+        HashMap::from([
+            ("claude", claude_config()),
+            ("gemini", gemini_config()),
+            ("codex", codex_config()),
+            ("copilot", copilot_config()),
+            ("cursor", cursor_config()),
+            ("grok", grok_config()),
+            ("qwen", qwen_config()),
+            ("auggie", auggie_config()),
+            ("amp", amp_config()),
+            ("opencode", opencode_config()),
+        ])
+    });
+    configs.get(cli).cloned().ok_or_else(|| anyhow!("Unknown CLI: {}", cli))
 }
 
 fn claude_config() -> CliConfig {

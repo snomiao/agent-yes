@@ -65,6 +65,9 @@ pub struct AgentContext {
 
     // Stdin line accumulator for /auto command detection
     stdin_line_buffer: String,
+
+    // Stop scanning for codex session ID after first one is found
+    codex_session_found: bool,
 }
 
 impl AgentContext {
@@ -102,6 +105,7 @@ impl AgentContext {
             log_writer: LogWriter::new(pid),
             cwd,
             stdin_line_buffer: String::new(),
+            codex_session_found: false,
         }
     }
 
@@ -376,15 +380,18 @@ impl AgentContext {
         let stripped = remove_control_characters(output);
         self.rendered_output.push_str(&stripped);
 
-        // Extract and store codex session ID
-        if self.cli == "codex" {
+        // Extract and store codex session ID (once per session)
+        if self.cli == "codex" && !self.codex_session_found {
             if let Some(session_id) = codex_sessions::extract_session_id(output) {
                 codex_sessions::store_session(&self.cwd, &session_id);
+                self.codex_session_found = true;
+                debug!("Stored codex session ID: {}", session_id);
             }
         }
 
         // Keep buffer size reasonable
         if self.output_buffer.len() > 100000 {
+            debug!("Output buffer truncated (was {} bytes)", self.output_buffer.len());
             let split_at = find_char_boundary(&self.output_buffer, 50000);
             self.output_buffer = self.output_buffer.split_off(split_at);
             let rendered_len = self.rendered_output.len();
