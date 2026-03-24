@@ -1,6 +1,13 @@
+import { existsSync } from "fs";
+import { mkdir, readFile, writeFile, unlink } from "fs/promises";
+import { homedir } from "os";
+import path from "path";
 import { getRunningAgentCount, type Task } from "./runningLock.ts";
 
 const POLL_INTERVAL = 2000;
+
+const getTrayDir = () => path.join(process.env.CLAUDE_YES_HOME || homedir(), ".claude-yes");
+const getTrayPidFile = () => path.join(getTrayDir(), "tray.pid");
 
 // Minimal 16x16 white circle PNG as base64 (used as tray icon)
 const ICON_BASE64 =
@@ -40,17 +47,100 @@ function buildMenuItems(tasks: Task[]) {
   return items;
 }
 
+function isDesktopOS(): boolean {
+  return process.platform === "darwin" || process.platform === "win32";
+}
+
+function isTrayProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Write the current process PID to the tray PID file
+ */
+async function writeTrayPid(): Promise<void> {
+  const dir = getTrayDir();
+  await mkdir(dir, { recursive: true });
+  await writeFile(getTrayPidFile(), String(process.pid), "utf8");
+}
+
+/**
+ * Remove the tray PID file
+ */
+async function removeTrayPid(): Promise<void> {
+  try {
+    await unlink(getTrayPidFile());
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Check if a tray process is already running
+ */
+export async function isTrayRunning(): Promise<boolean> {
+  try {
+    const pidFile = getTrayPidFile();
+    if (!existsSync(pidFile)) return false;
+    const pid = parseInt(await readFile(pidFile, "utf8"), 10);
+    if (isNaN(pid)) return false;
+    return isTrayProcessRunning(pid);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Auto-spawn a tray process in the background if not already running.
+ * Only spawns on desktop OS (macOS/Windows).
+ * Silently does nothing if systray2 is not installed or on non-desktop OS.
+ */
+export async function ensureTray(): Promise<void> {
+  if (!isDesktopOS()) return;
+  if (await isTrayRunning()) return;
+
+  try {
+    // Resolve the CLI entry point (dist/cli.js or ts/cli.ts)
+    const cliPath = new URL("./cli.ts", import.meta.url).pathname;
+    const { spawn } = await import("child_process");
+
+    // Spawn detached tray process
+    const child = spawn(process.execPath, [cliPath, "--tray", "--no-rust"], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env },
+    });
+    child.unref();
+  } catch {
+    // Silently fail — tray is best-effort
+  }
+}
+
 export async function startTray(): Promise<void> {
-  // Only macOS and Windows have proper tray support
-  if (process.platform !== "darwin" && process.platform !== "win32") {
+  if (!isDesktopOS()) {
     console.error("Tray icon is only supported on macOS and Windows.");
     return;
   }
+
+  // Check if another tray is already running
+  if (await isTrayRunning()) {
+    console.error("Tray is already running.");
+    return;
+  }
+
+  // Register our PID
+  await writeTrayPid();
 
   let SysTray: typeof import("systray2").default;
   try {
     SysTray = (await import("systray2")).default;
   } catch {
+    await removeTrayPid();
     console.error("systray2 is not installed. Install it with: npm install systray2");
     return;
   }
@@ -75,7 +165,7 @@ export async function startTray(): Promise<void> {
   systray.onClick((action) => {
     if (action.item.title === "Quit Tray") {
       systray.kill(false);
-      process.exit(0);
+      removeTrayPid().finally(() => process.exit(0));
     }
   });
 
@@ -105,14 +195,11 @@ export async function startTray(): Promise<void> {
   }, POLL_INTERVAL);
 
   // Cleanup on exit
-  process.on("SIGINT", () => {
+  const cleanup = () => {
     clearInterval(interval);
     systray.kill(false);
-    process.exit(0);
-  });
-  process.on("SIGTERM", () => {
-    clearInterval(interval);
-    systray.kill(false);
-    process.exit(0);
-  });
+    removeTrayPid().finally(() => process.exit(0));
+  };
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
 }

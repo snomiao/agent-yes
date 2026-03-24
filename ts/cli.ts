@@ -142,6 +142,12 @@ if (config.verbose) {
   console.log(argv);
 }
 
+// Auto-spawn tray icon in background on desktop OS (best-effort, silent failure)
+{
+  const { ensureTray } = await import("./tray.ts");
+  ensureTray(); // fire-and-forget, don't await
+}
+
 const { default: cliYes } = await import("./index.ts");
 const { exitCode } = await cliYes({ ...config, autoYes: config.autoYes });
 
