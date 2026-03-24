@@ -22,6 +22,13 @@ if (config.tray) {
   await new Promise(() => {}); // Block forever, exit via tray quit or signal
 }
 
+// Auto-spawn tray icon in background on desktop OS (best-effort, silent failure)
+// Must run before --rust spawn since that blocks forever
+{
+  const { ensureTray } = await import("./tray.ts");
+  ensureTray(); // fire-and-forget, don't await
+}
+
 // Handle --rust: spawn the Rust binary instead, fall back to TypeScript if unavailable
 if (config.useRust) {
   let rustBinary: string | undefined;
@@ -140,12 +147,6 @@ if (config.verbose) {
   process.env.VERBOSE = "true"; // enable verbose logging in yesLog.ts
   console.log(config);
   console.log(argv);
-}
-
-// Auto-spawn tray icon in background on desktop OS (best-effort, silent failure)
-{
-  const { ensureTray } = await import("./tray.ts");
-  ensureTray(); // fire-and-forget, don't await
 }
 
 const { default: cliYes } = await import("./index.ts");
