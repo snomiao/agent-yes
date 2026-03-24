@@ -130,6 +130,9 @@
       "optional": true
     }
   },
+  "optionalDependencies": {
+    "systray2": "^2.1.4"
+  },
   "engines": {
     "node": ">=22.0.0"
   },

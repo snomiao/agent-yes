@@ -15,6 +15,13 @@ const updateCheckPromise = checkAndAutoUpdate();
 // Parse CLI arguments
 const config = parseCliArgs(process.argv);
 
+// Handle --tray: show system tray icon and block
+if (config.tray) {
+  const { startTray } = await import("./tray.ts");
+  await startTray();
+  await new Promise(() => {}); // Block forever, exit via tray quit or signal
+}
+
 // Handle --rust: spawn the Rust binary instead, fall back to TypeScript if unavailable
 if (config.useRust) {
   let rustBinary: string | undefined;

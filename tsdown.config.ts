@@ -12,6 +12,7 @@ export default defineConfig({
     "from-node-stream",
     "bun",
     "terminal-render",
+    "systray2",
   ],
   format: "esm",
   outExtensions: () => ({ js: ".js" }),

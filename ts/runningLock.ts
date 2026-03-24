@@ -287,6 +287,20 @@ async function waitForUnlock(blockingTasks: Task[], currentTask: Task): Promise<
 }
 
 /**
+ * Read the current lock file (exported for tray and other consumers)
+ */
+export { readLockFile };
+
+/**
+ * Get the count of currently running agents
+ */
+export async function getRunningAgentCount(): Promise<{ count: number; tasks: Task[] }> {
+  const lockFile = await readLockFile();
+  const running = lockFile.tasks.filter((t) => t.status === "running");
+  return { count: running.length, tasks: running };
+}
+
+/**
  * Clean stale locks from the lock file
  */
 export async function cleanStaleLocks(): Promise<void> {
