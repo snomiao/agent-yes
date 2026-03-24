@@ -5,7 +5,7 @@ use crate::config::CliConfig;
 use crate::idle_waiter::IdleWaiter;
 use crate::log_files::LogWriter;
 use crate::messaging::{send_ctrl_c, send_text, MessageContext};
-use crate::pty_spawner::{get_terminal_size, PtyContext};
+use crate::pty_spawner::{get_terminal_size, get_terminal_size_from_tty, PtyContext};
 use crate::ready_manager::ReadyManager;
 use crate::utils::{remove_control_characters, sleep_ms};
 use anyhow::Result;
@@ -13,7 +13,7 @@ use crossterm::terminal;
 use std::io::Write;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 const HEARTBEAT_INTERVAL_MS: u64 = 50;  // Check frequently for Enter timing and patterns
@@ -175,24 +175,44 @@ impl AgentContext {
         // Set terminal to raw mode for proper signal handling
         let _raw_mode = terminal::enable_raw_mode();
 
-        // Channel for terminal resize events (SIGWINCH → child PTY)
-        let (resize_tx, mut resize_rx) = mpsc::channel::<(u16, u16)>(4);
+        // Watch channel for terminal resize events (SIGWINCH → child PTY).
+        // watch semantics: sender never blocks, receiver always sees the latest value.
+        // This is correct for PTY resize — only the current size matters, not history.
+        let initial_size = get_terminal_size();
+        let (resize_tx, mut resize_rx) = watch::channel::<(u16, u16)>(initial_size);
 
-        // Spawn SIGWINCH listener — sends new (cols, rows) whenever terminal is resized
+        // Sync PTY to current terminal size immediately — changed() won't fire for the
+        // initial value, so any resize that happened between spawn_agent() and here
+        // would be silently missed without this explicit call.
+        if let Err(e) = pty.resize(initial_size.0, initial_size.1) {
+            warn!("Initial PTY resize to {}x{} failed: {}", initial_size.0, initial_size.1, e);
+        }
+
+        // Suppress unused-variable warning on non-unix where resize_tx is never moved
+        #[cfg(not(unix))]
+        let _ = &resize_tx;
+
+        // Spawn SIGWINCH listener — updates the watch whenever terminal is resized
         #[cfg(unix)]
         let _sigwinch_handle = {
             tokio::spawn(async move {
                 use tokio::signal::unix::{signal, SignalKind};
                 let mut sig = match signal(SignalKind::window_change()) {
                     Ok(s) => s,
-                    Err(_) => return,
+                    Err(e) => {
+                        warn!("Failed to register SIGWINCH handler: {}", e);
+                        return;
+                    }
                 };
                 loop {
                     if sig.recv().await.is_none() {
                         break;
                     }
-                    let size = get_terminal_size();
-                    if resize_tx.send(size).await.is_err() {
+                    // Use ioctl(TIOCGWINSZ) — env vars (COLUMNS/LINES) are stale
+                    // after a resize and must NOT be used here.
+                    let size = get_terminal_size_from_tty();
+                    // send() on watch never blocks; old unseen values are overwritten
+                    if resize_tx.send(size).is_err() {
                         break;
                     }
                 }
@@ -217,9 +237,12 @@ impl AgentContext {
                 }
 
                 // Terminal resize: propagate SIGWINCH to child PTY
-                Some((cols, rows)) = resize_rx.recv() => {
+                Ok(()) = resize_rx.changed() => {
+                    let (cols, rows) = *resize_rx.borrow_and_update();
                     debug!("SIGWINCH: resizing PTY to {}x{}", cols, rows);
-                    let _ = pty.resize(cols, rows);
+                    if let Err(e) = pty.resize(cols, rows) {
+                        warn!("PTY resize to {}x{} failed: {}", cols, rows, e);
+                    }
                 }
 
                 // Stdin data

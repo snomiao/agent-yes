@@ -9,7 +9,32 @@ use std::thread;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-/// Get terminal dimensions from parent TTY, with fallback defaults
+/// Get terminal dimensions via ioctl(TIOCGWINSZ), falling back to defaults.
+/// Does NOT read COLUMNS/LINES env vars — always reflects the live kernel size.
+/// Use this in the SIGWINCH handler so stale env vars don't shadow the real size.
+pub fn get_terminal_size_from_tty() -> (u16, u16) {
+    #[cfg(not(unix))]
+    {
+        return (80, 24);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = std::io::stdout().as_raw_fd();
+        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+        if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) } == 0 {
+            if size.ws_col > 0 && size.ws_row > 0 {
+                return (size.ws_col.max(20), size.ws_row);
+            }
+        }
+        (80, 24)
+    }
+}
+
+/// Get terminal dimensions from parent TTY, with fallback defaults.
+/// Checks COLUMNS/LINES env vars first (useful for initial spawn in pipe/non-TTY context),
+/// then falls back to ioctl(TIOCGWINSZ), then to (80, 24).
+/// Do NOT use in SIGWINCH handler — env vars are stale after a resize.
 pub fn get_terminal_size() -> (u16, u16) {
     // Try to get from environment first (for pipes/non-TTY)
     if let (Ok(cols), Ok(rows)) = (std::env::var("COLUMNS"), std::env::var("LINES")) {
@@ -80,6 +105,9 @@ impl PtyContext {
 
     /// Resize the PTY
     pub fn resize(&self, cols: u16, rows: u16) -> Result<()> {
+        // Guard against zero dimensions, which can corrupt PTY state on some platforms
+        let cols = cols.max(1);
+        let rows = rows.max(1);
         self.master.resize(PtySize {
             rows,
             cols,
@@ -242,6 +270,10 @@ pub fn extract_valid_utf8(bytes: &[u8]) -> (&str, &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serialize tests that mutate env vars — std::env::set_var is not thread-safe
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_is_command_not_found() {
@@ -363,5 +395,118 @@ mod tests {
 
         // Sender completes instantly — no blocking occurred
         // (a bounded channel with blocking_send would stall here)
+    }
+
+    /// Spawn a real PTY, resize it, then verify the child shell sees the new dimensions via `stty size`.
+    #[cfg(unix)]
+    #[test]
+    fn test_pty_resize_reflected_in_child() {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        use std::io::Read;
+        use std::time::{Duration, Instant};
+
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty failed");
+
+        let mut cmd = CommandBuilder::new("sh");
+        cmd.args(["-c", "stty size"]);
+        let _child = pair.slave.spawn_command(cmd).expect("spawn failed");
+        drop(pair.slave);
+
+        // Resize before the child reads its terminal attributes
+        pair.master
+            .resize(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
+            .expect("resize failed");
+
+        // Read all output with a 2-second deadline
+        let mut reader = pair.master.try_clone_reader().expect("clone reader failed");
+        let mut output = String::new();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut buf = [0u8; 256];
+        loop {
+            // Use a short timeout by setting the read to non-blocking after deadline
+            if Instant::now() >= deadline {
+                break;
+            }
+            match reader.read(&mut buf) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => output.push_str(&String::from_utf8_lossy(&buf[..n])),
+            }
+            if output.contains('\n') {
+                break;
+            }
+        }
+
+        // `stty size` prints "rows cols\n"
+        let trimmed = output.trim();
+        assert!(
+            trimmed.contains("40 120") || trimmed.ends_with("40 120"),
+            "expected '40 120' in stty output, got: {:?}",
+            trimmed
+        );
+    }
+
+    #[test]
+    fn test_pty_resize_zero_guard() {
+        use portable_pty::{native_pty_system, PtySize};
+
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .expect("openpty failed");
+
+        // Build a PtyContext directly to test the zero-guard in resize()
+        let (_, output_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let writer = pair.master.take_writer().expect("take_writer");
+        let ctx = PtyContext {
+            master: pair.master,
+            child: pair.slave.spawn_command(CommandBuilder::new("true")).expect("spawn"),
+            output_rx,
+            writer: std::sync::Arc::new(std::sync::Mutex::new(writer)),
+        };
+        drop(pair.slave);
+
+        // resize(0, 0) must not panic or return an error — guard clamps to 1x1
+        ctx.resize(0, 0).expect("resize(0,0) should succeed via clamp");
+        ctx.resize(0, 24).expect("resize(0,24) should succeed via clamp");
+        ctx.resize(80, 0).expect("resize(80,0) should succeed via clamp");
+    }
+
+    #[test]
+    fn test_get_terminal_size_returns_valid_dimensions() {
+        let (cols, rows) = get_terminal_size();
+        // Must always return at least 1x1 to be a valid terminal size
+        assert!(cols >= 1, "cols must be >= 1, got {}", cols);
+        assert!(rows >= 1, "rows must be >= 1, got {}", rows);
+        // Should return at least the enforced minimum cols
+        assert!(cols >= 20, "cols must be >= 20 (enforced minimum), got {}", cols);
+    }
+
+    #[test]
+    fn test_get_terminal_size_env_override() {
+        // COLUMNS/LINES env vars should take precedence
+        // Hold ENV_MUTEX for the entire test to prevent races with other env-var tests
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("COLUMNS", "132");
+        std::env::set_var("LINES", "50");
+        let (cols, rows) = get_terminal_size();
+        std::env::remove_var("COLUMNS");
+        std::env::remove_var("LINES");
+        assert_eq!(cols, 132);
+        assert_eq!(rows, 50);
+    }
+
+    #[test]
+    fn test_get_terminal_size_env_override_enforces_min_cols() {
+        // COLUMNS below 20 should be clamped to 20
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("COLUMNS", "5");
+        std::env::set_var("LINES", "24");
+        let (cols, _rows) = get_terminal_size();
+        std::env::remove_var("COLUMNS");
+        std::env::remove_var("LINES");
+        assert_eq!(cols, 20, "cols below minimum should be clamped to 20");
     }
 }
