@@ -9,54 +9,42 @@ use std::thread;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
-/// Get terminal dimensions via ioctl(TIOCGWINSZ), falling back to defaults.
-/// Does NOT read COLUMNS/LINES env vars — always reflects the live kernel size.
-/// Use this in the SIGWINCH handler so stale env vars don't shadow the real size.
-pub fn get_terminal_size_from_tty() -> (u16, u16) {
-    #[cfg(not(unix))]
+/// Read terminal size via ioctl(TIOCGWINSZ). Returns None if stdout is not a TTY.
+#[cfg(unix)]
+fn ioctl_terminal_size() -> Option<(u16, u16)> {
+    use std::os::unix::io::AsRawFd;
+    let mut size: libc::winsize = unsafe { std::mem::zeroed() };
+    if unsafe { libc::ioctl(std::io::stdout().as_raw_fd(), libc::TIOCGWINSZ, &mut size) } == 0
+        && size.ws_col > 0
+        && size.ws_row > 0
     {
-        return (80, 24);
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let fd = std::io::stdout().as_raw_fd();
-        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
-        if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) } == 0 {
-            if size.ws_col > 0 && size.ws_row > 0 {
-                return (size.ws_col.max(20), size.ws_row);
-            }
-        }
-        (80, 24)
+        Some((size.ws_col.max(20), size.ws_row))
+    } else {
+        None
     }
 }
 
-/// Get terminal dimensions from parent TTY, with fallback defaults.
-/// Checks COLUMNS/LINES env vars first (useful for initial spawn in pipe/non-TTY context),
-/// then falls back to ioctl(TIOCGWINSZ), then to (80, 24).
-/// Do NOT use in SIGWINCH handler — env vars are stale after a resize.
+/// Terminal size from ioctl only — use in SIGWINCH handler where COLUMNS/LINES are stale.
+pub fn get_terminal_size_from_tty() -> (u16, u16) {
+    #[cfg(unix)]
+    if let Some(size) = ioctl_terminal_size() {
+        return size;
+    }
+    (80, 24)
+}
+
+/// Terminal size for initial PTY spawn: COLUMNS/LINES env vars first (useful in
+/// non-TTY/pipe/CI contexts), then ioctl, then (80, 24).
 pub fn get_terminal_size() -> (u16, u16) {
-    // Try to get from environment first (for pipes/non-TTY)
     if let (Ok(cols), Ok(rows)) = (std::env::var("COLUMNS"), std::env::var("LINES")) {
         if let (Ok(cols), Ok(rows)) = (cols.parse::<u16>(), rows.parse::<u16>()) {
             return (cols.max(20), rows);
         }
     }
-
-    // Try to get from TTY
     #[cfg(unix)]
-    {
-        use std::os::unix::io::AsRawFd;
-        let fd = std::io::stdout().as_raw_fd();
-        let mut size: libc::winsize = unsafe { std::mem::zeroed() };
-        if unsafe { libc::ioctl(fd, libc::TIOCGWINSZ, &mut size) } == 0 {
-            if size.ws_col > 0 && size.ws_row > 0 {
-                return (size.ws_col.max(20), size.ws_row);
-            }
-        }
+    if let Some(size) = ioctl_terminal_size() {
+        return size;
     }
-
-    // Default fallback
     (80, 24)
 }
 

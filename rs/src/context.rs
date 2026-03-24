@@ -204,16 +204,19 @@ impl AgentContext {
                         return;
                     }
                 };
+                let mut last_size = initial_size;
                 loop {
                     if sig.recv().await.is_none() {
                         break;
                     }
-                    // Use ioctl(TIOCGWINSZ) — env vars (COLUMNS/LINES) are stale
-                    // after a resize and must NOT be used here.
+                    // Use ioctl(TIOCGWINSZ) — env vars (COLUMNS/LINES) are stale after resize.
+                    // Only forward if size actually changed to avoid spurious pty.resize() calls.
                     let size = get_terminal_size_from_tty();
-                    // send() on watch never blocks; old unseen values are overwritten
-                    if resize_tx.send(size).is_err() {
-                        break;
+                    if size != last_size {
+                        last_size = size;
+                        if resize_tx.send(size).is_err() {
+                            break;
+                        }
                     }
                 }
             })
@@ -263,13 +266,7 @@ impl AgentContext {
                     }
                     // Check for Ctrl+Y (toggle auto-yes)
                     else if data.contains(&0x19) {
-                        self.auto_yes_enabled = !self.auto_yes_enabled;
-                        if self.auto_yes_enabled {
-                            eprintln!("\r\n[auto-yes: ON]\r");
-                        } else {
-                            eprintln!("\r\n[auto-yes: OFF]\r");
-                            self.stdin_ready.ready().await;
-                        }
+                        self.toggle_auto_yes().await;
                     }
                     // Text input: accumulate line buffer for /auto detection
                     else if let Ok(text) = String::from_utf8(data.clone()) {
@@ -281,13 +278,7 @@ impl AgentContext {
                         }
 
                         if is_auto_cmd {
-                            self.auto_yes_enabled = !self.auto_yes_enabled;
-                            if self.auto_yes_enabled {
-                                eprintln!("\r\n[auto-yes: ON]\r");
-                            } else {
-                                eprintln!("\r\n[auto-yes: OFF]\r");
-                                self.stdin_ready.ready().await;
-                            }
+                            self.toggle_auto_yes().await;
                             // Send Ctrl+U to clear the typed /auto from the shell line
                             let mut w = writer.lock().map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
                             w.write_all(b"\x15")?;
@@ -542,6 +533,16 @@ impl AgentContext {
         writer.flush()?;
         self.idle_waiter.ping();
         Ok(())
+    }
+
+    async fn toggle_auto_yes(&mut self) {
+        self.auto_yes_enabled = !self.auto_yes_enabled;
+        if self.auto_yes_enabled {
+            eprintln!("\r\n[auto-yes: ON]\r");
+        } else {
+            eprintln!("\r\n[auto-yes: OFF]\r");
+            self.stdin_ready.ready().await;
+        }
     }
 
     /// Check patterns and respond accordingly

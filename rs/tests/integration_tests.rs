@@ -83,7 +83,7 @@ AY_PID=$!
 # Wait for SIZE_CHANGED (mock CLI changed its PTY to 132×50)
 for i in $(seq 1 80); do
     grep -q "SIZE_CHANGED" "$OUTFILE" 2>/dev/null && break
-    sleep 0.1
+    sleep 0.05
 done
 
 # Send SIGWINCH to agent-yes → reads COLUMNS=80 LINES=24 → pty.resize(80,24)
@@ -93,7 +93,7 @@ kill -WINCH $AY_PID 2>/dev/null || true
 # Wait for RESIZE_2:24 80
 for i in $(seq 1 50); do
     grep -q "RESIZE_2:24 80" "$OUTFILE" 2>/dev/null && break
-    sleep 0.1
+    sleep 0.05
 done
 
 kill $AY_PID 2>/dev/null || true
@@ -140,29 +140,6 @@ wait $AY_PID 2>/dev/null || true
     );
 }
 
-/// Create a mock CLI script that never shows the ready pattern
-fn create_mock_cli(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    let script_path = dir.join(name);
-    let mut file = File::create(&script_path).unwrap();
-    writeln!(
-        file,
-        r#"#!/usr/bin/env bash
-echo "Starting {}..."
-echo "Loading..."
-# Sleep forever - never shows ready pattern
-sleep 10000
-"#,
-        name
-    )
-    .unwrap();
-
-    // Make executable
-    let mut perms = fs::metadata(&script_path).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&script_path, perms).unwrap();
-
-    script_path
-}
 
 #[test]
 fn test_version() {
