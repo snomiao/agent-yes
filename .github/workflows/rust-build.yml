@@ -20,10 +20,6 @@ on:
         default: "true"
         type: boolean
 
-  # Direct release event (backup for manual releases)
-  release:
-    types: [published]
-
 env:
   CARGO_TERM_COLOR: always
 

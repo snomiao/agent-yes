@@ -28,7 +28,7 @@ jobs:
 
       # semantic-release: bump version, update package.json + Cargo.toml,
       # create GitHub release + tag. npm publish is disabled (npmPublish: false).
-      # Creating the GitHub release triggers rust-build.yml via `release: published`.
+      # After this, we explicitly dispatch rust-build.yml below.
       - run: bunx semantic-release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -42,17 +42,42 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "New release tag: $TAG"
 
-      # Wait for the rust-build workflow (triggered by `release: published`) to finish.
-      # This ensures Rust binaries are attached to the GitHub release before we publish to npm.
+      # Explicitly dispatch rust-build.yml so we can track the exact run ID.
+      # (The release: published event on rust-build.yml is a backup; the dispatch here
+      #  is what release.yml actually waits for.)
+      - name: Trigger Rust build
+        id: trigger_rust
+        if: steps.get_tag.outputs.tag != ''
+        run: |
+          BEFORE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          echo "Dispatching rust-build.yml for tag ${{ steps.get_tag.outputs.tag }} (after $BEFORE)..."
+          gh workflow run rust-build.yml \
+            --field tag=${{ steps.get_tag.outputs.tag }} \
+            --field upload_release=true
+          # Poll until we see the new run (created after dispatch)
+          for i in $(seq 1 24); do
+            sleep 5
+            RUN_ID=$(gh run list --workflow=rust-build.yml --limit=10 --json databaseId,createdAt \
+              -q --arg before "$BEFORE" '.[] | select(.createdAt >= $before) | .databaseId' | head -1)
+            if [ -n "$RUN_ID" ]; then
+              echo "Found run ID: $RUN_ID"
+              echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT
+              break
+            fi
+            echo "Waiting for run to appear... ($((i*5))s elapsed)"
+          done
+          if [ -z "$RUN_ID" ]; then
+            echo "ERROR: rust-build.yml run not found after 2 minutes"
+            exit 1
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Wait for Rust build to complete
         if: steps.get_tag.outputs.tag != ''
         run: |
-          echo "Waiting for rust-build.yml triggered by release ${{ steps.get_tag.outputs.tag }}..."
-          # Give GitHub a moment to register the workflow run
-          sleep 15
-          RUN_ID=$(gh run list --workflow=rust-build.yml --limit=1 --json databaseId -q '.[0].databaseId')
-          echo "Watching run ID: $RUN_ID"
-          gh run watch "$RUN_ID" --exit-status
+          echo "Watching rust-build.yml run ${{ steps.trigger_rust.outputs.run_id }}..."
+          gh run watch "${{ steps.trigger_rust.outputs.run_id }}" --exit-status
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
