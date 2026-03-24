@@ -38,10 +38,12 @@
         "rambda": "^11.0.1",
         "semantic-release": "^25.0.2",
         "standard-version": "^9.5.0",
-        "systray2": "^2.1.4",
         "tsdown": "^0.20.3",
         "vitest": "4.1.0",
         "zod": "^3.23.0",
+      },
+      "optionalDependencies": {
+        "systray2": "^2.1.4",
       },
       "peerDependencies": {
         "node-pty": "latest",
