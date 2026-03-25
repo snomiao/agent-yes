@@ -204,19 +204,18 @@ impl AgentContext {
                         return;
                     }
                 };
-                let mut last_size = initial_size;
                 loop {
                     if sig.recv().await.is_none() {
                         break;
                     }
                     // Use ioctl(TIOCGWINSZ) — env vars (COLUMNS/LINES) are stale after resize.
-                    // Only forward if size actually changed to avoid spurious pty.resize() calls.
+                    // Always send even if size appears unchanged: the inner PTY may have been
+                    // resized by the child (e.g. `stty cols 132`), and we must override it back
+                    // to the outer terminal size.  watch::send() always increments the version
+                    // counter, so changed() in the select! loop fires on every SIGWINCH.
                     let size = get_terminal_size_from_tty();
-                    if size != last_size {
-                        last_size = size;
-                        if resize_tx.send(size).is_err() {
-                            break;
-                        }
+                    if resize_tx.send(size).is_err() {
+                        break;
                     }
                 }
             })
