@@ -17,6 +17,8 @@ jobs:
       actions: write # to trigger rust-build workflow
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # semantic-release needs full history to compute versions correctly
       - uses: actions/setup-node@v5
         with:
           node-version: "latest"
