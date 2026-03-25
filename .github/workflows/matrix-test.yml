@@ -44,6 +44,21 @@ jobs:
         if: matrix.runtime == 'bun'
         run: bun install
 
+      - name: Install Rust toolchain
+        if: runner.os != 'Windows'
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        if: runner.os != 'Windows'
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rs
+
+      - name: Build Rust binary (for [rs] e2e tests)
+        if: runner.os != 'Windows'
+        working-directory: rs
+        run: cargo build --release
+
       - name: Build (Node)
         if: matrix.runtime == 'node'
         run: npm run build
