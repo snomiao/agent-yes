@@ -215,62 +215,6 @@ describe("tray", () => {
       Object.defineProperty(process, "platform", { value: originalPlatform });
     });
 
-    it("should auto-exit after ~30s with 0 agents", async () => {
-      const originalPlatform = process.platform;
-      Object.defineProperty(process, "platform", { value: "darwin" });
-      vi.useFakeTimers();
-      const mockExit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
-
-      const { startTray } = await import("./tray.ts");
-      await startTray();
-
-      // Keep returning 0 agents for 15 polls (IDLE_EXIT_POLLS)
-      mockGetRunningAgentCount.mockResolvedValue({ count: 0, tasks: [] });
-
-      // Advance 15 * 2s = 30s
-      await vi.advanceTimersByTimeAsync(15 * 2100);
-
-      expect(mockSysTray.instance.kill).toHaveBeenCalledWith(false);
-      await vi.waitFor(() => expect(mockExit).toHaveBeenCalledWith(0));
-
-      mockExit.mockRestore();
-      vi.useRealTimers();
-      Object.defineProperty(process, "platform", { value: originalPlatform });
-    });
-
-    it("should reset idle counter when agents appear", async () => {
-      const originalPlatform = process.platform;
-      Object.defineProperty(process, "platform", { value: "darwin" });
-      vi.useFakeTimers();
-      const mockExit = vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
-
-      const { startTray } = await import("./tray.ts");
-      await startTray();
-
-      // 10 polls at 0 agents
-      mockGetRunningAgentCount.mockResolvedValue({ count: 0, tasks: [] });
-      await vi.advanceTimersByTimeAsync(10 * 2100);
-
-      // Then an agent appears — resets idle counter
-      mockGetRunningAgentCount.mockResolvedValue({
-        count: 1,
-        tasks: [
-          { pid: 1, cwd: "/a", task: "t", status: "running" as const, startedAt: 0, lockedAt: 0 },
-        ],
-      });
-      await vi.advanceTimersByTimeAsync(2100);
-
-      // Then 10 more polls at 0 — should NOT exit yet (need 15 consecutive)
-      mockGetRunningAgentCount.mockResolvedValue({ count: 0, tasks: [] });
-      await vi.advanceTimersByTimeAsync(10 * 2100);
-
-      expect(mockExit).not.toHaveBeenCalled();
-
-      mockExit.mockRestore();
-      vi.useRealTimers();
-      Object.defineProperty(process, "platform", { value: originalPlatform });
-    });
-
     it("should work on Windows", async () => {
       const originalPlatform = process.platform;
       Object.defineProperty(process, "platform", { value: "win32" });

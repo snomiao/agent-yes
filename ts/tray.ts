@@ -5,7 +5,6 @@ import path from "path";
 import { getRunningAgentCount, type Task } from "./runningLock.ts";
 
 const POLL_INTERVAL = 2000;
-const IDLE_EXIT_POLLS = 15; // Exit after 15 polls (~30s) with 0 agents
 
 const getTrayDir = () => path.join(process.env.CLAUDE_YES_HOME || homedir(), ".claude-yes");
 const getTrayPidFile = () => path.join(getTrayDir(), "tray.pid");
@@ -177,20 +176,9 @@ export async function startTray(): Promise<void> {
 
   // Poll and update, auto-exit after ~30s idle (0 agents)
   let lastCount = count;
-  let idlePolls = count === 0 ? 1 : 0;
   intervalId = setInterval(async () => {
     try {
       const { count: newCount, tasks: newTasks } = await getRunningAgentCount();
-
-      if (newCount === 0) {
-        idlePolls++;
-        if (idlePolls >= IDLE_EXIT_POLLS) {
-          cleanup();
-          return;
-        }
-      } else {
-        idlePolls = 0;
-      }
 
       if (newCount !== lastCount) {
         lastCount = newCount;
