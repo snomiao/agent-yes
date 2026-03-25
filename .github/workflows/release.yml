@@ -23,6 +23,15 @@ jobs:
           registry-url: "https://registry.npmjs.org"
       - uses: oven-sh/setup-bun@v2
       - run: bun i
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rs
+      - name: Build Rust binary
+        working-directory: rs
+        run: cargo build --release
       - run: bun run build
       - run: bun run test
 
