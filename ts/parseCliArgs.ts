@@ -126,6 +126,11 @@ export function parseCliArgs(argv: string[]) {
       default: false,
       alias: "y",
     })
+    .option("tray", {
+      type: "boolean",
+      description: "Show a system tray icon with running agent count (macOS/Windows only)",
+      default: false,
+    })
     .option("rust", {
       type: "boolean",
       description: "Use the Rust implementation (enabled by default, use --no-rust for TypeScript)",
@@ -275,6 +280,7 @@ export function parseCliArgs(argv: string[]) {
     showVersion: parsedArgv.version,
     autoYes: parsedArgv.auto !== "no", // auto-yes enabled by default, disabled with --auto=no
     idleAction: parsedArgv.idleAction as string | undefined,
+    tray: parsedArgv.tray,
     useRust: parsedArgv.rust,
     // New unified --swarm flag (takes precedence over deprecated flags)
     swarm: parsedArgv.swarm ?? (parsedArgv.experimentalSwarm ? parsedArgv.swarmTopic : undefined),

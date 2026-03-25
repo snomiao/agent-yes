@@ -1,6 +1,6 @@
 {
   "name": "agent-yes",
-  "version": "1.70.5",
+  "version": "1.72.1",
   "description": "A wrapper tool that automates interactions with various AI CLI tools by automatically handling common prompts and responses.",
   "keywords": [
     "ai",
@@ -129,6 +129,9 @@
     "node-pty": {
       "optional": true
     }
+  },
+  "optionalDependencies": {
+    "systray2": "^2.1.4"
   },
   "engines": {
     "node": ">=22.0.0"
