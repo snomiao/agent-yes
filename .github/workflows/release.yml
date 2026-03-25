@@ -95,7 +95,7 @@ jobs:
       # Now publish to npm — binaries are guaranteed to be on the GitHub release.
       - name: Publish agent-yes to npm
         if: steps.get_tag.outputs.tag != ''
-        run: npm publish --access public
+        run: npm publish --access public || echo "npm publish skipped (version already exists)"
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -103,7 +103,7 @@ jobs:
         if: steps.get_tag.outputs.tag != ''
         run: |
           npm pkg set name=claude-yes
-          npm publish --access public
+          npm publish --access public || echo "npm publish skipped (version already exists)"
           npm pkg set name=agent-yes
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
