@@ -2,9 +2,11 @@
  * Rust binary helper - finds or downloads the appropriate prebuilt binary
  */
 
+import { execFileSync } from "child_process";
 import { existsSync, mkdirSync, unlinkSync } from "fs";
 import { chmod, copyFile } from "fs/promises";
 import path from "path";
+import pkg from "../package.json" with { type: "json" };
 
 // Platform/arch to binary name mapping
 const PLATFORM_MAP: Record<string, string> = {
@@ -193,6 +195,70 @@ export async function downloadBinary(verbose = false): Promise<string> {
 }
 
 /**
+ * Get the version of a Rust binary by running it with --version
+ */
+function getRustBinaryVersion(binaryPath: string): string | null {
+  try {
+    const output = execFileSync(binaryPath, ["--version"], {
+      timeout: 5000,
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    // Output is like "agent-yes 1.72.3" or "agent-yes v1.72.3"
+    const match = output.match(/(\d+\.\d+\.\d+)/);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check if a binary path is inside a git repo (dev build), and rebuild if outdated.
+ * Returns the same path if up-to-date or rebuilt, undefined if rebuild failed.
+ */
+function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
+  // Only auto-rebuild for local dev builds (target/release or target/debug)
+  if (!binaryPath.includes("/target/release") && !binaryPath.includes("/target/debug")) {
+    return true; // not a dev build, skip
+  }
+
+  const binaryVersion = getRustBinaryVersion(binaryPath);
+  if (verbose) {
+    console.log(`[rust] Binary version: ${binaryVersion}, package version: ${pkg.version}`);
+  }
+
+  if (binaryVersion === pkg.version) {
+    return true; // up to date
+  }
+
+  // Find the rs/ directory relative to the binary (binary is at rs/target/release/agent-yes)
+  const rsDir = binaryPath.replace(/\/target\/(release|debug)\/agent-yes.*$/, "");
+  if (!existsSync(path.join(rsDir, "Cargo.toml"))) {
+    if (verbose) console.log(`[rust] Cannot find Cargo.toml at ${rsDir}, skipping rebuild`);
+    return true; // can't rebuild, use as-is
+  }
+
+  process.stderr.write(
+    `\x1b[33m[rust] Binary outdated (${binaryVersion ?? "unknown"} → ${pkg.version}), rebuilding…\x1b[0m\n`,
+  );
+
+  try {
+    const isRelease = binaryPath.includes("/target/release");
+    const args = ["build", ...(isRelease ? ["--release"] : [])];
+    execFileSync("cargo", args, {
+      cwd: rsDir,
+      stdio: "inherit",
+      timeout: 300_000, // 5 min max
+    });
+    process.stderr.write(`\x1b[32m[rust] Rebuild complete\x1b[0m\n`);
+    return true;
+  } catch {
+    process.stderr.write(`\x1b[31m[rust] Auto-rebuild failed, using outdated binary\x1b[0m\n`);
+    return true; // still usable, just old
+  }
+}
+
+/**
  * Get or download the Rust binary
  */
 export async function getRustBinary(
@@ -210,6 +276,8 @@ export async function getRustBinary(
       if (verbose) {
         console.log(`[rust] Using existing binary: ${existing}`);
       }
+      // Auto-rebuild if it's a dev build and version is outdated
+      autoRebuildIfOutdated(existing, verbose);
       return existing;
     }
   }

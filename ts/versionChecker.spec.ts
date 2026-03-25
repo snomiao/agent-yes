@@ -4,6 +4,8 @@ import {
   compareVersions,
   fetchLatestVersion,
   displayVersion,
+  detectInstallMethod,
+  versionString,
 } from "./versionChecker";
 
 vi.mock("execa", () => ({ execaCommand: vi.fn().mockResolvedValue({}) }));
@@ -12,6 +14,16 @@ vi.mock("fs/promises", () => ({
   readFile: vi.fn(),
   writeFile: vi.fn().mockResolvedValue(undefined),
 }));
+vi.mock("fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("fs")>();
+  return {
+    ...actual,
+    // Return false for .git checks so the dev-checkout guard doesn't skip auto-update in tests
+    existsSync: vi.fn(() => false),
+    lstatSync: actual.lstatSync,
+    readlinkSync: actual.readlinkSync,
+  };
+});
 vi.mock("child_process", () => ({
   execFileSync: vi.fn(() => {
     // Simulate successful re-exec by throwing an exit-like error
@@ -102,6 +114,14 @@ describe("versionChecker", () => {
 
     it("should skip when AGENT_YES_NO_UPDATE is set", async () => {
       process.env.AGENT_YES_NO_UPDATE = "1";
+      await checkAndAutoUpdate();
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("should skip when running from a git dev checkout", async () => {
+      const fs = await import("fs");
+      // Make the .git check return true so the dev-checkout guard triggers
+      vi.mocked(fs.existsSync).mockReturnValueOnce(true);
       await checkAndAutoUpdate();
       expect(fetch).not.toHaveBeenCalled();
     });
@@ -250,6 +270,34 @@ describe("versionChecker", () => {
       await displayVersion();
 
       expect(console.log).toHaveBeenCalledWith(expect.stringContaining("unable to check"));
+    });
+  });
+
+  describe("detectInstallMethod", () => {
+    it("should return a string", () => {
+      const method = detectInstallMethod();
+      expect(typeof method).toBe("string");
+      expect(method.length).toBeGreaterThan(0);
+    });
+
+    it("should return 'git' when .git exists in parent of script dir", async () => {
+      const fs = await import("fs");
+      vi.mocked(fs.existsSync).mockReturnValueOnce(true);
+      expect(detectInstallMethod()).toBe("git");
+    });
+
+    it("should return 'source' when not in node_modules and no .git", async () => {
+      const fs = await import("fs");
+      vi.mocked(fs.existsSync).mockReturnValueOnce(false);
+      expect(detectInstallMethod()).toBe("source");
+    });
+  });
+
+  describe("versionString", () => {
+    it("should include version and install method", () => {
+      const str = versionString();
+      expect(str).toContain("agent-yes v");
+      expect(str).toMatch(/agent-yes v\d+\.\d+\.\d+ \(.+\)/);
     });
   });
 });

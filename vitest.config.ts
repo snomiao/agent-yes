@@ -43,6 +43,7 @@ export default defineConfig({
         "ts/installEnv.ts",
         "ts/parseCliArgs.ts",
         "ts/rustBinary.ts",
+        "ts/versionChecker.ts",
         "ts/agentRegistry.ts",
         "ts/SUPPORTED_CLIS.ts",
         "ts/webhookNotifier.ts",

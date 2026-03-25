@@ -5,13 +5,15 @@ import { parseCliArgs } from "./parseCliArgs.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { logger } from "./logger.ts";
 import { PidStore } from "./pidStore.ts";
-import { checkAndAutoUpdate, displayVersion } from "./versionChecker.ts";
+import { checkAndAutoUpdate, displayVersion, versionString } from "./versionChecker.ts";
 import { getRustBinary } from "./rustBinary.ts";
 import { buildRustArgs } from "./buildRustArgs.ts";
 
 // Check for updates before starting — installs & re-execs if a newer version exists.
 // Fast path: cached result (no network), so this adds near-zero latency most of the time.
 await checkAndAutoUpdate();
+
+logger.info(versionString());
 
 // Parse CLI arguments
 const config = parseCliArgs(process.argv);

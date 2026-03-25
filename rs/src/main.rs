@@ -19,6 +19,27 @@ use anyhow::Result;
 use cli::CliArgs;
 use tracing::info;
 
+/// Detect how the Rust binary was installed.
+/// Returns "cargo" for ~/.cargo/bin, "git" if running from a git repo target dir, or the path hint.
+fn detect_install_method() -> &'static str {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(_) => return "unknown",
+    };
+    let exe_str = exe.to_string_lossy();
+
+    if exe_str.contains(".cargo/bin") {
+        return "cargo install";
+    }
+    if exe_str.contains("/target/release") || exe_str.contains("/target/debug") {
+        return "cargo build (dev)";
+    }
+    if exe_str.contains("node_modules") {
+        return "npm/bun";
+    }
+    "binary"
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parse CLI arguments
@@ -27,7 +48,8 @@ async fn main() -> Result<()> {
     // Initialize logging
     logger::init(args.verbose);
 
-    info!("agent-yes v{}", env!("CARGO_PKG_VERSION"));
+    let install_method = detect_install_method();
+    info!("agent-yes v{} ({})", env!("CARGO_PKG_VERSION"), install_method);
 
     // Capture current working directory early
     let cwd = std::env::current_dir()

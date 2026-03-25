@@ -1,5 +1,6 @@
 import { execFileSync } from "child_process";
 import { execaCommand } from "execa";
+import { existsSync, lstatSync, readlinkSync } from "fs";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
@@ -50,8 +51,15 @@ function detectPackageManager(): string {
 export async function checkAndAutoUpdate(): Promise<void> {
   if (process.env.AGENT_YES_NO_UPDATE) return;
 
-  // Prevent infinite re-exec: if we just updated to this version, skip
-  if (process.env.AGENT_YES_UPDATED === pkg.version) return;
+  // Prevent infinite re-exec: if we just updated, skip
+  if (process.env.AGENT_YES_UPDATED) return;
+
+  // Skip auto-update when running from a linked local dev checkout (git repo)
+  if (import.meta.url.startsWith("file://") && !import.meta.url.includes("node_modules")) {
+    const scriptDir = path.dirname(new URL(import.meta.url).pathname);
+    const repoRoot = path.resolve(scriptDir, "..");
+    if (existsSync(path.join(repoRoot, ".git"))) return;
+  }
 
   try {
     let latestVersion: string | undefined;
@@ -156,30 +164,79 @@ export function compareVersions(v1: string, v2: string): number {
 }
 
 /**
+ * Detect how agent-yes was installed.
+ * Returns a short label: "git", "bun link", "bun", "npm", "npx", or "unknown"
+ */
+export function detectInstallMethod(): string {
+  try {
+    // Check if running from a file path outside node_modules (git clone / bun link dev)
+    const scriptDir = path.dirname(new URL(import.meta.url).pathname);
+
+    if (!scriptDir.includes("node_modules")) {
+      // Running directly from source — is this a git repo?
+      const repoRoot = path.resolve(scriptDir, "..");
+      if (existsSync(path.join(repoRoot, ".git"))) {
+        return "git";
+      }
+      return "source";
+    }
+
+    // Check if the node_modules entry is a symlink (bun link)
+    const nodeModulesEntry = scriptDir.replace(/\/dist$/, "");
+    try {
+      const stat = lstatSync(nodeModulesEntry);
+      if (stat.isSymbolicLink()) {
+        const target = readlinkSync(nodeModulesEntry);
+        // bun link creates a symlink to the local repo
+        const resolvedTarget = path.resolve(path.dirname(nodeModulesEntry), target);
+        if (existsSync(path.join(resolvedTarget, ".git"))) {
+          return "bun link (git)";
+        }
+        return "bun link";
+      }
+    } catch {
+      // not a symlink, continue
+    }
+
+    // Detect package manager from path or env
+    if (scriptDir.includes(".bun/")) return "bun";
+    if (scriptDir.includes(".npm/")) return "npx";
+    if (process.env.npm_execpath?.includes("bun")) return "bun";
+    if (process.env.npm_config_user_agent?.startsWith("bun")) return "bun";
+    if (process.env.npm_config_user_agent?.startsWith("npm")) return "npm";
+
+    return "npm";
+  } catch {
+    return "unknown";
+  }
+}
+
+/**
+ * Format version string with install method
+ */
+export function versionString(): string {
+  return `agent-yes v${pkg.version} (${detectInstallMethod()})`;
+}
+
+/**
  * Display version information with async latest version check
  */
 export async function displayVersion(): Promise<void> {
-  // Display current version immediately
-  console.log(pkg.version);
+  console.log(versionString());
 
-  // Check latest version asynchronously
   const latestVersion = await fetchLatestVersion();
 
   if (latestVersion) {
     const comparison = compareVersions(pkg.version, latestVersion);
 
     if (comparison < 0) {
-      // Current version is older
       console.log(`\x1b[33m${latestVersion} (update available)\x1b[0m`);
     } else if (comparison > 0) {
-      // Current version is newer (pre-release or local dev)
       console.log(`${latestVersion} (latest published)`);
     } else {
-      // Versions are equal
       console.log(`${latestVersion} (latest)`);
     }
   } else {
-    // Failed to fetch latest version
     console.log("(unable to check for updates)");
   }
 }
