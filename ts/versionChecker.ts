@@ -1,3 +1,4 @@
+import { execFileSync } from "child_process";
 import { execaCommand } from "execa";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
@@ -25,59 +26,92 @@ async function writeUpdateCache(data: UpdateCache): Promise<void> {
 }
 
 function detectPackageManager(): string {
-  if (process.env.BUN_INSTALL || process.env.npm_execpath?.includes("bun")) return "bun";
+  if (
+    process.env.BUN_INSTALL ||
+    process.execPath?.includes("bun") ||
+    process.env.npm_execpath?.includes("bun")
+  )
+    return "bun";
   return "npm";
 }
 
 /**
- * Check for updates and auto-install if a newer version is available.
+ * Check for updates, auto-install if newer version is available, and re-exec
+ * so the current invocation always runs the latest code.
+ *
  * Uses a 1-hour TTL cache to avoid hitting the registry on every run.
  * All errors are swallowed — network issues must never break the tool.
  * Set AGENT_YES_NO_UPDATE=1 to opt out.
+ *
+ * The AGENT_YES_UPDATED env var prevents infinite re-exec loops:
+ * after updating we re-exec with AGENT_YES_UPDATED=<version> so the
+ * new process skips the update check.
  */
 export async function checkAndAutoUpdate(): Promise<void> {
   if (process.env.AGENT_YES_NO_UPDATE) return;
 
+  // Prevent infinite re-exec: if we just updated to this version, skip
+  if (process.env.AGENT_YES_UPDATED === pkg.version) return;
+
   try {
+    let latestVersion: string | undefined;
+
     // Check cache TTL
     const cache = await readUpdateCache();
     if (cache && Date.now() - cache.checkedAt < TTL_MS) {
-      // Use cached result
-      if (compareVersions(pkg.version, cache.latestVersion) < 0) {
-        await runInstall(cache.latestVersion);
-      }
-      return;
+      latestVersion = cache.latestVersion;
+    } else {
+      // Fetch latest from registry
+      const fetched = await fetchLatestVersion();
+      if (!fetched) return;
+      latestVersion = fetched;
+      await writeUpdateCache({ checkedAt: Date.now(), latestVersion });
     }
 
-    // Fetch latest from registry
-    const latestVersion = await fetchLatestVersion();
-    if (!latestVersion) return;
-
-    await writeUpdateCache({ checkedAt: Date.now(), latestVersion });
-
     if (compareVersions(pkg.version, latestVersion) < 0) {
-      await runInstall(latestVersion);
+      const installed = await runInstall(latestVersion);
+      if (installed) {
+        reExec(latestVersion);
+      }
     }
   } catch {
     // Silently ignore all errors
   }
 }
 
-async function runInstall(latestVersion: string): Promise<void> {
+async function runInstall(latestVersion: string): Promise<boolean> {
   const pm = detectPackageManager();
-  const installArgs =
+  const installCmd =
     pm === "bun"
       ? `bun add -g agent-yes@${latestVersion}`
       : `npm install -g agent-yes@${latestVersion}`;
 
   process.stderr.write(`\x1b[33m[agent-yes] Updating ${pkg.version} → ${latestVersion}…\x1b[0m\n`);
   try {
-    await execaCommand(installArgs, { stdio: "inherit" });
-    // Clear cache so next run re-checks
-    await writeUpdateCache({ checkedAt: 0, latestVersion });
+    await execaCommand(installCmd, { stdio: "inherit" });
     process.stderr.write(`\x1b[32m[agent-yes] Updated to ${latestVersion}\x1b[0m\n`);
+    return true;
   } catch {
-    process.stderr.write(`\x1b[31m[agent-yes] Auto-update failed. Run: ${installArgs}\x1b[0m\n`);
+    process.stderr.write(`\x1b[31m[agent-yes] Auto-update failed. Run: ${installCmd}\x1b[0m\n`);
+    return false;
+  }
+}
+
+/**
+ * Re-exec the current process so the newly installed version runs.
+ * Sets AGENT_YES_UPDATED=<version> to prevent an infinite loop.
+ */
+function reExec(version: string): never {
+  const [bin, ...args] = process.argv;
+  process.stderr.write(`\x1b[36m[agent-yes] Restarting with v${version}…\x1b[0m\n`);
+  try {
+    execFileSync(bin, args, {
+      stdio: "inherit",
+      env: { ...process.env, AGENT_YES_UPDATED: version },
+    });
+    process.exit(0);
+  } catch (err: any) {
+    process.exit(err.status ?? 1);
   }
 }
 
