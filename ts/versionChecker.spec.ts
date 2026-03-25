@@ -12,6 +12,14 @@ vi.mock("fs/promises", () => ({
   readFile: vi.fn(),
   writeFile: vi.fn().mockResolvedValue(undefined),
 }));
+vi.mock("child_process", () => ({
+  execFileSync: vi.fn(() => {
+    // Simulate successful re-exec by throwing an exit-like error
+    const err = new Error("re-exec") as any;
+    err.status = 0;
+    throw err;
+  }),
+}));
 
 describe("versionChecker", () => {
   describe("compareVersions", () => {
@@ -81,7 +89,10 @@ describe("versionChecker", () => {
       vi.clearAllMocks();
       vi.stubGlobal("fetch", vi.fn());
       vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      // Use a mock for process.exit to prevent actual exit in tests
+      vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
       delete process.env.AGENT_YES_NO_UPDATE;
+      delete process.env.AGENT_YES_UPDATED;
       delete process.env.BUN_INSTALL;
     });
 
@@ -91,6 +102,13 @@ describe("versionChecker", () => {
 
     it("should skip when AGENT_YES_NO_UPDATE is set", async () => {
       process.env.AGENT_YES_NO_UPDATE = "1";
+      await checkAndAutoUpdate();
+      expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("should skip when AGENT_YES_UPDATED matches current version", async () => {
+      const pkg = await import("../package.json");
+      process.env.AGENT_YES_UPDATED = pkg.default.version;
       await checkAndAutoUpdate();
       expect(fetch).not.toHaveBeenCalled();
     });
@@ -105,19 +123,23 @@ describe("versionChecker", () => {
       expect(process.stderr.write).not.toHaveBeenCalled();
     });
 
-    it("should install from cache when cached version is newer and within TTL", async () => {
+    it("should install and re-exec from cache when cached version is newer and within TTL", async () => {
       const { readFile } = await import("fs/promises");
       const { execaCommand } = await import("execa");
+      const { execFileSync } = await import("child_process");
       vi.mocked(readFile).mockResolvedValueOnce(
         JSON.stringify({ checkedAt: Date.now(), latestVersion: "999.0.0" }) as any,
       );
       await checkAndAutoUpdate();
       expect(execaCommand).toHaveBeenCalled();
+      expect(execFileSync).toHaveBeenCalled();
+      expect(process.exit).toHaveBeenCalled();
     });
 
-    it("should fetch and write cache when stale, install if behind", async () => {
+    it("should fetch and write cache when stale, install and re-exec if behind", async () => {
       const { readFile, writeFile } = await import("fs/promises");
       const { execaCommand } = await import("execa");
+      const { execFileSync } = await import("child_process");
       vi.mocked(readFile).mockRejectedValueOnce(new Error("no cache"));
       vi.mocked(fetch).mockResolvedValue({
         ok: true,
@@ -126,6 +148,7 @@ describe("versionChecker", () => {
       await checkAndAutoUpdate();
       expect(writeFile).toHaveBeenCalled();
       expect(execaCommand).toHaveBeenCalled();
+      expect(execFileSync).toHaveBeenCalled();
     });
 
     it("should fetch and write cache but not install if up-to-date", async () => {

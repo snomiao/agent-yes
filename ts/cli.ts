@@ -9,8 +9,9 @@ import { checkAndAutoUpdate, displayVersion } from "./versionChecker.ts";
 import { getRustBinary } from "./rustBinary.ts";
 import { buildRustArgs } from "./buildRustArgs.ts";
 
-// Start update check in background immediately (runs in parallel with the agent session)
-const updateCheckPromise = checkAndAutoUpdate();
+// Check for updates before starting — installs & re-execs if a newer version exists.
+// Fast path: cached result (no network), so this adds near-zero latency most of the time.
+await checkAndAutoUpdate();
 
 // Parse CLI arguments
 const config = parseCliArgs(process.argv);
@@ -151,9 +152,6 @@ if (config.verbose) {
 
 const { default: cliYes } = await import("./index.ts");
 const { exitCode } = await cliYes({ ...config, autoYes: config.autoYes });
-
-// Apply update if one was found during the session
-await updateCheckPromise;
 
 console.log("exiting process");
 process.exit(exitCode ?? 1);
