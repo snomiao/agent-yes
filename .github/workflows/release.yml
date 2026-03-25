@@ -58,7 +58,7 @@ jobs:
           for i in $(seq 1 24); do
             sleep 5
             RUN_ID=$(gh run list --workflow=rust-build.yml --limit=10 --json databaseId,createdAt \
-              -q --arg before "$BEFORE" '.[] | select(.createdAt >= $before) | .databaseId' | head -1)
+              -q ".[] | select(.createdAt >= \"$BEFORE\") | .databaseId" | head -1)
             if [ -n "$RUN_ID" ]; then
               echo "Found run ID: $RUN_ID"
               echo "run_id=$RUN_ID" >> $GITHUB_OUTPUT

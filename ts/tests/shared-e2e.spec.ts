@@ -135,6 +135,9 @@ describe("shared e2e: ts vs rs", () => {
   // -------------------------------------------------------------------------
   for (const impl of IMPLS) {
     it(`[${impl.name}] preserves working directory`, async () => {
+      // RS uses portable_pty which cannot execute .cmd batch files on Windows
+      if (impl.name === "rs" && IS_WINDOWS) return;
+
       const workdir = join(TEST_DIR, "workspace");
       mkdirSync(workdir, { recursive: true });
 
@@ -168,6 +171,9 @@ describe("shared e2e: ts vs rs", () => {
   // -------------------------------------------------------------------------
   for (const impl of IMPLS) {
     it(`[${impl.name}] auto-sends Enter on "Press Enter to continue"`, async () => {
+      // RS uses portable_pty which cannot execute .cmd batch files on Windows
+      if (impl.name === "rs" && IS_WINDOWS) return;
+
       // Mock CLI: blocks on read until Enter is received, then exits
       makeMockCli(
         binDir,
@@ -218,6 +224,11 @@ describe("shared e2e: ts vs rs", () => {
   // -------------------------------------------------------------------------
   for (const impl of IMPLS) {
     it(`[${impl.name}] exits when idle timeout is reached`, async () => {
+      // On Windows, the `ping -n 10001` subprocess in the .cmd batch file cannot be
+      // killed when agent-yes terminates, causing the process to hang until our outer
+      // timeout fires (20s), making elapsed > 20_000 and the assertion fail.
+      if (IS_WINDOWS) return;
+
       // Mock CLI: shows ready pattern then sleeps forever → idle timer fires
       makeMockCli(binDir, "claude", ["echo '? for shortcuts'", "sleep 10000"].join("\n"));
 

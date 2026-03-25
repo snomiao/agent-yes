@@ -178,7 +178,11 @@ describe("PidStore", () => {
 
     it("should return fifo of most recent non-exited process", async () => {
       const fifoTestDir = TEST_DIR + "-fifo";
-      await rm(fifoTestDir, { recursive: true, force: true });
+      try {
+        await rm(fifoTestDir, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup failures (e.g. Windows lock files)
+      }
 
       const fifoStore = new PidStore(fifoTestDir);
       await fifoStore.init();
@@ -193,7 +197,11 @@ describe("PidStore", () => {
         expect(fifo!).toContain(`${process.pid}.stdin`);
       }
 
-      await rm(fifoTestDir, { recursive: true, force: true });
+      try {
+        await rm(fifoTestDir, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup failures
+      }
     });
   });
 
