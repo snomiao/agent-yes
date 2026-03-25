@@ -12,14 +12,22 @@ describe("PidStore", () => {
   let store: PidStore;
 
   beforeEach(async () => {
-    await rm(TEST_DIR, { recursive: true, force: true });
+    try {
+      await rm(TEST_DIR, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup failures (e.g. Windows lock files from previous test)
+    }
     store = new PidStore(TEST_DIR);
     await store.init();
   });
 
   afterEach(async () => {
     await store.close();
-    await rm(TEST_DIR, { recursive: true, force: true });
+    try {
+      await rm(TEST_DIR, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup failures
+    }
   });
 
   describe("registerProcess", () => {

@@ -2,21 +2,30 @@ import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { JsonlStore } from "./JsonlStore";
 import { rm, readFile, writeFile, mkdir } from "fs/promises";
 import path from "path";
+import os from "os";
 
-const TEST_DIR = "/tmp/jsonlstore-test-" + process.pid;
+const TEST_DIR = path.join(os.tmpdir(), "jsonlstore-test-" + process.pid);
 const TEST_FILE = path.join(TEST_DIR, "test.jsonl");
 
 describe("JsonlStore", () => {
   let store: JsonlStore;
 
   beforeEach(async () => {
-    await rm(TEST_DIR, { recursive: true, force: true });
+    try {
+      await rm(TEST_DIR, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup failures (e.g. Windows lock files from previous test)
+    }
     await mkdir(TEST_DIR, { recursive: true });
     store = new JsonlStore(TEST_FILE);
   });
 
   afterEach(async () => {
-    await rm(TEST_DIR, { recursive: true, force: true });
+    try {
+      await rm(TEST_DIR, { recursive: true, force: true });
+    } catch {
+      // ignore cleanup failures
+    }
   });
 
   describe("load", () => {

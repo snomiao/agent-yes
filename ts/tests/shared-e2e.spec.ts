@@ -106,7 +106,13 @@ describe("shared e2e: ts vs rs", () => {
   let binDir: string;
 
   beforeEach(() => {
-    if (existsSync(TEST_DIR)) rmSync(TEST_DIR, { recursive: true, force: true });
+    if (existsSync(TEST_DIR)) {
+      try {
+        rmSync(TEST_DIR, { recursive: true, force: true });
+      } catch {
+        // ignore cleanup failures (e.g. Windows EBUSY from previous test's processes)
+      }
+    }
     mkdirSync(TEST_DIR, { recursive: true });
     binDir = join(TEST_DIR, "bin");
     mkdirSync(binDir, { recursive: true });
