@@ -29,6 +29,11 @@ impl PidStore {
         Self { path: store_path() }
     }
 
+    #[cfg(test)]
+    fn with_path(path: PathBuf) -> Self {
+        Self { path }
+    }
+
     pub fn register(&self, pid: u32, cli: &str, prompt: Option<&str>, cwd: &str, log_file: Option<&str>) {
         let record = PidRecord {
             pid,
@@ -135,5 +140,114 @@ pub fn is_process_alive(pid: u32) -> bool {
     {
         let _ = pid;
         true // conservative: assume alive on non-unix
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_register_and_read_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        store.register(1234, "claude", Some("hello"), "/tmp", Some("/tmp/log"));
+        let records = store.read_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].pid, 1234);
+        assert_eq!(records[0].cli, "claude");
+        assert_eq!(records[0].prompt, Some("hello".into()));
+        assert_eq!(records[0].cwd, "/tmp");
+        assert_eq!(records[0].status, "active");
+    }
+
+    #[test]
+    fn test_register_multiple() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        store.register(100, "claude", None, "/a", None);
+        store.register(200, "codex", Some("test"), "/b", None);
+        let records = store.read_all().unwrap();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].pid, 100);
+        assert_eq!(records[1].pid, 200);
+    }
+
+    #[test]
+    fn test_update_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        store.register(42, "claude", None, "/tmp", None);
+        store.update_status(42, "exited", Some(0), Some("done"));
+        let records = store.read_all().unwrap();
+        assert_eq!(records[0].status, "exited");
+        assert_eq!(records[0].exit_code, Some(0));
+        assert_eq!(records[0].exit_reason, Some("done".into()));
+    }
+
+    #[test]
+    fn test_clean_stale_removes_dead() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        // PID 999999 almost certainly doesn't exist
+        store.register(999999, "claude", None, "/tmp", None);
+        store.clean_stale();
+        let records = store.read_all().unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn test_read_all_empty_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        let records = store.read_all().unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn test_read_all_skips_corrupt_lines() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pids.jsonl");
+        std::fs::write(&path, "not json\n").unwrap();
+        let store = PidStore::with_path(path);
+        let records = store.read_all().unwrap();
+        assert!(records.is_empty());
+    }
+
+    #[test]
+    fn test_is_process_alive_self() {
+        assert!(is_process_alive(std::process::id()));
+    }
+
+    #[test]
+    fn test_is_process_alive_dead() {
+        assert!(!is_process_alive(999999));
+    }
+
+    #[test]
+    fn test_new_default_path() {
+        let store = PidStore::new();
+        assert!(store.path.ends_with("pids.jsonl"));
+    }
+
+    #[test]
+    fn test_write_all_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        let records = vec![PidRecord {
+            pid: 1,
+            cli: "claude".into(),
+            prompt: None,
+            cwd: "/tmp".into(),
+            log_file: None,
+            status: "active".into(),
+            exit_code: None,
+            exit_reason: None,
+            started_at: 0,
+        }];
+        store.write_all(&records).unwrap();
+        let loaded = store.read_all().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].pid, 1);
     }
 }

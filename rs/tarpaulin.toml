@@ -11,3 +11,5 @@ exclude-files = [
 # Run with all features disabled (swarm requires libp2p build)
 run-types = ["Tests"]
 timeout = "120s"
+# Avoid tarpaulin signal handling crash with PTY tests
+implicit-test-threads = true

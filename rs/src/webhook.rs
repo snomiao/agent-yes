@@ -63,3 +63,65 @@ fn percent_encode(s: &str) -> String {
     }
     out
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_percent_encode_plain() {
+        assert_eq!(percent_encode("hello"), "hello");
+    }
+
+    #[test]
+    fn test_percent_encode_special() {
+        assert_eq!(percent_encode("hello world"), "hello%20world");
+        assert_eq!(percent_encode("a&b=c"), "a%26b%3Dc");
+    }
+
+    #[test]
+    fn test_percent_encode_preserves_unreserved() {
+        assert_eq!(percent_encode("a-b_c.d~e"), "a-b_c.d~e");
+    }
+
+    #[test]
+    fn test_hostname_returns_string() {
+        let h = hostname();
+        assert!(!h.is_empty());
+    }
+
+    #[test]
+    fn test_notify_noop_without_env() {
+        // Should be a no-op when env var is not set
+        std::env::remove_var("AGENT_YES_MESSAGE_WEBHOOK");
+        notify("test", "details", "/tmp"); // should not panic
+    }
+
+    #[test]
+    fn test_notify_with_env_set() {
+        // Set to an invalid URL — curl will fail but notify() shouldn't panic
+        std::env::set_var("AGENT_YES_MESSAGE_WEBHOOK", "http://127.0.0.1:1/test?msg=%s");
+        notify("started", "test run", "/tmp/test");
+        // Give background thread a moment to spawn
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::env::remove_var("AGENT_YES_MESSAGE_WEBHOOK");
+    }
+
+    #[test]
+    fn test_notify_with_empty_env() {
+        std::env::set_var("AGENT_YES_MESSAGE_WEBHOOK", "");
+        notify("test", "details", "/tmp"); // should be a no-op
+        std::env::remove_var("AGENT_YES_MESSAGE_WEBHOOK");
+    }
+
+    #[test]
+    fn test_percent_encode_empty() {
+        assert_eq!(percent_encode(""), "");
+    }
+
+    #[test]
+    fn test_percent_encode_all_special() {
+        let encoded = percent_encode("@#$");
+        assert_eq!(encoded, "%40%23%24");
+    }
+}

@@ -333,4 +333,71 @@ describe("CLI argument parsing", () => {
     expect(result.cli).toBe("claude");
     expect(result.autoYes).toBe(true);
   });
+
+  it("should parse bare positional words as prompt (cy arg1 arg2)", () => {
+    const result = parseCliArgs(["node", "/usr/local/bin/cy", "arg1", "arg2"]);
+
+    expect(result.cli).toBe("claude");
+    expect(result.prompt).toBe("arg1 arg2");
+    expect(result.cliArgs).toEqual([]);
+  });
+
+  it("should parse bare positional words as prompt with explicit CLI name", () => {
+    const result = parseCliArgs(["node", "/path/to/cli", "claude", "fix", "this", "bug"]);
+
+    expect(result.cli).toBe("claude");
+    expect(result.prompt).toBe("fix this bug");
+    expect(result.cliArgs).toEqual([]);
+  });
+
+  it("should parse bare words as prompt with claude-yes script name", () => {
+    const result = parseCliArgs(["node", "/usr/local/bin/claude-yes", "solve", "all", "todos"]);
+
+    expect(result.cli).toBe("claude");
+    expect(result.prompt).toBe("solve all todos");
+    expect(result.cliArgs).toEqual([]);
+  });
+
+  it("should separate CLI flags from bare words as prompt", () => {
+    const result = parseCliArgs([
+      "node",
+      "/usr/local/bin/claude-yes",
+      "--some-flag",
+      "value",
+      "fix",
+      "the",
+      "bug",
+    ]);
+
+    expect(result.cli).toBe("claude");
+    expect(result.prompt).toBe("fix the bug");
+    expect(result.cliArgs).toContain("--some-flag");
+    expect(result.cliArgs).toContain("value");
+  });
+
+  it("should combine --prompt flag with bare positional words", () => {
+    const result = parseCliArgs([
+      "node",
+      "/usr/local/bin/claude-yes",
+      "--prompt",
+      "prefix:",
+      "solve",
+      "this",
+    ]);
+
+    expect(result.prompt).toBe("prefix: solve this");
+  });
+
+  it("should combine bare positional words with dash prompt", () => {
+    const result = parseCliArgs([
+      "node",
+      "/usr/local/bin/claude-yes",
+      "solve",
+      "--",
+      "this",
+      "too",
+    ]);
+
+    expect(result.prompt).toBe("solve this too");
+  });
 });

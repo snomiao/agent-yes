@@ -211,12 +211,33 @@ export function parseCliArgs(argv: string[]) {
     }
   });
 
+  // Collect bare positional words as prompt text (e.g., `cy arg1 arg2` → prompt = "arg1 arg2")
+  const positionalPromptWords: string[] = [];
+
   const cliArgsForSpawn = (() => {
     if (parsedArgv._[0] && !cliName) {
-      // Explicit CLI name provided as positional arg
-      return rawArgs.slice((cliArgIndex ?? 0) + 1, dashIndex ?? undefined);
+      // Explicit CLI name provided as positional arg — separate flags from bare words
+      const allAfterCli = rawArgs.slice((cliArgIndex ?? 0) + 1, dashIndex ?? undefined);
+      const result: string[] = [];
+      for (let i = 0; i < allAfterCli.length; i++) {
+        const arg = allAfterCli[i]!;
+        if (arg.startsWith("-")) {
+          result.push(arg);
+          // Consume the next arg as the flag's value if separate (--flag value)
+          if (!arg.includes("=") && i + 1 < allAfterCli.length) {
+            const nextArg = allAfterCli[i + 1];
+            if (nextArg && !nextArg.startsWith("-")) {
+              result.push(nextArg);
+              i++;
+            }
+          }
+        } else {
+          positionalPromptWords.push(arg);
+        }
+      }
+      return result;
     } else if (cliName) {
-      // CLI name from script, filter out only what yargs consumed
+      // CLI name from script, filter out what yargs consumed; bare words become prompt
       const result: string[] = [];
       const argsToCheck = rawArgs.slice(0, dashIndex ?? undefined);
 
@@ -234,14 +255,27 @@ export function parseCliArgs(argv: string[]) {
               i++; // Skip value
             }
           }
-        } else {
+        } else if (arg.startsWith("-")) {
+          // Non-consumed flag → pass to target CLI
           result.push(arg);
+          // Consume the next arg as the flag's value if separate
+          if (!arg.includes("=") && i + 1 < argsToCheck.length) {
+            const nextArg = argsToCheck[i + 1];
+            if (nextArg && !nextArg.startsWith("-")) {
+              result.push(nextArg);
+              i++;
+            }
+          }
+        } else {
+          // Bare word → treat as prompt text
+          positionalPromptWords.push(arg);
         }
       }
       return result;
     }
     return [];
   })();
+  const positionalPrompt = positionalPromptWords.join(" ") || undefined;
   const dashPrompt: string | undefined =
     dashIndex === undefined ? undefined : rawArgs.slice(dashIndex + 1).join(" ");
 
@@ -262,7 +296,8 @@ export function parseCliArgs(argv: string[]) {
         ? parsedArgv._[0]?.toString()?.replace?.(/-yes$/, "")
         : undefined)) as (typeof SUPPORTED_CLIS)[number],
     cliArgs: [...cliArgsForSpawn, ...(parsedArgv.yes ? ["--dangerously-skip-permissions"] : [])],
-    prompt: [parsedArgv.prompt, dashPrompt].filter(Boolean).join(" ") || undefined,
+    prompt:
+      [parsedArgv.prompt, positionalPrompt, dashPrompt].filter(Boolean).join(" ") || undefined,
     install: parsedArgv.install,
     exitOnIdle: Number(
       (parsedArgv.timeout || parsedArgv.idle || parsedArgv.exitOnIdle)?.replace(/.*/, (e) =>

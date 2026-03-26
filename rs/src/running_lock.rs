@@ -148,3 +148,155 @@ fn get_git_root(cwd: &str) -> Option<String> {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_lock(dir: &std::path::Path) -> RunningLock {
+        RunningLock {
+            path: dir.join("running.lock.json"),
+            pid: std::process::id(),
+            cwd: "/tmp/test".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_read_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = test_lock(dir.path());
+        let file = lock.read().unwrap();
+        assert!(file.tasks.is_empty());
+    }
+
+    #[test]
+    fn test_write_and_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = test_lock(dir.path());
+        let data = LockFile {
+            tasks: vec![Task {
+                pid: 42,
+                cwd: "/tmp".into(),
+                git_root: Some("/repo".into()),
+                prompt: Some("test".into()),
+                status: "running".into(),
+                started_at: 1000,
+            }],
+        };
+        lock.write(&data).unwrap();
+        let loaded = lock.read().unwrap();
+        assert_eq!(loaded.tasks.len(), 1);
+        assert_eq!(loaded.tasks[0].pid, 42);
+        assert_eq!(loaded.tasks[0].cwd, "/tmp");
+        assert_eq!(loaded.tasks[0].git_root, Some("/repo".into()));
+    }
+
+    #[tokio::test]
+    async fn test_acquire_and_release() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = test_lock(dir.path());
+        lock.acquire(Some("hello")).await.unwrap();
+        let file = lock.read().unwrap();
+        assert_eq!(file.tasks.len(), 1);
+        assert_eq!(file.tasks[0].status, "running");
+        lock.release();
+        let file = lock.read().unwrap();
+        assert!(file.tasks.is_empty());
+    }
+
+    #[test]
+    fn test_clean_stale_removes_dead_pids() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = test_lock(dir.path());
+        let data = LockFile {
+            tasks: vec![Task {
+                pid: 999999, // almost certainly dead
+                cwd: "/tmp".into(),
+                git_root: None,
+                prompt: None,
+                status: "running".into(),
+                started_at: 0,
+            }],
+        };
+        lock.write(&data).unwrap();
+        lock.clean_stale();
+        let file = lock.read().unwrap();
+        assert!(file.tasks.is_empty());
+    }
+
+    #[test]
+    fn test_drop_releases_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("running.lock.json");
+        {
+            let lock = RunningLock {
+                path: path.clone(),
+                pid: std::process::id(),
+                cwd: "/tmp".into(),
+            };
+            let data = LockFile {
+                tasks: vec![Task {
+                    pid: std::process::id(),
+                    cwd: "/tmp".into(),
+                    git_root: None,
+                    prompt: None,
+                    status: "running".into(),
+                    started_at: 0,
+                }],
+            };
+            lock.write(&data).unwrap();
+        } // drop here
+        let content = fs::read_to_string(&path).unwrap();
+        let file: LockFile = serde_json::from_str(&content).unwrap();
+        assert!(file.tasks.is_empty());
+    }
+
+    #[test]
+    fn test_get_git_root_in_repo() {
+        // We're in a git repo, so this should return something
+        let root = get_git_root(".");
+        assert!(root.is_some());
+    }
+
+    #[test]
+    fn test_get_git_root_outside_repo() {
+        let root = get_git_root("/");
+        assert!(root.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_acquire_with_stale_blocker() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock = test_lock(dir.path());
+        // Write a stale lock from a dead PID
+        let data = LockFile {
+            tasks: vec![Task {
+                pid: 999999, // dead PID
+                cwd: "/tmp/test".into(),
+                git_root: None,
+                prompt: None,
+                status: "running".into(),
+                started_at: 0,
+            }],
+        };
+        lock.write(&data).unwrap();
+        // acquire should clean stale and succeed immediately
+        lock.acquire(Some("test")).await.unwrap();
+        let file = lock.read().unwrap();
+        assert_eq!(file.tasks.len(), 1);
+        assert_eq!(file.tasks[0].pid, std::process::id());
+    }
+
+    #[test]
+    fn test_new_uses_current_pid() {
+        let lock = RunningLock::new("/tmp");
+        assert_eq!(lock.pid, std::process::id());
+        assert_eq!(lock.cwd, "/tmp");
+    }
+
+    #[test]
+    fn test_lock_path_fn() {
+        let path = lock_path();
+        assert!(path.ends_with("running.lock.json"));
+    }
+}

@@ -430,6 +430,28 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_args_bare_words_as_prompt() {
+        // `cy arg1 arg2` → bare words become prompt (not CLI args)
+        let mut args = default_args();
+        args.args = vec!["arg1".into(), "arg2".into()];
+        let result = resolve_args(args, "claude-yes").unwrap();
+        assert_eq!(result.cli, "claude");
+        assert!(result.cli_args.is_empty());
+        assert_eq!(result.prompt, Some("arg1 arg2".into()));
+    }
+
+    #[test]
+    fn test_resolve_args_bare_words_with_flags() {
+        // bare words mixed with flags: flags → cli_args, bare words → prompt
+        let mut args = default_args();
+        args.args = vec!["--some-flag".into(), "value".into(), "fix".into(), "the".into(), "bug".into()];
+        let result = resolve_args(args, "claude-yes").unwrap();
+        assert_eq!(result.cli, "claude");
+        assert_eq!(result.cli_args, vec!["--some-flag", "value"]);
+        assert_eq!(result.prompt, Some("fix the bug".into()));
+    }
+
+    #[test]
     fn test_supported_clis_count() {
         assert_eq!(SUPPORTED_CLIS.len(), 10);
     }
