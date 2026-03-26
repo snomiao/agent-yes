@@ -81,7 +81,8 @@
     "release": "standard-version && npm publish",
     "release:beta": "standard-version && npm publish --tag beta",
     "test": "vitest run",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "test:ui": "vitest run --config tests/ui-test/vitest.config.ts"
   },
   "dependencies": {
     "@snomiao/bun-pty": "^0.3.4",
@@ -98,6 +99,7 @@
     "yargs": "^18.0.0"
   },
   "devDependencies": {
+    "@google/generative-ai": "^0.24.1",
     "@semantic-release/exec": "^7.1.0",
     "@semantic-release/git": "^10.0.1",
     "@types/bun": "^1.3.6",
@@ -105,6 +107,7 @@
     "@types/ms": "^2.1.0",
     "@types/node": "^25.0.10",
     "@types/proper-lockfile": "^4.1.4",
+    "@types/ws": "^8.18.1",
     "@types/yargs": "^17.0.35",
     "@typescript/native-preview": "^7.0.0-dev.20260124.1",
     "@vitest/coverage-v8": "4.1.0",
@@ -114,11 +117,13 @@
     "oxfmt": "^0.26.0",
     "oxlint": "^1.41.0",
     "patch-package": "^8.0.1",
+    "playwright": "^1.58.2",
     "rambda": "^11.0.1",
     "semantic-release": "^25.0.2",
     "standard-version": "^9.5.0",
     "tsdown": "^0.20.3",
     "vitest": "4.1.0",
+    "ws": "^8.20.0",
     "zod": "^3.23.0"
   },
   "peerDependencies": {

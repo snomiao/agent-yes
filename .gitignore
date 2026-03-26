@@ -43,3 +43,4 @@ bin
 /tmp
 TODO.md
 package-lock.json
+tests/ui-test/screenshots/
