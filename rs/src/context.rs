@@ -549,20 +549,25 @@ impl AgentContext {
         // Use rendered output (ANSI codes stripped) for pattern matching
         let buffer = &self.rendered_output;
 
-        // Check fatal patterns first
-        for pattern in &self.cli_config.fatal {
-            if pattern.is_match(buffer) {
-                error!("Fatal pattern matched: {}", pattern);
-                self.is_fatal = true;
-                return Ok(());
+        // Check fatal patterns first (only if not already matched)
+        if !self.is_fatal {
+            for pattern in &self.cli_config.fatal {
+                if pattern.is_match(buffer) {
+                    error!("Fatal pattern matched: {}", pattern);
+                    self.is_fatal = true;
+                    return Ok(());
+                }
             }
         }
 
-        // Check restart-without-continue patterns
-        for pattern in &self.cli_config.restart_without_continue {
-            if pattern.is_match(buffer) {
-                warn!("Restart without continue pattern matched");
-                self.should_restart_without_continue = true;
+        // Check restart-without-continue patterns (only if not already matched)
+        if !self.should_restart_without_continue {
+            for pattern in &self.cli_config.restart_without_continue {
+                if pattern.is_match(buffer) {
+                    warn!("Restart without continue pattern matched");
+                    self.should_restart_without_continue = true;
+                    break;
+                }
             }
         }
 

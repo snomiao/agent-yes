@@ -388,6 +388,7 @@ mod tests {
     /// Spawn a real PTY, resize it, then verify the child shell sees the new dimensions via `stty size`.
     #[cfg(unix)]
     #[test]
+    #[cfg_attr(tarpaulin, ignore)] // PTY child signals crash tarpaulin's ptrace
     fn test_pty_resize_reflected_in_child() {
         use portable_pty::{native_pty_system, CommandBuilder, PtySize};
         use std::io::Read;
@@ -437,6 +438,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(tarpaulin, ignore)] // PTY child signals crash tarpaulin's ptrace
     fn test_pty_resize_zero_guard() {
         use portable_pty::{native_pty_system, PtySize};
 
