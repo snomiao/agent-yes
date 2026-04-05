@@ -247,7 +247,11 @@ export function parseCliArgs(argv: string[]) {
 
         const [flag] = arg.split("=");
 
-        if (flag && yargsConsumed.has(flag)) {
+        // Check both the flag itself and its --no- negation (yargs stores --no-x as key "x")
+        const isConsumed =
+          (flag && yargsConsumed.has(flag)) ||
+          (flag?.startsWith("--no-") && yargsConsumed.has(`--${flag.slice(5)}`));
+        if (isConsumed) {
           // Skip consumed flag and its value if separate
           if (!arg.includes("=") && i + 1 < argsToCheck.length) {
             const nextArg = argsToCheck[i + 1];

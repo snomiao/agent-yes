@@ -400,4 +400,25 @@ describe("CLI argument parsing", () => {
 
     expect(result.prompt).toBe("solve this too");
   });
+
+  it("should not pass --no-rust to the target CLI", () => {
+    const result = parseCliArgs(["node", "/path/to/cy", "--no-rust"]);
+
+    expect(result.useRust).toBe(false);
+    expect(result.cliArgs).not.toContain("--no-rust");
+  });
+
+  it("should not pass --no-robust to the target CLI", () => {
+    const result = parseCliArgs(["node", "/path/to/cy", "--no-robust"]);
+
+    expect(result.robust).toBe(false);
+    expect(result.cliArgs).not.toContain("--no-robust");
+  });
+
+  it("should not pass --no-queue to the target CLI", () => {
+    const result = parseCliArgs(["node", "/path/to/cy", "--no-queue"]);
+
+    expect(result.queue).toBe(false);
+    expect(result.cliArgs).not.toContain("--no-queue");
+  });
 });
