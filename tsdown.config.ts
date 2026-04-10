@@ -11,7 +11,6 @@ export default defineConfig({
     "node-pty",
     "from-node-stream",
     "bun",
-    "terminal-render",
     "systray2",
   ],
   format: "esm",
