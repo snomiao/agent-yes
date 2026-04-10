@@ -54,7 +54,11 @@ export class XtermProxy {
    */
   write(data: string): void {
     // Push to downstream readable first (passthrough)
-    this.readableController?.enqueue(data);
+    try {
+      this.readableController?.enqueue(data);
+    } catch {
+      // Stream already closed/canceled — ignore
+    }
 
     // Feed to xterm for state tracking and query auto-response
     this.term.write(data);
@@ -112,7 +116,14 @@ export class XtermProxy {
 
   /** Clean up resources */
   dispose(): void {
-    this.readableController?.close();
+    if (this.readableController) {
+      try {
+        this.readableController.close();
+      } catch {
+        // Already closed
+      }
+      this.readableController = null;
+    }
     this.term.dispose();
   }
 }
