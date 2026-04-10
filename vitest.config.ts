@@ -51,6 +51,7 @@ export default defineConfig({
         "ts/beta/**",
         "ts/core/**",
         "ts/resume/**",
+        "ts/xterm-proxy.ts",
       ],
       thresholds: {
         lines: 90,

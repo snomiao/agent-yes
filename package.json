@@ -86,6 +86,7 @@
   },
   "dependencies": {
     "@snomiao/bun-pty": "^0.3.4",
+    "@xterm/headless": "^6.0.0",
     "bun-pty": "^0.4.8",
     "execa": "^9.6.1",
     "from-node-stream": "^0.2.0",
@@ -93,7 +94,6 @@
     "phpdie": "^1.7.0",
     "proper-lockfile": "^4.1.2",
     "sflow": "^1.27.0",
-    "terminal-render": "^1.5.1",
     "winston": "^3.19.0",
     "yaml": "^2.8.2",
     "yargs": "^18.0.0"

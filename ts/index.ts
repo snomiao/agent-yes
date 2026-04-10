@@ -4,7 +4,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import DIE from "phpdie";
 import sflow from "sflow";
-import { TerminalRenderStream } from "terminal-render";
+import { XtermProxy } from "./xterm-proxy.ts";
 import {
   extractSessionId,
   getSessionForCwd,
@@ -185,9 +185,14 @@ export default async function agentYes({
   process.stdin.setRawMode?.(true); // must be called any stdout/stdin usage
   if (verbose) logger.debug(`[stdin] Raw mode set, isRaw: ${(process.stdin as any).isRaw}`);
 
-  const terminalStream = new TerminalRenderStream({ mode: "raw" });
-  const terminalRender = terminalStream.getRenderer();
-  const outputWriter = terminalStream.writable.getWriter();
+  // XtermProxy: headless xterm emulator that auto-responds to all terminal
+  // queries (DSR, DA, etc.) so the spawned CLI never blocks waiting for replies.
+  // writeToPty is set after shell spawn (see below).
+  let shellWrite: (data: string) => void = () => {};
+  const xtermProxy = new XtermProxy({
+    ...getTerminalDimensions(),
+    writeToPty: (data) => shellWrite(data),
+  });
 
   logger.debug(`Using ${ptyPackage} for pseudo terminal management.`);
 
@@ -329,11 +334,14 @@ export default async function agentYes({
     ptyOptions,
   });
 
+  // Wire up the xterm proxy to write back to the PTY
+  shellWrite = (data: string) => shell.write(data);
+
   // Attach data handler IMMEDIATELY after spawn to avoid losing early PTY output.
   // node-pty emits 'data' events eagerly — if no listener is attached, events are lost.
   function onData(data: string) {
     const currentPid = shell.pid;
-    outputWriter.write(data);
+    xtermProxy.write(data);
     globalAgentRegistry.appendStdout(currentPid, data);
   }
   shell.onData(onData);
@@ -447,6 +455,7 @@ export default async function agentYes({
         env: ptyEnv,
       };
       shell = pty.spawn(bin!, args, restartPtyOptions);
+      shellWrite = (data: string) => shell.write(data);
       // Register process in pidStore (non-blocking)
       try {
         await pidStore.registerProcess({ pid: shell.pid, cli, args, prompt, cwd: workingDir });
@@ -548,6 +557,7 @@ export default async function agentYes({
         env: ptyEnv,
       };
       shell = pty.spawn(cli, restoreArgs, restorePtyOptions);
+      shellWrite = (data: string) => shell.write(data);
       // Register process in pidStore (non-blocking)
       try {
         await pidStore.registerProcess({
@@ -601,14 +611,15 @@ export default async function agentYes({
     return pendingExitCode.resolve(exitCode);
   });
 
-  // when current tty resized, resize the pty too
+  // when current tty resized, resize both pty and xterm proxy
   process.stdout.on("resize", () => {
     const { cols, rows } = getTerminalDimensions();
     shell.resize(cols, rows);
+    xtermProxy.resize(cols, rows);
   });
 
   const isStillWorkingQ = () => {
-    const rendered = terminalRender.tail(24).replace(/\s+/g, " ");
+    const rendered = xtermProxy.tail(24).replace(/\s+/g, " ");
     return conf.working?.some((rgx) => rgx.test(rendered));
   };
 
@@ -617,7 +628,7 @@ export default async function agentYes({
   let lastHeartbeatRendered = "";
   const heartbeatInterval = setInterval(async () => {
     try {
-      const rendered = removeControlCharacters(terminalRender.tail(12));
+      const rendered = removeControlCharacters(xtermProxy.tail(12));
 
       // Skip if output hasn't changed since last heartbeat
       if (rendered === lastHeartbeatRendered) return;
@@ -895,7 +906,7 @@ export default async function agentYes({
           shell.write(data);
         },
       }),
-      readable: terminalStream.readable,
+      readable: xtermProxy.readable,
     })
 
     .forEach(() => {
@@ -926,97 +937,72 @@ export default async function agentYes({
       // if (cli === "codex" && !process.stdin.isTTY) shell.write(`\u001b[1;1R`); // send cursor position response when stdin is not tty
 
       let lastRendered = "";
-      return e
-        .forEach((chunk) => {
-          // NOTE: terminalRender is already updated by terminalStream.writable.write() in onData()
-          // (terminal-render v1.5+ calls renderer.write() as a side effect of the writable).
-          // Calling terminalRender.write(chunk) here again would double-process every chunk,
-          // corrupting cursor state and breaking all pattern matching.
-          // ============ HANDLE special control sequences
-          // Handle Device Attributes query (DA) - ESC[c or ESC[0c
-          // This must be handled regardless of TTY status
-          if (chunk.includes("\u001b[c") || chunk.includes("\u001b[0c")) {
-            // Respond shell with VT100 with Advanced Video Option
-            shell.write("\u001b[?1;2c");
-            if (verbose) {
-              logger.debug("device|respond DA: VT100 with Advanced Video Option");
+      return (
+        e
+          // Terminal query responses (DA, DSR, etc.) are handled automatically
+          // by XtermProxy via @xterm/headless — no ad-hoc interception needed.
+          .forEach(async (line, lineIndex) => {
+            // ============ respond on rendered screen
+            const rendered = xtermProxy.tail(24);
+            // Skip processing if output hasn't changed
+            if (rendered === lastRendered) return;
+            lastRendered = rendered;
+
+            logger.debug(`stdout|${line}`);
+
+            // ready matcher: if matched, mark stdin ready
+            if (conf.ready?.some((rx: RegExp) => line.match(rx))) {
+              logger.debug(`ready |${line}`);
+              if (cli === "gemini" && lineIndex <= 80) return; // gemini initial noise, only after many lines
+              ctx.stdinReady.ready();
+              ctx.stdinFirstReady.ready();
             }
-            return;
-          }
 
-          // Only handle cursor position when stdin is not tty, because tty already handled this
-          if (process.stdin.isTTY) return;
-
-          // Handle cursor position request - ESC[6n
-          if (!chunk.includes("\u001b[6n")) return;
-
-          // xterm replies CSI row; column R if asked cursor position
-          // https://en.wikipedia.org/wiki/ANSI_escape_code#:~:text=citation%20needed%5D-,xterm%20replies,-CSI%20row%C2%A0%3B
-          const { col, row } = terminalRender.getCursorPosition();
-          shell.write(`\u001b[${row};${col}R`); // reply cli when getting cursor position
-
-          logger.debug(`cursor|respond position: row=${String(row)}, col=${String(col)}`);
-        })
-        .forEach(async (line, lineIndex) => {
-          // ============ respond on rendered screen
-          const rendered = terminalRender.tail(24);
-          // Skip processing if output hasn't changed
-          if (rendered === lastRendered) return;
-
-          logger.debug(`stdout|${line}`);
-
-          // ready matcher: if matched, mark stdin ready
-          if (conf.ready?.some((rx: RegExp) => line.match(rx))) {
-            logger.debug(`ready |${line}`);
-            if (cli === "gemini" && lineIndex <= 80) return; // gemini initial noise, only after many lines
-            ctx.stdinReady.ready();
-            ctx.stdinFirstReady.ready();
-          }
-
-          // enter matchers: send Enter when any enter regex matches
-          if (conf.enter?.some((rx: RegExp) => line.match(rx))) {
-            logger.debug(`sendEnter matched|${line}`);
-            return await sendEnter(ctx.messageContext, 400); // wait for idle for a short while and then send Enter
-          }
-
-          // typingRespond matcher: if matched, send the specified message
-          const typeingRespondMatched = Object.entries(conf.typingRespond ?? {}).filter(
-            ([_sendString, onThePatterns]) => onThePatterns.some((rx) => line.match(rx)),
-          );
-          const typingResponded =
-            typeingRespondMatched.length &&
-            (await sflow(typeingRespondMatched)
-              .map(
-                async ([sendString]) =>
-                  await sendMessage(ctx.messageContext, sendString, { waitForReady: false }),
-              )
-              .toCount());
-          if (typingResponded) return;
-
-          // fatal matchers: set isFatal flag when matched
-          if (conf.fatal?.some((rx: RegExp) => line.match(rx))) {
-            logger.debug(`fatal |${line}`);
-            ctx.isFatal = true;
-            await exitAgent();
-          }
-
-          // restartWithoutContinueArg matchers: set flag to restart without continue args
-          if (conf.restartWithoutContinueArg?.some((rx: RegExp) => line.match(rx))) {
-            logger.debug(`restart-without-continue|${line}`);
-            ctx.shouldRestartWithoutContinue = true;
-            ctx.isFatal = true; // also set fatal to trigger exit
-            await exitAgent();
-          }
-
-          // session ID capture for codex
-          if (cli === "codex") {
-            const sessionId = extractSessionId(line);
-            if (sessionId) {
-              logger.debug(`session|captured session ID: ${sessionId}`);
-              await storeSessionForCwd(workingDir, sessionId);
+            // enter matchers: send Enter when any enter regex matches
+            if (conf.enter?.some((rx: RegExp) => line.match(rx))) {
+              logger.debug(`sendEnter matched|${line}`);
+              return await sendEnter(ctx.messageContext, 400); // wait for idle for a short while and then send Enter
             }
-          }
-        });
+
+            // typingRespond matcher: if matched, send the specified message
+            const typeingRespondMatched = Object.entries(conf.typingRespond ?? {}).filter(
+              ([_sendString, onThePatterns]) => onThePatterns.some((rx) => line.match(rx)),
+            );
+            const typingResponded =
+              typeingRespondMatched.length &&
+              (await sflow(typeingRespondMatched)
+                .map(
+                  async ([sendString]) =>
+                    await sendMessage(ctx.messageContext, sendString, { waitForReady: false }),
+                )
+                .toCount());
+            if (typingResponded) return;
+
+            // fatal matchers: set isFatal flag when matched
+            if (conf.fatal?.some((rx: RegExp) => line.match(rx))) {
+              logger.debug(`fatal |${line}`);
+              ctx.isFatal = true;
+              await exitAgent();
+            }
+
+            // restartWithoutContinueArg matchers: set flag to restart without continue args
+            if (conf.restartWithoutContinueArg?.some((rx: RegExp) => line.match(rx))) {
+              logger.debug(`restart-without-continue|${line}`);
+              ctx.shouldRestartWithoutContinue = true;
+              ctx.isFatal = true; // also set fatal to trigger exit
+              await exitAgent();
+            }
+
+            // session ID capture for codex
+            if (cli === "codex") {
+              const sessionId = extractSessionId(line);
+              if (sessionId) {
+                logger.debug(`session|captured session ID: ${sessionId}`);
+                await storeSessionForCwd(workingDir, sessionId);
+              }
+            }
+          })
+      );
     })
 
     // auto-response
@@ -1043,7 +1029,7 @@ export default async function agentYes({
     .by(createTerminatorStream(pendingExitCode.promise))
     .to(fromWritable(process.stdout));
 
-  await saveLogFile(ctx.logPaths.logPath, terminalRender.render());
+  await saveLogFile(ctx.logPaths.logPath, xtermProxy.render());
 
   // and then get its exitcode
   const exitCode = await pendingExitCode.promise;
@@ -1052,13 +1038,14 @@ export default async function agentYes({
   // Final pidStore cleanup
   await pidStore.close();
 
-  // Update task status.writable release lock
-  await outputWriter.close();
+  // Capture final render before disposing xterm proxy
+  const finalRender = xtermProxy.render();
+  xtermProxy.dispose();
 
   // deprecated logFile option, we have logPath now, but keep for backward compatibility
-  await saveDeprecatedLogFile(logFile, terminalRender.render(), verbose);
+  await saveDeprecatedLogFile(logFile, finalRender, verbose);
 
-  return { exitCode, logs: terminalRender.render() };
+  return { exitCode, logs: finalRender };
 
   async function exitAgent() {
     ctx.robust = false; // disable robust to avoid auto restart
