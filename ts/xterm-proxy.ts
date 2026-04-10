@@ -53,15 +53,16 @@ export class XtermProxy {
    * - Raw data is pushed to readable for downstream consumption
    */
   write(data: string): void {
-    // Push to downstream readable first (passthrough)
-    try {
-      this.readableController?.enqueue(data);
-    } catch {
-      // Stream already closed/canceled — ignore
-    }
-
-    // Feed to xterm for state tracking and query auto-response
-    this.term.write(data);
+    // Feed to xterm for state tracking and query auto-response first.
+    // xterm.write() is buffered/async, so only emit to downstream once the
+    // terminal state has been updated for this chunk.
+    this.term.write(data, () => {
+      try {
+        this.readableController?.enqueue(data);
+      } catch {
+        // Stream already closed/canceled — ignore
+      }
+    });
   }
 
   /** Get cursor position from xterm's buffer state */
