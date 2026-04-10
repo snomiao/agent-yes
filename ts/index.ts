@@ -1036,13 +1036,14 @@ export default async function agentYes({
   // Final pidStore cleanup
   await pidStore.close();
 
-  // Clean up xterm proxy
+  // Capture final render before disposing xterm proxy
+  const finalRender = xtermProxy.render();
   xtermProxy.dispose();
 
   // deprecated logFile option, we have logPath now, but keep for backward compatibility
-  await saveDeprecatedLogFile(logFile, xtermProxy.render(), verbose);
+  await saveDeprecatedLogFile(logFile, finalRender, verbose);
 
-  return { exitCode, logs: xtermProxy.render() };
+  return { exitCode, logs: finalRender };
 
   async function exitAgent() {
     ctx.robust = false; // disable robust to avoid auto restart
