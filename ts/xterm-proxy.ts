@@ -1,4 +1,5 @@
-import { Terminal } from "@xterm/headless";
+import xterm from "@xterm/headless";
+const { Terminal } = xterm;
 import { logger } from "./logger.ts";
 
 /**
