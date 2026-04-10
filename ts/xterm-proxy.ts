@@ -34,7 +34,7 @@ export class XtermProxy {
     // xterm internally generates responses to terminal queries (DSR, DA, etc.)
     // and fires them via onData. Pipe those back to the PTY stdin.
     this.term.onData((data) => {
-      logger.debug(`xterm-proxy|onData response: ${JSON.stringify(data)}`);
+      logger.debug("xterm-proxy|onData response", data);
       this.writeToPty(data);
     });
 
