@@ -455,6 +455,7 @@ export default async function agentYes({
         env: ptyEnv,
       };
       shell = pty.spawn(bin!, args, restartPtyOptions);
+      shellWrite = (data: string) => shell.write(data);
       // Register process in pidStore (non-blocking)
       try {
         await pidStore.registerProcess({ pid: shell.pid, cli, args, prompt, cwd: workingDir });
@@ -556,6 +557,7 @@ export default async function agentYes({
         env: ptyEnv,
       };
       shell = pty.spawn(cli, restoreArgs, restorePtyOptions);
+      shellWrite = (data: string) => shell.write(data);
       // Register process in pidStore (non-blocking)
       try {
         await pidStore.registerProcess({
