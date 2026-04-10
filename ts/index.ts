@@ -944,6 +944,7 @@ export default async function agentYes({
             const rendered = xtermProxy.tail(24);
             // Skip processing if output hasn't changed
             if (rendered === lastRendered) return;
+            lastRendered = rendered;
 
             logger.debug(`stdout|${line}`);
 
