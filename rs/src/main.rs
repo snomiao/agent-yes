@@ -13,6 +13,7 @@ mod ready_manager;
 mod running_lock;
 mod swarm;
 mod utils;
+mod vterm;
 mod webhook;
 
 use anyhow::Result;
@@ -147,6 +148,7 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
         let mut ctx = spawn_agent(&args.cli, &cmd_args, &cli_config, cwd, args.verbose).await?;
 
         // Create agent context (also initialises log file)
+        let (term_cols, term_rows) = crate::pty_spawner::get_terminal_size();
         let mut agent_ctx = AgentContext::new(
             args.cli.clone(),
             cli_config.clone(),
@@ -155,6 +157,8 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             args.auto_yes,
             cwd.to_string(),
             pid,
+            term_rows,
+            term_cols,
         );
 
         // Register in PID store and send RUNNING webhook
