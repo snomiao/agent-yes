@@ -206,7 +206,7 @@ function getRustBinaryVersion(binaryPath: string): string | null {
     });
     // Output is like "agent-yes 1.72.3" or "agent-yes v1.72.3"
     const match = output.match(/(\d+\.\d+\.\d+)/);
-    return match ? match[1] : null;
+    return match ? (match[1] ?? null) : null;
   } catch {
     return null;
   }
@@ -251,6 +251,15 @@ function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
       stdio: "inherit",
       timeout: 300_000, // 5 min max
     });
+    // Also update ~/.cargo/bin so the system-wide binary stays current
+    try {
+      execFileSync("cargo", ["install", "--path", rsDir], {
+        stdio: "inherit",
+        timeout: 60_000,
+      });
+    } catch {
+      // non-fatal: the target/ binary is already updated
+    }
     process.stderr.write(`\x1b[32m[rust] Rebuild complete\x1b[0m\n`);
     return true;
   } catch {
