@@ -87,7 +87,11 @@ pub struct VTermProxy {
 
 impl VTermProxy {
     /// Create a new virtual terminal with the given dimensions.
+    /// Dimensions are clamped to at least 1×1 to avoid panics in the
+    /// underlying vt100 parser when upstream size detection yields 0.
     pub fn new(rows: u16, cols: u16) -> Self {
+        let rows = rows.max(1);
+        let cols = cols.max(1);
         let collector = ResponseCollector::default();
         let parser = vt100_ctt::Parser::new_with_callbacks(rows, cols, 1000, collector.clone());
         Self { parser, collector }
@@ -139,8 +143,11 @@ impl VTermProxy {
         self.parser.screen().cursor_position()
     }
 
-    /// Resize the virtual terminal.
+    /// Resize the virtual terminal. Dimensions are clamped to at least 1×1
+    /// to match the same guard in `new()`.
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        let rows = rows.max(1);
+        let cols = cols.max(1);
         self.parser.screen_mut().set_size(rows, cols);
     }
 }
@@ -238,6 +245,19 @@ mod tests {
         let (row, col) = vt.parser.screen().size();
         assert_eq!(row, 30);
         assert_eq!(col, 120);
+    }
+
+    #[test]
+    fn test_zero_dimensions_clamped() {
+        // Both new() and resize() must clamp 0 → 1 to avoid vt100 panics
+        let mut vt = VTermProxy::new(0, 0);
+        let (row, col) = vt.parser.screen().size();
+        assert!(row >= 1);
+        assert!(col >= 1);
+        vt.resize(0, 0);
+        let (row, col) = vt.parser.screen().size();
+        assert!(row >= 1);
+        assert!(col >= 1);
     }
 
     #[test]
