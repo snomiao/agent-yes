@@ -46,6 +46,11 @@ pub struct AgentContext {
     vterm: VTermProxy,
     start_time: Instant,
 
+    // Hash of vterm screen contents at the last typing_respond/enter match.
+    // Suppresses re-trigger of one-shot patterns until the screen actually
+    // changes (vterm contents() persists, unlike the old append-only buffer).
+    last_action_screen_hash: Option<u64>,
+
     // Enter key scheduling
     pending_enter: bool,
     pending_enter_detected_at: Option<Instant>,
@@ -109,6 +114,7 @@ impl AgentContext {
             cwd,
             stdin_line_buffer: String::new(),
             codex_session_found: false,
+            last_action_screen_hash: None,
         }
     }
 
@@ -460,14 +466,20 @@ impl AgentContext {
                 if should_scan {
                     self.last_idle_scan_at = Some(Instant::now());
                     let buffer = self.vterm.contents();
-                    for pattern in &self.cli_config.enter {
-                        if pattern.is_match(&buffer) {
-                            debug!("Idle scan: enter pattern matched after {}ms idle", idle_ms);
-                            self.pending_enter = true;
-                            self.pending_enter_detected_at = Some(Instant::now());
-                            self.enter_sent_at = None;
-                            self.enter_retry_count = 0;
-                            break;
+                    let buffer_hash = hash_str(&buffer);
+                    // Skip if screen hasn't changed since last action — prevents
+                    // resurrecting an already-handled prompt during idle.
+                    if Some(buffer_hash) != self.last_action_screen_hash {
+                        for pattern in &self.cli_config.enter {
+                            if pattern.is_match(&buffer) {
+                                debug!("Idle scan: enter pattern matched after {}ms idle", idle_ms);
+                                self.pending_enter = true;
+                                self.pending_enter_detected_at = Some(Instant::now());
+                                self.enter_sent_at = None;
+                                self.enter_retry_count = 0;
+                                self.last_action_screen_hash = Some(buffer_hash);
+                                break;
+                            }
                         }
                     }
                 }
@@ -586,15 +598,23 @@ impl AgentContext {
             return Ok(());
         }
 
+        // One-shot pattern suppression: if the screen hasn't changed since
+        // the last typing_respond/enter match, skip those checks. Without
+        // this, vterm.contents() persists matched prompts and would
+        // re-trigger every time check_patterns() runs.
+        let current_hash = hash_str(&buffer);
+        if Some(current_hash) == self.last_action_screen_hash {
+            return Ok(());
+        }
+
         // Check typing response patterns
         for (response, patterns) in &self.cli_config.typing_respond {
             for pattern in patterns {
                 if pattern.is_match(&buffer) {
                     debug!("Typing response pattern matched, sending: {:?}", response);
                     send_text(msg_ctx, response).await?;
-                    // Clear raw buffer to prevent re-triggering
-                    // (vterm screen will be overwritten by new output naturally)
                     self.output_buffer.clear();
+                    self.last_action_screen_hash = Some(current_hash);
                     return Ok(());
                 }
             }
@@ -609,8 +629,8 @@ impl AgentContext {
                     self.pending_enter_detected_at = Some(Instant::now());
                     self.enter_sent_at = None;
                     self.enter_retry_count = 0;
-                    // Clear raw buffer to prevent re-triggering
                     self.output_buffer.clear();
+                    self.last_action_screen_hash = Some(current_hash);
                 }
                 return Ok(());
             }
@@ -618,6 +638,14 @@ impl AgentContext {
 
         Ok(())
     }
+}
+
+/// Hash a string with the default hasher — used to detect screen state changes.
+fn hash_str(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut hasher);
+    hasher.finish()
 }
 
 /// Find the nearest char boundary at or after `at`, so split_off won't panic on multi-byte UTF-8.

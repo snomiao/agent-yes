@@ -29,31 +29,42 @@ impl vt100_ctt::Callbacks for ResponseCollector {
     fn unhandled_csi(
         &mut self,
         screen: &mut vt100_ctt::Screen,
-        _intermediates: Option<u8>,
+        intermediates: Option<u8>,
         _ignored_excess_intermediates: Option<u8>,
         params: &[&[u16]],
         c: char,
     ) {
+        // Only respond to plain (no private/intermediate marker) primary
+        // DA/DSR queries. CSI '?' n / CSI '>' c etc. are private or
+        // secondary forms that expect different (or no) replies.
+        if intermediates.is_some() {
+            return;
+        }
+        let param = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
         match c {
-            // DSR - Device Status Report: ESC[6n → respond ESC[<row>;<col>R
-            'n' => {
-                let param = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
-                if param == 6 {
+            // DSR - Device Status Report
+            'n' => match param {
+                // ESC[5n → terminal status: respond OK (ESC[0n)
+                5 => {
+                    let response = b"\x1b[0n".to_vec();
+                    debug!("vterm|DSR status response: {:?}", String::from_utf8_lossy(&response));
+                    self.push_response(response);
+                }
+                // ESC[6n → cursor position: respond ESC[<row>;<col>R
+                6 => {
                     let (row, col) = screen.cursor_position();
                     // Terminal uses 1-based coordinates
                     let response = format!("\x1b[{};{}R", row + 1, col + 1);
-                    debug!("vterm|DSR response: {:?}", response);
+                    debug!("vterm|DSR cursor response: {:?}", response);
                     self.push_response(response.into_bytes());
                 }
-            }
-            // DA - Device Attributes: ESC[c or ESC[0c → respond as VT100
-            'c' => {
-                let param = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
-                if param == 0 {
-                    let response = b"\x1b[?1;2c".to_vec(); // VT100 with AVO
-                    debug!("vterm|DA response: {:?}", String::from_utf8_lossy(&response));
-                    self.push_response(response);
-                }
+                _ => {}
+            },
+            // DA - Device Attributes: ESC[c or ESC[0c → respond as VT100 with AVO
+            'c' if param == 0 => {
+                let response = b"\x1b[?1;2c".to_vec();
+                debug!("vterm|DA response: {:?}", String::from_utf8_lossy(&response));
+                self.push_response(response);
             }
             _ => {}
         }
@@ -185,6 +196,32 @@ mod tests {
         let responses = vt.take_responses();
         assert_eq!(responses.len(), 1);
         assert_eq!(responses[0], b"\x1b[?1;2c");
+    }
+
+    #[test]
+    fn test_dsr_status_response() {
+        // ESC[5n → terminal OK status
+        let mut vt = VTermProxy::new(24, 80);
+        vt.process(b"\x1b[5n");
+        let responses = vt.take_responses();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0], b"\x1b[0n");
+    }
+
+    #[test]
+    fn test_secondary_da_not_answered() {
+        // ESC[>c → secondary DA, must NOT respond as primary DA
+        let mut vt = VTermProxy::new(24, 80);
+        vt.process(b"\x1b[>c");
+        assert!(vt.take_responses().is_empty());
+    }
+
+    #[test]
+    fn test_private_dsr_not_answered() {
+        // ESC[?6n → DEC private DSR, must NOT respond as plain CPR
+        let mut vt = VTermProxy::new(24, 80);
+        vt.process(b"\x1b[?6n");
+        assert!(vt.take_responses().is_empty());
     }
 
     #[test]
