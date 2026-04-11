@@ -16,12 +16,19 @@ struct ResponseCollector {
 
 impl ResponseCollector {
     fn take_responses(&self) -> Vec<Vec<u8>> {
-        let mut responses = self.responses.lock().unwrap();
+        let mut responses = self
+            .responses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         std::mem::take(&mut *responses)
     }
 
     fn push_response(&self, data: Vec<u8>) {
-        self.responses.lock().unwrap().push(data);
+        let mut responses = self
+            .responses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        responses.push(data);
     }
 }
 

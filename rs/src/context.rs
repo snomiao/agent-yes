@@ -196,6 +196,10 @@ impl AgentContext {
         if let Err(e) = pty.resize(initial_size.0, initial_size.1) {
             warn!("Initial PTY resize to {}x{} failed: {}", initial_size.0, initial_size.1, e);
         }
+        // Keep vterm in sync with the same initial size, otherwise vterm
+        // could remain stuck at AgentContext::new() dimensions until the
+        // first SIGWINCH fires.
+        self.vterm.resize(initial_size.1, initial_size.0);
 
         // Suppress unused-variable warning on non-unix where resize_tx is never moved
         #[cfg(not(unix))]
@@ -405,10 +409,14 @@ impl AgentContext {
         // Feed raw output to virtual terminal emulator for accurate screen state
         self.vterm.process(output.as_bytes());
 
-        // Write back any terminal query responses (DSR, DA) to child process
-        for response in self.vterm.take_responses() {
+        // Write back any terminal query responses (DSR, DA) to child process.
+        // Lock once and batch all responses to keep them atomic w.r.t. other writers.
+        let responses = self.vterm.take_responses();
+        if !responses.is_empty() {
             let mut w = msg_ctx.writer.lock().map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
-            w.write_all(&response)?;
+            for response in responses {
+                w.write_all(&response)?;
+            }
             w.flush()?;
         }
 
@@ -467,9 +475,11 @@ impl AgentContext {
                     self.last_idle_scan_at = Some(Instant::now());
                     let buffer = self.vterm.contents();
                     let buffer_hash = hash_str(&buffer);
-                    // Skip if screen hasn't changed since last action — prevents
-                    // resurrecting an already-handled prompt during idle.
-                    if Some(buffer_hash) != self.last_action_screen_hash {
+                    // Skip if screen still equals the last handled action.
+                    // If it diverges, clear the suppression so identical
+                    // prompts can be re-handled after intervening output.
+                    if self.last_action_screen_hash != Some(buffer_hash) {
+                        self.last_action_screen_hash = None;
                         for pattern in &self.cli_config.enter {
                             if pattern.is_match(&buffer) {
                                 debug!("Idle scan: enter pattern matched after {}ms idle", idle_ms);
@@ -603,9 +613,13 @@ impl AgentContext {
         // this, vterm.contents() persists matched prompts and would
         // re-trigger every time check_patterns() runs.
         let current_hash = hash_str(&buffer);
-        if Some(current_hash) == self.last_action_screen_hash {
+        if self.last_action_screen_hash == Some(current_hash) {
             return Ok(());
         }
+        // Screen has diverged from the last handled action — clear the
+        // suppression so that if an identical prompt later reappears (after
+        // any intervening output), one-shot patterns can fire again.
+        self.last_action_screen_hash = None;
 
         // Check typing response patterns
         for (response, patterns) in &self.cli_config.typing_respond {
