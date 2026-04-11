@@ -44,6 +44,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # Disable husky hooks so @semantic-release/git's commit doesn't trigger
+          # pre-commit (fmt/build/test), which races the rust rebuild against
+          # stale bins when rs/Cargo.toml was just bumped.
+          HUSKY: "0"
 
       - name: Get new release tag
         id: get_tag
