@@ -7,7 +7,8 @@ use crate::log_files::LogWriter;
 use crate::messaging::{send_ctrl_c, send_text, MessageContext};
 use crate::pty_spawner::{get_terminal_size, get_terminal_size_from_tty, PtyContext};
 use crate::ready_manager::ReadyManager;
-use crate::utils::{remove_control_characters, sleep_ms};
+use crate::utils::sleep_ms;
+use crate::vterm::VTermProxy;
 use anyhow::Result;
 use crossterm::terminal;
 use std::io::Write;
@@ -42,7 +43,7 @@ pub struct AgentContext {
 
     // Buffer for pattern matching
     output_buffer: String,
-    rendered_output: String,
+    vterm: VTermProxy,
     start_time: Instant,
 
     // Enter key scheduling
@@ -79,6 +80,8 @@ impl AgentContext {
         auto_yes_enabled: bool,
         cwd: String,
         pid: u32,
+        term_rows: u16,
+        term_cols: u16,
     ) -> Self {
         Self {
             cli,
@@ -94,7 +97,7 @@ impl AgentContext {
             next_stdout: ReadyManager::new(),
             idle_waiter: IdleWaiter::new(),
             output_buffer: String::new(),
-            rendered_output: String::new(),
+            vterm: VTermProxy::new(term_rows, term_cols),
             start_time: Instant::now(),
             pending_enter: false,
             pending_enter_detected_at: None,
@@ -245,6 +248,7 @@ impl AgentContext {
                     if let Err(e) = pty.resize(cols, rows) {
                         warn!("PTY resize to {}x{} failed: {}", cols, rows, e);
                     }
+                    self.vterm.resize(rows, cols);
                 }
 
                 // Stdin data
@@ -322,8 +326,9 @@ impl AgentContext {
                         }
                         if idle > timeout {
                             // Check if still working
+                            let screen = self.vterm.contents();
                             let is_working = self.cli_config.working.iter()
-                                .any(|p| p.is_match(&self.rendered_output));
+                                .any(|p| p.is_match(&screen));
 
                             debug!("Idle check: idle={}ms, timeout={}ms, is_working={}", idle, timeout, is_working);
 
@@ -390,8 +395,16 @@ impl AgentContext {
 
         // Update buffers
         self.output_buffer.push_str(output);
-        let stripped = remove_control_characters(output);
-        self.rendered_output.push_str(&stripped);
+
+        // Feed raw output to virtual terminal emulator for accurate screen state
+        self.vterm.process(output.as_bytes());
+
+        // Write back any terminal query responses (DSR, DA) to child process
+        for response in self.vterm.take_responses() {
+            let mut w = msg_ctx.writer.lock().map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
+            w.write_all(&response)?;
+            w.flush()?;
+        }
 
         // Extract and store codex session ID (once per session)
         if self.cli == "codex" && !self.codex_session_found {
@@ -402,14 +415,11 @@ impl AgentContext {
             }
         }
 
-        // Keep buffer size reasonable
+        // Keep raw output buffer size reasonable
         if self.output_buffer.len() > 100000 {
             debug!("Output buffer truncated (was {} bytes)", self.output_buffer.len());
             let split_at = find_char_boundary(&self.output_buffer, 50000);
             self.output_buffer = self.output_buffer.split_off(split_at);
-            let rendered_len = self.rendered_output.len();
-            let rendered_split = find_char_boundary(&self.rendered_output, 50000.min(rendered_len));
-            self.rendered_output = self.rendered_output.split_off(rendered_split);
         }
 
         // Mark stdout received
@@ -417,6 +427,7 @@ impl AgentContext {
 
         // Only ping activity if there's visible content (not just ANSI codes)
         // This prevents cursor control sequences from resetting the idle timer
+        let stripped = strip_ansi_escapes::strip_str(output);
         if !stripped.trim().is_empty() {
             self.idle_waiter.ping();
         }
@@ -429,21 +440,8 @@ impl AgentContext {
 
     /// Heartbeat pattern check (for cursor-based rendering)
     async fn heartbeat_check(&mut self, msg_ctx: &mut MessageContext) -> Result<()> {
-        // Handle Device Attributes request
-        if self.output_buffer.contains("\x1b[c") || self.output_buffer.contains("\x1b[0c") {
-            debug!("Responding to DA request");
-            let mut w = msg_ctx.writer.lock().map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
-            w.write_all(b"\x1b[?1;2c")?; // VT100 with AVO
-            w.flush()?;
-        }
-
-        // Handle cursor position request
-        if self.output_buffer.contains("\x1b[6n") {
-            debug!("Responding to cursor position request");
-            let mut w = msg_ctx.writer.lock().map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
-            w.write_all(b"\x1b[1;1R")?; // Position 1,1
-            w.flush()?;
-        }
+        // Terminal query responses (DSR, DA) are now handled automatically
+        // by VTermProxy in handle_output() via vt100 callbacks.
 
         // Check patterns on heartbeat (for no-EOL CLIs)
         if self.cli_config.no_eol {
@@ -461,9 +459,9 @@ impl AgentContext {
                 };
                 if should_scan {
                     self.last_idle_scan_at = Some(Instant::now());
-                    let buffer = &self.rendered_output;
+                    let buffer = self.vterm.contents();
                     for pattern in &self.cli_config.enter {
-                        if pattern.is_match(buffer) {
+                        if pattern.is_match(&buffer) {
                             debug!("Idle scan: enter pattern matched after {}ms idle", idle_ms);
                             self.pending_enter = true;
                             self.pending_enter_detected_at = Some(Instant::now());
@@ -546,13 +544,13 @@ impl AgentContext {
 
     /// Check patterns and respond accordingly
     async fn check_patterns(&mut self, msg_ctx: &mut MessageContext) -> Result<()> {
-        // Use rendered output (ANSI codes stripped) for pattern matching
-        let buffer = &self.rendered_output;
+        // Use vterm rendered screen for pattern matching (correctly handles cursor movement, clearing, etc.)
+        let buffer = self.vterm.contents();
 
         // Check fatal patterns first (only if not already matched)
         if !self.is_fatal {
             for pattern in &self.cli_config.fatal {
-                if pattern.is_match(buffer) {
+                if pattern.is_match(&buffer) {
                     error!("Fatal pattern matched: {}", pattern);
                     self.is_fatal = true;
                     return Ok(());
@@ -563,7 +561,7 @@ impl AgentContext {
         // Check restart-without-continue patterns (only if not already matched)
         if !self.should_restart_without_continue {
             for pattern in &self.cli_config.restart_without_continue {
-                if pattern.is_match(buffer) {
+                if pattern.is_match(&buffer) {
                     warn!("Restart without continue pattern matched");
                     self.should_restart_without_continue = true;
                     break;
@@ -573,7 +571,7 @@ impl AgentContext {
 
         // Check ready patterns
         for pattern in &self.cli_config.ready {
-            if pattern.is_match(buffer) {
+            if pattern.is_match(&buffer) {
                 if !self.stdin_ready.is_ready().await {
                     debug!("Ready pattern matched");
                     self.stdin_ready.ready().await;
@@ -591,12 +589,12 @@ impl AgentContext {
         // Check typing response patterns
         for (response, patterns) in &self.cli_config.typing_respond {
             for pattern in patterns {
-                if pattern.is_match(buffer) {
+                if pattern.is_match(&buffer) {
                     debug!("Typing response pattern matched, sending: {:?}", response);
                     send_text(msg_ctx, response).await?;
-                    // Clear buffer to prevent re-triggering
+                    // Clear raw buffer to prevent re-triggering
+                    // (vterm screen will be overwritten by new output naturally)
                     self.output_buffer.clear();
-                    self.rendered_output.clear();
                     return Ok(());
                 }
             }
@@ -604,16 +602,15 @@ impl AgentContext {
 
         // Check enter patterns
         for pattern in &self.cli_config.enter {
-            if pattern.is_match(buffer) {
+            if pattern.is_match(&buffer) {
                 if !self.pending_enter {
                     debug!("Enter pattern matched, scheduling Enter after idle");
                     self.pending_enter = true;
                     self.pending_enter_detected_at = Some(Instant::now());
                     self.enter_sent_at = None;
                     self.enter_retry_count = 0;
-                    // Clear buffer to prevent re-triggering
+                    // Clear raw buffer to prevent re-triggering
                     self.output_buffer.clear();
-                    self.rendered_output.clear();
                 }
                 return Ok(());
             }
