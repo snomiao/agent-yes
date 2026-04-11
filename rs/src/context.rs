@@ -51,6 +51,12 @@ pub struct AgentContext {
     // changes (vterm contents() persists, unlike the old append-only buffer).
     last_action_screen_hash: Option<u64>,
 
+    // Hash of vterm screen contents at the last full pattern check. Used to
+    // short-circuit check_patterns() entirely when nothing on screen changed
+    // — heartbeat_check() can call check_patterns() every 50ms for no_eol
+    // CLIs, so re-running all regexes on an unchanged screen is wasteful.
+    last_checked_screen_hash: Option<u64>,
+
     // Enter key scheduling
     pending_enter: bool,
     pending_enter_detected_at: Option<Instant>,
@@ -115,6 +121,7 @@ impl AgentContext {
             stdin_line_buffer: String::new(),
             codex_session_found: false,
             last_action_screen_hash: None,
+            last_checked_screen_hash: None,
         }
     }
 
@@ -569,6 +576,16 @@ impl AgentContext {
         // Use vterm rendered screen for pattern matching (correctly handles cursor movement, clearing, etc.)
         let buffer = self.vterm.contents();
 
+        // Short-circuit if screen contents are byte-identical to the last
+        // check. Sticky state (is_fatal, ready, pending_enter) cannot transition
+        // without a screen change, and one-shot patterns are already suppressed
+        // via last_action_screen_hash, so re-running all regexes is pure waste.
+        let buffer_hash = hash_str(&buffer);
+        if self.last_checked_screen_hash == Some(buffer_hash) {
+            return Ok(());
+        }
+        self.last_checked_screen_hash = Some(buffer_hash);
+
         // Check fatal patterns first (only if not already matched)
         if !self.is_fatal {
             for pattern in &self.cli_config.fatal {
@@ -612,8 +629,7 @@ impl AgentContext {
         // the last typing_respond/enter match, skip those checks. Without
         // this, vterm.contents() persists matched prompts and would
         // re-trigger every time check_patterns() runs.
-        let current_hash = hash_str(&buffer);
-        if self.last_action_screen_hash == Some(current_hash) {
+        if self.last_action_screen_hash == Some(buffer_hash) {
             return Ok(());
         }
         // Screen has diverged from the last handled action — clear the
@@ -628,7 +644,7 @@ impl AgentContext {
                     debug!("Typing response pattern matched, sending: {:?}", response);
                     send_text(msg_ctx, response).await?;
                     self.output_buffer.clear();
-                    self.last_action_screen_hash = Some(current_hash);
+                    self.last_action_screen_hash = Some(buffer_hash);
                     return Ok(());
                 }
             }
@@ -644,7 +660,7 @@ impl AgentContext {
                     self.enter_sent_at = None;
                     self.enter_retry_count = 0;
                     self.output_buffer.clear();
-                    self.last_action_screen_hash = Some(current_hash);
+                    self.last_action_screen_hash = Some(buffer_hash);
                 }
                 return Ok(());
             }
