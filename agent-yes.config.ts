@@ -126,6 +126,7 @@ function getDefaultConfig() {
         updateAvailable: [/^✨⬆️ Update available!/],
         ready: [
           /⏎ send/, // legacy
+          /^› /, // bare prompt line
           /\? for shortcuts/, // 2026-01-05 update
         ],
         enter: [

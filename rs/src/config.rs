@@ -168,6 +168,7 @@ fn codex_config() -> CliConfig {
         },
         ready: vec![
             Regex::new(r"⏎ send").unwrap(),
+            Regex::new(r"^› ").unwrap(),
             Regex::new(r"\? for shortcuts").unwrap(),
         ],
         working: vec![],
@@ -429,6 +430,7 @@ mod tests {
         assert!(config.install.npm.is_some());
         assert!(!config.ready.is_empty());
         assert!(config.ready[0].is_match("⏎ send"));
+        assert!(config.ready.iter().any(|rx| rx.is_match("› ")));
         assert!(!config.enter.is_empty());
         assert!(!config.fatal.is_empty());
         assert!(config.restore_args.is_empty());
