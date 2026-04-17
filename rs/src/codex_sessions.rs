@@ -128,7 +128,10 @@ mod tests {
     #[test]
     fn test_uuid_boundary() {
         // Should not match if adjacent to alphanumeric
-        assert_eq!(extract_session_id("xa1b2c3d4-e5f6-7890-abcd-ef1234567890"), None);
+        assert_eq!(
+            extract_session_id("xa1b2c3d4-e5f6-7890-abcd-ef1234567890"),
+            None
+        );
     }
 
     #[test]

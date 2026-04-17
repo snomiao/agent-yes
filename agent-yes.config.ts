@@ -2,6 +2,7 @@ import { mkdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { defineCliYesConfig } from "./ts/defineConfig.ts";
+import { loadSharedCliDefaults } from "./ts/configShared.ts";
 import { deepMixin } from "./ts/utils.ts";
 import { logger } from "./ts/logger.ts";
 import { loadCascadingConfig, ensureSchemaInConfigFiles } from "./ts/configLoader.ts";
@@ -63,138 +64,10 @@ const legacyConfigs = await Promise.all([
 // Merge all configs: default -> cascading -> legacy TS
 export default deepMixin(await getDefaultConfig(), cascadingConfig, ...legacyConfigs);
 
-function getDefaultConfig() {
+async function getDefaultConfig() {
   return defineCliYesConfig({
     configDir,
     logsDir: configDir && path.resolve(configDir, "logs"),
-    clis: {
-      claude: {
-        // args
-        promptArg: "last-arg",
-        systemPrompt: "--append-system-prompt",
-        //
-        install: {
-          // try this first if powershell available and its windows
-          powershell: 'powershell -Command "irm https://claude.ai/install.ps1 | iex"', // powershell
-          // or bash if found
-          bash: "curl -fsSL https://claude.ai/install.sh | bash",
-          // fallback to npm if bash not found
-          npm: "npm i -g @anthropic-ai/claude-code@latest",
-        },
-        // regex matcher for stdin ready
-        ready: [
-          /\? for shortcuts/,
-          /\u00A0Try "/, // regex matcher for stdin ready (note: \u00A0 is non-breaking space)
-          /^\? for shortcuts/,
-          /^>[ \u00A0]/,
-          /──────────+/,
-        ], // regex matcher for stdin ready
-        working: [/esc to interrupt/, /to run in background/],
-        typingRespond: {
-          "1\n": [/│ Do you want to use this API key\?/],
-        },
-        enter: [
-          / > 1. Yes, I trust this folder/m,
-          /❯ ?1\. ?Dark mode ?✔/m,
-          /❯ ?1\. ?Yes/m,
-          /^.{0,4} ?1\. ?Dark mode ?✔/m,
-          /^.{0,4} ?1\. ?Yes/m,
-          /Press Enter to continue…/m,
-        ],
-        fatal: [
-          /⎿  Claude usage limit reached\./,
-          /^error: unknown option/,
-          /No conversation found to continue/,
-        ],
-        restoreArgs: ["--continue"], // restart with --continue when crashed
-        exitCommand: ["/exit"],
-        bunx: true, // use bunx to run the binary, start time is 5s faster than node
-        defaultArgs: [],
-      },
-      gemini: {
-        install: "npm install -g @google/gemini-cli@latest",
-        // match the agent prompt after initial lines; handled by index logic using line index
-        ready: [/Type your message/], // used with line index check
-        enter: [/│ ● 1. Yes, allow once/, /│ ● 1. Allow once/, /│ ● 1. Allow once/],
-        fatal: [/Error resuming session/, /No previous sessions found for this project./],
-        restoreArgs: ["--resume"], // restart with --resume when crashed
-        exitCommand: ["/chat save ${PWD}", "/quit"],
-      },
-      codex: {
-        promptArg: "first-arg",
-        install: "npm install -g @openai/codex@latest",
-        updateAvailable: [/^✨⬆️ Update available!/],
-        ready: [
-          /⏎ send/, // legacy
-          /^› /, // bare prompt line
-          /\? for shortcuts/, // 2026-01-05 update
-        ],
-        enter: [
-          /> 1. Yes,/,
-          /> 1. Yes, allow Codex to work in this folder/,
-          /> 1. Approve and run now/,
-        ],
-        fatal: [/Error: The cursor position could not be read within/],
-        // add to codex --search by default when not provided by the user
-        defaultArgs: ["--search"],
-        noEOL: true, // codex use cursor moving instead of EOL when rendering output
-      },
-      // below are experimental agents
-      qwen: {
-        install: "npm install -g @qwen-code/qwen-code@latest",
-        version: "qwen --version",
-      },
-      grok: {
-        install: "npm install -g @vibe-kit/grok-cli@latest",
-        ready: [/^  │ ❯ +/],
-        enter: [/^   1. Yes/],
-      },
-      copilot: {
-        promptArg: "-i", // use stdin to prompt or it will reject all bash commands
-        install: "npm install -g @github/copilot",
-        ready: [/^ +> /, /Ctrl\+c Exit/],
-        enter: [/ │ ❯ +1. Yes, proceed/, / ❯ +1. Yes/],
-        system:
-          "IMPORTANT: USE TOOLS TO RESEARCH/EXPLORE/WORKAROUND your self, except you need approve on DESTRUCTIVE OPERATIONS, DONT ASK QUESTIONS ON USERS REQUEST, JUST SOLVE IT.", //copilot asks too much
-        fatal: [],
-      },
-      cursor: {
-        install: "open https://cursor.com/ja/docs/cli/installation",
-        // map logical "cursor" cli name to actual binary name
-        binary: "cursor-agent",
-        bunx: true,
-        ready: [/\/ commands/],
-        enter: [/→ Run \(once\) \(y\) \(enter\)/, /▶ \[a\] Trust this workspace/],
-        fatal: [/^  Error: You've hit your usage limit/],
-      },
-      auggie: {
-        help: "https://docs.augmentcode.com/cli/overview",
-        install: "npm install -g @augmentcode/auggie",
-        promptArg: "first-arg",
-        ready: [/ > /, /\? to show shortcuts/],
-        typingRespond: {
-          "y\n": [/\[Y\] Enable indexing - Unlock full workspace understanding/],
-        },
-        enter: [], // auggie seems not to ask for permission currently, which is super nice
-        fatal: [], // no fatal patterns known yet
-      },
-      amp: {
-        help: "https://ampcode.com/",
-        install: {
-          bash: "curl -fsSL https://ampcode.com/install.sh | bash",
-          npm: "npm i -g @sourcegraph/amp",
-        },
-        enter: [/^.{0,4} Approve /],
-      },
-      opencode: {
-        help: "https://opencode.ai/",
-        install: {
-          bash: "curl -fsSL https://opencode.ai/install | bash",
-          npm: "npm i -g opencode-ai",
-        },
-        enter: [],
-        ready: [],
-      },
-    },
+    clis: await loadSharedCliDefaults(import.meta.url),
   });
 }

@@ -34,7 +34,14 @@ impl PidStore {
         Self { path }
     }
 
-    pub fn register(&self, pid: u32, cli: &str, prompt: Option<&str>, cwd: &str, log_file: Option<&str>) {
+    pub fn register(
+        &self,
+        pid: u32,
+        cli: &str,
+        prompt: Option<&str>,
+        cwd: &str,
+        log_file: Option<&str>,
+    ) {
         let record = PidRecord {
             pid,
             cli: cli.to_string(),
@@ -51,7 +58,13 @@ impl PidStore {
         }
     }
 
-    pub fn update_status(&self, pid: u32, status: &str, exit_code: Option<i32>, exit_reason: Option<&str>) {
+    pub fn update_status(
+        &self,
+        pid: u32,
+        status: &str,
+        exit_code: Option<i32>,
+        exit_reason: Option<&str>,
+    ) {
         let result = (|| -> Result<()> {
             let mut records = self.read_all()?;
             for r in &mut records {
@@ -87,7 +100,10 @@ impl PidStore {
             let _ = fs::create_dir_all(parent);
         }
         let line = serde_json::to_string(record)? + "\n";
-        let mut file = fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.path)?;
         file.write_all(line.as_bytes())?;
         Ok(())
     }
@@ -105,7 +121,11 @@ impl PidStore {
             }
             match serde_json::from_str::<PidRecord>(&line) {
                 Ok(r) => records.push(r),
-                Err(e) => warn!("PidStore: skipping corrupt record ({}): {:?}", e, &line[..line.len().min(80)]),
+                Err(e) => warn!(
+                    "PidStore: skipping corrupt record ({}): {:?}",
+                    e,
+                    &line[..line.len().min(80)]
+                ),
             }
         }
         Ok(records)

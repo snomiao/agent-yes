@@ -32,7 +32,11 @@ impl MessageContext {
 }
 
 /// Send a message to the agent (types text and presses Enter)
-pub async fn send_message(ctx: &mut MessageContext, message: &str, wait_for_ready: bool) -> Result<()> {
+pub async fn send_message(
+    ctx: &mut MessageContext,
+    message: &str,
+    wait_for_ready: bool,
+) -> Result<()> {
     if wait_for_ready {
         ctx.stdin_ready.wait().await;
     }
@@ -41,7 +45,10 @@ pub async fn send_message(ctx: &mut MessageContext, message: &str, wait_for_read
 
     // Write the message
     {
-        let mut writer = ctx.writer.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let mut writer = ctx
+            .writer
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         writer.write_all(message.as_bytes())?;
         writer.write_all(b"\n")?;
         writer.flush()?;
@@ -66,7 +73,10 @@ pub async fn send_enter(ctx: &mut MessageContext, _wait_ms: u64) -> Result<()> {
 
     // Write Enter (use \r for PTY - carriage return)
     {
-        let mut writer = ctx.writer.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+        let mut writer = ctx
+            .writer
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
         writer.write_all(b"\r")?;
         writer.flush()?;
     }
@@ -85,7 +95,10 @@ pub async fn send_enter(ctx: &mut MessageContext, _wait_ms: u64) -> Result<()> {
 pub async fn send_text(ctx: &MessageContext, text: &str) -> Result<()> {
     debug!("Sending text: {}", text);
 
-    let mut writer = ctx.writer.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+    let mut writer = ctx
+        .writer
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
     writer.write_all(text.as_bytes())?;
     writer.flush()?;
 
@@ -96,7 +109,9 @@ pub async fn send_text(ctx: &MessageContext, text: &str) -> Result<()> {
 
 /// Send Ctrl+C (SIGINT)
 pub fn send_ctrl_c(writer: &Arc<Mutex<Box<dyn Write + Send>>>) -> Result<()> {
-    let mut writer = writer.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+    let mut writer = writer
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
     writer.write_all(&[0x03])?; // Ctrl+C
     writer.flush()?;
     Ok(())
@@ -104,7 +119,9 @@ pub fn send_ctrl_c(writer: &Arc<Mutex<Box<dyn Write + Send>>>) -> Result<()> {
 
 /// Send Ctrl+Y (custom toggle)
 pub fn send_ctrl_y(writer: &Arc<Mutex<Box<dyn Write + Send>>>) -> Result<()> {
-    let mut writer = writer.lock().map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+    let mut writer = writer
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
     writer.write_all(&[0x19])?; // Ctrl+Y
     writer.flush()?;
     Ok(())

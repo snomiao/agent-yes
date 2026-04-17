@@ -76,16 +76,10 @@ pub enum AgentMessage {
     },
 
     /// Agent claims a task
-    TaskClaim {
-        task_id: TaskId,
-        agent_id: AgentId,
-    },
+    TaskClaim { task_id: TaskId, agent_id: AgentId },
 
     /// Task status update
-    TaskUpdate {
-        task_id: TaskId,
-        status: TaskStatus,
-    },
+    TaskUpdate { task_id: TaskId, status: TaskStatus },
 
     /// Coordinator election message
     CoordinatorElection {
@@ -101,10 +95,7 @@ pub enum AgentMessage {
     },
 
     /// General chat/log message
-    Chat {
-        agent_id: AgentId,
-        message: String,
-    },
+    Chat { agent_id: AgentId, message: String },
 }
 
 /// Requirements for a task
@@ -125,10 +116,7 @@ pub enum AgentRequest {
     GetStatus,
 
     /// Request agent to execute a task
-    ExecuteTask {
-        task_id: TaskId,
-        prompt: String,
-    },
+    ExecuteTask { task_id: TaskId, prompt: String },
 
     /// Request agent to cancel current task
     CancelTask { task_id: TaskId },

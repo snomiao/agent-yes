@@ -49,6 +49,7 @@
   "files": [
     "agent-yes.config.schema.json",
     "bin",
+    "config",
     "examples",
     "scripts",
     "ts/*.ts",

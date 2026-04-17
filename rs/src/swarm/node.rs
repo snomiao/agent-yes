@@ -6,12 +6,7 @@ use crate::swarm::messages::{AgentCapabilities, AgentMessage, AgentRequest, Agen
 use anyhow::Result;
 use futures::StreamExt;
 use libp2p::{
-    gossipsub::IdentTopic,
-    identity::Keypair,
-    kad,
-    mdns,
-    request_response,
-    swarm::SwarmEvent,
+    gossipsub::IdentTopic, identity::Keypair, kad, mdns, request_response, swarm::SwarmEvent,
     Multiaddr, PeerId, Swarm,
 };
 use std::collections::HashSet;
@@ -110,7 +105,14 @@ pub struct SwarmNode {
 impl SwarmNode {
     /// Create a new swarm node
     pub async fn new(config: SwarmConfig) -> Result<Self> {
-        let agent_id = format!("agent-{}", Uuid::new_v4().to_string().split('-').next().unwrap_or("unknown"));
+        let agent_id = format!(
+            "agent-{}",
+            Uuid::new_v4()
+                .to_string()
+                .split('-')
+                .next()
+                .unwrap_or("unknown")
+        );
 
         info!("Creating swarm node: {}", agent_id);
         info!("  Listen: {}", config.listen_addr);
@@ -308,10 +310,15 @@ impl SwarmNode {
                     if peer_id != self.peer_id && !self.known_peers.contains(&peer_id) {
                         info!("Discovered peer via mDNS: {} at {}", peer_id, addr);
                         self.known_peers.insert(peer_id);
-                        self.swarm.behaviour_mut().kademlia.add_address(&peer_id, addr);
-                        let _ = event_tx.send(SwarmEvent2::PeerDiscovered {
-                            peer_id: peer_id.to_string(),
-                        }).await;
+                        self.swarm
+                            .behaviour_mut()
+                            .kademlia
+                            .add_address(&peer_id, addr);
+                        let _ = event_tx
+                            .send(SwarmEvent2::PeerDiscovered {
+                                peer_id: peer_id.to_string(),
+                            })
+                            .await;
                     }
                 }
             }
@@ -320,47 +327,55 @@ impl SwarmNode {
                 for (peer_id, _) in peers {
                     if self.known_peers.remove(&peer_id) {
                         info!("Peer expired: {}", peer_id);
-                        let _ = event_tx.send(SwarmEvent2::PeerLeft {
-                            peer_id: peer_id.to_string(),
-                        }).await;
+                        let _ = event_tx
+                            .send(SwarmEvent2::PeerLeft {
+                                peer_id: peer_id.to_string(),
+                            })
+                            .await;
                     }
                 }
             }
 
-            SwarmEvent::Behaviour(AgentBehaviourEvent::Gossipsub(libp2p::gossipsub::Event::Message {
-                message,
-                propagation_source,
-                ..
-            })) => {
+            SwarmEvent::Behaviour(AgentBehaviourEvent::Gossipsub(
+                libp2p::gossipsub::Event::Message {
+                    message,
+                    propagation_source,
+                    ..
+                },
+            )) => {
                 if let Ok(msg) = serde_json::from_slice::<AgentMessage>(&message.data) {
-                    self.handle_agent_message(msg, propagation_source, event_tx).await?;
+                    self.handle_agent_message(msg, propagation_source, event_tx)
+                        .await?;
                 }
             }
 
             SwarmEvent::Behaviour(AgentBehaviourEvent::RequestResponse(
                 request_response::Event::Message { peer, message },
-            )) => {
-                match message {
-                    request_response::Message::Request { request, channel, .. } => {
-                        let response = self.handle_request(request).await;
-                        let _ = self.swarm.behaviour_mut().send_response(channel, response);
-                    }
-                    request_response::Message::Response { response, .. } => {
-                        debug!("Received response from {}: {:?}", peer, response);
-                    }
+            )) => match message {
+                request_response::Message::Request {
+                    request, channel, ..
+                } => {
+                    let response = self.handle_request(request).await;
+                    let _ = self.swarm.behaviour_mut().send_response(channel, response);
                 }
-            }
+                request_response::Message::Response { response, .. } => {
+                    debug!("Received response from {}: {:?}", peer, response);
+                }
+            },
 
             SwarmEvent::Behaviour(AgentBehaviourEvent::Kademlia(kad::Event::RoutingUpdated {
-                peer, ..
+                peer,
+                ..
             })) => {
                 debug!("Kademlia routing updated for peer: {}", peer);
             }
 
-            SwarmEvent::Behaviour(AgentBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
-                result: kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(record))),
-                ..
-            })) => {
+            SwarmEvent::Behaviour(AgentBehaviourEvent::Kademlia(
+                kad::Event::OutboundQueryProgressed {
+                    result: kad::QueryResult::GetRecord(Ok(kad::GetRecordOk::FoundRecord(record))),
+                    ..
+                },
+            )) => {
                 // Room code resolution: found a record
                 let key_str = String::from_utf8_lossy(record.record.key.as_ref());
                 if key_str.starts_with("room:") {
@@ -376,17 +391,21 @@ impl SwarmNode {
                 }
             }
 
-            SwarmEvent::Behaviour(AgentBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
-                result: kad::QueryResult::GetRecord(Err(err)),
-                ..
-            })) => {
+            SwarmEvent::Behaviour(AgentBehaviourEvent::Kademlia(
+                kad::Event::OutboundQueryProgressed {
+                    result: kad::QueryResult::GetRecord(Err(err)),
+                    ..
+                },
+            )) => {
                 warn!("Room code lookup failed: {:?}", err);
             }
 
-            SwarmEvent::Behaviour(AgentBehaviourEvent::Kademlia(kad::Event::OutboundQueryProgressed {
-                result: kad::QueryResult::PutRecord(Ok(_)),
-                ..
-            })) => {
+            SwarmEvent::Behaviour(AgentBehaviourEvent::Kademlia(
+                kad::Event::OutboundQueryProgressed {
+                    result: kad::QueryResult::PutRecord(Ok(_)),
+                    ..
+                },
+            )) => {
                 debug!("Room code published to DHT successfully");
             }
 
@@ -416,7 +435,10 @@ impl SwarmNode {
     ) -> Result<()> {
         match msg {
             AgentMessage::Announce(capabilities) => {
-                debug!("Agent announced: {} ({})", capabilities.agent_id, capabilities.cli);
+                debug!(
+                    "Agent announced: {} ({})",
+                    capabilities.agent_id, capabilities.cli
+                );
                 self.coordinator.register_agent(capabilities);
             }
 
@@ -425,9 +447,17 @@ impl SwarmNode {
                 self.coordinator.remove_agent(&agent_id);
             }
 
-            AgentMessage::TaskBroadcast { task_id, prompt, .. } => {
-                info!("Task broadcast: {} - {}", task_id, prompt.chars().take(50).collect::<String>());
-                let _ = event_tx.send(SwarmEvent2::TaskReceived { task_id, prompt }).await;
+            AgentMessage::TaskBroadcast {
+                task_id, prompt, ..
+            } => {
+                info!(
+                    "Task broadcast: {} - {}",
+                    task_id,
+                    prompt.chars().take(50).collect::<String>()
+                );
+                let _ = event_tx
+                    .send(SwarmEvent2::TaskReceived { task_id, prompt })
+                    .await;
             }
 
             AgentMessage::TaskClaim { task_id, agent_id } => {
@@ -437,10 +467,12 @@ impl SwarmNode {
             AgentMessage::TaskUpdate { task_id, status } => {
                 info!("Task {} status: {:?}", task_id, status);
                 self.coordinator.update_task(&task_id, status.clone());
-                let _ = event_tx.send(SwarmEvent2::TaskUpdate {
-                    task_id,
-                    status: format!("{:?}", status),
-                }).await;
+                let _ = event_tx
+                    .send(SwarmEvent2::TaskUpdate {
+                        task_id,
+                        status: format!("{:?}", status),
+                    })
+                    .await;
             }
 
             AgentMessage::CoordinatorElection { agent_id, priority } => {
@@ -456,14 +488,19 @@ impl SwarmNode {
             }
 
             AgentMessage::CoordinatorHeartbeat { coordinator_id, .. } => {
-                self.coordinator.handle_coordinator_heartbeat(coordinator_id.clone());
+                self.coordinator
+                    .handle_coordinator_heartbeat(coordinator_id.clone());
                 if self.coordinator.get_coordinator() == Some(&coordinator_id) {
-                    let _ = event_tx.send(SwarmEvent2::NewCoordinator { coordinator_id }).await;
+                    let _ = event_tx
+                        .send(SwarmEvent2::NewCoordinator { coordinator_id })
+                        .await;
                 }
             }
 
             AgentMessage::Chat { agent_id, message } => {
-                let _ = event_tx.send(SwarmEvent2::ChatReceived { agent_id, message }).await;
+                let _ = event_tx
+                    .send(SwarmEvent2::ChatReceived { agent_id, message })
+                    .await;
             }
         }
 
@@ -482,12 +519,14 @@ impl SwarmNode {
                 AgentResponse::Status(caps)
             }
 
-            AgentRequest::Ping => {
-                AgentResponse::Pong { agent_id: self.agent_id.clone() }
-            }
+            AgentRequest::Ping => AgentResponse::Pong {
+                agent_id: self.agent_id.clone(),
+            },
 
             AgentRequest::GetTasks => {
-                let tasks: Vec<_> = self.coordinator.tasks
+                let tasks: Vec<_> = self
+                    .coordinator
+                    .tasks
                     .iter()
                     .map(|(id, t)| (id.clone(), t.status.clone()))
                     .collect();
@@ -499,14 +538,16 @@ impl SwarmNode {
                 AgentResponse::TaskAccepted { task_id }
             }
 
-            AgentRequest::CancelTask { task_id } => {
-                AgentResponse::TaskCancelled { task_id }
-            }
+            AgentRequest::CancelTask { task_id } => AgentResponse::TaskCancelled { task_id },
 
             AgentRequest::JoinSwarm { capabilities } => {
                 self.coordinator.register_agent(capabilities);
                 AgentResponse::JoinAccepted {
-                    coordinator_id: self.coordinator.get_coordinator().cloned().unwrap_or_default(),
+                    coordinator_id: self
+                        .coordinator
+                        .get_coordinator()
+                        .cloned()
+                        .unwrap_or_default(),
                 }
             }
         }
@@ -528,7 +569,11 @@ impl SwarmNode {
     /// Publish a message to gossipsub (may fail silently if no peers)
     fn publish_message(&mut self, msg: &AgentMessage) -> Result<()> {
         let data = serde_json::to_vec(msg)?;
-        match self.swarm.behaviour_mut().publish(&self.config.topic, &data) {
+        match self
+            .swarm
+            .behaviour_mut()
+            .publish(&self.config.topic, &data)
+        {
             Ok(_) => Ok(()),
             Err(e) => {
                 // Don't treat InsufficientPeers as a fatal error
@@ -590,7 +635,9 @@ impl SwarmNode {
     /// Publish room code to DHT for resolution
     fn publish_room_code(&mut self, code: &str) {
         // Use the first listen address (prefer non-localhost)
-        let addr = self.listen_addrs.iter()
+        let addr = self
+            .listen_addrs
+            .iter()
             .find(|a| !a.contains("127.0.0.1") && !a.contains("::1"))
             .or(self.listen_addrs.first());
 
@@ -604,7 +651,12 @@ impl SwarmNode {
             };
 
             debug!("Publishing room code {} -> {} to DHT", code, addr);
-            if let Err(e) = self.swarm.behaviour_mut().kademlia.put_record(record, kad::Quorum::One) {
+            if let Err(e) = self
+                .swarm
+                .behaviour_mut()
+                .kademlia
+                .put_record(record, kad::Quorum::One)
+            {
                 warn!("Failed to publish room code to DHT: {:?}", e);
             }
         }

@@ -59,7 +59,10 @@ pub struct PtyContext {
 impl PtyContext {
     /// Write data to the PTY
     pub fn write(&self, data: &str) -> Result<()> {
-        let mut writer = self.writer.lock().map_err(|e| anyhow!("Lock error: {}", e))?;
+        let mut writer = self
+            .writer
+            .lock()
+            .map_err(|e| anyhow!("Lock error: {}", e))?;
         writer.write_all(data.as_bytes())?;
         writer.flush()?;
         Ok(())
@@ -154,7 +157,10 @@ pub async fn spawn_agent(
     cmd.cwd(cwd);
 
     if verbose {
-        debug!("Spawning {} with args: {:?} in directory: {}", binary, args, cwd);
+        debug!(
+            "Spawning {} with args: {:?} in directory: {}",
+            binary, args, cwd
+        );
     }
 
     info!("Starting {} agent in {}...", cli, cwd);
@@ -181,7 +187,7 @@ pub async fn spawn_agent(
 
     // Spawn reader thread
     thread::spawn(move || {
-        let mut buf = [0u8; 8192];  // 8KB buffer like bun-pty
+        let mut buf = [0u8; 8192]; // 8KB buffer like bun-pty
         let mut partial = Vec::new(); // Buffer for incomplete UTF-8 sequences
         loop {
             match reader.read(&mut buf) {
@@ -396,7 +402,12 @@ mod tests {
 
         let pty_system = native_pty_system();
         let pair = pty_system
-            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .expect("openpty failed");
 
         let mut cmd = CommandBuilder::new("sh");
@@ -406,7 +417,12 @@ mod tests {
 
         // Resize before the child reads its terminal attributes
         pair.master
-            .resize(PtySize { rows: 40, cols: 120, pixel_width: 0, pixel_height: 0 })
+            .resize(PtySize {
+                rows: 40,
+                cols: 120,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .expect("resize failed");
 
         // Read all output with a 2-second deadline
@@ -444,7 +460,12 @@ mod tests {
 
         let pty_system = native_pty_system();
         let pair = pty_system
-            .openpty(PtySize { rows: 24, cols: 80, pixel_width: 0, pixel_height: 0 })
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
             .expect("openpty failed");
 
         // Build a PtyContext directly to test the zero-guard in resize()
@@ -452,16 +473,22 @@ mod tests {
         let writer = pair.master.take_writer().expect("take_writer");
         let ctx = PtyContext {
             master: pair.master,
-            child: pair.slave.spawn_command(CommandBuilder::new("true")).expect("spawn"),
+            child: pair
+                .slave
+                .spawn_command(CommandBuilder::new("true"))
+                .expect("spawn"),
             output_rx,
             writer: std::sync::Arc::new(std::sync::Mutex::new(writer)),
         };
         drop(pair.slave);
 
         // resize(0, 0) must not panic or return an error — guard clamps to 1x1
-        ctx.resize(0, 0).expect("resize(0,0) should succeed via clamp");
-        ctx.resize(0, 24).expect("resize(0,24) should succeed via clamp");
-        ctx.resize(80, 0).expect("resize(80,0) should succeed via clamp");
+        ctx.resize(0, 0)
+            .expect("resize(0,0) should succeed via clamp");
+        ctx.resize(0, 24)
+            .expect("resize(0,24) should succeed via clamp");
+        ctx.resize(80, 0)
+            .expect("resize(80,0) should succeed via clamp");
     }
 
     #[test]
@@ -471,7 +498,11 @@ mod tests {
         assert!(cols >= 1, "cols must be >= 1, got {}", cols);
         assert!(rows >= 1, "rows must be >= 1, got {}", rows);
         // Should return at least the enforced minimum cols
-        assert!(cols >= 20, "cols must be >= 20 (enforced minimum), got {}", cols);
+        assert!(
+            cols >= 20,
+            "cols must be >= 20 (enforced minimum), got {}",
+            cols
+        );
     }
 
     #[test]

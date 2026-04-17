@@ -41,11 +41,16 @@ export type AgentCliConfig = {
   version?: string; // hint user for version command to check if installed
   binary?: string; // actual binary name if different from cli, e.g. cursor -> cursor-agent
   defaultArgs?: string[]; // function to ensure certain args are present
+  help?: string; // documentation/help URL for the CLI
+  bunx?: boolean; // metadata for bunx-based launches
+  systemPrompt?: string; // flag name for system prompt injection
+  system?: string; // system prompt content to inject
 
   // status detect, and actions
   ready?: RegExp[]; // regex matcher for stdin ready, or line index for gemini. Set to empty array [] to disable ready check entirely.
   fatal?: RegExp[]; // array of regex to match for fatal errors
   working?: RegExp[]; // regex matcher for working status
+  updateAvailable?: RegExp[]; // regex matcher for update available banners
   exitCommands?: string[]; // commands to exit the cli gracefully
   promptArg?: (string & {}) | "first-arg" | "last-arg"; // argument name to pass the prompt, e.g. --prompt, or first-arg for positional arg
 

@@ -6,8 +6,7 @@ use libp2p::{
     gossipsub::{self, IdentTopic, MessageAuthenticity, ValidationMode},
     identify,
     kad::{self, store::MemoryStore},
-    mdns,
-    ping,
+    mdns, ping,
     request_response::{self, Codec, ProtocolSupport},
     swarm::NetworkBehaviour,
     PeerId,
@@ -163,7 +162,11 @@ impl AgentBehaviour {
     }
 
     /// Send a direct request to a peer
-    pub fn send_request(&mut self, peer: &PeerId, request: AgentRequest) -> request_response::OutboundRequestId {
+    pub fn send_request(
+        &mut self,
+        peer: &PeerId,
+        request: AgentRequest,
+    ) -> request_response::OutboundRequestId {
         self.request_response.send_request(peer, request)
     }
 
@@ -190,9 +193,7 @@ impl Codec for AgentProtocolCodec {
         &'life0 mut self,
         _protocol: &'life1 Self::Protocol,
         io: &'life2 mut T,
-    ) -> std::pin::Pin<
-        Box<dyn Future<Output = io::Result<Self::Request>> + Send + 'async_trait>,
-    >
+    ) -> std::pin::Pin<Box<dyn Future<Output = io::Result<Self::Request>> + Send + 'async_trait>>
     where
         T: AsyncRead + Unpin + Send + 'async_trait,
         'life0: 'async_trait,
@@ -204,8 +205,7 @@ impl Codec for AgentProtocolCodec {
             let mut buf = Vec::new();
             let mut reader = io.take(1024 * 1024); // 1MB limit
             reader.read_to_end(&mut buf).await?;
-            serde_json::from_slice(&buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            serde_json::from_slice(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         })
     }
 
@@ -213,9 +213,7 @@ impl Codec for AgentProtocolCodec {
         &'life0 mut self,
         _protocol: &'life1 Self::Protocol,
         io: &'life2 mut T,
-    ) -> std::pin::Pin<
-        Box<dyn Future<Output = io::Result<Self::Response>> + Send + 'async_trait>,
-    >
+    ) -> std::pin::Pin<Box<dyn Future<Output = io::Result<Self::Response>> + Send + 'async_trait>>
     where
         T: AsyncRead + Unpin + Send + 'async_trait,
         'life0: 'async_trait,
@@ -227,8 +225,7 @@ impl Codec for AgentProtocolCodec {
             let mut buf = Vec::new();
             let mut reader = io.take(1024 * 1024); // 1MB limit
             reader.read_to_end(&mut buf).await?;
-            serde_json::from_slice(&buf)
-                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+            serde_json::from_slice(&buf).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
         })
     }
 

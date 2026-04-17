@@ -38,6 +38,30 @@
     }
   },
   "definitions": {
+    "RegexSource": {
+      "description": "Regex source as a raw pattern string or a structured object with explicit flags",
+      "oneOf": [
+        {
+          "type": "string",
+          "description": "Regex pattern source text"
+        },
+        {
+          "type": "object",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "description": "Regex pattern source text"
+            },
+            "flags": {
+              "type": "string",
+              "description": "Regex flags such as 'm' or 'im'"
+            }
+          },
+          "required": ["pattern"],
+          "additionalProperties": false
+        }
+      ]
+    },
     "AgentCliConfig": {
       "type": "object",
       "description": "Configuration for a specific CLI tool",
@@ -77,17 +101,17 @@
         },
         "ready": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/definitions/RegexSource" },
           "description": "Regex patterns to detect when CLI is ready for input. Set to [] to disable ready check."
         },
         "fatal": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/definitions/RegexSource" },
           "description": "Regex patterns to detect fatal errors that should stop execution"
         },
         "working": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/definitions/RegexSource" },
           "description": "Regex patterns to detect when CLI is currently processing"
         },
         "exitCommands": {
@@ -106,12 +130,12 @@
         },
         "enter": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/definitions/RegexSource" },
           "description": "Regex patterns that trigger automatic Enter key press"
         },
         "enterExclude": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/definitions/RegexSource" },
           "description": "Regex patterns to exclude from auto-enter (even if 'enter' matches)"
         },
         "typingRespond": {
@@ -119,7 +143,7 @@
           "description": "Map of responses to type when specific patterns are matched",
           "additionalProperties": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": { "$ref": "#/definitions/RegexSource" },
             "description": "Regex patterns that trigger this response"
           },
           "examples": [
@@ -134,7 +158,7 @@
         },
         "restartWithoutContinueArg": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/definitions/RegexSource" },
           "description": "Regex patterns for errors that require restart WITHOUT continue args"
         },
         "bunx": {
@@ -155,7 +179,7 @@
         },
         "updateAvailable": {
           "type": "array",
-          "items": { "type": "string" },
+          "items": { "$ref": "#/definitions/RegexSource" },
           "description": "Regex patterns to detect update available messages"
         }
       },

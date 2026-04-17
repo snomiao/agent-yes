@@ -17,11 +17,11 @@ use tokio::io::AsyncReadExt;
 use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
-const HEARTBEAT_INTERVAL_MS: u64 = 50;  // Check frequently for Enter timing and patterns
+const HEARTBEAT_INTERVAL_MS: u64 = 50; // Check frequently for Enter timing and patterns
 const FORCE_READY_TIMEOUT_MS: u64 = 10000;
-const ENTER_IDLE_WAIT_MS: u64 = 50;     // Wait for 50ms idle before sending Enter (reduced from 1000 due to cursor control sequences)
-const ENTER_RETRY_1_MS: u64 = 500;      // Retry after 500ms if no response
-const ENTER_RETRY_2_MS: u64 = 1500;     // Retry after 1500ms if no response
+const ENTER_IDLE_WAIT_MS: u64 = 50; // Wait for 50ms idle before sending Enter (reduced from 1000 due to cursor control sequences)
+const ENTER_RETRY_1_MS: u64 = 500; // Retry after 500ms if no response
+const ENTER_RETRY_2_MS: u64 = 1500; // Retry after 1500ms if no response
 const IDLE_SCAN_INTERVAL_MS: u64 = 60000; // Re-scan rendered screen every 60s of idle
 
 /// Agent context - centralized session state
@@ -127,11 +127,19 @@ impl AgentContext {
 
     /// Path to the raw log file for this session (for PID store registration)
     pub fn raw_log_path(&self) -> Option<String> {
-        self.log_writer.raw_log_path.as_ref().map(|p| p.to_string_lossy().to_string())
+        self.log_writer
+            .raw_log_path
+            .as_ref()
+            .map(|p| p.to_string_lossy().to_string())
     }
 
     /// Run the main agent loop
-    pub async fn run(&mut self, pty: &mut PtyContext, timeout_ms: Option<u64>, idle_action: Option<&str>) -> Result<i32> {
+    pub async fn run(
+        &mut self,
+        pty: &mut PtyContext,
+        timeout_ms: Option<u64>,
+        idle_action: Option<&str>,
+    ) -> Result<i32> {
         let writer = pty.get_writer();
 
         // Create message context
@@ -201,7 +209,10 @@ impl AgentContext {
         // initial value, so any resize that happened between spawn_agent() and here
         // would be silently missed without this explicit call.
         if let Err(e) = pty.resize(initial_size.0, initial_size.1) {
-            warn!("Initial PTY resize to {}x{} failed: {}", initial_size.0, initial_size.1, e);
+            warn!(
+                "Initial PTY resize to {}x{} failed: {}",
+                initial_size.0, initial_size.1, e
+            );
         }
         // Keep vterm in sync with the same initial size, otherwise vterm
         // could remain stuck at AgentContext::new() dimensions until the
@@ -389,7 +400,12 @@ impl AgentContext {
     }
 
     /// Handle PTY output
-    async fn handle_output(&mut self, output: &str, msg_ctx: &mut MessageContext, stdout_tx: &mpsc::Sender<String>) -> Result<()> {
+    async fn handle_output(
+        &mut self,
+        output: &str,
+        msg_ctx: &mut MessageContext,
+        stdout_tx: &mpsc::Sender<String>,
+    ) -> Result<()> {
         // Send to background stdout writer (never blocks main loop).
         // If the channel is full (~10MB buffered), drop the output —
         // agent operation is more important than display completeness.
@@ -399,7 +415,10 @@ impl AgentContext {
                 self.stdout_drop_count += 1;
                 // Warn on first drop, then every 100 drops to avoid log spam
                 if self.stdout_drop_count == 1 || self.stdout_drop_count % 100 == 0 {
-                    warn!("stdout channel full, dropped output ({} total drops)", self.stdout_drop_count);
+                    warn!(
+                        "stdout channel full, dropped output ({} total drops)",
+                        self.stdout_drop_count
+                    );
                 }
             }
             Err(mpsc::error::TrySendError::Closed(_)) => {
@@ -420,7 +439,10 @@ impl AgentContext {
         // Lock once and batch all responses to keep them atomic w.r.t. other writers.
         let responses = self.vterm.take_responses();
         if !responses.is_empty() {
-            let mut w = msg_ctx.writer.lock().map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
+            let mut w = msg_ctx
+                .writer
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
             for response in responses {
                 w.write_all(&response)?;
             }
@@ -438,7 +460,10 @@ impl AgentContext {
 
         // Keep raw output buffer size reasonable
         if self.output_buffer.len() > 100000 {
-            debug!("Output buffer truncated (was {} bytes)", self.output_buffer.len());
+            debug!(
+                "Output buffer truncated (was {} bytes)",
+                self.output_buffer.len()
+            );
             let split_at = find_char_boundary(&self.output_buffer, 50000);
             self.output_buffer = self.output_buffer.split_off(split_at);
         }
@@ -507,7 +532,11 @@ impl AgentContext {
         if self.pending_enter {
             let idle_time = self.idle_waiter.idle_time_ms();
             let now = Instant::now();
-            debug!("Pending enter: idle_time={}ms, enter_sent={}", idle_time, self.enter_sent_at.is_some());
+            debug!(
+                "Pending enter: idle_time={}ms, enter_sent={}",
+                idle_time,
+                self.enter_sent_at.is_some()
+            );
 
             // Check if we should send Enter (first time - wait for idle)
             if self.enter_sent_at.is_none() {
@@ -531,12 +560,19 @@ impl AgentContext {
                     let elapsed_since_send = now.duration_since(sent_at).as_millis() as u64;
 
                     if self.enter_retry_count == 0 && elapsed_since_send >= ENTER_RETRY_1_MS {
-                        debug!("Retry 1: Sending Enter again after {}ms", elapsed_since_send);
+                        debug!(
+                            "Retry 1: Sending Enter again after {}ms",
+                            elapsed_since_send
+                        );
                         self.do_send_enter(msg_ctx)?;
                         self.enter_retry_count = 1;
                         self.enter_sent_at = Some(now);
-                    } else if self.enter_retry_count == 1 && elapsed_since_send >= ENTER_RETRY_2_MS {
-                        debug!("Retry 2: Sending Enter again after {}ms", elapsed_since_send);
+                    } else if self.enter_retry_count == 1 && elapsed_since_send >= ENTER_RETRY_2_MS
+                    {
+                        debug!(
+                            "Retry 2: Sending Enter again after {}ms",
+                            elapsed_since_send
+                        );
                         self.do_send_enter(msg_ctx)?;
                         self.enter_retry_count = 2;
                         // After second retry, just keep waiting
@@ -554,7 +590,10 @@ impl AgentContext {
 
     /// Actually send the Enter key
     fn do_send_enter(&self, msg_ctx: &MessageContext) -> Result<()> {
-        let mut writer = msg_ctx.writer.lock().map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
+        let mut writer = msg_ctx
+            .writer
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
         writer.write_all(b"\r")?;
         writer.flush()?;
         self.idle_waiter.ping();
@@ -651,8 +690,17 @@ impl AgentContext {
         }
 
         // Check enter patterns
+        let enter_excluded = self
+            .cli_config
+            .enter_exclude
+            .iter()
+            .any(|pattern| pattern.is_match(&buffer));
         for pattern in &self.cli_config.enter {
             if pattern.is_match(&buffer) {
+                if enter_excluded {
+                    debug!("Enter pattern matched but excluded");
+                    return Ok(());
+                }
                 if !self.pending_enter {
                     debug!("Enter pattern matched, scheduling Enter after idle");
                     self.pending_enter = true;

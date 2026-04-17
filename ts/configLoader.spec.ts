@@ -52,6 +52,25 @@ clis:
     expect(config.clis?.gemini?.defaultArgs).toEqual(["--resume"]);
   });
 
+  it("should compile regex sources from YAML config", async () => {
+    const configPath = path.join(testDir, ".agent-yes.config.yaml");
+    await writeFile(
+      configPath,
+      `
+clis:
+  codex:
+    ready:
+      - pattern: '^› '
+        flags: m
+`,
+    );
+
+    const config = await loadCascadingConfig({ projectDir: testDir, homeDir: testDir });
+    expect(config.clis?.codex?.ready?.[0]).toBeInstanceOf(RegExp);
+    expect(config.clis?.codex?.ready?.[0]?.flags).toContain("m");
+    expect(config.clis?.codex?.ready?.[0]?.test("› ")).toBe(true);
+  });
+
   it("should load YML config", async () => {
     const configPath = path.join(testDir, ".agent-yes.config.yml");
     await writeFile(

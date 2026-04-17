@@ -8,6 +8,7 @@ import os from "node:os";
 import { parse as parseYaml } from "yaml";
 import { logger } from "./logger.ts";
 import type { AgentYesConfig } from "./index.ts";
+import { normalizeAgentYesConfig } from "./configShared.ts";
 import { deepMixin } from "./utils.ts";
 
 const CONFIG_FILENAME = ".agent-yes.config";
@@ -34,16 +35,21 @@ async function fileExists(filepath: string): Promise<boolean> {
 async function parseConfigFile(filepath: string): Promise<Partial<AgentYesConfig>> {
   const content = await readFile(filepath, "utf-8");
   const ext = path.extname(filepath).toLowerCase();
+  let parsed: Partial<AgentYesConfig>;
 
   switch (ext) {
     case ".json":
-      return JSON.parse(content);
+      parsed = JSON.parse(content);
+      break;
     case ".yml":
     case ".yaml":
-      return parseYaml(content) ?? {};
+      parsed = parseYaml(content) ?? {};
+      break;
     default:
       throw new Error(`Unsupported config file extension: ${ext}`);
   }
+
+  return normalizeAgentYesConfig(parsed as Partial<AgentYesConfig>);
 }
 
 /**

@@ -100,7 +100,10 @@ impl CoordinatorState {
 
     /// Handle election message from another agent
     pub fn handle_election(&mut self, agent_id: AgentId, priority: u64) {
-        debug!("Received election message from {} with priority {}", agent_id, priority);
+        debug!(
+            "Received election message from {} with priority {}",
+            agent_id, priority
+        );
 
         match &self.state {
             ElectionState::NoCoordinator => {
@@ -118,7 +121,10 @@ impl CoordinatorState {
             ElectionState::Coordinator => {
                 // If someone has higher priority, step down
                 if priority > self.priority {
-                    info!("Stepping down as coordinator, {} has higher priority", agent_id);
+                    info!(
+                        "Stepping down as coordinator, {} has higher priority",
+                        agent_id
+                    );
                     self.state = ElectionState::Follower {
                         coordinator_id: agent_id.clone(),
                     };
@@ -128,7 +134,10 @@ impl CoordinatorState {
             ElectionState::Follower { coordinator_id } => {
                 // If the new agent has higher priority than current coordinator
                 if priority > self.priority {
-                    debug!("New potential coordinator: {} (was {})", agent_id, coordinator_id);
+                    debug!(
+                        "New potential coordinator: {} (was {})",
+                        agent_id, coordinator_id
+                    );
                 }
             }
         }
@@ -163,7 +172,9 @@ impl CoordinatorState {
                     }
                 }
             }
-            ElectionState::Follower { coordinator_id: current } => {
+            ElectionState::Follower {
+                coordinator_id: current,
+            } => {
                 if *current == coordinator_id {
                     self.last_coordinator_heartbeat = Some(Instant::now());
                 } else {

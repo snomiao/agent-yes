@@ -142,8 +142,12 @@ pub fn is_room_code(s: &str) -> bool {
         if parts.len() == 2 {
             return parts[0].len() == 3
                 && parts[1].len() == 3
-                && parts[0].chars().all(|c| ROOM_CODE_CHARS.contains(&(c as u8)))
-                && parts[1].chars().all(|c| ROOM_CODE_CHARS.contains(&(c as u8)));
+                && parts[0]
+                    .chars()
+                    .all(|c| ROOM_CODE_CHARS.contains(&(c as u8)))
+                && parts[1]
+                    .chars()
+                    .all(|c| ROOM_CODE_CHARS.contains(&(c as u8)));
         }
     }
 

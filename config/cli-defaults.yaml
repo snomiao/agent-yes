@@ -1,0 +1,154 @@
+clis:
+  claude:
+    promptArg: last-arg
+    systemPrompt: --append-system-prompt
+    install:
+      powershell: 'powershell -Command "irm https://claude.ai/install.ps1 | iex"'
+      bash: "curl -fsSL https://claude.ai/install.sh | bash"
+      npm: "npm i -g @anthropic-ai/claude-code@latest"
+    ready:
+      - '\? for shortcuts'
+      - ' Try "'
+      - '^\? for shortcuts'
+      - "^>[  ]"
+      - "──────────+"
+    working:
+      - esc to interrupt
+      - to run in background
+    typingRespond:
+      "1\n":
+        - '│ Do you want to use this API key\?'
+    enter:
+      - pattern: ' > 1\. Yes, I trust this folder'
+        flags: m
+      - pattern: '❯ ?1\. ?Dark mode ?✔'
+        flags: m
+      - pattern: '❯ ?1\. ?Yes'
+        flags: m
+      - pattern: '^.{0,4} ?1\. ?Dark mode ?✔'
+        flags: m
+      - pattern: '^.{0,4} ?1\. ?Yes'
+        flags: m
+      - pattern: Press Enter to continue
+        flags: m
+    fatal:
+      - Claude usage limit reached
+      - "^error: unknown option"
+    restoreArgs:
+      - --continue
+    restartWithoutContinueArg:
+      - No conversation found to continue
+    exitCommands:
+      - /exit
+    bunx: true
+    defaultArgs: []
+
+  gemini:
+    install:
+      npm: "npm install -g @google/gemini-cli@latest"
+    ready:
+      - Type your message
+    enter:
+      - "│ ● 1. Yes, allow once"
+      - "│ ● 1. Allow once"
+      - "│ ● 1. Allow once"
+    fatal:
+      - Error resuming session
+      - No previous sessions found for this project\.
+    restoreArgs:
+      - --resume
+    restartWithoutContinueArg:
+      - Error resuming session
+      - No previous sessions found for this project\.
+    exitCommands:
+      - /chat save ${PWD}
+      - /quit
+
+  codex:
+    promptArg: first-arg
+    install:
+      npm: "npm install -g @openai/codex@latest"
+    updateAvailable:
+      - "^✨⬆️ Update available!"
+    ready:
+      - ⏎ send
+      - "^› "
+      - '\? for shortcuts'
+    enter:
+      - "> 1. Yes,"
+      - "> 1. Yes, allow Codex to work in this folder"
+      - "> 1. Approve and run now"
+    fatal:
+      - "Error: The cursor position could not be read within"
+    defaultArgs:
+      - --search
+    noEOL: true
+
+  qwen:
+    install:
+      npm: "npm install -g @qwen-code/qwen-code@latest"
+    version: qwen --version
+
+  grok:
+    install:
+      npm: "npm install -g @vibe-kit/grok-cli@latest"
+    ready:
+      - "^  │ ❯ +"
+    enter:
+      - "^   1. Yes"
+
+  copilot:
+    promptArg: -i
+    install:
+      npm: "npm install -g @github/copilot"
+    ready:
+      - "^ +> "
+      - Ctrl\+c Exit
+    enter:
+      - " │ ❯ +1. Yes, proceed"
+      - " ❯ +1. Yes"
+    system: "IMPORTANT: USE TOOLS TO RESEARCH/EXPLORE/WORKAROUND your self, except you need approve on DESTRUCTIVE OPERATIONS, DONT ASK QUESTIONS ON USERS REQUEST, JUST SOLVE IT."
+    fatal: []
+
+  cursor:
+    install:
+      bash: open https://cursor.com/ja/docs/cli/installation
+    binary: cursor-agent
+    bunx: true
+    ready:
+      - / commands
+    enter:
+      - '→ Run \(once\) \(y\) \(enter\)'
+      - '▶ \[a\] Trust this workspace'
+    fatal:
+      - "Error: You've hit your usage limit"
+
+  auggie:
+    help: https://docs.augmentcode.com/cli/overview
+    install:
+      npm: "npm install -g @augmentcode/auggie"
+    promptArg: first-arg
+    ready:
+      - " > "
+      - '\? to show shortcuts'
+    typingRespond:
+      "y\n":
+        - '\[Y\] Enable indexing - Unlock full workspace understanding'
+    enter: []
+    fatal: []
+
+  amp:
+    help: https://ampcode.com/
+    install:
+      bash: "curl -fsSL https://ampcode.com/install.sh | bash"
+      npm: "npm i -g @sourcegraph/amp"
+    enter:
+      - "^.{0,4} Approve "
+
+  opencode:
+    help: https://opencode.ai/
+    install:
+      bash: "curl -fsSL https://opencode.ai/install | bash"
+      npm: "npm i -g opencode-ai"
+    enter: []
+    ready: []

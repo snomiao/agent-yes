@@ -50,7 +50,11 @@ async fn main() -> Result<()> {
     logger::init(args.verbose);
 
     let install_method = detect_install_method();
-    info!("agent-yes v{} ({})", env!("CARGO_PKG_VERSION"), install_method);
+    info!(
+        "agent-yes v{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        install_method
+    );
 
     // Capture current working directory early
     let cwd = std::env::current_dir()
@@ -80,12 +84,12 @@ async fn main() -> Result<()> {
 }
 
 async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
-    use crate::config::get_cli_config;
+    use crate::config::get_runtime_cli_config;
     use crate::context::AgentContext;
     use crate::pid_store::PidStore;
     use crate::pty_spawner::spawn_agent;
 
-    let cli_config = get_cli_config(&args.cli)?;
+    let cli_config = get_runtime_cli_config(&args.cli)?;
 
     // Build command arguments
     let mut cmd_args = args.cli_args.clone();
@@ -163,11 +167,19 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
 
         // Register in PID store and send RUNNING webhook
         let log_file = agent_ctx.raw_log_path();
-        pid_store.register(pid, &args.cli, args.prompt.as_deref(), cwd, log_file.as_deref());
+        pid_store.register(
+            pid,
+            &args.cli,
+            args.prompt.as_deref(),
+            cwd,
+            log_file.as_deref(),
+        );
         webhook::notify("RUNNING", args.prompt.as_deref().unwrap_or(""), cwd);
 
         // Run the main loop
-        let exit_code = agent_ctx.run(&mut ctx, args.timeout_ms, args.idle_action.as_deref()).await?;
+        let exit_code = agent_ctx
+            .run(&mut ctx, args.timeout_ms, args.idle_action.as_deref())
+            .await?;
 
         // Update PID store and send EXIT webhook
         let exit_reason = if agent_ctx.is_user_abort {
@@ -180,7 +192,11 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             "crashed"
         };
         pid_store.update_status(pid, "exited", Some(exit_code), Some(exit_reason));
-        webhook::notify("EXIT", &format!("{} exitCode={}", exit_reason, exit_code), cwd);
+        webhook::notify(
+            "EXIT",
+            &format!("{} exitCode={}", exit_reason, exit_code),
+            cwd,
+        );
 
         // Handle restart-without-continue (e.g., "No conversation found to continue")
         // Must be checked before normal crash restart to avoid re-adding --continue
@@ -208,7 +224,9 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
 /// Run in swarm mode - P2P agent networking
 #[cfg(feature = "swarm")]
 async fn run_swarm_mode(args: CliArgs, cwd: &str) -> Result<i32> {
-    use crate::swarm::{SwarmConfig, SwarmNode, SwarmEvent2, SwarmCommand, SwarmUrlConfig, generate_room_code};
+    use crate::swarm::{
+        generate_room_code, SwarmCommand, SwarmConfig, SwarmEvent2, SwarmNode, SwarmUrlConfig,
+    };
     use tokio::sync::mpsc;
     use tracing::{info, warn};
 
@@ -237,7 +255,8 @@ async fn run_swarm_mode(args: CliArgs, cwd: &str) -> Result<i32> {
         info!("  Resolving room code: {}", code);
     }
 
-    let listen_addr = url_config.listen_addr
+    let listen_addr = url_config
+        .listen_addr
         .or(args.swarm_listen)
         .unwrap_or_else(|| "/ip4/0.0.0.0/tcp/0".to_string());
 
@@ -304,7 +323,9 @@ async fn run_swarm_mode(args: CliArgs, cwd: &str) -> Result<i32> {
                         if prompt.is_empty() {
                             println!("Usage: /task <prompt>");
                         } else {
-                            let _ = cmd_tx_clone.send(SwarmCommand::BroadcastTask { prompt }).await;
+                            let _ = cmd_tx_clone
+                                .send(SwarmCommand::BroadcastTask { prompt })
+                                .await;
                         }
                     } else if line.starts_with("/chat") {
                         let message = line.strip_prefix("/chat").unwrap_or("").trim().to_string();
@@ -326,7 +347,11 @@ async fn run_swarm_mode(args: CliArgs, cwd: &str) -> Result<i32> {
                         println!("  /quit           - Exit swarm mode");
                     } else if !line.is_empty() && !line.starts_with("/") {
                         // Treat non-command input as chat
-                        let _ = cmd_tx_clone.send(SwarmCommand::Chat { message: line.to_string() }).await;
+                        let _ = cmd_tx_clone
+                            .send(SwarmCommand::Chat {
+                                message: line.to_string(),
+                            })
+                            .await;
                     } else if !line.is_empty() {
                         println!("Unknown command: {}. Try /help", line);
                     }
@@ -364,10 +389,21 @@ async fn run_swarm_mode(args: CliArgs, cwd: &str) -> Result<i32> {
                 SwarmEvent2::NewCoordinator { coordinator_id } => {
                     println!("\n[*] New coordinator: {}", coordinator_id);
                 }
-                SwarmEvent2::Status { peer_count, is_coordinator, coordinator_id } => {
+                SwarmEvent2::Status {
+                    peer_count,
+                    is_coordinator,
+                    coordinator_id,
+                } => {
                     println!("\n[Status]");
                     println!("  Peers: {}", peer_count);
-                    println!("  Coordinator: {}", if is_coordinator { "You" } else { coordinator_id.as_deref().unwrap_or("Unknown") });
+                    println!(
+                        "  Coordinator: {}",
+                        if is_coordinator {
+                            "You"
+                        } else {
+                            coordinator_id.as_deref().unwrap_or("Unknown")
+                        }
+                    );
                 }
             }
             print!("> ");

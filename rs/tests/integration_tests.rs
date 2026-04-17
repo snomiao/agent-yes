@@ -140,7 +140,6 @@ wait $AY_PID 2>/dev/null || true
     );
 }
 
-
 #[test]
 fn test_version() {
     let mut cmd = Command::cargo_bin("agent-yes").unwrap();
@@ -162,10 +161,7 @@ fn test_help() {
 #[test]
 fn test_unknown_cli() {
     let mut cmd = Command::cargo_bin("agent-yes").unwrap();
-    cmd.arg("--cli")
-        .arg("unknown_cli")
-        .assert()
-        .failure();
+    cmd.arg("--cli").arg("unknown_cli").assert().failure();
 }
 
 /// Create a mock CLI that prints its working directory
@@ -227,8 +223,8 @@ fn test_cwd_is_preserved() {
     // Check that the working directory printed by the CLI matches our test_subdir
     let expected_pwd = test_subdir.canonicalize().unwrap();
     assert!(
-        stdout.contains(&format!("PWD: {}", expected_pwd.display())) ||
-        stderr.contains(&format!("PWD: {}", expected_pwd.display())),
+        stdout.contains(&format!("PWD: {}", expected_pwd.display()))
+            || stderr.contains(&format!("PWD: {}", expected_pwd.display())),
         "Expected PWD: {} but got stdout:\n{}\nstderr:\n{}",
         expected_pwd.display(),
         stdout,

@@ -1,9 +1,15 @@
 //! CLI tool configuration module
 
-use anyhow::{anyhow, Result};
+use crate::config_loader::{
+    load_cascading_config, CliConfigOverride, ConfigFile, InstallConfigOverride, RegexSource,
+};
+use anyhow::{anyhow, Context, Result};
 use regex::Regex;
 use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::OnceLock;
+
+const BUILTIN_CLI_DEFAULTS: &str = include_str!("../../config/cli-defaults.yaml");
 
 /// Configuration for a CLI tool
 #[derive(Debug, Clone)]
@@ -14,14 +20,28 @@ pub struct CliConfig {
     pub binary: Option<String>,
     /// Install command
     pub install: InstallConfig,
+    /// Version command
+    pub version: Option<String>,
+    /// Help URL or hint
+    pub help: Option<String>,
+    /// Use bunx metadata
+    pub bunx: bool,
+    /// System prompt flag
+    pub system_prompt: Option<String>,
+    /// System prompt content
+    pub system: Option<String>,
     /// Ready patterns (agent is ready for input)
     pub ready: Vec<Regex>,
     /// Working patterns (agent is currently processing)
     pub working: Vec<Regex>,
     /// Enter patterns (auto-press Enter)
     pub enter: Vec<Regex>,
+    /// Enter exclusion patterns
+    pub enter_exclude: Vec<Regex>,
     /// Fatal patterns (exit on match)
     pub fatal: Vec<Regex>,
+    /// Update available banner patterns
+    pub update_available: Vec<Regex>,
     /// Typing responses (send text on pattern match)
     pub typing_respond: HashMap<String, Vec<Regex>>,
     /// Restart with continue patterns
@@ -36,335 +56,175 @@ pub struct CliConfig {
     pub no_eol: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct InstallConfig {
+    pub single: Option<String>,
     pub npm: Option<String>,
     pub bash: Option<String>,
     pub powershell: Option<String>,
-}
-
-impl Default for InstallConfig {
-    fn default() -> Self {
-        Self {
-            npm: None,
-            bash: None,
-            powershell: None,
-        }
-    }
+    pub unix: Option<String>,
+    pub windows: Option<String>,
 }
 
 /// Get configuration for a specific CLI.
 /// All configs are compiled once and cached for the process lifetime.
+#[cfg(test)]
 pub fn get_cli_config(cli: &str) -> Result<CliConfig> {
-    static CONFIGS: OnceLock<HashMap<&'static str, CliConfig>> = OnceLock::new();
-    let configs = CONFIGS.get_or_init(|| {
-        HashMap::from([
-            ("claude", claude_config()),
-            ("gemini", gemini_config()),
-            ("codex", codex_config()),
-            ("copilot", copilot_config()),
-            ("cursor", cursor_config()),
-            ("grok", grok_config()),
-            ("qwen", qwen_config()),
-            ("auggie", auggie_config()),
-            ("amp", amp_config()),
-            ("opencode", opencode_config()),
-        ])
-    });
-    configs.get(cli).cloned().ok_or_else(|| anyhow!("Unknown CLI: {}", cli))
+    static CONFIGS: OnceLock<Result<HashMap<String, CliConfig>, String>> = OnceLock::new();
+    let configs = CONFIGS.get_or_init(|| load_builtin_cli_configs().map_err(|err| err.to_string()));
+    let configs = configs
+        .as_ref()
+        .map_err(|err| anyhow!("Failed to load CLI defaults: {}", err))?;
+
+    configs
+        .get(cli)
+        .cloned()
+        .ok_or_else(|| anyhow!("Unknown CLI: {}", cli))
 }
 
-fn claude_config() -> CliConfig {
-    CliConfig {
-        prompt_arg: "last-arg".to_string(),
-        binary: None,
-        install: InstallConfig {
-            powershell: Some(
-                r#"powershell -Command "irm https://claude.ai/install.ps1 | iex""#.to_string(),
-            ),
-            bash: Some("curl -fsSL https://claude.ai/install.sh | bash".to_string()),
-            npm: Some("npm i -g @anthropic-ai/claude-code@latest".to_string()),
+/// Get configuration for a specific CLI with runtime cascading overrides applied.
+pub fn get_runtime_cli_config(cli: &str) -> Result<CliConfig> {
+    let mut merged = load_builtin_config_file()?;
+    merged.merge(load_cascading_config());
+
+    build_cli_configs(merged)?
+        .remove(cli)
+        .ok_or_else(|| anyhow!("Unknown CLI: {}", cli))
+}
+
+#[cfg(test)]
+fn load_builtin_cli_configs() -> Result<HashMap<String, CliConfig>> {
+    build_cli_configs(load_builtin_config_file()?)
+}
+
+fn load_builtin_config_file() -> Result<ConfigFile> {
+    serde_yaml::from_str(BUILTIN_CLI_DEFAULTS)
+        .context("Failed to parse embedded config/cli-defaults.yaml")
+}
+
+fn build_cli_configs(config: ConfigFile) -> Result<HashMap<String, CliConfig>> {
+    config
+        .clis
+        .into_iter()
+        .map(|(name, raw)| {
+            build_cli_config(raw)
+                .with_context(|| format!("Failed to build CLI config for '{}'", name))
+                .map(|cfg| (name, cfg))
+        })
+        .collect()
+}
+
+fn build_cli_config(raw: CliConfigOverride) -> Result<CliConfig> {
+    Ok(CliConfig {
+        prompt_arg: raw.prompt_arg.unwrap_or_else(|| "last-arg".to_string()),
+        binary: raw.binary,
+        install: compile_install_config(raw.install),
+        version: raw.version,
+        help: raw.help,
+        bunx: raw.bunx.unwrap_or(false),
+        system_prompt: raw.system_prompt,
+        system: raw.system,
+        ready: compile_regex_list(raw.ready)?,
+        working: compile_regex_list(raw.working)?,
+        enter: compile_regex_list(raw.enter)?,
+        enter_exclude: compile_regex_list(raw.enter_exclude)?,
+        fatal: compile_regex_list(raw.fatal)?,
+        update_available: compile_regex_list(raw.update_available)?,
+        typing_respond: compile_typing_respond(raw.typing_respond)?,
+        restart_without_continue: compile_regex_list(raw.restart_without_continue_arg)?,
+        restore_args: raw.restore_args.unwrap_or_default(),
+        exit_command: raw.exit_commands.unwrap_or_default(),
+        default_args: raw.default_args.unwrap_or_default(),
+        no_eol: raw.no_eol.unwrap_or(false),
+    })
+}
+
+fn compile_install_config(install: Option<InstallConfigOverride>) -> InstallConfig {
+    match install {
+        Some(InstallConfigOverride::Single(command)) => InstallConfig {
+            single: Some(command),
+            ..InstallConfig::default()
         },
-        ready: vec![
-            Regex::new(r"\? for shortcuts").unwrap(),
-            Regex::new(r"\u{00A0}Try ").unwrap(),
-            Regex::new(r"^\? for shortcuts").unwrap(),
-            Regex::new(r"^>[ \u{00A0}]").unwrap(),
-            Regex::new(r"─{10,}").unwrap(),
-        ],
-        working: vec![
-            Regex::new(r"esc to interrupt").unwrap(),
-            Regex::new(r"to run in background").unwrap(),
-        ],
-        typing_respond: {
-            let mut map = HashMap::new();
-            map.insert(
-                "1\n".to_string(),
-                vec![Regex::new(r"Do you want to use this API key\?").unwrap()],
-            );
-            map
+        Some(InstallConfigOverride::Multiple {
+            npm,
+            bash,
+            powershell,
+            unix,
+            windows,
+        }) => InstallConfig {
+            single: None,
+            npm,
+            bash,
+            powershell,
+            unix,
+            windows,
         },
-        enter: vec![
-            Regex::new(r" > 1\. Yes, I trust this folder").unwrap(),
-            Regex::new(r"❯ ?1\. ?Dark mode").unwrap(),
-            Regex::new(r"❯ ?1\. ?Yes").unwrap(),
-            Regex::new(r"^.{0,4} ?1\. ?Dark mode").unwrap(),
-            Regex::new(r"^.{0,4} ?1\. ?Yes").unwrap(),
-            Regex::new(r"Press Enter to continue").unwrap(),
-        ],
-        fatal: vec![
-            Regex::new(r"Claude usage limit reached").unwrap(),
-            Regex::new(r"^error: unknown option").unwrap(),
-        ],
-        restore_args: vec!["--continue".to_string()],
-        restart_without_continue: vec![
-            Regex::new(r"No conversation found to continue").unwrap(),
-        ],
-        exit_command: vec!["/exit".to_string()],
-        default_args: vec![],
-        no_eol: false,
+        None => InstallConfig::default(),
     }
 }
 
-fn gemini_config() -> CliConfig {
-    CliConfig {
-        prompt_arg: "last-arg".to_string(),
-        binary: None,
-        install: InstallConfig {
-            npm: Some("npm install -g @google/gemini-cli@latest".to_string()),
-            bash: None,
-            powershell: None,
-        },
-        ready: vec![Regex::new(r"Type your message").unwrap()],
-        working: vec![],
-        typing_respond: HashMap::new(),
-        enter: vec![
-            Regex::new(r"│ ● 1\. Yes, allow once").unwrap(),
-            Regex::new(r"│ ● 1\. Allow once").unwrap(),
-        ],
-        fatal: vec![
-            Regex::new(r"Error resuming session").unwrap(),
-            Regex::new(r"No previous sessions found for this project").unwrap(),
-        ],
-        restore_args: vec!["--resume".to_string()],
-        restart_without_continue: vec![
-            Regex::new(r"No previous sessions found for this project").unwrap(),
-            Regex::new(r"Error resuming session").unwrap(),
-        ],
-        exit_command: vec!["/chat save ${PWD}".to_string(), "/quit".to_string()],
-        default_args: vec![],
-        no_eol: false,
-    }
+fn compile_typing_respond(
+    typing_respond: Option<HashMap<String, Vec<RegexSource>>>,
+) -> Result<HashMap<String, Vec<Regex>>> {
+    typing_respond
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(message, sources)| {
+            compile_regex_list(Some(sources)).map(|compiled| (message, compiled))
+        })
+        .collect()
 }
 
-fn codex_config() -> CliConfig {
-    CliConfig {
-        prompt_arg: "first-arg".to_string(),
-        binary: None,
-        install: InstallConfig {
-            npm: Some("npm install -g @openai/codex@latest".to_string()),
-            bash: None,
-            powershell: None,
-        },
-        ready: vec![
-            Regex::new(r"⏎ send").unwrap(),
-            Regex::new(r"^› ").unwrap(),
-            Regex::new(r"\? for shortcuts").unwrap(),
-        ],
-        working: vec![],
-        typing_respond: HashMap::new(),
-        enter: vec![
-            Regex::new(r"› 1\. Yes,").unwrap(),
-            Regex::new(r"> 1\. Yes,").unwrap(),
-            Regex::new(r"> 1\. Approve and run now").unwrap(),
-            Regex::new(r"› 1\. Approve and run now").unwrap(),
-        ],
-        fatal: vec![Regex::new(r"Error: The cursor position could not be read within").unwrap()],
-        restore_args: vec![],
-        restart_without_continue: vec![],
-        exit_command: vec![],
-        default_args: vec!["--search".to_string()],
-        no_eol: true,
-    }
+fn compile_regex_list(sources: Option<Vec<RegexSource>>) -> Result<Vec<Regex>> {
+    sources
+        .unwrap_or_default()
+        .into_iter()
+        .map(compile_regex)
+        .collect()
 }
 
-fn copilot_config() -> CliConfig {
-    CliConfig {
-        prompt_arg: "-i".to_string(),
-        binary: None,
-        install: InstallConfig {
-            npm: Some("npm install -g @github/copilot".to_string()),
-            bash: None,
-            powershell: None,
-        },
-        ready: vec![
-            Regex::new(r"^ +> ").unwrap(),
-            Regex::new(r"Ctrl\+c Exit").unwrap(),
-        ],
-        working: vec![],
-        typing_respond: HashMap::new(),
-        enter: vec![
-            Regex::new(r" │ ❯ +1\. Yes, proceed").unwrap(),
-            Regex::new(r" ❯ +1\. Yes").unwrap(),
-        ],
-        fatal: vec![],
-        restore_args: vec![],
-        restart_without_continue: vec![],
-        exit_command: vec![],
-        default_args: vec![],
-        no_eol: false,
-    }
+fn compile_regex(source: RegexSource) -> Result<Regex> {
+    let (pattern, flags) = match source {
+        RegexSource::Pattern(pattern) => (pattern, None),
+        RegexSource::Structured { pattern, flags } => (pattern, flags),
+    };
+
+    let inline_flags = compile_inline_flags(flags.as_deref().unwrap_or(""))?;
+    let compiled = format!("{}{}", inline_flags, pattern);
+    Regex::new(&compiled).with_context(|| format!("Invalid regex pattern '{}'", pattern))
 }
 
-fn cursor_config() -> CliConfig {
-    CliConfig {
-        prompt_arg: "last-arg".to_string(),
-        binary: Some("cursor-agent".to_string()),
-        install: InstallConfig {
-            npm: None,
-            bash: Some("open https://cursor.com/ja/docs/cli/installation".to_string()),
-            powershell: None,
-        },
-        ready: vec![Regex::new(r"/ commands").unwrap()],
-        working: vec![],
-        typing_respond: HashMap::new(),
-        enter: vec![
-            Regex::new(r"→ Run \(once\) \(y\) \(enter\)").unwrap(),
-            Regex::new(r"▶ \[a\] Trust this workspace").unwrap(),
-        ],
-        fatal: vec![Regex::new(r"Error: You've hit your usage limit").unwrap()],
-        restore_args: vec![],
-        restart_without_continue: vec![],
-        exit_command: vec![],
-        default_args: vec![],
-        no_eol: false,
+fn compile_inline_flags(flags: &str) -> Result<String> {
+    if flags.is_empty() {
+        return Ok(String::new());
     }
-}
 
-fn grok_config() -> CliConfig {
-    CliConfig {
-        prompt_arg: "last-arg".to_string(),
-        binary: None,
-        install: InstallConfig {
-            npm: Some("npm install -g @vibe-kit/grok-cli@latest".to_string()),
-            bash: None,
-            powershell: None,
-        },
-        ready: vec![Regex::new(r"^  │ ❯ +").unwrap()],
-        working: vec![],
-        typing_respond: HashMap::new(),
-        enter: vec![Regex::new(r"^   1\. Yes").unwrap()],
-        fatal: vec![],
-        restore_args: vec![],
-        restart_without_continue: vec![],
-        exit_command: vec![],
-        default_args: vec![],
-        no_eol: false,
+    let mut normalized = String::new();
+    for flag in flags.chars() {
+        match flag {
+            'i' | 'm' | 's' | 'x' | 'U' => normalized.push(flag),
+            'u' => {}
+            other => return Err(anyhow!("Unsupported regex flag '{}'", other)),
+        }
     }
-}
 
-fn qwen_config() -> CliConfig {
-    CliConfig {
-        prompt_arg: "last-arg".to_string(),
-        binary: None,
-        install: InstallConfig {
-            npm: Some("npm install -g @qwen-code/qwen-code@latest".to_string()),
-            bash: None,
-            powershell: None,
-        },
-        ready: vec![],
-        working: vec![],
-        typing_respond: HashMap::new(),
-        enter: vec![],
-        fatal: vec![],
-        restore_args: vec![],
-        restart_without_continue: vec![],
-        exit_command: vec![],
-        default_args: vec![],
-        no_eol: false,
-    }
-}
-
-fn auggie_config() -> CliConfig {
-    CliConfig {
-        prompt_arg: "first-arg".to_string(),
-        binary: None,
-        install: InstallConfig {
-            npm: Some("npm install -g @augmentcode/auggie".to_string()),
-            bash: None,
-            powershell: None,
-        },
-        ready: vec![
-            Regex::new(r" > ").unwrap(),
-            Regex::new(r"\? to show shortcuts").unwrap(),
-        ],
-        working: vec![],
-        typing_respond: {
-            let mut map = HashMap::new();
-            map.insert(
-                "y\n".to_string(),
-                vec![Regex::new(r"\[Y\] Enable indexing - Unlock full workspace understanding")
-                    .unwrap()],
-            );
-            map
-        },
-        enter: vec![],
-        fatal: vec![],
-        restore_args: vec![],
-        restart_without_continue: vec![],
-        exit_command: vec![],
-        default_args: vec![],
-        no_eol: false,
-    }
-}
-
-fn amp_config() -> CliConfig {
-    CliConfig {
-        prompt_arg: "last-arg".to_string(),
-        binary: None,
-        install: InstallConfig {
-            bash: Some("curl -fsSL https://ampcode.com/install.sh | bash".to_string()),
-            npm: Some("npm i -g @sourcegraph/amp".to_string()),
-            powershell: None,
-        },
-        ready: vec![],
-        working: vec![],
-        typing_respond: HashMap::new(),
-        enter: vec![Regex::new(r"^.{0,4} Approve ").unwrap()],
-        fatal: vec![],
-        restore_args: vec![],
-        restart_without_continue: vec![],
-        exit_command: vec![],
-        default_args: vec![],
-        no_eol: false,
-    }
-}
-
-fn opencode_config() -> CliConfig {
-    CliConfig {
-        prompt_arg: "last-arg".to_string(),
-        binary: None,
-        install: InstallConfig {
-            bash: Some("curl -fsSL https://opencode.ai/install | bash".to_string()),
-            npm: Some("npm i -g opencode-ai".to_string()),
-            powershell: None,
-        },
-        ready: vec![],
-        working: vec![],
-        typing_respond: HashMap::new(),
-        enter: vec![],
-        fatal: vec![],
-        restore_args: vec![],
-        restart_without_continue: vec![],
-        exit_command: vec![],
-        default_args: vec![],
-        no_eol: false,
+    if normalized.is_empty() {
+        Ok(String::new())
+    } else {
+        Ok(format!("(?{})", normalized))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn merged_config_from_yaml(cli: &str, yaml: &str) -> CliConfig {
+        let mut merged = load_builtin_config_file().unwrap();
+        let overrides: ConfigFile = serde_yaml::from_str(yaml).unwrap();
+        merged.merge(overrides);
+        build_cli_configs(merged).unwrap().remove(cli).unwrap()
+    }
 
     #[test]
     fn test_get_cli_config() {
@@ -385,6 +245,10 @@ mod tests {
         let config = get_cli_config("claude").unwrap();
         assert!(config.ready[0].is_match("? for shortcuts"));
         assert!(config.enter[2].is_match("❯ 1. Yes"));
+        assert!(config
+            .enter
+            .iter()
+            .any(|rx| rx.is_match("Press Enter to continue")));
         assert!(!config.working.is_empty());
         assert!(config.working[0].is_match("esc to interrupt"));
         assert!(!config.fatal.is_empty());
@@ -397,6 +261,12 @@ mod tests {
         assert!(config.default_args.is_empty());
         assert!(!config.no_eol);
         assert!(config.binary.is_none());
+        assert_eq!(config.system_prompt, Some("--append-system-prompt".into()));
+        assert!(config.system.is_none());
+        assert!(config.bunx);
+        assert!(config.enter_exclude.is_empty());
+        assert!(config.update_available.is_empty());
+        assert!(config.install.single.is_none());
         assert!(config.install.bash.is_some());
         assert!(config.install.powershell.is_some());
         assert!(config.install.npm.is_some());
@@ -418,6 +288,7 @@ mod tests {
         assert_eq!(config.restore_args, vec!["--resume"]);
         assert!(!config.restart_without_continue.is_empty());
         assert!(!config.exit_command.is_empty());
+        assert!(config.update_available.is_empty());
         assert!(!config.no_eol);
         assert!(config.typing_respond.is_empty());
     }
@@ -433,6 +304,8 @@ mod tests {
         assert!(config.ready.iter().any(|rx| rx.is_match("› ")));
         assert!(!config.enter.is_empty());
         assert!(!config.fatal.is_empty());
+        assert!(!config.update_available.is_empty());
+        assert!(config.update_available[0].is_match("✨⬆️ Update available!"));
         assert!(config.restore_args.is_empty());
         assert!(config.restart_without_continue.is_empty());
         assert!(config.exit_command.is_empty());
@@ -451,6 +324,10 @@ mod tests {
         assert!(!config.enter.is_empty());
         assert!(config.fatal.is_empty());
         assert!(config.restore_args.is_empty());
+        assert_eq!(
+            config.system,
+            Some("IMPORTANT: USE TOOLS TO RESEARCH/EXPLORE/WORKAROUND your self, except you need approve on DESTRUCTIVE OPERATIONS, DONT ASK QUESTIONS ON USERS REQUEST, JUST SOLVE IT.".into())
+        );
         assert!(!config.no_eol);
     }
 
@@ -466,6 +343,7 @@ mod tests {
         assert!(!config.enter.is_empty());
         assert!(!config.fatal.is_empty());
         assert!(config.fatal[0].is_match("Error: You've hit your usage limit"));
+        assert!(config.bunx);
         assert!(!config.no_eol);
     }
 
@@ -488,6 +366,7 @@ mod tests {
         assert_eq!(config.prompt_arg, "last-arg");
         assert!(config.binary.is_none());
         assert!(config.install.npm.is_some());
+        assert_eq!(config.version, Some("qwen --version".into()));
         assert!(config.ready.is_empty());
         assert!(config.working.is_empty());
         assert!(config.enter.is_empty());
@@ -506,6 +385,10 @@ mod tests {
         assert!(config.ready[1].is_match("? to show shortcuts"));
         assert!(!config.typing_respond.is_empty());
         assert!(config.typing_respond.contains_key("y\n"));
+        assert_eq!(
+            config.help,
+            Some("https://docs.augmentcode.com/cli/overview".into())
+        );
         assert!(config.enter.is_empty());
         assert!(!config.no_eol);
     }
@@ -517,6 +400,7 @@ mod tests {
         assert!(config.binary.is_none());
         assert!(config.install.bash.is_some());
         assert!(config.install.npm.is_some());
+        assert_eq!(config.help, Some("https://ampcode.com/".into()));
         assert!(config.ready.is_empty());
         assert!(!config.enter.is_empty());
         assert!(config.enter[0].is_match("  Approve "));
@@ -531,6 +415,7 @@ mod tests {
         assert!(config.binary.is_none());
         assert!(config.install.bash.is_some());
         assert!(config.install.npm.is_some());
+        assert_eq!(config.help, Some("https://opencode.ai/".into()));
         assert!(config.ready.is_empty());
         assert!(config.enter.is_empty());
         assert!(config.fatal.is_empty());
@@ -540,14 +425,50 @@ mod tests {
     #[test]
     fn test_install_config_default() {
         let ic = InstallConfig::default();
+        assert!(ic.single.is_none());
         assert!(ic.npm.is_none());
         assert!(ic.bash.is_none());
         assert!(ic.powershell.is_none());
+        assert!(ic.unix.is_none());
+        assert!(ic.windows.is_none());
+    }
+
+    #[test]
+    fn test_merged_config_compiles_runtime_overrides() {
+        let config = merged_config_from_yaml(
+            "codex",
+            r#"
+clis:
+  codex:
+    install: npm install -g custom-codex
+    ready:
+      - pattern: '^custom ready$'
+        flags: m
+    enterExclude:
+      - '^skip-enter$'
+    updateAvailable:
+      - '^custom update$'
+    exitCommands:
+      - /quit
+"#,
+        );
+
+        assert_eq!(
+            config.install.single,
+            Some("npm install -g custom-codex".into())
+        );
+        assert!(config.install.npm.is_none());
+        assert_eq!(config.exit_command, vec!["/quit"]);
+        assert_eq!(config.ready.len(), 1);
+        assert!(config.ready[0].is_match("custom ready"));
+        assert_eq!(config.enter_exclude.len(), 1);
+        assert!(config.enter_exclude[0].is_match("skip-enter"));
+        assert_eq!(config.update_available.len(), 1);
+        assert!(config.update_available[0].is_match("custom update"));
     }
 
     #[test]
     fn test_all_supported_clis() {
-        // Ensure every CLI in the match returns Ok
         let clis = vec![
             "claude", "gemini", "codex", "copilot", "cursor", "grok", "qwen", "auggie", "amp",
             "opencode",

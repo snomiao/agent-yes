@@ -66,7 +66,10 @@ impl RunningLock {
                     tokio::time::sleep(Duration::from_secs(2)).await;
                     waited_secs += 2;
                     if waited_secs % 30 == 0 {
-                        info!("Still waiting for lock after {}s (PID {} in {})", waited_secs, b.pid, b.cwd);
+                        info!(
+                            "Still waiting for lock after {}s (PID {} in {})",
+                            waited_secs, b.pid, b.cwd
+                        );
                     }
                     self.clean_stale();
                 }
@@ -101,7 +104,8 @@ impl RunningLock {
 
     fn clean_stale(&self) {
         let mut lock = self.read().unwrap_or_default();
-        lock.tasks.retain(|t| crate::pid_store::is_process_alive(t.pid));
+        lock.tasks
+            .retain(|t| crate::pid_store::is_process_alive(t.pid));
         if let Err(e) = self.write(&lock) {
             warn!("RunningLock: failed to write after clean_stale: {}", e);
         }

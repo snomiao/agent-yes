@@ -100,7 +100,10 @@ mod tests {
     #[test]
     fn test_notify_with_env_set() {
         // Set to an invalid URL — curl will fail but notify() shouldn't panic
-        std::env::set_var("AGENT_YES_MESSAGE_WEBHOOK", "http://127.0.0.1:1/test?msg=%s");
+        std::env::set_var(
+            "AGENT_YES_MESSAGE_WEBHOOK",
+            "http://127.0.0.1:1/test?msg=%s",
+        );
         notify("started", "test run", "/tmp/test");
         // Give background thread a moment to spawn
         std::thread::sleep(std::time::Duration::from_millis(100));

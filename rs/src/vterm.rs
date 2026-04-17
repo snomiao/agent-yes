@@ -16,18 +16,12 @@ struct ResponseCollector {
 
 impl ResponseCollector {
     fn take_responses(&self) -> Vec<Vec<u8>> {
-        let mut responses = self
-            .responses
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut responses = self.responses.lock().unwrap_or_else(|e| e.into_inner());
         std::mem::take(&mut *responses)
     }
 
     fn push_response(&self, data: Vec<u8>) {
-        let mut responses = self
-            .responses
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut responses = self.responses.lock().unwrap_or_else(|e| e.into_inner());
         responses.push(data);
     }
 }
@@ -54,7 +48,10 @@ impl vt100_ctt::Callbacks for ResponseCollector {
                 // ESC[5n → terminal status: respond OK (ESC[0n)
                 5 => {
                     let response = b"\x1b[0n".to_vec();
-                    debug!("vterm|DSR status response: {:?}", String::from_utf8_lossy(&response));
+                    debug!(
+                        "vterm|DSR status response: {:?}",
+                        String::from_utf8_lossy(&response)
+                    );
                     self.push_response(response);
                 }
                 // ESC[6n → cursor position: respond ESC[<row>;<col>R
@@ -70,7 +67,10 @@ impl vt100_ctt::Callbacks for ResponseCollector {
             // DA - Device Attributes: ESC[c or ESC[0c → respond as VT100 with AVO
             'c' if param == 0 => {
                 let response = b"\x1b[?1;2c".to_vec();
-                debug!("vterm|DA response: {:?}", String::from_utf8_lossy(&response));
+                debug!(
+                    "vterm|DA response: {:?}",
+                    String::from_utf8_lossy(&response)
+                );
                 self.push_response(response);
             }
             _ => {}
@@ -124,12 +124,7 @@ impl VTermProxy {
         let start = total.saturating_sub(n);
         let mut lines: Vec<String> = Vec::with_capacity(n);
         for row in start..total {
-            lines.push(screen.contents_between(
-                row as u16,
-                0,
-                row as u16,
-                screen.size().1,
-            ));
+            lines.push(screen.contents_between(row as u16, 0, row as u16, screen.size().1));
         }
         // Trim trailing empty lines
         while lines.len() > 1 && lines.last().map_or(false, |l| l.is_empty()) {
@@ -170,7 +165,11 @@ mod tests {
         // Write "AAAA", move cursor back, overwrite with "BB"
         vt.process(b"AAAA\x1b[4DBB");
         let contents = vt.contents();
-        assert!(contents.contains("BBAA"), "expected 'BBAA' but got: {}", contents);
+        assert!(
+            contents.contains("BBAA"),
+            "expected 'BBAA' but got: {}",
+            contents
+        );
     }
 
     #[test]
@@ -179,7 +178,11 @@ mod tests {
         // Write text, then clear the line with ESC[2K
         vt.process(b"old text\r\x1b[2Knew text");
         let contents = vt.contents();
-        assert!(!contents.contains("old text"), "old text should be cleared: {}", contents);
+        assert!(
+            !contents.contains("old text"),
+            "old text should be cleared: {}",
+            contents
+        );
         assert!(contents.contains("new text"));
     }
 
@@ -189,8 +192,16 @@ mod tests {
         // Simulate progress bar: write, carriage return, overwrite
         vt.process(b"[##--------] 20%\r[#####-----] 50%\r[##########] 100%");
         let contents = vt.contents();
-        assert!(contents.contains("100%"), "should show final state: {}", contents);
-        assert!(!contents.contains("20%"), "should not show old progress: {}", contents);
+        assert!(
+            contents.contains("100%"),
+            "should show final state: {}",
+            contents
+        );
+        assert!(
+            !contents.contains("20%"),
+            "should not show old progress: {}",
+            contents
+        );
     }
 
     #[test]
@@ -275,6 +286,10 @@ mod tests {
         vt.process(b"line 1\r\nline 2\r\n\x1b[2J\x1b[1;1Hfresh start");
         let contents = vt.contents();
         assert!(contents.contains("fresh start"));
-        assert!(!contents.contains("line 1"), "screen should be cleared: {}", contents);
+        assert!(
+            !contents.contains("line 1"),
+            "screen should be cleared: {}",
+            contents
+        );
     }
 }

@@ -28,7 +28,10 @@ impl LogWriter {
             }
             None => (None, None),
         };
-        Self { file: Arc::new(Mutex::new(file)), raw_log_path: path }
+        Self {
+            file: Arc::new(Mutex::new(file)),
+            raw_log_path: path,
+        }
     }
 
     pub fn write(&self, data: &str) {

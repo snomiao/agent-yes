@@ -322,7 +322,10 @@ mod tests {
         assert_eq!(detect_cli_from_name("qwen-yes"), Some("qwen".into()));
         assert_eq!(detect_cli_from_name("auggie-yes"), Some("auggie".into()));
         assert_eq!(detect_cli_from_name("amp-yes"), Some("amp".into()));
-        assert_eq!(detect_cli_from_name("opencode-yes"), Some("opencode".into()));
+        assert_eq!(
+            detect_cli_from_name("opencode-yes"),
+            Some("opencode".into())
+        );
         assert_eq!(detect_cli_from_name("agent-yes"), None);
         assert_eq!(detect_cli_from_name("something"), None);
         assert_eq!(detect_cli_from_name(""), None);
@@ -355,8 +358,7 @@ mod tests {
     #[test]
     fn test_extract_prompt_explicit() {
         let args = vec!["--flag".into()];
-        let (cli_args, prompt) =
-            extract_prompt_from_args(args, Some("explicit".into()));
+        let (cli_args, prompt) = extract_prompt_from_args(args, Some("explicit".into()));
         assert_eq!(cli_args, vec!["--flag"]);
         assert_eq!(prompt, Some("explicit".into()));
     }
@@ -381,7 +383,12 @@ mod tests {
     #[test]
     fn test_extract_prompt_bare_words_as_prompt() {
         // Bare words without -- should become the prompt
-        let args = vec!["rebuild".into(), "and".into(), "analyze".into(), "problems".into()];
+        let args = vec![
+            "rebuild".into(),
+            "and".into(),
+            "analyze".into(),
+            "problems".into(),
+        ];
         let (cli_args, prompt) = extract_prompt_from_args(args, None);
         assert!(cli_args.is_empty());
         assert_eq!(prompt, Some("rebuild and analyze problems".into()));
@@ -390,7 +397,13 @@ mod tests {
     #[test]
     fn test_extract_prompt_mixed_flags_and_bare_words() {
         // Flags stay as cli_args, bare words become prompt
-        let args = vec!["--timeout".into(), "5m".into(), "solve".into(), "all".into(), "todos".into()];
+        let args = vec![
+            "--timeout".into(),
+            "5m".into(),
+            "solve".into(),
+            "all".into(),
+            "todos".into(),
+        ];
         let (cli_args, prompt) = extract_prompt_from_args(args, None);
         assert_eq!(cli_args, vec!["--timeout", "5m"]);
         assert_eq!(prompt, Some("solve all todos".into()));
@@ -444,7 +457,13 @@ mod tests {
     fn test_resolve_args_bare_words_with_flags() {
         // bare words mixed with flags: flags → cli_args, bare words → prompt
         let mut args = default_args();
-        args.args = vec!["--some-flag".into(), "value".into(), "fix".into(), "the".into(), "bug".into()];
+        args.args = vec![
+            "--some-flag".into(),
+            "value".into(),
+            "fix".into(),
+            "the".into(),
+            "bug".into(),
+        ];
         let result = resolve_args(args, "claude-yes").unwrap();
         assert_eq!(result.cli, "claude");
         assert_eq!(result.cli_args, vec!["--some-flag", "value"]);
