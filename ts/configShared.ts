@@ -127,7 +127,7 @@ export async function findSharedCliDefaultsPath(
   let currentDir = path.dirname(fileURLToPath(fromUrl));
 
   while (true) {
-    const candidate = path.resolve(currentDir, "config", "cli-defaults.yaml");
+    const candidate = path.resolve(currentDir, "default.config.yaml");
     if (await fileExists(candidate)) return candidate;
 
     const parent = path.dirname(currentDir);
@@ -135,7 +135,7 @@ export async function findSharedCliDefaultsPath(
     currentDir = parent;
   }
 
-  throw new Error("Unable to locate config/cli-defaults.yaml from current package path");
+  throw new Error("Unable to locate default.config.yaml from current package path");
 }
 
 export async function loadSharedCliDefaults(

@@ -64,7 +64,7 @@ describe("configShared", () => {
 
   it("finds the shared defaults file by walking upward", async () => {
     const found = await findSharedCliDefaultsPath(import.meta.url);
-    expect(found.endsWith(path.join("config", "cli-defaults.yaml"))).toBe(true);
+    expect(found.endsWith("default.config.yaml")).toBe(true);
   });
 
   it("throws when no shared defaults file exists in parent directories", async () => {
@@ -80,8 +80,8 @@ describe("configShared", () => {
   it("throws when the located shared defaults file is not an object", async () => {
     const tempDir = path.join(os.tmpdir(), `agent-yes-config-shared-${Date.now()}-invalid`);
     tempRoots.push(tempDir);
-    await mkdir(path.join(tempDir, "config"), { recursive: true });
-    await writeFile(path.join(tempDir, "config", "cli-defaults.yaml"), "123\n");
+    await mkdir(tempDir, { recursive: true });
+    await writeFile(path.join(tempDir, "default.config.yaml"), "123\n");
 
     await expect(
       loadSharedCliDefaults(pathToFileURL(path.join(tempDir, "entry.js")).href),

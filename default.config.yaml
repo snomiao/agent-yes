@@ -72,7 +72,7 @@ clis:
       - "^✨⬆️ Update available!"
     ready:
       - ⏎ send
-      - "^› "
+      - "› "
       - '\? for shortcuts'
     enter:
       - "> 1. Yes,"

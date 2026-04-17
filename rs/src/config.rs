@@ -9,7 +9,7 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::OnceLock;
 
-const BUILTIN_CLI_DEFAULTS: &str = include_str!("../../config/cli-defaults.yaml");
+const BUILTIN_CLI_DEFAULTS: &str = include_str!("../../default.config.yaml");
 
 /// Configuration for a CLI tool
 #[derive(Debug, Clone)]
@@ -99,7 +99,7 @@ fn load_builtin_cli_configs() -> Result<HashMap<String, CliConfig>> {
 
 fn load_builtin_config_file() -> Result<ConfigFile> {
     serde_yaml::from_str(BUILTIN_CLI_DEFAULTS)
-        .context("Failed to parse embedded config/cli-defaults.yaml")
+        .context("Failed to parse embedded default.config.yaml")
 }
 
 fn build_cli_configs(config: ConfigFile) -> Result<HashMap<String, CliConfig>> {
