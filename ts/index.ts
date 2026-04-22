@@ -16,7 +16,6 @@ import { acquireLock, releaseLock, shouldUseLock } from "./runningLock.ts";
 import { logger } from "./logger.ts";
 import { createFifoStream } from "./beta/fifo.ts";
 import { PidStore } from "./pidStore.ts";
-import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { sendEnter, sendMessage } from "./core/messaging.ts";
 import {
   initializeLogPaths,
@@ -126,7 +125,7 @@ export default async function agentYes({
   autoYes = true,
   idleAction,
 }: {
-  cli: SUPPORTED_CLIS;
+  cli: keyof typeof CLIS_CONFIG;
   cliArgs?: string[];
   prompt?: string;
   robust?: boolean;
@@ -361,7 +360,7 @@ export default async function agentYes({
 
   // Initialize log paths (independent of registration)
   const logPaths = await initializeLogPaths(pidStore, shell.pid);
-  setupDebugLogging(logPaths.debuggingLogsPath);
+  await setupDebugLogging(logPaths.debuggingLogsPath);
 
   // Create agent context
   const ctx = new AgentContext({

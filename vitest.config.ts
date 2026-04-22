@@ -45,6 +45,7 @@ export default defineConfig({
         "ts/rustBinary.ts",
         "ts/versionChecker.ts",
         "ts/agentRegistry.ts",
+        "ts/logger.ts",
         "ts/SUPPORTED_CLIS.ts",
         "ts/webhookNotifier.ts",
         "ts/runningLock.ts",

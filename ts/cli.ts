@@ -2,12 +2,19 @@
 import { argv } from "process";
 import { spawn } from "child_process";
 import { parseCliArgs } from "./parseCliArgs.ts";
-import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { logger } from "./logger.ts";
-import { PidStore } from "./pidStore.ts";
 import { checkAndAutoUpdate, displayVersion, versionString } from "./versionChecker.ts";
 import { getRustBinary } from "./rustBinary.ts";
 import { buildRustArgs } from "./buildRustArgs.ts";
+
+// Ultra-fast path: skip heavy init for --version/-v
+{
+  const rawArgs = process.argv.slice(2);
+  if (rawArgs[0] === "-v" || rawArgs.includes("--version")) {
+    console.log(versionString());
+    process.exit(0);
+  }
+}
 
 // Check for updates before starting — installs & re-execs if a newer version exists.
 // Fast path: cached result (no network), so this adds near-zero latency most of the time.
@@ -15,7 +22,7 @@ await checkAndAutoUpdate();
 
 logger.info(versionString());
 
-// Parse CLI arguments
+// Parse CLI arguments (no choices validation — SUPPORTED_CLIS loaded lazily below)
 const config = parseCliArgs(process.argv);
 
 // Handle --tray: show system tray icon and block
@@ -47,6 +54,7 @@ if (config.useRust) {
   }
 
   if (rustBinary) {
+    const { SUPPORTED_CLIS } = await import("./SUPPORTED_CLIS.ts");
     const rustArgs = buildRustArgs(process.argv, config.cli, SUPPORTED_CLIS);
 
     if (config.verbose) {
@@ -83,7 +91,7 @@ if (config.useRust) {
   }
 }
 
-// Handle --version: display version and exit
+// Handle --version: display version and exit (also reached when --version comes after other flags)
 if (config.showVersion) {
   await displayVersion();
   process.exit(0);
@@ -91,6 +99,7 @@ if (config.showVersion) {
 
 // Handle --append-prompt: write to active IPC (FIFO/Named Pipe) and exit
 if (config.appendPrompt) {
+  const { PidStore } = await import("./pidStore.ts");
   const ipcPath = await PidStore.findActiveFifo(process.cwd());
   if (!ipcPath) {
     console.error("No active agent with IPC found in current directory.");
@@ -136,12 +145,8 @@ if (config.appendPrompt) {
 
 // Validate CLI name
 if (!config.cli) {
-  // logger.error(process.argv);
   config.cli = "claude"; // default to claude, for smooth UX
   logger.warn("Warning: No CLI name provided. Using default 'claude'.");
-  // throw new Error(
-  //   `missing cli def, available clis: ${Object.keys((await cliYesConfig).clis).join(", ")}`,
-  // );
 }
 
 // console.log(`Using CLI: ${config.cli}`);

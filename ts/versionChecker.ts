@@ -1,5 +1,4 @@
 import { execFileSync } from "child_process";
-import { execaCommand } from "execa";
 import { existsSync, lstatSync, readlinkSync } from "fs";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
@@ -96,6 +95,7 @@ async function runInstall(latestVersion: string): Promise<boolean> {
 
   process.stderr.write(`\x1b[33m[agent-yes] Updating ${pkg.version} → ${latestVersion}…\x1b[0m\n`);
   try {
+    const { execaCommand } = await import("execa");
     await execaCommand(installCmd, { stdio: "inherit" });
     process.stderr.write(`\x1b[32m[agent-yes] Updated to ${latestVersion}\x1b[0m\n`);
     return true;

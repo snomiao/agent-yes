@@ -1,12 +1,11 @@
 import ms from "ms";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
-import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 /**
  * Parse CLI arguments the same way cli.ts does
  * This is a test helper that mirrors the parsing logic in cli.ts
  */
-export function parseCliArgs(argv: string[]) {
+export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) {
   // Detect cli name from script name (same logic as cli.ts:10-14)
   const scriptBaseName =
     argv[1]
@@ -171,7 +170,7 @@ export function parseCliArgs(argv: string[]) {
     .positional("cli", {
       describe: "The AI CLI to run, e.g., claude, codex, copilot, cursor, gemini",
       type: "string",
-      choices: SUPPORTED_CLIS,
+      choices: supportedClis as string[] | undefined,
       demandOption: false,
       default: cliName,
     })
@@ -298,7 +297,7 @@ export function parseCliArgs(argv: string[]) {
       parsedArgv.cli ||
       (dashIndex !== 0
         ? parsedArgv._[0]?.toString()?.replace?.(/-yes$/, "")
-        : undefined)) as (typeof SUPPORTED_CLIS)[number],
+        : undefined)) as string,
     cliArgs: [...cliArgsForSpawn, ...(parsedArgv.yes ? ["--dangerously-skip-permissions"] : [])],
     prompt:
       [parsedArgv.prompt, positionalPrompt, dashPrompt].filter(Boolean).join(" ") || undefined,

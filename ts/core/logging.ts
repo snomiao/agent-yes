@@ -1,7 +1,6 @@
 import path from "path";
 import { mkdir, writeFile } from "fs/promises";
-import winston from "winston";
-import { logger } from "../logger.ts";
+import { logger, addTransport } from "../logger.ts";
 import { PidStore } from "../pidStore.ts";
 
 /**
@@ -39,9 +38,10 @@ export async function initializeLogPaths(pidStore: PidStore, pid: number): Promi
  * Setup debug logging to file
  * @param debuggingLogsPath Path to debug log file
  */
-export function setupDebugLogging(debuggingLogsPath: string | false) {
+export async function setupDebugLogging(debuggingLogsPath: string | false): Promise<void> {
   if (debuggingLogsPath) {
-    logger.add(
+    const { default: winston } = await import("winston");
+    await addTransport(
       new winston.transports.File({
         filename: debuggingLogsPath,
         level: "debug",
