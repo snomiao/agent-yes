@@ -107,6 +107,10 @@ jobs:
         if: matrix.cross
         run: cargo install cross --git https://github.com/cross-rs/cross
 
+      - name: Copy default.config.yaml into rs/
+        shell: bash
+        run: cp default.config.yaml rs/default.config.yaml
+
       - name: Build with cross
         if: matrix.cross
         working-directory: rs

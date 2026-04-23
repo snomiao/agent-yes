@@ -1,2 +1,4 @@
 /target
 Cargo.lock
+# Copied at build time by build.rs or CI from repo root
+default.config.yaml

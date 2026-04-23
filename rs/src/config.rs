@@ -9,7 +9,7 @@ use std::collections::HashMap;
 #[cfg(test)]
 use std::sync::OnceLock;
 
-const BUILTIN_CLI_DEFAULTS: &str = include_str!("../../default.config.yaml");
+const BUILTIN_CLI_DEFAULTS: &str = include_str!("../default.config.yaml");
 
 /// Configuration for a CLI tool
 #[derive(Debug, Clone)]

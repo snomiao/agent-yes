@@ -4,6 +4,7 @@ exclude-files = [
   "src/main.rs",
   "src/context.rs",
   "src/pty_spawner.rs",
+  "src/vterm.rs",
   "src/logger.rs",
   "src/swarm/*",
   "src/swarm.rs",
