@@ -36,37 +36,37 @@ This document tracks what TypeScript has that Rust still needs.
 
 ## CLI Flags
 
-| Flag                    | TS  | RS  | Notes                                      |
-| ----------------------- | --- | --- | ------------------------------------------ |
-| `--cli`                 | ✅  | ✅  |                                            |
-| `--prompt` / `-p`       | ✅  | ✅  |                                            |
-| `--timeout` / `-t`      | ✅  | ✅  |                                            |
-| `--idle-action` / `-ia` | ✅  | ✅  |                                            |
-| `--robust` / `-r`       | ✅  | ✅  |                                            |
-| `--continue` / `-c`     | ✅  | ✅  |                                            |
-| `--auto` / `-y`         | ✅  | ✅  |                                            |
-| `--verbose`             | ✅  | 🟡  | RS logs to stderr only, no file output     |
-| `--install`             | ✅  | ❌  | Auto-install missing CLI tool              |
-| `--queue`               | ✅  | ❌  | Prevent concurrent agents in same repo     |
-| `--use-skills`          | ✅  | ❌  | SKILL.md header injection into prompt      |
-| `--use-stdin-append`    | ✅  | ❌  | FIFO IPC for appending prompts mid-session |
-| `--swarm`               | ✅  | 🦀  | RS has full libp2p P2P swarm; TS is stub   |
+| Flag                    | TS  | RS  | Notes                                                                              |
+| ----------------------- | --- | --- | ---------------------------------------------------------------------------------- |
+| `--cli`                 | ✅  | ✅  |                                                                                    |
+| `--prompt` / `-p`       | ✅  | ✅  |                                                                                    |
+| `--timeout` / `-t`      | ✅  | ✅  |                                                                                    |
+| `--idle-action` / `-ia` | ✅  | ✅  |                                                                                    |
+| `--robust` / `-r`       | ✅  | ✅  |                                                                                    |
+| `--continue` / `-c`     | ✅  | ✅  |                                                                                    |
+| `--auto` / `-y`         | ✅  | ✅  |                                                                                    |
+| `--verbose`             | ✅  | 🟡  | RS logs to stderr only, no file output                                             |
+| `--install`             | ✅  | ❌  | Auto-install missing CLI tool                                                      |
+| `--queue`               | ✅  | ❌  | Prevent concurrent agents in same repo                                             |
+| `--use-skills`          | ✅  | ❌  | SKILL.md header injection into prompt                                              |
+| `--use-stdin-append`    | ✅  | ✅  | FIFO IPC for appending prompts mid-session — `cy send` lands here on both runtimes |
+| `--swarm`               | ✅  | 🦀  | RS has full libp2p P2P swarm; TS is stub                                           |
 
 ---
 
 ## Infrastructure
 
-| Feature                               | Status | TS file                            | Notes                                              |
-| ------------------------------------- | ------ | ---------------------------------- | -------------------------------------------------- |
-| PID store / process registry (JSONL)  | ✅     | `ts/pidStore.ts`                   | `rs/src/pid_store.rs`                              |
-| Webhook notifications                 | ✅     | `ts/webhookNotifier.ts`            | `rs/src/webhook.rs` (uses curl)                    |
-| Auto-update on startup                | 🚫     | `ts/versionChecker.ts`             | Not planned                                        |
-| File-based logging (raw logs)         | ✅     | `ts/core/logging.ts`               | `rs/src/log_files.rs` → `.agent-yes/<pid>.raw.log` |
-| Global agent registry (in-memory)     | 🚫     | `ts/agentRegistry.ts`              | Not planned                                        |
-| Queue / run lock                      | ✅     | `ts/runningLock.ts`                | `rs/src/running_lock.rs`                           |
-| SKILL.md header injection             | 🚫     | `ts/index.ts` ~170-245             | Not planned                                        |
-| FIFO / IPC named pipe                 | 🚫     | `ts/beta/fifo.ts`                  | Not planned                                        |
-| Codex session ID extraction + storage | ✅     | `ts/resume/codexSessionManager.ts` | `rs/src/codex_sessions.rs`                         |
+| Feature                               | Status | TS file                            | Notes                                                                                             |
+| ------------------------------------- | ------ | ---------------------------------- | ------------------------------------------------------------------------------------------------- |
+| PID store / process registry (JSONL)  | ✅     | `ts/pidStore.ts`                   | `rs/src/pid_store.rs`                                                                             |
+| Webhook notifications                 | ✅     | `ts/webhookNotifier.ts`            | `rs/src/webhook.rs` (uses curl)                                                                   |
+| Auto-update on startup                | 🚫     | `ts/versionChecker.ts`             | Not planned                                                                                       |
+| File-based logging (raw logs)         | ✅     | `ts/core/logging.ts`               | `rs/src/log_files.rs` → `.agent-yes/<pid>.raw.log`                                                |
+| Global agent registry (in-memory)     | 🚫     | `ts/agentRegistry.ts`              | Not planned                                                                                       |
+| Queue / run lock                      | ✅     | `ts/runningLock.ts`                | `rs/src/running_lock.rs`                                                                          |
+| SKILL.md header injection             | 🚫     | `ts/index.ts` ~170-245             | Not planned                                                                                       |
+| FIFO / IPC named pipe                 | ✅     | `ts/beta/fifo.ts`                  | Rust: `rs/src/fifo.rs` — per-pid FIFO read+write keepalive, registered in PidStore as `fifo_file` |
+| Codex session ID extraction + storage | ✅     | `ts/resume/codexSessionManager.ts` | `rs/src/codex_sessions.rs`                                                                        |
 
 ---
 
@@ -93,4 +93,4 @@ This document tracks what TypeScript has that Rust still needs.
 | 7   | SKILL.md injection — `--use-skills`          | 🚫 Not planned                             |
 | 8   | Codex session resume — persist session IDs   | ✅ Done (`rs/src/codex_sessions.rs`)       |
 | 9   | `--install` flag — auto-install CLI tool     | 🚫 Not planned                             |
-| 10  | FIFO IPC — `--use-stdin-append`              | 🚫 Not planned                             |
+| 10  | FIFO IPC — `--use-stdin-append`              | ✅ Done (`rs/src/fifo.rs` + `cy send`)     |

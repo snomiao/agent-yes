@@ -272,22 +272,30 @@ async function cmdLs(rest: string[]): Promise<number> {
     return 0;
   }
 
+  // Budget the trailing PROMPT column to whatever space is left in the
+  // terminal after the fixed columns, so users on wide terminals see more
+  // context and users on narrow ones don't get an awkwardly-wrapped table.
+  const termWidth = (process.stdout as any).columns ?? 120;
+
+  const rawCwds = records.map((r) => shortenPath(r.cwd));
+  const widths = {
+    pid: Math.max(3, ...records.map((r) => String(r.pid).length)),
+    cli: Math.max(3, ...records.map((r) => r.cli.length)),
+    status: Math.max(6, ...records.map((r) => r.status.length)),
+    age: Math.max(3, ...records.map((r) => humanizeAge(Date.now() - r.started_at).length)),
+    cwd: Math.max(3, ...rawCwds.map((c) => c.length)),
+  };
+  const fixedWidth = widths.pid + widths.cli + widths.status + widths.age + widths.cwd + 5 * 2; // 5 separators of "  "
+  const promptBudget = Math.max(20, termWidth - fixedWidth - 1);
+
   const rows = records.map((r) => ({
     pid: String(r.pid),
     cli: r.cli,
     status: r.status,
     age: humanizeAge(Date.now() - r.started_at),
     cwd: shortenPath(r.cwd),
-    prompt: truncate(r.prompt ?? "", 60),
+    prompt: truncate(r.prompt ?? "", promptBudget),
   }));
-
-  const widths = {
-    pid: Math.max(3, ...rows.map((r) => r.pid.length)),
-    cli: Math.max(3, ...rows.map((r) => r.cli.length)),
-    status: Math.max(6, ...rows.map((r) => r.status.length)),
-    age: Math.max(3, ...rows.map((r) => r.age.length)),
-    cwd: Math.max(3, ...rows.map((r) => r.cwd.length)),
-  };
 
   const header =
     [
