@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile } from "fs/promises";
+import { appendFile, mkdir, readFile, rename, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
 import { lock } from "proper-lockfile";
@@ -151,5 +151,42 @@ function isProcessAlive(pid: number): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+const COMPACT_THRESHOLD_LINES = 500; // raw events; one merged record per pid
+
+/**
+ * Best-effort compaction: rewrite the JSONL file with one line per known pid,
+ * dropping records whose pid is dead AND status is exited (those won't be
+ * referenced by `cy ls` anyway). Triggered opportunistically when the raw
+ * file grows past `COMPACT_THRESHOLD_LINES`. Safe to call unconditionally;
+ * it no-ops when the file is already small enough.
+ */
+export async function maybeCompactGlobalPids(): Promise<void> {
+  let raw: string;
+  try {
+    raw = await readFile(resolveGlobalFile(), "utf-8");
+  } catch (err: any) {
+    if (err.code === "ENOENT") return;
+    return;
+  }
+  const lineCount = raw.split("\n").filter((l) => l.trim()).length;
+  if (lineCount < COMPACT_THRESHOLD_LINES) return;
+
+  try {
+    await withLock(async () => {
+      const merged = await readGlobalPidsRaw();
+      // Drop dead-and-exited entries; keep dead-but-not-yet-exited so a later
+      // status-update from elsewhere can still be matched against them.
+      const keep = merged.filter((r) => r.status !== "exited" || isProcessAlive(r.pid));
+      const tmpFile = resolveGlobalFile() + ".compact";
+      const content = keep.map((r) => JSON.stringify(r)).join("\n") + (keep.length ? "\n" : "");
+      await writeFile(tmpFile, content);
+      await rename(tmpFile, resolveGlobalFile());
+      logger.debug(`[globalPidIndex] compacted ${lineCount} → ${keep.length} lines`);
+    });
+  } catch (error) {
+    logger.debug("[globalPidIndex] compact failed:", error);
   }
 }

@@ -2,7 +2,11 @@ import { mkdir, writeFile } from "fs/promises";
 import path from "path";
 import { logger } from "./logger.ts";
 import { JsonlStore } from "./JsonlStore.ts";
-import { appendGlobalPid, updateGlobalPidStatus } from "./globalPidIndex.ts";
+import {
+  appendGlobalPid,
+  maybeCompactGlobalPids,
+  updateGlobalPidStatus,
+} from "./globalPidIndex.ts";
 
 export interface PidRecord {
   _id?: string;
@@ -100,7 +104,9 @@ export class PidStore {
       exit_code: null,
       exit_reason: null,
       started_at: now,
-    }).catch(() => null);
+    })
+      .then(() => maybeCompactGlobalPids())
+      .catch(() => null);
 
     return result;
   }

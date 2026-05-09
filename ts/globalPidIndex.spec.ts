@@ -142,6 +142,69 @@ describe("globalPidIndex", () => {
     expect(records).toEqual([]);
   });
 
+  it("maybeCompactGlobalPids no-ops when below threshold", async () => {
+    const mod = await loadModule();
+    await mod.appendGlobalPid({
+      pid: 1234,
+      cli: "claude",
+      prompt: null,
+      cwd: "/a",
+      log_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: 1,
+    });
+    const before = (await import("fs/promises")).readFile;
+    const beforeContent = await before(mod.getGlobalPidIndexPath(), "utf-8");
+    await mod.maybeCompactGlobalPids();
+    const afterContent = await before(mod.getGlobalPidIndexPath(), "utf-8");
+    expect(afterContent).toBe(beforeContent);
+  });
+
+  it("maybeCompactGlobalPids collapses event spam to one line per pid", async () => {
+    const mod = await loadModule();
+    // Emit > 500 status events across two pids (one alive, one will be exited+dead)
+    for (let i = 0; i < 260; i++) {
+      await mod.appendGlobalPid({
+        pid: process.pid,
+        cli: "claude",
+        prompt: null,
+        cwd: "/a",
+        log_file: null,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: 1,
+      });
+      await mod.appendGlobalPid({
+        pid: 999999, // dead
+        cli: "codex",
+        prompt: null,
+        cwd: "/b",
+        log_file: null,
+        status: "exited",
+        exit_code: 0,
+        exit_reason: "done",
+        started_at: 1,
+      });
+    }
+    const fs = await import("fs/promises");
+    const before = (await fs.readFile(mod.getGlobalPidIndexPath(), "utf-8")).split("\n").length;
+    await mod.maybeCompactGlobalPids();
+    const after = (await fs.readFile(mod.getGlobalPidIndexPath(), "utf-8")).split("\n").length;
+    // Compaction must have shrunk the file dramatically and dropped the
+    // dead-and-exited pid 999999 entirely.
+    expect(after).toBeLessThan(before / 10);
+    const records = await mod.readGlobalPids();
+    expect(records.map((r) => r.pid)).toEqual([process.pid]);
+  });
+
+  it("maybeCompactGlobalPids on missing file is a noop", async () => {
+    const mod = await loadModule();
+    await mod.maybeCompactGlobalPids(); // no throw, no error
+  });
+
   it("skips corrupt lines without throwing", async () => {
     const mod = await loadModule();
     await mod.appendGlobalPid({
