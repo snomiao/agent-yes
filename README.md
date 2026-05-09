@@ -130,6 +130,25 @@ claude-yes --exit-on-idle=60s "run all tests and commit current changes"
 claude-code-execute claude-yes "your task here"
 ```
 
+### Inspect and message running agents (`cy ls / read / send`)
+
+From any terminal you can list and interact with agents that are already
+running on the machine — both TS- and Rust-spawned ones:
+
+```bash
+cy ls                                  # list all running agents
+cy ls codex                            # filter (matches pid, cwd, cli, or prompt)
+cy tail <keyword>                      # render last 96 lines via @xterm/headless
+cy read <keyword>                      # full rendered log
+cy send <keyword> "next: run tests"    # append a prompt to that agent's stdin
+cy send <keyword> "" --code=ctrl-c     # send a Ctrl+C
+```
+
+`cy` (and `ay` / `agent-yes`) writes to a shared registry at
+`~/.agent-yes/pids.jsonl` and a per-pid FIFO at `~/.agent-yes/fifo/<pid>.stdin`,
+so subcommands work whether the target agent is the TS or Rust runtime.
+Detailed reference (Japanese): [`docs/cy-subcommands.md`](./docs/cy-subcommands.md).
+
 ### Docker Usage
 
 You can run `agent-yes` in a Docker container with all AI CLI tools pre-installed.
