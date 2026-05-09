@@ -26,6 +26,11 @@ fn test_sigwinch_propagated_through_agent_yes_to_child() {
     let dir = tempdir().unwrap();
     let bin_dir = dir.path().join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
+    // Isolate the agent-yes registry into a tempdir under HOME so the
+    // robust-restart loop during this test doesn't leak entries into the
+    // developer's real ~/.agent-yes/pids.jsonl.
+    let home_dir = dir.path().join("home");
+    fs::create_dir_all(&home_dir).unwrap();
 
     // Mock CLI: traps SIGWINCH with a counter, changes size, signals SIZE_CHANGED
     let mock_path = bin_dir.join("claude");
@@ -56,11 +61,13 @@ sleep 15
     // agent-yes to abort with "output.write(&bytes).is_ok()".
     let orchestrator_path = dir.path().join("run_test.sh");
     let mut sf = File::create(&orchestrator_path).unwrap();
+    let home = home_dir.display();
     writeln!(
         sf,
         r#"#!/usr/bin/env bash
 set -e
 export PATH="{new_path}"
+export HOME="{home}"
 export COLUMNS=80
 export LINES=24
 
@@ -205,10 +212,17 @@ fn test_cwd_is_preserved() {
     let original_path = std::env::var("PATH").unwrap_or_default();
     let new_path = format!("{}:{}", bin_dir.display(), original_path);
 
+    // Isolate the agent-yes registry into a tempdir under HOME so robust-mode
+    // restarts during this test don't leak entries into the developer's
+    // real ~/.agent-yes/pids.jsonl.
+    let home_dir = temp_dir.path().join("home");
+    fs::create_dir_all(&home_dir).unwrap();
+
     // Run agent-yes from the test subdirectory
     let mut cmd = Command::cargo_bin("agent-yes").unwrap();
     cmd.current_dir(&test_subdir)
         .env("PATH", new_path)
+        .env("HOME", &home_dir)
         .arg("--cli")
         .arg("claude")
         .arg("--timeout")
