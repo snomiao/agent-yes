@@ -46,6 +46,13 @@ TS 側 `PidStore` も `register` / `updateStatus` 時に同じファイルへ
 死んでいる PID と `status: exited` のレコードは既定で除外する。`--all`
 で履歴も含めて表示する。
 
+レジストリは追記専用 JSONL のため、長期間運用するとイベント行が
+肥大化する。新しいエージェント起動時に行数が 500 を超えていたら
+**自動でコンパクション** が走り、`pid` ごとに 1 行へ畳む（atomic
+rename・ロック付き、ベストエフォート）。コンパクション時、`status:
+exited` かつ既に死亡している PID はまるごと破棄される。手動で起動
+したい場合は `maybeCompactGlobalPids()` を直接呼び出してもよい。
+
 ## `cy read|tail|head` の描画
 
 各エージェントは生 PTY 出力を `<pid>.raw.log` に追記している（TS:
