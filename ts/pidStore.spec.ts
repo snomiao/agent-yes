@@ -10,6 +10,11 @@ const TEST_DIR = isWindows
 
 describe("PidStore", () => {
   let store: PidStore;
+  // Isolate the cross-runtime global pid index too — without this, the
+  // synthetic pid=12345 records leak into the user's real
+  // ~/.agent-yes/pids.jsonl via the mirror writer wired into PidStore.
+  const GLOBAL_TEST_DIR = path.join(TEST_DIR, "global");
+  let originalAgentYesHome: string | undefined;
 
   beforeEach(async () => {
     try {
@@ -17,12 +22,19 @@ describe("PidStore", () => {
     } catch {
       // ignore cleanup failures (e.g. Windows lock files from previous test)
     }
+    originalAgentYesHome = process.env.AGENT_YES_HOME;
+    process.env.AGENT_YES_HOME = GLOBAL_TEST_DIR;
     store = new PidStore(TEST_DIR);
     await store.init();
   });
 
   afterEach(async () => {
     await store.close();
+    if (originalAgentYesHome === undefined) {
+      delete process.env.AGENT_YES_HOME;
+    } else {
+      process.env.AGENT_YES_HOME = originalAgentYesHome;
+    }
     try {
       await rm(TEST_DIR, { recursive: true, force: true });
     } catch {

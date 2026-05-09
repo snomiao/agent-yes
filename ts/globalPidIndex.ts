@@ -38,23 +38,35 @@ export interface GlobalPidRecord {
   started_at: number;
 }
 
-const GLOBAL_DIR = path.join(homedir(), ".agent-yes");
-const GLOBAL_FILE = path.join(GLOBAL_DIR, "pids.jsonl");
+/**
+ * Resolved at call time (not module load time) so tests and other callers
+ * can override via $AGENT_YES_HOME without juggling module-cache resets.
+ * Falls back to `~/.agent-yes` for normal user runs.
+ */
+function resolveGlobalDir(): string {
+  return process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
+}
+
+function resolveGlobalFile(): string {
+  return path.join(resolveGlobalDir(), "pids.jsonl");
+}
 
 export function getGlobalPidIndexPath(): string {
-  return GLOBAL_FILE;
+  return resolveGlobalFile();
 }
 
 async function ensureDir() {
-  await mkdir(GLOBAL_DIR, { recursive: true });
+  await mkdir(resolveGlobalDir(), { recursive: true });
 }
 
 async function withLock<R>(fn: () => Promise<R>): Promise<R> {
   await ensureDir();
+  const file = resolveGlobalFile();
+  const dir = resolveGlobalDir();
   let release: (() => Promise<void>) | undefined;
   try {
-    release = await lock(GLOBAL_DIR, {
-      lockfilePath: GLOBAL_FILE + ".lock",
+    release = await lock(dir, {
+      lockfilePath: file + ".lock",
       retries: { retries: 5, minTimeout: 50, maxTimeout: 500 },
     });
     return await fn();
@@ -67,7 +79,7 @@ async function withLock<R>(fn: () => Promise<R>): Promise<R> {
 export async function appendGlobalPid(record: GlobalPidRecord): Promise<void> {
   try {
     await withLock(async () => {
-      await appendFile(GLOBAL_FILE, JSON.stringify(record) + "\n");
+      await appendFile(resolveGlobalFile(), JSON.stringify(record) + "\n");
     });
   } catch (error) {
     logger.debug("[globalPidIndex] append failed:", error);
@@ -85,7 +97,7 @@ export async function updateGlobalPidStatus(
       const existing = current.find((r) => r.pid === pid);
       if (!existing) return; // unknown pid — nothing to update
       const merged: GlobalPidRecord = { ...existing, ...patch };
-      await appendFile(GLOBAL_FILE, JSON.stringify(merged) + "\n");
+      await appendFile(resolveGlobalFile(), JSON.stringify(merged) + "\n");
     });
   } catch (error) {
     logger.debug("[globalPidIndex] updateStatus failed:", error);
@@ -98,7 +110,7 @@ export async function updateGlobalPidStatus(
 async function readGlobalPidsRaw(): Promise<GlobalPidRecord[]> {
   let raw: string;
   try {
-    raw = await readFile(GLOBAL_FILE, "utf-8");
+    raw = await readFile(resolveGlobalFile(), "utf-8");
   } catch (err: any) {
     if (err.code === "ENOENT") return [];
     throw err;
