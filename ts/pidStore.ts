@@ -2,6 +2,7 @@ import { mkdir, writeFile } from "fs/promises";
 import path from "path";
 import { logger } from "./logger.ts";
 import { JsonlStore } from "./JsonlStore.ts";
+import { appendGlobalPid, updateGlobalPidStatus } from "./globalPidIndex.ts";
 
 export interface PidRecord {
   _id?: string;
@@ -85,6 +86,22 @@ export class PidStore {
     }
 
     logger.debug(`[pidStore] Registered process ${pid}`);
+
+    // Mirror to the cross-runtime global index (~/.agent-yes/pids.jsonl).
+    // Fire-and-forget — failures must not block agent startup.
+    appendGlobalPid({
+      pid,
+      cli,
+      prompt: prompt ?? null,
+      cwd,
+      log_file: logFile,
+      fifo_file: fifoFile,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: now,
+    }).catch(() => null);
+
     return result;
   }
 
@@ -102,6 +119,13 @@ export class PidStore {
 
     await this.store.updateById(existing._id!, patch);
     logger.debug(`[pidStore] Updated process ${pid} status=${status}`);
+
+    // Mirror to global index. Same fire-and-forget policy.
+    updateGlobalPidStatus(pid, {
+      status,
+      exit_code: extra?.exitCode ?? null,
+      exit_reason: extra?.exitReason ?? null,
+    }).catch(() => null);
   }
 
   getAllRecords(): PidRecord[] {

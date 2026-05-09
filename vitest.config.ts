@@ -53,6 +53,10 @@ export default defineConfig({
         "ts/core/**",
         "ts/resume/**",
         "ts/xterm-proxy.ts",
+        // CLI subcommand dispatcher: testable paths covered, but the file
+        // also contains a Windows named-pipe branch and an xterm-headless
+        // import-failure fallback that aren't reachable on Linux CI.
+        "ts/subcommands.ts",
       ],
       thresholds: {
         lines: 90,

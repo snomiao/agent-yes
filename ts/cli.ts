@@ -16,6 +16,17 @@ import { buildRustArgs } from "./buildRustArgs.ts";
   }
 }
 
+// Subcommand fast path: `cy ls / read / cat / tail / head / send` bypass the
+// agent-spawn machinery (and the --rust dispatch) and operate on the global
+// pid index instead. Must run before checkAndAutoUpdate / yargs / Rust spawn.
+{
+  const { isSubcommand, runSubcommand } = await import("./subcommands.ts");
+  if (isSubcommand(process.argv[2])) {
+    const code = await runSubcommand(process.argv);
+    process.exit(code ?? 0);
+  }
+}
+
 // Check for updates before starting — installs & re-execs if a newer version exists.
 // Fast path: cached result (no network), so this adds near-zero latency most of the time.
 await checkAndAutoUpdate();

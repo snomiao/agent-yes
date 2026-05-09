@@ -140,6 +140,18 @@ impl AgentContext {
         timeout_ms: Option<u64>,
         idle_action: Option<&str>,
     ) -> Result<i32> {
+        self.run_with_fifo(pty, timeout_ms, idle_action, None).await
+    }
+
+    /// Run with an optional FIFO whose bytes are forwarded into the same
+    /// stdin channel as user input, giving `cy send` a path into the agent.
+    pub async fn run_with_fifo(
+        &mut self,
+        pty: &mut PtyContext,
+        timeout_ms: Option<u64>,
+        idle_action: Option<&str>,
+        fifo_path: Option<std::path::PathBuf>,
+    ) -> Result<i32> {
         let writer = pty.get_writer();
 
         // Create message context
@@ -168,28 +180,88 @@ impl AgentContext {
             }
         });
 
-        // Channel for stdin data
+        // Channel for stdin data — both the user's stdin AND the FIFO reader
+        // converge here, so /auto detection, Ctrl+C handling, and PTY forwarding
+        // work the same regardless of input origin.
         let (stdin_tx, mut stdin_rx) = mpsc::channel::<Vec<u8>>(100);
 
         // Spawn stdin reader task
-        let stdin_handle = tokio::spawn(async move {
-            let mut stdin = tokio::io::stdin();
-            let mut buf = [0u8; 1024];
-            loop {
-                match stdin.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if stdin_tx.send(buf[..n].to_vec()).await.is_err() {
+        let stdin_handle = tokio::spawn({
+            let stdin_tx = stdin_tx.clone();
+            async move {
+                let mut stdin = tokio::io::stdin();
+                let mut buf = [0u8; 1024];
+                loop {
+                    match stdin.read(&mut buf).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            if stdin_tx.send(buf[..n].to_vec()).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            error!("stdin read error: {}", e);
                             break;
                         }
-                    }
-                    Err(e) => {
-                        error!("stdin read error: {}", e);
-                        break;
                     }
                 }
             }
         });
+
+        // Spawn FIFO reader thread (if a FIFO was created for this agent).
+        // Uses a dedicated OS thread because the FIFO is opened RDWR on a
+        // std::fs::File — no async runtime hookup, blocking reads are fine
+        // since this thread does nothing else.
+        let fifo_handle: Option<std::thread::JoinHandle<()>> = if let Some(ref path) = fifo_path {
+            #[cfg(unix)]
+            {
+                match crate::fifo::open_for_reading(path) {
+                    Ok(file) => {
+                        let tx = stdin_tx.clone();
+                        let path_dbg = path.clone();
+                        Some(std::thread::spawn(move || {
+                            use std::io::Read;
+                            let mut reader = file;
+                            let mut buf = [0u8; 4096];
+                            loop {
+                                match reader.read(&mut buf) {
+                                    Ok(0) => {
+                                        // RDWR fd shouldn't EOF, but defend anyway.
+                                        std::thread::sleep(Duration::from_millis(200));
+                                        continue;
+                                    }
+                                    Ok(n) => {
+                                        if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                                            break; // main loop ended
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(
+                                            "FIFO read error at {:?}: {} — stopping reader",
+                                            path_dbg, e
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                        }))
+                    }
+                    Err(e) => {
+                        warn!("Failed to open FIFO for reading at {:?}: {}", path, e);
+                        None
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = path;
+                None
+            }
+        } else {
+            None
+        };
+        // Drop our extra clone so the channel closes once both readers stop.
+        drop(stdin_tx);
 
         // Main loop
         let mut heartbeat = tokio::time::interval(Duration::from_millis(HEARTBEAT_INTERVAL_MS));
@@ -387,6 +459,14 @@ impl AgentContext {
 
         // Cancel stdin reader and stdout writer
         stdin_handle.abort();
+        // FIFO reader thread will exit on its own when the channel closes
+        // (we already dropped our extra sender clone). Just join briefly.
+        if let Some(h) = fifo_handle {
+            // Detach — we can't easily unblock a thread mid-blocking-read, but
+            // the kernel cleans up when the process exits. The thread's
+            // sender will fail the next send and the loop will exit.
+            let _ = h;
+        }
         // Drop sender to signal stdout writer to finish, then wait briefly
         drop(stdout_tx);
         let _ = tokio::time::timeout(Duration::from_millis(500), stdout_handle).await;

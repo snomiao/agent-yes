@@ -14,6 +14,10 @@ pub struct PidRecord {
     pub prompt: Option<String>,
     pub cwd: String,
     pub log_file: Option<String>,
+    /// Path to per-pid FIFO for `cy send`. None when FIFO IPC is unavailable
+    /// (Windows, or a build that disables it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fifo_file: Option<String>,
     pub status: String, // "active" | "idle" | "exited"
     pub exit_code: Option<i32>,
     pub exit_reason: Option<String>,
@@ -42,12 +46,25 @@ impl PidStore {
         cwd: &str,
         log_file: Option<&str>,
     ) {
+        self.register_with_fifo(pid, cli, prompt, cwd, log_file, None);
+    }
+
+    pub fn register_with_fifo(
+        &self,
+        pid: u32,
+        cli: &str,
+        prompt: Option<&str>,
+        cwd: &str,
+        log_file: Option<&str>,
+        fifo_file: Option<&str>,
+    ) {
         let record = PidRecord {
             pid,
             cli: cli.to_string(),
             prompt: prompt.map(|s| s.to_string()),
             cwd: cwd.to_string(),
             log_file: log_file.map(|s| s.to_string()),
+            fifo_file: fifo_file.map(|s| s.to_string()),
             status: "active".to_string(),
             exit_code: None,
             exit_reason: None,
@@ -260,6 +277,7 @@ mod tests {
             prompt: None,
             cwd: "/tmp".into(),
             log_file: None,
+            fifo_file: None,
             status: "active".into(),
             exit_code: None,
             exit_reason: None,

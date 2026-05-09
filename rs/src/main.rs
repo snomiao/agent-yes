@@ -3,6 +3,7 @@ mod codex_sessions;
 mod config;
 mod config_loader;
 mod context;
+mod fifo;
 mod idle_waiter;
 mod log_files;
 mod logger;
@@ -165,21 +166,48 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             term_cols,
         );
 
+        // Create per-pid FIFO for `cy send <keyword> <msg>`. Best-effort —
+        // failure (Windows, full disk, etc.) just means cy send won't work
+        // against this agent. The agent itself runs fine without it.
+        let fifo_path = fifo::fifo_path(pid);
+        let fifo_path = match &fifo_path {
+            Some(p) => match fifo::create_fifo(p) {
+                Ok(()) => Some(p.clone()),
+                Err(e) => {
+                    tracing::warn!("Failed to create FIFO at {:?}: {}", p, e);
+                    None
+                }
+            },
+            None => None,
+        };
+        let fifo_str = fifo_path.as_ref().map(|p| p.to_string_lossy().to_string());
+
         // Register in PID store and send RUNNING webhook
         let log_file = agent_ctx.raw_log_path();
-        pid_store.register(
+        pid_store.register_with_fifo(
             pid,
             &args.cli,
             args.prompt.as_deref(),
             cwd,
             log_file.as_deref(),
+            fifo_str.as_deref(),
         );
         webhook::notify("RUNNING", args.prompt.as_deref().unwrap_or(""), cwd);
 
         // Run the main loop
         let exit_code = agent_ctx
-            .run(&mut ctx, args.timeout_ms, args.idle_action.as_deref())
+            .run_with_fifo(
+                &mut ctx,
+                args.timeout_ms,
+                args.idle_action.as_deref(),
+                fifo_path.clone(),
+            )
             .await?;
+
+        // FIFO cleanup — happens for every loop exit (crash, fatal, normal).
+        if let Some(ref p) = fifo_path {
+            fifo::cleanup_fifo(p);
+        }
 
         // Update PID store and send EXIT webhook
         let exit_reason = if agent_ctx.is_user_abort {
