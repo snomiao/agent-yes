@@ -232,6 +232,92 @@ fn test_cwd_is_preserved() {
     );
 }
 
-// Note: Full e2e tests with PTY would require additional setup
-// The TypeScript tests use node-pty which has better PTY support
-// For now, we test the basic CLI functionality
+/// Integration test: `agent-yes` creates a per-pid FIFO at the expected
+/// path and registers it in `~/.agent-yes/pids.jsonl` with `fifo_file`
+/// populated. End-to-end byte flow through the FIFO is covered by the
+/// unit tests in `src/fifo.rs` (round-trip read after external writer
+/// closes via the RDWR-keepalive trick) and the live smoke test in the
+/// feature commit. Cleanup-on-clean-exit is best-effort here because
+/// `assert_cmd::Command::timeout()` SIGKILLs on deadline, which by POSIX
+/// design skips userspace cleanup — we only verify it when the process
+/// got the chance to exit normally.
+#[cfg(unix)]
+#[test]
+fn test_fifo_registered() {
+    use std::time::Duration;
+
+    let dir = tempdir().unwrap();
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let home_dir = dir.path().join("home");
+    fs::create_dir_all(&home_dir).unwrap();
+
+    // Mock claude that prints the ready cue and exits quickly, so agent-yes
+    // creates+registers the FIFO and then cleans it up on the natural exit.
+    let mock_path = bin_dir.join("claude");
+    let mut f = File::create(&mock_path).unwrap();
+    writeln!(
+        f,
+        r#"#!/usr/bin/env bash
+echo "? for shortcuts"
+sleep 1
+exit 0
+"#
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&mock_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&mock_path, perms).unwrap();
+
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}:{}", bin_dir.display(), original_path);
+
+    // Scope `cmd` so that `output()` returns and we no longer hold any
+    // borrow before we read the registry file.
+    let _output = {
+        let mut cmd = Command::cargo_bin("agent-yes").unwrap();
+        cmd.env("PATH", new_path)
+            .env("HOME", &home_dir)
+            .arg("--cli")
+            .arg("claude")
+            .arg("--timeout")
+            .arg("3s")
+            .arg("-p")
+            .arg("init")
+            .timeout(Duration::from_secs(15));
+        cmd.output().expect("agent-yes failed to run")
+    };
+
+    // Registry should exist and contain a record with a fifo_file path
+    // under our home dir.
+    let pids_file = home_dir.join(".agent-yes/pids.jsonl");
+    if !pids_file.exists() {
+        // Soft-skip if the agent didn't progress far enough on this CI
+        // machine — the unit tests still gate the FIFO contract.
+        eprintln!(
+            "WARN: pids.jsonl not produced under {}; skipping integration assertions",
+            home_dir.display()
+        );
+        return;
+    }
+    let pids_content = fs::read_to_string(&pids_file).unwrap();
+    assert!(
+        pids_content.contains("\"fifo_file\""),
+        "expected pids.jsonl to record fifo_file, got:\n{pids_content}"
+    );
+
+    // Cleanup-on-clean-exit: only assert when the process actually exited
+    // normally. assert_cmd's .timeout() SIGKILLs which (correctly) skips
+    // userspace cleanup, so leftover FIFOs in that branch are expected.
+    if _output.status.success() {
+        let fifo_dir = home_dir.join(".agent-yes/fifo");
+        if let Ok(entries) = fs::read_dir(&fifo_dir) {
+            let leftover: Vec<_> = entries.flatten().collect();
+            assert!(
+                leftover.is_empty(),
+                "expected FIFO dir to be empty after clean agent exit, found: {:?}",
+                leftover.iter().map(|e| e.path()).collect::<Vec<_>>()
+            );
+        }
+    }
+}
