@@ -175,12 +175,13 @@ function reExec(version: string): never {
  */
 export async function fetchLatestVersion(): Promise<string | null> {
   try {
-    const response = await fetch(
-      `https://registry.npmjs.org/${getInstalledPackage().name}/latest`,
-      {
-        signal: AbortSignal.timeout(3000), // 3 second timeout
-      },
-    );
+    // Always query the canonical package name. The release pipeline publishes
+    // both `agent-yes` and `claude-yes` from the same dist, and `runInstall`
+    // is hard-coded to install `agent-yes` — switching this to the on-disk
+    // name would desync the lookup, install command, and shared cache file.
+    const response = await fetch(`https://registry.npmjs.org/${bundledPkg.name}/latest`, {
+      signal: AbortSignal.timeout(3000), // 3 second timeout
+    });
 
     if (!response.ok) {
       return null;
