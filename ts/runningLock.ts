@@ -44,6 +44,22 @@ function isProcessRunning(pid: number): boolean {
 }
 
 /**
+ * Build an env that scrubs inherited GIT_* repo-locating vars so the spawned
+ * `git` resolves the repo from `cwd` only. Without this, running inside a git
+ * hook (where GIT_DIR / GIT_INDEX_FILE / GIT_WORK_TREE / GIT_COMMON_DIR are
+ * exported) makes `git rev-parse --show-toplevel` use the hook's repo context
+ * instead of the requested directory.
+ */
+function gitCleanEnv(): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  delete env.GIT_DIR;
+  delete env.GIT_WORK_TREE;
+  delete env.GIT_INDEX_FILE;
+  delete env.GIT_COMMON_DIR;
+  return env;
+}
+
+/**
  * Get git repository root for a directory
  */
 function getGitRoot(cwd: string): string | null {
@@ -52,6 +68,7 @@ function getGitRoot(cwd: string): string | null {
       cwd,
       encoding: "utf8",
       stdio: ["pipe", "pipe", "ignore"],
+      env: gitCleanEnv(),
     });
     return result.trim();
   } catch {

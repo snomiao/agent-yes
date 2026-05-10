@@ -143,9 +143,17 @@ fn lock_path() -> PathBuf {
 }
 
 fn get_git_root(cwd: &str) -> Option<String> {
+    // Scrub inherited GIT_* repo-locating vars so `git` resolves the repo from
+    // `cwd` only. Otherwise, running inside a git hook (where these vars are
+    // exported) hijacks the lookup and returns the hook's repo or the cwd
+    // itself instead of the requested directory's true toplevel.
     std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(cwd)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_COMMON_DIR")
         .output()
         .ok()
         .filter(|o| o.status.success())

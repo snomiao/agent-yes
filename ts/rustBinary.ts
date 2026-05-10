@@ -6,7 +6,7 @@ import { execFileSync } from "child_process";
 import { existsSync, mkdirSync, unlinkSync } from "fs";
 import { chmod, copyFile } from "fs/promises";
 import path from "path";
-import pkg from "../package.json" with { type: "json" };
+import { getInstalledPackage } from "./versionChecker.ts";
 
 // Platform/arch to binary name mapping
 const PLATFORM_MAP: Record<string, string> = {
@@ -223,11 +223,12 @@ function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
   }
 
   const binaryVersion = getRustBinaryVersion(binaryPath);
+  const pkgVersion = getInstalledPackage().version;
   if (verbose) {
-    console.log(`[rust] Binary version: ${binaryVersion}, package version: ${pkg.version}`);
+    console.log(`[rust] Binary version: ${binaryVersion}, package version: ${pkgVersion}`);
   }
 
-  if (binaryVersion === pkg.version) {
+  if (binaryVersion === pkgVersion) {
     return true; // up to date
   }
 
@@ -239,7 +240,7 @@ function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
   }
 
   process.stderr.write(
-    `\x1b[33m[rust] Binary outdated (${binaryVersion ?? "unknown"} → ${pkg.version}), rebuilding…\x1b[0m\n`,
+    `\x1b[33m[rust] Binary outdated (${binaryVersion ?? "unknown"} → ${pkgVersion}), rebuilding…\x1b[0m\n`,
   );
 
   try {
