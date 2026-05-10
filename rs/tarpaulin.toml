@@ -8,6 +8,10 @@ exclude-files = [
   "src/logger.rs",
   "src/swarm/*",
   "src/swarm.rs",
+  # FIFO IPC: mkfifo + a spawned OS reader thread; tarpaulin's ptrace
+  # can't trace into the thread's read loop. Unit tests in src/fifo.rs
+  # still run for correctness, they just don't contribute to coverage.
+  "src/fifo.rs",
 ]
 # Run with all features disabled (swarm requires libp2p build)
 run-types = ["Tests"]

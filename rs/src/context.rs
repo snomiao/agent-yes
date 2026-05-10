@@ -209,43 +209,13 @@ impl AgentContext {
         });
 
         // Spawn FIFO reader thread (if a FIFO was created for this agent).
-        // Uses a dedicated OS thread because the FIFO is opened RDWR on a
-        // std::fs::File — no async runtime hookup, blocking reads are fine
-        // since this thread does nothing else.
+        // Forwards into the same stdin_tx as user keystrokes, so /auto
+        // detection, Ctrl+C handling, and stdin_ready gating apply identically.
         let fifo_handle: Option<std::thread::JoinHandle<()>> = if let Some(ref path) = fifo_path {
             #[cfg(unix)]
             {
-                match crate::fifo::open_for_reading(path) {
-                    Ok(file) => {
-                        let tx = stdin_tx.clone();
-                        let path_dbg = path.clone();
-                        Some(std::thread::spawn(move || {
-                            use std::io::Read;
-                            let mut reader = file;
-                            let mut buf = [0u8; 4096];
-                            loop {
-                                match reader.read(&mut buf) {
-                                    Ok(0) => {
-                                        // RDWR fd shouldn't EOF, but defend anyway.
-                                        std::thread::sleep(Duration::from_millis(200));
-                                        continue;
-                                    }
-                                    Ok(n) => {
-                                        if tx.blocking_send(buf[..n].to_vec()).is_err() {
-                                            break; // main loop ended
-                                        }
-                                    }
-                                    Err(e) => {
-                                        warn!(
-                                            "FIFO read error at {:?}: {} — stopping reader",
-                                            path_dbg, e
-                                        );
-                                        break;
-                                    }
-                                }
-                            }
-                        }))
-                    }
+                match crate::fifo::spawn_fifo_reader(path.clone(), stdin_tx.clone()) {
+                    Ok(h) => Some(h),
                     Err(e) => {
                         warn!("Failed to open FIFO for reading at {:?}: {}", path, e);
                         None

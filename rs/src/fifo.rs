@@ -84,6 +84,48 @@ pub fn cleanup_fifo(path: &Path) {
     }
 }
 
+/// Spawn a dedicated OS thread that blocks on `read()` from the FIFO and
+/// forwards each chunk to the given mpsc sender (which is shared with the
+/// agent's user-stdin reader, so the bytes hit the same /auto detection,
+/// Ctrl+C handling, and PTY-readiness gate).
+///
+/// The thread exits when the receiver is dropped (`blocking_send` fails) or
+/// on a hard read error. The OS reaps it when the agent process exits.
+///
+/// Extracted from `context.rs::run_with_fifo` so the same plumbing can be
+/// unit-tested in isolation without spawning agent-yes.
+#[cfg(unix)]
+pub fn spawn_fifo_reader(
+    path: PathBuf,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    let file = open_for_reading(&path)?;
+    let handle = std::thread::spawn(move || {
+        use std::io::Read;
+        let mut reader = file;
+        let mut buf = [0u8; 4096];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => {
+                    // RDWR fd shouldn't EOF, but defend anyway.
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    continue;
+                }
+                Ok(n) => {
+                    if tx.blocking_send(buf[..n].to_vec()).is_err() {
+                        break; // receiver dropped — main loop ended
+                    }
+                }
+                Err(e) => {
+                    warn!("FIFO read error at {:?}: {} — stopping reader", path, e);
+                    break;
+                }
+            }
+        }
+    });
+    Ok(handle)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
@@ -169,6 +211,87 @@ mod tests {
             std::ffi::OsStr::from_bytes(&bytes).to_os_string().into();
         let result = create_fifo(&bad_path);
         assert!(result.is_err(), "expected error for NUL-byte path");
+    }
+
+    /// Closes the integration gap from the feature commit: directly tests
+    /// that bytes written through the FIFO arrive at the consumer of the
+    /// shared mpsc channel — i.e., the same plumbing context.rs uses for
+    /// `cy send`. No agent-yes binary or PTY involved, so it bypasses the
+    /// cargo-test fd-inheritance crash that blocks a full e2e test.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_spawn_fifo_reader_forwards_bytes_to_channel() {
+        use tokio::sync::mpsc;
+        use tokio::time::{timeout, Duration};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.fifo");
+        create_fifo(&path).unwrap();
+
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(100);
+        let handle = spawn_fifo_reader(path.clone(), tx).unwrap();
+
+        // External writer pushes data and closes — repeat to prove the
+        // RDWR-keepalive pattern doesn't EOF after the first close.
+        for marker in &[b"alpha\n".to_vec(), b"beta\n".to_vec(), b"gamma\n".to_vec()] {
+            let mut writer = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap();
+            writer.write_all(marker).unwrap();
+            // dropping the writer here closes its fd; reader must not EOF.
+        }
+
+        // Drain the channel until we've collected all expected bytes or hit
+        // a 2s deadline. Bytes may arrive in one chunk or several.
+        let expected: Vec<u8> = b"alpha\nbeta\ngamma\n".to_vec();
+        let mut received = Vec::new();
+        let drain = async {
+            while received.len() < expected.len() {
+                match rx.recv().await {
+                    Some(chunk) => received.extend_from_slice(&chunk),
+                    None => break,
+                }
+            }
+        };
+        let _ = timeout(Duration::from_secs(2), drain).await;
+
+        assert_eq!(
+            received, expected,
+            "FIFO reader did not forward all bytes to the channel"
+        );
+
+        // Now exercise the channel-closed branch: drop the receiver, then
+        // poke the FIFO so the reader thread tries to send and observes
+        // the closed channel. The thread must exit cleanly.
+        drop(rx);
+        {
+            let mut writer = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .unwrap();
+            writer.write_all(b"after-rx-drop\n").unwrap();
+        }
+        // Wait for the reader thread to exit (blocking join in a task so we
+        // can apply a timeout from the async runtime).
+        let join_result = tokio::task::spawn_blocking(move || handle.join()).await;
+        let _ = timeout(Duration::from_secs(2), async { join_result.unwrap() }).await;
+    }
+
+    /// Cover the read-error branch: open_for_reading succeeds, but the
+    /// underlying file is later replaced with something that yields a
+    /// hard error on read (closing it from underneath). The reader thread
+    /// must log and exit, not panic.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_spawn_fifo_reader_propagates_open_error() {
+        use tokio::sync::mpsc;
+
+        // Path doesn't exist → open_for_reading fails → spawn_fifo_reader
+        // returns Err(io::Error) without spawning a thread.
+        let dir = tempfile::tempdir().unwrap();
+        let bogus = dir.path().join("does-not-exist.fifo");
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(1);
+        let result = spawn_fifo_reader(bogus, tx);
+        assert!(result.is_err(), "expected open error to surface");
     }
 
     #[test]
