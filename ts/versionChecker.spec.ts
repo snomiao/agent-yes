@@ -334,6 +334,26 @@ describe("versionChecker", () => {
       expect(resolved.name).toBe("agent-yes");
     });
 
+    it("continues walking parents when a candidate package.json is unreadable", async () => {
+      // Per-candidate try/catch: an unreadable/unparsable manifest at one
+      // level must not abort the upward walk and silently fall back to the
+      // bundled (stale) manifest. The walk must keep going until it finds
+      // a matching package.json or exhausts parents.
+      const fs = await import("fs");
+      let call = 0;
+      vi.mocked(fs.existsSync).mockImplementation(() => true);
+      vi.mocked(fs.readFileSync).mockImplementation(() => {
+        call += 1;
+        if (call === 1) throw new Error("EACCES");
+        if (call === 2) return "{not json" as any;
+        return JSON.stringify({ name: "agent-yes", version: "999.0.0" }) as any;
+      });
+
+      const resolved = getInstalledPackage();
+      expect(resolved.version).toBe("999.0.0");
+      expect(call).toBeGreaterThanOrEqual(3);
+    });
+
     it("does not trigger an auto-update when on-disk version already matches the registry", async () => {
       // Simulate the post-fix scenario: the bundled `pkg.version` (frozen at
       // build time) is older than the registry, but the runtime resolver

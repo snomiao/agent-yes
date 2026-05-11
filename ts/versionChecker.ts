@@ -31,26 +31,38 @@ let cachedInstalledPkg: { name: string; version: string } | null = null;
  */
 export function getInstalledPackage(): { name: string; version: string } {
   if (cachedInstalledPkg) return cachedInstalledPkg;
+  let dir: string | null = null;
   try {
-    let dir = path.dirname(fileURLToPath(import.meta.url));
+    dir = path.dirname(fileURLToPath(import.meta.url));
+  } catch {
+    // import.meta.url malformed; fall through to bundled
+  }
+  if (dir) {
     for (let i = 0; i < 6; i++) {
       const candidate = path.join(dir, "package.json");
-      if (existsSync(candidate)) {
-        const json = JSON.parse(readFileSync(candidate, "utf8")) as {
-          name?: string;
-          version?: string;
-        };
-        if (json.name === bundledPkg.name && typeof json.version === "string") {
-          cachedInstalledPkg = { name: json.name, version: json.version };
-          return cachedInstalledPkg;
+      // A per-candidate try/catch: a transient read error, partial write, or
+      // BOM on any single package.json must NOT abort the upward walk —
+      // otherwise we'd silently fall back to the stale bundled manifest that
+      // issue #39 was about. Keep walking until we either find a matching
+      // manifest or exhaust parents.
+      try {
+        if (existsSync(candidate)) {
+          const json = JSON.parse(readFileSync(candidate, "utf8")) as {
+            name?: string;
+            version?: string;
+          };
+          if (json.name === bundledPkg.name && typeof json.version === "string") {
+            cachedInstalledPkg = { name: json.name, version: json.version };
+            return cachedInstalledPkg;
+          }
         }
+      } catch {
+        // unreadable / unparsable — continue walking
       }
       const parent = path.dirname(dir);
       if (parent === dir) break;
       dir = parent;
     }
-  } catch {
-    // fall through to bundled fallback
   }
   cachedInstalledPkg = { name: bundledPkg.name, version: bundledPkg.version };
   return cachedInstalledPkg;
