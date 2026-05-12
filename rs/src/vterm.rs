@@ -93,7 +93,7 @@ impl VTermProxy {
         let rows = rows.max(1);
         let cols = cols.max(1);
         let collector = ResponseCollector::default();
-        let parser = vt100_ctt::Parser::new_with_callbacks(rows, cols, 1000, collector.clone());
+        let parser = vt100_ctt::Parser::new_with_callbacks(rows, cols, 10000, collector.clone());
         Self { parser, collector }
     }
 
