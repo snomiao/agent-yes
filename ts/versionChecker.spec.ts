@@ -1,12 +1,14 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from "vitest";
 import {
+  _setInstalledPackageForTesting,
   checkAndAutoUpdate,
   compareVersions,
   fetchLatestVersion,
   displayVersion,
   detectInstallMethod,
+  getInstalledPackage,
   versionString,
-} from "./versionChecker";
+} from "./versionChecker.ts";
 
 vi.mock("execa", () => ({ execaCommand: vi.fn().mockResolvedValue({}) }));
 vi.mock("fs/promises", () => ({
@@ -18,8 +20,12 @@ vi.mock("fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("fs")>();
   return {
     ...actual,
-    // Return false for .git checks so the dev-checkout guard doesn't skip auto-update in tests
+    // Return false for .git / package.json lookups so neither the dev-checkout
+    // guard nor getInstalledPackage's disk read fires during the auto-update tests.
     existsSync: vi.fn(() => false),
+    readFileSync: vi.fn(() => {
+      throw new Error("readFileSync not stubbed");
+    }),
     lstatSync: actual.lstatSync,
     readlinkSync: actual.readlinkSync,
   };
@@ -99,6 +105,7 @@ describe("versionChecker", () => {
   describe("checkAndAutoUpdate", () => {
     beforeEach(() => {
       vi.clearAllMocks();
+      _setInstalledPackageForTesting(null);
       vi.stubGlobal("fetch", vi.fn());
       vi.spyOn(process.stderr, "write").mockImplementation(() => true);
       // Use a mock for process.exit to prevent actual exit in tests
@@ -298,6 +305,79 @@ describe("versionChecker", () => {
       const str = versionString();
       expect(str).toContain("agent-yes v");
       expect(str).toMatch(/agent-yes v\d+\.\d+\.\d+ \(.+\)/);
+    });
+  });
+
+  // Regression test for https://github.com/snomiao/agent-yes/issues/39:
+  // a stale bundled version string must not pin the auto-update comparison
+  // when a fresh package.json is on disk next to the running module.
+  describe("getInstalledPackage (issue #39)", () => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+      _setInstalledPackageForTesting(null);
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      _setInstalledPackageForTesting(null);
+    });
+
+    it("prefers the on-disk package.json over the bundled (potentially stale) import", async () => {
+      const fs = await import("fs");
+      vi.mocked(fs.existsSync).mockReturnValueOnce(true);
+      vi.mocked(fs.readFileSync).mockReturnValueOnce(
+        JSON.stringify({ name: "agent-yes", version: "999.0.0" }) as any,
+      );
+
+      const resolved = getInstalledPackage();
+      expect(resolved.version).toBe("999.0.0");
+      expect(resolved.name).toBe("agent-yes");
+    });
+
+    it("continues walking parents when a candidate package.json is unreadable", async () => {
+      // Per-candidate try/catch: an unreadable/unparsable manifest at one
+      // level must not abort the upward walk and silently fall back to the
+      // bundled (stale) manifest. The walk must keep going until it finds
+      // a matching package.json or exhausts parents.
+      const fs = await import("fs");
+      let call = 0;
+      vi.mocked(fs.existsSync).mockImplementation(() => true);
+      vi.mocked(fs.readFileSync).mockImplementation(() => {
+        call += 1;
+        if (call === 1) throw new Error("EACCES");
+        if (call === 2) return "{not json" as any;
+        return JSON.stringify({ name: "agent-yes", version: "999.0.0" }) as any;
+      });
+
+      const resolved = getInstalledPackage();
+      expect(resolved.version).toBe("999.0.0");
+      expect(call).toBeGreaterThanOrEqual(3);
+    });
+
+    it("does not trigger an auto-update when on-disk version already matches the registry", async () => {
+      // Simulate the post-fix scenario: the bundled `pkg.version` (frozen at
+      // build time) is older than the registry, but the runtime resolver
+      // surfaces the correct on-disk version and the comparison short-circuits.
+      // Pre-fix behavior was install + reExec on every invocation → infinite loop.
+      _setInstalledPackageForTesting({ name: "agent-yes", version: "999.0.0" });
+
+      const { readFile } = await import("fs/promises");
+      const { execaCommand } = await import("execa");
+      vi.mocked(readFile).mockRejectedValueOnce(new Error("no cache"));
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({
+          ok: true,
+          json: async () => ({ version: "999.0.0" }),
+        } as Response),
+      );
+      vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+      vi.spyOn(process, "exit").mockImplementation(() => undefined as never);
+      delete process.env.AGENT_YES_NO_UPDATE;
+      delete process.env.AGENT_YES_UPDATED;
+
+      await checkAndAutoUpdate();
+      expect(execaCommand).not.toHaveBeenCalled();
     });
   });
 });

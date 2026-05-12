@@ -5,7 +5,7 @@ import pty, { type IPty } from "../pty.ts";
 import type { AgentCliConfig } from "../index.ts";
 import type { SUPPORTED_CLIS } from "../SUPPORTED_CLIS.ts";
 import { execSync } from "node:child_process";
-import pkg from "../../package.json" with { type: "json" };
+import { getInstalledPackage } from "../versionChecker.ts";
 
 /**
  * Agent spawning utilities
@@ -134,7 +134,9 @@ export function spawnAgent(options: SpawnOptions): IPty {
     let [bin, ...args] = [...parseCommandString(cliCommand), ...cliArgs];
     logger.debug(`Spawning ${bin} with args: ${JSON.stringify(args)}`);
     const spawned = pty.spawn(bin!, args, ptyOptions);
-    logger.info(`[${cli}-yes] Spawned ${bin} with PID ${spawned.pid} (agent-yes v${pkg.version})`);
+    logger.info(
+      `[${cli}-yes] Spawned ${bin} with PID ${spawned.pid} (agent-yes v${getInstalledPackage().version})`,
+    );
     return spawned;
   };
 

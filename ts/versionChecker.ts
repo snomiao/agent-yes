@@ -1,13 +1,79 @@
 import { execFileSync } from "child_process";
-import { existsSync, lstatSync, readlinkSync } from "fs";
+import { existsSync, lstatSync, readFileSync, readlinkSync } from "fs";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
-import pkg from "../package.json" with { type: "json" };
+import { fileURLToPath } from "url";
+import bundledPkg from "../package.json" with { type: "json" };
 
 const CACHE_DIR = path.join(homedir(), ".cache", "agent-yes");
 const CACHE_FILE = path.join(CACHE_DIR, "update-check.json");
 const TTL_MS = 60 * 60 * 1000; // 1 hour
+
+// The release pipeline publishes both `agent-yes` and `claude-yes` from the
+// same source by flipping `package.json#name` and re-running `npm publish`
+// (which now triggers `bun run build`, rebuilding dist with whichever name is
+// set). The auto-updater's registry lookup, install command, and shared
+// cache file must all stay pinned to the canonical package — otherwise a
+// `claude-yes` install would query `claude-yes/latest` while `runInstall`
+// still hard-codes `agent-yes`.
+const CANONICAL_PKG_NAME = "agent-yes";
+
+let cachedInstalledPkg: { name: string; version: string } | null = null;
+
+/**
+ * Read the live `package.json` from disk for the running module.
+ *
+ * The bundled `package.json` import is inlined at build time; if `dist/` is
+ * published without a fresh build (issue #39), the inlined `version` lies
+ * and the auto-update loop fires forever. Reading the on-disk manifest each
+ * run keeps the version honest even when the bundle is stale.
+ */
+export function getInstalledPackage(): { name: string; version: string } {
+  if (cachedInstalledPkg) return cachedInstalledPkg;
+  let dir: string | null = null;
+  try {
+    dir = path.dirname(fileURLToPath(import.meta.url));
+  } catch {
+    // import.meta.url malformed; fall through to bundled
+  }
+  if (dir) {
+    for (let i = 0; i < 6; i++) {
+      const candidate = path.join(dir, "package.json");
+      // A per-candidate try/catch: a transient read error, partial write, or
+      // BOM on any single package.json must NOT abort the upward walk —
+      // otherwise we'd silently fall back to the stale bundled manifest that
+      // issue #39 was about. Keep walking until we either find a matching
+      // manifest or exhaust parents.
+      try {
+        if (existsSync(candidate)) {
+          const json = JSON.parse(readFileSync(candidate, "utf8")) as {
+            name?: string;
+            version?: string;
+          };
+          if (json.name === bundledPkg.name && typeof json.version === "string") {
+            cachedInstalledPkg = { name: json.name, version: json.version };
+            return cachedInstalledPkg;
+          }
+        }
+      } catch {
+        // unreadable / unparsable — continue walking
+      }
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
+  }
+  cachedInstalledPkg = { name: bundledPkg.name, version: bundledPkg.version };
+  return cachedInstalledPkg;
+}
+
+/** Test-only: clear or seed the memoized lookup. */
+export function _setInstalledPackageForTesting(
+  value: { name: string; version: string } | null,
+): void {
+  cachedInstalledPkg = value;
+}
 
 type UpdateCache = { checkedAt: number; latestVersion: string };
 
@@ -75,7 +141,7 @@ export async function checkAndAutoUpdate(): Promise<void> {
       await writeUpdateCache({ checkedAt: Date.now(), latestVersion });
     }
 
-    if (compareVersions(pkg.version, latestVersion) < 0) {
+    if (compareVersions(getInstalledPackage().version, latestVersion) < 0) {
       const installed = await runInstall(latestVersion);
       if (installed) {
         reExec(latestVersion);
@@ -90,10 +156,12 @@ async function runInstall(latestVersion: string): Promise<boolean> {
   const pm = detectPackageManager();
   const installCmd =
     pm === "bun"
-      ? `bun add -g agent-yes@${latestVersion}`
-      : `npm install -g agent-yes@${latestVersion}`;
+      ? `bun add -g ${CANONICAL_PKG_NAME}@${latestVersion}`
+      : `npm install -g ${CANONICAL_PKG_NAME}@${latestVersion}`;
 
-  process.stderr.write(`\x1b[33m[agent-yes] Updating ${pkg.version} → ${latestVersion}…\x1b[0m\n`);
+  process.stderr.write(
+    `\x1b[33m[agent-yes] Updating ${getInstalledPackage().version} → ${latestVersion}…\x1b[0m\n`,
+  );
   try {
     const { execaCommand } = await import("execa");
     await execaCommand(installCmd, { stdio: "inherit" });
@@ -128,7 +196,7 @@ function reExec(version: string): never {
  */
 export async function fetchLatestVersion(): Promise<string | null> {
   try {
-    const response = await fetch(`https://registry.npmjs.org/${pkg.name}/latest`, {
+    const response = await fetch(`https://registry.npmjs.org/${CANONICAL_PKG_NAME}/latest`, {
       signal: AbortSignal.timeout(3000), // 3 second timeout
     });
 
@@ -215,7 +283,7 @@ export function detectInstallMethod(): string {
  * Format version string with install method
  */
 export function versionString(): string {
-  return `agent-yes v${pkg.version} (${detectInstallMethod()})`;
+  return `agent-yes v${getInstalledPackage().version} (${detectInstallMethod()})`;
 }
 
 /**
@@ -227,7 +295,7 @@ export async function displayVersion(): Promise<void> {
   const latestVersion = await fetchLatestVersion();
 
   if (latestVersion) {
-    const comparison = compareVersions(pkg.version, latestVersion);
+    const comparison = compareVersions(getInstalledPackage().version, latestVersion);
 
     if (comparison < 0) {
       console.log(`\x1b[33m${latestVersion} (update available)\x1b[0m`);
