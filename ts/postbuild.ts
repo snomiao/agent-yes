@@ -15,18 +15,26 @@ const suffixes = ["-yes"];
 // Short aliases: maps alias name → target CLI name (alias resolves in parseCliArgs.ts)
 const shortAliases: Record<string, string> = { cy: "claude" };
 
+// When .git exists (git clone), run TypeScript directly via bun — no build needed.
+// When absent (npm install), fall back to compiled dist/cli.js.
+const wrapperContent = `\
+#!/usr/bin/env bun
+import { existsSync } from "node:fs";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+if (existsSync(join(root, ".git"))) {
+  await import("../ts/cli.ts");
+} else {
+  await import("./cli.js");
+}`;
+
 await sflow(cliNames.flatMap((cli) => suffixes.map((suffix) => ({ cli, suffix }))))
   .map(async ({ cli, suffix }) => {
     const cliName = `${cli}${suffix}`;
 
     const wrapperPath = `./dist/${cliName}.js`;
-    await writeFile(
-      wrapperPath,
-      `
-#!/usr/bin/env bun
-await import('./cli.js')
-`.trim(),
-    );
+    await writeFile(wrapperPath, wrapperContent);
     await chmod(wrapperPath, 0o755);
 
     // Only register -yes variants in package.json bin
@@ -41,13 +49,7 @@ await import('./cli.js')
 // Generate short alias wrapper files
 for (const [alias] of Object.entries(shortAliases)) {
   const wrapperPath = `./dist/${alias}.js`;
-  await writeFile(
-    wrapperPath,
-    `
-#!/usr/bin/env bun
-await import('./cli.js')
-`.trim(),
-  );
+  await writeFile(wrapperPath, wrapperContent);
   await chmod(wrapperPath, 0o755);
   if (!(pkg.bin as Record<string, string>)?.[alias]) {
     await Bun.$`npm pkg set ${"bin." + alias}=${wrapperPath}`;
