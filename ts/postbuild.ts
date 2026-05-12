@@ -15,15 +15,17 @@ const suffixes = ["-yes"];
 // Short aliases: maps alias name → target CLI name (alias resolves in parseCliArgs.ts)
 const shortAliases: Record<string, string> = { cy: "claude" };
 
-// When .git exists (git clone), run TypeScript directly via bun — no build needed.
-// When absent (npm install), fall back to compiled dist/cli.js.
+// Under Bun (dev via `bun link`), run TypeScript source directly — no build needed.
+// Under Node (published install or CI), use the compiled dist/cli.js.
+// Detect Bun at runtime: the shebang prefers bun but Node may still invoke us
+// directly (e.g. `node dist/claude-yes.js` in CI), and Node cannot import .ts.
 const wrapperContent = `\
 #!/usr/bin/env bun
 import { existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
-if (existsSync(join(root, ".git"))) {
+if (typeof Bun !== "undefined" && existsSync(join(root, ".git"))) {
   await import("../ts/cli.ts");
 } else {
   await import("./cli.js");
