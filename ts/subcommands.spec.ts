@@ -206,7 +206,7 @@ describe("subcommands.runSubcommand routing", () => {
     try {
       const code = await runSubcommand(["bun", "cli.js", "read", "no-such-agent-keyword"]);
       expect(code).toBe(1);
-      expect(stderr.join("")).toMatch(/no running agent matched/);
+      expect(stderr.join("")).toMatch(/no agent matched/);
     } finally {
       process.stderr.write = orig;
     }

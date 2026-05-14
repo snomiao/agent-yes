@@ -76,7 +76,7 @@ function mergeRecords(...buckets: GlobalPidRecord[][]): GlobalPidRecord[] {
   return Array.from(out.values());
 }
 
-const SUBCOMMANDS = new Set(["ls", "list", "ps", "read", "cat", "tail", "head", "send"]);
+const SUBCOMMANDS = new Set(["ls", "list", "ps", "read", "cat", "tail", "head", "send", "restart"]);
 
 export function isSubcommand(name: string | undefined): boolean {
   return !!name && SUBCOMMANDS.has(name);
@@ -107,6 +107,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdRead(rest, { mode: "head" });
       case "send":
         return await cmdSend(rest);
+      case "restart":
+        return await cmdRestart(rest);
       default:
         return null;
     }
@@ -123,6 +125,7 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
 
 interface CommonOpts {
   all: boolean;
+  active: boolean;
   cwdScope: string | null;
   latest: boolean;
   json: boolean;
@@ -146,7 +149,7 @@ export function parseArgs(rest: string[]): ParsedArgs {
         const key = arg.slice(2);
         const next = rest[i + 1];
         // Boolean flags: --all, --json, --latest
-        if (["all", "json", "latest"].includes(key) || !next || next.startsWith("-")) {
+        if (["all", "active", "json", "latest"].includes(key) || !next || next.startsWith("-")) {
           flags[key] = true;
         } else {
           flags[key] = next;
@@ -171,6 +174,7 @@ export function parseArgs(rest: string[]): ParsedArgs {
 function commonOpts(flags: Record<string, string | boolean>): CommonOpts {
   return {
     all: !!flags.all,
+    active: !!flags.active,
     cwdScope:
       typeof flags.cwd === "string"
         ? path.resolve(flags.cwd)
@@ -210,7 +214,10 @@ async function listRecords(
   let records = mergeRecords(local, scopeLocal, global);
 
   if (!opts.all) {
-    records = records.filter((r) => r.status !== "exited" && isPidAlive(r.pid));
+    records = records.filter((r) => r.status !== "exited");
+  }
+  if (opts.active) {
+    records = records.filter((r) => isPidAlive(r.pid));
   }
   if (opts.cwdScope) {
     const scope = opts.cwdScope;
@@ -237,7 +244,7 @@ async function resolveOne(keyword: string | undefined, opts: CommonOpts): Promis
   }
   const matches = await listRecords(keyword, opts);
   if (matches.length === 0) {
-    throw new Error(`no running agent matched "${keyword}"`);
+    throw new Error(`no agent matched "${keyword}"`);
   }
   if (matches.length === 1) return matches[0]!;
   if (opts.latest) return matches[0]!; // already sorted newest-first
@@ -291,12 +298,17 @@ async function cmdLs(rest: string[]): Promise<number> {
   const IDLE_THRESHOLD_MS = 60 * 1000;
   const rows = await Promise.all(
     records.map(async (r) => {
-      let displayStatus = r.status;
-      if (r.status === "active" && r.log_file) {
+      let displayStatus: string;
+      if (!isPidAlive(r.pid)) {
+        displayStatus = "stopped";
+      } else if (r.log_file) {
         const mtime = await stat(r.log_file)
           .then((s) => s.mtimeMs)
           .catch(() => null);
-        if (mtime !== null && Date.now() - mtime > IDLE_THRESHOLD_MS) displayStatus = "idle";
+        displayStatus =
+          mtime !== null && Date.now() - mtime > IDLE_THRESHOLD_MS ? "idle" : "active";
+      } else {
+        displayStatus = "active";
       }
       return {
         pid: String(r.pid),
@@ -305,6 +317,7 @@ async function cmdLs(rest: string[]): Promise<number> {
         age: humanizeAge(Date.now() - r.started_at),
         cwd: shortenPath(r.cwd),
         prompt: truncate(r.prompt ?? "", promptBudget),
+        _alive: displayStatus !== "stopped",
       };
     }),
   );
@@ -333,15 +346,21 @@ async function cmdLs(rest: string[]): Promise<number> {
     );
   }
 
-  if (!opts.json && records.length > 0) {
-    const example = records[0]!.pid;
-    process.stderr.write(
-      `\n` +
-        `  cy tail ${example}                  # view latest output\n` +
-        `  cy read ${example}                  # full rendered log\n` +
-        `  cy send ${example} "next: ..."      # send a prompt\n` +
-        `  cy send ${example} "" --code=ctrl-c # interrupt\n`,
-    );
+  if (!opts.json && rows.length > 0) {
+    const alive = rows.find((r) => r._alive);
+    const stopped = rows.find((r) => !r._alive);
+    const hints: string[] = ["\n"];
+    if (alive) {
+      hints.push(`  cy tail ${alive.pid}                  # view latest output\n`);
+      hints.push(`  cy send ${alive.pid} "next: ..."      # send a prompt\n`);
+      hints.push(`  cy send ${alive.pid} "" --code=ctrl-c # interrupt\n`);
+    }
+    if (stopped) {
+      hints.push(`  cy restart ${stopped.pid}             # restart stopped agent\n`);
+    }
+    if (!alive && !stopped)
+      hints.push(`  cy ls --all                          # show exited agents\n`);
+    process.stderr.write(hints.join(""));
   }
 
   return 0;
@@ -563,4 +582,39 @@ async function writeToIpc(ipcPath: string, payload: string): Promise<void> {
       closeSync(fd);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// cy restart
+// ---------------------------------------------------------------------------
+
+async function cmdRestart(rest: string[]): Promise<number> {
+  const { flags, positional } = parseArgs(rest);
+  const opts = { ...commonOpts(flags), all: true }; // search stopped agents too
+  const keyword = positional[0];
+  const record = await resolveOne(keyword, opts);
+
+  if (isPidAlive(record.pid)) {
+    process.stderr.write(`pid ${record.pid} is still running — stop it first or use cy send\n`);
+    return 1;
+  }
+
+  const args = ["--cli=" + record.cli];
+  if (record.prompt) args.push(record.prompt);
+
+  const proc = Bun.spawn(["agent-yes", ...args], {
+    cwd: record.cwd,
+    detached: true,
+    stdio: ["ignore", "ignore", "ignore"],
+  });
+
+  process.stdout.write(
+    `restarted ${record.cli} in ${shortenPath(record.cwd)} (new pid: ${proc.pid})\n`,
+  );
+  process.stderr.write(
+    `\n` +
+      `  cy tail ${proc.pid}   # watch output\n` +
+      `  cy ls                 # list all agents\n`,
+  );
+  return 0;
 }
