@@ -149,7 +149,11 @@ export function parseArgs(rest: string[]): ParsedArgs {
         const key = arg.slice(2);
         const next = rest[i + 1];
         // Boolean flags: --all, --json, --latest
-        if (["all", "active", "json", "latest"].includes(key) || !next || next.startsWith("-")) {
+        if (
+          ["all", "active", "follow", "json", "latest"].includes(key) ||
+          !next ||
+          next.startsWith("-")
+        ) {
           flags[key] = true;
         } else {
           flags[key] = next;
@@ -352,6 +356,7 @@ async function cmdLs(rest: string[]): Promise<number> {
     const hints: string[] = ["\n"];
     if (alive) {
       hints.push(`  cy tail ${alive.pid}                  # view latest output\n`);
+      hints.push(`  cy tail -f ${alive.pid}               # follow live output\n`);
       hints.push(`  cy send ${alive.pid} "next: ..."      # send a prompt\n`);
       hints.push(`  cy send ${alive.pid} "" --code=ctrl-c # interrupt\n`);
     }
@@ -400,6 +405,7 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
   const { flags, positional } = parseArgs(rest);
   const opts = commonOpts(flags);
   const keyword = positional[0];
+  const follow = !!(flags.f || flags.follow);
 
   const nFlag = typeof flags.n === "string" ? Number(flags.n) : undefined;
   const n =
@@ -431,9 +437,35 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
   process.stdout.write(rendered);
   if (!rendered.endsWith("\n")) process.stdout.write("\n");
 
+  if (follow) {
+    process.stderr.write(`following... (Ctrl-C to stop)\n`);
+    let offset = buf.length;
+    const { watch } = await import("fs");
+    // oxlint-disable-next-line no-control-regex -- intentional: strip ANSI/control
+    const ansiRe = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
+    // oxlint-disable-next-line no-control-regex -- intentional: strip control chars
+    const ctrlRe = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+    await new Promise<void>((resolve) => {
+      const watcher = watch(logPath, async () => {
+        const full = await readFile(logPath);
+        if (full.length <= offset) return;
+        const chunk = full.slice(offset);
+        offset = full.length;
+        const text = new TextDecoder().decode(chunk).replace(ansiRe, "").replace(ctrlRe, "");
+        if (text.trim()) process.stdout.write(text.trimStart());
+      });
+      process.on("SIGINT", () => {
+        watcher.close();
+        resolve();
+      });
+    });
+    return 0;
+  }
+
   process.stderr.write(
     `\n` +
       `  cy ls                                 # list all agents\n` +
+      `  cy tail -f ${record.pid}              # follow live output\n` +
       `  cy send ${record.pid} "next: ..."      # send a prompt\n` +
       `  cy send ${record.pid} "" --code=ctrl-c # interrupt\n`,
   );
