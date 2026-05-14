@@ -288,14 +288,26 @@ async function cmdLs(rest: string[]): Promise<number> {
   const fixedWidth = widths.pid + widths.cli + widths.status + widths.age + widths.cwd + 5 * 2; // 5 separators of "  "
   const promptBudget = Math.max(20, termWidth - fixedWidth - 1);
 
-  const rows = records.map((r) => ({
-    pid: String(r.pid),
-    cli: r.cli,
-    status: r.status,
-    age: humanizeAge(Date.now() - r.started_at),
-    cwd: shortenPath(r.cwd),
-    prompt: truncate(r.prompt ?? "", promptBudget),
-  }));
+  const IDLE_THRESHOLD_MS = 60 * 1000;
+  const rows = await Promise.all(
+    records.map(async (r) => {
+      let displayStatus = r.status;
+      if (r.status === "active" && r.log_file) {
+        const mtime = await stat(r.log_file)
+          .then((s) => s.mtimeMs)
+          .catch(() => null);
+        if (mtime !== null && Date.now() - mtime > IDLE_THRESHOLD_MS) displayStatus = "idle";
+      }
+      return {
+        pid: String(r.pid),
+        cli: r.cli,
+        status: displayStatus,
+        age: humanizeAge(Date.now() - r.started_at),
+        cwd: shortenPath(r.cwd),
+        prompt: truncate(r.prompt ?? "", promptBudget),
+      };
+    }),
+  );
 
   const header =
     [
