@@ -11,10 +11,57 @@
  * to the normal agent-spawning flow.
  */
 
-import { readFile, stat } from "fs/promises";
+import { appendFile, mkdir, readFile, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
 import { type GlobalPidRecord, readGlobalPids } from "./globalPidIndex.ts";
+
+// ---------------------------------------------------------------------------
+// notes store  (~/.agent-yes/notes.jsonl)
+// ---------------------------------------------------------------------------
+
+function notesPath(): string {
+  const dir = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
+  return path.join(dir, "notes.jsonl");
+}
+
+async function readNotes(): Promise<Map<number, string>> {
+  let raw: string;
+  try {
+    raw = await readFile(notesPath(), "utf-8");
+  } catch {
+    return new Map();
+  }
+  const map = new Map<number, string>();
+  for (const line of raw.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const { pid, note } = JSON.parse(t);
+      if (typeof pid === "number") {
+        if (note) map.set(pid, note);
+        else map.delete(pid);
+      }
+    } catch {
+      /* skip */
+    }
+  }
+  return map;
+}
+
+async function writeNote(pid: number, note: string): Promise<void> {
+  const p = notesPath();
+  await mkdir(path.dirname(p), { recursive: true });
+  await appendFile(p, JSON.stringify({ pid, note, updated_at: Date.now() }) + "\n");
+}
+
+async function compactNotes(): Promise<void> {
+  const map = await readNotes();
+  const lines = Array.from(map.entries())
+    .map(([pid, note]) => JSON.stringify({ pid, note, updated_at: Date.now() }))
+    .join("\n");
+  await writeFile(notesPath(), lines ? lines + "\n" : "");
+}
 
 /**
  * Read the per-cwd TS PidStore JSONL and convert to the global record shape,
@@ -76,7 +123,18 @@ function mergeRecords(...buckets: GlobalPidRecord[][]): GlobalPidRecord[] {
   return Array.from(out.values());
 }
 
-const SUBCOMMANDS = new Set(["ls", "list", "ps", "read", "cat", "tail", "head", "send", "restart"]);
+const SUBCOMMANDS = new Set([
+  "ls",
+  "list",
+  "ps",
+  "read",
+  "cat",
+  "tail",
+  "head",
+  "send",
+  "restart",
+  "note",
+]);
 
 export function isSubcommand(name: string | undefined): boolean {
   return !!name && SUBCOMMANDS.has(name);
@@ -109,6 +167,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdSend(rest);
       case "restart":
         return await cmdRestart(rest);
+      case "note":
+        return await cmdNote(rest);
       default:
         return null;
     }
@@ -300,6 +360,7 @@ async function cmdLs(rest: string[]): Promise<number> {
   const promptBudget = Math.max(20, termWidth - fixedWidth - 1);
 
   const IDLE_THRESHOLD_MS = 60 * 1000;
+  const notes = await readNotes();
   const rows = await Promise.all(
     records.map(async (r) => {
       let displayStatus: string;
@@ -314,13 +375,16 @@ async function cmdLs(rest: string[]): Promise<number> {
       } else {
         displayStatus = "active";
       }
+      const label = truncate(notes.get(r.pid) ?? r.prompt ?? "", promptBudget);
+      const hasNote = notes.has(r.pid);
       return {
         pid: String(r.pid),
         cli: r.cli,
         status: displayStatus,
         age: humanizeAge(Date.now() - r.started_at),
         cwd: shortenPath(r.cwd),
-        prompt: truncate(r.prompt ?? "", promptBudget),
+        label,
+        hasNote,
         _alive: displayStatus !== "stopped",
       };
     }),
@@ -333,7 +397,7 @@ async function cmdLs(rest: string[]): Promise<number> {
       "STATUS".padEnd(widths.status),
       "AGE".padEnd(widths.age),
       "CWD".padEnd(widths.cwd),
-      "PROMPT",
+      "NOTE/PROMPT",
     ].join("  ") + "\n";
   process.stdout.write(header);
 
@@ -345,7 +409,7 @@ async function cmdLs(rest: string[]): Promise<number> {
         r.status.padEnd(widths.status),
         r.age.padEnd(widths.age),
         r.cwd.padEnd(widths.cwd),
-        r.prompt,
+        r.hasNote ? `* ${r.label}` : r.label,
       ].join("  ") + "\n",
     );
   }
@@ -359,6 +423,7 @@ async function cmdLs(rest: string[]): Promise<number> {
       hints.push(`  cy tail -f ${alive.pid}               # follow live output\n`);
       hints.push(`  cy send ${alive.pid} "next: ..."      # send a prompt\n`);
       hints.push(`  cy send ${alive.pid} "" --code=ctrl-c # interrupt\n`);
+      hints.push(`  cy note ${alive.pid} "what it's doing" # set a note\n`);
     }
     if (stopped) {
       hints.push(`  cy restart ${stopped.pid}             # restart stopped agent\n`);
@@ -433,7 +498,12 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
 
   const buf = await readFile(logPath);
   const rendered = await renderRawLog(buf, { mode, n });
-  process.stderr.write(`[pid ${record.pid}  ${shortenPath(record.cwd)}]\n`);
+  const notes = await readNotes();
+  const noteLabel = notes.get(record.pid);
+  const header = noteLabel
+    ? `[pid ${record.pid}  ${shortenPath(record.cwd)}  * ${noteLabel}]`
+    : `[pid ${record.pid}  ${shortenPath(record.cwd)}]`;
+  process.stderr.write(header + "\n");
   process.stdout.write(rendered);
   if (!rendered.endsWith("\n")) process.stdout.write("\n");
 
@@ -663,5 +733,33 @@ async function cmdRestart(rest: string[]): Promise<number> {
       `  cy tail ${proc.pid}   # watch output\n` +
       `  cy ls                 # list all agents\n`,
   );
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// cy note
+// ---------------------------------------------------------------------------
+
+async function cmdNote(rest: string[]): Promise<number> {
+  const { flags, positional } = parseArgs(rest);
+  const opts = commonOpts(flags);
+  const keyword = positional[0];
+  const note = positional.slice(1).join(" ");
+
+  if (!keyword) throw new Error('usage: cy note <keyword> ["note text"]  (omit text to clear)');
+
+  const record = await resolveOne(keyword, { ...opts, all: true });
+
+  if (!note) {
+    // clear
+    await writeNote(record.pid, "");
+    await compactNotes();
+    process.stdout.write(`cleared note for pid ${record.pid}\n`);
+    return 0;
+  }
+
+  await writeNote(record.pid, note);
+  process.stdout.write(`note set for pid ${record.pid}: ${note}\n`);
+  process.stderr.write(`\n  cy ls   # see updated note in list\n`);
   return 0;
 }
