@@ -396,6 +396,7 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
 
   const buf = await readFile(logPath);
   const rendered = await renderRawLog(buf, { mode, n });
+  process.stderr.write(`[pid ${record.pid}  ${shortenPath(record.cwd)}]\n`);
   process.stdout.write(rendered);
   if (!rendered.endsWith("\n")) process.stdout.write("\n");
 
