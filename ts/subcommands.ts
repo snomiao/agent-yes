@@ -510,8 +510,15 @@ async function cmdSend(rest: string[]): Promise<number> {
     );
   }
 
-  const payload = (message ?? "") + trailing;
-  await writeToIpc(fifoPath, payload);
+  const body = message ?? "";
+  if (body && trailing) {
+    await writeToIpc(fifoPath, body);
+    await new Promise((r) => setTimeout(r, 200));
+    await writeToIpc(fifoPath, trailing);
+  } else {
+    await writeToIpc(fifoPath, body + trailing);
+  }
+  const payload = body + trailing;
   process.stdout.write(`sent to pid ${record.pid} (${record.cli}): ${truncate(payload, 80)}\n`);
 
   process.stderr.write(
