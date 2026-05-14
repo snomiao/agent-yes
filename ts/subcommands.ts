@@ -526,10 +526,10 @@ async function cmdSend(rest: string[]): Promise<number> {
   const { flags, positional } = parseArgs(rest);
   const opts = commonOpts(flags);
   const keyword = positional[0];
-  const message = positional.slice(1).join(" ");
+  const rawMessage = positional.slice(1).join(" ");
 
   if (!keyword)
-    throw new Error("usage: cy send <keyword> <msg> [--code=enter|esc|ctrl-c|ctrl-y|tab|none]");
+    throw new Error("usage: cy send <keyword> <msg|-> [--code=enter|esc|ctrl-c|ctrl-y|tab|none]");
 
   const codeName = typeof flags.code === "string" ? flags.code.toLowerCase() : "enter";
   const trailing = controlCodeFromName(codeName);
@@ -542,7 +542,15 @@ async function cmdSend(rest: string[]): Promise<number> {
     );
   }
 
-  const body = message ?? "";
+  let body: string;
+  if (rawMessage === "-") {
+    const chunks: Buffer[] = [];
+    for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
+    body = Buffer.concat(chunks).toString("utf-8").trimEnd();
+  } else {
+    body = rawMessage;
+  }
+
   if (body && trailing) {
     await writeToIpc(fifoPath, body);
     await new Promise((r) => setTimeout(r, 200));
