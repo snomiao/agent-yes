@@ -321,6 +321,17 @@ async function cmdLs(rest: string[]): Promise<number> {
     );
   }
 
+  if (!opts.json && records.length > 0) {
+    const example = records[0]!.pid;
+    process.stderr.write(
+      `\n` +
+        `  cy tail ${example}                  # view latest output\n` +
+        `  cy read ${example}                  # full rendered log\n` +
+        `  cy send ${example} "next: ..."      # send a prompt\n` +
+        `  cy send ${example} "" --code=ctrl-c # interrupt\n`,
+    );
+  }
+
   return 0;
 }
 
@@ -387,6 +398,13 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
   const rendered = await renderRawLog(buf, { mode, n });
   process.stdout.write(rendered);
   if (!rendered.endsWith("\n")) process.stdout.write("\n");
+
+  process.stderr.write(
+    `\n` +
+      `  cy ls                                 # list all agents\n` +
+      `  cy send ${record.pid} "next: ..."      # send a prompt\n` +
+      `  cy send ${record.pid} "" --code=ctrl-c # interrupt\n`,
+  );
   return 0;
 }
 
@@ -463,6 +481,12 @@ async function cmdSend(rest: string[]): Promise<number> {
   const payload = (message ?? "") + trailing;
   await writeToIpc(fifoPath, payload);
   process.stdout.write(`sent to pid ${record.pid} (${record.cli}): ${truncate(payload, 80)}\n`);
+
+  process.stderr.write(
+    `\n` +
+      `  cy tail ${record.pid}                  # watch output\n` +
+      `  cy ls                                  # list all agents\n`,
+  );
   return 0;
 }
 
