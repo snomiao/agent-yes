@@ -11,7 +11,7 @@
  * to the normal agent-spawning flow.
  */
 
-import { appendFile, mkdir, readFile, stat, writeFile } from "fs/promises";
+import { appendFile, mkdir, open, readFile, stat, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
 import { type GlobalPidRecord, readGlobalPids } from "./globalPidIndex.ts";
@@ -375,8 +375,18 @@ async function cmdLs(rest: string[]): Promise<number> {
       } else {
         displayStatus = "active";
       }
-      const label = truncate(notes.get(r.pid) ?? r.prompt ?? "", promptBudget);
-      const hasNote = notes.has(r.pid);
+      const note = notes.get(r.pid);
+      let label: string;
+      let hasNote = false;
+      if (note) {
+        label = truncate(note, promptBudget);
+        hasNote = true;
+      } else if (r.log_file && displayStatus !== "stopped") {
+        const activity = await extractActivity(r.log_file);
+        label = truncate(activity ?? r.prompt ?? "", promptBudget);
+      } else {
+        label = truncate(r.prompt ?? "", promptBudget);
+      }
       return {
         pid: String(r.pid),
         cli: r.cli,
@@ -586,6 +596,112 @@ async function renderRawLog(
     if (mode === "tail") return lines.slice(Math.max(0, lines.length - n)).join("\n");
     return lines.slice(0, n).join("\n");
   }
+}
+
+// ---------------------------------------------------------------------------
+// activity extraction
+// ---------------------------------------------------------------------------
+
+/**
+ * Extract a one-line activity summary from a raw log file.
+ * Reads only the last 32 KB for speed, renders via xterm for clean output.
+ */
+async function extractActivity(logPath: string): Promise<string | null> {
+  const TAIL_BYTES = 32 * 1024;
+  let buf: Uint8Array;
+  try {
+    const fh = await open(logPath, "r");
+    try {
+      const { size } = await fh.stat();
+      if (size === 0) return null;
+      if (size <= TAIL_BYTES) {
+        const data = await fh.readFile();
+        buf = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+      } else {
+        const tmp = Buffer.alloc(TAIL_BYTES);
+        const { bytesRead } = await fh.read(tmp, 0, TAIL_BYTES, size - TAIL_BYTES);
+        buf = new Uint8Array(tmp.buffer, 0, bytesRead);
+      }
+    } finally {
+      await fh.close();
+    }
+  } catch {
+    return null;
+  }
+
+  try {
+    const rendered = await renderRawLog(buf, { mode: "tail", n: 40 });
+    return extractActivityFromLines(rendered.split("\n"));
+  } catch {
+    return null;
+  }
+}
+
+function extractActivityFromLines(lines: string[]): string | null {
+  // Claude Code UI chrome: these lines carry no meaningful activity info
+  const isChrome = (l: string): boolean => {
+    const s = l.trim();
+    return (
+      !s ||
+      /^─+$/.test(s) ||
+      s.startsWith("? for shortcuts") ||
+      /^esc to interrupt/i.test(s) ||
+      /\d+%\s*until auto-compact/i.test(s) ||
+      /^\/model\s+/i.test(s) ||
+      /^⧉\s+In\s+/i.test(s) ||
+      /^●\s+(high|medium|low)\s*[·•]/i.test(s) ||
+      /^[·•]\s*\d+\s+(left|request)/i.test(s)
+    );
+  };
+
+  const clean = lines.filter((l) => !isChrome(l));
+
+  // Priority 1: thinking/composing spinner active
+  // Claude Code cycles through various Unicode dingbats for its spinner (✢✳✶✻✷…).
+  // The format is always: SPINNER_CHAR Verb… (timing…)
+  // Require ellipsis after the verb so we don't false-positive on normal text
+  // that happens to contain one of these chars mid-sentence.
+  const thinkingLine = clean.find(
+    (l) => /^[^\w\s❯>⎿✓✗]\s+[A-Z]\w+[….]/u.test(l.trim()) || /still thinking/i.test(l),
+  );
+  if (thinkingLine) {
+    const m = /^.\s+(\w+[^(]*)(?:\s*\(|$)/u.exec(thinkingLine.trim());
+    return m ? `✳ ${m[1].trim()}` : "thinking…";
+  }
+
+  // Priority 2: last ❯ prompt line means agent is idle, waiting for next input
+  const promptLines = clean.filter((l) => /^❯\s+/.test(l.trim()));
+  if (promptLines.length > 0) {
+    const text = promptLines[promptLines.length - 1]!.trim()
+      .replace(/^❯\s+/, "")
+      .trim();
+    if (text) return `» ${text}`;
+  }
+
+  // Priority 3: ✻ spinner just finished — show nearby context
+  const cookIdx = clean.findIndex((l) => /^✻\s+/.test(l.trim()));
+  if (cookIdx >= 0) {
+    const window = clean.slice(Math.max(0, cookIdx - 8), cookIdx);
+    for (let i = window.length - 1; i >= 0; i--) {
+      const l = window[i]!.trim();
+      if (l && !/^[✻✢⧉❯]/.test(l) && !isChrome(l)) {
+        return l.length > 80 ? l.slice(0, 79) + "…" : l;
+      }
+    }
+  }
+
+  // Priority 4: last meaningful non-icon line
+  for (let i = clean.length - 1; i >= 0; i--) {
+    const l = clean[i]!.trim();
+    // Skip lines that look like spinner patterns (caught by priority 1 above)
+    // and status dots/separators; everything else (including ⎿ tool sub-output
+    // and non-ASCII text like Japanese) is fair game as meaningful content.
+    if (l && !/^[─●○◉⧉]/.test(l) && !/^[^\w\s❯>]\s+[A-Z]\w+[….]/u.test(l)) {
+      return l.length > 80 ? l.slice(0, 79) + "…" : l;
+    }
+  }
+
+  return null;
 }
 
 // ---------------------------------------------------------------------------
