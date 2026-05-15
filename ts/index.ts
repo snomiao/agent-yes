@@ -28,6 +28,7 @@ import { AgentContext } from "./core/context.ts";
 import { createTerminatorStream } from "./core/streamHelpers.ts";
 import { globalAgentRegistry } from "./agentRegistry.ts";
 import { notifyWebhook } from "./webhookNotifier.ts";
+import { readGlobalPids } from "./globalPidIndex.ts";
 
 export { removeControlCharacters };
 export { AgentContext };
@@ -124,6 +125,7 @@ export default async function agentYes({
   useStdinAppend = false,
   autoYes = true,
   idleAction,
+  swarmHint = true,
 }: {
   cli: keyof typeof CLIS_CONFIG;
   cliArgs?: string[];
@@ -142,6 +144,7 @@ export default async function agentYes({
   useStdinAppend?: boolean; // if true, enable FIFO input stream on Linux,  for additional stdin input
   autoYes?: boolean; // if true, auto-yes is enabled (default), toggle with Ctrl+Y during session
   idleAction?: string; // if set, type this message when idle instead of exiting
+  swarmHint?: boolean; // if true (default), inject peer discovery hint when other agents are running; --no-swarm-hint to opt out
 }) {
   if (!cli) throw new Error(`cli is required`);
   const conf =
@@ -272,6 +275,23 @@ export default async function agentYes({
   } catch (error) {
     // Non-fatal; continue without skills
     if (verbose) logger.warn("[skills] Failed to inject SKILL.md header:", { error });
+  }
+
+  // Inject peer discovery hint when other agents are running
+  if (swarmHint) {
+    try {
+      const peers = await readGlobalPids({ liveOnly: true });
+      if (peers.length > 0) {
+        const hint = `${peers.length} peer agent${peers.length > 1 ? "s are" : " is"} running. Before asking the user for input on any domain-specific topic (design, testing, architecture, etc.), check for relevant peers first: \`ay ls --json\` (see \`prompt\` field for their role). Ask one: \`ay send <pid> <question>\`. Read reply: \`ay tail <pid>\`. Do not use interactive forms or user prompts when a peer can answer.`;
+        if (cli === "claude") {
+          cliArgs = ["--append-system-prompt", hint, ...cliArgs];
+        }
+        // Prepend to prompt for all CLIs (including claude) so it's read before the task
+        prompt = prompt ? `[${hint}]\n\n${prompt}` : hint;
+      }
+    } catch {
+      // Non-fatal
+    }
   }
 
   // Handle --continue flag for codex session restoration

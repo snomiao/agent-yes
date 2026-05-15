@@ -387,9 +387,9 @@ async function cmdLs(rest: string[]): Promise<number> {
         hasNote = true;
       } else if (r.log_file && displayStatus !== "stopped") {
         const activity = await extractActivity(r.log_file);
-        label = truncate(activity ?? r.prompt ?? "", promptBudget);
+        label = truncate(activity ?? (r.prompt ? `→ ${r.prompt}` : ""), promptBudget);
       } else {
-        label = truncate(r.prompt ?? "", promptBudget);
+        label = truncate(r.prompt ? `→ ${r.prompt}` : "", promptBudget);
       }
       return {
         pid: String(r.pid),
@@ -437,9 +437,14 @@ async function cmdLs(rest: string[]): Promise<number> {
       hints.push(`  ay status ${alive.pid} --watch        # stream changes as JSON\n`);
       hints.push(`  ay tail ${alive.pid}                  # view latest output\n`);
       hints.push(`  ay tail -f ${alive.pid}               # follow live output\n`);
-      hints.push(`  ay send ${alive.pid} "next: ..."      # send a prompt\n`);
+      hints.push(
+        `  ay send ${alive.pid} "next: ..."      # send a prompt (keyword: pid, cwd, or prompt substring)\n`,
+      );
       hints.push(`  ay send ${alive.pid} "" --code=ctrl-c # interrupt\n`);
       hints.push(`  ay note ${alive.pid} "what it's doing" # set a note\n`);
+      hints.push(
+        `  ay ls --json                           # machine-readable list for scripts/agents\n`,
+      );
     }
     if (stopped) {
       hints.push(`  ay restart ${stopped.pid}             # restart stopped agent\n`);

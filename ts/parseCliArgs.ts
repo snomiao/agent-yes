@@ -63,6 +63,12 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
         "Prepend SKILL.md header from current directory to the prompt (helpful for non-Claude agents)",
       default: false,
     })
+    .option("swarm-hint", {
+      type: "boolean",
+      description:
+        "Inject peer discovery hint into agent system prompt when other agents are running (use --no-swarm-hint to opt out)",
+      default: true,
+    })
     .option("timeout", {
       type: "string",
       description: 'Exit after a period of inactivity, e.g., "5s" or "1m"',
@@ -313,6 +319,7 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
     verbose: parsedArgv.verbose,
     resume: parsedArgv.continue, // Note: intentional use resume here to avoid preserved keyword (continue)
     useSkills: parsedArgv.useSkills,
+    swarmHint: parsedArgv.swarmHint,
     appendPrompt: parsedArgv.appendPrompt,
     useStdinAppend: Boolean(parsedArgv.stdpush || parsedArgv.ipc || parsedArgv.fifo), // Support --stdpush, --ipc, and --fifo (backward compatibility)
     showVersion: parsedArgv.version,
