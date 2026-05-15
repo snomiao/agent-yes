@@ -332,6 +332,30 @@ async function resolveOne(keyword: string | undefined, opts: CommonOpts): Promis
 
 async function cmdLs(rest: string[]): Promise<number> {
   const { flags, positional } = parseArgs(rest);
+  if (flags.h || flags.help) {
+    process.stdout.write(
+      `Usage: ay ls [keyword] [options]\n` +
+        `       ay list [keyword] [options]\n` +
+        `       ay ps   [keyword] [options]\n` +
+        `\n` +
+        `List running agents. Optionally filter by keyword (pid, cwd substring, or prompt substring).\n` +
+        `\n` +
+        `Options:\n` +
+        `  --all          Show all agents including exited ones\n` +
+        `  --active       Only show agents with an alive process\n` +
+        `  --json         Output as JSON array\n` +
+        `  --latest       Show only the most recent agent\n` +
+        `  --cwd [dir]    Restrict to agents whose cwd starts with dir (default: current dir)\n` +
+        `  -h, --help     Show this help\n` +
+        `\n` +
+        `Examples:\n` +
+        `  ay ls                    # list running agents\n` +
+        `  ay ls --all              # include exited agents\n` +
+        `  ay ls --json             # machine-readable output\n` +
+        `  ay ls symval             # filter by cwd/prompt keyword\n`,
+    );
+    return 0;
+  }
   const opts = commonOpts(flags);
   const keyword = positional[0];
   const records = await listRecords(keyword, opts);

@@ -525,6 +525,541 @@ describe("subcommands.cmdSend writes bytes to FIFO", () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// parseArgs — additional flag coverage
+// ---------------------------------------------------------------------------
+
+describe("subcommands.parseArgs additional flags", () => {
+  it("parses -h as flags.h = true", async () => {
+    const { parseArgs } = await loadModule();
+    const out = parseArgs(["-h"]);
+    expect(out.flags.h).toBe(true);
+    expect(out.positional).toEqual([]);
+  });
+
+  it("parses --help as flags.help = true", async () => {
+    const { parseArgs } = await loadModule();
+    const out = parseArgs(["--help"]);
+    expect(out.flags.help).toBe(true);
+  });
+
+  it("parses -f as flags.f = true", async () => {
+    const { parseArgs } = await loadModule();
+    const out = parseArgs(["-f"]);
+    expect(out.flags.f).toBe(true);
+  });
+
+  it("treats --follow, --watch, --json, --active, --latest as booleans", async () => {
+    const { parseArgs } = await loadModule();
+    const out = parseArgs(["--follow", "--watch", "--json", "--active", "--latest", "kw"]);
+    expect(out.flags.follow).toBe(true);
+    expect(out.flags.watch).toBe(true);
+    expect(out.flags.json).toBe(true);
+    expect(out.flags.active).toBe(true);
+    expect(out.flags.latest).toBe(true);
+    expect(out.positional).toEqual(["kw"]);
+  });
+
+  it("treats bare --cwd (no following value) as flags.cwd = true", async () => {
+    const { parseArgs } = await loadModule();
+    const out = parseArgs(["--cwd"]);
+    expect(out.flags.cwd).toBe(true);
+  });
+
+  it("treats --unknown followed by another flag as boolean", async () => {
+    const { parseArgs } = await loadModule();
+    const out = parseArgs(["--unknown", "--json"]);
+    expect(out.flags.unknown).toBe(true);
+    expect(out.flags.json).toBe(true);
+  });
+
+  it("handles mixed positional + flags in any order", async () => {
+    const { parseArgs } = await loadModule();
+    const out = parseArgs(["kw", "--all", "--code=ctrl-c"]);
+    expect(out.positional).toEqual(["kw"]);
+    expect(out.flags.all).toBe(true);
+    expect(out.flags.code).toBe("ctrl-c");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cmdLs additional arg coverage
+// ---------------------------------------------------------------------------
+
+describe("subcommands.cmdLs -h / --help", () => {
+  function captureStdout() {
+    const chunks: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (s: any) => {
+      chunks.push(String(s));
+      return true;
+    };
+    return {
+      get text() {
+        return chunks.join("");
+      },
+      restore() {
+        process.stdout.write = orig;
+      },
+    };
+  }
+
+  it("ay ls -h prints usage to stdout and exits 0", async () => {
+    const { runSubcommand } = await loadModule();
+    const cap = captureStdout();
+    let code: number | null;
+    try {
+      code = await runSubcommand(["bun", "cli.js", "ls", "-h"]);
+    } finally {
+      cap.restore();
+    }
+    expect(code).toBe(0);
+    expect(cap.text).toMatch(/Usage:/);
+    expect(cap.text).toMatch(/--all/);
+    expect(cap.text).toMatch(/--json/);
+  });
+
+  it("ay ls --help prints usage to stdout and exits 0", async () => {
+    const { runSubcommand } = await loadModule();
+    const cap = captureStdout();
+    let code: number | null;
+    try {
+      code = await runSubcommand(["bun", "cli.js", "ls", "--help"]);
+    } finally {
+      cap.restore();
+    }
+    expect(code).toBe(0);
+    expect(cap.text).toMatch(/Usage:/);
+  });
+});
+
+describe("subcommands.cmdLs --all / --active / keyword filter / aliases", () => {
+  function captureOutput() {
+    const out: string[] = [];
+    const err: string[] = [];
+    const origOut = process.stdout.write.bind(process.stdout);
+    const origErr = process.stderr.write.bind(process.stderr);
+    (process.stdout as any).write = (s: any) => {
+      out.push(String(s));
+      return true;
+    };
+    (process.stderr as any).write = (s: any) => {
+      err.push(String(s));
+      return true;
+    };
+    return {
+      get stdout() {
+        return out.join("");
+      },
+      get stderr() {
+        return err.join("");
+      },
+      restore() {
+        process.stdout.write = origOut;
+        process.stderr.write = origErr;
+      },
+    };
+  }
+
+  it("--all shows exited agents", async () => {
+    const mod = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: 1, // pid 1 is almost never the test process, so isPidAlive returns false
+      cli: "claude",
+      prompt: "exited agent",
+      cwd: process.cwd(),
+      log_file: null,
+      status: "exited",
+      exit_code: 0,
+      exit_reason: "done",
+      started_at: Date.now() - 10_000,
+    });
+
+    const cap = captureOutput();
+    let code: number | null;
+    try {
+      code = await mod.runSubcommand(["bun", "cli.js", "ls", "--all", "--json"]);
+    } finally {
+      cap.restore();
+    }
+    expect(code).toBe(0);
+    const parsed = JSON.parse(cap.stdout);
+    expect(Array.isArray(parsed)).toBe(true);
+    expect(parsed.some((r: any) => r.prompt === "exited agent")).toBe(true);
+  });
+
+  it("keyword filter restricts results to matching agents", async () => {
+    const mod = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: "unique-xyzzy-prompt",
+      cwd: process.cwd(),
+      log_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+    });
+
+    const cap = captureOutput();
+    let code: number | null;
+    try {
+      code = await mod.runSubcommand(["bun", "cli.js", "ls", "--json", "unique-xyzzy-prompt"]);
+    } finally {
+      cap.restore();
+    }
+    expect(code).toBe(0);
+    const parsed = JSON.parse(cap.stdout);
+    expect(parsed.every((r: any) => r.prompt?.includes("unique-xyzzy-prompt"))).toBe(true);
+  });
+
+  it("keyword filter returns 'no running agents' when nothing matches", async () => {
+    const { runSubcommand } = await loadModule();
+    const stderr: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (s: any) => {
+      stderr.push(String(s));
+      return true;
+    };
+    try {
+      const code = await runSubcommand(["bun", "cli.js", "ls", "no-match-zzzzzz"]);
+      expect(code).toBe(0);
+      expect(stderr.join("")).toMatch(/no running agents matched/);
+    } finally {
+      process.stderr.write = orig;
+    }
+  });
+
+  it("list alias routes to cmdLs", async () => {
+    const { runSubcommand } = await loadModule();
+    const stderr: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (s: any) => {
+      stderr.push(String(s));
+      return true;
+    };
+    try {
+      const code = await runSubcommand(["bun", "cli.js", "list"]);
+      expect(code).toBe(0);
+    } finally {
+      process.stderr.write = orig;
+    }
+  });
+
+  it("ps alias routes to cmdLs", async () => {
+    const { runSubcommand } = await loadModule();
+    const stderr: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (s: any) => {
+      stderr.push(String(s));
+      return true;
+    };
+    try {
+      const code = await runSubcommand(["bun", "cli.js", "ps"]);
+      expect(code).toBe(0);
+    } finally {
+      process.stderr.write = orig;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cmdRead — head and cat modes
+// ---------------------------------------------------------------------------
+
+describe("subcommands.cmdRead head and cat modes", () => {
+  it("head emits first N lines", async () => {
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const tmp = await mkdtemp(path.join(tmpdir(), "ay-head-log-"));
+    try {
+      const logPath = path.join(tmp, "x.raw.log");
+      const lines: string[] = [];
+      for (let i = 0; i < 50; i++) lines.push(`line-${i}`);
+      await writeFile(logPath, lines.join("\r\n") + "\r\n");
+
+      await appendGlobalPid({
+        pid: process.pid,
+        cli: "claude",
+        prompt: null,
+        cwd: process.cwd(),
+        log_file: logPath,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: Date.now(),
+      });
+
+      const stdout: string[] = [];
+      const orig = process.stdout.write.bind(process.stdout);
+      (process.stdout as any).write = (s: any) => {
+        stdout.push(String(s));
+        return true;
+      };
+      const stderr_chunks: string[] = [];
+      const origErr = process.stderr.write.bind(process.stderr);
+      (process.stderr as any).write = (s: any) => {
+        stderr_chunks.push(String(s));
+        return true;
+      };
+      try {
+        const code = await runSubcommand(["bun", "cli.js", "head", String(process.pid), "-n", "5"]);
+        expect(code).toBe(0);
+      } finally {
+        process.stdout.write = orig;
+        process.stderr.write = origErr;
+      }
+      const text = stdout.join("");
+      expect(text).toMatch(/line-0/);
+      expect(text).toMatch(/line-4/);
+      expect(text).not.toMatch(/line-10\b/);
+    } finally {
+      await rm(tmp, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("cat emits all lines", async () => {
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const tmp = await mkdtemp(path.join(tmpdir(), "ay-cat-log-"));
+    try {
+      const logPath = path.join(tmp, "x.raw.log");
+      await writeFile(logPath, "alpha\r\nbeta\r\ngamma\r\n");
+
+      await appendGlobalPid({
+        pid: process.pid,
+        cli: "claude",
+        prompt: null,
+        cwd: process.cwd(),
+        log_file: logPath,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: Date.now(),
+      });
+
+      const stdout: string[] = [];
+      const orig = process.stdout.write.bind(process.stdout);
+      (process.stdout as any).write = (s: any) => {
+        stdout.push(String(s));
+        return true;
+      };
+      const stderr_chunks: string[] = [];
+      const origErr = process.stderr.write.bind(process.stderr);
+      (process.stderr as any).write = (s: any) => {
+        stderr_chunks.push(String(s));
+        return true;
+      };
+      try {
+        const code = await runSubcommand(["bun", "cli.js", "cat", String(process.pid)]);
+        expect(code).toBe(0);
+      } finally {
+        process.stdout.write = orig;
+        process.stderr.write = origErr;
+      }
+      const text = stdout.join("");
+      expect(text).toMatch(/alpha/);
+      expect(text).toMatch(/beta/);
+      expect(text).toMatch(/gamma/);
+    } finally {
+      await rm(tmp, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cmdNote
+// ---------------------------------------------------------------------------
+
+describe("subcommands.cmdNote", () => {
+  it("throws usage error when no keyword given", async () => {
+    const { runSubcommand } = await loadModule();
+    const stderr: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (s: any) => {
+      stderr.push(String(s));
+      return true;
+    };
+    try {
+      const code = await runSubcommand(["bun", "cli.js", "note"]);
+      expect(code).toBe(1);
+      expect(stderr.join("")).toMatch(/usage:/i);
+    } finally {
+      process.stderr.write = orig;
+    }
+  });
+
+  it("sets a note on a matched agent", async () => {
+    const mod = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: "note-target",
+      cwd: process.cwd(),
+      log_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+    });
+
+    const stdout: string[] = [];
+    const origOut = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (s: any) => {
+      stdout.push(String(s));
+      return true;
+    };
+    const origErr = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = () => true;
+    try {
+      const code = await mod.runSubcommand([
+        "bun",
+        "cli.js",
+        "note",
+        String(process.pid),
+        "my note text",
+      ]);
+      expect(code).toBe(0);
+      expect(stdout.join("")).toMatch(/note set/);
+    } finally {
+      process.stdout.write = origOut;
+      process.stderr.write = origErr;
+    }
+  });
+
+  it("clears a note when no text given", async () => {
+    const mod = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: "note-clear-target",
+      cwd: process.cwd(),
+      log_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+    });
+
+    const stdout: string[] = [];
+    const origOut = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (s: any) => {
+      stdout.push(String(s));
+      return true;
+    };
+    (process.stderr as any).write = () => true;
+    try {
+      const code = await mod.runSubcommand(["bun", "cli.js", "note", String(process.pid)]);
+      expect(code).toBe(0);
+      expect(stdout.join("")).toMatch(/cleared note/);
+    } finally {
+      process.stdout.write = origOut;
+      process.stderr.write = process.stderr.write; // no-op restore (silenced above)
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cmdStatus
+// ---------------------------------------------------------------------------
+
+describe("subcommands.cmdStatus", () => {
+  it("throws usage error when no keyword given", async () => {
+    const { runSubcommand } = await loadModule();
+    const stderr: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (s: any) => {
+      stderr.push(String(s));
+      return true;
+    };
+    try {
+      const code = await runSubcommand(["bun", "cli.js", "status"]);
+      expect(code).toBe(1);
+      expect(stderr.join("")).toMatch(/usage:/i);
+    } finally {
+      process.stderr.write = orig;
+    }
+  });
+
+  it("emits JSON snapshot for a matched agent", async () => {
+    const mod = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: "status-test",
+      cwd: process.cwd(),
+      log_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now() - 1000,
+    });
+
+    const stdout: string[] = [];
+    const origOut = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (s: any) => {
+      stdout.push(String(s));
+      return true;
+    };
+    (process.stderr as any).write = () => true;
+    try {
+      const code = await mod.runSubcommand(["bun", "cli.js", "status", String(process.pid)]);
+      expect(code).toBe(0);
+    } finally {
+      process.stdout.write = origOut;
+    }
+    const snap = JSON.parse(stdout.join(""));
+    expect(snap).toMatchObject({ pid: process.pid, cli: "claude" });
+    expect(typeof snap.age_ms).toBe("number");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cmdRestart
+// ---------------------------------------------------------------------------
+
+describe("subcommands.cmdRestart", () => {
+  it("returns 1 and warns when the agent is still alive", async () => {
+    const mod = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: "restart-live-test",
+      cwd: process.cwd(),
+      log_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+    });
+
+    const stderr: string[] = [];
+    const origErr = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (s: any) => {
+      stderr.push(String(s));
+      return true;
+    };
+    try {
+      const code = await mod.runSubcommand(["bun", "cli.js", "restart", String(process.pid)]);
+      expect(code).toBe(1);
+      expect(stderr.join("")).toMatch(/still running/);
+    } finally {
+      process.stderr.write = origErr;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// listRecords merges per-cwd TS file with global
+// ---------------------------------------------------------------------------
+
 describe("subcommands.listRecords merges per-cwd TS file with global", () => {
   it("includes records from <cwd>/.agent-yes/pid-records.jsonl", async () => {
     // Write a fake per-cwd file that uses the live process pid so liveOnly
