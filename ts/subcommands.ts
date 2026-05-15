@@ -16,7 +16,7 @@ import { homedir } from "os";
 import path from "path";
 import { type GlobalPidRecord, readGlobalPids } from "./globalPidIndex.ts";
 import yargs from "yargs";
-import { type ResolvedRemote, resolveRemoteSpec } from "./remotes.ts";
+import { type ResolvedRemote, readRemotes, resolveRemoteSpec } from "./remotes.ts";
 
 // ---------------------------------------------------------------------------
 // notes store  (~/.agent-yes/notes.jsonl)
@@ -365,6 +365,7 @@ async function runRemoteRead(
   mode: "cat" | "tail" | "head",
   follow: boolean,
   n: number,
+  reconnectTimeoutMs = 120_000,
 ): Promise<number> {
   const keyword = remote.keyword ?? "";
   if (!keyword) {
@@ -375,51 +376,77 @@ async function runRemoteRead(
   }
 
   if (mode === "tail" && follow) {
-    // SSE stream
     const ac = new AbortController();
     process.on("SIGINT", () => ac.abort());
-    let res: Response;
-    try {
-      res = await fetch(`${remote.url}/api/tail/${encodeURIComponent(keyword)}`, {
-        headers: { Authorization: `Bearer ${remote.token}`, Accept: "text/event-stream" },
-        signal: ac.signal,
-      });
-    } catch (e: any) {
-      if (e.name === "AbortError") return 0;
-      throw e;
-    }
-    if (!res.ok) {
-      process.stderr.write(`remote error ${res.status}: ${await res.text()}\n`);
-      return 1;
-    }
-    process.stderr.write(`[remote ${remote.url}  ${keyword}]\nfollowing... (Ctrl-C to stop)\n`);
-    const reader = res.body!.getReader();
-    const dec = new TextDecoder();
-    let buf = "";
-    let first = true;
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const lines = buf.split("\n");
-        buf = lines.pop() ?? "";
-        for (const line of lines) {
-          if (!line.startsWith("data: ")) continue;
-          try {
-            const text = JSON.parse(line.slice(6)) as string;
-            if (first) {
-              first = false;
+    const deadline = Date.now() + reconnectTimeoutMs;
+    let delay = 1_000;
+    let attempt = 0;
+
+    process.stderr.write(
+      `[remote ${remote.url}  ${keyword}]\nfollowing... (Ctrl-C to stop, timeout: ${Math.round(reconnectTimeoutMs / 1000)}s)\n`,
+    );
+
+    while (!ac.signal.aborted) {
+      try {
+        const res = await fetch(`${remote.url}/api/tail/${encodeURIComponent(keyword)}`, {
+          headers: { Authorization: `Bearer ${remote.token}`, Accept: "text/event-stream" },
+          signal: ac.signal,
+        });
+        if (!res.ok) {
+          // 401/404 are permanent failures — no point retrying
+          if (res.status === 401 || res.status === 404) {
+            process.stderr.write(`remote error ${res.status}: ${await res.text()}\n`);
+            return 1;
+          }
+          throw new Error(`HTTP ${res.status}`);
+        }
+
+        if (attempt > 0) process.stderr.write("remote: reconnected\n");
+        delay = 1_000; // reset backoff on successful connect
+
+        const reader = res.body!.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          const lines = buf.split("\n");
+          buf = lines.pop() ?? "";
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            try {
+              const text = JSON.parse(line.slice(6)) as string;
+              process.stdout.write(text);
+              if (!text.endsWith("\n")) process.stdout.write("\n");
+            } catch {
+              /* skip non-JSON */
             }
-            process.stdout.write(text);
-            if (!text.endsWith("\n")) process.stdout.write("\n");
-          } catch {
-            /* skip non-JSON */
           }
         }
+        break; // stream ended cleanly
+      } catch (e: any) {
+        if (e.name === "AbortError" || ac.signal.aborted) return 0;
+        if (Date.now() >= deadline) {
+          process.stderr.write(
+            `remote: timeout after ${Math.round(reconnectTimeoutMs / 1000)}s, giving up\n`,
+          );
+          return 1;
+        }
+        process.stderr.write(
+          `remote: disconnected (${e.message}), retrying in ${delay / 1000}s…\n`,
+        );
+        await new Promise<void>((resolve, reject) => {
+          const t = setTimeout(resolve, delay);
+          ac.signal.addEventListener("abort", () => {
+            clearTimeout(t);
+            reject(new Error("abort"));
+          });
+        }).catch(() => {});
+        if (ac.signal.aborted) return 0;
+        delay = Math.min(delay * 2, 30_000);
+        attempt++;
       }
-    } catch (e: any) {
-      if (e.name !== "AbortError") throw e;
     }
     return 0;
   }
@@ -470,6 +497,105 @@ async function runRemoteStatus(remote: ResolvedRemote): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
+// --all-remotes helpers
+// ---------------------------------------------------------------------------
+
+async function fetchRemoteRecordsRaw(
+  url: string,
+  token: string,
+  opts: { all: boolean; active: boolean; keyword?: string },
+): Promise<any[]> {
+  const params = new URLSearchParams();
+  if (opts.all) params.set("all", "1");
+  if (opts.active) params.set("active", "1");
+  if (opts.keyword) params.set("keyword", opts.keyword);
+  try {
+    const res = await fetch(`${url}/api/ls?${params}`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return [];
+    return (await res.json()) as any[];
+  } catch {
+    return [];
+  }
+}
+
+async function runAllRemotesLs(opts: {
+  all: boolean;
+  active: boolean;
+  keyword?: string;
+}): Promise<number> {
+  const remotes = await readRemotes();
+  const localOpts: CommonOpts = {
+    all: opts.all,
+    active: opts.active,
+    json: true,
+    latest: false,
+    cwdScope: null,
+  };
+
+  const [localResult, ...remoteResults] = await Promise.allSettled([
+    listRecords(opts.keyword, localOpts).then((recs) => ({
+      host: "local",
+      records: recs as any[],
+    })),
+    ...Array.from(remotes.entries()).map(([alias, cfg]) =>
+      fetchRemoteRecordsRaw(cfg.url, cfg.token, opts).then((records) => ({ host: alias, records })),
+    ),
+  ]);
+
+  type HostedRow = { host: string; rec: any };
+  const rows: HostedRow[] = [];
+  if (localResult.status === "fulfilled") {
+    for (const r of localResult.value.records) rows.push({ host: "local", rec: r });
+  }
+  for (const res of remoteResults) {
+    if (res.status === "fulfilled") {
+      for (const r of res.value.records) rows.push({ host: res.value.host, rec: r });
+    }
+  }
+
+  if (rows.length === 0) {
+    process.stderr.write("no running agents\n");
+    return 0;
+  }
+
+  const termWidth = (process.stdout as any).columns ?? 120;
+  const hostW = Math.max(4, ...rows.map((r) => r.host.length));
+  const pidW = Math.max(3, ...rows.map((r) => String(r.rec.pid).length));
+  const cliW = Math.max(3, ...rows.map((r) => String(r.rec.cli).length));
+  const statusW = Math.max(6, ...rows.map((r) => String(r.rec.status).length));
+  const cwdW = Math.max(3, ...rows.map((r) => shortenPath(String(r.rec.cwd)).length));
+  const promptBudget = Math.max(20, termWidth - hostW - pidW - cliW - statusW - cwdW - 5 * 2 - 1);
+
+  process.stdout.write(
+    [
+      "HOST".padEnd(hostW),
+      "PID".padEnd(pidW),
+      "CLI".padEnd(cliW),
+      "STATUS".padEnd(statusW),
+      "CWD".padEnd(cwdW),
+      "PROMPT",
+    ].join("  ") + "\n",
+  );
+  for (const { host, rec } of rows) {
+    const label = rec.prompt ? truncate(`→ ${rec.prompt}`, promptBudget) : "";
+    process.stdout.write(
+      [
+        host.padEnd(hostW),
+        String(rec.pid).padEnd(pidW),
+        String(rec.cli).padEnd(cliW),
+        String(rec.status).padEnd(statusW),
+        shortenPath(String(rec.cwd)).padEnd(cwdW),
+        label,
+      ].join("  ") + "\n",
+    );
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
 // ay ls
 // ---------------------------------------------------------------------------
 
@@ -498,8 +624,14 @@ async function cmdLs(rest: string[]): Promise<number> {
       description: "Show only the most recent agent",
     })
     .option("cwd", { type: "string", description: "Restrict to agents whose cwd starts with dir" })
+    .option("all-remotes", {
+      type: "boolean",
+      default: false,
+      description: "Include agents from all configured remotes (remotes.yaml)",
+    })
     .option("help", { alias: "h", type: "boolean", default: false, description: "Show this help" })
     .example("ay ls", "list running agents")
+    .example("ay ls --all-remotes", "include all configured remote machines")
     .example("ay ls --all", "include exited agents")
     .example("ay ls --json", "machine-readable output")
     .example("ay ls symval", "filter by cwd/prompt keyword")
@@ -512,6 +644,14 @@ async function cmdLs(rest: string[]): Promise<number> {
   if (argv.help || argv.h) {
     process.stdout.write((await y.getHelp()) + "\n");
     return 0;
+  }
+
+  if (argv["all-remotes"]) {
+    return runAllRemotesLs({
+      all: argv.all,
+      active: argv.active,
+      keyword: argv._[0] !== undefined ? String(argv._[0]) : undefined,
+    });
   }
 
   const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
@@ -696,6 +836,11 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
       description: "Use most recent match when multiple match",
     })
     .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
+    .option("reconnect-timeout", {
+      type: "number",
+      default: 120,
+      description: "Seconds before giving up reconnecting remote SSE (default: 120)",
+    })
     .help(false)
     .version(false)
     .exitProcess(false);
@@ -718,7 +863,8 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
         : mode === "cat"
           ? 0
           : 96;
-    if (remote) return runRemoteRead(remote, mode, argv.follow, n2);
+    const reconnectTimeoutMs = ((argv["reconnect-timeout"] as number) ?? 120) * 1000;
+    if (remote) return runRemoteRead(remote, mode, argv.follow, n2, reconnectTimeoutMs);
   }
   const follow = argv.follow;
   const nFlag = argv.n;

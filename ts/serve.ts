@@ -57,10 +57,69 @@ const defaultOpts = (overrides: Partial<CommonOpts> = {}): CommonOpts => ({
 });
 
 // ---------------------------------------------------------------------------
+// ay serve install / uninstall / logs  (oxmgr daemon management)
+// ---------------------------------------------------------------------------
+
+const DAEMON_NAME = "agent-yes";
+
+async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
+  const oxmgrBin = Bun.which("oxmgr");
+  if (!oxmgrBin) {
+    process.stderr.write(
+      "ay serve install: oxmgr not found\n" +
+        "  install with:  cargo install oxmgr\n" +
+        "             or: bun add -g oxmgr\n",
+    );
+    return 1;
+  }
+
+  if (sub === "install") {
+    const token = await loadOrCreateToken(undefined);
+    // Build the ay serve command with forwarded args (port, host, etc.)
+    const serveCmd = ["ay", "serve", ...args].join(" ");
+    const proc = Bun.spawn(
+      [oxmgrBin, "start", serveCmd, "--name", DAEMON_NAME, "--restart", "always"],
+      { stdio: ["ignore", "inherit", "inherit"] },
+    );
+    const code = await proc.exited;
+    if (code === 0) {
+      process.stdout.write(`\ninstalled '${DAEMON_NAME}' as a daemon via oxmgr\n`);
+      process.stdout.write(`token: ${token}\n\n`);
+      process.stdout.write(`  ay ls ${token}@<host>:${DEFAULT_PORT}\n`);
+      process.stdout.write(`  ay serve logs                # view server logs\n`);
+      process.stdout.write(`  ay serve uninstall           # remove daemon\n`);
+    }
+    return code ?? 1;
+  }
+
+  if (sub === "uninstall") {
+    const proc = Bun.spawn([oxmgrBin, "delete", DAEMON_NAME], {
+      stdio: ["ignore", "inherit", "inherit"],
+    });
+    return (await proc.exited) ?? 1;
+  }
+
+  if (sub === "logs") {
+    const proc = Bun.spawn([oxmgrBin, "logs", DAEMON_NAME, ...args], {
+      stdio: ["ignore", "inherit", "inherit"],
+    });
+    return (await proc.exited) ?? 1;
+  }
+
+  return 1;
+}
+
+// ---------------------------------------------------------------------------
 // ay serve
 // ---------------------------------------------------------------------------
 
 export async function cmdServe(rest: string[]): Promise<number> {
+  // Daemon subcommands
+  const sub = rest[0];
+  if (sub === "install" || sub === "uninstall" || sub === "logs") {
+    return cmdServeDaemon(sub, rest.slice(1));
+  }
+
   const y = yargs(rest)
     .usage("Usage: ay serve [options]")
     .option("port", { type: "number", default: DEFAULT_PORT, description: "Port to listen on" })
