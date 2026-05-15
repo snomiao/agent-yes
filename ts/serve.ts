@@ -85,7 +85,8 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     if (code === 0) {
       process.stdout.write(`\ninstalled '${DAEMON_NAME}' as a daemon via oxmgr\n`);
       process.stdout.write(`token: ${token}\n\n`);
-      process.stdout.write(`  ay ls ${token}@<host>:${DEFAULT_PORT}\n`);
+      process.stdout.write(`  ay ls   ${token}@<host>:${DEFAULT_PORT}\n`);
+      process.stdout.write(`  ay remote add <alias> http://${token}@<host>:${DEFAULT_PORT}\n`);
       process.stdout.write(`  ay serve logs                # view server logs\n`);
       process.stdout.write(`  ay serve uninstall           # remove daemon\n`);
     }
@@ -114,6 +115,27 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
 // ---------------------------------------------------------------------------
 
 export async function cmdServe(rest: string[]): Promise<number> {
+  if (rest.includes("-h") || rest.includes("--help")) {
+    process.stdout.write(
+      `Usage: ay serve [options]\n\n` +
+        `Start an HTTP API server so remote machines can list/tail/send agents.\n\n` +
+        `Options:\n` +
+        `  --port N          Port to listen on (default: ${DEFAULT_PORT})\n` +
+        `  --host HOST       Interface to bind (default: 127.0.0.1; use 0.0.0.0 to expose)\n` +
+        `  --token TOKEN     Auth token (auto-generated and saved if omitted)\n` +
+        `  --tls-cert FILE   TLS certificate PEM\n` +
+        `  --tls-key  FILE   TLS private key PEM\n\n` +
+        `Subcommands:\n` +
+        `  ay serve install    install as background daemon via oxmgr\n` +
+        `  ay serve uninstall  remove daemon\n` +
+        `  ay serve logs       view daemon logs\n\n` +
+        `Once running, connect from another machine:\n` +
+        `  ay ls   <token>@<host>:${DEFAULT_PORT}\n` +
+        `  ay remote add <alias> http://<token>@<host>:${DEFAULT_PORT}\n`,
+    );
+    return 0;
+  }
+
   // Daemon subcommands
   const sub = rest[0];
   if (sub === "install" || sub === "uninstall" || sub === "logs") {
@@ -350,6 +372,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
   process.stdout.write(`  ay ls   ${token}@<host>:${port}\n`);
   process.stdout.write(`  ay tail ${token}@<host>:${port}:<keyword>\n`);
   process.stdout.write(`  ay send ${token}@<host>:${port}:<keyword> "message"\n\n`);
+  process.stdout.write(`save as alias:\n`);
+  process.stdout.write(`  ay remote add <alias> ${scheme}://${token}@<host>:${port}\n\n`);
   if (!useHttps) {
     process.stdout.write(
       `for HTTPS: ay serve --tls-cert cert.pem --tls-key key.pem\n` +

@@ -140,6 +140,7 @@ const SUBCOMMANDS = new Set([
   "note",
   "serve",
   "remote",
+  "help",
 ]);
 
 const IDLE_THRESHOLD_MS = 60 * 1000;
@@ -187,6 +188,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         const { cmdRemote } = await import("./remotes.ts");
         return cmdRemote(rest);
       }
+      case "help":
+        return cmdHelp();
       default:
         return null;
     }
@@ -195,6 +198,42 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
     process.stderr.write(`ay ${sub}: ${msg}\n`);
     return 1;
   }
+}
+
+// ---------------------------------------------------------------------------
+// ay help
+// ---------------------------------------------------------------------------
+
+export function cmdHelp(): number {
+  process.stdout.write(
+    `ay - agent-yes CLI\n` +
+      `\n` +
+      `Management:\n` +
+      `  ay ls [keyword]                     list running agents\n` +
+      `  ay tail [-f] <keyword>              stream output  (Ctrl-C to stop)\n` +
+      `  ay cat <keyword>                    full log\n` +
+      `  ay head <keyword>                   first N lines\n` +
+      `  ay send <keyword> <msg>             send a message\n` +
+      `  ay status <keyword>                 agent status snapshot\n` +
+      `\n` +
+      `Remote:\n` +
+      `  ay serve [--port N]                 start HTTP API server (prints token)\n` +
+      `  ay remote add <alias> http://<token>@<host>:<port>\n` +
+      `  ay remote ls / rm <alias>           manage saved remotes\n` +
+      `  ay ls   <token>@<host>:<port>       connect inline (no alias needed)\n` +
+      `  ay send <token>@<host>:<port>:<kw> <msg>\n` +
+      `\n` +
+      `Run an agent:\n` +
+      `  ay [claude|codex|gemini|...] [options] -- [prompt]\n` +
+      `  ay claude -- "fix the bug in auth.ts"\n` +
+      `  ay claude --help                    full agent-runner options\n` +
+      `\n` +
+      `Labs (examples in ./lab/):\n` +
+      `  local-role-play/   designer + builder on one machine\n` +
+      `  http-remote/       ay serve remote access demo\n` +
+      `  p2p-pairing/       libp2p P2P  (needs: cargo build --features swarm)\n`,
+  );
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -261,6 +300,69 @@ export function isPidAlive(pid: number): boolean {
   }
 }
 
+async function pickInteractive(matches: GlobalPidRecord[]): Promise<GlobalPidRecord | null> {
+  const list = matches.slice(0, 10);
+  let sel = 0;
+
+  const render = () => {
+    for (let i = 0; i < list.length; i++) {
+      const r = list[i]!;
+      const marker = i === sel ? "\x1b[36m>\x1b[0m" : " ";
+      process.stderr.write(`${marker} ${r.pid}  ${r.cli}  ${r.cwd}\n`);
+    }
+  };
+
+  process.stderr.write(`Multiple matches — select with ↑↓ Enter (or type 1-${list.length}):\n`);
+  render();
+
+  return new Promise((resolve) => {
+    process.stdin.setRawMode(true);
+    process.stdin.resume();
+    process.stdin.setEncoding("utf8");
+
+    const redraw = () => {
+      process.stderr.write(`\x1b[${list.length}A\x1b[0J`);
+      render();
+    };
+
+    const cleanup = () => {
+      process.stdin.off("data", onData);
+      try {
+        process.stdin.setRawMode(false);
+      } catch {
+        /* not a tty */
+      }
+      process.stdin.pause();
+    };
+
+    const onData = (key: string) => {
+      if (key === "\x03") {
+        cleanup();
+        process.stderr.write("\n");
+        resolve(null);
+      } else if (key === "\r" || key === "\n") {
+        cleanup();
+        process.stderr.write("\n");
+        resolve(list[sel]!);
+      } else if (key === "\x1b[A") {
+        sel = Math.max(0, sel - 1);
+        redraw();
+      } else if (key === "\x1b[B") {
+        sel = Math.min(list.length - 1, sel + 1);
+        redraw();
+      } else if (key >= "1" && key <= String(list.length)) {
+        sel = parseInt(key, 10) - 1;
+        redraw();
+        cleanup();
+        process.stderr.write("\n");
+        resolve(list[sel]!);
+      }
+    };
+
+    process.stdin.on("data", onData);
+  });
+}
+
 export async function resolveOne(
   keyword: string | undefined,
   opts: CommonOpts,
@@ -274,6 +376,11 @@ export async function resolveOne(
   }
   if (matches.length === 1) return matches[0]!;
   if (opts.latest) return matches[0]!; // already sorted newest-first
+  if (process.stderr.isTTY && process.stdin.isTTY) {
+    const chosen = await pickInteractive(matches);
+    if (chosen) return chosen;
+    throw new Error("no agent selected");
+  }
   const lines = matches
     .slice(0, 10)
     .map((r) => `  ${r.pid}  ${r.cli}  ${r.cwd}`)

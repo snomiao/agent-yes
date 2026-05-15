@@ -102,14 +102,30 @@ export async function resolveRemoteSpec(spec: string): Promise<ResolvedRemote | 
 export async function cmdRemote(rest: string[]): Promise<number> {
   const sub = rest[0];
 
+  if (sub === "-h" || sub === "--help") {
+    process.stdout.write(
+      `Usage: ay remote <subcommand>\n\n` +
+        `Manage saved remote server aliases.\n\n` +
+        `Subcommands:\n` +
+        `  ay remote ls                                           list configured remotes\n` +
+        `  ay remote add <alias> http://<token>@<host>:<port>    add a remote\n` +
+        `  ay remote rm <alias>                                   remove a remote\n\n` +
+        `Once added, use the alias anywhere a keyword is accepted:\n` +
+        `  ay ls   <alias>\n` +
+        `  ay tail <alias>:<keyword>\n` +
+        `  ay send <alias>:<keyword> "message"\n`,
+    );
+    return 0;
+  }
+
   if (!sub || sub === "ls" || sub === "list") {
     const remotes = await readRemotes();
     if (remotes.size === 0) {
       process.stdout.write("no remotes configured\n");
       process.stderr.write(
         "\n" +
-          "  ay remote add <alias> <url> <token>   # add a remote\n" +
-          "  ay serve                               # start server (prints token)\n",
+          "  ay remote add <alias> http://<token>@<host>:<port>   # add a remote\n" +
+          "  ay serve                                           # start server (prints token)\n",
       );
       return 0;
     }
@@ -121,11 +137,28 @@ export async function cmdRemote(rest: string[]): Promise<number> {
   }
 
   if (sub === "add") {
-    const [, alias, url, token] = rest;
-    if (!alias || !url || !token) {
-      process.stderr.write("usage: ay remote add <alias> <url> <token>\n");
+    const [, alias, rawUrl] = rest;
+    if (!alias || !rawUrl) {
+      process.stderr.write("usage: ay remote add <alias> http://<token>@<host>:<port>\n");
       process.stderr.write(
-        "  example: ay remote add work-mac http://192.168.1.5:7432 mytoken123\n",
+        "  example: ay remote add work-mac http://mytoken123@192.168.1.5:7432\n",
+      );
+      return 1;
+    }
+    let url: string, token: string;
+    try {
+      const parsed = new URL(rawUrl);
+      token = parsed.username;
+      parsed.username = "";
+      parsed.password = "";
+      url = parsed.toString().replace(/\/$/, "");
+    } catch {
+      process.stderr.write(`ay remote add: invalid URL '${rawUrl}'\n`);
+      return 1;
+    }
+    if (!token) {
+      process.stderr.write(
+        `ay remote add: no token in URL — expected http://<token>@<host>:<port>\n`,
       );
       return 1;
     }
@@ -153,9 +186,9 @@ export async function cmdRemote(rest: string[]): Promise<number> {
 
   process.stderr.write(`ay remote: unknown subcommand '${sub}'\n`);
   process.stderr.write(
-    "  ay remote ls                           # list configured remotes\n" +
-      "  ay remote add <alias> <url> <token>   # add a remote\n" +
-      "  ay remote rm <alias>                   # remove a remote\n",
+    "  ay remote ls                                           # list configured remotes\n" +
+      "  ay remote add <alias> http://<token>@<host>:<port>   # add a remote\n" +
+      "  ay remote rm <alias>                                  # remove a remote\n",
   );
   return 1;
 }

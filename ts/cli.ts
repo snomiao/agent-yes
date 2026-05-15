@@ -20,8 +20,15 @@ import { buildRustArgs } from "./buildRustArgs.ts";
 // agent-spawn machinery (and the --rust dispatch) and operate on the global
 // pid index instead. Must run before checkAndAutoUpdate / yargs / Rust spawn.
 {
-  const { isSubcommand, runSubcommand } = await import("./subcommands.ts");
-  if (isSubcommand(process.argv[2])) {
+  const rawArg = process.argv[2];
+  // Intercept bare -h/--help so we show TS subcommands, not just Rust agent-runner options.
+  const isHelpFlag = rawArg === "-h" || rawArg === "--help";
+  const { isSubcommand, runSubcommand, cmdHelp } = await import("./subcommands.ts");
+  if (isHelpFlag && process.argv.length === 3) {
+    cmdHelp();
+    process.exit(0);
+  }
+  if (isSubcommand(rawArg)) {
     const code = await runSubcommand(process.argv);
     process.exit(code ?? 0);
   }
