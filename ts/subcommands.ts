@@ -12,6 +12,7 @@
  */
 
 import { appendFile, mkdir, open, readFile, stat, writeFile } from "fs/promises";
+import ms from "ms";
 import { homedir } from "os";
 import path from "path";
 import { type GlobalPidRecord, readGlobalPids } from "./globalPidIndex.ts";
@@ -422,6 +423,7 @@ async function cmdLs(rest: string[]): Promise<number> {
     if (alive) {
       hints.push(`  ay status ${alive.pid}                # JSON status snapshot\n`);
       hints.push(`  ay status ${alive.pid} --watch        # stream changes as JSON\n`);
+      hints.push(`  ay status ${alive.pid} --wait-idle    # block until state == idle\n`);
       hints.push(`  ay tail ${alive.pid}                  # view latest output\n`);
       hints.push(`  ay tail -f ${alive.pid}               # follow live output\n`);
       hints.push(
@@ -1032,6 +1034,15 @@ async function cmdStatus(rest: string[]): Promise<number> {
       default: false,
       description: "Stream changes as JSON",
     })
+    .option("wait-idle", {
+      type: "boolean",
+      default: false,
+      description: "Block until state == idle. Exit 0 idle, 1 stopped, 2 timeout",
+    })
+    .option("timeout", {
+      type: "string",
+      description: "Timeout for --wait-idle (e.g. 30s, 5m). Default: no timeout",
+    })
     .option("interval", { type: "number", default: 2, description: "Poll interval in seconds" })
     .option("latest", { type: "boolean", default: false, description: "Use most recent match" })
     .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
@@ -1049,11 +1060,20 @@ async function cmdStatus(rest: string[]): Promise<number> {
   };
   const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
 
-  if (!keyword) throw new Error("usage: ay status <keyword> [--watch] [--interval=N]");
+  if (!keyword)
+    throw new Error("usage: ay status <keyword> [--watch | --wait-idle] [--timeout=Ns]");
 
   const watch = argv.watch;
+  const waitIdle = argv["wait-idle"];
   const intervalFlag = argv.interval;
   const intervalMs = Math.max(500, (Number.isFinite(intervalFlag) ? intervalFlag : 2) * 1000);
+  const timeoutMs =
+    typeof argv.timeout === "string" && argv.timeout.length > 0
+      ? (ms(argv.timeout) ?? Number.NaN)
+      : null;
+  if (timeoutMs !== null && !Number.isFinite(timeoutMs)) {
+    throw new Error(`invalid --timeout value: ${argv.timeout}`);
+  }
 
   const record = await resolveOne(keyword, opts);
 
@@ -1061,6 +1081,26 @@ async function cmdStatus(rest: string[]): Promise<number> {
     const out = ts !== undefined ? { ts, ...snap } : snap;
     process.stdout.write(JSON.stringify(out) + "\n");
   };
+
+  if (waitIdle) {
+    const startedAt = Date.now();
+    for (;;) {
+      const snap = await snapshotStatus(record);
+      if (snap.state === "idle") {
+        emit(snap);
+        return 0;
+      }
+      if (snap.state === "stopped") {
+        emit(snap);
+        return 1;
+      }
+      if (timeoutMs !== null && Date.now() - startedAt >= timeoutMs) {
+        emit(snap);
+        return 2;
+      }
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  }
 
   if (!watch) {
     emit(await snapshotStatus(record));

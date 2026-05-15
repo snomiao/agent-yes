@@ -926,6 +926,109 @@ describe("subcommands.cmdStatus", () => {
     expect(snap).toMatchObject({ pid: process.pid, cli: "claude" });
     expect(typeof snap.age_ms).toBe("number");
   });
+
+  it("--wait-idle returns 0 immediately for an idle agent", async () => {
+    const mod = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const logFile = path.join(testHome, "idle.raw.log");
+    await writeFile(logFile, "old\n");
+    // Stale mtime: > IDLE_THRESHOLD_MS (60s) in the past
+    const stale = (Date.now() - 5 * 60 * 1000) / 1000;
+    const { utimes } = await import("fs/promises");
+    await utimes(logFile, stale, stale);
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: "wait-idle-test",
+      cwd: process.cwd(),
+      log_file: logFile,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now() - 10_000,
+    });
+
+    const stdout: string[] = [];
+    (process.stdout as any).write = (s: any) => {
+      stdout.push(String(s));
+      return true;
+    };
+    (process.stderr as any).write = () => true;
+    const code = await mod.runSubcommand([
+      "bun",
+      "cli.js",
+      "status",
+      String(process.pid),
+      "--wait-idle",
+      "--timeout=2s",
+      "--interval=0.5",
+    ]);
+    expect(code).toBe(0);
+    const snap = JSON.parse(stdout.join("").trim().split("\n").pop()!);
+    expect(snap.state).toBe("idle");
+  });
+
+  it("--wait-idle returns 1 when the agent is stopped", async () => {
+    const mod = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    // Pick a pid that is almost certainly not alive.
+    const deadPid = 999_999;
+    await appendGlobalPid({
+      pid: deadPid,
+      cli: "claude",
+      prompt: "wait-idle-stopped",
+      cwd: process.cwd(),
+      log_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now() - 10_000,
+    });
+
+    (process.stdout as any).write = () => true;
+    (process.stderr as any).write = () => true;
+    const code = await mod.runSubcommand([
+      "bun",
+      "cli.js",
+      "status",
+      String(deadPid),
+      "--wait-idle",
+      "--interval=0.5",
+    ]);
+    expect(code).toBe(1);
+  });
+
+  it("--wait-idle returns 2 on timeout while still active", async () => {
+    const mod = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const logFile = path.join(testHome, "active.raw.log");
+    await writeFile(logFile, "fresh\n");
+    // Fresh mtime keeps state = active
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: "wait-idle-timeout",
+      cwd: process.cwd(),
+      log_file: logFile,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now() - 10_000,
+    });
+
+    (process.stdout as any).write = () => true;
+    (process.stderr as any).write = () => true;
+    const code = await mod.runSubcommand([
+      "bun",
+      "cli.js",
+      "status",
+      String(process.pid),
+      "--wait-idle",
+      "--timeout=600ms",
+      "--interval=0.5",
+    ]);
+    expect(code).toBe(2);
+  });
 });
 
 // ---------------------------------------------------------------------------
