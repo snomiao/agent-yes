@@ -15,6 +15,7 @@ import { appendFile, mkdir, open, readFile, stat, writeFile } from "fs/promises"
 import { homedir } from "os";
 import path from "path";
 import { type GlobalPidRecord, readGlobalPids } from "./globalPidIndex.ts";
+import yargs from "yargs";
 
 // ---------------------------------------------------------------------------
 // notes store  (~/.agent-yes/notes.jsonl)
@@ -196,65 +197,6 @@ interface CommonOpts {
   json: boolean;
 }
 
-interface ParsedArgs {
-  flags: Record<string, string | boolean>;
-  positional: string[];
-}
-
-export function parseArgs(rest: string[]): ParsedArgs {
-  const flags: Record<string, string | boolean> = {};
-  const positional: string[] = [];
-  for (let i = 0; i < rest.length; i++) {
-    const arg = rest[i]!;
-    if (arg.startsWith("--")) {
-      const eq = arg.indexOf("=");
-      if (eq >= 0) {
-        flags[arg.slice(2, eq)] = arg.slice(eq + 1);
-      } else {
-        const key = arg.slice(2);
-        const next = rest[i + 1];
-        // Boolean flags: --all, --json, --latest
-        if (
-          ["all", "active", "follow", "json", "latest", "watch"].includes(key) ||
-          !next ||
-          next.startsWith("-")
-        ) {
-          flags[key] = true;
-        } else {
-          flags[key] = next;
-          i++;
-        }
-      }
-    } else if (arg.startsWith("-") && arg.length > 1) {
-      // -n N short flag
-      if (arg === "-n") {
-        flags["n"] = rest[i + 1] ?? "";
-        i++;
-      } else {
-        flags[arg.slice(1)] = true;
-      }
-    } else {
-      positional.push(arg);
-    }
-  }
-  return { flags, positional };
-}
-
-function commonOpts(flags: Record<string, string | boolean>): CommonOpts {
-  return {
-    all: !!flags.all,
-    active: !!flags.active,
-    cwdScope:
-      typeof flags.cwd === "string"
-        ? path.resolve(flags.cwd)
-        : flags.cwd === true
-          ? process.cwd()
-          : null,
-    latest: !!flags.latest,
-    json: !!flags.json,
-  };
-}
-
 export function matchKeyword(record: GlobalPidRecord, keyword: string): boolean {
   if (!keyword) return true;
   const kw = keyword.toLowerCase();
@@ -331,33 +273,54 @@ async function resolveOne(keyword: string | undefined, opts: CommonOpts): Promis
 // ---------------------------------------------------------------------------
 
 async function cmdLs(rest: string[]): Promise<number> {
-  const { flags, positional } = parseArgs(rest);
-  if (flags.h || flags.help) {
-    process.stdout.write(
-      `Usage: ay ls [keyword] [options]\n` +
-        `       ay list [keyword] [options]\n` +
-        `       ay ps   [keyword] [options]\n` +
-        `\n` +
-        `List running agents. Optionally filter by keyword (pid, cwd substring, or prompt substring).\n` +
-        `\n` +
-        `Options:\n` +
-        `  --all          Show all agents including exited ones\n` +
-        `  --active       Only show agents with an alive process\n` +
-        `  --json         Output as JSON array\n` +
-        `  --latest       Show only the most recent agent\n` +
-        `  --cwd [dir]    Restrict to agents whose cwd starts with dir (default: current dir)\n` +
-        `  -h, --help     Show this help\n` +
-        `\n` +
-        `Examples:\n` +
-        `  ay ls                    # list running agents\n` +
-        `  ay ls --all              # include exited agents\n` +
-        `  ay ls --json             # machine-readable output\n` +
-        `  ay ls symval             # filter by cwd/prompt keyword\n`,
-    );
+  const y = yargs(rest)
+    .usage(
+      "Usage: ay ls [keyword] [options]\n" +
+        "       ay list [keyword] [options]\n" +
+        "       ay ps   [keyword] [options]\n\n" +
+        "List running agents. Optionally filter by keyword (pid, cwd substring, or prompt substring).",
+    )
+    .option("all", {
+      type: "boolean",
+      default: false,
+      description: "Show all agents including exited ones",
+    })
+    .option("active", {
+      type: "boolean",
+      default: false,
+      description: "Only show agents with an alive process",
+    })
+    .option("json", { type: "boolean", default: false, description: "Output as JSON array" })
+    .option("latest", {
+      type: "boolean",
+      default: false,
+      description: "Show only the most recent agent",
+    })
+    .option("cwd", { type: "string", description: "Restrict to agents whose cwd starts with dir" })
+    .option("help", { alias: "h", type: "boolean", default: false, description: "Show this help" })
+    .example("ay ls", "list running agents")
+    .example("ay ls --all", "include exited agents")
+    .example("ay ls --json", "machine-readable output")
+    .example("ay ls symval", "filter by cwd/prompt keyword")
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+
+  const argv = await y.parseAsync();
+
+  if (argv.help || argv.h) {
+    process.stdout.write((await y.getHelp()) + "\n");
     return 0;
   }
-  const opts = commonOpts(flags);
-  const keyword = positional[0];
+
+  const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+  const opts: CommonOpts = {
+    all: argv.all,
+    active: argv.active,
+    json: argv.json,
+    latest: argv.latest,
+    cwdScope: typeof argv.cwd === "string" ? path.resolve(argv.cwd) : null,
+  };
   const records = await listRecords(keyword, opts);
 
   if (opts.json) {
@@ -512,12 +475,37 @@ interface ReadOpts {
 }
 
 async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
-  const { flags, positional } = parseArgs(rest);
-  const opts = commonOpts(flags);
-  const keyword = positional[0];
-  const follow = !!(flags.f || flags.follow);
+  const y = yargs(rest)
+    .usage("Usage: ay read/cat/tail/head <keyword> [options]")
+    .option("follow", {
+      alias: "f",
+      type: "boolean",
+      default: false,
+      description: "Follow log output (Ctrl-C to stop)",
+    })
+    .option("n", { type: "number", description: "Number of lines (default: 96 for tail/head)" })
+    .option("all", { type: "boolean", default: false, description: "Include exited agents" })
+    .option("latest", {
+      type: "boolean",
+      default: false,
+      description: "Use most recent match when multiple match",
+    })
+    .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
 
-  const nFlag = typeof flags.n === "string" ? Number(flags.n) : undefined;
+  const argv = await y.parseAsync();
+  const opts: CommonOpts = {
+    all: argv.all,
+    active: false,
+    json: false,
+    latest: argv.latest,
+    cwdScope: typeof argv.cwd === "string" ? path.resolve(argv.cwd) : null,
+  };
+  const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+  const follow = argv.follow;
+  const nFlag = argv.n;
   const n =
     nFlag !== undefined && Number.isFinite(nFlag) && nFlag > 0
       ? Math.floor(nFlag)
@@ -756,15 +744,35 @@ function extractActivityFromLines(lines: string[]): string | null {
 // ---------------------------------------------------------------------------
 
 async function cmdSend(rest: string[]): Promise<number> {
-  const { flags, positional } = parseArgs(rest);
-  const opts = commonOpts(flags);
-  const keyword = positional[0];
-  const rawMessage = positional.slice(1).join(" ");
+  const y = yargs(rest)
+    .usage("Usage: ay send <keyword> <msg|-> [options]")
+    .option("code", {
+      type: "string",
+      default: "enter",
+      description: "Trailing control code (enter|esc|ctrl-c|ctrl-y|tab|none)",
+    })
+    .option("all", { type: "boolean", default: false, description: "Include exited agents" })
+    .option("latest", { type: "boolean", default: false, description: "Use most recent match" })
+    .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+
+  const argv = await y.parseAsync();
+  const opts: CommonOpts = {
+    all: argv.all,
+    active: false,
+    json: false,
+    latest: argv.latest,
+    cwdScope: typeof argv.cwd === "string" ? path.resolve(argv.cwd) : null,
+  };
+  const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+  const rawMessage = argv._.slice(1).map(String).join(" ");
 
   if (!keyword)
     throw new Error("usage: ay send <keyword> <msg|-> [--code=enter|esc|ctrl-c|ctrl-y|tab|none]");
 
-  const codeName = typeof flags.code === "string" ? flags.code.toLowerCase() : "enter";
+  const codeName = argv.code.toLowerCase();
   const trailing = controlCodeFromName(codeName);
 
   const record = await resolveOne(keyword, opts);
@@ -879,9 +887,23 @@ async function writeToIpc(ipcPath: string, payload: string): Promise<void> {
 // ---------------------------------------------------------------------------
 
 async function cmdRestart(rest: string[]): Promise<number> {
-  const { flags, positional } = parseArgs(rest);
-  const opts = { ...commonOpts(flags), all: true }; // search stopped agents too
-  const keyword = positional[0];
+  const y = yargs(rest)
+    .usage("Usage: ay restart <keyword>")
+    .option("latest", { type: "boolean", default: false, description: "Use most recent match" })
+    .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+
+  const argv = await y.parseAsync();
+  const opts: CommonOpts = {
+    all: true,
+    active: false,
+    json: false,
+    latest: argv.latest,
+    cwdScope: typeof argv.cwd === "string" ? path.resolve(argv.cwd) : null,
+  };
+  const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
   const record = await resolveOne(keyword, opts);
 
   if (isPidAlive(record.pid)) {
@@ -914,14 +936,25 @@ async function cmdRestart(rest: string[]): Promise<number> {
 // ---------------------------------------------------------------------------
 
 async function cmdNote(rest: string[]): Promise<number> {
-  const { flags, positional } = parseArgs(rest);
-  const opts = commonOpts(flags);
-  const keyword = positional[0];
-  const note = positional.slice(1).join(" ");
+  const y = yargs(rest)
+    .usage('Usage: ay note <keyword> ["note text"]')
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+
+  const argv = await y.parseAsync();
+  const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+  const note = argv._.slice(1).map(String).join(" ");
 
   if (!keyword) throw new Error('usage: ay note <keyword> ["note text"]  (omit text to clear)');
 
-  const record = await resolveOne(keyword, { ...opts, all: true });
+  const record = await resolveOne(keyword, {
+    all: true,
+    active: false,
+    json: false,
+    latest: false,
+    cwdScope: null,
+  });
 
   if (!note) {
     // clear
@@ -991,14 +1024,35 @@ async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSnapshot> 
 }
 
 async function cmdStatus(rest: string[]): Promise<number> {
-  const { flags, positional } = parseArgs(rest);
-  const opts = { ...commonOpts(flags), all: true };
-  const keyword = positional[0];
+  const y = yargs(rest)
+    .usage("Usage: ay status <keyword> [options]")
+    .option("watch", {
+      alias: "w",
+      type: "boolean",
+      default: false,
+      description: "Stream changes as JSON",
+    })
+    .option("interval", { type: "number", default: 2, description: "Poll interval in seconds" })
+    .option("latest", { type: "boolean", default: false, description: "Use most recent match" })
+    .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+
+  const argv = await y.parseAsync();
+  const opts: CommonOpts = {
+    all: true,
+    active: false,
+    json: false,
+    latest: argv.latest,
+    cwdScope: typeof argv.cwd === "string" ? path.resolve(argv.cwd) : null,
+  };
+  const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
 
   if (!keyword) throw new Error("usage: ay status <keyword> [--watch] [--interval=N]");
 
-  const watch = !!(flags.watch || flags.w);
-  const intervalFlag = typeof flags.interval === "string" ? Number(flags.interval) : 2;
+  const watch = argv.watch;
+  const intervalFlag = argv.interval;
   const intervalMs = Math.max(500, (Number.isFinite(intervalFlag) ? intervalFlag : 2) * 1000);
 
   const record = await resolveOne(keyword, opts);

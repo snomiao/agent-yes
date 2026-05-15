@@ -27,41 +27,6 @@ async function loadModule() {
   return await import("./subcommands.ts");
 }
 
-describe("subcommands.parseArgs", () => {
-  it("collects positional args and bare flags", async () => {
-    const { parseArgs } = await loadModule();
-    const out = parseArgs(["foo", "bar", "--all"]);
-    expect(out.positional).toEqual(["foo", "bar"]);
-    expect(out.flags.all).toBe(true);
-  });
-
-  it("parses --key=value form", async () => {
-    const { parseArgs } = await loadModule();
-    const out = parseArgs(["--code=enter"]);
-    expect(out.flags.code).toBe("enter");
-  });
-
-  it("parses --key value form for non-boolean keys", async () => {
-    const { parseArgs } = await loadModule();
-    const out = parseArgs(["--cwd", "/tmp/foo"]);
-    expect(out.flags.cwd).toBe("/tmp/foo");
-  });
-
-  it("treats well-known boolean flags as boolean even with a following positional", async () => {
-    const { parseArgs } = await loadModule();
-    const out = parseArgs(["--all", "claude"]);
-    expect(out.flags.all).toBe(true);
-    expect(out.positional).toEqual(["claude"]);
-  });
-
-  it("supports -n N short form", async () => {
-    const { parseArgs } = await loadModule();
-    const out = parseArgs(["-n", "50", "keyword"]);
-    expect(out.flags.n).toBe("50");
-    expect(out.positional).toEqual(["keyword"]);
-  });
-});
-
 describe("subcommands.controlCodeFromName", () => {
   it("maps named codes to the right control bytes", async () => {
     const { controlCodeFromName } = await loadModule();
@@ -522,63 +487,6 @@ describe("subcommands.cmdSend writes bytes to FIFO", () => {
   it("--code=none skips the trailing CR", async () => {
     const { controlCodeFromName } = await loadModule();
     expect(controlCodeFromName("none")).toBe("");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// parseArgs — additional flag coverage
-// ---------------------------------------------------------------------------
-
-describe("subcommands.parseArgs additional flags", () => {
-  it("parses -h as flags.h = true", async () => {
-    const { parseArgs } = await loadModule();
-    const out = parseArgs(["-h"]);
-    expect(out.flags.h).toBe(true);
-    expect(out.positional).toEqual([]);
-  });
-
-  it("parses --help as flags.help = true", async () => {
-    const { parseArgs } = await loadModule();
-    const out = parseArgs(["--help"]);
-    expect(out.flags.help).toBe(true);
-  });
-
-  it("parses -f as flags.f = true", async () => {
-    const { parseArgs } = await loadModule();
-    const out = parseArgs(["-f"]);
-    expect(out.flags.f).toBe(true);
-  });
-
-  it("treats --follow, --watch, --json, --active, --latest as booleans", async () => {
-    const { parseArgs } = await loadModule();
-    const out = parseArgs(["--follow", "--watch", "--json", "--active", "--latest", "kw"]);
-    expect(out.flags.follow).toBe(true);
-    expect(out.flags.watch).toBe(true);
-    expect(out.flags.json).toBe(true);
-    expect(out.flags.active).toBe(true);
-    expect(out.flags.latest).toBe(true);
-    expect(out.positional).toEqual(["kw"]);
-  });
-
-  it("treats bare --cwd (no following value) as flags.cwd = true", async () => {
-    const { parseArgs } = await loadModule();
-    const out = parseArgs(["--cwd"]);
-    expect(out.flags.cwd).toBe(true);
-  });
-
-  it("treats --unknown followed by another flag as boolean", async () => {
-    const { parseArgs } = await loadModule();
-    const out = parseArgs(["--unknown", "--json"]);
-    expect(out.flags.unknown).toBe(true);
-    expect(out.flags.json).toBe(true);
-  });
-
-  it("handles mixed positional + flags in any order", async () => {
-    const { parseArgs } = await loadModule();
-    const out = parseArgs(["kw", "--all", "--code=ctrl-c"]);
-    expect(out.positional).toEqual(["kw"]);
-    expect(out.flags.all).toBe(true);
-    expect(out.flags.code).toBe("ctrl-c");
   });
 });
 
