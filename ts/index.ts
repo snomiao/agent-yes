@@ -322,6 +322,7 @@ export default async function agentYes({
 
   // Spawn the agent CLI process
   const ptyEnv = { ...(env ?? (process.env as Record<string, string>)) };
+  ptyEnv.AGENT_YES_PID = String(process.pid);
   const ptyOptions = {
     name: "xterm-color",
     ...getTerminalDimensions(),

@@ -1,5 +1,5 @@
 /**
- * `cy ls / read / cat / tail / head / send` subcommand implementations.
+ * `ay ls / read / cat / tail / head / send` subcommand implementations.
  *
  * Mirrors the principles of koho's `terminal-ws-lib.ts` (session list, render
  * via @xterm/headless, keyword-keyed input) — but file-based instead of via
@@ -66,7 +66,7 @@ async function compactNotes(): Promise<void> {
 /**
  * Read the per-cwd TS PidStore JSONL and convert to the global record shape,
  * so pre-existing TS agents that were spawned before the global-index mirror
- * shipped still show up in `cy ls`. Merging is done in `mergeRecords`.
+ * shipped still show up in `ay ls`. Merging is done in `mergeRecords`.
  */
 async function readLocalTsPids(cwd: string): Promise<GlobalPidRecord[]> {
   const jsonlPath = path.join(cwd, ".agent-yes", "pid-records.jsonl");
@@ -127,6 +127,7 @@ const SUBCOMMANDS = new Set([
   "ls",
   "list",
   "ps",
+  "status",
   "read",
   "cat",
   "tail",
@@ -135,6 +136,8 @@ const SUBCOMMANDS = new Set([
   "restart",
   "note",
 ]);
+
+const IDLE_THRESHOLD_MS = 60 * 1000;
 
 export function isSubcommand(name: string | undefined): boolean {
   return !!name && SUBCOMMANDS.has(name);
@@ -156,6 +159,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
       case "list":
       case "ps":
         return await cmdLs(rest);
+      case "status":
+        return await cmdStatus(rest);
       case "read":
       case "cat":
         return await cmdRead(rest, { mode: "cat" });
@@ -174,7 +179,7 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    process.stderr.write(`cy ${sub}: ${msg}\n`);
+    process.stderr.write(`ay ${sub}: ${msg}\n`);
     return 1;
   }
 }
@@ -210,7 +215,7 @@ export function parseArgs(rest: string[]): ParsedArgs {
         const next = rest[i + 1];
         // Boolean flags: --all, --json, --latest
         if (
-          ["all", "active", "follow", "json", "latest"].includes(key) ||
+          ["all", "active", "follow", "json", "latest", "watch"].includes(key) ||
           !next ||
           next.startsWith("-")
         ) {
@@ -322,7 +327,7 @@ async function resolveOne(keyword: string | undefined, opts: CommonOpts): Promis
 }
 
 // ---------------------------------------------------------------------------
-// cy ls
+// ay ls
 // ---------------------------------------------------------------------------
 
 async function cmdLs(rest: string[]): Promise<number> {
@@ -359,7 +364,6 @@ async function cmdLs(rest: string[]): Promise<number> {
   const fixedWidth = widths.pid + widths.cli + widths.status + widths.age + widths.cwd + 5 * 2; // 5 separators of "  "
   const promptBudget = Math.max(20, termWidth - fixedWidth - 1);
 
-  const IDLE_THRESHOLD_MS = 60 * 1000;
   const notes = await readNotes();
   const rows = await Promise.all(
     records.map(async (r) => {
@@ -429,17 +433,19 @@ async function cmdLs(rest: string[]): Promise<number> {
     const stopped = rows.find((r) => !r._alive);
     const hints: string[] = ["\n"];
     if (alive) {
-      hints.push(`  cy tail ${alive.pid}                  # view latest output\n`);
-      hints.push(`  cy tail -f ${alive.pid}               # follow live output\n`);
-      hints.push(`  cy send ${alive.pid} "next: ..."      # send a prompt\n`);
-      hints.push(`  cy send ${alive.pid} "" --code=ctrl-c # interrupt\n`);
-      hints.push(`  cy note ${alive.pid} "what it's doing" # set a note\n`);
+      hints.push(`  ay status ${alive.pid}                # JSON status snapshot\n`);
+      hints.push(`  ay status ${alive.pid} --watch        # stream changes as JSON\n`);
+      hints.push(`  ay tail ${alive.pid}                  # view latest output\n`);
+      hints.push(`  ay tail -f ${alive.pid}               # follow live output\n`);
+      hints.push(`  ay send ${alive.pid} "next: ..."      # send a prompt\n`);
+      hints.push(`  ay send ${alive.pid} "" --code=ctrl-c # interrupt\n`);
+      hints.push(`  ay note ${alive.pid} "what it's doing" # set a note\n`);
     }
     if (stopped) {
-      hints.push(`  cy restart ${stopped.pid}             # restart stopped agent\n`);
+      hints.push(`  ay restart ${stopped.pid}             # restart stopped agent\n`);
     }
     if (!alive && !stopped)
-      hints.push(`  cy ls --all                          # show exited agents\n`);
+      hints.push(`  ay ls --all                          # show exited agents\n`);
     process.stderr.write(hints.join(""));
   }
 
@@ -469,7 +475,7 @@ function truncate(s: string, n: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// cy read / cat / tail / head
+// ay read / cat / tail / head
 // ---------------------------------------------------------------------------
 
 interface ReadOpts {
@@ -544,10 +550,10 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
 
   process.stderr.write(
     `\n` +
-      `  cy ls                                 # list all agents\n` +
-      `  cy tail -f ${record.pid}              # follow live output\n` +
-      `  cy send ${record.pid} "next: ..."      # send a prompt\n` +
-      `  cy send ${record.pid} "" --code=ctrl-c # interrupt\n`,
+      `  ay ls                                 # list all agents\n` +
+      `  ay tail -f ${record.pid}              # follow live output\n` +
+      `  ay send ${record.pid} "next: ..."      # send a prompt\n` +
+      `  ay send ${record.pid} "" --code=ctrl-c # interrupt\n`,
   );
   return 0;
 }
@@ -656,26 +662,38 @@ function extractActivityFromLines(lines: string[]): string | null {
 
   const clean = lines.filter((l) => !isChrome(l));
 
+  const isSpinnerLine = (l: string) =>
+    /^[^\w\s❯>⎿✓✗]\s+[A-Z]\w+[….]/u.test(l.trim()) || /still thinking/i.test(l);
+
+  // Find positions of the last ❯ prompt and last spinner in the rendered output.
+  // If ❯ comes after the last spinner, the agent finished and is waiting — show
+  // idle state rather than the stale spinner description.
+  let lastPromptIdx = -1;
+  let lastSpinnerIdx = -1;
+  for (let i = clean.length - 1; i >= 0; i--) {
+    const l = clean[i]!.trim();
+    if (lastPromptIdx === -1 && l.startsWith("❯")) lastPromptIdx = i;
+    if (lastSpinnerIdx === -1 && isSpinnerLine(l)) lastSpinnerIdx = i;
+    if (lastPromptIdx !== -1 && lastSpinnerIdx !== -1) break;
+  }
+
+  // ❯ appears after (or without) any spinner → agent is idle/waiting for input
+  if (lastPromptIdx > lastSpinnerIdx) {
+    const text = clean[lastPromptIdx]!.trim()
+      .replace(/^❯\s*/, "")
+      .trim();
+    return text ? `» ${text}` : null;
+  }
+
   // Priority 1: thinking/composing spinner active
   // Claude Code cycles through various Unicode dingbats for its spinner (✢✳✶✻✷…).
   // The format is always: SPINNER_CHAR Verb… (timing…)
   // Require ellipsis after the verb so we don't false-positive on normal text
   // that happens to contain one of these chars mid-sentence.
-  const thinkingLine = clean.find(
-    (l) => /^[^\w\s❯>⎿✓✗]\s+[A-Z]\w+[….]/u.test(l.trim()) || /still thinking/i.test(l),
-  );
+  const thinkingLine = clean.find((l) => isSpinnerLine(l));
   if (thinkingLine) {
     const m = /^.\s+(\w+[^(]*)(?:\s*\(|$)/u.exec(thinkingLine.trim());
-    return m ? `✳ ${m[1].trim()}` : "thinking…";
-  }
-
-  // Priority 2: last ❯ prompt line means agent is idle, waiting for next input
-  const promptLines = clean.filter((l) => /^❯\s+/.test(l.trim()));
-  if (promptLines.length > 0) {
-    const text = promptLines[promptLines.length - 1]!.trim()
-      .replace(/^❯\s+/, "")
-      .trim();
-    if (text) return `» ${text}`;
+    return m?.[1] ? `✳ ${m[1].trim()}` : "thinking…";
   }
 
   // Priority 3: ✻ spinner just finished — show nearby context
@@ -705,7 +723,7 @@ function extractActivityFromLines(lines: string[]): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// cy send
+// ay send
 // ---------------------------------------------------------------------------
 
 async function cmdSend(rest: string[]): Promise<number> {
@@ -715,7 +733,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   const rawMessage = positional.slice(1).join(" ");
 
   if (!keyword)
-    throw new Error("usage: cy send <keyword> <msg|-> [--code=enter|esc|ctrl-c|ctrl-y|tab|none]");
+    throw new Error("usage: ay send <keyword> <msg|-> [--code=enter|esc|ctrl-c|ctrl-y|tab|none]");
 
   const codeName = typeof flags.code === "string" ? flags.code.toLowerCase() : "enter";
   const trailing = controlCodeFromName(codeName);
@@ -737,20 +755,30 @@ async function cmdSend(rest: string[]): Promise<number> {
     body = rawMessage;
   }
 
-  if (body && trailing) {
-    await writeToIpc(fifoPath, body);
+  const sourcePid = process.env.AGENT_YES_PID ? Number(process.env.AGENT_YES_PID) : null;
+  const talkBack = sourcePid
+    ? `\n(from AGENT_YES_PID=${sourcePid} — reply: ay send ${sourcePid} "...")`
+    : "";
+
+  const fullBody = body + talkBack;
+  if (fullBody && trailing) {
+    await writeToIpc(fifoPath, fullBody);
     await new Promise((r) => setTimeout(r, 200));
     await writeToIpc(fifoPath, trailing);
   } else {
-    await writeToIpc(fifoPath, body + trailing);
+    await writeToIpc(fifoPath, fullBody + trailing);
   }
   const payload = body + trailing;
   process.stdout.write(`sent to pid ${record.pid} (${record.cli}): ${truncate(payload, 80)}\n`);
 
+  const replyHint = sourcePid
+    ? `  ay send ${sourcePid} "..."              # reply to sender\n`
+    : "";
   process.stderr.write(
     `\n` +
-      `  cy tail ${record.pid}                  # watch output\n` +
-      `  cy ls                                  # list all agents\n`,
+      replyHint +
+      `  ay tail ${record.pid}                  # watch output\n` +
+      `  ay ls                                  # list all agents\n`,
   );
   return 0;
 }
@@ -818,7 +846,7 @@ async function writeToIpc(ipcPath: string, payload: string): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
-// cy restart
+// ay restart
 // ---------------------------------------------------------------------------
 
 async function cmdRestart(rest: string[]): Promise<number> {
@@ -828,7 +856,7 @@ async function cmdRestart(rest: string[]): Promise<number> {
   const record = await resolveOne(keyword, opts);
 
   if (isPidAlive(record.pid)) {
-    process.stderr.write(`pid ${record.pid} is still running — stop it first or use cy send\n`);
+    process.stderr.write(`pid ${record.pid} is still running — stop it first or use ay send\n`);
     return 1;
   }
 
@@ -846,14 +874,14 @@ async function cmdRestart(rest: string[]): Promise<number> {
   );
   process.stderr.write(
     `\n` +
-      `  cy tail ${proc.pid}   # watch output\n` +
-      `  cy ls                 # list all agents\n`,
+      `  ay tail ${proc.pid}   # watch output\n` +
+      `  ay ls                 # list all agents\n`,
   );
   return 0;
 }
 
 // ---------------------------------------------------------------------------
-// cy note
+// ay note
 // ---------------------------------------------------------------------------
 
 async function cmdNote(rest: string[]): Promise<number> {
@@ -862,7 +890,7 @@ async function cmdNote(rest: string[]): Promise<number> {
   const keyword = positional[0];
   const note = positional.slice(1).join(" ");
 
-  if (!keyword) throw new Error('usage: cy note <keyword> ["note text"]  (omit text to clear)');
+  if (!keyword) throw new Error('usage: ay note <keyword> ["note text"]  (omit text to clear)');
 
   const record = await resolveOne(keyword, { ...opts, all: true });
 
@@ -876,6 +904,114 @@ async function cmdNote(rest: string[]): Promise<number> {
 
   await writeNote(record.pid, note);
   process.stdout.write(`note set for pid ${record.pid}: ${note}\n`);
-  process.stderr.write(`\n  cy ls   # see updated note in list\n`);
+  process.stderr.write(`\n  ay ls   # see updated note in list\n`);
+  return 0;
+}
+
+// ---------------------------------------------------------------------------
+// ay status
+// ---------------------------------------------------------------------------
+
+interface StatusSnapshot {
+  pid: number;
+  cli: string;
+  cwd: string;
+  state: "active" | "idle" | "stopped";
+  activity: string | null;
+  note: string | null;
+  log_mtime_ms: number | null;
+  started_at: number;
+  age_ms: number;
+  exit_code: number | null;
+  exit_reason: string | null;
+  log_file: string | null;
+}
+
+async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSnapshot> {
+  const alive = isPidAlive(record.pid);
+  let state: "active" | "idle" | "stopped";
+  let logMtimeMs: number | null = null;
+  if (!alive) {
+    state = "stopped";
+  } else if (record.log_file) {
+    logMtimeMs = await stat(record.log_file)
+      .then((s) => s.mtimeMs)
+      .catch(() => null);
+    state = logMtimeMs !== null && Date.now() - logMtimeMs > IDLE_THRESHOLD_MS ? "idle" : "active";
+  } else {
+    state = "active";
+  }
+  const activity =
+    state !== "stopped" && record.log_file ? await extractActivity(record.log_file) : null;
+  const notes = await readNotes();
+  const note = notes.get(record.pid) ?? null;
+  return {
+    pid: record.pid,
+    cli: record.cli,
+    cwd: record.cwd,
+    state,
+    activity,
+    note,
+    log_mtime_ms: logMtimeMs,
+    started_at: record.started_at,
+    age_ms: Date.now() - record.started_at,
+    exit_code: record.exit_code,
+    exit_reason: record.exit_reason,
+    log_file: record.log_file ?? null,
+  };
+}
+
+async function cmdStatus(rest: string[]): Promise<number> {
+  const { flags, positional } = parseArgs(rest);
+  const opts = { ...commonOpts(flags), all: true };
+  const keyword = positional[0];
+
+  if (!keyword) throw new Error("usage: ay status <keyword> [--watch] [--interval=N]");
+
+  const watch = !!(flags.watch || flags.w);
+  const intervalFlag = typeof flags.interval === "string" ? Number(flags.interval) : 2;
+  const intervalMs = Math.max(500, (Number.isFinite(intervalFlag) ? intervalFlag : 2) * 1000);
+
+  const record = await resolveOne(keyword, opts);
+
+  const emit = (snap: StatusSnapshot, ts?: number): void => {
+    const out = ts !== undefined ? { ts, ...snap } : snap;
+    process.stdout.write(JSON.stringify(out) + "\n");
+  };
+
+  if (!watch) {
+    emit(await snapshotStatus(record));
+    return 0;
+  }
+
+  process.stderr.write(
+    `watching pid ${record.pid} every ${intervalMs / 1000}s… (Ctrl-C to stop)\n`,
+  );
+
+  let prev: { state: string; activity: string | null; exit_code: number | null } | null = null;
+
+  const tick = async (): Promise<void> => {
+    const snap = await snapshotStatus(record);
+    if (
+      prev === null ||
+      snap.state !== prev.state ||
+      snap.activity !== prev.activity ||
+      snap.exit_code !== prev.exit_code
+    ) {
+      emit(snap, Date.now());
+      prev = { state: snap.state, activity: snap.activity, exit_code: snap.exit_code };
+    }
+  };
+
+  await tick();
+
+  await new Promise<void>((resolve) => {
+    const timer = setInterval(tick, intervalMs);
+    process.on("SIGINT", () => {
+      clearInterval(timer);
+      resolve();
+    });
+  });
+
   return 0;
 }
