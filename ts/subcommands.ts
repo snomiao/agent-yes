@@ -16,6 +16,7 @@ import { homedir } from "os";
 import path from "path";
 import { type GlobalPidRecord, readGlobalPids } from "./globalPidIndex.ts";
 import yargs from "yargs";
+import { type ResolvedRemote, resolveRemoteSpec } from "./remotes.ts";
 
 // ---------------------------------------------------------------------------
 // notes store  (~/.agent-yes/notes.jsonl)
@@ -26,7 +27,7 @@ function notesPath(): string {
   return path.join(dir, "notes.jsonl");
 }
 
-async function readNotes(): Promise<Map<number, string>> {
+export async function readNotes(): Promise<Map<number, string>> {
   let raw: string;
   try {
     raw = await readFile(notesPath(), "utf-8");
@@ -136,6 +137,8 @@ const SUBCOMMANDS = new Set([
   "send",
   "restart",
   "note",
+  "serve",
+  "remote",
 ]);
 
 const IDLE_THRESHOLD_MS = 60 * 1000;
@@ -175,6 +178,14 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdRestart(rest);
       case "note":
         return await cmdNote(rest);
+      case "serve": {
+        const { cmdServe } = await import("./serve.ts");
+        return cmdServe(rest);
+      }
+      case "remote": {
+        const { cmdRemote } = await import("./remotes.ts");
+        return cmdRemote(rest);
+      }
       default:
         return null;
     }
@@ -189,7 +200,7 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
 // shared helpers
 // ---------------------------------------------------------------------------
 
-interface CommonOpts {
+export interface CommonOpts {
   all: boolean;
   active: boolean;
   cwdScope: string | null;
@@ -211,7 +222,7 @@ export function matchKeyword(record: GlobalPidRecord, keyword: string): boolean 
   return false;
 }
 
-async function listRecords(
+export async function listRecords(
   keyword: string | undefined,
   opts: CommonOpts,
 ): Promise<GlobalPidRecord[]> {
@@ -240,7 +251,7 @@ async function listRecords(
   return records;
 }
 
-function isPidAlive(pid: number): boolean {
+export function isPidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
@@ -249,7 +260,10 @@ function isPidAlive(pid: number): boolean {
   }
 }
 
-async function resolveOne(keyword: string | undefined, opts: CommonOpts): Promise<GlobalPidRecord> {
+export async function resolveOne(
+  keyword: string | undefined,
+  opts: CommonOpts,
+): Promise<GlobalPidRecord> {
   if (!keyword) {
     throw new Error("keyword required (pid, cwd substring, cli name, or prompt substring)");
   }
@@ -266,6 +280,193 @@ async function resolveOne(keyword: string | undefined, opts: CommonOpts): Promis
   throw new Error(
     `keyword "${keyword}" matched ${matches.length} agents — disambiguate by pid or pass --latest:\n${lines}`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// remote routing helpers
+// ---------------------------------------------------------------------------
+
+async function remoteGet(remote: ResolvedRemote, pathname: string): Promise<Response> {
+  return fetch(`${remote.url}${pathname}`, {
+    headers: { Authorization: `Bearer ${remote.token}` },
+  });
+}
+
+async function remotePost(
+  remote: ResolvedRemote,
+  pathname: string,
+  body: unknown,
+): Promise<Response> {
+  return fetch(`${remote.url}${pathname}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${remote.token}`, "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+}
+
+async function runRemoteLs(
+  remote: ResolvedRemote,
+  opts: { all: boolean; active: boolean },
+): Promise<number> {
+  const params = new URLSearchParams();
+  if (remote.keyword) params.set("keyword", remote.keyword);
+  if (opts.all) params.set("all", "1");
+  if (opts.active) params.set("active", "1");
+  const res = await remoteGet(remote, `/api/ls?${params}`);
+  if (!res.ok) {
+    process.stderr.write(`remote error ${res.status}: ${await res.text()}\n`);
+    return 1;
+  }
+  const records = (await res.json()) as any[];
+  if (records.length === 0) {
+    process.stderr.write(
+      remote.keyword
+        ? `no agents matched "${remote.keyword}" on ${remote.url}\n`
+        : `no running agents on ${remote.url}\n`,
+    );
+    return 0;
+  }
+  process.stderr.write(`[remote ${remote.url}]\n`);
+  const termWidth = (process.stdout as any).columns ?? 120;
+  const widths = {
+    pid: Math.max(3, ...records.map((r: any) => String(r.pid).length)),
+    cli: Math.max(3, ...records.map((r: any) => String(r.cli).length)),
+    status: Math.max(6, ...records.map((r: any) => String(r.status).length)),
+    cwd: Math.max(3, ...records.map((r: any) => String(r.cwd).length)),
+  };
+  const fixedWidth = widths.pid + widths.cli + widths.status + widths.cwd + 4 * 2;
+  const promptBudget = Math.max(20, termWidth - fixedWidth - 1);
+  const header =
+    [
+      "PID".padEnd(widths.pid),
+      "CLI".padEnd(widths.cli),
+      "STATUS".padEnd(widths.status),
+      "CWD".padEnd(widths.cwd),
+      "PROMPT",
+    ].join("  ") + "\n";
+  process.stdout.write(header);
+  for (const r of records) {
+    const label = r.prompt ? truncate(`→ ${r.prompt}`, promptBudget) : "";
+    process.stdout.write(
+      [
+        String(r.pid).padEnd(widths.pid),
+        String(r.cli).padEnd(widths.cli),
+        String(r.status).padEnd(widths.status),
+        String(r.cwd).padEnd(widths.cwd),
+        label,
+      ].join("  ") + "\n",
+    );
+  }
+  return 0;
+}
+
+async function runRemoteRead(
+  remote: ResolvedRemote,
+  mode: "cat" | "tail" | "head",
+  follow: boolean,
+  n: number,
+): Promise<number> {
+  const keyword = remote.keyword ?? "";
+  if (!keyword) {
+    process.stderr.write(
+      "remote tail/cat/head requires a keyword (e.g. token@host:port:keyword)\n",
+    );
+    return 1;
+  }
+
+  if (mode === "tail" && follow) {
+    // SSE stream
+    const ac = new AbortController();
+    process.on("SIGINT", () => ac.abort());
+    let res: Response;
+    try {
+      res = await fetch(`${remote.url}/api/tail/${encodeURIComponent(keyword)}`, {
+        headers: { Authorization: `Bearer ${remote.token}`, Accept: "text/event-stream" },
+        signal: ac.signal,
+      });
+    } catch (e: any) {
+      if (e.name === "AbortError") return 0;
+      throw e;
+    }
+    if (!res.ok) {
+      process.stderr.write(`remote error ${res.status}: ${await res.text()}\n`);
+      return 1;
+    }
+    process.stderr.write(`[remote ${remote.url}  ${keyword}]\nfollowing... (Ctrl-C to stop)\n`);
+    const reader = res.body!.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    let first = true;
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const text = JSON.parse(line.slice(6)) as string;
+            if (first) {
+              first = false;
+            }
+            process.stdout.write(text);
+            if (!text.endsWith("\n")) process.stdout.write("\n");
+          } catch {
+            /* skip non-JSON */
+          }
+        }
+      }
+    } catch (e: any) {
+      if (e.name !== "AbortError") throw e;
+    }
+    return 0;
+  }
+
+  // Static read (cat/head/tail without -f)
+  const params = new URLSearchParams({ mode, n: String(n) });
+  const res = await remoteGet(remote, `/api/read/${encodeURIComponent(keyword)}?${params}`);
+  if (!res.ok) {
+    process.stderr.write(`remote error ${res.status}: ${await res.text()}\n`);
+    return 1;
+  }
+  const text = await res.text();
+  process.stderr.write(`[remote ${remote.url}  ${keyword}]\n`);
+  process.stdout.write(text);
+  if (!text.endsWith("\n")) process.stdout.write("\n");
+  return 0;
+}
+
+async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string): Promise<number> {
+  const keyword = remote.keyword ?? "";
+  if (!keyword) {
+    process.stderr.write("remote send requires a keyword (e.g. token@host:port:keyword)\n");
+    return 1;
+  }
+  const res = await remotePost(remote, "/api/send", { keyword, msg, code });
+  if (!res.ok) {
+    process.stderr.write(`remote error ${res.status}: ${await res.text()}\n`);
+    return 1;
+  }
+  const data = (await res.json()) as any;
+  process.stdout.write(`sent to remote pid ${data.pid} (${remote.url}  ${keyword})\n`);
+  return 0;
+}
+
+async function runRemoteStatus(remote: ResolvedRemote): Promise<number> {
+  const keyword = remote.keyword ?? "";
+  if (!keyword) {
+    process.stderr.write("remote status requires a keyword (e.g. token@host:port:keyword)\n");
+    return 1;
+  }
+  const res = await remoteGet(remote, `/api/status/${encodeURIComponent(keyword)}`);
+  if (!res.ok) {
+    process.stderr.write(`remote error ${res.status}: ${await res.text()}\n`);
+    return 1;
+  }
+  process.stdout.write(JSON.stringify(await res.json(), null, 2) + "\n");
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -314,6 +515,10 @@ async function cmdLs(rest: string[]): Promise<number> {
   }
 
   const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+  if (keyword) {
+    const remote = await resolveRemoteSpec(keyword);
+    if (remote) return runRemoteLs(remote, { all: argv.all, active: argv.active });
+  }
   const opts: CommonOpts = {
     all: argv.all,
     active: argv.active,
@@ -504,6 +709,17 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
     cwdScope: typeof argv.cwd === "string" ? path.resolve(argv.cwd) : null,
   };
   const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+  if (keyword) {
+    const remote = await resolveRemoteSpec(keyword);
+    const nFlag2 = argv.n;
+    const n2 =
+      nFlag2 !== undefined && Number.isFinite(nFlag2) && nFlag2 > 0
+        ? Math.floor(nFlag2)
+        : mode === "cat"
+          ? 0
+          : 96;
+    if (remote) return runRemoteRead(remote, mode, argv.follow, n2);
+  }
   const follow = argv.follow;
   const nFlag = argv.n;
   const n =
@@ -579,7 +795,7 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
  * Feed the raw PTY bytes through @xterm/headless and emit plain text.
  * Same approach as koho's renderTerminalBuffer + agent-yes's XtermProxy.
  */
-async function renderRawLog(
+export async function renderRawLog(
   buf: Uint8Array,
   { mode, n }: { mode: "cat" | "tail" | "head"; n: number },
 ): Promise<string> {
@@ -773,6 +989,10 @@ async function cmdSend(rest: string[]): Promise<number> {
     throw new Error("usage: ay send <keyword> <msg|-> [--code=enter|esc|ctrl-c|ctrl-y|tab|none]");
 
   const codeName = argv.code.toLowerCase();
+  {
+    const remote = await resolveRemoteSpec(keyword);
+    if (remote) return runRemoteSend(remote, rawMessage, codeName);
+  }
   const trailing = controlCodeFromName(codeName);
 
   const record = await resolveOne(keyword, opts);
@@ -851,7 +1071,7 @@ export function controlCodeFromName(name: string): string {
   }
 }
 
-async function writeToIpc(ipcPath: string, payload: string): Promise<void> {
+export async function writeToIpc(ipcPath: string, payload: string): Promise<void> {
   if (process.platform === "win32") {
     const { connect } = await import("net");
     await new Promise<void>((resolve, reject) => {
@@ -974,7 +1194,7 @@ async function cmdNote(rest: string[]): Promise<number> {
 // ay status
 // ---------------------------------------------------------------------------
 
-interface StatusSnapshot {
+export interface StatusSnapshot {
   pid: number;
   cli: string;
   cwd: string;
@@ -989,7 +1209,7 @@ interface StatusSnapshot {
   log_file: string | null;
 }
 
-async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSnapshot> {
+export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSnapshot> {
   const alive = isPidAlive(record.pid);
   let state: "active" | "idle" | "stopped";
   let logMtimeMs: number | null = null;
@@ -1050,6 +1270,11 @@ async function cmdStatus(rest: string[]): Promise<number> {
   const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
 
   if (!keyword) throw new Error("usage: ay status <keyword> [--watch] [--interval=N]");
+
+  {
+    const remote = await resolveRemoteSpec(keyword);
+    if (remote) return runRemoteStatus(remote);
+  }
 
   const watch = argv.watch;
   const intervalFlag = argv.interval;

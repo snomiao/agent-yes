@@ -57,6 +57,10 @@ export default defineConfig({
         // also contains a Windows named-pipe branch and an xterm-headless
         // import-failure fallback that aren't reachable on Linux CI.
         "ts/subcommands.ts",
+        // HTTP server and remote config — integration-test only (requires a
+        // running server and network); unit coverage not meaningful here.
+        "ts/serve.ts",
+        "ts/remotes.ts",
       ],
       thresholds: {
         lines: 90,
