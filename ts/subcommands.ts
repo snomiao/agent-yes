@@ -335,27 +335,46 @@ async function pickInteractive(matches: GlobalPidRecord[]): Promise<GlobalPidRec
       process.stdin.pause();
     };
 
-    const onData = (key: string) => {
-      if (key === "\x03") {
-        cleanup();
-        process.stderr.write("\n");
-        resolve(null);
-      } else if (key === "\r" || key === "\n") {
-        cleanup();
-        process.stderr.write("\n");
-        resolve(list[sel]!);
-      } else if (key === "\x1b[A") {
-        sel = Math.max(0, sel - 1);
-        redraw();
-      } else if (key === "\x1b[B") {
-        sel = Math.min(list.length - 1, sel + 1);
-        redraw();
-      } else if (key >= "1" && key <= String(list.length)) {
-        sel = parseInt(key, 10) - 1;
-        redraw();
-        cleanup();
-        process.stderr.write("\n");
-        resolve(list[sel]!);
+    // Buffer partial escape sequences — arrow keys (\x1b[A/B) can arrive split
+    // across multiple data events on some terminals and PTY wrappers.
+    let buf = "";
+    const onData = (chunk: string) => {
+      buf += chunk;
+      while (buf.length > 0) {
+        if (buf[0] === "\x1b") {
+          if (buf.length < 3) break; // wait for rest of sequence
+          const seq = buf.slice(0, 3);
+          buf = buf.slice(3);
+          if (seq === "\x1b[A") {
+            sel = Math.max(0, sel - 1);
+            redraw();
+          } else if (seq === "\x1b[B") {
+            sel = Math.min(list.length - 1, sel + 1);
+            redraw();
+          }
+          // ignore other escape sequences
+        } else {
+          const key = buf[0]!;
+          buf = buf.slice(1);
+          if (key === "\x03") {
+            cleanup();
+            process.stderr.write("\n");
+            resolve(null);
+            return;
+          } else if (key === "\r" || key === "\n") {
+            cleanup();
+            process.stderr.write("\n");
+            resolve(list[sel]!);
+            return;
+          } else if (key >= "1" && key <= String(list.length)) {
+            sel = parseInt(key, 10) - 1;
+            redraw();
+            cleanup();
+            process.stderr.write("\n");
+            resolve(list[sel]!);
+            return;
+          }
+        }
       }
     };
 
