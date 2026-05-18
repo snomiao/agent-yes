@@ -315,24 +315,33 @@ async function pickInteractive(matches: GlobalPidRecord[]): Promise<GlobalPidRec
   process.stderr.write(`Multiple matches — select with ↑↓ Enter (or type 1-${list.length}):\n`);
   render();
 
+  // Open /dev/tty directly so the picker works even when stdin is piped
+  // (e.g. `! ay tail foo` in Claude Code, or `ay tail foo | head`).
+  const { openSync } = await import("fs");
+  const { ReadStream } = await import("tty");
+  const fd = openSync("/dev/tty", "r+");
+  const tty = new ReadStream(fd);
+
+  const write = (s: string) => process.stderr.write(s);
+
   return new Promise((resolve) => {
-    process.stdin.setRawMode(true);
-    process.stdin.resume();
-    process.stdin.setEncoding("utf8");
+    tty.setRawMode(true);
+    tty.resume();
+    tty.setEncoding("utf8");
 
     const redraw = () => {
-      process.stderr.write(`\x1b[${list.length}A\x1b[0J`);
+      write(`\x1b[${list.length}A\x1b[0J`);
       render();
     };
 
     const cleanup = () => {
-      process.stdin.off("data", onData);
+      tty.off("data", onData);
       try {
-        process.stdin.setRawMode(false);
+        tty.setRawMode(false);
       } catch {
-        /* not a tty */
+        /* ignore */
       }
-      process.stdin.pause();
+      tty.destroy();
     };
 
     // Buffer partial escape sequences — arrow keys (\x1b[A/B) can arrive split
@@ -378,7 +387,7 @@ async function pickInteractive(matches: GlobalPidRecord[]): Promise<GlobalPidRec
       }
     };
 
-    process.stdin.on("data", onData);
+    tty.on("data", onData);
   });
 }
 
@@ -395,10 +404,18 @@ export async function resolveOne(
   }
   if (matches.length === 1) return matches[0]!;
   if (opts.latest) return matches[0]!; // already sorted newest-first
-  if (process.stderr.isTTY && process.stdin.isTTY) {
-    const chosen = await pickInteractive(matches);
-    if (chosen) return chosen;
-    throw new Error("no agent selected");
+  if (process.stderr.isTTY && process.platform !== "win32") {
+    try {
+      const chosen = await pickInteractive(matches);
+      if (chosen) return chosen;
+      throw new Error("no agent selected");
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+        // /dev/tty not available (no controlling terminal), fall through
+      } else {
+        throw e;
+      }
+    }
   }
   const lines = matches
     .slice(0, 10)
