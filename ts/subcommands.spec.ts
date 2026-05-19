@@ -36,6 +36,8 @@ describe("subcommands.controlCodeFromName", () => {
     expect(controlCodeFromName("ctrl-c")).toBe("\x03");
     expect(controlCodeFromName("ctrl-y")).toBe("\x19");
     expect(controlCodeFromName("ctrl-d")).toBe("\x04");
+    expect(controlCodeFromName("ctrl-\\")).toBe("\x1c");
+    expect(controlCodeFromName("ctrl-backslash")).toBe("\x1c");
     expect(controlCodeFromName("tab")).toBe("\t");
     expect(controlCodeFromName("none")).toBe("");
     expect(controlCodeFromName("")).toBe("");
@@ -50,6 +52,17 @@ describe("subcommands.controlCodeFromName", () => {
   it("throws on unknown code names", async () => {
     const { controlCodeFromName } = await loadModule();
     expect(() => controlCodeFromName("nope")).toThrow(/unknown --code/);
+  });
+});
+
+describe("subcommands.isSubcommand", () => {
+  it("recognises attach alongside the existing subcommands", async () => {
+    const { isSubcommand } = await loadModule();
+    expect(isSubcommand("attach")).toBe(true);
+    expect(isSubcommand("tail")).toBe(true);
+    expect(isSubcommand("send")).toBe(true);
+    expect(isSubcommand("not-a-command")).toBe(false);
+    expect(isSubcommand(undefined)).toBe(false);
   });
 });
 

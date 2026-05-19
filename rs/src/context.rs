@@ -277,16 +277,19 @@ impl AgentContext {
                         return;
                     }
                 };
+                let my_pid = std::process::id();
                 loop {
                     if sig.recv().await.is_none() {
                         break;
                     }
-                    // Use ioctl(TIOCGWINSZ) — env vars (COLUMNS/LINES) are stale after resize.
-                    // Always send even if size appears unchanged: the inner PTY may have been
-                    // resized by the child (e.g. `stty cols 132`), and we must override it back
-                    // to the outer terminal size.  watch::send() always increments the version
-                    // counter, so changed() in the select! loop fires on every SIGWINCH.
-                    let size = get_terminal_size_from_tty();
+                    // `ay attach` writes ~/.agent-yes/winsize/<pid> and then
+                    // raises SIGWINCH on us, since we have no TTY of our own
+                    // when running detached under an orchestrator. Prefer
+                    // that over ioctl whenever the file is fresh — falling
+                    // back to the local TTY keeps the existing in-terminal
+                    // workflow working.
+                    let size = crate::pty_spawner::read_external_winsize(my_pid)
+                        .unwrap_or_else(get_terminal_size_from_tty);
                     if resize_tx.send(size).is_err() {
                         break;
                     }

@@ -33,6 +33,50 @@ pub fn get_terminal_size_from_tty() -> (u16, u16) {
     (80, 24)
 }
 
+/// Max age of an externally-supplied winsize before we ignore it. After this,
+/// a stale attach client that died holding the lock would otherwise pin our
+/// PTY at the wrong size forever.
+const WINSIZE_STALE_MS: u128 = 30_000;
+
+/// Read `~/.agent-yes/winsize/<pid>` if a recent `ay attach` wrote one.
+/// Format: `<cols> <rows> <timestamp_ms>\n`. Returns None when the file is
+/// missing, malformed, or older than [`WINSIZE_STALE_MS`].
+///
+/// Used by the SIGWINCH handler so attach clients can override the agent's
+/// PTY size even though the agent has no TTY of its own.
+pub fn read_external_winsize(pid: u32) -> Option<(u16, u16)> {
+    let dir = crate::log_files::log_dir()?;
+    read_external_winsize_from(&dir, pid)
+}
+
+/// `read_external_winsize` with the base dir injected — exposed so tests
+/// can hit a tempdir without mutating `$HOME` (which races with concurrent
+/// PTY tests that snapshot the env via posix_spawn).
+pub fn read_external_winsize_from(base_dir: &std::path::Path, pid: u32) -> Option<(u16, u16)> {
+    let path = base_dir.join("winsize").join(pid.to_string());
+    let content = std::fs::read_to_string(&path).ok()?;
+    parse_winsize_line(content.lines().next()?)
+}
+
+/// Parse a single `"cols rows timestamp_ms"` line. Extracted for unit tests.
+pub fn parse_winsize_line(line: &str) -> Option<(u16, u16)> {
+    let mut parts = line.split_ascii_whitespace();
+    let cols: u16 = parts.next()?.parse().ok()?;
+    let rows: u16 = parts.next()?.parse().ok()?;
+    let ts: u128 = parts.next()?.parse().ok()?;
+    if cols == 0 || rows == 0 {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_millis();
+    if now.saturating_sub(ts) > WINSIZE_STALE_MS {
+        return None;
+    }
+    Some((cols.max(20), rows))
+}
+
 /// Terminal size for initial PTY spawn: COLUMNS/LINES env vars first (useful in
 /// non-TTY/pipe/CI contexts), then ioctl, then (80, 24).
 pub fn get_terminal_size() -> (u16, u16) {
@@ -489,6 +533,96 @@ mod tests {
             .expect("resize(0,24) should succeed via clamp");
         ctx.resize(80, 0)
             .expect("resize(80,0) should succeed via clamp");
+    }
+
+    #[test]
+    fn test_parse_winsize_fresh() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let line = format!("120 40 {}", now);
+        assert_eq!(parse_winsize_line(&line), Some((120, 40)));
+    }
+
+    #[test]
+    fn test_parse_winsize_clamps_below_min_cols() {
+        // get_terminal_size enforces a 20-col minimum; the winsize parser
+        // applies the same floor for consistency.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        let line = format!("5 24 {}", now);
+        assert_eq!(parse_winsize_line(&line), Some((20, 24)));
+    }
+
+    #[test]
+    fn test_parse_winsize_stale() {
+        // 60s old → must be rejected.
+        let stale = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .saturating_sub(60_000);
+        let line = format!("120 40 {}", stale);
+        assert_eq!(parse_winsize_line(&line), None);
+    }
+
+    #[test]
+    fn test_parse_winsize_rejects_zero_dims() {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        assert_eq!(parse_winsize_line(&format!("0 40 {}", now)), None);
+        assert_eq!(parse_winsize_line(&format!("80 0 {}", now)), None);
+    }
+
+    #[test]
+    fn test_parse_winsize_rejects_malformed() {
+        assert_eq!(parse_winsize_line(""), None);
+        assert_eq!(parse_winsize_line("not numbers here"), None);
+        assert_eq!(parse_winsize_line("80 24"), None); // missing timestamp
+        assert_eq!(parse_winsize_line("80 24 abc"), None);
+    }
+
+    #[test]
+    fn test_read_external_winsize_missing_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(read_external_winsize_from(dir.path(), 99_999), None);
+    }
+
+    #[test]
+    fn test_read_external_winsize_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let winsize_dir = dir.path().join("winsize");
+        std::fs::create_dir_all(&winsize_dir).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis();
+        std::fs::write(winsize_dir.join("12345"), format!("132 50 {}\n", now)).unwrap();
+        assert_eq!(
+            read_external_winsize_from(dir.path(), 12345),
+            Some((132, 50))
+        );
+    }
+
+    #[test]
+    fn test_read_external_winsize_ignores_stale_file_on_disk() {
+        // End-to-end: a file on disk older than 30s is rejected by the
+        // freshness gate even though its content is otherwise valid.
+        let dir = tempfile::tempdir().unwrap();
+        let winsize_dir = dir.path().join("winsize");
+        std::fs::create_dir_all(&winsize_dir).unwrap();
+        let stale = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+            .saturating_sub(60_000);
+        std::fs::write(winsize_dir.join("42"), format!("100 30 {}\n", stale)).unwrap();
+        assert_eq!(read_external_winsize_from(dir.path(), 42), None);
     }
 
     #[test]

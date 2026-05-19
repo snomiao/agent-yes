@@ -142,6 +142,7 @@ cy tail <keyword>                      # render last 96 lines via @xterm/headles
 cy read <keyword>                      # full rendered log
 cy send <keyword> "next: run tests"    # append a prompt to that agent's stdin
 cy send <keyword> "" --code=ctrl-c     # send a Ctrl+C
+cy attach <keyword>                    # interactive attach (detach: Ctrl-\)
 ```
 
 `cy` (and `ay` / `agent-yes`) writes to a shared registry at

@@ -136,6 +136,7 @@ const SUBCOMMANDS = new Set([
   "tail",
   "head",
   "send",
+  "attach",
   "restart",
   "note",
   "serve",
@@ -176,6 +177,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdRead(rest, { mode: "head" });
       case "send":
         return await cmdSend(rest);
+      case "attach":
+        return await cmdAttach(rest);
       case "restart":
         return await cmdRestart(rest);
       case "note":
@@ -214,6 +217,7 @@ export function cmdHelp(): number {
       `  ay cat <keyword>                    full log\n` +
       `  ay head <keyword>                   first N lines\n` +
       `  ay send <keyword> <msg>             send a message\n` +
+      `  ay attach <keyword>                 interactive attach (detach: Ctrl-\\)\n` +
       `  ay status <keyword>                 agent status snapshot\n` +
       `\n` +
       `Remote:\n` +
@@ -1349,6 +1353,13 @@ export function controlCodeFromName(name: string): string {
     case "ctrl-d":
     case "ctrld":
       return "\x04";
+    case "ctrl-\\":
+    case "ctrl\\":
+    case "ctrl-backslash":
+      // FS (file separator); convenient detach key for `ay attach`
+      // because few CLIs send it. Same as SIGQUIT's terminal binding,
+      // but here it's intercepted before reaching any signal handler.
+      return "\x1c";
     case "tab":
       return "\t";
     case "none":
@@ -1391,6 +1402,248 @@ export async function writeToIpc(ipcPath: string, payload: string): Promise<void
       closeSync(fd);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// ay attach
+// ---------------------------------------------------------------------------
+
+async function cmdAttach(rest: string[]): Promise<number> {
+  const y = yargs(rest)
+    .usage("Usage: ay attach <keyword> [--escape ctrl-\\]")
+    .option("escape", {
+      type: "string",
+      default: "ctrl-\\",
+      description: "Detach key name (see --code list; default: ctrl-\\)",
+    })
+    .option("all", { type: "boolean", default: false, description: "Include exited agents" })
+    .option("latest", { type: "boolean", default: false, description: "Use most recent match" })
+    .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+
+  const argv = await y.parseAsync();
+  const opts: CommonOpts = {
+    all: argv.all,
+    active: false,
+    json: false,
+    latest: argv.latest,
+    cwdScope: typeof argv.cwd === "string" ? path.resolve(argv.cwd) : null,
+  };
+  const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+  if (!keyword) throw new Error("usage: ay attach <keyword> [--escape ctrl-\\]");
+
+  const escapeName = String(argv.escape).toLowerCase();
+  const detachSeq = controlCodeFromName(escapeName);
+  if (!detachSeq) {
+    throw new Error(`--escape must resolve to a non-empty byte sequence (got "${argv.escape}")`);
+  }
+  const detachByte = detachSeq.charCodeAt(0);
+
+  const record = await resolveOne(keyword, opts);
+  if (!record.fifo_file) {
+    throw new Error(`pid ${record.pid}: no fifo_file recorded — agent has no input channel`);
+  }
+  if (!record.log_file) {
+    throw new Error(`pid ${record.pid}: no log_file recorded — cannot stream output`);
+  }
+  if (!isPidAlive(record.pid)) {
+    throw new Error(`pid ${record.pid}: process is not alive`);
+  }
+
+  const fifoPath = record.fifo_file;
+  const logPath = record.log_file;
+
+  // 1. Replay the current screen via @xterm/headless so the user sees a
+  //    coherent snapshot instead of half-frame ANSI garbage. Cap input bytes
+  //    so multi-MB logs don't stall the attach.
+  const REPLAY_CAP_BYTES = 1024 * 1024;
+  let initialOffset = 0;
+  let replay = "";
+  try {
+    const st = await stat(logPath);
+    initialOffset = Number(st.size);
+    if (initialOffset > 0) {
+      const readStart = Math.max(0, initialOffset - REPLAY_CAP_BYTES);
+      const fh = await open(logPath, "r");
+      try {
+        const buf = Buffer.alloc(initialOffset - readStart);
+        await fh.read(buf, 0, buf.length, readStart);
+        const rows = process.stdout.rows ?? 50;
+        replay = await renderRawLog(buf, { mode: "tail", n: rows });
+      } finally {
+        await fh.close();
+      }
+    }
+  } catch {
+    /* log unreadable — show nothing */
+  }
+
+  process.stderr.write(
+    `[attaching to pid ${record.pid}: ${record.cli} in ${shortenPath(record.cwd)}]\n` +
+      `[detach: ${escapeName}]\n`,
+  );
+  if (replay) {
+    process.stdout.write(replay);
+    if (!replay.endsWith("\n")) process.stdout.write("\n");
+  }
+
+  // 2. Push local winsize → ~/.agent-yes/winsize/<pid>, signal SIGWINCH so
+  //    the agent resizes its inner PTY before we start forwarding bytes.
+  const ayHome = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
+  const winsizeDir = path.join(ayHome, "winsize");
+  await mkdir(winsizeDir, { recursive: true });
+  const winsizePath = path.join(winsizeDir, String(record.pid));
+
+  const sendResize = async () => {
+    const cols = process.stdout.columns ?? 80;
+    const rows = process.stdout.rows ?? 24;
+    try {
+      await writeFile(winsizePath, `${cols} ${rows} ${Date.now()}\n`);
+      try {
+        process.kill(record.pid, "SIGWINCH");
+      } catch {
+        /* agent died — handled by alive check */
+      }
+    } catch {
+      /* ignore */
+    }
+  };
+  await sendResize();
+  await new Promise((r) => setTimeout(r, 50)); // let agent redraw
+
+  // 3. Raw TTY so per-keystroke bytes flow through unchanged.
+  const stdinIsTty = !!process.stdin.isTTY;
+  if (stdinIsTty) {
+    try {
+      process.stdin.setRawMode(true);
+    } catch {
+      /* ignore */
+    }
+  }
+  process.stdin.resume();
+
+  const onResize = () => {
+    void sendResize();
+  };
+  process.stdout.on("resize", onResize);
+
+  // 4. Keep FIFO open across keystrokes so we don't pay open(2) per byte.
+  //    Agent's RDWR keepalive means O_WRONLY does not block here.
+  const { openSync, writeSync, closeSync, watch } = await import("fs");
+  let fifoFd: number | null = null;
+  try {
+    fifoFd = openSync(fifoPath, "w");
+  } catch (err) {
+    throw new Error(`failed to open FIFO ${fifoPath}: ${(err as Error).message}`);
+  }
+
+  // 5. Stream new log bytes → stdout. fs.watch may coalesce on macOS, so
+  //    poll every 100ms as a safety net.
+  let offset = initialOffset;
+  let detached = false;
+  let pollTimer: NodeJS.Timeout | undefined;
+  let aliveCheck: NodeJS.Timeout | undefined;
+
+  const flushNew = async () => {
+    if (detached) return;
+    try {
+      const st = await stat(logPath);
+      if (st.size < offset) offset = 0; // truncated
+      if (st.size > offset) {
+        const fh = await open(logPath, "r");
+        try {
+          const buf = Buffer.alloc(st.size - offset);
+          await fh.read(buf, 0, buf.length, offset);
+          process.stdout.write(buf);
+          offset = st.size;
+        } finally {
+          await fh.close();
+        }
+      }
+    } catch {
+      /* transient — retry */
+    }
+  };
+
+  const watcher = watch(logPath, () => {
+    void flushNew();
+  });
+  // Race fix: bytes can land between stat() above and watch() install.
+  await flushNew();
+  pollTimer = setInterval(() => {
+    void flushNew();
+  }, 100);
+
+  // 6. Stdin → FIFO, watching for detach byte.
+  const triggerDetach = () => {
+    if (detached) return;
+    detached = true;
+    if (pollTimer) clearInterval(pollTimer);
+    if (aliveCheck) clearInterval(aliveCheck);
+    watcher.close();
+    process.stdout.removeListener("resize", onResize);
+    process.stdin.removeListener("data", onStdinData);
+    if (stdinIsTty) {
+      try {
+        process.stdin.setRawMode(false);
+      } catch {
+        /* ignore */
+      }
+    }
+    process.stdin.pause();
+    if (fifoFd !== null) {
+      try {
+        closeSync(fifoFd);
+      } catch {
+        /* ignore */
+      }
+      fifoFd = null;
+    }
+    process.stderr.write(`\n[detached from pid ${record.pid} — agent still running]\n`);
+  };
+
+  const onStdinData = (chunk: Buffer) => {
+    if (detached) return;
+    const idx = chunk.indexOf(detachByte);
+    if (idx === -1) {
+      try {
+        if (fifoFd !== null) writeSync(fifoFd, chunk);
+      } catch (err) {
+        process.stderr.write(`\n[fifo write failed: ${(err as Error).message}]\n`);
+        triggerDetach();
+      }
+      return;
+    }
+    if (idx > 0 && fifoFd !== null) {
+      try {
+        writeSync(fifoFd, chunk.subarray(0, idx));
+      } catch {
+        /* ignore */
+      }
+    }
+    triggerDetach();
+  };
+  process.stdin.on("data", onStdinData);
+
+  // 7. Detach automatically if the agent exits.
+  aliveCheck = setInterval(() => {
+    if (!isPidAlive(record.pid)) {
+      process.stderr.write(`\n[pid ${record.pid} exited]\n`);
+      triggerDetach();
+    }
+  }, 1000);
+
+  await new Promise<void>((resolve) => {
+    const tick = () => {
+      if (detached) resolve();
+      else setTimeout(tick, 50);
+    };
+    tick();
+  });
+
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
