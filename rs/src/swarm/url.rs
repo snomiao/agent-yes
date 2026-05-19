@@ -1,10 +1,15 @@
-//! Swarm URL parsing and room code handling
+//! Swarm URL parsing and room code handling.
 //!
 //! Supports multiple formats:
 //! - Topic-only: `my-project` (LAN auto-discovery via mDNS)
 //! - Room code: `ABC-123` (6-char, easy to share verbally)
 //! - Swarm URL: `ay://my-project?peer=/ip4/1.2.3.4/tcp/4001/p2p/QmXxx`
 //! - Raw multiaddr: `/ip4/1.2.3.4/tcp/4001/p2p/QmXxx`
+//!
+//! `format_room_code` is half of a UX pair with `generate_room_code` — kept
+//! exported so display code can render the canonical "ABC-123" form even
+//! though main.rs currently shows the raw code.
+#![allow(dead_code)]
 
 use rand::Rng;
 

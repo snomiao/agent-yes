@@ -1,4 +1,8 @@
-//! Ready state manager for async coordination
+//! Ready state manager for async coordination.
+//!
+//! Library-style: `receiver`, `wait`, `wait_timeout` are part of the API
+//! surface; not every consumer is migrated to use them yet.
+#![allow(dead_code)]
 
 use std::sync::Arc;
 use tokio::sync::{watch, Mutex};

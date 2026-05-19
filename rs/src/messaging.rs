@@ -1,4 +1,11 @@
-//! Message sending and keyboard simulation module
+//! Message sending and keyboard simulation module.
+//!
+//! `send_message`, `send_enter`, `send_ctrl_y` and a couple of context
+//! fields (`stdin_ready`, `next_stdout`) are part of the public messaging
+//! API but only some are used in the current binary entrypoint — they stay
+//! available so future flows (idle-action prompts, restart auto-resume,
+//! external invocations) don't need to re-declare them.
+#![allow(dead_code)]
 
 use crate::idle_waiter::IdleWaiter;
 use crate::ready_manager::ReadyManager;

@@ -367,7 +367,11 @@ pub fn load_cascading_config() -> ConfigFile {
     merged
 }
 
-/// Get all possible config file paths (for debugging/user info)
+/// Get all possible config file paths (for debugging/user info).
+///
+/// Reserved for a `--show-config` / diagnostic surface that hasn't shipped yet;
+/// keeping the helper exported avoids breaking it when that surface lands.
+#[allow(dead_code)]
 pub fn get_config_paths() -> Vec<PathBuf> {
     let mut paths = Vec::new();
 

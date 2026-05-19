@@ -62,9 +62,9 @@ async fn main() -> Result<()> {
     // webhooks) see a stable identifier regardless of how the user typed it.
     let cwd = if let Some(ref requested) = args.cwd {
         let path = std::path::PathBuf::from(requested);
-        let canonical = path.canonicalize().map_err(|e| {
-            anyhow::anyhow!("Invalid --cwd {:?}: {}", requested, e)
-        })?;
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| anyhow::anyhow!("Invalid --cwd {:?}: {}", requested, e))?;
         if !canonical.is_dir() {
             return Err(anyhow::anyhow!("--cwd {:?} is not a directory", requested));
         }

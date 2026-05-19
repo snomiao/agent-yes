@@ -21,7 +21,7 @@ use tempfile::tempdir;
 #[cfg(unix)]
 #[test]
 fn test_sigwinch_propagated_through_agent_yes_to_child() {
-    use std::time::{Duration, Instant};
+    use std::time::Duration;
 
     let dir = tempdir().unwrap();
     let bin_dir = dir.path().join("bin");

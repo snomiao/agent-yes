@@ -1,4 +1,9 @@
-//! Idle detection based on activity pings
+//! Idle detection based on activity pings.
+//!
+//! Library-style module: `wait` / `wait_timeout` are part of the API surface
+//! but only some callers are wired up today. New callers (e.g., idle-action
+//! retry policies) are expected to land soon, so the helpers stay public.
+#![allow(dead_code)]
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;

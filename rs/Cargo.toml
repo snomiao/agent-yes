@@ -98,3 +98,9 @@ predicates = "3"
 opt-level = 3
 lto = true
 strip = true
+
+# Register cfg names we set ourselves so the unexpected_cfgs lint (Rust 1.80+)
+# doesn't fire on `#[cfg_attr(tarpaulin, ignore)]` annotations used to skip
+# PTY tests under tarpaulin coverage runs.
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(tarpaulin)'] }

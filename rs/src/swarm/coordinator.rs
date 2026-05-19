@@ -1,4 +1,8 @@
-//! Coordinator election and task distribution
+//! Coordinator election and task distribution.
+//!
+//! Experimental swarm subsystem under active development — most of the API
+//! is shaped but not all paths are wired into the current `SwarmNode` loop.
+#![allow(dead_code)]
 
 use crate::swarm::messages::{AgentCapabilities, AgentId, TaskId, TaskStatus};
 use std::collections::HashMap;

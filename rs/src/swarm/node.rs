@@ -1,4 +1,8 @@
-//! Swarm node - main entry point for P2P networking
+//! Swarm node - main entry point for P2P networking.
+//!
+//! Experimental subsystem; not all fields/methods are wired into the
+//! current run-loop yet.
+#![allow(dead_code)]
 
 use crate::swarm::behaviour::{AgentBehaviour, AgentBehaviourEvent};
 use crate::swarm::coordinator::CoordinatorState;
@@ -426,11 +430,13 @@ impl SwarmNode {
         Ok(())
     }
 
-    /// Handle an agent message from gossipsub
+    /// Handle an agent message from gossipsub. `source` is the peer that
+    /// sent the message; not yet used in the current dispatch, but kept on
+    /// the signature so future routing decisions can attribute origin.
     async fn handle_agent_message(
         &mut self,
         msg: AgentMessage,
-        source: PeerId,
+        _source: PeerId,
         event_tx: &mpsc::Sender<SwarmEvent2>,
     ) -> Result<()> {
         match msg {

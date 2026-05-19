@@ -4,6 +4,10 @@
 //! correctly handles cursor movement, line clearing, scrolling, etc.
 //! Also auto-responds to terminal queries (DSR, DA) so the child process
 //! never blocks waiting for a terminal reply.
+//!
+//! `tail` / `cursor_position` are read-only inspection helpers kept on the
+//! public surface for tooling / future callers; not all are wired up today.
+#![allow(dead_code)]
 
 use std::sync::{Arc, Mutex};
 use tracing::debug;

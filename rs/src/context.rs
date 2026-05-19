@@ -28,7 +28,14 @@ const IDLE_SCAN_INTERVAL_MS: u64 = 60000; // Re-scan rendered screen every 60s o
 pub struct AgentContext {
     pub cli: String,
     pub cli_config: CliConfig,
+    /// Captured from CLI flags; read by tracing/log filters configured outside
+    /// this struct and by call sites that branch on verbose-only diagnostics.
+    #[allow(dead_code)]
     pub verbose: bool,
+    /// Captured from --robust; the main.rs restart loop reads it directly from
+    /// CliArgs rather than going through the context, so this copy is unused
+    /// at present but kept for symmetry / future internal consumers.
+    #[allow(dead_code)]
     pub robust: bool,
     pub auto_yes_enabled: bool,
     pub is_fatal: bool,
@@ -133,7 +140,12 @@ impl AgentContext {
             .map(|p| p.to_string_lossy().to_string())
     }
 
-    /// Run the main agent loop
+    /// Run the main agent loop.
+    ///
+    /// Superseded by `run_with_fifo` for the production path, but kept for
+    /// callers that don't want FIFO IPC (e.g. embedded use). Delegates to
+    /// `run_with_fifo` with no FIFO path so the two share one main loop.
+    #[allow(dead_code)]
     pub async fn run(
         &mut self,
         pty: &mut PtyContext,

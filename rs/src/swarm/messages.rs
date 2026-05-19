@@ -1,4 +1,8 @@
-//! Message types for agent-to-agent communication
+//! Message types for agent-to-agent communication.
+//!
+//! Experimental swarm subsystem — some message variants and the AgentCodec
+//! aren't constructed by the current node yet.
+#![allow(dead_code)]
 
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;

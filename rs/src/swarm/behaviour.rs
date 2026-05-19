@@ -1,4 +1,8 @@
-//! Network behaviour for the agent swarm
+//! Network behaviour for the agent swarm.
+//!
+//! Holds libp2p Behaviour wiring; some derive-generated event variants and
+//! helper methods aren't observed in the current node loop yet.
+#![allow(dead_code)]
 
 use crate::swarm::messages::{AgentRequest, AgentResponse};
 use futures::prelude::*;

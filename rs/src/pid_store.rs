@@ -38,6 +38,9 @@ impl PidStore {
         Self { path }
     }
 
+    /// Pre-FIFO API kept so embedders that don't allocate a FIFO can still
+    /// register a pid record. Production agents call `register_with_fifo`.
+    #[allow(dead_code)]
     pub fn register(
         &self,
         pid: u32,

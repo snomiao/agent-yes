@@ -100,6 +100,10 @@ pub struct PtyContext {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
 }
 
+// Library-style PTY wrapper. `write` / `wait` / `kill` are stable helpers
+// kept on the type so embedders / tests can drive the PTY directly even
+// though the agent main loop only uses `get_writer`/`try_wait` today.
+#[allow(dead_code)]
 impl PtyContext {
     /// Write data to the PTY
     pub fn write(&self, data: &str) -> Result<()> {
@@ -274,7 +278,12 @@ pub async fn spawn_agent(
     })
 }
 
-/// Check if error is "command not found"
+/// Check if error is "command not found".
+///
+/// Used by the auto-install path; called only when `--install` triggers a
+/// recovery flow, so under typical runs this is unused. Kept here rather
+/// than inline to make the failure-string heuristics greppable.
+#[allow(dead_code)]
 pub fn is_command_not_found_error(error: &str) -> bool {
     error.contains("command not found")
         || error.contains("not recognized")

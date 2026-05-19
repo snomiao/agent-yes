@@ -11,7 +11,13 @@ use std::sync::OnceLock;
 
 const BUILTIN_CLI_DEFAULTS: &str = include_str!("../default.config.yaml");
 
-/// Configuration for a CLI tool
+/// Configuration for a CLI tool.
+///
+/// Several fields (install, version, help, bunx, system_prompt, system,
+/// update_available) are populated from the YAML config and consumed by the
+/// TS side / external tooling; the Rust runtime reads only a subset today.
+/// Keeping them here means a single source of truth for the schema.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CliConfig {
     /// How to pass the prompt argument
@@ -56,6 +62,9 @@ pub struct CliConfig {
     pub no_eol: bool,
 }
 
+/// Install command catalogue per-platform. Currently consumed only by the TS
+/// side; mirrored here so the YAML schema round-trips cleanly through Rust.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 pub struct InstallConfig {
     pub single: Option<String>,

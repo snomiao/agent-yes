@@ -9,6 +9,12 @@ pub const SUPPORTED_CLIS: &[&str] = &[
     "claude", "gemini", "codex", "copilot", "cursor", "grok", "qwen", "auggie", "amp", "opencode",
 ];
 
+// Most fields here are read elsewhere in the binary; the ones that aren't
+// are kept either for forward use (auto-install, use-skills) or as deprecated
+// CLI compat aliases consumed by `resolve_args` and not read downstream.
+// Marking them dead_code at the struct level keeps the public CLI surface
+// stable without per-field annotations every commit.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct CliArgs {
     pub cli: String,

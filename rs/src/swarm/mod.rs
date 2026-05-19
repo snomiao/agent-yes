@@ -14,16 +14,14 @@ mod node;
 #[cfg(feature = "swarm")]
 mod url;
 
-#[cfg(feature = "swarm")]
-pub use behaviour::AgentBehaviour;
-#[cfg(feature = "swarm")]
-pub use coordinator::CoordinatorState;
-#[cfg(feature = "swarm")]
-pub use messages::{AgentMessage, AgentRequest, AgentResponse, TaskStatus};
+// Only the names actually consumed by main.rs are re-exported. The sub-
+// modules keep their own internal types (AgentBehaviour, CoordinatorState,
+// AgentMessage etc.) but exporting them at this level just produced unused-
+// re-export warnings since this is a binary crate, not a library.
 #[cfg(feature = "swarm")]
 pub use node::{SwarmCommand, SwarmConfig, SwarmEvent2, SwarmNode};
 #[cfg(feature = "swarm")]
-pub use url::{format_room_code, generate_room_code, is_room_code, SwarmUrlConfig};
+pub use url::{generate_room_code, SwarmUrlConfig};
 
 #[cfg(not(feature = "swarm"))]
 pub fn swarm_not_available() {

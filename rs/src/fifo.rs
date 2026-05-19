@@ -143,10 +143,7 @@ mod tests {
 
         // External writer pushes data and closes.
         {
-            let mut writer = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .unwrap();
+            let mut writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
             writer.write_all(b"hello\n").unwrap();
         }
 
@@ -233,10 +230,7 @@ mod tests {
         // External writer pushes data and closes — repeat to prove the
         // RDWR-keepalive pattern doesn't EOF after the first close.
         for marker in &[b"alpha\n".to_vec(), b"beta\n".to_vec(), b"gamma\n".to_vec()] {
-            let mut writer = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .unwrap();
+            let mut writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
             writer.write_all(marker).unwrap();
             // dropping the writer here closes its fd; reader must not EOF.
         }
@@ -265,10 +259,7 @@ mod tests {
         // the closed channel. The thread must exit cleanly.
         drop(rx);
         {
-            let mut writer = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&path)
-                .unwrap();
+            let mut writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
             writer.write_all(b"after-rx-drop\n").unwrap();
         }
         // Wait for the reader thread to exit (blocking join in a task so we
@@ -305,7 +296,7 @@ mod tests {
         assert!(p1.exists() && p2.exists());
 
         let mut r1 = open_for_reading(&p1).unwrap();
-        let mut r2 = open_for_reading(&p2).unwrap();
+        let r2 = open_for_reading(&p2).unwrap();
 
         // Cross-write: writing to p1 must be readable on r1, not r2.
         {
