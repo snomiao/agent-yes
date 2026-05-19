@@ -236,7 +236,7 @@ export function cmdHelp(): number {
       `  ay claude -- "fix the bug in auth.ts"\n` +
       `  ay claude --help                    full agent-runner options\n` +
       `\n` +
-      `Labs (examples in ./lab/):\n` +
+      `Labs (examples at https://github.com/snomiao/agent-yes/tree/main/lab):\n` +
       `  local-role-play/   designer + builder on one machine\n` +
       `  http-remote/       ay serve remote access demo\n` +
       `  p2p-pairing/       libp2p P2P  (needs: cargo build --features swarm)\n`,

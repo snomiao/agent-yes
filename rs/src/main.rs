@@ -61,7 +61,27 @@ async fn main() -> Result<()> {
     // Canonicalise to an absolute path so downstream consumers (pid_store, lock keys,
     // webhooks) see a stable identifier regardless of how the user typed it.
     let cwd = if let Some(ref requested) = args.cwd {
-        let path = std::path::PathBuf::from(requested);
+        // Expand leading `~` / `~/` because shells (zsh, bash) do NOT expand a tilde
+        // that appears after `=` (e.g. `--cwd=~/foo` arrives literally). Only the
+        // user's own `~` is supported; `~user` is not.
+        let expanded = if requested == "~" {
+            dirs::home_dir()
+                .map(|h| h.to_string_lossy().to_string())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Invalid --cwd \"~\": cannot resolve home directory")
+                })?
+        } else if let Some(rest) = requested.strip_prefix("~/") {
+            let home = dirs::home_dir().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid --cwd {:?}: cannot resolve home directory",
+                    requested
+                )
+            })?;
+            home.join(rest).to_string_lossy().to_string()
+        } else {
+            requested.clone()
+        };
+        let path = std::path::PathBuf::from(&expanded);
         let canonical = path
             .canonicalize()
             .map_err(|e| anyhow::anyhow!("Invalid --cwd {:?}: {}", requested, e))?;
