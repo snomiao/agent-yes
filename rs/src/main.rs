@@ -57,11 +57,24 @@ async fn main() -> Result<()> {
         install_method
     );
 
-    // Capture current working directory early
-    let cwd = std::env::current_dir()
-        .map_err(|e| anyhow::anyhow!("Failed to get current working directory: {}", e))?
-        .to_string_lossy()
-        .to_string();
+    // Resolve working directory: --cwd flag overrides, else use process current_dir.
+    // Canonicalise to an absolute path so downstream consumers (pid_store, lock keys,
+    // webhooks) see a stable identifier regardless of how the user typed it.
+    let cwd = if let Some(ref requested) = args.cwd {
+        let path = std::path::PathBuf::from(requested);
+        let canonical = path.canonicalize().map_err(|e| {
+            anyhow::anyhow!("Invalid --cwd {:?}: {}", requested, e)
+        })?;
+        if !canonical.is_dir() {
+            return Err(anyhow::anyhow!("--cwd {:?} is not a directory", requested));
+        }
+        canonical.to_string_lossy().to_string()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("Failed to get current working directory: {}", e))?
+            .to_string_lossy()
+            .to_string()
+    };
 
     // Check for swarm mode (new --swarm flag or deprecated --experimental-swarm)
     if args.swarm.is_some() {

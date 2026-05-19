@@ -24,6 +24,8 @@ pub struct CliArgs {
     pub queue: bool,
     pub use_skills: bool,
     pub skip_permissions: bool,
+    /// Working directory to run the agent in. None = use process current_dir.
+    pub cwd: Option<String>,
     /// Swarm mode: None = disabled, Some(value) = enabled with optional config
     /// Value can be: topic name, room code (XXX-XXX), ay:// URL, or multiaddr
     pub swarm: Option<String>,
@@ -97,6 +99,10 @@ struct Args {
     /// Pass --dangerously-skip-permissions to the CLI
     #[arg(short = 'y', long = "yes", default_value = "false")]
     yes: bool,
+
+    /// Working directory for the agent (default: current directory)
+    #[arg(long)]
+    cwd: Option<String>,
 
     /// Enable swarm mode for multi-agent P2P networking
     ///
@@ -203,6 +209,7 @@ fn resolve_args(args: Args, exe_name: &str) -> Result<CliArgs> {
         queue: args.queue,
         use_skills: args.use_skills,
         skip_permissions: args.yes,
+        cwd: args.cwd,
         swarm,
         experimental_swarm: args.experimental_swarm,
         swarm_listen: args.swarm_listen,
@@ -491,6 +498,7 @@ mod tests {
             queue: false,
             use_skills: false,
             yes: false,
+            cwd: None,
             swarm: None,
             experimental_swarm: false,
             swarm_listen: None,
@@ -633,6 +641,20 @@ mod tests {
         args.verbose = true;
         let result = resolve_args(args, "agent-yes").unwrap();
         assert!(result.verbose);
+    }
+
+    #[test]
+    fn test_resolve_args_cwd_default_none() {
+        let result = resolve_args(default_args(), "agent-yes").unwrap();
+        assert!(result.cwd.is_none());
+    }
+
+    #[test]
+    fn test_resolve_args_cwd_explicit() {
+        let mut args = default_args();
+        args.cwd = Some("/tmp".into());
+        let result = resolve_args(args, "agent-yes").unwrap();
+        assert_eq!(result.cwd, Some("/tmp".into()));
     }
 
     #[test]

@@ -246,6 +246,92 @@ fn test_cwd_is_preserved() {
     );
 }
 
+#[test]
+fn test_cwd_flag_overrides_current_dir() {
+    // Verify that --cwd <path> makes the agent run in <path>, even when
+    // agent-yes itself was invoked from a different directory.
+    let temp_dir = tempdir().unwrap();
+    let invocation_dir = temp_dir.path().join("invocation");
+    let target_dir = temp_dir.path().join("target_workspace");
+    fs::create_dir(&invocation_dir).unwrap();
+    fs::create_dir(&target_dir).unwrap();
+
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir(&bin_dir).unwrap();
+    let _mock_cli_path = create_cwd_printing_cli(&bin_dir, "claude");
+
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}:{}", bin_dir.display(), original_path);
+
+    let home_dir = temp_dir.path().join("home");
+    fs::create_dir_all(&home_dir).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent-yes").unwrap();
+    cmd.current_dir(&invocation_dir)
+        .env("PATH", new_path)
+        .env("HOME", &home_dir)
+        .arg("--cli")
+        .arg("claude")
+        .arg("--cwd")
+        .arg(&target_dir)
+        .arg("--timeout")
+        .arg("5s")
+        .arg("-p")
+        .arg("test");
+
+    let output = cmd.output().unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    let expected_pwd = target_dir.canonicalize().unwrap();
+    let unexpected_pwd = invocation_dir.canonicalize().unwrap();
+
+    assert!(
+        stdout.contains(&format!("PWD: {}", expected_pwd.display()))
+            || stderr.contains(&format!("PWD: {}", expected_pwd.display())),
+        "Expected PWD: {} but got stdout:\n{}\nstderr:\n{}",
+        expected_pwd.display(),
+        stdout,
+        stderr
+    );
+
+    // And make sure it's NOT the invocation dir
+    assert!(
+        !stdout.contains(&format!("PWD: {}", unexpected_pwd.display()))
+            && !stderr.contains(&format!("PWD: {}", unexpected_pwd.display())),
+        "Expected PWD to differ from invocation dir {}",
+        unexpected_pwd.display(),
+    );
+}
+
+#[test]
+fn test_cwd_flag_rejects_missing_directory() {
+    // --cwd pointing at a nonexistent path should make agent-yes fail fast.
+    let temp_dir = tempdir().unwrap();
+    let missing = temp_dir.path().join("does-not-exist");
+
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir(&bin_dir).unwrap();
+    let _mock_cli_path = create_cwd_printing_cli(&bin_dir, "claude");
+
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}:{}", bin_dir.display(), original_path);
+    let home_dir = temp_dir.path().join("home");
+    fs::create_dir_all(&home_dir).unwrap();
+
+    let mut cmd = Command::cargo_bin("agent-yes").unwrap();
+    cmd.env("PATH", new_path)
+        .env("HOME", &home_dir)
+        .arg("--cli")
+        .arg("claude")
+        .arg("--cwd")
+        .arg(&missing)
+        .arg("-p")
+        .arg("test");
+
+    cmd.assert().failure();
+}
+
 /// Integration test: `agent-yes` creates a per-pid FIFO at the expected
 /// path and registers it in `~/.agent-yes/pids.jsonl` with `fifo_file`
 /// populated. End-to-end byte flow through the FIFO is covered by the
