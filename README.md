@@ -143,7 +143,16 @@ cy read <keyword>                      # full rendered log
 cy send <keyword> "next: run tests"    # append a prompt to that agent's stdin
 cy send <keyword> "" --code=ctrl-c     # send a Ctrl+C
 cy attach <keyword>                    # interactive attach (detach: Ctrl-\)
+cy stop <keyword>                      # graceful shutdown (claude/codex: /exit)
 ```
+
+#### Tips
+
+- A **single** `--code=ctrl-c` does not stop `claude` / `codex` — they treat it
+  as "cancel current turn" rather than "quit". Prefer `cy stop <keyword>` (which
+  sends `/exit` for claude/codex and `/quit` for gemini), or send Ctrl+C twice
+  in quick succession. The `cy send … --code=ctrl-c` output prints a one-line
+  hint pointing at this when it detects one of those CLIs.
 
 `cy` (and `ay` / `agent-yes`) writes to a shared registry at
 `~/.agent-yes/pids.jsonl` and a per-pid FIFO at `~/.agent-yes/fifo/<pid>.stdin`,

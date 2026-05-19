@@ -137,6 +137,7 @@ const SUBCOMMANDS = new Set([
   "head",
   "send",
   "attach",
+  "stop",
   "restart",
   "note",
   "serve",
@@ -179,6 +180,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdSend(rest);
       case "attach":
         return await cmdAttach(rest);
+      case "stop":
+        return await cmdStop(rest);
       case "restart":
         return await cmdRestart(rest);
       case "note":
@@ -218,6 +221,7 @@ export function cmdHelp(): number {
       `  ay head <keyword>                   first N lines\n` +
       `  ay send <keyword> <msg>             send a message\n` +
       `  ay attach <keyword>                 interactive attach (detach: Ctrl-\\)\n` +
+      `  ay stop <keyword>                   graceful shutdown (/exit for claude/codex)\n` +
       `  ay status <keyword>                 agent status snapshot\n` +
       `\n` +
       `Remote:\n` +
@@ -1332,8 +1336,36 @@ async function cmdSend(rest: string[]): Promise<number> {
       `  ay tail ${record.pid}                  # watch output\n` +
       `  ay ls                                  # list all agents\n`,
   );
+  if (codeName === "ctrl-c" || codeName === "ctrlc") {
+    const tip = stopTipForCli(record.cli, record.pid);
+    if (tip) process.stderr.write(tip);
+  }
   return 0;
 }
+
+/// CLIs that ignore a single Ctrl+C and need a more specific shutdown signal.
+/// Users hit this every time they try `ay send <pid> "" --code=ctrl-c` and
+/// see no effect — print a one-liner pointing them at `ay stop`.
+export function stopTipForCli(cli: string, pid: number): string | null {
+  const cmd = GRACEFUL_EXIT_COMMANDS[cli];
+  if (cmd) {
+    return `  tip: ${cli} ignores a single Ctrl+C — try 'ay stop ${pid}' (sends '${cmd}') or double Ctrl+C.\n`;
+  }
+  return null;
+}
+
+/// Per-CLI graceful shutdown commands. Empty fallback = use double Ctrl+C.
+/// Verified against current upstream CLIs:
+///   claude   — `/exit`
+///   codex    — `/exit`
+///   gemini   — `/quit`
+/// Other CLIs aren't in the table because their reliable graceful-exit
+/// command isn't well-known here; `ay stop` falls back to double Ctrl+C.
+export const GRACEFUL_EXIT_COMMANDS: Record<string, string> = {
+  claude: "/exit",
+  codex: "/exit",
+  gemini: "/quit",
+};
 
 export function controlCodeFromName(name: string): string {
   switch (name) {
@@ -1402,6 +1434,83 @@ export async function writeToIpc(ipcPath: string, payload: string): Promise<void
       closeSync(fd);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// ay stop
+// ---------------------------------------------------------------------------
+
+async function cmdStop(rest: string[]): Promise<number> {
+  const y = yargs(rest)
+    .usage("Usage: ay stop <keyword> [--method=graceful|double-ctrl-c|auto]")
+    .option("method", {
+      type: "string",
+      default: "auto",
+      description:
+        "Shutdown strategy: auto (per-CLI), graceful (/exit-style), double-ctrl-c (force)",
+    })
+    .option("all", { type: "boolean", default: false, description: "Include exited agents" })
+    .option("latest", { type: "boolean", default: false, description: "Use most recent match" })
+    .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+
+  const argv = await y.parseAsync();
+  const opts: CommonOpts = {
+    all: argv.all,
+    active: false,
+    json: false,
+    latest: argv.latest,
+    cwdScope: typeof argv.cwd === "string" ? path.resolve(argv.cwd) : null,
+  };
+  const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+  if (!keyword) throw new Error("usage: ay stop <keyword> [--method=auto|graceful|double-ctrl-c]");
+
+  const record = await resolveOne(keyword, opts);
+  if (!record.fifo_file) {
+    throw new Error(`pid ${record.pid}: no fifo_file — cannot send shutdown command`);
+  }
+
+  const method = String(argv.method).toLowerCase();
+  const graceful = GRACEFUL_EXIT_COMMANDS[record.cli];
+
+  let payload: string;
+  let strategy: string;
+  if (method === "double-ctrl-c") {
+    payload = "double-ctrl-c";
+    strategy = `double Ctrl+C (forced)`;
+  } else if (method === "graceful" || (method === "auto" && graceful)) {
+    if (!graceful) {
+      throw new Error(`--method=graceful: no known graceful-exit command for cli "${record.cli}"`);
+    }
+    payload = graceful;
+    strategy = `'${graceful}' + Enter`;
+  } else if (method === "auto") {
+    payload = "double-ctrl-c";
+    strategy = `double Ctrl+C (no known /exit for cli "${record.cli}")`;
+  } else {
+    throw new Error(`unknown --method=${method}`);
+  }
+
+  const fifoPath = record.fifo_file;
+  if (payload === "double-ctrl-c") {
+    await writeToIpc(fifoPath, "\x03");
+    await new Promise((r) => setTimeout(r, 200));
+    await writeToIpc(fifoPath, "\x03");
+  } else {
+    await writeToIpc(fifoPath, payload);
+    await new Promise((r) => setTimeout(r, 200));
+    await writeToIpc(fifoPath, "\r");
+  }
+
+  process.stdout.write(`stopping pid ${record.pid} (${record.cli}) via ${strategy}\n`);
+  process.stderr.write(
+    `\n` +
+      `  ay status ${record.pid}                # confirm it exited\n` +
+      `  ay ls --all                            # see exit codes\n`,
+  );
+  return 0;
 }
 
 // ---------------------------------------------------------------------------

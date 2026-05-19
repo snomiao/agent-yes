@@ -56,13 +56,39 @@ describe("subcommands.controlCodeFromName", () => {
 });
 
 describe("subcommands.isSubcommand", () => {
-  it("recognises attach alongside the existing subcommands", async () => {
+  it("recognises attach and stop alongside the existing subcommands", async () => {
     const { isSubcommand } = await loadModule();
     expect(isSubcommand("attach")).toBe(true);
+    expect(isSubcommand("stop")).toBe(true);
     expect(isSubcommand("tail")).toBe(true);
     expect(isSubcommand("send")).toBe(true);
     expect(isSubcommand("not-a-command")).toBe(false);
     expect(isSubcommand(undefined)).toBe(false);
+  });
+});
+
+describe("subcommands.stopTipForCli", () => {
+  it("returns a hint for CLIs that ignore single Ctrl+C", async () => {
+    const { stopTipForCli } = await loadModule();
+    expect(stopTipForCli("claude", 1234)).toMatch(/ay stop 1234/);
+    expect(stopTipForCli("claude", 1234)).toMatch(/\/exit/);
+    expect(stopTipForCli("codex", 99)).toMatch(/ay stop 99/);
+    expect(stopTipForCli("gemini", 7)).toMatch(/\/quit/);
+  });
+
+  it("returns null for CLIs without a known graceful command", async () => {
+    const { stopTipForCli } = await loadModule();
+    expect(stopTipForCli("qwen", 1)).toBeNull();
+    expect(stopTipForCli("copilot", 1)).toBeNull();
+  });
+});
+
+describe("subcommands.GRACEFUL_EXIT_COMMANDS", () => {
+  it("maps the three known CLIs to their /exit-style commands", async () => {
+    const { GRACEFUL_EXIT_COMMANDS } = await loadModule();
+    expect(GRACEFUL_EXIT_COMMANDS["claude"]).toBe("/exit");
+    expect(GRACEFUL_EXIT_COMMANDS["codex"]).toBe("/exit");
+    expect(GRACEFUL_EXIT_COMMANDS["gemini"]).toBe("/quit");
   });
 });
 
