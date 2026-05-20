@@ -121,7 +121,11 @@ export async function checkAndAutoUpdate(): Promise<void> {
 
   // Skip auto-update when running from a linked local dev checkout (git repo)
   if (import.meta.url.startsWith("file://") && !import.meta.url.includes("node_modules")) {
-    const scriptDir = path.dirname(new URL(import.meta.url).pathname);
+    // Use fileURLToPath rather than `new URL(url).pathname`: on Windows the
+    // pathname of file:///C:/foo is "/C:/foo" (leading slash before the drive
+    // letter), which path.dirname/path.resolve misinterpret — the .git lookup
+    // then runs against a non-existent path and auto-update fires on dev clones.
+    const scriptDir = path.dirname(fileURLToPath(import.meta.url));
     const repoRoot = path.resolve(scriptDir, "..");
     if (existsSync(path.join(repoRoot, ".git"))) return;
   }
