@@ -4,27 +4,43 @@
 //! external CLI invocations (`cy send <keyword> <msg>`) inject text into the
 //! agent's stdin without going through the user's terminal.
 //!
-//! Path: `~/.agent-yes/fifo/<pid>.stdin` (homedir keeps it out of the user's
-//! working tree — no .gitignore needed).
+//! Unix path: `~/.agent-yes/fifo/<pid>.stdin` (homedir keeps it out of the
+//! user's working tree — no .gitignore needed).
+//!
+//! Windows path: `\\.\pipe\agent-yes-<pid>` — the Win32 named-pipe namespace,
+//! not a filesystem path. Must match `ts/pidStore.ts:getFifoPath` so that
+//! `ay send` (TS-side `net.connect`) reaches the same endpoint.
 //!
 //! On Unix we use `mkfifo(3)` and then open the FIFO with O_RDWR in our own
 //! process. RDWR keeps the read-end unblocked at open time and prevents EOF
 //! when an external writer closes — same trick `terminal-ws-lib` and the TS
 //! `fifo.ts` use (paired read + dummy-write fds).
 //!
-//! Windows: not yet supported on the Rust side. (TS uses Named Pipes via
-//! `net.createServer`; a Rust port would need `windows::Win32::Pipes` and
-//! is out of scope here.)
+//! On Windows we use Tokio's `NamedPipeServer` (a thin wrapper over
+//! `CreateNamedPipeW`). The pipe is created when the server starts listening
+//! — there is no separate "mknode" step — so `create_fifo` is a no-op there
+//! and `spawn_fifo_reader` owns the entire lifecycle. After each client
+//! disconnects we recreate the server instance so subsequent `ay send` calls
+//! see a live endpoint.
 
 #[cfg(unix)]
 use std::ffi::CString;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
-/// Resolve the FIFO path for a given pid. Mirrors the layout chosen for the
-/// raw log: a single user-scoped directory under `$HOME/.agent-yes`.
+/// Resolve the FIFO path for a given pid. On Unix this is a filesystem path
+/// under `$HOME/.agent-yes/fifo/`; on Windows it's the Win32 named-pipe
+/// namespace string (`\\.\pipe\agent-yes-<pid>`), which `net.connect` /
+/// `CreateFileW` accept directly.
 pub fn fifo_path(pid: u32) -> Option<PathBuf> {
-    crate::log_files::log_dir().map(|dir| dir.join("fifo").join(format!("{}.stdin", pid)))
+    #[cfg(windows)]
+    {
+        Some(PathBuf::from(format!(r"\\.\pipe\agent-yes-{}", pid)))
+    }
+    #[cfg(not(windows))]
+    {
+        crate::log_files::log_dir().map(|dir| dir.join("fifo").join(format!("{}.stdin", pid)))
+    }
 }
 
 /// Create the FIFO (idempotent — if it already exists from a stale run, unlink first).
@@ -48,7 +64,16 @@ pub fn create_fifo(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+pub fn create_fifo(_path: &Path) -> std::io::Result<()> {
+    // No-op: Win32 named pipes are created the moment the server listens
+    // (see `spawn_fifo_reader`), not by a separate mknode-style call.
+    // Reporting Ok here keeps main.rs's spawn flow symmetric across platforms
+    // without having to special-case "the pipe doesn't exist yet".
+    Ok(())
+}
+
+#[cfg(not(any(unix, windows)))]
 pub fn create_fifo(_path: &Path) -> std::io::Result<()> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
@@ -67,15 +92,23 @@ pub fn open_for_reading(path: &Path) -> std::io::Result<std::fs::File> {
         .open(path)
 }
 
+// Kept as a stub on non-unix targets for source-level symmetry — the Windows
+// `spawn_fifo_reader` owns the `NamedPipeServer` directly (the server can't be
+// re-expressed as a `std::fs::File`), so this is not called in practice.
 #[cfg(not(unix))]
+#[allow(dead_code)]
 pub fn open_for_reading(_path: &Path) -> std::io::Result<std::fs::File> {
     Err(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
-        "FIFO IPC not yet supported on this platform",
+        "open_for_reading is not implemented on this platform; use spawn_fifo_reader",
     ))
 }
 
 /// Best-effort cleanup. Failures are logged at debug level.
+///
+/// On Windows the named pipe is reclaimed by the kernel when the last server
+/// instance handle drops, so `remove_file` on `\\.\pipe\<name>` is meaningless
+/// — but it's also harmless (NotFound is silenced below).
 pub fn cleanup_fifo(path: &Path) {
     if let Err(e) = std::fs::remove_file(path) {
         if e.kind() != std::io::ErrorKind::NotFound {
@@ -122,6 +155,118 @@ pub fn spawn_fifo_reader(
                 }
             }
         }
+    });
+    Ok(handle)
+}
+
+/// Windows counterpart: a server-side Win32 named pipe. The thread runs its
+/// own current-thread Tokio runtime because the existing caller (context.rs)
+/// expects a `std::thread::JoinHandle` — wrapping `tokio::spawn` would break
+/// that contract — and because `NamedPipeServer::read` is async-only.
+///
+/// Uses the **pre-create** pattern: at each iteration the next server
+/// instance is created *before* `current.connect()` is awaited. When the
+/// current client disconnects and `current` is dropped, `next` already holds
+/// an instance bound to the same name, so the kernel namespace stays
+/// continuously populated. Without this, the gap between drop and recreate
+/// leaks: clients arriving in that window get `ERROR_FILE_NOT_FOUND` (which
+/// Node surfaces as `connect ENOENT`). Empirically confirmed on Windows 11
+/// build 26200: the *first* `ay send` worked, the *second* failed with
+/// ENOENT until the next instance was staged ahead of the disconnect.
+#[cfg(windows)]
+pub fn spawn_fifo_reader(
+    path: PathBuf,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+) -> std::io::Result<std::thread::JoinHandle<()>> {
+    use tokio::io::AsyncReadExt;
+    use tokio::net::windows::named_pipe::ServerOptions;
+
+    let path_str = path
+        .to_str()
+        .ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("named-pipe path is not valid UTF-16: {:?}", path),
+            )
+        })?
+        .to_owned();
+
+    let handle = std::thread::spawn(move || {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(e) => {
+                warn!("named-pipe reader: failed to build runtime: {}", e);
+                return;
+            }
+        };
+        rt.block_on(async move {
+            // Pre-create pattern: always have the NEXT server instance listening
+            // before we let the CURRENT one accept a client. Without this, the
+            // gap between `drop(current)` and `create(next)` removes the pipe
+            // name from the Win32 namespace, so any `ay send` issued in that
+            // window gets ENOENT. Empirically confirmed on Windows 11 build
+            // 26200: the first `ay send` worked, the second (after the gap)
+            // returned `connect ENOENT \\.\pipe\agent-yes-<pid>`.
+            let mut current = match ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&path_str)
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    warn!(
+                        "named-pipe create failed at {} (first instance): {}",
+                        path_str, e
+                    );
+                    return;
+                }
+            };
+            loop {
+                // Stage the next instance *now*, before letting `current`
+                // accept its client. When `current` is dropped at the end of
+                // this iteration, the namespace stays populated because `next`
+                // already holds an instance — so an `ay send` arriving in the
+                // handoff window connects to `next` instead of getting ENOENT.
+                let next = match ServerOptions::new().create(&path_str) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        warn!(
+                            "named-pipe create failed at {} (next instance): {}",
+                            path_str, e
+                        );
+                        return;
+                    }
+                };
+
+                if let Err(e) = current.connect().await {
+                    warn!("named-pipe connect at {} failed: {}", path_str, e);
+                    return;
+                }
+
+                let mut buf = [0u8; 4096];
+                loop {
+                    match current.read(&mut buf).await {
+                        Ok(0) => break, // client disconnected — promote `next`
+                        Ok(n) => {
+                            if tx.send(buf[..n].to_vec()).await.is_err() {
+                                return; // receiver dropped — main loop ended
+                            }
+                        }
+                        Err(e) => {
+                            warn!("named-pipe read error at {}: {}", path_str, e);
+                            break;
+                        }
+                    }
+                }
+
+                // `current` is dropped here (handle released → instance
+                // closes), but `next` already holds a live instance, so the
+                // pipe name remains continuously present in the namespace.
+                current = next;
+            }
+        });
     });
     Ok(handle)
 }

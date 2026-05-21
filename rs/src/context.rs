@@ -224,7 +224,7 @@ impl AgentContext {
         // Forwards into the same stdin_tx as user keystrokes, so /auto
         // detection, Ctrl+C handling, and stdin_ready gating apply identically.
         let fifo_handle: Option<std::thread::JoinHandle<()>> = if let Some(ref path) = fifo_path {
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             {
                 match crate::fifo::spawn_fifo_reader(path.clone(), stdin_tx.clone()) {
                     Ok(h) => Some(h),
@@ -234,7 +234,7 @@ impl AgentContext {
                     }
                 }
             }
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             {
                 let _ = path;
                 None
