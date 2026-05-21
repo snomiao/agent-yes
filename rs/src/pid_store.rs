@@ -176,10 +176,33 @@ pub fn is_process_alive(pid: u32) -> bool {
     unsafe {
         libc::kill(pid as libc::pid_t, 0) == 0
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::Foundation::{CloseHandle, FALSE, STILL_ACTIVE};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // `PROCESS_QUERY_LIMITED_INFORMATION` is the smallest access right
+        // that lets `GetExitCodeProcess` succeed and works against processes
+        // we don't own (anything in `pids.jsonl` may have been spawned by
+        // any account on the box). If the pid isn't a live process, OpenProcess
+        // returns NULL (ERROR_INVALID_PARAMETER for a pid that never existed,
+        // or no permission); both cases mean "treat as dead" for stale eviction.
+        let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if h.is_null() {
+            return false;
+        }
+        // The pid handle may belong to a process that already exited but is
+        // still in the kernel table; STILL_ACTIVE distinguishes the two.
+        let mut exit_code: u32 = 0;
+        let ok = GetExitCodeProcess(h, &mut exit_code);
+        CloseHandle(h);
+        ok != FALSE && exit_code == STILL_ACTIVE as u32
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
-        true // conservative: assume alive on non-unix
+        true // conservative: assume alive on unsupported platforms
     }
 }
 

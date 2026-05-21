@@ -521,15 +521,26 @@ mod tests {
             })
             .expect("openpty failed");
 
-        // Build a PtyContext directly to test the zero-guard in resize()
+        // Build a PtyContext directly to test the zero-guard in resize().
+        // The child just has to be *some* command that exits quickly; the test
+        // only exercises the resize clamp, never reads the PTY output. `true`
+        // is a Unix shell builtin and does not exist as a binary on Windows
+        // (`CreateProcessW` fails with `file not found`), so branch on platform:
+        // `cmd /c exit` is the Windows equivalent that exits 0 immediately.
+        #[cfg(unix)]
+        let child_cmd = CommandBuilder::new("true");
+        #[cfg(windows)]
+        let child_cmd = {
+            let mut b = CommandBuilder::new("cmd");
+            b.args(["/c", "exit"]);
+            b
+        };
+
         let (_, output_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let writer = pair.master.take_writer().expect("take_writer");
         let ctx = PtyContext {
             master: pair.master,
-            child: pair
-                .slave
-                .spawn_command(CommandBuilder::new("true"))
-                .expect("spawn"),
+            child: pair.slave.spawn_command(child_cmd).expect("spawn"),
             output_rx,
             writer: std::sync::Arc::new(std::sync::Mutex::new(writer)),
         };
