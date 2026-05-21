@@ -421,4 +421,22 @@ describe("CLI argument parsing", () => {
     expect(result.queue).toBe(false);
     expect(result.cliArgs).not.toContain("--no-queue");
   });
+
+  it("enables stdpush IPC by default", () => {
+    // --stdpush defaults to true so `ay send` works out of the box.
+    // Without this, fifo_file ends up null in pids.jsonl and `ay send` returns 409.
+    const result = parseCliArgs(["node", "/path/to/ay", "claude"]);
+
+    expect(result.useStdinAppend).toBe(true);
+  });
+
+  it("respects --no-stdpush opt-out only when placed before the CLI positional", () => {
+    // halt-at-non-option means agent-yes flags must precede the CLI positional.
+    const beforeCli = parseCliArgs(["node", "/path/to/ay", "--no-stdpush", "claude"]);
+    const afterCli = parseCliArgs(["node", "/path/to/ay", "claude", "--no-stdpush"]);
+
+    expect(beforeCli.useStdinAppend).toBe(false);
+    expect(afterCli.useStdinAppend).toBe(true);
+    expect(afterCli.cliArgs).toContain("--no-stdpush");
+  });
 });

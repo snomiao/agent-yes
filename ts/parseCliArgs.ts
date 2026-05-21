@@ -114,8 +114,9 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
     })
     .option("stdpush", {
       type: "boolean",
-      description: "Enable external input stream to push additional data to stdin",
-      default: false,
+      description:
+        "Enable external input stream to push additional data to stdin (default: true; pass --no-stdpush to disable). Required for `ay send` to deliver messages to this agent.",
+      default: true,
       alias: ["ipc", "fifo"], // backward compatibility
     })
     .option("auto", {
@@ -321,7 +322,7 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
     useSkills: parsedArgv.useSkills,
     swarmHint: parsedArgv.swarmHint,
     appendPrompt: parsedArgv.appendPrompt,
-    useStdinAppend: Boolean(parsedArgv.stdpush || parsedArgv.ipc || parsedArgv.fifo), // Support --stdpush, --ipc, and --fifo (backward compatibility)
+    useStdinAppend: Boolean(parsedArgv.stdpush), // --ipc and --fifo are yargs aliases of --stdpush; reading the canonical key ensures --no-stdpush wins over alias defaults
     showVersion: parsedArgv.version,
     autoYes: parsedArgv.auto !== "no", // auto-yes enabled by default, disabled with --auto=no
     idleAction: parsedArgv.idleAction as string | undefined,
