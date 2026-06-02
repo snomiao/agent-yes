@@ -1,8 +1,13 @@
-//! Per-session file logging — write raw PTY output to ~/.agent-yes/<pid>.raw.log
+//! Per-session file logging.
+//!
+//! Durable PTY logs live under `<cwd>/.agent-yes/` so they stay with the
+//! project that produced them. Machine-global runtime state such as the pid
+//! index, FIFO endpoints, winsize signals, and locks lives under
+//! `$AGENT_YES_HOME` or `~/.agent-yes`.
 
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 
@@ -13,10 +18,11 @@ pub struct LogWriter {
 }
 
 impl LogWriter {
-    pub fn new(pid: u32) -> Self {
-        let (file, path) = match log_dir() {
+    pub fn new(pid: u32, cwd: &str) -> Self {
+        let (file, path) = match project_log_dir(cwd) {
             Some(dir) => {
                 let _ = fs::create_dir_all(&dir);
+                let _ = ensure_project_gitignore(&dir);
                 let path = dir.join(format!("{}.raw.log", pid));
                 match fs::OpenOptions::new().create(true).append(true).open(&path) {
                     Ok(f) => (Some(f), Some(path)),
@@ -43,8 +49,22 @@ impl LogWriter {
     }
 }
 
-pub fn log_dir() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".agent-yes"))
+pub fn global_dir() -> Option<PathBuf> {
+    std::env::var_os("AGENT_YES_HOME")
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|h| h.join(".agent-yes")))
+}
+
+pub fn project_log_dir(cwd: &str) -> Option<PathBuf> {
+    Some(Path::new(cwd).join(".agent-yes"))
+}
+
+fn ensure_project_gitignore(dir: &Path) -> std::io::Result<()> {
+    let path = dir.join(".gitignore");
+    if path.exists() {
+        return Ok(());
+    }
+    fs::write(path, "/*\n!.gitignore\n")
 }
 
 #[cfg(test)]
@@ -52,34 +72,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_log_dir_returns_some() {
-        let dir = log_dir();
+    fn test_global_dir_returns_some() {
+        let dir = global_dir();
         assert!(dir.is_some());
         assert!(dir.unwrap().ends_with(".agent-yes"));
     }
 
     #[test]
+    fn test_project_log_dir_uses_cwd() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_dir = project_log_dir(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(log_dir, dir.path().join(".agent-yes"));
+    }
+
+    #[test]
     fn test_log_writer_new_and_write() {
-        let writer = LogWriter::new(std::process::id());
+        let dir = tempfile::tempdir().unwrap();
+        let writer = LogWriter::new(std::process::id(), dir.path().to_str().unwrap());
         assert!(writer.raw_log_path.is_some());
         writer.write("test log line\n");
         // Verify file exists and has content
         let path = writer.raw_log_path.as_ref().unwrap();
+        assert!(path.starts_with(dir.path().join(".agent-yes")));
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("test log line"));
-        // Cleanup
-        let _ = std::fs::remove_file(path);
+        assert!(dir.path().join(".agent-yes/.gitignore").exists());
     }
 
     #[test]
     fn test_log_writer_write_multiple() {
-        let writer = LogWriter::new(std::process::id() + 100000);
+        let dir = tempfile::tempdir().unwrap();
+        let writer = LogWriter::new(std::process::id() + 100000, dir.path().to_str().unwrap());
         writer.write("line1\n");
         writer.write("line2\n");
         let path = writer.raw_log_path.as_ref().unwrap();
         let content = std::fs::read_to_string(path).unwrap();
         assert!(content.contains("line1"));
         assert!(content.contains("line2"));
-        let _ = std::fs::remove_file(path);
     }
 }

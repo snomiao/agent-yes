@@ -142,6 +142,54 @@ impl VTermProxy {
         self.parser.screen().cursor_position()
     }
 
+    /// True if the terminal is currently showing the alternate screen buffer.
+    /// Used to detect alt-screen TUIs, whose content is NOT retained in the
+    /// normal-buffer scrollback that `dump_scrollback` reconstructs.
+    pub fn alternate_screen(&self) -> bool {
+        self.parser.screen().alternate_screen()
+    }
+
+    /// Render the full normal-buffer history (scrollback + visible screen) as
+    /// plain text — the rust equivalent of the TS `XtermProxy.render()`.
+    ///
+    /// vt100 only exposes one visible window at a time, so we walk the
+    /// scrollback from the oldest line down to the live screen, indexing every
+    /// row by its absolute position (overlapping windows simply overwrite the
+    /// same slot). The viewport is restored to the live screen before return.
+    pub fn dump_scrollback(&mut self) -> String {
+        let (rows, cols) = self.parser.screen().size();
+        let h = rows.max(1) as usize;
+
+        // set_scrollback clamps to the real scrollback size; read it back to
+        // learn the maximum offset (number of rows above the visible screen).
+        self.parser.screen_mut().set_scrollback(usize::MAX);
+        let max = self.parser.screen().scrollback();
+
+        let total = max + h;
+        let mut lines: Vec<String> = vec![String::new(); total];
+        let mut off = max;
+        loop {
+            self.parser.screen_mut().set_scrollback(off);
+            let base = max - off; // absolute index of the first visible row
+            for (i, row) in self.parser.screen().rows(0, cols).enumerate() {
+                if base + i < total {
+                    lines[base + i] = row;
+                }
+            }
+            if off == 0 {
+                break;
+            }
+            off = off.saturating_sub(h);
+        }
+        self.parser.screen_mut().set_scrollback(0); // restore the live view
+
+        // Trim trailing blank lines.
+        while lines.len() > 1 && lines.last().map_or(false, |l| l.trim().is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
     /// Resize the virtual terminal. Dimensions are clamped to at least 1×1
     /// to match the same guard in `new()`.
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -295,5 +343,62 @@ mod tests {
             "screen should be cleared: {}",
             contents
         );
+    }
+
+    #[test]
+    fn test_dump_scrollback_recovers_lines_scrolled_off_screen() {
+        // 3-row screen; write 10 lines so the first 7 scroll into history.
+        // Trailing '!' terminator keeps "line 1!" from matching "line 10!".
+        let mut vt = VTermProxy::new(3, 80);
+        for i in 1..=10 {
+            vt.process(format!("line {i}!\r\n").as_bytes());
+        }
+
+        // The visible screen only holds the last few lines...
+        let visible = vt.contents();
+        assert!(
+            !visible.contains("line 1!"),
+            "early line should have scrolled off the visible screen: {visible}"
+        );
+
+        // ...but dump_scrollback walks the scrollback and recovers the whole
+        // history, start to end.
+        let full = vt.dump_scrollback();
+        assert!(
+            full.contains("line 1!"),
+            "dump should recover line 1: {full}"
+        );
+        assert!(
+            full.contains("line 5!"),
+            "dump should recover line 5: {full}"
+        );
+        assert!(
+            full.contains("line 10!"),
+            "dump should recover line 10: {full}"
+        );
+        // Ordered: line 1 appears before line 10.
+        assert!(full.find("line 1!").unwrap() < full.find("line 10!").unwrap());
+
+        // The viewport is restored to the live screen after dumping.
+        assert_eq!(vt.contents(), visible);
+    }
+
+    #[test]
+    fn test_dump_scrollback_no_scrollback_returns_visible() {
+        let mut vt = VTermProxy::new(24, 80);
+        vt.process(b"hello\r\nworld");
+        let full = vt.dump_scrollback();
+        assert!(full.contains("hello"));
+        assert!(full.contains("world"));
+    }
+
+    #[test]
+    fn test_alternate_screen_detection() {
+        let mut vt = VTermProxy::new(24, 80);
+        assert!(!vt.alternate_screen());
+        vt.process(b"\x1b[?1049h"); // enter alternate screen
+        assert!(vt.alternate_screen());
+        vt.process(b"\x1b[?1049l"); // leave alternate screen
+        assert!(!vt.alternate_screen());
     }
 }

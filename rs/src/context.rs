@@ -87,6 +87,11 @@ pub struct AgentContext {
 
     // Stop scanning for codex session ID after first one is found
     codex_session_found: bool,
+
+    // True once the session ever switched to the alternate screen buffer.
+    // dump_scrollback() reconstructs only the normal buffer, so when this is
+    // set the raw log must NOT be replaced by the rendered log on exit.
+    used_alt_screen: bool,
 }
 
 impl AgentContext {
@@ -123,12 +128,13 @@ impl AgentContext {
             enter_retry_count: 0,
             last_idle_scan_at: None,
             stdout_drop_count: 0,
-            log_writer: LogWriter::new(pid),
+            log_writer: LogWriter::new(pid, &cwd),
             cwd,
             stdin_line_buffer: String::new(),
             codex_session_found: false,
             last_action_screen_hash: None,
             last_checked_screen_hash: None,
+            used_alt_screen: false,
         }
     }
 
@@ -138,6 +144,39 @@ impl AgentContext {
             .raw_log_path
             .as_ref()
             .map(|p| p.to_string_lossy().to_string())
+    }
+
+    /// On exit, render the full scrollback to `<pid>.log` and remove the raw
+    /// byte log (which exists only for live tailing). Returns the rendered log
+    /// path when it replaced the raw log, so the caller can repoint the pid
+    /// index at it. No-op (returns None, keeping the raw log) when the session
+    /// used the alternate screen — whose content the scrollback can't
+    /// reconstruct — or when the render is empty.
+    pub fn finalize_log(&mut self) -> Option<String> {
+        if self.used_alt_screen {
+            return None;
+        }
+        let raw_path = self.log_writer.raw_log_path.clone()?;
+        let raw_str = raw_path.to_string_lossy();
+        let base = raw_str.strip_suffix(".raw.log")?;
+        let rendered_path = std::path::PathBuf::from(format!("{base}.log"));
+
+        let rendered = self.vterm.dump_scrollback();
+        if rendered.trim().is_empty() {
+            return None;
+        }
+
+        // Write the rendered log first; only drop the raw log once it's durable.
+        if let Err(e) = std::fs::write(&rendered_path, rendered.as_bytes()) {
+            warn!("Failed to write rendered log {:?}: {}", rendered_path, e);
+            return None;
+        }
+        if let Err(e) = std::fs::remove_file(&raw_path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!("Failed to remove raw log {:?}: {}", raw_path, e);
+            }
+        }
+        Some(rendered_path.to_string_lossy().to_string())
     }
 
     /// Run the main agent loop.
@@ -499,6 +538,9 @@ impl AgentContext {
 
         // Feed raw output to virtual terminal emulator for accurate screen state
         self.vterm.process(output.as_bytes());
+        // Latch alt-screen usage so finalize_log knows whether the rendered
+        // scrollback can safely stand in for the raw byte log.
+        self.used_alt_screen |= self.vterm.alternate_screen();
 
         // Write back any terminal query responses (DSR, DA) to child process.
         // Lock once and batch all responses to keep them atomic w.r.t. other writers.

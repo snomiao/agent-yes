@@ -179,6 +179,7 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
 
     // Clean up stale PID records on startup
     let pid_store = PidStore::new();
+    pid_store.prune_old_logs();
     pid_store.clean_stale();
 
     loop {
@@ -242,6 +243,11 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             fifo::cleanup_fifo(p);
         }
 
+        // Render the full scrollback to <pid>.log and drop the now-redundant
+        // raw byte log (kept only when the session used the alternate screen).
+        // The returned path repoints the pid index from the raw log to it.
+        let rendered_log = agent_ctx.finalize_log();
+
         // Update PID store and send EXIT webhook
         let exit_reason = if agent_ctx.is_user_abort {
             "user_abort"
@@ -252,7 +258,13 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
         } else {
             "crashed"
         };
-        pid_store.update_status(pid, "exited", Some(exit_code), Some(exit_reason));
+        pid_store.update_status(
+            pid,
+            "exited",
+            Some(exit_code),
+            Some(exit_reason),
+            rendered_log.as_deref(),
+        );
         webhook::notify(
             "EXIT",
             &format!("{} exitCode={}", exit_reason, exit_code),

@@ -4,7 +4,8 @@
 //! external CLI invocations (`cy send <keyword> <msg>`) inject text into the
 //! agent's stdin without going through the user's terminal.
 //!
-//! Unix path: `~/.agent-yes/fifo/<pid>.stdin` (homedir keeps it out of the
+//! Unix path: `$AGENT_YES_HOME/fifo/<pid>.stdin` or `~/.agent-yes/fifo/<pid>.stdin`
+//! (homedir keeps it out of the
 //! user's working tree — no .gitignore needed).
 //!
 //! Windows path: `\\.\pipe\agent-yes-<pid>` — the Win32 named-pipe namespace,
@@ -29,7 +30,7 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 /// Resolve the FIFO path for a given pid. On Unix this is a filesystem path
-/// under `$HOME/.agent-yes/fifo/`; on Windows it's the Win32 named-pipe
+/// under `$AGENT_YES_HOME/fifo/` or `$HOME/.agent-yes/fifo/`; on Windows it's the Win32 named-pipe
 /// namespace string (`\\.\pipe\agent-yes-<pid>`), which `net.connect` /
 /// `CreateFileW` accept directly.
 pub fn fifo_path(pid: u32) -> Option<PathBuf> {
@@ -39,7 +40,7 @@ pub fn fifo_path(pid: u32) -> Option<PathBuf> {
     }
     #[cfg(not(windows))]
     {
-        crate::log_files::log_dir().map(|dir| dir.join("fifo").join(format!("{}.stdin", pid)))
+        crate::log_files::global_dir().map(|dir| dir.join("fifo").join(format!("{}.stdin", pid)))
     }
 }
 
@@ -332,9 +333,9 @@ mod tests {
     }
 
     #[test]
-    fn test_fifo_path_uses_log_dir() {
+    fn test_fifo_path_uses_global_dir() {
         let p = fifo_path(42).expect("home dir resolves in test env");
-        // Always under <log_dir>/fifo/<pid>.stdin
+        // Always under <global_dir>/fifo/<pid>.stdin
         assert!(p.ends_with("fifo/42.stdin"));
         let parent = p.parent().unwrap();
         assert!(parent.ends_with("fifo"));

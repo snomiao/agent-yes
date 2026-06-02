@@ -332,8 +332,8 @@ fn test_cwd_flag_rejects_missing_directory() {
     cmd.assert().failure();
 }
 
-/// Integration test: `agent-yes` creates a per-pid FIFO at the expected
-/// path and registers it in `~/.agent-yes/pids.jsonl` with `fifo_file`
+/// Integration test: `agent-yes` creates project-local logs, a per-pid
+/// global FIFO, and registers both absolute paths in `~/.agent-yes/pids.jsonl`
 /// populated. End-to-end byte flow through the FIFO is covered by the
 /// unit tests in `src/fifo.rs` (round-trip read after external writer
 /// closes via the RDWR-keepalive trick) and the live smoke test in the
@@ -351,6 +351,8 @@ fn test_fifo_registered() {
     fs::create_dir_all(&bin_dir).unwrap();
     let home_dir = dir.path().join("home");
     fs::create_dir_all(&home_dir).unwrap();
+    let project_dir = dir.path().join("project");
+    fs::create_dir_all(&project_dir).unwrap();
 
     // Mock claude that prints the ready cue and exits quickly, so agent-yes
     // creates+registers the FIFO and then cleans it up on the natural exit.
@@ -378,6 +380,7 @@ exit 0
         let mut cmd = Command::cargo_bin("agent-yes").unwrap();
         cmd.env("PATH", new_path)
             .env("HOME", &home_dir)
+            .current_dir(&project_dir)
             .arg("--cli")
             .arg("claude")
             .arg("--timeout")
@@ -388,8 +391,7 @@ exit 0
         cmd.output().expect("agent-yes failed to run")
     };
 
-    // Registry should exist and contain a record with a fifo_file path
-    // under our home dir.
+    // Registry should exist under the global home dir.
     let pids_file = home_dir.join(".agent-yes/pids.jsonl");
     if !pids_file.exists() {
         // Soft-skip if the agent didn't progress far enough on this CI
@@ -405,6 +407,24 @@ exit 0
         pids_content.contains("\"fifo_file\""),
         "expected pids.jsonl to record fifo_file, got:\n{pids_content}"
     );
+    let record: serde_json::Value = pids_content
+        .lines()
+        .filter_map(|line| serde_json::from_str(line).ok())
+        .last()
+        .expect("expected at least one pid record");
+    let log_file = record["log_file"].as_str().expect("log_file should be set");
+    let fifo_file = record["fifo_file"]
+        .as_str()
+        .expect("fifo_file should be set");
+    let project_agent_dir = fs::canonicalize(project_dir.join(".agent-yes")).unwrap();
+    assert!(
+        log_file.starts_with(project_agent_dir.to_str().unwrap()),
+        "expected log_file under project .agent-yes, got {log_file}"
+    );
+    assert!(
+        fifo_file.starts_with(home_dir.join(".agent-yes/fifo").to_str().unwrap()),
+        "expected fifo_file under global home fifo dir, got {fifo_file}"
+    );
 
     // Cleanup-on-clean-exit: only assert when the process actually exited
     // normally. assert_cmd's .timeout() SIGKILLs which (correctly) skips
@@ -419,5 +439,21 @@ exit 0
                 leftover.iter().map(|e| e.path()).collect::<Vec<_>>()
             );
         }
+
+        // On clean exit the scrollback is rendered to <pid>.log, the raw byte
+        // log is dropped, and the index is repointed at the rendered log.
+        assert!(
+            log_file.ends_with(".log") && !log_file.ends_with(".raw.log"),
+            "expected log_file repointed to the rendered .log, got {log_file}"
+        );
+        assert!(
+            std::path::Path::new(log_file).exists(),
+            "expected rendered log to exist at {log_file}"
+        );
+        let raw_log = log_file.strip_suffix(".log").unwrap().to_string() + ".raw.log";
+        assert!(
+            !std::path::Path::new(&raw_log).exists(),
+            "expected raw log to be removed after render, still present at {raw_log}"
+        );
     }
 }
