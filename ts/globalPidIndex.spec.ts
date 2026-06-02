@@ -205,6 +205,146 @@ describe("globalPidIndex", () => {
     await mod.maybeCompactGlobalPids(); // no throw, no error
   });
 
+  it("updateGlobalPidStatus can repoint log_file (raw -> rendered)", async () => {
+    const mod = await loadModule();
+    await mod.appendGlobalPid({
+      pid: 4242,
+      cli: "claude",
+      prompt: null,
+      cwd: "/a",
+      log_file: "/a/.agent-yes/4242.raw.log",
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: 1,
+    });
+    await mod.updateGlobalPidStatus(4242, { log_file: "/a/.agent-yes/4242.log" });
+    const records = await mod.readGlobalPids();
+    expect(records[0]?.log_file).toBe("/a/.agent-yes/4242.log");
+  });
+
+  describe("pruneOldLogs", () => {
+    it("deletes log siblings of old, dead sessions but keeps live/recent ones", async () => {
+      const mod = await loadModule();
+      const { mkdir, writeFile } = await import("fs/promises");
+      const { existsSync } = await import("fs");
+      const dir = path.join(testHome, "logs");
+      await mkdir(dir, { recursive: true });
+
+      // Old + dead pid: should be pruned (raw + rendered + sidecars).
+      const deadRaw = path.join(dir, "999999.raw.log");
+      const deadRendered = path.join(dir, "999999.log");
+      const deadLines = path.join(dir, "999999.lines.log");
+      for (const f of [deadRaw, deadRendered, deadLines]) await writeFile(f, "x");
+
+      // Live pid (this process), old timestamp: must be kept (still running).
+      const liveRaw = path.join(dir, `${process.pid}.raw.log`);
+      await writeFile(liveRaw, "x");
+
+      // Dead pid but recent: must be kept (inside retention window).
+      const recentRaw = path.join(dir, "999998.raw.log");
+      await writeFile(recentRaw, "x");
+
+      const oldTs = Date.now() - 30 * 24 * 60 * 60 * 1000; // 30 days ago
+      await mod.appendGlobalPid({
+        pid: 999999,
+        cli: "claude",
+        prompt: null,
+        cwd: "/a",
+        log_file: deadRaw,
+        status: "exited",
+        exit_code: 0,
+        exit_reason: null,
+        started_at: oldTs,
+      });
+      await mod.appendGlobalPid({
+        pid: process.pid,
+        cli: "claude",
+        prompt: null,
+        cwd: "/a",
+        log_file: liveRaw,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: oldTs,
+      });
+      await mod.appendGlobalPid({
+        pid: 999998,
+        cli: "claude",
+        prompt: null,
+        cwd: "/a",
+        log_file: recentRaw,
+        status: "exited",
+        exit_code: 0,
+        exit_reason: null,
+        started_at: Date.now(),
+      });
+
+      const removed = await mod.pruneOldLogs();
+
+      expect(removed).toBe(3); // deadRaw + deadRendered + deadLines
+      expect(existsSync(deadRaw)).toBe(false);
+      expect(existsSync(deadRendered)).toBe(false);
+      expect(existsSync(deadLines)).toBe(false);
+      expect(existsSync(liveRaw)).toBe(true);
+      expect(existsSync(recentRaw)).toBe(true);
+    });
+
+    it("returns 0 and does not throw when the index is empty", async () => {
+      const mod = await loadModule();
+      expect(await mod.pruneOldLogs()).toBe(0);
+    });
+
+    it("skips records with no log_file and honors an explicit maxAge", async () => {
+      const mod = await loadModule();
+      await mod.appendGlobalPid({
+        pid: 999999,
+        cli: "claude",
+        prompt: null,
+        cwd: "/a",
+        log_file: null,
+        status: "exited",
+        exit_code: 0,
+        exit_reason: null,
+        started_at: 1,
+      });
+      // Old + dead but no log_file to delete → nothing removed, no throw.
+      expect(await mod.pruneOldLogs(1)).toBe(0);
+    });
+
+    it("respects $AGENT_YES_LOG_RETENTION_DAYS for the default window", async () => {
+      const mod = await loadModule();
+      const { mkdir, writeFile } = await import("fs/promises");
+      const { existsSync } = await import("fs");
+      const dir = path.join(testHome, "logs");
+      await mkdir(dir, { recursive: true });
+      const raw = path.join(dir, "999999.raw.log");
+      await writeFile(raw, "x");
+      const twoDaysAgo = Date.now() - 2 * 24 * 60 * 60 * 1000;
+      await mod.appendGlobalPid({
+        pid: 999999,
+        cli: "claude",
+        prompt: null,
+        cwd: "/a",
+        log_file: raw,
+        status: "exited",
+        exit_code: 0,
+        exit_reason: null,
+        started_at: twoDaysAgo,
+      });
+
+      const original = process.env.AGENT_YES_LOG_RETENTION_DAYS;
+      try {
+        process.env.AGENT_YES_LOG_RETENTION_DAYS = "1"; // 1-day window → 2-day-old log is stale
+        expect(await mod.pruneOldLogs()).toBe(1);
+        expect(existsSync(raw)).toBe(false);
+      } finally {
+        if (original === undefined) delete process.env.AGENT_YES_LOG_RETENTION_DAYS;
+        else process.env.AGENT_YES_LOG_RETENTION_DAYS = original;
+      }
+    });
+  });
+
   it("skips corrupt lines without throwing", async () => {
     const mod = await loadModule();
     await mod.appendGlobalPid({

@@ -2,9 +2,11 @@ import { mkdir, writeFile } from "fs/promises";
 import path from "path";
 import { logger } from "./logger.ts";
 import { JsonlStore } from "./JsonlStore.ts";
+import { agentYesHome } from "./agentYesHome.ts";
 import {
   appendGlobalPid,
   maybeCompactGlobalPids,
+  pruneOldLogs,
   updateGlobalPidStatus,
 } from "./globalPidIndex.ts";
 
@@ -37,6 +39,10 @@ export class PidStore {
       await this.ensureGitignore();
       await this.store.load();
       await this.cleanStaleRecords();
+      // Best-effort, fire-and-forget: reclaim raw/rendered logs of long-dead
+      // sessions across all projects. Index-driven so scattered pwd logs are
+      // still swept. Never block startup on it.
+      pruneOldLogs().catch(() => null);
     } catch (error) {
       logger.warn("[pidStore] Failed to initialize:", error);
     }
@@ -57,7 +63,10 @@ export class PidStore {
   }): Promise<PidRecord> {
     const now = Date.now();
     const argsJson = JSON.stringify(args);
-    const logFile = path.resolve(this.getLogDir(), `${pid}.log`);
+    // The index points at the file readers should tail. During the run that is
+    // the raw byte log (`ay logs`/`attach` stream it live); on clean exit it is
+    // repointed to the rendered log via `markRendered`.
+    const logFile = this.getRawLogPath(pid);
     const fifoFile = this.getFifoPath(pid);
 
     const record: Omit<PidRecord, "_id"> = {
@@ -138,16 +147,47 @@ export class PidStore {
     return this.store.getAll();
   }
 
+  /** Project-local store dir: `<cwd>/.agent-yes`. Durable logs live here. */
+  getStoreDir() {
+    return this.storeDir;
+  }
+
   getLogDir() {
     return path.resolve(this.storeDir, "logs");
+  }
+
+  /** Raw PTY byte log (runtime), `<cwd>/.agent-yes/<pid>.raw.log`. */
+  getRawLogPath(pid: number) {
+    return path.resolve(this.storeDir, `${pid}.raw.log`);
+  }
+
+  /** Rendered plain-text log (final), `<cwd>/.agent-yes/<pid>.log`. */
+  getRenderedLogPath(pid: number) {
+    return path.resolve(this.storeDir, `${pid}.log`);
   }
 
   getFifoPath(pid: number) {
     if (process.platform === "win32") {
       return `\\\\.\\pipe\\agent-yes-${pid}`;
     } else {
-      return path.resolve(this.storeDir, "fifo", `${pid}.stdin`);
+      // Ephemeral IPC lives under the global home root, not the project dir:
+      // keeps the FIFO on a local filesystem (reliable mkfifo) and stable even
+      // if the project dir is moved/removed while the agent runs.
+      return path.resolve(agentYesHome(), "fifo", `${pid}.stdin`);
     }
+  }
+
+  /**
+   * Repoint a session's log from the raw byte stream to its rendered text log
+   * (called on clean exit once the rendered log is durably written and the raw
+   * log has been reclaimed). Updates both the local record and global index.
+   */
+  async markRendered(pid: number, renderedPath: string): Promise<void> {
+    const existing = this.store.findOne((doc) => doc.pid === pid);
+    if (existing) {
+      await this.store.updateById(existing._id!, { logFile: renderedPath });
+    }
+    updateGlobalPidStatus(pid, { log_file: renderedPath }).catch(() => null);
   }
 
   async cleanStaleRecords(): Promise<void> {

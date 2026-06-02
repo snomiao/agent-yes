@@ -20,17 +20,17 @@ export interface LogPaths {
  * @returns Object containing all log paths
  */
 export async function initializeLogPaths(pidStore: PidStore, pid: number): Promise<LogPaths> {
-  const logDir = pidStore.getLogDir();
-  await mkdir(logDir, { recursive: true });
-  const rawLogPath = path.resolve(path.dirname(logDir), `${pid}.raw.log`);
-  const rawLinesLogPath = path.resolve(path.dirname(logDir), `${pid}.lines.log`);
-  const debuggingLogsPath = path.resolve(path.dirname(logDir), `${pid}.debug.log`);
+  const storeDir = pidStore.getStoreDir();
+  await mkdir(storeDir, { recursive: true });
 
   return {
-    logPath: logDir,
-    rawLogPath,
-    rawLinesLogPath,
-    debuggingLogsPath,
+    // Rendered plain-text log (final). Previously this was the logs/ *directory*,
+    // so saveLogFile's writeFile() hit EISDIR and the render was silently lost —
+    // which is why raw logs piled up forever (nothing was ever "rendered").
+    logPath: pidStore.getRenderedLogPath(pid),
+    rawLogPath: pidStore.getRawLogPath(pid),
+    rawLinesLogPath: path.resolve(storeDir, `${pid}.lines.log`),
+    debuggingLogsPath: path.resolve(storeDir, `${pid}.debug.log`),
   };
 }
 
@@ -55,12 +55,19 @@ export async function setupDebugLogging(debuggingLogsPath: string | false): Prom
  * @param logPath Path to log file
  * @param content Rendered content to save
  */
-export async function saveLogFile(logPath: string | false, content: string) {
-  if (!logPath) return;
+export async function saveLogFile(logPath: string | false, content: string): Promise<boolean> {
+  if (!logPath) return false;
+  if (!content.trim()) return false; // nothing meaningful to persist
 
-  await mkdir(path.dirname(logPath), { recursive: true }).catch(() => null);
-  await writeFile(logPath, content).catch(() => null);
-  logger.info(`Full logs saved to ${logPath}`);
+  try {
+    await mkdir(path.dirname(logPath), { recursive: true });
+    await writeFile(logPath, content);
+    logger.info(`Full logs saved to ${logPath}`);
+    return true;
+  } catch (error) {
+    logger.warn(`Failed to save rendered log to ${logPath}:`, error);
+    return false;
+  }
 }
 
 /**
