@@ -1,6 +1,6 @@
 import { execaCommandSync, parseCommandString } from "execa";
 import { fromWritable } from "from-node-stream";
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "fs/promises";
 import path from "path";
 import DIE from "phpdie";
 import sflow from "sflow";
@@ -382,6 +382,13 @@ export default async function agentYes({
   // Initialize log paths (independent of registration)
   const logPaths = await initializeLogPaths(pidStore, shell.pid);
   await setupDebugLogging(logPaths.debuggingLogsPath);
+
+  // Track whether the session ever switched to the alternate screen buffer.
+  // render() reconstructs scrollback of the normal buffer only; the alt buffer
+  // keeps no scrollback, so for alt-screen apps the rendered log would be just
+  // the final frame and must NOT replace the raw byte log. Current CLIs (ink-
+  // based claude/codex) stay on the normal buffer, but guard for the future.
+  let usedAltScreen = false;
 
   // Create agent context
   const ctx = new AgentContext({
@@ -949,6 +956,11 @@ export default async function agentYes({
           logger.debug(`[${cli}-yes] raw logs streaming to ${rawLogPath}`);
           return f
             .forEach(async (chars) => {
+              // Detect alt-screen enter (DECSET 1049/1047/47) so we know whether
+              // the rendered log can safely stand in for this raw log on exit.
+              if (!usedAltScreen && /\[\?(?:1049|1047|47)h/.test(chars)) {
+                usedAltScreen = true;
+              }
               await writeFile(rawLogPath, chars, { flag: "a" }).catch(() => null);
             })
             .run();
@@ -1054,7 +1066,17 @@ export default async function agentYes({
     .by(createTerminatorStream(pendingExitCode.promise))
     .to(fromWritable(process.stdout));
 
-  await saveLogFile(ctx.logPaths.logPath, xtermProxy.render());
+  const renderedSaved = await saveLogFile(ctx.logPaths.logPath, xtermProxy.render());
+
+  // The raw byte log exists for live tailing during the run. Once a non-empty
+  // rendered log is durably written — and the session stayed on the normal
+  // screen buffer, so the render holds the full scrollback — the raw log is
+  // redundant: drop it and repoint the index at the rendered log. On crash /
+  // empty render / alt-screen we keep the raw log; the startup sweep prunes it.
+  if (renderedSaved && !usedAltScreen && ctx.logPaths.rawLogPath && ctx.logPaths.logPath) {
+    await unlink(ctx.logPaths.rawLogPath).catch(() => null);
+    await pidStore.markRendered(shell.pid, ctx.logPaths.logPath).catch(() => null);
+  }
 
   // and then get its exitcode
   const exitCode = await pendingExitCode.promise;

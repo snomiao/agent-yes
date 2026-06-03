@@ -4,8 +4,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::warn;
+
+const DEFAULT_LOG_RETENTION_DAYS: i64 = 7;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PidRecord {
@@ -84,6 +86,7 @@ impl PidStore {
         status: &str,
         exit_code: Option<i32>,
         exit_reason: Option<&str>,
+        log_file: Option<&str>,
     ) {
         let result = (|| -> Result<()> {
             let mut records = self.read_all()?;
@@ -92,6 +95,11 @@ impl PidStore {
                     r.status = status.to_string();
                     r.exit_code = exit_code;
                     r.exit_reason = exit_reason.map(|s| s.to_string());
+                    // Only repoint the log when given one (raw -> rendered on
+                    // clean exit); otherwise keep the raw path recorded at start.
+                    if let Some(lf) = log_file {
+                        r.log_file = Some(lf.to_string());
+                    }
                 }
             }
             self.write_all(&records)
@@ -112,6 +120,37 @@ impl PidStore {
         })();
         if let Err(e) = result {
             warn!("PidStore: failed to clean stale: {}", e);
+        }
+    }
+
+    pub fn prune_old_logs(&self) {
+        let result = (|| -> Result<usize> {
+            let records = self.read_all()?;
+            let now = chrono::Utc::now().timestamp_millis();
+            let max_age_ms = log_retention_ms();
+            let mut removed = 0;
+            for r in records {
+                let dead = r.status == "exited" || !is_process_alive(r.pid);
+                let old = now.saturating_sub(r.started_at) > max_age_ms;
+                if !dead || !old {
+                    continue;
+                }
+                for path in log_siblings(r.log_file.as_deref()) {
+                    match fs::remove_file(&path) {
+                        Ok(()) => removed += 1,
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => warn!("PidStore: failed to prune log {:?}: {}", path, e),
+                    }
+                }
+            }
+            Ok(removed)
+        })();
+        match result {
+            Ok(removed) if removed > 0 => {
+                tracing::debug!("PidStore: pruned {} stale log file(s)", removed);
+            }
+            Ok(_) => {}
+            Err(e) => warn!("PidStore: failed to prune old logs: {}", e),
         }
     }
 
@@ -166,9 +205,36 @@ impl PidStore {
 }
 
 fn store_path() -> PathBuf {
-    crate::log_files::log_dir()
+    crate::log_files::global_dir()
         .unwrap_or_else(|| PathBuf::from(".agent-yes"))
         .join("pids.jsonl")
+}
+
+fn log_retention_ms() -> i64 {
+    let days = std::env::var("AGENT_YES_LOG_RETENTION_DAYS")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|d| *d > 0)
+        .unwrap_or(DEFAULT_LOG_RETENTION_DAYS);
+    days * 24 * 60 * 60 * 1000
+}
+
+fn log_siblings(log_file: Option<&str>) -> Vec<PathBuf> {
+    let Some(log_file) = log_file else {
+        return vec![];
+    };
+    let path = Path::new(log_file);
+    let s = path.to_string_lossy();
+    let base = s
+        .strip_suffix(".raw.log")
+        .or_else(|| s.strip_suffix(".log"))
+        .unwrap_or(&s);
+    vec![
+        PathBuf::from(format!("{base}.raw.log")),
+        PathBuf::from(format!("{base}.log")),
+        PathBuf::from(format!("{base}.lines.log")),
+        PathBuf::from(format!("{base}.debug.log")),
+    ]
 }
 
 pub fn is_process_alive(pid: u32) -> bool {
@@ -241,7 +307,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = PidStore::with_path(dir.path().join("pids.jsonl"));
         store.register(42, "claude", None, "/tmp", None);
-        store.update_status(42, "exited", Some(0), Some("done"));
+        store.update_status(42, "exited", Some(0), Some("done"), None);
         let records = store.read_all().unwrap();
         assert_eq!(records[0].status, "exited");
         assert_eq!(records[0].exit_code, Some(0));
@@ -313,5 +379,41 @@ mod tests {
         let loaded = store.read_all().unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].pid, 1);
+    }
+
+    #[test]
+    fn test_prune_old_logs_removes_dead_old_log_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        let base = dir.path().join("1234");
+        let raw = PathBuf::from(format!("{}.raw.log", base.display()));
+        let rendered = PathBuf::from(format!("{}.log", base.display()));
+        let lines = PathBuf::from(format!("{}.lines.log", base.display()));
+        std::fs::write(&raw, "raw").unwrap();
+        std::fs::write(&rendered, "rendered").unwrap();
+        std::fs::write(&lines, "lines").unwrap();
+
+        let old_started_at = chrono::Utc::now().timestamp_millis()
+            - (DEFAULT_LOG_RETENTION_DAYS + 1) * 24 * 60 * 60 * 1000;
+        store
+            .write_all(&[PidRecord {
+                pid: 999999,
+                cli: "claude".into(),
+                prompt: None,
+                cwd: "/tmp".into(),
+                log_file: Some(raw.to_string_lossy().to_string()),
+                fifo_file: None,
+                status: "exited".into(),
+                exit_code: Some(0),
+                exit_reason: Some("completed".into()),
+                started_at: old_started_at,
+            }])
+            .unwrap();
+
+        store.prune_old_logs();
+
+        assert!(!raw.exists());
+        assert!(!rendered.exists());
+        assert!(!lines.exists());
     }
 }

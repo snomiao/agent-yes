@@ -53,18 +53,6 @@ vt100-ctt = "0.17"
 # Directories
 dirs = "5"
 
-# Unix-specific
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
-# Windows-specific
-[target.'cfg(windows)'.dependencies]
-# Used by `is_process_alive` (OpenProcess + GetExitCodeProcess vs STILL_ACTIVE)
-# so the stale-cleanup path correctly evicts dead pids on Windows. Without
-# this, the Unix fallback hard-coded `true` and three tests asserting against
-# `is_process_alive(<dead-pid>)` hung or failed.
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
-
 # Misc
 lazy_static = "1"
 once_cell = "1"
@@ -92,6 +80,18 @@ rand = { version = "0.8", optional = true }
 
 # UUID for agent identification
 uuid = { version = "1", features = ["v4"] }
+
+# Unix-specific
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+# Windows-specific
+[target.'cfg(windows)'.dependencies]
+# Used by `is_process_alive` (OpenProcess + GetExitCodeProcess vs STILL_ACTIVE)
+# so the stale-cleanup path correctly evicts dead pids on Windows. Without
+# this, the Unix fallback hard-coded `true` and three tests asserting against
+# `is_process_alive(<dead-pid>)` hung or failed.
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
 
 [features]
 default = []

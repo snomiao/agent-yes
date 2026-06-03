@@ -106,7 +106,9 @@ describe("PidStore", () => {
         cwd: "/tmp",
       });
 
-      expect(rec.logFile).toContain("42.log");
+      // The index points at the raw log during the run (repointed to the
+      // rendered <pid>.log on clean exit via markRendered).
+      expect(rec.logFile).toContain("42.raw.log");
       if (isWindows) {
         expect(rec.fifoFile).toContain("agent-yes-42");
       } else {
@@ -245,8 +247,31 @@ describe("PidStore", () => {
       if (isWindows) {
         expect(fifo).toBe(`\\\\.\\pipe\\agent-yes-42`);
       } else {
-        expect(fifo).toBe(path.resolve(TEST_DIR, ".agent-yes", "fifo", "42.stdin"));
+        // FIFO lives under the global home root (AGENT_YES_HOME), not the
+        // project dir — ephemeral IPC is intentionally not colocated with logs.
+        expect(fifo).toBe(path.resolve(GLOBAL_TEST_DIR, "fifo", "42.stdin"));
       }
+    });
+
+    it("raw/rendered/store paths resolve under the project store dir", () => {
+      expect(store.getStoreDir()).toBe(path.resolve(TEST_DIR, ".agent-yes"));
+      expect(store.getRawLogPath(42)).toBe(path.resolve(TEST_DIR, ".agent-yes", "42.raw.log"));
+      expect(store.getRenderedLogPath(42)).toBe(path.resolve(TEST_DIR, ".agent-yes", "42.log"));
+    });
+  });
+
+  describe("markRendered", () => {
+    it("repoints the record's logFile to the rendered path", async () => {
+      await store.registerProcess({ pid: 51, cli: "claude", args: [], cwd: "/tmp" });
+      const rendered = store.getRenderedLogPath(51);
+      await store.markRendered(51, rendered);
+
+      const rec = store.getAllRecords().find((r) => r.pid === 51);
+      expect(rec?.logFile).toBe(rendered);
+    });
+
+    it("is a no-op for an unknown pid", async () => {
+      await expect(store.markRendered(999123, "/whatever/999123.log")).resolves.toBeUndefined();
     });
   });
 

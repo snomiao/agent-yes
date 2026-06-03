@@ -1,5 +1,5 @@
 //! File-based process lock — prevents concurrent agent-yes runs in the same directory.
-//! Lock file: ~/.agent-yes/running.lock.json
+//! Lock file: `$AGENT_YES_HOME/running.lock.json` or `~/.agent-yes/running.lock.json`
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -137,7 +137,7 @@ impl Drop for RunningLock {
 }
 
 fn lock_path() -> PathBuf {
-    crate::log_files::log_dir()
+    crate::log_files::global_dir()
         .unwrap_or_else(|| PathBuf::from(".agent-yes"))
         .join("running.lock.json")
 }

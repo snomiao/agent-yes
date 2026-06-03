@@ -1,4 +1,4 @@
-import { appendFile, mkdir, readFile, rename, writeFile } from "fs/promises";
+import { appendFile, mkdir, readFile, rename, unlink, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
 import { lock } from "proper-lockfile";
@@ -86,10 +86,10 @@ export async function appendGlobalPid(record: GlobalPidRecord): Promise<void> {
   }
 }
 
-/** Append a partial status update by pid (status, exit_code, exit_reason). */
+/** Append a partial update by pid (status, exit_code, exit_reason, log_file). */
 export async function updateGlobalPidStatus(
   pid: number,
-  patch: Partial<Pick<GlobalPidRecord, "status" | "exit_code" | "exit_reason">>,
+  patch: Partial<Pick<GlobalPidRecord, "status" | "exit_code" | "exit_reason" | "log_file">>,
 ): Promise<void> {
   try {
     await withLock(async () => {
@@ -189,4 +189,56 @@ export async function maybeCompactGlobalPids(): Promise<void> {
   } catch (error) {
     logger.debug("[globalPidIndex] compact failed:", error);
   }
+}
+
+/** Default log retention: sessions older than this whose process is gone. */
+const DEFAULT_RETENTION_DAYS = 7;
+
+function retentionMs(): number {
+  const days = Number(process.env.AGENT_YES_LOG_RETENTION_DAYS);
+  return (Number.isFinite(days) && days > 0 ? days : DEFAULT_RETENTION_DAYS) * 24 * 60 * 60 * 1000;
+}
+
+/** All on-disk log files associated with a record (raw + rendered + sidecars). */
+function logSiblings(logFile: string | null): string[] {
+  if (!logFile) return [];
+  // logFile may point at either `<pid>.raw.log` or `<pid>.log`; derive the rest.
+  const base = logFile.replace(/\.raw\.log$|\.log$/, "");
+  return [`${base}.raw.log`, `${base}.log`, `${base}.lines.log`, `${base}.debug.log`];
+}
+
+/**
+ * Index-driven retention sweep: delete the log files of sessions whose process
+ * is gone (exited or dead pid) and that started longer ago than the retention
+ * window. Because the index records absolute `log_file` paths, this reclaims
+ * logs scattered across many project `.agent-yes/` dirs from one call.
+ * Best-effort; never throws. Returns the number of files removed.
+ */
+export async function pruneOldLogs(maxAgeMs: number = retentionMs()): Promise<number> {
+  let records: GlobalPidRecord[];
+  try {
+    records = await readGlobalPidsRaw();
+  } catch {
+    return 0;
+  }
+  const now = Date.now();
+  let removed = 0;
+  for (const r of records) {
+    const dead = r.status === "exited" || !isProcessAlive(r.pid);
+    const old = now - (r.started_at ?? now) > maxAgeMs;
+    if (!dead || !old) continue;
+    for (const f of logSiblings(r.log_file)) {
+      try {
+        await unlink(f);
+        removed++;
+      } catch {
+        // missing / already gone — ignore
+      }
+    }
+  }
+  if (removed > 0) {
+    logger.debug(`[globalPidIndex] pruned ${removed} stale log file(s)`);
+    await maybeCompactGlobalPids();
+  }
+  return removed;
 }

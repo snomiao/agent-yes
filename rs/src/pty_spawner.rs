@@ -38,14 +38,15 @@ pub fn get_terminal_size_from_tty() -> (u16, u16) {
 /// PTY at the wrong size forever.
 const WINSIZE_STALE_MS: u128 = 30_000;
 
-/// Read `~/.agent-yes/winsize/<pid>` if a recent `ay attach` wrote one.
+/// Read `$AGENT_YES_HOME/winsize/<pid>` or `~/.agent-yes/winsize/<pid>` if a
+/// recent `ay attach` wrote one.
 /// Format: `<cols> <rows> <timestamp_ms>\n`. Returns None when the file is
 /// missing, malformed, or older than [`WINSIZE_STALE_MS`].
 ///
 /// Used by the SIGWINCH handler so attach clients can override the agent's
 /// PTY size even though the agent has no TTY of its own.
 pub fn read_external_winsize(pid: u32) -> Option<(u16, u16)> {
-    let dir = crate::log_files::log_dir()?;
+    let dir = crate::log_files::global_dir()?;
     read_external_winsize_from(&dir, pid)
 }
 
