@@ -64,7 +64,7 @@ fn ensure_project_gitignore(dir: &Path) -> std::io::Result<()> {
     if path.exists() {
         return Ok(());
     }
-    fs::write(path, "/*\n!.gitignore\n")
+    fs::write(path, "*\n")
 }
 
 #[cfg(test)]
