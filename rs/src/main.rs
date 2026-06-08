@@ -5,6 +5,7 @@ mod config_loader;
 mod context;
 mod fifo;
 mod idle_waiter;
+mod installer;
 mod log_files;
 mod logger;
 mod messaging;
@@ -19,7 +20,7 @@ mod webhook;
 
 use anyhow::Result;
 use cli::CliArgs;
-use tracing::info;
+use tracing::{error, info};
 
 /// Detect how the Rust binary was installed.
 /// Returns "cargo" for ~/.cargo/bin, "git" if running from a git repo target dir, or the path hint.
@@ -125,6 +126,18 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
 
     let cli_config = get_runtime_cli_config(&args.cli)?;
 
+    // Pre-flight: make sure the wrapped CLI is actually installed before we
+    // enter the spawn/restart loop. A missing CLI otherwise produces an endless
+    // crash-restart loop (the shell prints "not recognized", exits 1, and
+    // --robust restarts). Instead, show the install command and offer to run it.
+    {
+        let binary = cli_config.binary.as_deref().unwrap_or(args.cli.as_str());
+        if !installer::ensure_cli_installed(&args.cli, binary, &cli_config.install, args.install) {
+            // 127 = conventional "command not found" exit status.
+            return Ok(127);
+        }
+    }
+
     // Build command arguments
     let mut cmd_args = args.cli_args.clone();
 
@@ -182,7 +195,17 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     pid_store.prune_old_logs();
     pid_store.clean_stale();
 
+    // Crash-restart loop guard: if the agent keeps exiting non-zero almost
+    // immediately, restarting is futile (misconfig, broken install, etc.).
+    // Track consecutive fast failures and give up after a few rather than
+    // spinning forever.
+    let mut fast_failures: u32 = 0;
+    const MAX_FAST_FAILURES: u32 = 3;
+    const FAST_FAILURE_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
+
     loop {
+        let iter_start = std::time::Instant::now();
+
         // Spawn the agent process
         let mut ctx = spawn_agent(&args.cli, &cmd_args, &cli_config, cwd, args.verbose).await?;
 
@@ -282,6 +305,23 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
 
         // Check if we should restart
         if args.robust && exit_code != 0 && !agent_ctx.is_fatal && !agent_ctx.is_user_abort {
+            // Count consecutive fast failures; a run that survived past the
+            // window is a real session, so reset the counter on it.
+            if iter_start.elapsed() < FAST_FAILURE_WINDOW {
+                fast_failures += 1;
+            } else {
+                fast_failures = 0;
+            }
+            if fast_failures >= MAX_FAST_FAILURES {
+                error!(
+                    "Agent exited non-zero within {}s {} times in a row — giving up to avoid a \
+                     crash-restart loop (last exit code {}). Check the agent CLI and its config.",
+                    FAST_FAILURE_WINDOW.as_secs(),
+                    fast_failures,
+                    exit_code
+                );
+                return Ok(exit_code);
+            }
             info!("Agent crashed with code {}, restarting...", exit_code);
             // Add restore args for next iteration
             if !cmd_args.iter().any(|a| cli_config.restore_args.contains(a)) {

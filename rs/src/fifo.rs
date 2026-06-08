@@ -105,15 +105,25 @@ pub fn open_for_reading(_path: &Path) -> std::io::Result<std::fs::File> {
     ))
 }
 
-/// Best-effort cleanup. Failures are logged at debug level.
+/// Best-effort cleanup of the FIFO endpoint.
 ///
-/// On Windows the named pipe is reclaimed by the kernel when the last server
-/// instance handle drops, so `remove_file` on `\\.\pipe\<name>` is meaningless
-/// — but it's also harmless (NotFound is silenced below).
+/// On Windows the named pipe lives in the Win32 object namespace, not the
+/// filesystem: `remove_file` on `\\.\pipe\<name>` returns
+/// `ERROR_INVALID_PARAMETER` (os error 87), *not* `NotFound`, so attempting it
+/// logs a spurious warning on every loop exit. The kernel reclaims the pipe
+/// when the last server-instance handle drops, so there is nothing to remove —
+/// this is a no-op there.
 pub fn cleanup_fifo(path: &Path) {
-    if let Err(e) = std::fs::remove_file(path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            warn!("Failed to remove FIFO at {:?}: {}", path, e);
+    #[cfg(windows)]
+    {
+        let _ = path;
+    }
+    #[cfg(not(windows))]
+    {
+        if let Err(e) = std::fs::remove_file(path) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                warn!("Failed to remove FIFO at {:?}: {}", path, e);
+            }
         }
     }
 }
