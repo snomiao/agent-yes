@@ -11,7 +11,7 @@
 //! `--robust` restarts forever.
 
 use crate::config::InstallConfig;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 /// Does `binary` resolve to an executable on PATH?
@@ -137,18 +137,249 @@ pub fn ensure_cli_installed(
         }
     }
 
-    // The installer may have updated PATH, but the current process keeps a stale
-    // copy (notably on Windows). Re-check; if the binary still isn't visible,
-    // ask the user to re-run rather than crash-looping on a not-found spawn.
+    // The installer may have updated the *persistent* PATH (Windows registry /
+    // shell rc), but this process keeps a stale copy, so `binary` still won't
+    // resolve. Rather than dump the user at "open a new terminal", locate the
+    // freshly-installed binary, add its directory to THIS process's PATH so the
+    // spawn we're about to do finds it, and start immediately.
     if binary_exists(binary) {
-        eprintln!("\n`{cli}` installed successfully — starting…\n");
-        true
-    } else {
-        eprintln!(
-            "\n`{cli}` installed, but it isn't on this shell's PATH yet.\n\
-             Open a new terminal (or restart this one) and re-run `agent-yes {cli}`."
+        eprintln!("\n`{cli}` installed and already on PATH — starting…\n");
+        return true;
+    }
+
+    match find_installed_dir(binary) {
+        Some(dir) => {
+            // Make it usable in THIS process so we can launch right now…
+            merge_dir_into_process_path(&dir);
+            // …and persist it so future shells resolve it too — no manual
+            // "System Properties → Environment Variables" GUI dance. Some
+            // installers (e.g. claude's native installer) drop the binary in a
+            // dir they DON'T add to PATH; we add it ourselves.
+            let persisted = persist_dir_on_path(&dir);
+            eprintln!(
+                "\n`{cli}` installed at {} — added to PATH, starting now.",
+                dir.display()
+            );
+            if persisted {
+                eprintln!(
+                    "Added that directory to your persistent PATH; new terminals will find `{cli}` too."
+                );
+            } else {
+                eprintln!(
+                    "Couldn't update your persistent PATH automatically. Add it for new shells with:"
+                );
+                print_path_commands(&dir);
+            }
+            eprintln!();
+            true
+        }
+        None => {
+            eprintln!(
+                "\n`{cli}` installed, but it isn't on this shell's PATH yet and I couldn't locate it.\n\
+                 Open a new terminal (or restart this one) and re-run `agent-yes {cli}`."
+            );
+            false
+        }
+    }
+}
+
+/// Locate the directory containing `binary` after an install, checking (in
+/// order): the current `$PATH`, the OS persistent PATH (Windows registry —
+/// where installers write, invisible to a running process), and well-known
+/// install directories. Returns the directory, or `None` if not found anywhere.
+fn find_installed_dir(binary: &str) -> Option<PathBuf> {
+    resolve_binary_dir(binary)
+        .or_else(|| {
+            os_persistent_path_dirs()
+                .into_iter()
+                .find(|dir| dir_has_executable(dir, binary))
+        })
+        .or_else(|| {
+            common_install_dirs()
+                .into_iter()
+                .find(|dir| dir_has_executable(dir, binary))
+        })
+}
+
+/// If `binary` resolves on the current `$PATH`, return the directory holding it.
+fn resolve_binary_dir(binary: &str) -> Option<PathBuf> {
+    let paths = std::env::var_os("PATH")?;
+    std::env::split_paths(&paths).find(|dir| dir_has_executable(dir, binary))
+}
+
+fn dir_has_executable(dir: &Path, binary: &str) -> bool {
+    path_is_executable(&dir.join(binary))
+}
+
+/// Directories on the OS *persistent* PATH that the current process hasn't
+/// picked up. On Windows an installer writes to the per-user/machine registry
+/// PATH, which a running process can't see until it restarts — query it via
+/// PowerShell. On Unix the persistent PATH lives in shell rc files we can't
+/// reliably re-source, so this is empty (the common-dir probe covers it).
+fn os_persistent_path_dirs() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        let out = Command::new("powershell")
+            .args([
+                "-NoProfile",
+                "-Command",
+                "[Environment]::GetEnvironmentVariable('Path','User') + ';' + \
+                 [Environment]::GetEnvironmentVariable('Path','Machine')",
+            ])
+            .output();
+        if let Ok(out) = out {
+            if out.status.success() {
+                return String::from_utf8_lossy(&out.stdout)
+                    .split(';')
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(PathBuf::from)
+                    .collect();
+            }
+        }
+        Vec::new()
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
+    }
+}
+
+/// Directories installers commonly drop CLIs into, beyond `$PATH`.
+fn common_install_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = home_dir() {
+        dirs.push(home.join(".local").join("bin"));
+        dirs.push(home.join(".bun").join("bin"));
+        #[cfg(not(windows))]
+        {
+            dirs.push(home.join(".cargo").join("bin"));
+            dirs.push(home.join(".npm-global").join("bin"));
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        dirs.push(PathBuf::from("/usr/local/bin"));
+        dirs.push(PathBuf::from("/opt/homebrew/bin"));
+    }
+    dirs
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+}
+
+/// Prepend `dir` to this process's `PATH` (if not already present) so a spawn we
+/// do next resolves a binary that lives there.
+fn merge_dir_into_process_path(dir: &Path) {
+    let current = std::env::var_os("PATH").unwrap_or_default();
+    if let Some(joined) = path_with_dir_prepended(&current, dir) {
+        // Single-threaded pre-flight, before any thread that reads PATH is
+        // spawned. (set_var is safe on edition 2021; `unsafe` under 2024.)
+        std::env::set_var("PATH", joined);
+    }
+}
+
+/// Pure core of [`merge_dir_into_process_path`]: given a `PATH` value and a
+/// directory, return the new `PATH` with `dir` prepended — or `None` if `dir` is
+/// already present (nothing to change).
+fn path_with_dir_prepended(current: &std::ffi::OsStr, dir: &Path) -> Option<std::ffi::OsString> {
+    let mut entries: Vec<PathBuf> = std::env::split_paths(current).collect();
+    if entries.iter().any(|p| p == dir) {
+        return None;
+    }
+    entries.insert(0, dir.to_path_buf());
+    std::env::join_paths(entries).ok()
+}
+
+/// Make `dir` stick on the *persistent* PATH so future shells resolve the
+/// newly-installed binary without the user touching any GUI. Idempotent: if the
+/// directory is already on the persistent PATH, it's left untouched. Returns
+/// true on success (added or already present), false if it couldn't.
+///
+/// Windows: append to the per-user registry PATH via .NET
+/// `[Environment]::SetEnvironmentVariable(...,'User')`, which also broadcasts
+/// WM_SETTINGCHANGE so newly-launched processes pick it up. We deliberately
+/// avoid `setx` — it truncates PATH at 1024 chars and can clobber a long one.
+///
+/// Unix: append a guarded `export PATH=…` line to the user's shell rc.
+fn persist_dir_on_path(dir: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::process::Command;
+        // Escape single quotes for the PowerShell single-quoted string literal.
+        let d = dir.to_string_lossy().replace('\'', "''");
+        let script = format!(
+            "$d='{d}'; \
+             $p=[Environment]::GetEnvironmentVariable('Path','User'); \
+             if (-not $p) {{ $p='' }} \
+             $parts=@($p -split ';' | Where-Object {{ $_ -ne '' }}); \
+             if ($parts -notcontains $d) {{ \
+               $new = if ($p) {{ \"$p;$d\" }} else {{ $d }}; \
+               [Environment]::SetEnvironmentVariable('Path', $new, 'User'); \
+             }}"
         );
-        false
+        Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        let Some(home) = home_dir() else {
+            return false;
+        };
+        // Pick the rc for the user's shell; fall back to ~/.profile.
+        let shell = std::env::var("SHELL").unwrap_or_default();
+        let rc = if shell.ends_with("zsh") {
+            home.join(".zshrc")
+        } else if shell.ends_with("bash") {
+            home.join(".bashrc")
+        } else {
+            home.join(".profile")
+        };
+        append_path_line_to_rc(&rc, dir)
+    }
+}
+
+/// Append a guarded `export PATH=…` line for `dir` to the shell rc at `rc`,
+/// unless the directory is already referenced there (idempotent). Returns true
+/// on success or if it was already present.
+#[cfg(not(windows))]
+fn append_path_line_to_rc(rc: &Path, dir: &Path) -> bool {
+    use std::io::Write;
+    let dir_str = dir.to_string_lossy();
+    if let Ok(existing) = std::fs::read_to_string(rc) {
+        if existing.contains(dir_str.as_ref()) {
+            return true; // already on persistent PATH via this rc
+        }
+    }
+    match std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(rc)
+    {
+        Ok(mut f) => writeln!(f, "\nexport PATH=\"{dir_str}:$PATH\"  # added by agent-yes").is_ok(),
+        Err(_) => false,
+    }
+}
+
+/// Print copy-paste, session-scoped commands to put `dir` on PATH. Used only as
+/// a fallback when persisting the PATH automatically failed.
+fn print_path_commands(dir: &Path) {
+    let d = dir.display();
+    #[cfg(windows)]
+    {
+        eprintln!("    PowerShell:  $env:Path = \"{d};\" + $env:Path");
+        eprintln!("    cmd.exe:     set \"PATH={d};%PATH%\"");
+    }
+    #[cfg(not(windows))]
+    {
+        eprintln!("    bash/zsh:    export PATH=\"{d}:$PATH\"");
     }
 }
 
@@ -185,14 +416,25 @@ fn prompt_yes_no(question: &str) -> bool {
 }
 
 /// Run an install command through the platform shell, inheriting stdio so the
-/// user sees installer progress (and can answer any prompts it raises).
+/// user sees installer progress live (and can answer any prompts it raises).
+/// The exact command and its exit code are framed so it's clear what ran and
+/// what the installer itself printed.
 fn run_install_command(cmd: &str) -> std::io::Result<bool> {
     use std::process::Command;
+    eprintln!("\x1b[2m> {cmd}\x1b[0m");
+    eprintln!("\x1b[2m──────────────────────── installer output ────────────────────────\x1b[0m");
     let status = if cfg!(windows) {
         Command::new("cmd").arg("/C").arg(cmd).status()?
     } else {
         Command::new("sh").arg("-c").arg(cmd).status()?
     };
+    let code = status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "terminated".to_string());
+    eprintln!(
+        "\x1b[2m──────────────────── installer finished (exit {code}) ─────────────────\x1b[0m"
+    );
     Ok(status.success())
 }
 
@@ -273,5 +515,92 @@ mod tests {
         assert!(!interpret_yes_no("no"));
         assert!(!interpret_yes_no("yeah"));
         assert!(!interpret_yes_no("garbage"));
+    }
+
+    #[test]
+    fn test_resolve_binary_dir_finds_shell_dir() {
+        // The shell binary resolves on PATH; its dir must contain it.
+        #[cfg(windows)]
+        let (bin, _) = ("cmd", ());
+        #[cfg(not(windows))]
+        let (bin, _) = ("sh", ());
+        let dir = resolve_binary_dir(bin).expect("shell resolves on PATH");
+        assert!(dir_has_executable(&dir, bin));
+    }
+
+    #[test]
+    fn test_common_install_dirs_includes_local_bin() {
+        // Whatever HOME/USERPROFILE is, ~/.local/bin should be a candidate.
+        if home_dir().is_some() {
+            let dirs = common_install_dirs();
+            assert!(
+                dirs.iter().any(|d| d.ends_with("bin")),
+                "expected at least one .../bin candidate, got {dirs:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_path_with_dir_prepended_prepends_and_dedupes() {
+        use std::ffi::OsString;
+        let sep = if cfg!(windows) { ";" } else { ":" };
+        let existing = format!("/usr/bin{sep}/bin");
+        let cur = OsString::from(&existing);
+        let dir = Path::new("/opt/tools/bin");
+
+        // New dir → prepended at the front.
+        let got = path_with_dir_prepended(&cur, dir).expect("dir is new → Some");
+        let entries: Vec<PathBuf> = std::env::split_paths(&got).collect();
+        assert_eq!(entries.first().map(|p| p.as_path()), Some(dir));
+        assert!(entries.iter().any(|p| p == Path::new("/usr/bin")));
+
+        // Already present → None (no change, no duplicate).
+        assert!(path_with_dir_prepended(&cur, Path::new("/bin")).is_none());
+    }
+
+    #[test]
+    fn test_dir_has_executable_on_temp_file() {
+        // dir_has_executable is the core of find_installed_dir's directory probe.
+        let tmp = std::env::temp_dir().join("ay-installer-test-bin");
+        let _ = std::fs::create_dir_all(&tmp);
+        #[cfg(windows)]
+        let name = "ay-fake-cli.exe";
+        #[cfg(not(windows))]
+        let name = "ay-fake-cli";
+        let bin_path = tmp.join(name);
+        std::fs::write(&bin_path, b"#!/bin/sh\n").unwrap();
+        #[cfg(not(windows))]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        // Bare name resolves (Windows applies PATHEXT to match .exe).
+        assert!(dir_has_executable(&tmp, "ay-fake-cli"));
+        assert!(!dir_has_executable(&tmp, "ay-nonexistent-cli"));
+        let _ = std::fs::remove_file(&bin_path);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_append_path_line_to_rc_is_idempotent() {
+        let dir = std::env::temp_dir();
+        let rc = dir.join("ay-test-rc-file");
+        let _ = std::fs::remove_file(&rc);
+        let bindir = Path::new("/opt/agent/bin");
+
+        // First append: creates the file and writes the export line.
+        assert!(append_path_line_to_rc(&rc, bindir));
+        let c1 = std::fs::read_to_string(&rc).unwrap();
+        assert!(c1.contains("/opt/agent/bin"));
+        assert!(c1.contains("added by agent-yes"));
+        let count1 = c1.matches("/opt/agent/bin").count();
+        assert_eq!(count1, 1);
+
+        // Second append: dir already referenced → no-op, no duplicate line.
+        assert!(append_path_line_to_rc(&rc, bindir));
+        let c2 = std::fs::read_to_string(&rc).unwrap();
+        assert_eq!(c2.matches("/opt/agent/bin").count(), 1);
+
+        let _ = std::fs::remove_file(&rc);
     }
 }
