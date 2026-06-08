@@ -41,20 +41,32 @@ export function getBinaryName(): string {
  */
 export function getBinDir(): string {
   // First check for binaries in the npm package
-  const packageBinDir = path.resolve(import.meta.dirname ?? import.meta.dir, "../bin");
+  const packageBinDir = path.resolve(
+    import.meta.dirname ?? import.meta.dir,
+    "../bin",
+  );
   if (existsSync(packageBinDir)) {
     return packageBinDir;
   }
 
-  // Fall back to user's cache directory
+  // Fall back to user's cache directory.
+  //
+  // IMPORTANT: scope the cache by package version. The download cache is shared
+  // across every agent-yes version a user has ever run, but the binary filename
+  // (e.g. agent-yes-win32-x64.exe) is NOT version-qualified — so without a
+  // version segment, findRustBinary() would happily return a stale binary that a
+  // previous (older) release downloaded, and a published binary fix would never
+  // reach a machine that already has one cached. A version segment makes a new
+  // release miss the path and re-download; old binaries sit harmlessly beside it.
   const cacheDir =
     process.env.AGENT_YES_CACHE_DIR ||
     path.join(
-      process.env.XDG_CACHE_HOME || path.join(process.env.HOME || "/tmp", ".cache"),
+      process.env.XDG_CACHE_HOME ||
+        path.join(process.env.HOME || "/tmp", ".cache"),
       "agent-yes",
     );
 
-  return path.join(cacheDir, "bin");
+  return path.join(cacheDir, "bin", getInstalledPackage().version);
 }
 
 /**
@@ -66,8 +78,14 @@ export function findRustBinary(verbose = false): string | undefined {
   const ext = process.platform === "win32" ? ".exe" : "";
   const searchPaths = [
     // 1. Check relative to this script (in the repo during development)
-    path.resolve(import.meta.dirname ?? import.meta.dir, `../rs/target/release/agent-yes${ext}`),
-    path.resolve(import.meta.dirname ?? import.meta.dir, `../rs/target/debug/agent-yes${ext}`),
+    path.resolve(
+      import.meta.dirname ?? import.meta.dir,
+      `../rs/target/release/agent-yes${ext}`,
+    ),
+    path.resolve(
+      import.meta.dirname ?? import.meta.dir,
+      `../rs/target/debug/agent-yes${ext}`,
+    ),
 
     // 2. Check in npm package bin directory
     path.join(getBinDir(), binaryName),
@@ -119,14 +137,21 @@ export async function downloadBinary(verbose = false): Promise<string> {
   // Create bin directory if needed
   mkdirSync(binDir, { recursive: true });
 
-  const url = getDownloadUrl();
+  // Pin the download to THIS package's version, not "latest". The shim is
+  // version-pinned by bunx/npm, so its binary must match — pulling "latest"
+  // could fetch a newer binary than the shim expects, and is incoherent with
+  // the version-scoped cache dir above. The release flow guarantees vX's
+  // binaries are uploaded before agent-yes@X is published.
+  const url = getDownloadUrl(getInstalledPackage().version);
   if (verbose) {
     console.log(`[rust] Downloading binary from: ${url}`);
   }
 
   const response = await fetch(url);
   if (!response.ok) {
-    throw new Error(`Failed to download binary: ${response.status} ${response.statusText}`);
+    throw new Error(
+      `Failed to download binary: ${response.status} ${response.statusText}`,
+    );
   }
 
   const isWindows = process.platform === "win32";
@@ -218,14 +243,19 @@ function getRustBinaryVersion(binaryPath: string): string | null {
  */
 function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
   // Only auto-rebuild for local dev builds (target/release or target/debug)
-  if (!binaryPath.includes("/target/release") && !binaryPath.includes("/target/debug")) {
+  if (
+    !binaryPath.includes("/target/release") &&
+    !binaryPath.includes("/target/debug")
+  ) {
     return true; // not a dev build, skip
   }
 
   const binaryVersion = getRustBinaryVersion(binaryPath);
   const pkgVersion = getInstalledPackage().version;
   if (verbose) {
-    console.log(`[rust] Binary version: ${binaryVersion}, package version: ${pkgVersion}`);
+    console.log(
+      `[rust] Binary version: ${binaryVersion}, package version: ${pkgVersion}`,
+    );
   }
 
   if (binaryVersion === pkgVersion) {
@@ -233,9 +263,15 @@ function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
   }
 
   // Find the rs/ directory relative to the binary (binary is at rs/target/release/agent-yes)
-  const rsDir = binaryPath.replace(/\/target\/(release|debug)\/agent-yes.*$/, "");
+  const rsDir = binaryPath.replace(
+    /\/target\/(release|debug)\/agent-yes.*$/,
+    "",
+  );
   if (!existsSync(path.join(rsDir, "Cargo.toml"))) {
-    if (verbose) console.log(`[rust] Cannot find Cargo.toml at ${rsDir}, skipping rebuild`);
+    if (verbose)
+      console.log(
+        `[rust] Cannot find Cargo.toml at ${rsDir}, skipping rebuild`,
+      );
     return true; // can't rebuild, use as-is
   }
 
@@ -263,7 +299,9 @@ function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
     process.stderr.write(`\x1b[32m[rust] Rebuild complete\x1b[0m\n`);
     return true;
   } catch {
-    process.stderr.write(`\x1b[31m[rust] Auto-rebuild failed, using outdated binary\x1b[0m\n`);
+    process.stderr.write(
+      `\x1b[31m[rust] Auto-rebuild failed, using outdated binary\x1b[0m\n`,
+    );
     return true; // still usable, just old
   }
 }
