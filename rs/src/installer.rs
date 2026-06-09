@@ -258,6 +258,22 @@ fn common_install_dirs() -> Vec<PathBuf> {
             dirs.push(home.join(".npm-global").join("bin"));
         }
     }
+    #[cfg(windows)]
+    {
+        // The LocalSystem service account's profile. When an installer ran under
+        // a service context (codehost/CI Windows boxes do), native installers
+        // land here even though the interactive user's USERPROFILE differs.
+        // Observed with claude: USERPROFILE=C:\Users\qauser but claude.exe at
+        // C:\Windows\System32\config\systemprofile\.local\bin.
+        if let Some(sysroot) = std::env::var_os("SystemRoot") {
+            let sysprofile = PathBuf::from(sysroot)
+                .join("System32")
+                .join("config")
+                .join("systemprofile");
+            dirs.push(sysprofile.join(".local").join("bin"));
+            dirs.push(sysprofile.join(".bun").join("bin"));
+        }
+    }
     #[cfg(not(windows))]
     {
         dirs.push(PathBuf::from("/usr/local/bin"));
