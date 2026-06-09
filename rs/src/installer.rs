@@ -92,12 +92,22 @@ pub fn ensure_cli_installed(
     install: &InstallConfig,
     auto_install: bool,
 ) -> bool {
+    // 1. Already resolvable on this shell's PATH — nothing to do.
     if binary_exists(binary) {
         return true;
     }
 
-    warn!("`{}` not found on PATH.", binary);
+    // 2. Installed somewhere known but not *linked* onto PATH? Use it as-is
+    //    instead of reinstalling. Native installers (e.g. claude's) often drop
+    //    the binary in ~/.local/bin or the LocalSystem profile and leave it off
+    //    PATH — agent-yes should just adopt that existing install.
+    if let Some(dir) = find_installed_dir(binary) {
+        return enable_installed_dir(cli, &dir, false);
+    }
 
+    warn!("`{}` not found on PATH or any known install dir.", binary);
+
+    // 3. Genuinely not installed — offer to install it.
     let Some(install_cmd) = select_install_command(install) else {
         eprintln!(
             "\n`{cli}` is not installed, and no install command is configured for this platform.\n\
@@ -137,42 +147,13 @@ pub fn ensure_cli_installed(
         }
     }
 
-    // The installer may have updated the *persistent* PATH (Windows registry /
-    // shell rc), but this process keeps a stale copy, so `binary` still won't
-    // resolve. Rather than dump the user at "open a new terminal", locate the
-    // freshly-installed binary, add its directory to THIS process's PATH so the
-    // spawn we're about to do finds it, and start immediately.
+    // 4. After install, link it onto PATH and launch.
     if binary_exists(binary) {
         eprintln!("\n`{cli}` installed and already on PATH — starting…\n");
         return true;
     }
-
     match find_installed_dir(binary) {
-        Some(dir) => {
-            // Make it usable in THIS process so we can launch right now…
-            merge_dir_into_process_path(&dir);
-            // …and persist it so future shells resolve it too — no manual
-            // "System Properties → Environment Variables" GUI dance. Some
-            // installers (e.g. claude's native installer) drop the binary in a
-            // dir they DON'T add to PATH; we add it ourselves.
-            let persisted = persist_dir_on_path(&dir);
-            eprintln!(
-                "\n`{cli}` installed at {} — added to PATH, starting now.",
-                dir.display()
-            );
-            if persisted {
-                eprintln!(
-                    "Added that directory to your persistent PATH; new terminals will find `{cli}` too."
-                );
-            } else {
-                eprintln!(
-                    "Couldn't update your persistent PATH automatically. Add it for new shells with:"
-                );
-                print_path_commands(&dir);
-            }
-            eprintln!();
-            true
-        }
+        Some(dir) => enable_installed_dir(cli, &dir, true),
         None => {
             eprintln!(
                 "\n`{cli}` installed, but it isn't on this shell's PATH yet and I couldn't locate it.\n\
@@ -181,6 +162,39 @@ pub fn ensure_cli_installed(
             false
         }
     }
+}
+
+/// Adopt an install found at `dir` that isn't on PATH: add the directory to THIS
+/// process's PATH so the spawn we're about to do resolves it, persist it so
+/// future shells resolve it too (no manual GUI), and report. `just_installed`
+/// distinguishes "we just installed it" from "it was already installed, just
+/// not linked". Always returns true (the binary is now usable).
+fn enable_installed_dir(cli: &str, dir: &Path, just_installed: bool) -> bool {
+    merge_dir_into_process_path(dir);
+    let persisted = persist_dir_on_path(dir);
+    if just_installed {
+        eprintln!(
+            "\n`{cli}` installed at {} — added to PATH, starting now.",
+            dir.display()
+        );
+    } else {
+        eprintln!(
+            "\n`{cli}` is already installed at {} but not on PATH — added it, starting now.",
+            dir.display()
+        );
+    }
+    if persisted {
+        eprintln!(
+            "Added that directory to your persistent PATH; new terminals will find `{cli}` too."
+        );
+    } else {
+        eprintln!(
+            "Couldn't update your persistent PATH automatically. Add it for new shells with:"
+        );
+        print_path_commands(dir);
+    }
+    eprintln!();
+    true
 }
 
 /// Locate the directory containing `binary` after an install, checking (in
