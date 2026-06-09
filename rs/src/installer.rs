@@ -439,11 +439,29 @@ fn run_install_command(cmd: &str) -> std::io::Result<bool> {
     use std::process::Command;
     eprintln!("\x1b[2m> {cmd}\x1b[0m");
     eprintln!("\x1b[2m──────────────────────── installer output ────────────────────────\x1b[0m");
-    let status = if cfg!(windows) {
-        Command::new("cmd").arg("/C").arg(cmd).status()?
-    } else {
-        Command::new("sh").arg("-c").arg(cmd).status()?
+
+    #[cfg(windows)]
+    let status = {
+        // Do NOT use `cmd /C <cmd>`. cmd.exe mis-parses `|`, `&` and `"` in the
+        // command (Rust's CreateProcess arg quoting doesn't match cmd's parser),
+        // which mangles installers like claude's
+        // `powershell -Command "irm … | iex"` — the `|` gets eaten, so the
+        // installer neither runs correctly nor shows its output. Writing the
+        // command to a temp .ps1 and running it with `-File` sidesteps all
+        // command-line quoting: PowerShell reads the bytes from the file.
+        let mut script = std::env::temp_dir();
+        script.push(format!("agent-yes-install-{}.ps1", std::process::id()));
+        std::fs::write(&script, cmd)?;
+        let result = Command::new("powershell")
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .status();
+        let _ = std::fs::remove_file(&script);
+        result?
     };
+    #[cfg(not(windows))]
+    let status = Command::new("sh").arg("-c").arg(cmd).status()?;
+
     let code = status
         .code()
         .map(|c| c.to_string())
