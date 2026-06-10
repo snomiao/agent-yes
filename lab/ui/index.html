@@ -625,7 +625,7 @@
             };
             ws.onerror = () => fail(new Error("signaling error"));
             ws.onclose = () => fail(new Error("signaling closed"));
-            setTimeout(() => fail(new Error("connect timeout")), 15000);
+            setTimeout(() => fail(new Error("connect timeout")), 8000);
           });
         }
         _recv(r) {
@@ -824,11 +824,16 @@
             }).catch(() => {});
         };
         term.onResize(pushSize);
-        // Forward keystrokes/mouse typed into the terminal straight to the agent stdin
-        // (raw, no trailing Enter) so it's directly interactive, not just a viewer.
-        term.onData((d) => {
+        // Forward everything the terminal emits to the agent stdin (raw, no
+        // trailing Enter): keystrokes, paste, and — when a TUI enables mouse
+        // tracking — click / drag-motion / wheel as SGR mouse reports. onBinary
+        // covers the UTF-8 mouse encoding (DECSET 1005). Verified end-to-end:
+        // a drag emits \x1b[<0;..M / \x1b[<32;..M / \x1b[<0;..m, wheel \x1b[<64/65..M.
+        const fwd = (d) => {
           if (sel) Conn.post("/api/send", { keyword: sel, msg: d, code: "none" }).catch(() => {});
-        });
+        };
+        term.onData(fwd);
+        term.onBinary(fwd);
         try {
           fit.fit();
         } catch {}
@@ -1093,6 +1098,7 @@
         const h = decodeURIComponent(raw);
         const full = /^([A-Za-z0-9_-]+):([^@]+)(?:@(.+))?$/.exec(h);
         const bare = /^([A-Za-z0-9_-]+)$/.exec(h);
+        let pending = null;
         if (full) {
           const [, room, token, host] = full;
           // SECURITY: strip the token from the URL immediately so it never lingers in
@@ -1102,15 +1108,17 @@
             document.title,
             location.pathname + location.search + "#" + room,
           );
-          await connectRoom(room, token, host);
+          pending = { room, token, host };
         } else if (bare && loadRooms()[bare[1]]) {
           const r = loadRooms()[bare[1]];
-          await connectRoom(bare[1], r.token, r.host);
-        } else {
-          setConn("● local", "var(--muted)");
-          loadList();
+          pending = { room: bare[1], token: r.token, host: r.host };
         }
+        // Render the UI immediately and refresh on a timer; connect to a room (if
+        // any) in the BACKGROUND so a dead/slow cached room never blanks the page.
+        if (!pending) setConn("● local", "var(--muted)");
+        loadList();
         setInterval(loadList, 3000); // refresh statuses / new agents
+        if (pending) connectRoom(pending.room, pending.token, pending.host);
       }
       boot();
     </script>

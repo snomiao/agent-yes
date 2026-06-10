@@ -1,4 +1,5 @@
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { mkdir, open, readFile, writeFile } from "fs/promises";
+import { watch } from "node:fs";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { homedir } from "os";
 import path from "path";
@@ -319,34 +320,59 @@ export async function cmdServe(rest: string[]): Promise<number> {
               // eslint-disable-next-line no-control-regex
               const ctrlRe = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
 
-              const poller = setInterval(async () => {
-                if (closed) {
-                  clearInterval(poller);
-                  return;
-                }
+              // Stream only the bytes appended since `offset` (incremental read,
+              // not a full re-read), driven by fs.watch for near-instant echo with
+              // a short fallback poll in case the watcher misses an event. The old
+              // 300 ms full-file poll was the dominant typing-echo latency.
+              const fh = await open(logPath, "r").catch(() => null);
+              let reading = false;
+              const flush = async () => {
+                if (closed || reading || !fh) return;
+                reading = true;
                 try {
-                  const full = await readFile(logPath);
-                  if (full.length <= offset) return;
-                  const chunk = full.slice(offset);
-                  offset = full.length;
-                  if (raw) {
-                    send(new TextDecoder().decode(chunk));
-                  } else {
-                    const text = new TextDecoder()
-                      .decode(chunk)
-                      .replace(ansiRe, "")
-                      .replace(ctrlRe, "");
-                    if (text.trim()) send(text.trimStart());
+                  const { size } = await fh.stat();
+                  if (size < offset) offset = size; // truncated/rotated
+                  if (size > offset) {
+                    const len = size - offset;
+                    const buf = Buffer.allocUnsafe(len);
+                    const { bytesRead } = await fh.read(buf, 0, len, offset);
+                    offset += bytesRead;
+                    const chunk = buf.subarray(0, bytesRead);
+                    if (raw) {
+                      send(new TextDecoder().decode(chunk));
+                    } else {
+                      const text = new TextDecoder()
+                        .decode(chunk)
+                        .replace(ansiRe, "")
+                        .replace(ctrlRe, "");
+                      if (text.trim()) send(text.trimStart());
+                    }
                   }
                 } catch {
                   /* log gone */
+                } finally {
+                  reading = false;
                 }
-              }, 300);
+              };
+
+              let watcher: ReturnType<typeof watch> | null = null;
+              try {
+                watcher = watch(logPath, () => void flush());
+              } catch {
+                /* fs.watch unsupported — the fallback poll below still works */
+              }
+              const poller = setInterval(() => void flush(), 60);
 
               req.signal.addEventListener("abort", () => {
                 closed = true;
                 clearInterval(heartbeat);
                 clearInterval(poller);
+                try {
+                  watcher?.close();
+                } catch {
+                  /* already closed */
+                }
+                void fh?.close().catch(() => {});
                 try {
                   ctrl.close();
                 } catch {
