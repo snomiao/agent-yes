@@ -1,0 +1,23 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "agent-yes-signal",
+  // SNOLAB account — agent-yes.com lives here. account_id in config is honored
+  // (CLOUDFLARE_ACCOUNT_ID env is ignored by some wrangler commands).
+  "account_id": "0beef4cd2d2da6befa47d8d149d6e157",
+  "main": "worker.ts",
+  "compatibility_date": "2025-05-01",
+  // Static console UI (served for every non-WebSocket request).
+  "assets": { "directory": "./public", "binding": "ASSETS" },
+  "durable_objects": {
+    "bindings": [{ "name": "ROOMS", "class_name": "Room" }],
+  },
+  // SQLite-backed DO classes (required on the free plan, fine on paid).
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
+  // One Worker, two custom domains: the UI on agent-yes.com, signaling on
+  // s.agent-yes.com. Custom domains auto-provision DNS in the zone.
+  "routes": [
+    { "pattern": "agent-yes.com", "custom_domain": true },
+    { "pattern": "s.agent-yes.com", "custom_domain": true },
+  ],
+  "observability": { "enabled": true },
+}

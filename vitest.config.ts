@@ -61,6 +61,9 @@ export default defineConfig({
         // running server and network); unit coverage not meaningful here.
         "ts/serve.ts",
         "ts/remotes.ts",
+        // WebRTC share bridge — needs a peer + signaling server; proven e2e, not
+        // unit-testable.
+        "ts/share.ts",
       ],
       thresholds: {
         lines: 90,
