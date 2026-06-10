@@ -44,3 +44,6 @@ bin
 TODO.md
 package-lock.json
 tests/ui-test/screenshots/
+
+# generated: deploy copies lab/ui/index.html here
+lab/ui/cf/public/

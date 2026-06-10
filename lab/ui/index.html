@@ -1,0 +1,1118 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>agent-yes · console</title>
+    <style>
+      /* Palette borrowed from codehost (GitHub-dark) so the two feel like one system. */
+      :root {
+        --bg: #0d1117;
+        --panel: #161b22;
+        --panel2: #1c2430;
+        --line: #2d3748;
+        --line2: #222b38;
+        --fg: #e6edf3;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --green: #3fb950;
+        --amber: #d29922;
+        --purple: #bc8cff;
+        --pink: #f778ba;
+        --red: #f85149;
+        --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        height: 100vh;
+        overflow: hidden;
+        font:
+          14px/1.55 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          system-ui,
+          sans-serif;
+      }
+      code {
+        font-family: var(--mono);
+        font-size: 12.5px;
+        background: var(--panel2);
+        padding: 1px 5px;
+        border-radius: 5px;
+        color: var(--purple);
+      }
+
+      /* grid-template-rows:minmax(0,1fr) caps the row at the viewport so the inner
+     panes scroll instead of growing the page (the min-height:0 below lets the
+     flex children actually shrink — without it overflow:auto never engages). */
+      .app {
+        display: grid;
+        grid-template-columns: minmax(360px, 42%) 1fr;
+        grid-template-rows: minmax(0, 1fr);
+        height: 100vh;
+      }
+
+      /* ---- left: list ---- */
+      .left {
+        border-right: 1px solid var(--line);
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        min-height: 0;
+      }
+      .head {
+        padding: 16px 18px 10px;
+        border-bottom: 1px solid var(--line);
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 2px;
+        letter-spacing: -0.02em;
+      }
+      h1 .tag {
+        color: var(--accent);
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+      .ibox {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        padding: 7px 11px;
+        margin-top: 11px;
+      }
+      .ibox:focus-within {
+        border-color: var(--accent);
+      }
+      .ibox .mag {
+        color: var(--muted);
+      }
+      #q {
+        flex: 1;
+        background: transparent;
+        border: 0;
+        outline: 0;
+        color: var(--fg);
+        font: 13px var(--mono);
+      }
+      .meta {
+        display: flex;
+        justify-content: space-between;
+        color: var(--muted);
+        font-size: 11.5px;
+        margin-top: 8px;
+      }
+      .connbadge {
+        cursor: pointer;
+        user-select: none;
+      }
+      .connbadge:hover {
+        filter: brightness(1.3);
+      }
+      .rooms {
+        position: relative;
+        margin-top: 8px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        padding: 8px;
+        font-size: 12px;
+      }
+      .rooms .rtitle {
+        color: var(--muted);
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        padding: 2px 4px 6px;
+      }
+      .rooms .ritem {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 6px;
+        border-radius: 7px;
+      }
+      .rooms .ritem:hover {
+        background: var(--panel2);
+      }
+      .rooms .ritem.cur {
+        box-shadow: inset 2px 0 0 var(--green);
+      }
+      .rooms .rname {
+        font-family: var(--mono);
+        color: var(--accent);
+        cursor: pointer;
+        flex: 1;
+      }
+      .rooms .rhost {
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 10.5px;
+      }
+      .rooms .rx {
+        color: var(--muted);
+        cursor: pointer;
+        padding: 0 4px;
+      }
+      .rooms .rx:hover {
+        color: var(--red);
+      }
+      .rooms .radd {
+        display: flex;
+        gap: 6px;
+        margin-top: 6px;
+        padding-top: 6px;
+        border-top: 1px solid var(--line2);
+      }
+      .rooms .radd input {
+        flex: 1;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--fg);
+        font: 11.5px var(--mono);
+        padding: 6px 8px;
+        outline: 0;
+      }
+      .rooms .radd button {
+        background: var(--accent);
+        color: var(--bg);
+        border: 0;
+        border-radius: 7px;
+        font-weight: 600;
+        padding: 0 12px;
+        cursor: pointer;
+      }
+      .rooms .empty2 {
+        color: var(--muted);
+        padding: 6px;
+      }
+      .rooms .rconnect {
+        margin-top: 6px;
+        padding: 8px 6px 2px;
+        border-top: 1px solid var(--line2);
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.7;
+      }
+      .rooms .rconnect code {
+        display: block;
+        margin-top: 4px;
+        cursor: pointer;
+      }
+      .rooms .rconnect code:hover {
+        color: var(--accent);
+      }
+
+      /* launch overlay (command-only launch URLs: #launch=<json>) */
+      .launchoverlay {
+        position: fixed;
+        inset: 0;
+        z-index: 20;
+        background: rgba(2, 6, 12, 0.7);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+      }
+      .lcard {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 22px 24px;
+        width: min(560px, 92vw);
+      }
+      .lcard .ltitle {
+        font-size: 16px;
+        font-weight: 600;
+        margin-bottom: 12px;
+      }
+      .lcard .lcmd {
+        font-family: var(--mono);
+        font-size: 13px;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 10px 12px;
+        color: var(--green);
+        word-break: break-word;
+      }
+      .lcard .lcwd {
+        color: var(--muted);
+        font-family: var(--mono);
+        font-size: 11.5px;
+        margin-top: 6px;
+      }
+      .lcard .lfleets {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 16px;
+      }
+      .lcard .lfleet {
+        background: var(--accent);
+        color: var(--bg);
+        border: 0;
+        border-radius: 8px;
+        font-weight: 600;
+        font-family: var(--mono);
+        padding: 8px 14px;
+        cursor: pointer;
+      }
+      .lcard .lwarn {
+        color: var(--amber);
+        font-size: 12.5px;
+        margin-top: 16px;
+        line-height: 1.6;
+      }
+      .lcard .lwarn code {
+        font-family: var(--mono);
+        background: var(--bg);
+        padding: 1px 6px;
+        border-radius: 5px;
+        color: var(--fg);
+      }
+      .lcard .lhint {
+        color: var(--muted);
+        font-size: 11.5px;
+        margin-top: 12px;
+      }
+      .lcard .lcancel {
+        background: transparent;
+        color: var(--muted);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 6px 14px;
+        cursor: pointer;
+        margin-top: 16px;
+      }
+
+      .list {
+        overflow-y: auto;
+        flex: 1;
+        min-height: 0;
+      }
+      .row {
+        padding: 11px 18px;
+        border-bottom: 1px solid var(--line2);
+        cursor: pointer;
+      }
+      .row:hover {
+        background: var(--panel);
+      }
+      .row.sel {
+        background: var(--panel);
+        box-shadow: inset 3px 0 0 var(--accent);
+      }
+      .r1 {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex: none;
+      }
+      .dot.active,
+      .dot.running {
+        background: var(--green);
+      }
+      .dot.idle {
+        background: var(--amber);
+      }
+      .dot.stopped,
+      .dot.exited {
+        background: var(--muted);
+      }
+      .name {
+        font-weight: 600;
+      }
+      .badge {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        padding: 1px 6px;
+        border-radius: 5px;
+        border: 1px solid var(--line);
+        color: var(--muted);
+      }
+      .age {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 11.5px;
+      }
+      .detail {
+        color: var(--muted);
+        font-size: 12.5px;
+        margin-top: 4px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .rowtags {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        margin-top: 6px;
+      }
+      .rtag {
+        font-family: var(--mono);
+        font-size: 11px;
+        padding: 1px 7px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        color: var(--muted);
+        white-space: nowrap;
+      }
+      .rtag[data-k="repo"],
+      .rtag[data-k="wt"] {
+        color: var(--green);
+        border-color: #1d3b25;
+      }
+      .rtag[data-k="cli"] {
+        color: var(--purple);
+        border-color: #3a2a4a;
+      }
+      .empty {
+        text-align: center;
+        color: var(--muted);
+        padding: 40px;
+      }
+
+      /* ---- right: live tail + send (this is what codehost structurally can't do) ---- */
+      .right {
+        display: flex;
+        flex-direction: column;
+        min-width: 0;
+        min-height: 0;
+      }
+      .rhead {
+        padding: 14px 20px;
+        border-bottom: 1px solid var(--line);
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .rhead .name {
+        font-size: 15px;
+      }
+      .rhead .live {
+        margin-left: auto;
+        font-size: 11px;
+        font-family: var(--mono);
+        color: var(--muted);
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .rhead .live .dot {
+        width: 7px;
+        height: 7px;
+      }
+      .log {
+        flex: 1;
+        min-height: 0;
+        overflow: hidden;
+        padding: 8px 10px;
+        background: #0d1117;
+      }
+      .log .xterm {
+        height: 100%;
+      }
+      .log .xterm-viewport {
+        background: transparent !important;
+      }
+      .placeholder {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100%;
+        color: var(--muted);
+        font-size: 14px;
+      }
+      .composer {
+        border-top: 1px solid var(--line);
+        padding: 12px 16px;
+        display: flex;
+        gap: 8px;
+        align-items: flex-end;
+      }
+      .composer textarea {
+        flex: 1;
+        resize: none;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 9px;
+        color: var(--fg);
+        font: 13px var(--mono);
+        padding: 9px 12px;
+        outline: 0;
+        min-height: 40px;
+        max-height: 160px;
+      }
+      .composer textarea:focus {
+        border-color: var(--accent);
+      }
+      .send {
+        background: var(--accent);
+        color: var(--bg);
+        border: 0;
+        border-radius: 9px;
+        font-weight: 600;
+        padding: 10px 18px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .send:disabled {
+        opacity: 0.45;
+        cursor: not-allowed;
+      }
+      .hint {
+        color: var(--muted);
+        font-size: 11px;
+        font-family: var(--mono);
+        margin-top: 6px;
+        padding: 0 16px 10px;
+      }
+    </style>
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+  </head>
+  <body>
+    <div class="app">
+      <div class="left">
+        <div class="head">
+          <h1><span class="tag">agent-yes</span> · console</h1>
+          <div class="sub">
+            Live <code>ay ls</code> + per-agent tail &amp; send. Backed by <code>ay serve</code>.
+          </div>
+          <div class="ibox">
+            <span class="mag">⌕</span>
+            <input
+              id="q"
+              placeholder="filter…  repo:agent-yes  claude  symval  (space = AND)"
+              autocomplete="off"
+              autofocus
+            />
+          </div>
+          <div class="meta">
+            <span id="count"></span
+            ><span id="conn" class="connbadge" title="rooms — click to manage">● local</span>
+          </div>
+          <div class="rooms" id="rooms" style="display: none"></div>
+        </div>
+        <div class="list" id="list"></div>
+      </div>
+
+      <div class="right">
+        <div class="rhead" id="rhead" style="display: none">
+          <span class="dot" id="rdot"></span>
+          <span class="name" id="rname"></span>
+          <span class="badge" id="rpid"></span>
+          <span class="live"
+            ><span class="dot" id="livedot"></span><span id="livetxt">connecting…</span></span
+          >
+        </div>
+        <div class="log" id="log">
+          <div class="placeholder">← pick an agent to tail its log and send it a message</div>
+        </div>
+        <div class="composer" id="composer" style="display: none">
+          <textarea
+            id="msg"
+            rows="1"
+            placeholder="message to send to the agent…  (⌘/Ctrl+Enter)"
+          ></textarea>
+          <button class="send" id="send">Send ⏎</button>
+        </div>
+        <div class="hint" id="hint" style="display: none">
+          POST /api/send → writes to the agent's stdin fifo, then Enter.
+        </div>
+      </div>
+    </div>
+
+    <div class="launchoverlay" id="launch" style="display: none"></div>
+
+    <script>
+      let entries = [];
+      let sel = null; // selected keyword (pid as string)
+      let es = null; // live-tail subscription closer
+      let term = null; // xterm.js Terminal rendering the raw PTY stream
+      let fit = null;
+
+      const $ = (id) => document.getElementById(id);
+      const esc = (s) =>
+        String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+
+      // ---- transport ---------------------------------------------------------
+      // Local: same-origin fetch + EventSource (via the ay-serve proxy).
+      // Remote: an /api/* call tunnelled over a WebRTC DataChannel to a peer running
+      // `ay serve --share` — established through the signaling server. Same call
+      // sites, two wires. Remote is selected by a URL hash: #room:token[@sighost].
+      const SIG_DEFAULT = "s.agent-yes.com"; // signaling host (override in the hash with @host)
+      const SUB = "ay-signal-1";
+
+      // Tunnels request/response + streaming over one DataChannel. Mirrors the
+      // envelope in lab/ui/share-host.ts: {t:"req"|"abort"} out, {t:"res"|"data"|"end"} in.
+      class RTCClient {
+        constructor(host, room, token) {
+          Object.assign(this, {
+            host,
+            room,
+            token,
+            dc: null,
+            nextId: 1,
+            calls: new Map(),
+            streams: new Map(),
+            onstate: () => {},
+          });
+        }
+        connect() {
+          return new Promise((resolve, reject) => {
+            const ws = new WebSocket(`wss://${this.host}/${this.room}`, [SUB]);
+            let pc,
+              settled = false;
+            const fail = (e) => {
+              if (!settled) {
+                settled = true;
+                reject(e);
+              }
+            };
+            ws.onopen = () =>
+              ws.send(JSON.stringify({ type: "hello", role: "client", token: this.token }));
+            ws.onmessage = async (ev) => {
+              const m = JSON.parse(ev.data);
+              if (m.type === "welcome") {
+                pc = new RTCPeerConnection({
+                  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
+                });
+                this.pc = pc;
+                pc.onicecandidate = (e) => {
+                  if (e.candidate)
+                    ws.send(JSON.stringify({ type: "candidate", candidate: e.candidate }));
+                };
+                pc.onconnectionstatechange = () => this.onstate(pc.connectionState);
+                pc.ondatachannel = (e) => {
+                  this.dc = e.channel;
+                  this.dc.onopen = () => {
+                    settled = true;
+                    this.onstate("open");
+                    resolve();
+                  };
+                  this.dc.onmessage = (ev2) => this._recv(JSON.parse(ev2.data));
+                  this.dc.onclose = () => this.onstate("closed");
+                };
+              } else if (m.type === "offer") {
+                await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
+                await pc.setLocalDescription(await pc.createAnswer());
+                ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription.sdp }));
+              } else if (m.type === "candidate") {
+                await pc.addIceCandidate(m.candidate).catch(() => {});
+              }
+            };
+            ws.onerror = () => fail(new Error("signaling error"));
+            ws.onclose = () => fail(new Error("signaling closed"));
+            setTimeout(() => fail(new Error("connect timeout")), 15000);
+          });
+        }
+        _recv(r) {
+          const call = this.calls.get(r.id),
+            stream = this.streams.get(r.id);
+          if (r.t === "res") {
+            if (call) {
+              call.status = r.status;
+            }
+          } else if (r.t === "data") {
+            if (call) call.body += r.chunk;
+            if (stream) stream(r.chunk);
+          } else if (r.t === "end") {
+            if (call) {
+              this.calls.delete(r.id);
+              r.error
+                ? call.reject(new Error(r.error))
+                : call.resolve({ status: call.status, text: call.body });
+            }
+          }
+        }
+        req(method, path, body) {
+          const id = this.nextId++;
+          return new Promise((resolve, reject) => {
+            this.calls.set(id, { status: 0, body: "", resolve, reject });
+            this.dc.send(JSON.stringify({ t: "req", id, method, path, body }));
+          });
+        }
+        subscribe(path, onRaw) {
+          const id = this.nextId++;
+          this.streams.set(id, onRaw);
+          this.dc.send(JSON.stringify({ t: "req", id, method: "GET", path }));
+          return () => {
+            this.streams.delete(id);
+            try {
+              this.dc.send(JSON.stringify({ t: "abort", id }));
+            } catch {}
+          };
+        }
+      }
+
+      const Conn = {
+        rtc: null, // RTCClient when remote, null when local
+        async fetchJSON(path) {
+          if (this.rtc) return JSON.parse((await this.rtc.req("GET", path)).text);
+          return (await fetch(path)).json();
+        },
+        async post(path, bodyObj) {
+          if (this.rtc) {
+            const r = await this.rtc.req("POST", path, JSON.stringify(bodyObj));
+            return { ok: r.status >= 200 && r.status < 300, text: r.text };
+          }
+          const r = await fetch(path, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(bodyObj),
+          });
+          return { ok: r.ok, text: await r.text() };
+        },
+        // onText gets each parsed SSE data payload (same shape as the local EventSource path).
+        subscribe(path, onText, onOpen, onError) {
+          if (this.rtc) {
+            onOpen && onOpen();
+            let buf = "";
+            return this.rtc.subscribe(path, (raw) => {
+              buf += raw;
+              let i;
+              while ((i = buf.indexOf("\n\n")) >= 0) {
+                const evt = buf.slice(0, i);
+                buf = buf.slice(i + 2);
+                for (const line of evt.split("\n"))
+                  if (line.startsWith("data:")) {
+                    try {
+                      onText(JSON.parse(line.slice(5).trim()));
+                    } catch {}
+                  }
+              }
+            });
+          }
+          const ev = new EventSource(path);
+          ev.onopen = () => onOpen && onOpen();
+          ev.onmessage = (e) => onText(JSON.parse(e.data));
+          ev.onerror = () => onError && onError();
+          return () => ev.close();
+        },
+      };
+
+      // Derive codehost-style mnemonic tags from a cwd like .../ws/<owner>/<repo>/tree/<wt>
+      function tagsFor(e) {
+        const t = [];
+        const m = /\/([^/]+)\/([^/]+)\/tree\/([^/]+)/.exec(e.cwd || "");
+        if (m) {
+          t.push(["repo", `${m[1]}/${m[2]}`], ["wt", m[3]]);
+        }
+        if (e.cli) t.push(["cli", e.cli]);
+        return t;
+      }
+      function age(e) {
+        if (!e.started_at) return "";
+        const s = Math.max(0, (Date.now() - e.started_at) / 1000);
+        if (s < 60) return Math.floor(s) + "s";
+        if (s < 3600) return Math.floor(s / 60) + "m";
+        return Math.floor(s / 3600) + "h";
+      }
+
+      function matches(e, toks) {
+        const hay = (e.prompt || "") + " " + e.cli + " " + (e.cwd || "") + " " + e.status;
+        return toks.every((tok) => {
+          tok = tok.toLowerCase();
+          const ci = tok.indexOf(":");
+          if (ci > 0) {
+            const k = tok.slice(0, ci),
+              v = tok.slice(ci + 1);
+            return tagsFor(e).some(([tk, tv]) => tk === k && tv.toLowerCase().includes(v));
+          }
+          return hay.toLowerCase().includes(tok);
+        });
+      }
+
+      function renderList() {
+        const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
+        const shown = entries.filter((e) => matches(e, toks));
+        $("count").textContent = `${shown.length} / ${entries.length} agents`;
+        $("list").innerHTML =
+          shown
+            .map((e) => {
+              const tags = tagsFor(e)
+                .map(
+                  ([k, v]) =>
+                    `<span class="rtag" data-k="${k}"><span style="opacity:.55">${k}:</span>${esc(v)}</span>`,
+                )
+                .join("");
+              return `<div class="row ${String(e.pid) === sel ? "sel" : ""}" data-pid="${e.pid}">
+        <div class="r1"><span class="dot ${esc(e.status)}"></span>
+          <span class="name">${esc(e.cli)}</span>
+          <span class="badge">pid ${e.pid}</span>
+          <span class="age">${age(e)}</span></div>
+        ${e.prompt ? `<div class="detail" title="${esc(e.prompt)}">${esc(e.prompt)}</div>` : ""}
+        <div class="rowtags">${tags}</div>
+      </div>`;
+            })
+            .join("") || `<div class="empty">no match</div>`;
+      }
+
+      async function loadList() {
+        try {
+          entries = await Conn.fetchJSON("/api/ls?all=1");
+          setConn(Conn.rtc ? "● " + (curRoom || "remote") : "● local", "var(--green)");
+        } catch (e) {
+          setConn(Conn.rtc ? "● peer down" : "● ay serve down", "var(--red)");
+        }
+        renderList();
+      }
+
+      function select(pid) {
+        sel = String(pid);
+        const e = entries.find((x) => String(x.pid) === sel);
+        if (!e) return;
+        renderList();
+        $("rhead").style.display = "flex";
+        $("composer").style.display = "flex";
+        $("hint").style.display = "block";
+        $("rdot").className = "dot " + e.status;
+        $("rname").textContent = e.cli;
+        $("rpid").textContent = "pid " + e.pid;
+        $("msg").focus();
+
+        // Render the agent's native TUI with xterm.js by feeding it the raw PTY
+        // stream (ANSI/cursor control intact) — see /api/tail?raw=1.
+        if (es) es.close();
+        if (term) {
+          term.dispose();
+          term = null;
+        }
+        const logEl = $("log");
+        logEl.innerHTML = "";
+        term = new Terminal({
+          convertEol: false,
+          disableStdin: false,
+          cursorBlink: true,
+          scrollback: 5000,
+          fontSize: 12,
+          fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
+          theme: { background: "#0d1117", foreground: "#c9d1d9", cursor: "#0d1117" },
+        });
+        fit = new FitAddon.FitAddon();
+        term.loadAddon(fit);
+        term.open(logEl);
+        // Drive the agent's PTY to the browser's terminal size so its TUI reflows to
+        // match what we render (POST /api/resize → winsize file + SIGWINCH on the host).
+        const pushSize = () => {
+          if (term && sel)
+            Conn.post("/api/resize/" + encodeURIComponent(sel), {
+              cols: term.cols,
+              rows: term.rows,
+            }).catch(() => {});
+        };
+        term.onResize(pushSize);
+        // Forward keystrokes/mouse typed into the terminal straight to the agent stdin
+        // (raw, no trailing Enter) so it's directly interactive, not just a viewer.
+        term.onData((d) => {
+          if (sel) Conn.post("/api/send", { keyword: sel, msg: d, code: "none" }).catch(() => {});
+        });
+        try {
+          fit.fit();
+        } catch {}
+        pushSize();
+
+        // True live tail via ay serve's SSE stream. First event is an xterm-rendered
+        // tail snapshot; later events are incremental deltas. We normalise terminal
+        // carriage returns so the stream reads cleanly as HTML, autoscroll while the
+        // viewer is pinned to the bottom, and cap the buffer so it can't grow forever.
+        $("livedot").className = "dot idle";
+        $("livetxt").textContent = "connecting…";
+        const close = Conn.subscribe(
+          "/api/tail/" + encodeURIComponent(sel) + "?raw=1",
+          (raw) => {
+            if (term) term.write(raw);
+          },
+          () => {
+            $("livedot").className = "dot active";
+            $("livetxt").textContent = "live";
+          },
+          () => {
+            $("livedot").className = "dot stopped";
+            $("livetxt").textContent = "disconnected";
+          },
+        );
+        es = { close };
+      }
+
+      async function send() {
+        if (!sel) return;
+        const msg = $("msg").value;
+        if (!msg.trim()) return;
+        $("send").disabled = true;
+        try {
+          const r = await Conn.post("/api/send", { keyword: sel, msg, code: "enter" });
+          if (r.ok) {
+            $("msg").value = "";
+          } else {
+            alert("send failed: " + r.text);
+          }
+        } finally {
+          $("send").disabled = false;
+          $("msg").focus();
+        }
+      }
+
+      $("list").addEventListener("click", (ev) => {
+        const row = ev.target.closest(".row");
+        if (row) select(row.dataset.pid);
+      });
+      $("q").addEventListener("input", renderList);
+      window.addEventListener("resize", () => {
+        if (fit)
+          try {
+            fit.fit();
+          } catch {}
+      });
+      $("send").addEventListener("click", send);
+      $("msg").addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
+          ev.preventDefault();
+          send();
+        }
+      });
+
+      // ---- rooms: localStorage cache + a manager you open by clicking the badge ----
+      const ROOMS_KEY = "ay.rooms";
+      let curRoom = null;
+      const loadRooms = () => {
+        try {
+          return JSON.parse(localStorage.getItem(ROOMS_KEY) || "{}");
+        } catch {
+          return {};
+        }
+      };
+      const saveRoom = (room, token, host) => {
+        const r = loadRooms();
+        r[room] = { token, host: host || SIG_DEFAULT, ts: Date.now() };
+        localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
+      };
+      const dropRoom = (room) => {
+        const r = loadRooms();
+        delete r[room];
+        localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
+      };
+      function setConn(text, color) {
+        $("conn").textContent = text;
+        $("conn").style.color = color;
+      }
+
+      async function connectRoom(room, token, host) {
+        host = host || SIG_DEFAULT;
+        saveRoom(room, token, host); // cache so the badge can list & reconnect later
+        curRoom = room;
+        if (Conn.rtc) {
+          try {
+            Conn.rtc.pc?.close();
+          } catch {}
+          Conn.rtc = null;
+        }
+        setConn("● connecting " + room + "…", "var(--amber)");
+        const c = new RTCClient(host, room, token);
+        c.onstate = (s) => {
+          if (s === "failed" || s === "closed") setConn("● peer lost", "var(--red)");
+        };
+        try {
+          await c.connect();
+          Conn.rtc = c;
+        } catch (e) {
+          setConn("● connect failed", "var(--red)");
+        }
+        loadList();
+      }
+
+      function parseRoomInput(s) {
+        s = s.trim();
+        const hash = s.indexOf("#");
+        if (hash >= 0) s = s.slice(hash + 1);
+        const m = /^([A-Za-z0-9_-]+):([^@\s]+)(?:@(.+))?$/.exec(decodeURIComponent(s));
+        return m ? { room: m[1], token: m[2], host: m[3] } : null;
+      }
+
+      function renderRooms() {
+        const r = loadRooms();
+        const names = Object.keys(r).sort((a, b) => r[b].ts - r[a].ts);
+        const items = names.length
+          ? names
+              .map(
+                (n) => `<div class="ritem ${n === curRoom ? "cur" : ""}">
+          <span class="rname" data-room="${esc(n)}">${esc(n)}</span>
+          <span class="rhost">${esc(r[n].host)}</span>
+          <span class="rx" data-del="${esc(n)}" title="forget">✕</span></div>`,
+              )
+              .join("")
+          : `<div class="empty2">no saved rooms — paste a share link below</div>`;
+        $("rooms").innerHTML = `<div class="rtitle">rooms · stored on this device</div>${items}
+      <div class="radd"><input id="roomin" placeholder="room:token  or  https://…/#room:token" /><button id="roomadd">add</button></div>
+      <div class="rconnect">share your own fleet — run this, then open the printed link:
+        <code id="cmd" title="click to copy">bunx agent-yes serve --share</code></div>`;
+      }
+
+      $("conn").addEventListener("click", () => {
+        const el = $("rooms");
+        if (el.style.display === "none") {
+          renderRooms();
+          el.style.display = "block";
+          $("roomin")?.focus();
+        } else el.style.display = "none";
+      });
+      $("rooms").addEventListener("click", (ev) => {
+        const name = ev.target.closest(".rname");
+        if (name) {
+          const r = loadRooms()[name.dataset.room];
+          if (r) {
+            connectRoom(name.dataset.room, r.token, r.host);
+            $("rooms").style.display = "none";
+          }
+          return;
+        }
+        const del = ev.target.closest(".rx");
+        if (del) {
+          dropRoom(del.dataset.del);
+          renderRooms();
+          return;
+        }
+        if (ev.target.id === "roomadd") {
+          const p = parseRoomInput($("roomin").value);
+          if (p) {
+            connectRoom(p.room, p.token, p.host);
+            $("rooms").style.display = "none";
+          } else alert("expected  room:token  or a share link");
+        }
+        if (ev.target.id === "cmd") {
+          navigator.clipboard?.writeText(ev.target.textContent).then(() => {
+            const o = ev.target.textContent;
+            ev.target.textContent = "copied ✓";
+            setTimeout(() => {
+              ev.target.textContent = o;
+            }, 1000);
+          });
+        }
+      });
+
+      // ---- launch: command-only URLs (#launch=<json>, NO token) ----
+      // The link carries only WHAT to run; the capability to run it is the viewer's
+      // own connected fleet (cached room) + a y/N confirm on that host. So a public
+      // launch link can never spawn on a machine the clicker doesn't already control.
+      function showLaunch(spec) {
+        const rooms = loadRooms();
+        const names = Object.keys(rooms).sort((a, b) => rooms[b].ts - rooms[a].ts);
+        const cmd = "ay " + (spec.cli || "claude") + (spec.prompt ? ` -- "${spec.prompt}"` : "");
+        const fleets = names.length
+          ? `<div class="lfleets">${names.map((n) => `<button class="lfleet" data-room="${esc(n)}">▷ ${esc(n)}</button>`).join("")}</div>
+         <div class="lhint">pick a fleet to run on — its host will ask to confirm</div>`
+          : `<div class="lwarn">No connected fleet on this device. Run <code>bunx agent-yes serve --share --allow-spawn</code>, open its link once, then reopen this launch link.</div>`;
+        $("launch").innerHTML = `<div class="lcard">
+      <div class="ltitle">Launch agent</div>
+      <div class="lcmd">${esc(cmd)}</div>
+      <div class="lcwd">cwd: ${esc(spec.cwd || "(host default)")}</div>
+      ${fleets}
+      <button class="lcancel">cancel</button></div>`;
+        $("launch").dataset.spec = JSON.stringify(spec);
+        $("launch").style.display = "flex";
+      }
+
+      async function launchOn(room, spec) {
+        const r = loadRooms()[room];
+        if (!r) return;
+        $("launch").style.display = "none";
+        await connectRoom(room, r.token, r.host);
+        await loadList();
+        // Match by "newest agent that wasn't here before" — the spawn returns the
+        // wrapper pid, but the agent registers under the runtime's own pid.
+        const before = new Set(entries.map((e) => e.pid));
+        const res = await Conn.post("/api/spawn", {
+          cli: spec.cli || "claude",
+          cwd: spec.cwd,
+          prompt: spec.prompt,
+        });
+        if (!res.ok) {
+          alert("launch failed: " + res.text);
+          return;
+        }
+        for (let i = 0; i < 14; i++) {
+          await loadList();
+          const fresh = entries
+            .filter((e) => !before.has(e.pid))
+            .sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
+          if (fresh.length) {
+            select(fresh[0].pid);
+            return;
+          }
+          await new Promise((r) => setTimeout(r, 800));
+        }
+      }
+
+      $("launch").addEventListener("click", (ev) => {
+        const f = ev.target.closest(".lfleet");
+        if (f) {
+          launchOn(f.dataset.room, JSON.parse($("launch").dataset.spec));
+          return;
+        }
+        if (ev.target.closest(".lcancel")) $("launch").style.display = "none";
+      });
+
+      // boot: a launch URL opens the launcher; otherwise connect from the hash (then
+      // eat the token); a bare #room reconnects from the cached token; else local.
+      async function boot() {
+        const raw = location.hash.replace(/^#/, "");
+        if (raw.startsWith("launch=")) {
+          let spec = null;
+          try {
+            spec = JSON.parse(decodeURIComponent(raw.slice(7)));
+          } catch {}
+          history.replaceState(null, document.title, location.pathname + location.search); // eat launch params
+          if (spec) showLaunch(spec);
+          setConn("● local", "var(--muted)");
+          loadList();
+          setInterval(loadList, 3000);
+          return;
+        }
+        const h = decodeURIComponent(raw);
+        const full = /^([A-Za-z0-9_-]+):([^@]+)(?:@(.+))?$/.exec(h);
+        const bare = /^([A-Za-z0-9_-]+)$/.exec(h);
+        if (full) {
+          const [, room, token, host] = full;
+          // SECURITY: strip the token from the URL immediately so it never lingers in
+          // the omnibox, history, or a screenshot. Keep only the room mnemonic.
+          history.replaceState(
+            null,
+            document.title,
+            location.pathname + location.search + "#" + room,
+          );
+          await connectRoom(room, token, host);
+        } else if (bare && loadRooms()[bare[1]]) {
+          const r = loadRooms()[bare[1]];
+          await connectRoom(bare[1], r.token, r.host);
+        } else {
+          setConn("● local", "var(--muted)");
+          loadList();
+        }
+        setInterval(loadList, 3000); // refresh statuses / new agents
+      }
+      boot();
+    </script>
+  </body>
+</html>

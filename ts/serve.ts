@@ -13,6 +13,7 @@ import {
   writeToIpc,
   type CommonOpts,
 } from "./subcommands.ts";
+import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 
 const DEFAULT_PORT = 7432;
 
@@ -123,6 +124,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  --port N          Port to listen on (default: ${DEFAULT_PORT})\n` +
         `  --host HOST       Interface to bind (default: 127.0.0.1; use 0.0.0.0 to expose)\n` +
         `  --token TOKEN     Auth token (auto-generated and saved if omitted)\n` +
+        `  --share [URL]     Share over WebRTC to agent-yes.com (bare flag mints a room+link)\n` +
+        `  --allow-spawn     Let the shared console launch new agents (asks y/N per request)\n` +
         `  --tls-cert FILE   TLS certificate PEM\n` +
         `  --tls-key  FILE   TLS private key PEM\n\n` +
         `Subcommands:\n` +
@@ -153,6 +156,16 @@ export async function cmdServe(rest: string[]): Promise<number> {
     .option("token", { type: "string", description: "Auth token (auto-generated if omitted)" })
     .option("tls-cert", { type: "string", description: "TLS certificate file (PEM)" })
     .option("tls-key", { type: "string", description: "TLS private key file (PEM)" })
+    .option("share", {
+      type: "string",
+      description:
+        "Share over WebRTC: bare flag mints a room+link, or pass webrtc://room:token@host",
+    })
+    .option("allow-spawn", {
+      type: "boolean",
+      default: false,
+      description: "Allow the shared console to spawn new agents (asks y/N per request on a TTY)",
+    })
     .help(false)
     .version(false)
     .exitProcess(false);
@@ -178,6 +191,26 @@ export async function cmdServe(rest: string[]): Promise<number> {
   }
 
   const token = await loadOrCreateToken(tokenFlag);
+  const allowSpawn = argv["allow-spawn"] === true;
+
+  // Spawn confirmation: launch requests are gated by --allow-spawn AND, on a TTY,
+  // an interactive y/N per request (a leaked launch link can't silently spawn).
+  const spawnQueue: Array<(ok: boolean) => void> = [];
+  let stdinWired = false;
+  const confirmSpawn = (cli: string, cwd: string, prompt: string): Promise<boolean> => {
+    if (!process.stdin.isTTY) return Promise.resolve(true); // flag is the consent when headless
+    if (!stdinWired) {
+      stdinWired = true;
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (d: string) => spawnQueue.shift()?.(/^y/i.test(d.trim())));
+      process.stdin.resume();
+    }
+    process.stdout.write(
+      `\n⚠ console requests spawn:  ay ${cli}${prompt ? ` -- "${prompt.slice(0, 60)}"` : ""}\n` +
+        `   cwd: ${cwd}\n   allow? [y/N] `,
+    );
+    return new Promise((res) => spawnQueue.push(res));
+  };
 
   const serverOpts: any = {
     hostname: host,
@@ -246,6 +279,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
       const tailM = /^\/api\/tail\/(.+)$/.exec(p);
       if (req.method === "GET" && tailM) {
         const keyword = decodeURIComponent(tailM[1]!);
+        // raw=1 streams the unmodified PTY bytes (ANSI/cursor control intact) so a
+        // browser xterm.js can render the real terminal; default stays ANSI-stripped.
+        const raw = url.searchParams.get("raw") === "1";
         try {
           const record = await resolveOne(keyword, defaultOpts());
           if (!record.log_file)
@@ -259,10 +295,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
                 ctrl.enqueue(enc.encode(`data: ${JSON.stringify(text)}\n\n`));
               const ping = () => ctrl.enqueue(enc.encode(": ping\n\n"));
 
-              // Initial tail
+              // Initial tail. Raw: replay the last ~64 KB of PTY bytes (enough to
+              // contain a recent full-screen redraw so xterm converges fast).
               const initBuf = await readFile(logPath).catch(() => Buffer.alloc(0));
-              const initText = await renderRawLog(initBuf, { mode: "tail", n: 96 });
-              send(initText);
+              if (raw)
+                send(new TextDecoder().decode(initBuf.slice(Math.max(0, initBuf.length - 65536))));
+              else send(await renderRawLog(initBuf, { mode: "tail", n: 96 }));
 
               let offset = initBuf.length;
               let closed = false;
@@ -291,11 +329,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
                   if (full.length <= offset) return;
                   const chunk = full.slice(offset);
                   offset = full.length;
-                  const text = new TextDecoder()
-                    .decode(chunk)
-                    .replace(ansiRe, "")
-                    .replace(ctrlRe, "");
-                  if (text.trim()) send(text.trimStart());
+                  if (raw) {
+                    send(new TextDecoder().decode(chunk));
+                  } else {
+                    const text = new TextDecoder()
+                      .decode(chunk)
+                      .replace(ansiRe, "")
+                      .replace(ctrlRe, "");
+                    if (text.trim()) send(text.trimStart());
+                  }
                 } catch {
                   /* log gone */
                 }
@@ -356,6 +398,74 @@ export async function cmdServe(rest: string[]): Promise<number> {
         }
       }
 
+      // POST /api/resize/:keyword  body {cols, rows} — drive the agent's PTY size.
+      // Mirrors `ay attach`: write ~/.agent-yes/winsize/<pid> then SIGWINCH; the
+      // agent's resize listener picks it up and reflows its TUI to that width.
+      const resizeM = /^\/api\/resize\/(.+)$/.exec(p);
+      if (req.method === "POST" && resizeM) {
+        const keyword = decodeURIComponent(resizeM[1]!);
+        let body: { cols?: number; rows?: number };
+        try {
+          body = await req.json();
+        } catch {
+          return new Response("invalid JSON body", { status: 400 });
+        }
+        const cols = Math.max(1, Math.floor(Number(body.cols) || 0));
+        const rows = Math.max(1, Math.floor(Number(body.rows) || 0));
+        if (!cols || !rows) return new Response("missing cols/rows", { status: 400 });
+        try {
+          const record = await resolveOne(keyword, defaultOpts());
+          const ayHome = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
+          const winsizeDir = path.join(ayHome, "winsize");
+          await mkdir(winsizeDir, { recursive: true });
+          await writeFile(
+            path.join(winsizeDir, String(record.pid)),
+            `${cols} ${rows} ${Date.now()}\n`,
+          );
+          try {
+            process.kill(record.pid, "SIGWINCH");
+          } catch {
+            /* agent gone */
+          }
+          return Response.json({ ok: true, pid: record.pid, cols, rows });
+        } catch (e) {
+          return new Response((e as Error).message, { status: 404 });
+        }
+      }
+
+      // POST /api/spawn  body {cli, cwd, prompt} — launch a new agent (gated)
+      if (req.method === "POST" && p === "/api/spawn") {
+        if (!allowSpawn)
+          return new Response("spawning disabled — start: ay serve --share --allow-spawn", {
+            status: 403,
+          });
+        let body: { cli?: string; cwd?: string; prompt?: string };
+        try {
+          body = await req.json();
+        } catch {
+          return new Response("invalid JSON body", { status: 400 });
+        }
+        const cli = String(body.cli ?? "claude");
+        if (!SUPPORTED_CLIS.includes(cli as never))
+          return new Response(`unsupported cli: ${cli}`, { status: 400 });
+        const cwd = typeof body.cwd === "string" && body.cwd ? body.cwd : process.cwd();
+        const prompt = String(body.prompt ?? "");
+        if (!(await confirmSpawn(cli, cwd, prompt)))
+          return new Response("denied by host", { status: 403 });
+        try {
+          const child = Bun.spawn(["ay", cli, ...(prompt ? ["--", prompt] : [])], {
+            cwd,
+            stdin: "ignore",
+            stdout: "ignore",
+            stderr: "ignore",
+          });
+          child.unref();
+          return Response.json({ ok: true, pid: child.pid, cli, cwd });
+        } catch (e) {
+          return new Response((e as Error).message, { status: 500 });
+        }
+      }
+
       return new Response("Not Found", { status: 404 });
     },
   };
@@ -380,6 +490,27 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'\n\n`,
     );
   }
+  // --share: bridge this local server to a WebRTC room so the agent-yes.com
+  // console can reach it peer-to-peer. Bare flag mints a room; a webrtc:// value
+  // joins an explicit one.
+  if (argv.share !== undefined) {
+    const shareUrl =
+      typeof argv.share === "string" && argv.share.startsWith("webrtc://") ? argv.share : undefined;
+    try {
+      const { startShare } = await import("./share.ts");
+      const { link } = await startShare({
+        url: shareUrl,
+        apiUrl: `http://127.0.0.1:${port}`,
+        apiToken: token,
+      });
+      process.stdout.write(
+        `\nshared over WebRTC — open this link (the token is eaten from the URL on open):\n  ${link}\n\n`,
+      );
+    } catch (e) {
+      process.stderr.write(`ay serve --share failed: ${(e as Error).message}\n`);
+    }
+  }
+
   process.stdout.write(`(Ctrl-C to stop)\n`);
 
   await new Promise<void>((resolve) => {
