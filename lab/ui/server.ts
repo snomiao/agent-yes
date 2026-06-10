@@ -26,6 +26,14 @@ Bun.serve({
       return new Response(HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
+    // The codehost room transport, vendored beside this file (see index.html's
+    // module script). Served with a JS MIME so the ESM import works.
+    if (url.pathname === "/room-client.js") {
+      return new Response(readFileSync(path.join(import.meta.dir, "room-client.js")), {
+        headers: { "Content-Type": "text/javascript; charset=utf-8" },
+      });
+    }
+
     if (url.pathname.startsWith("/api/")) {
       const upstream = AY_API + url.pathname + url.search;
       const res = await fetch(upstream, {
