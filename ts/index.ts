@@ -5,6 +5,7 @@ import path from "path";
 import DIE from "phpdie";
 import sflow from "sflow";
 import { XtermProxy } from "./xterm-proxy.ts";
+import { agentYesHome } from "./agentYesHome.ts";
 import {
   extractSessionId,
   getSessionForCwd,
@@ -643,11 +644,26 @@ export default async function agentYes({
     return pendingExitCode.resolve(exitCode);
   });
 
+  // Record the agent's current PTY size to ~/.agent-yes/ptysize/<pid> so `ay serve`
+  // / the web console can render the existing buffer at the agent's real width
+  // before adapting. Mirrors the Rust runtime (rs/src/pty_spawner.rs).
+  const writeCurrentPtysize = (cols: number, rows: number) => {
+    const dir = path.join(agentYesHome(), "ptysize");
+    void mkdir(dir, { recursive: true })
+      .then(() => writeFile(path.join(dir, String(process.pid)), `${cols} ${rows}\n`))
+      .catch(() => null);
+  };
+  {
+    const { cols, rows } = getTerminalDimensions();
+    writeCurrentPtysize(cols, rows);
+  }
+
   // when current tty resized, resize both pty and xterm proxy
   process.stdout.on("resize", () => {
     const { cols, rows } = getTerminalDimensions();
     shell.resize(cols, rows);
     xtermProxy.resize(cols, rows);
+    writeCurrentPtysize(cols, rows);
   });
 
   const isStillWorkingQ = () => {

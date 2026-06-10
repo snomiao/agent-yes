@@ -625,7 +625,7 @@
             };
             ws.onerror = () => fail(new Error("signaling error"));
             ws.onclose = () => fail(new Error("signaling closed"));
-            setTimeout(() => fail(new Error("connect timeout")), 15000);
+            setTimeout(() => fail(new Error("connect timeout")), 8000);
           });
         }
         _recv(r) {
@@ -814,25 +814,50 @@
         fit = new FitAddon.FitAddon();
         term.loadAddon(fit);
         term.open(logEl);
-        // Drive the agent's PTY to the browser's terminal size so its TUI reflows to
-        // match what we render (POST /api/resize → winsize file + SIGWINCH on the host).
+        // Adapt: drive the agent's PTY to the browser terminal size (POST
+        // /api/resize → winsize + SIGWINCH) so its TUI reflows to match what we
+        // render. Suppressed while we're merely adopting the agent's OWN size.
+        let adoptingAgentSize = false;
         const pushSize = () => {
-          if (term && sel)
+          if (term && sel && !adoptingAgentSize)
             Conn.post("/api/resize/" + encodeURIComponent(sel), {
               cols: term.cols,
               rows: term.rows,
             }).catch(() => {});
         };
         term.onResize(pushSize);
-        // Forward keystrokes/mouse typed into the terminal straight to the agent stdin
-        // (raw, no trailing Enter) so it's directly interactive, not just a viewer.
-        term.onData((d) => {
+        // Forward everything the terminal emits to the agent stdin (raw, no
+        // trailing Enter): keystrokes, paste, and — when a TUI enables mouse
+        // tracking — click / drag-motion / wheel as SGR mouse reports. onBinary
+        // covers the UTF-8 mouse encoding (DECSET 1005). Verified end-to-end:
+        // a drag emits \x1b[<0;..M / \x1b[<32;..M / \x1b[<0;..m, wheel \x1b[<64/65..M.
+        const fwd = (d) => {
           if (sel) Conn.post("/api/send", { keyword: sel, msg: d, code: "none" }).catch(() => {});
-        });
-        try {
-          fit.fit();
-        } catch {}
-        pushSize();
+        };
+        term.onData(fwd);
+        term.onBinary(fwd);
+        // Render the existing buffer at the AGENT's current width first so its
+        // wrapping is correct, instead of forcing our viewport width onto stale
+        // content. The user adapts to the window by resizing it (fit → push).
+        const selPid = sel;
+        Conn.fetchJSON("/api/size/" + encodeURIComponent(selPid))
+          .then((sz) => {
+            if (sel !== selPid || !term) return;
+            if (sz && sz.cols && sz.rows) {
+              adoptingAgentSize = true;
+              term.resize(sz.cols, sz.rows);
+              adoptingAgentSize = false;
+            } else {
+              try {
+                fit.fit();
+              } catch {}
+            }
+          })
+          .catch(() => {
+            try {
+              fit.fit();
+            } catch {}
+          });
 
         // True live tail via ay serve's SSE stream. First event is an xterm-rendered
         // tail snapshot; later events are incremental deltas. We normalise terminal
@@ -922,6 +947,9 @@
       async function connectRoom(room, token, host) {
         host = host || SIG_DEFAULT;
         saveRoom(room, token, host); // cache so the badge can list & reconnect later
+        try {
+          localStorage.setItem("ay.lastRoom", room); // reconnect here on a bare open
+        } catch {}
         curRoom = room;
         if (Conn.rtc) {
           try {
@@ -1093,6 +1121,7 @@
         const h = decodeURIComponent(raw);
         const full = /^([A-Za-z0-9_-]+):([^@]+)(?:@(.+))?$/.exec(h);
         const bare = /^([A-Za-z0-9_-]+)$/.exec(h);
+        let pending = null;
         if (full) {
           const [, room, token, host] = full;
           // SECURITY: strip the token from the URL immediately so it never lingers in
@@ -1102,15 +1131,28 @@
             document.title,
             location.pathname + location.search + "#" + room,
           );
-          await connectRoom(room, token, host);
+          pending = { room, token, host };
         } else if (bare && loadRooms()[bare[1]]) {
           const r = loadRooms()[bare[1]];
-          await connectRoom(bare[1], r.token, r.host);
-        } else {
-          setConn("● local", "var(--muted)");
-          loadList();
+          pending = { room: bare[1], token: r.token, host: r.host };
+        } else if (!raw) {
+          // No hash → reconnect to the last-used room (or the most recent saved
+          // one), so opening agent-yes.com brings back your list automatically.
+          const rooms = loadRooms();
+          const names = Object.keys(rooms);
+          if (names.length) {
+            const last = localStorage.getItem("ay.lastRoom");
+            const pick =
+              last && rooms[last] ? last : names.sort((a, b) => rooms[b].ts - rooms[a].ts)[0];
+            pending = { room: pick, token: rooms[pick].token, host: rooms[pick].host };
+          }
         }
+        // Render the UI immediately and refresh on a timer; connect to a room (if
+        // any) in the BACKGROUND so a dead/slow cached room never blanks the page.
+        if (!pending) setConn("● local", "var(--muted)");
+        loadList();
         setInterval(loadList, 3000); // refresh statuses / new agents
+        if (pending) connectRoom(pending.room, pending.token, pending.host);
       }
       boot();
     </script>

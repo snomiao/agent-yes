@@ -59,6 +59,18 @@ pub fn read_external_winsize_from(base_dir: &std::path::Path, pid: u32) -> Optio
     parse_winsize_line(content.lines().next()?)
 }
 
+/// Record the agent's CURRENT applied PTY size to `$AGENT_YES_HOME/ptysize/<pid>`
+/// (format: `<cols> <rows>\n`) so `ay serve` / the web console can render the
+/// existing buffer at the agent's real width before adapting to the viewport.
+/// Best-effort; never panics.
+pub fn write_current_ptysize(pid: u32, cols: u16, rows: u16) {
+    if let Some(dir) = crate::log_files::global_dir() {
+        let d = dir.join("ptysize");
+        let _ = std::fs::create_dir_all(&d);
+        let _ = std::fs::write(d.join(pid.to_string()), format!("{} {}\n", cols, rows));
+    }
+}
+
 /// Parse a single `"cols rows timestamp_ms"` line. Extracted for unit tests.
 pub fn parse_winsize_line(line: &str) -> Option<(u16, u16)> {
     let mut parts = line.split_ascii_whitespace();
