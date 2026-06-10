@@ -307,6 +307,11 @@ impl AgentContext {
                 initial_size.0, initial_size.1, e
             );
         }
+        crate::pty_spawner::write_current_ptysize(
+            std::process::id(),
+            initial_size.0,
+            initial_size.1,
+        );
         // Keep vterm in sync with the same initial size, otherwise vterm
         // could remain stuck at AgentContext::new() dimensions until the
         // first SIGWINCH fires.
@@ -373,6 +378,7 @@ impl AgentContext {
                         warn!("PTY resize to {}x{} failed: {}", cols, rows, e);
                     }
                     self.vterm.resize(rows, cols);
+                    crate::pty_spawner::write_current_ptysize(std::process::id(), cols, rows);
                 }
 
                 // Stdin data

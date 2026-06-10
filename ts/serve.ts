@@ -276,6 +276,32 @@ export async function cmdServe(rest: string[]): Promise<number> {
         }
       }
 
+      // GET /api/size/:keyword — the agent's current PTY size, so the console can
+      // render the existing buffer at the agent's real width before adapting.
+      const sizeM = /^\/api\/size\/(.+)$/.exec(p);
+      if (req.method === "GET" && sizeM) {
+        const keyword = decodeURIComponent(sizeM[1]!);
+        try {
+          const record = await resolveOne(keyword, defaultOpts());
+          const ayHome = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
+          let cols: number | null = null;
+          let rows: number | null = null;
+          try {
+            const txt = await readFile(path.join(ayHome, "ptysize", String(record.pid)), "utf-8");
+            const [c, r] = txt.trim().split(/\s+/).map(Number);
+            if (c > 0 && r > 0) {
+              cols = c;
+              rows = r;
+            }
+          } catch {
+            /* no ptysize sidecar (older agent or not yet written) */
+          }
+          return Response.json({ pid: record.pid, cols, rows });
+        } catch (e) {
+          return new Response((e as Error).message, { status: 404 });
+        }
+      }
+
       // GET /api/tail/:keyword  — SSE streaming
       const tailM = /^\/api\/tail\/(.+)$/.exec(p);
       if (req.method === "GET" && tailM) {
