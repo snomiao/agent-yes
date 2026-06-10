@@ -296,6 +296,67 @@
         margin-top: 16px;
       }
 
+      /* new-agent button (header) + spawn form (reuses the launch overlay shell) */
+      .metaright {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+      .newbtn {
+        background: var(--accent);
+        color: var(--bg);
+        border: 0;
+        border-radius: 7px;
+        font-weight: 600;
+        font-size: 11.5px;
+        padding: 4px 11px;
+        cursor: pointer;
+        line-height: 1.6;
+      }
+      .newbtn:hover {
+        filter: brightness(1.12);
+      }
+      .lcard .nfield {
+        margin-top: 12px;
+      }
+      .lcard .nfield label {
+        display: block;
+        color: var(--muted);
+        font-size: 10.5px;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        margin-bottom: 4px;
+      }
+      .lcard .nfield input,
+      .lcard .nfield textarea {
+        width: 100%;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--fg);
+        font: 13px var(--mono);
+        padding: 8px 10px;
+        outline: 0;
+        resize: vertical;
+      }
+      .lcard .nfield input:focus,
+      .lcard .nfield textarea:focus {
+        border-color: var(--accent);
+      }
+      .lcard .lrow {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-top: 18px;
+      }
+      .lcard .lrow .lcancel {
+        margin-top: 0;
+      }
+      .lfleet:disabled {
+        opacity: 0.5;
+        cursor: progress;
+      }
+
       .list {
         overflow-y: auto;
         flex: 1;
@@ -491,6 +552,14 @@
     />
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+    <script type="module">
+      // codehost room transport — vendored from codehost's `bun run build:lib`.
+      // Loaded as a module (deferred), so the classic script below awaits the
+      // "codehost-ready" event before first use.
+      import * as codehost from "./room-client.js";
+      window.__codehost = codehost;
+      window.dispatchEvent(new Event("codehost-ready"));
+    </script>
   </head>
   <body>
     <div class="app">
@@ -510,8 +579,13 @@
             />
           </div>
           <div class="meta">
-            <span id="count"></span
-            ><span id="conn" class="connbadge" title="rooms — click to manage">● local</span>
+            <span id="count"></span>
+            <span class="metaright">
+              <button id="newbtn" class="newbtn" title="spawn a new agent on this fleet">
+                + New agent
+              </button>
+              <span id="conn" class="connbadge" title="rooms — click to manage">● local</span>
+            </span>
           </div>
           <div class="rooms" id="rooms" style="display: none"></div>
         </div>
@@ -545,6 +619,7 @@
     </div>
 
     <div class="launchoverlay" id="launch" style="display: none"></div>
+    <div class="launchoverlay" id="newform" style="display: none"></div>
 
     <script>
       let entries = [];
@@ -667,13 +742,167 @@
         }
       }
 
-      const Conn = {
-        rtc: null, // RTCClient when remote, null when local
+      // ---- codehost rooms: a THIRD wire -----------------------------------
+      // A codehost room can hold several machines: every `codehost serve`
+      // daemon advertises its live agents (PeerMeta.agents) and proxies the
+      // local ay-serve API over its WebRTC tunnel at /__codehost/agent-yes/*.
+      // This wire aggregates all hosts' agents into one list, then routes each
+      // per-agent call to the host that owns the pid. Known v1 limitation:
+      // pids may collide across hosts (last listed wins); the host: tag keeps
+      // them tellable-apart visually.
+      const CH_API = "/__codehost/agent-yes";
+      class CodehostClient {
+        constructor(token) {
+          Object.assign(this, { token, room: null, byPid: new Map(), onstate: () => {} });
+        }
+        async connect() {
+          if (!window.__codehost)
+            await new Promise((r) => window.addEventListener("codehost-ready", r, { once: true }));
+          let firstPeers;
+          const ready = new Promise((resolve) => (firstPeers = resolve));
+          this.room = window.__codehost.joinRoom({
+            token: this.token,
+            onStatus: (open) => {
+              if (!open) this.onstate("closed");
+            },
+            onPeers: () => {
+              this.onstate("open");
+              firstPeers();
+            },
+          });
+          // First peer broadcast usually lands instantly after the WS opens;
+          // don't hang the UI on an empty/unreachable room.
+          await Promise.race([ready, new Promise((r) => setTimeout(r, 6000))]);
+        }
+        close() {
+          this.room?.close();
+        }
+        hosts() {
+          // Machines that can answer for agents: anything advertising agents,
+          // plus root daemons (their ay serve may know agents the broadcast
+          // hasn't picked up yet).
+          return (this.room?.peers || []).filter(
+            (p) => p.meta && ((p.meta.agents || []).length || p.meta.kind === "root"),
+          );
+        }
+        anyHost() {
+          const h = this.hosts();
+          return h.length ? h[0].peerId : null;
+        }
+        peerFor(path) {
+          const m = /^\/api\/(?:tail|size|resize|read|status)\/([^/?]+)/.exec(path);
+          const kw = m ? decodeURIComponent(m[1]) : null;
+          return (kw && this.byPid.get(kw)) || null;
+        }
+        async ls(path) {
+          const hosts = this.hosts();
+          const lists = await Promise.all(
+            hosts.map(async (p) => {
+              try {
+                const res = await this.room.fetch(p.peerId, "GET", CH_API + path);
+                if (!res.ok) throw new Error("HTTP " + res.status);
+                return (await res.json()).map((e) => ({ ...e, _host: p.meta?.host }));
+              } catch {
+                // ay serve down on that host — fall back to the daemon-advertised list.
+                return (p.meta?.agents || []).map((a) => ({
+                  pid: a.pid,
+                  cli: a.tool,
+                  prompt: a.title || null,
+                  cwd: a.cwd,
+                  status: a.state,
+                  started_at: a.startedAt,
+                  _host: p.meta?.host,
+                }));
+              }
+            }),
+          );
+          const byPid = new Map();
+          const merged = [];
+          lists.forEach((arr, i) => {
+            for (const e of arr) {
+              byPid.set(String(e.pid), hosts[i].peerId);
+              merged.push(e);
+            }
+          });
+          this.byPid = byPid;
+          return merged;
+        }
         async fetchJSON(path) {
+          if (path.startsWith("/api/ls")) return this.ls(path);
+          const peer = this.peerFor(path) || this.anyHost();
+          if (!peer) throw new Error("no codehost peer");
+          const res = await this.room.fetch(peer, "GET", CH_API + path);
+          if (!res.ok) throw new Error("HTTP " + res.status);
+          return res.json();
+        }
+        async post(path, bodyObj) {
+          const kw = bodyObj && bodyObj.keyword != null ? String(bodyObj.keyword) : null;
+          const peer = (kw && this.byPid.get(kw)) || this.peerFor(path) || this.anyHost();
+          if (!peer) return { ok: false, text: "no codehost peer in the room" };
+          const res = await this.room.fetch(peer, "POST", CH_API + path, {
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify(bodyObj),
+          });
+          return { ok: res.status >= 200 && res.status < 300, text: await res.text() };
+        }
+        subscribe(path, onText, onOpen, onError) {
+          let cancelled = false;
+          let reader = null;
+          (async () => {
+            const peer = this.peerFor(path) || this.anyHost();
+            if (!peer) {
+              onError && onError();
+              return;
+            }
+            try {
+              const res = await this.room.fetch(peer, "GET", CH_API + path, {
+                headers: { accept: "text/event-stream" },
+              });
+              if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
+              onOpen && onOpen();
+              reader = res.body.getReader();
+              const dec = new TextDecoder();
+              let buf = "";
+              for (;;) {
+                const { done, value } = await reader.read();
+                if (done || cancelled) break;
+                buf += dec.decode(value, { stream: true });
+                let i;
+                while ((i = buf.indexOf("\n\n")) >= 0) {
+                  const evt = buf.slice(0, i);
+                  buf = buf.slice(i + 2);
+                  for (const line of evt.split("\n"))
+                    if (line.startsWith("data:")) {
+                      try {
+                        onText(JSON.parse(line.slice(5).trim()));
+                      } catch {}
+                    }
+                }
+              }
+              if (!cancelled) onError && onError();
+            } catch {
+              if (!cancelled) onError && onError();
+            }
+          })();
+          return () => {
+            cancelled = true;
+            try {
+              reader?.cancel();
+            } catch {}
+          };
+        }
+      }
+
+      const Conn = {
+        rtc: null, // RTCClient when remote (ay share), null when local
+        ch: null, // CodehostClient when viewing a codehost room
+        async fetchJSON(path) {
+          if (this.ch) return this.ch.fetchJSON(path);
           if (this.rtc) return JSON.parse((await this.rtc.req("GET", path)).text);
           return (await fetch(path)).json();
         },
         async post(path, bodyObj) {
+          if (this.ch) return this.ch.post(path, bodyObj);
           if (this.rtc) {
             const r = await this.rtc.req("POST", path, JSON.stringify(bodyObj));
             return { ok: r.status >= 200 && r.status < 300, text: r.text };
@@ -687,6 +916,7 @@
         },
         // onText gets each parsed SSE data payload (same shape as the local EventSource path).
         subscribe(path, onText, onOpen, onError) {
+          if (this.ch) return this.ch.subscribe(path, onText, onOpen, onError);
           if (this.rtc) {
             onOpen && onOpen();
             let buf = "";
@@ -721,6 +951,7 @@
           t.push(["repo", `${m[1]}/${m[2]}`], ["wt", m[3]]);
         }
         if (e.cli) t.push(["cli", e.cli]);
+        if (e._host) t.push(["host", e._host]); // codehost rooms: which machine
         return t;
       }
       function age(e) {
@@ -771,11 +1002,12 @@
       }
 
       async function loadList() {
+        const remote = Conn.ch || Conn.rtc;
         try {
           entries = await Conn.fetchJSON("/api/ls?all=1");
-          setConn(Conn.rtc ? "● " + (curRoom || "remote") : "● local", "var(--green)");
+          setConn(remote ? "● " + (curRoom || "remote") : "● local", "var(--green)");
         } catch (e) {
-          setConn(Conn.rtc ? "● peer down" : "● ay serve down", "var(--red)");
+          setConn(remote ? "● peer down" : "● ay serve down", "var(--red)");
         }
         renderList();
       }
@@ -814,6 +1046,13 @@
         fit = new FitAddon.FitAddon();
         term.loadAddon(fit);
         term.open(logEl);
+        // An agent can rename itself by emitting an OSC 0/2 title sequence
+        // (\x1b]2;my-name\x07); xterm parses it out of the raw PTY stream we already
+        // feed it, so we just surface the latest title as the header name. Falls
+        // back to the cli name when the agent never sets one.
+        term.onTitleChange((t) => {
+          if (sel === String(e.pid) && t && t.trim()) $("rname").textContent = t.trim();
+        });
         // Adapt: drive the agent's PTY to the browser terminal size (POST
         // /api/resize → winsize + SIGWINCH) so its TUI reflows to match what we
         // render. Suppressed while we're merely adopting the agent's OWN size.
@@ -944,6 +1183,34 @@
         $("conn").style.color = color;
       }
 
+      // codehost rooms ride the same saved-rooms cache, discriminated by the
+      // sentinel host "codehost". The token is a bearer secret — never render
+      // it; display a short FNV-1a mnemonic instead (mirrors codehost.dev).
+      const CH_HOST = "codehost";
+      function chName(token) {
+        let h = 0x811c9dc5;
+        for (let i = 0; i < token.length; i++) {
+          h ^= token.charCodeAt(i);
+          h = Math.imul(h, 0x01000193);
+        }
+        return "ch-" + (h >>> 0).toString(36).slice(0, 4).padStart(4, "0");
+      }
+
+      function dropConn() {
+        if (Conn.rtc) {
+          try {
+            Conn.rtc.pc?.close();
+          } catch {}
+          Conn.rtc = null;
+        }
+        if (Conn.ch) {
+          try {
+            Conn.ch.close();
+          } catch {}
+          Conn.ch = null;
+        }
+      }
+
       async function connectRoom(room, token, host) {
         host = host || SIG_DEFAULT;
         saveRoom(room, token, host); // cache so the badge can list & reconnect later
@@ -951,13 +1218,22 @@
           localStorage.setItem("ay.lastRoom", room); // reconnect here on a bare open
         } catch {}
         curRoom = room;
-        if (Conn.rtc) {
-          try {
-            Conn.rtc.pc?.close();
-          } catch {}
-          Conn.rtc = null;
-        }
+        dropConn();
         setConn("● connecting " + room + "…", "var(--amber)");
+        if (host === CH_HOST) {
+          const c = new CodehostClient(token);
+          c.onstate = (s) => {
+            if (s === "closed") setConn("● room lost", "var(--red)");
+          };
+          try {
+            await c.connect();
+            Conn.ch = c;
+          } catch (e) {
+            setConn("● connect failed", "var(--red)");
+          }
+          loadList();
+          return;
+        }
         const c = new RTCClient(host, room, token);
         c.onstate = (s) => {
           if (s === "failed" || s === "closed") setConn("● peer lost", "var(--red)");
@@ -975,7 +1251,13 @@
         s = s.trim();
         const hash = s.indexOf("#");
         if (hash >= 0) s = s.slice(hash + 1);
-        const m = /^([A-Za-z0-9_-]+):([^@\s]+)(?:@(.+))?$/.exec(decodeURIComponent(s));
+        s = decodeURIComponent(s);
+        // codehost rooms: "ch:<room-token>" or a codehost.dev share link ("…#t=<token>").
+        if (s.startsWith("ch:") || s.startsWith("t=")) {
+          const token = (s.startsWith("ch:") ? s.slice(3) : s.slice(2)).trim();
+          return token ? { room: chName(token), token, host: CH_HOST } : null;
+        }
+        const m = /^([A-Za-z0-9_-]+):([^@\s]+)(?:@(.+))?$/.exec(s);
         return m ? { room: m[1], token: m[2], host: m[3] } : null;
       }
 
@@ -995,7 +1277,9 @@
         $("rooms").innerHTML = `<div class="rtitle">rooms · stored on this device</div>${items}
       <div class="radd"><input id="roomin" placeholder="room:token  or  https://…/#room:token" /><button id="roomadd">add</button></div>
       <div class="rconnect">share your own fleet — run this, then open the printed link:
-        <code id="cmd" title="click to copy">bunx agent-yes serve --share</code></div>`;
+        <code id="cmd" title="click to copy">bunx agent-yes serve --share</code></div>
+      <div class="rconnect">or view a <b>codehost</b> room — paste <code>ch:&lt;room-token&gt;</code> (or a
+        codehost.dev share link) above; every machine in the room shows its agents here.</div>`;
       }
 
       $("conn").addEventListener("click", () => {
@@ -1050,8 +1334,8 @@
         const cmd = "ay " + (spec.cli || "claude") + (spec.prompt ? ` -- "${spec.prompt}"` : "");
         const fleets = names.length
           ? `<div class="lfleets">${names.map((n) => `<button class="lfleet" data-room="${esc(n)}">▷ ${esc(n)}</button>`).join("")}</div>
-         <div class="lhint">pick a fleet to run on — its host will ask to confirm</div>`
-          : `<div class="lwarn">No connected fleet on this device. Run <code>bunx agent-yes serve --share --allow-spawn</code>, open its link once, then reopen this launch link.</div>`;
+         <div class="lhint">pick a fleet to run on</div>`
+          : `<div class="lwarn">No connected fleet on this device. Run <code>bunx agent-yes serve --share</code>, open its link once, then reopen this launch link.</div>`;
         $("launch").innerHTML = `<div class="lcard">
       <div class="ltitle">Launch agent</div>
       <div class="lcmd">${esc(cmd)}</div>
@@ -1062,23 +1346,23 @@
         $("launch").style.display = "flex";
       }
 
-      async function launchOn(room, spec) {
-        const r = loadRooms()[room];
-        if (!r) return;
-        $("launch").style.display = "none";
-        await connectRoom(room, r.token, r.host);
+      // Spawn a new agent on the CURRENT connection (local same-origin, or the
+      // connected remote fleet) and select it once it registers. Shared by the
+      // launch-URL flow and the "+ New agent" button. Returns false on a spawn
+      // error (the alert is already shown), true otherwise.
+      async function spawnAndSelect(spec) {
         await loadList();
         // Match by "newest agent that wasn't here before" — the spawn returns the
         // wrapper pid, but the agent registers under the runtime's own pid.
         const before = new Set(entries.map((e) => e.pid));
         const res = await Conn.post("/api/spawn", {
           cli: spec.cli || "claude",
-          cwd: spec.cwd,
-          prompt: spec.prompt,
+          cwd: spec.cwd || undefined,
+          prompt: spec.prompt || undefined,
         });
         if (!res.ok) {
           alert("launch failed: " + res.text);
-          return;
+          return false;
         }
         for (let i = 0; i < 14; i++) {
           await loadList();
@@ -1087,10 +1371,19 @@
             .sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
           if (fresh.length) {
             select(fresh[0].pid);
-            return;
+            return true;
           }
           await new Promise((r) => setTimeout(r, 800));
         }
+        return true;
+      }
+
+      async function launchOn(room, spec) {
+        const r = loadRooms()[room];
+        if (!r) return;
+        $("launch").style.display = "none";
+        await connectRoom(room, r.token, r.host);
+        await spawnAndSelect(spec);
       }
 
       $("launch").addEventListener("click", (ev) => {
@@ -1100,6 +1393,61 @@
           return;
         }
         if (ev.target.closest(".lcancel")) $("launch").style.display = "none";
+      });
+
+      // ---- "+ New agent": a spawn form for the CURRENTLY connected fleet ----
+      // Click → fill (cli defaults to claude, cwd prefilled from the selected agent
+      // when there is one, prompt optional) → POST /api/spawn on this connection.
+      // Always allowed: the console already controls every running agent's stdin.
+      function showNew() {
+        const here = entries.find((x) => String(x.pid) === sel);
+        const cwd = here?.cwd || "";
+        const where = Conn.rtc ? curRoom || "remote fleet" : "local";
+        $("newform").innerHTML = `<div class="lcard">
+      <div class="ltitle">New agent · ${esc(where)}</div>
+      <div class="nfield"><label>CLI</label><input id="nf-cli" value="claude" spellcheck="false" autocapitalize="off" /></div>
+      <div class="nfield"><label>Working dir</label><input id="nf-cwd" value="${esc(cwd)}" placeholder="(host default)" spellcheck="false" autocapitalize="off" /></div>
+      <div class="nfield"><label>Prompt — optional</label><textarea id="nf-prompt" rows="3" placeholder="initial message to send the agent…"></textarea></div>
+      <div class="lrow">
+        <button class="lfleet" id="nf-go">▷ Launch</button>
+        <button class="lcancel" id="nf-cancel">cancel</button>
+      </div>
+      <div class="lhint">POST /api/spawn on this fleet. ⌘/Ctrl+Enter to launch.</div></div>`;
+        $("newform").style.display = "flex";
+        setTimeout(() => $("nf-prompt")?.focus(), 0);
+      }
+
+      async function submitNew() {
+        const go = $("nf-go");
+        if (!go || go.disabled) return;
+        const spec = {
+          cli: ($("nf-cli").value || "claude").trim(),
+          cwd: $("nf-cwd").value.trim(),
+          prompt: $("nf-prompt").value,
+        };
+        go.disabled = true;
+        go.textContent = "launching…";
+        const ok = await spawnAndSelect(spec);
+        if (ok) {
+          $("newform").style.display = "none";
+        } else {
+          go.disabled = false;
+          go.textContent = "▷ Launch";
+        }
+      }
+
+      $("newbtn").addEventListener("click", showNew);
+      $("newform").addEventListener("click", (ev) => {
+        if (ev.target.id === "nf-go") submitNew();
+        else if (ev.target.id === "nf-cancel" || ev.target === $("newform"))
+          $("newform").style.display = "none";
+      });
+      $("newform").addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape") $("newform").style.display = "none";
+        else if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
+          ev.preventDefault();
+          submitNew();
+        }
       });
 
       // boot: a launch URL opens the launcher; otherwise connect from the hash (then
@@ -1119,9 +1467,23 @@
           return;
         }
         const h = decodeURIComponent(raw);
-        const full = /^([A-Za-z0-9_-]+):([^@]+)(?:@(.+))?$/.exec(h);
-        const bare = /^([A-Za-z0-9_-]+)$/.exec(h);
         let pending = null;
+        // codehost rooms first — the generic room:token regex below would
+        // otherwise eat "ch:<token>" as room "ch".
+        if (h.startsWith("ch:") || h.startsWith("t=")) {
+          const p = parseRoomInput(h);
+          if (p) {
+            // SECURITY: strip the bearer token from the URL immediately.
+            history.replaceState(
+              null,
+              document.title,
+              location.pathname + location.search + "#" + p.room,
+            );
+            pending = p;
+          }
+        }
+        const full = pending ? null : /^([A-Za-z0-9_-]+):([^@]+)(?:@(.+))?$/.exec(h);
+        const bare = /^([A-Za-z0-9_-]+)$/.exec(h);
         if (full) {
           const [, room, token, host] = full;
           // SECURITY: strip the token from the URL immediately so it never lingers in

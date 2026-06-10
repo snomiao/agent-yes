@@ -126,7 +126,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  --host HOST       Interface to bind (default: 127.0.0.1; use 0.0.0.0 to expose)\n` +
         `  --token TOKEN     Auth token (auto-generated and saved if omitted)\n` +
         `  --share [URL]     Share over WebRTC to agent-yes.com (bare flag mints a room+link)\n` +
-        `  --allow-spawn     Let the shared console launch new agents (asks y/N per request)\n` +
+        `  --allow-spawn     Deprecated no-op — the console can always spawn agents\n` +
         `  --tls-cert FILE   TLS certificate PEM\n` +
         `  --tls-key  FILE   TLS private key PEM\n\n` +
         `Subcommands:\n` +
@@ -165,7 +165,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
     .option("allow-spawn", {
       type: "boolean",
       default: false,
-      description: "Allow the shared console to spawn new agents (asks y/N per request on a TTY)",
+      description: "Deprecated no-op — the console can always spawn agents",
     })
     .help(false)
     .version(false)
@@ -192,26 +192,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
   }
 
   const token = await loadOrCreateToken(tokenFlag);
-  const allowSpawn = argv["allow-spawn"] === true;
-
-  // Spawn confirmation: launch requests are gated by --allow-spawn AND, on a TTY,
-  // an interactive y/N per request (a leaked launch link can't silently spawn).
-  const spawnQueue: Array<(ok: boolean) => void> = [];
-  let stdinWired = false;
-  const confirmSpawn = (cli: string, cwd: string, prompt: string): Promise<boolean> => {
-    if (!process.stdin.isTTY) return Promise.resolve(true); // flag is the consent when headless
-    if (!stdinWired) {
-      stdinWired = true;
-      process.stdin.setEncoding("utf8");
-      process.stdin.on("data", (d: string) => spawnQueue.shift()?.(/^y/i.test(d.trim())));
-      process.stdin.resume();
-    }
-    process.stdout.write(
-      `\n⚠ console requests spawn:  ay ${cli}${prompt ? ` -- "${prompt.slice(0, 60)}"` : ""}\n` +
-        `   cwd: ${cwd}\n   allow? [y/N] `,
-    );
-    return new Promise((res) => spawnQueue.push(res));
-  };
+  // Spawning is always allowed: a connected console already has full read-write
+  // control over every running agent (it writes straight to their stdin), so it
+  // can already make an agent do anything — gating /api/spawn behind a flag or a
+  // y/N prompt bought no real safety. We just log each spawn so the host sees it.
+  // (--allow-spawn is still accepted as a no-op for older invocations.)
 
   const serverOpts: any = {
     hostname: host,
@@ -485,12 +470,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
         }
       }
 
-      // POST /api/spawn  body {cli, cwd, prompt} — launch a new agent (gated)
+      // POST /api/spawn  body {cli, cwd, prompt} — launch a new agent
       if (req.method === "POST" && p === "/api/spawn") {
-        if (!allowSpawn)
-          return new Response("spawning disabled — start: ay serve --share --allow-spawn", {
-            status: 403,
-          });
         let body: { cli?: string; cwd?: string; prompt?: string };
         try {
           body = await req.json();
@@ -502,8 +483,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
           return new Response(`unsupported cli: ${cli}`, { status: 400 });
         const cwd = typeof body.cwd === "string" && body.cwd ? body.cwd : process.cwd();
         const prompt = String(body.prompt ?? "");
-        if (!(await confirmSpawn(cli, cwd, prompt)))
-          return new Response("denied by host", { status: 403 });
+        process.stderr.write(
+          `→ console spawned:  ay ${cli}${prompt ? ` -- "${prompt.slice(0, 60)}"` : ""}  (cwd: ${cwd})\n`,
+        );
         try {
           const child = Bun.spawn(["ay", cli, ...(prompt ? ["--", prompt] : [])], {
             cwd,
