@@ -9,6 +9,7 @@ class U {
   ws = null;
   closed = !1;
   reconnectDelay = 1000;
+  reconnectTimer = null;
   heartbeat = null;
   stableTimer = null;
   openedAt = 0;
@@ -17,7 +18,29 @@ class U {
     this.peerId = q.peerId ?? W();
   }
   connect() {
-    ((this.closed = !1), this.open());
+    ((this.closed = !1), this.attachWakeListeners(), this.open());
+  }
+  onWake = () => {
+    if (this.closed) return;
+    let q = this.ws?.readyState;
+    if (q === 1) return;
+    if (q === 0) {
+      try {
+        this.ws?.close();
+      } catch {}
+      return;
+    }
+    if (this.reconnectTimer != null) (this.clearReconnectTimer(), this.open());
+  };
+  attachWakeListeners() {
+    globalThis.document?.addEventListener("visibilitychange", this.onWake);
+    let z = globalThis.window;
+    (z?.addEventListener("focus", this.onWake), z?.addEventListener("online", this.onWake));
+  }
+  detachWakeListeners() {
+    globalThis.document?.removeEventListener("visibilitychange", this.onWake);
+    let z = globalThis.window;
+    (z?.removeEventListener("focus", this.onWake), z?.removeEventListener("online", this.onWake));
   }
   roomUrl() {
     return `${this.opts.url.replace(/\/+$/, "")}/room/${encodeURIComponent(this.opts.token)}`;
@@ -89,9 +112,14 @@ class U {
   scheduleReconnect() {
     let q = this.reconnectDelay;
     ((this.reconnectDelay = Math.min(q * 2, 15000)),
-      setTimeout(() => {
-        if (!this.closed) this.open();
-      }, q));
+      this.clearReconnectTimer(),
+      (this.reconnectTimer = setTimeout(() => {
+        if (((this.reconnectTimer = null), !this.closed)) this.open();
+      }, q)));
+  }
+  clearReconnectTimer() {
+    if (this.reconnectTimer != null)
+      (clearTimeout(this.reconnectTimer), (this.reconnectTimer = null));
   }
   sendSignal(q, z) {
     let K = { type: "signal", to: q, data: z };
@@ -104,7 +132,11 @@ class U {
     }
   }
   close() {
-    ((this.closed = !0), this.stopHeartbeat(), this.clearStableTimer());
+    ((this.closed = !0),
+      this.detachWakeListeners(),
+      this.clearReconnectTimer(),
+      this.stopHeartbeat(),
+      this.clearStableTimer());
     try {
       this.ws?.close();
     } catch {}

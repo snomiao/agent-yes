@@ -83,7 +83,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
 
   if (sub === "install") {
     const token = await loadOrCreateToken(undefined);
-    // Build the ay serve command with forwarded args (port, host, etc.)
+    // Build the ay serve command with forwarded args (port, host, --webrtc, etc.)
     const serveCmd = ["ay", "serve", ...args].join(" ");
     const proc = Bun.spawn(
       [oxmgrBin, "start", serveCmd, "--name", DAEMON_NAME, "--restart", "always"],
@@ -91,12 +91,19 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     );
     const code = await proc.exited;
     if (code === 0) {
+      const portM = /--port[=\s](\d+)/.exec(args.join(" "));
+      const port = portM ? Number(portM[1]) : DEFAULT_PORT;
       process.stdout.write(`\ninstalled '${DAEMON_NAME}' as a daemon via oxmgr\n`);
       process.stdout.write(`token: ${token}\n\n`);
-      process.stdout.write(`  ay ls   ${token}@<host>:${DEFAULT_PORT}\n`);
-      process.stdout.write(`  ay remote add <alias> http://${token}@<host>:${DEFAULT_PORT}\n`);
+      process.stdout.write(`  ay ls   ${token}@<host>:${port}\n`);
+      process.stdout.write(`  ay remote add <alias> http://${token}@<host>:${port}\n`);
       process.stdout.write(`  ay serve logs                # view server logs\n`);
       process.stdout.write(`  ay serve uninstall           # remove daemon\n`);
+      if (args.some((a) => a.startsWith("--webrtc") || a.startsWith("--share"))) {
+        process.stdout.write(
+          `\nthe WebRTC share link is printed by the daemon — see: ay serve logs\n`,
+        );
+      }
     }
     return code ?? 1;
   }
@@ -182,6 +189,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
       type: "string",
       description: "Legacy alias for --http --webrtc",
     })
+    .option("daemon", {
+      alias: "d",
+      type: "boolean",
+      default: false,
+      description: "Install as a background daemon via oxmgr (same as: ay serve install <flags>)",
+    })
     .option("allow-spawn", {
       type: "boolean",
       default: false,
@@ -224,6 +237,37 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // y/N prompt bought no real safety. We just log each spawn so the host sees it.
   // (--allow-spawn is still accepted as a no-op for older invocations.)
 
+  // Agents retitle their terminal by writing OSC 0/2 (\x1b]2;name\x07) into the
+  // PTY stream we log; surfacing the most recent one lets the console label list
+  // rows without streaming every log. Cached per (size, mtime) — the UI polls
+  // /api/ls every few seconds and exited agents' logs never change again.
+  const titleCache = new Map<string, { size: number; mtimeMs: number; title: string | null }>();
+  const logTitle = async (logFile: string | null | undefined): Promise<string | null> => {
+    if (!logFile) return null;
+    try {
+      const fh = await open(logFile, "r");
+      try {
+        const { size, mtimeMs } = await fh.stat();
+        const hit = titleCache.get(logFile);
+        if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.title;
+        const len = Math.min(size, 65536);
+        const buf = Buffer.allocUnsafe(len);
+        const { bytesRead } = await fh.read(buf, 0, len, size - len);
+        const text = buf.toString("utf-8", 0, bytesRead);
+        // eslint-disable-next-line no-control-regex
+        const oscTitleRe = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+        let title: string | null = null;
+        for (let m; (m = oscTitleRe.exec(text)); ) if (m[1]!.trim()) title = m[1]!.trim();
+        titleCache.set(logFile, { size, mtimeMs, title });
+        return title;
+      } finally {
+        await fh.close();
+      }
+    } catch {
+      return null;
+    }
+  };
+
   // The whole API as a plain handler: served over HTTP by Bun.serve (--http)
   // and called in-process by the WebRTC bridge (--webrtc) — the latter needs
   // no TCP port at all.
@@ -244,7 +288,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
       });
       try {
         const records = await listRecords(keyword, opts);
-        return Response.json(records);
+        const withTitles = await Promise.all(
+          records.map(async (r) => ({ ...r, title: await logTitle(r.log_file) })),
+        );
+        return Response.json(withTitles);
       } catch (e) {
         return new Response((e as Error).message, { status: 500 });
       }
@@ -299,7 +346,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         let rows: number | null = null;
         try {
           const txt = await readFile(path.join(ayHome, "ptysize", String(record.pid)), "utf-8");
-          const [c, r] = txt.trim().split(/\s+/).map(Number);
+          const [c = 0, r = 0] = txt.trim().split(/\s+/).map(Number);
           if (c > 0 && r > 0) {
             cols = c;
             rows = r;
@@ -435,7 +482,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
     if (req.method === "POST" && p === "/api/send") {
       let body: { keyword: string; msg: string; code?: string };
       try {
-        body = await req.json();
+        body = (await req.json()) as typeof body;
       } catch {
         return new Response("invalid JSON body", { status: 400 });
       }
@@ -469,7 +516,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       const keyword = decodeURIComponent(resizeM[1]!);
       let body: { cols?: number; rows?: number };
       try {
-        body = await req.json();
+        body = (await req.json()) as typeof body;
       } catch {
         return new Response("invalid JSON body", { status: 400 });
       }
@@ -500,7 +547,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
     if (req.method === "POST" && p === "/api/spawn") {
       let body: { cli?: string; cwd?: string; prompt?: string };
       try {
-        body = await req.json();
+        body = (await req.json()) as typeof body;
       } catch {
         return new Response("invalid JSON body", { status: 400 });
       }
@@ -550,6 +597,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return serveUiFile("index.html", "text/html; charset=utf-8");
     if (req.method === "GET" && p === "/room-client.js")
       return serveUiFile("room-client.js", "text/javascript; charset=utf-8");
+    if (req.method === "GET" && p === "/favicon.ico") return new Response(null, { status: 204 });
     return apiFetch(req);
   };
 

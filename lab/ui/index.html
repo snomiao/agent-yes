@@ -420,6 +420,14 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      .rowtitle {
+        color: var(--fg);
+        font-size: 12.5px;
+        margin-top: 4px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       .rowtags {
         display: flex;
         flex-wrap: wrap;
@@ -807,6 +815,7 @@
                 return (p.meta?.agents || []).map((a) => ({
                   pid: a.pid,
                   cli: a.tool,
+                  title: a.title || null,
                   prompt: a.title || null,
                   cwd: a.cwd,
                   status: a.state,
@@ -974,7 +983,16 @@
       }
 
       function matches(e, toks) {
-        const hay = (e.prompt || "") + " " + e.cli + " " + (e.cwd || "") + " " + e.status;
+        const hay =
+          (e.title || "") +
+          " " +
+          (e.prompt || "") +
+          " " +
+          e.cli +
+          " " +
+          (e.cwd || "") +
+          " " +
+          e.status;
         return toks.every((tok) => {
           tok = tok.toLowerCase();
           const ci = tok.indexOf(":");
@@ -1005,11 +1023,19 @@
           <span class="name">${esc(e.cli)}</span>
           <span class="badge">pid ${e.pid}</span>
           <span class="age">${age(e)}</span></div>
+        ${e.title ? `<div class="rowtitle" title="${esc(e.title)}">${esc(e.title)}</div>` : ""}
         ${e.prompt ? `<div class="detail" title="${esc(e.prompt)}">${esc(e.prompt)}</div>` : ""}
         <div class="rowtags">${tags}</div>
       </div>`;
             })
             .join("") || `<div class="empty">no match</div>`;
+      }
+
+      // A ?pid=<pid> in the URL (codehost.dev's agent chips link here) selects
+      // that agent as soon as it shows up in the list, then forgets itself.
+      let autoPid = new URLSearchParams(location.search).get("pid");
+      if (autoPid) {
+        history.replaceState(null, document.title, location.pathname + location.hash);
       }
 
       async function loadList() {
@@ -1021,6 +1047,11 @@
           setConn(remote ? "● peer down" : "● ay serve down", "var(--red)");
         }
         renderList();
+        if (autoPid && entries.some((x) => String(x.pid) === String(autoPid))) {
+          const pid = autoPid;
+          autoPid = null;
+          select(pid);
+        }
       }
 
       function select(pid) {
@@ -1032,7 +1063,7 @@
         $("composer").style.display = "flex";
         $("hint").style.display = "block";
         $("rdot").className = "dot " + e.status;
-        $("rname").textContent = e.cli;
+        $("rname").textContent = e.title || e.cli;
         $("rpid").textContent = "pid " + e.pid;
         $("msg").focus();
 

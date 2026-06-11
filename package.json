@@ -54,7 +54,9 @@
     "scripts",
     "ts/*.ts",
     "!dist/**/*.map",
-    "dist/**/*.js"
+    "dist/**/*.js",
+    "lab/ui/index.html",
+    "lab/ui/room-client.js"
   ],
   "type": "module",
   "module": "ts/index.ts",
