@@ -1,188 +1,242 @@
-function W() {
+// src/shared/signaling.ts
+function newPeerId() {
   return crypto.randomUUID();
 }
-var E = 1e4,
-  T = 1e4;
-class U {
+
+// src/shared/signaling-client.ts
+var STABLE_MS = 60000;
+var CONNECT_TIMEOUT_MS = 1e4;
+var RECONNECT_MIN_MS = 1000;
+var RECONNECT_MAX_MS = 120000;
+var HEARTBEAT_MS = 25000;
+
+class SignalingClient {
   opts;
   peerId;
   ws = null;
-  closed = !1;
-  reconnectDelay = 1000;
+  closed = false;
+  reconnectDelay = RECONNECT_MIN_MS;
   reconnectTimer = null;
+  dormant = false;
   heartbeat = null;
   stableTimer = null;
   openedAt = 0;
-  constructor(q) {
-    this.opts = q;
-    this.peerId = q.peerId ?? W();
+  constructor(opts) {
+    this.opts = opts;
+    this.peerId = opts.peerId ?? newPeerId();
   }
   connect() {
-    ((this.closed = !1), this.attachWakeListeners(), this.open());
+    this.closed = false;
+    this.attachWakeListeners();
+    this.open();
   }
   onWake = () => {
     if (this.closed) return;
-    let q = this.ws?.readyState;
-    if (q === 1) return;
-    if (q === 0) {
+    const state = this.ws?.readyState;
+    if (state === 1) return;
+    if (state === 0) {
       try {
         this.ws?.close();
       } catch {}
       return;
     }
-    if (this.reconnectTimer != null) (this.clearReconnectTimer(), this.open());
+    if (this.dormant || this.reconnectTimer != null) {
+      this.dormant = false;
+      this.clearReconnectTimer();
+      this.open();
+    }
   };
+  hidden() {
+    const doc = globalThis.document;
+    return doc?.visibilityState === "hidden";
+  }
   attachWakeListeners() {
-    globalThis.document?.addEventListener("visibilitychange", this.onWake);
-    let z = globalThis.window;
-    (z?.addEventListener("focus", this.onWake), z?.addEventListener("online", this.onWake));
+    const doc = globalThis.document;
+    doc?.addEventListener("visibilitychange", this.onWake);
+    const win = globalThis.window;
+    win?.addEventListener("focus", this.onWake);
+    win?.addEventListener("online", this.onWake);
   }
   detachWakeListeners() {
-    globalThis.document?.removeEventListener("visibilitychange", this.onWake);
-    let z = globalThis.window;
-    (z?.removeEventListener("focus", this.onWake), z?.removeEventListener("online", this.onWake));
+    const doc = globalThis.document;
+    doc?.removeEventListener("visibilitychange", this.onWake);
+    const win = globalThis.window;
+    win?.removeEventListener("focus", this.onWake);
+    win?.removeEventListener("online", this.onWake);
   }
   roomUrl() {
-    return `${this.opts.url.replace(/\/+$/, "")}/room/${encodeURIComponent(this.opts.token)}`;
+    const base = this.opts.url.replace(/\/+$/, "");
+    return `${base}/room/${encodeURIComponent(this.opts.token)}`;
   }
   open() {
-    let q = new WebSocket(this.roomUrl());
-    this.ws = q;
-    let z = setTimeout(() => {
-      if (q.readyState === 0)
+    const ws = new WebSocket(this.roomUrl());
+    this.ws = ws;
+    const connectTimer = setTimeout(() => {
+      if (ws.readyState === 0) {
         try {
-          q.close();
+          ws.close();
         } catch {}
-    }, T);
-    ((q.onopen = () => {
-      (clearTimeout(z),
-        (this.openedAt = Date.now()),
-        this.clearStableTimer(),
-        (this.stableTimer = setTimeout(() => {
-          this.reconnectDelay = 1000;
-        }, E)));
-      let K = {
+      }
+    }, CONNECT_TIMEOUT_MS);
+    ws.onopen = () => {
+      clearTimeout(connectTimer);
+      this.openedAt = Date.now();
+      this.clearStableTimer();
+      this.stableTimer = setTimeout(() => {
+        this.reconnectDelay = RECONNECT_MIN_MS;
+      }, STABLE_MS);
+      const hello = {
         type: "hello",
         role: this.opts.role,
         peerId: this.peerId,
         ...(this.opts.meta ? { meta: this.opts.meta } : {}),
       };
-      (q.send(JSON.stringify(K)), this.startHeartbeat(), this.opts.onOpen?.());
-    }),
-      (q.onmessage = (K) => {
-        let Q;
-        try {
-          Q = JSON.parse(String(K.data));
-        } catch {
-          return;
-        }
-        if (Q.type === "peers") this.opts.onPeers?.(Q.peers);
-        else if (Q.type === "signal") this.opts.onSignal?.(Q.from, Q.data);
-      }),
-      (q.onclose = (K) => {
-        (clearTimeout(z), this.clearStableTimer(), this.stopHeartbeat());
-        let Q = this.openedAt ? Date.now() - this.openedAt : 0;
-        if (
-          ((this.openedAt = 0),
-          this.opts.onClose?.({ code: K?.code ?? 0, reason: K?.reason ?? "", ms: Q }),
-          !this.closed)
-        )
-          this.scheduleReconnect();
-      }),
-      (q.onerror = () => {
-        try {
-          q.close();
-        } catch {}
-      }));
+      ws.send(JSON.stringify(hello));
+      this.startHeartbeat();
+      this.opts.onOpen?.();
+    };
+    ws.onmessage = (ev) => {
+      let msg;
+      try {
+        msg = JSON.parse(String(ev.data));
+      } catch {
+        return;
+      }
+      if (msg.type === "peers") this.opts.onPeers?.(msg.peers);
+      else if (msg.type === "signal") this.opts.onSignal?.(msg.from, msg.data);
+    };
+    ws.onclose = (ev) => {
+      clearTimeout(connectTimer);
+      this.clearStableTimer();
+      this.stopHeartbeat();
+      const ms = this.openedAt ? Date.now() - this.openedAt : 0;
+      this.openedAt = 0;
+      this.opts.onClose?.({ code: ev?.code ?? 0, reason: ev?.reason ?? "", ms });
+      if (!this.closed) this.scheduleReconnect();
+    };
+    ws.onerror = () => {
+      try {
+        ws.close();
+      } catch {}
+    };
   }
   startHeartbeat() {
-    (this.stopHeartbeat(),
-      (this.heartbeat = setInterval(() => {
-        try {
-          this.ws?.send(JSON.stringify({ type: "ping" }));
-        } catch {}
-      }, 1e4)));
+    this.stopHeartbeat();
+    this.heartbeat = setInterval(() => {
+      try {
+        this.ws?.send(JSON.stringify({ type: "ping" }));
+      } catch {}
+    }, HEARTBEAT_MS);
   }
   stopHeartbeat() {
-    if (this.heartbeat != null) (clearInterval(this.heartbeat), (this.heartbeat = null));
+    if (this.heartbeat != null) {
+      clearInterval(this.heartbeat);
+      this.heartbeat = null;
+    }
   }
   clearStableTimer() {
-    if (this.stableTimer != null) (clearTimeout(this.stableTimer), (this.stableTimer = null));
+    if (this.stableTimer != null) {
+      clearTimeout(this.stableTimer);
+      this.stableTimer = null;
+    }
   }
   scheduleReconnect() {
-    let q = this.reconnectDelay;
-    ((this.reconnectDelay = Math.min(q * 2, 15000)),
-      this.clearReconnectTimer(),
-      (this.reconnectTimer = setTimeout(() => {
-        if (((this.reconnectTimer = null), !this.closed)) this.open();
-      }, q)));
+    if (this.hidden()) {
+      this.dormant = true;
+      return;
+    }
+    const delay = Math.round(this.reconnectDelay * (0.75 + Math.random() * 0.5));
+    this.reconnectDelay = Math.min(this.reconnectDelay * 2, RECONNECT_MAX_MS);
+    this.clearReconnectTimer();
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (this.closed) return;
+      if (this.hidden()) {
+        this.dormant = true;
+        return;
+      }
+      this.open();
+    }, delay);
   }
   clearReconnectTimer() {
-    if (this.reconnectTimer != null)
-      (clearTimeout(this.reconnectTimer), (this.reconnectTimer = null));
+    if (this.reconnectTimer != null) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
   }
-  sendSignal(q, z) {
-    let K = { type: "signal", to: q, data: z };
-    this.ws?.send(JSON.stringify(K));
+  sendSignal(to, data) {
+    const msg = { type: "signal", to, data };
+    this.ws?.send(JSON.stringify(msg));
   }
-  updateMeta(q) {
-    if (((this.opts.meta = q), this.ws?.readyState === 1)) {
-      let z = { type: "meta", meta: q };
-      this.ws.send(JSON.stringify(z));
+  updateMeta(meta) {
+    this.opts.meta = meta;
+    if (this.ws?.readyState === 1) {
+      const msg = { type: "meta", meta };
+      this.ws.send(JSON.stringify(msg));
     }
   }
   close() {
-    ((this.closed = !0),
-      this.detachWakeListeners(),
-      this.clearReconnectTimer(),
-      this.stopHeartbeat(),
-      this.clearStableTimer());
+    this.closed = true;
+    this.dormant = false;
+    this.detachWakeListeners();
+    this.clearReconnectTimer();
+    this.stopHeartbeat();
+    this.clearStableTimer();
     try {
       this.ws?.close();
     } catch {}
   }
 }
-var A = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
-  _ = "codehost";
-class B {
+
+// src/shared/rtc.ts
+var ICE_SERVERS = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"];
+var CHANNEL_LABEL = "codehost";
+
+// src/web/rtc-client.ts
+class RtcClient {
   opts;
   pc;
   channel = null;
-  constructor(q) {
-    this.opts = q;
-    ((this.pc = new RTCPeerConnection({ iceServers: A.map((z) => ({ urls: z })) })),
-      (this.pc.onicecandidate = (z) => {
-        if (z.candidate)
-          this.opts.sendSignal({
-            kind: "candidate",
-            candidate: z.candidate.candidate,
-            mid: z.candidate.sdpMid ?? "0",
-          });
-      }),
-      (this.pc.onconnectionstatechange = () => {
-        this.opts.onState?.(this.pc.connectionState);
-      }));
+  constructor(opts) {
+    this.opts = opts;
+    this.pc = new RTCPeerConnection({
+      iceServers: ICE_SERVERS.map((urls) => ({ urls })),
+    });
+    this.pc.onicecandidate = (ev) => {
+      if (ev.candidate) {
+        this.opts.sendSignal({
+          kind: "candidate",
+          candidate: ev.candidate.candidate,
+          mid: ev.candidate.sdpMid ?? "0",
+        });
+      }
+    };
+    this.pc.onconnectionstatechange = () => {
+      this.opts.onState?.(this.pc.connectionState);
+    };
   }
   async start() {
-    let q = this.pc.createDataChannel(_, { ordered: !0 });
-    ((q.binaryType = "arraybuffer"),
-      (this.channel = q),
-      (q.onopen = () => this.opts.onOpen?.(q)),
-      (q.onclose = () => this.opts.onClose?.()));
-    let z = await this.pc.createOffer();
-    (await this.pc.setLocalDescription(z),
-      this.opts.sendSignal({ kind: "offer", type: "offer", sdp: z.sdp ?? "" }));
+    const channel = this.pc.createDataChannel(CHANNEL_LABEL, { ordered: true });
+    channel.binaryType = "arraybuffer";
+    this.channel = channel;
+    channel.onopen = () => this.opts.onOpen?.(channel);
+    channel.onclose = () => this.opts.onClose?.();
+    const offer = await this.pc.createOffer();
+    await this.pc.setLocalDescription(offer);
+    this.opts.sendSignal({ kind: "offer", type: "offer", sdp: offer.sdp ?? "" });
   }
-  async handleSignal(q) {
-    let z = q;
-    if (!z || typeof z !== "object") return;
-    if (z.kind === "answer") await this.pc.setRemoteDescription({ type: "answer", sdp: z.sdp });
-    else if (z.kind === "candidate")
+  async handleSignal(data) {
+    const sig = data;
+    if (!sig || typeof sig !== "object") return;
+    if (sig.kind === "answer") {
+      await this.pc.setRemoteDescription({ type: "answer", sdp: sig.sdp });
+    } else if (sig.kind === "candidate") {
       try {
-        await this.pc.addIceCandidate({ candidate: z.candidate, sdpMid: z.mid });
-      } catch (K) {
-        console.error("[rtc] addIceCandidate failed:", K);
+        await this.pc.addIceCandidate({ candidate: sig.candidate, sdpMid: sig.mid });
+      } catch (err) {
+        console.error("[rtc] addIceCandidate failed:", err);
       }
+    }
   }
   get dataChannel() {
     return this.channel;
@@ -196,254 +250,304 @@ class B {
     } catch {}
   }
 }
-var F = new TextEncoder(),
-  x = new TextDecoder();
-function G(q, z, K) {
-  let Q = K?.byteLength ?? 0,
-    X = new Uint8Array(5 + Q);
-  if (((X[0] = q), new DataView(X.buffer).setUint32(1, z >>> 0, !1), K && Q)) X.set(K, 5);
-  return X;
+
+// src/shared/protocol.ts
+var FRAME_HEADER = 5;
+var MAX_FRAME = 16 * 1024;
+var MAX_CHUNK = MAX_FRAME - FRAME_HEADER;
+var enc = new TextEncoder();
+var dec = new TextDecoder();
+function encodeFrame(op, streamId, payload) {
+  const len = payload?.byteLength ?? 0;
+  const buf = new Uint8Array(5 + len);
+  buf[0] = op;
+  new DataView(buf.buffer).setUint32(1, streamId >>> 0, false);
+  if (payload && len) buf.set(payload, 5);
+  return buf;
 }
-function P(q, z, K) {
-  return G(q, z, F.encode(JSON.stringify(K)));
+function encodeJson(op, streamId, obj) {
+  return encodeFrame(op, streamId, enc.encode(JSON.stringify(obj)));
 }
-function J(q) {
-  let z = q instanceof Uint8Array ? q : new Uint8Array(q),
-    K = z[0],
-    Q = new DataView(z.buffer, z.byteOffset, z.byteLength).getUint32(1, !1),
-    X = z.subarray(5);
-  return { op: K, streamId: Q, payload: X };
+function decodeFrame(data) {
+  const u8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+  const op = u8[0];
+  const streamId = new DataView(u8.buffer, u8.byteOffset, u8.byteLength).getUint32(1, false);
+  const payload = u8.subarray(5);
+  return { op, streamId, payload };
 }
-function H(q) {
-  return JSON.parse(x.decode(q));
+function payloadJson(payload) {
+  return JSON.parse(dec.decode(payload));
 }
-function L(q) {
-  return x.decode(q);
+function payloadText(payload) {
+  return dec.decode(payload);
 }
-function* S(q) {
-  for (let z = 0; z < q.byteLength; z += 16379) yield q.slice(z, Math.min(z + 16379, q.byteLength));
+function* chunk(body) {
+  for (let off = 0; off < body.byteLength; off += MAX_CHUNK) {
+    yield body.slice(off, Math.min(off + MAX_CHUNK, body.byteLength));
+  }
 }
-function C(q) {
-  if (q.length === 1) return q[0];
-  let z = q.reduce((X, Z) => X + Z.byteLength, 0),
-    K = new Uint8Array(z),
-    Q = 0;
-  for (let X of q) (K.set(X, Q), (Q += X.byteLength));
-  return K;
+function concatBytes(parts) {
+  if (parts.length === 1) return parts[0];
+  const total = parts.reduce((n, p) => n + p.byteLength, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const p of parts) {
+    out.set(p, off);
+    off += p.byteLength;
+  }
+  return out;
 }
-function* M(q, z, K) {
-  let Q = 0;
-  while (K.byteLength - Q > 16379) (yield G(13, z, K.subarray(Q, Q + 16379)), (Q += 16379));
-  yield G(q, z, K.subarray(Q));
+function* wsMessageFrames(terminal, streamId, payload) {
+  let off = 0;
+  while (payload.byteLength - off > MAX_CHUNK) {
+    yield encodeFrame(13 /* WsCont */, streamId, payload.subarray(off, off + MAX_CHUNK));
+    off += MAX_CHUNK;
+  }
+  yield encodeFrame(terminal, streamId, payload.subarray(off));
 }
-class k {
+
+class WsReassembler {
   pending = new Map();
-  cont(q, z) {
-    let K = this.pending.get(q);
-    if (K) K.push(z.slice());
-    else this.pending.set(q, [z.slice()]);
+  cont(streamId, payload) {
+    const buf = this.pending.get(streamId);
+    if (buf) buf.push(payload.slice());
+    else this.pending.set(streamId, [payload.slice()]);
   }
-  finish(q, z) {
-    let K = this.pending.get(q);
-    if (!K) return z;
-    return (this.pending.delete(q), K.push(z), C(K));
+  finish(streamId, payload) {
+    const buf = this.pending.get(streamId);
+    if (!buf) return payload;
+    this.pending.delete(streamId);
+    buf.push(payload);
+    return concatBytes(buf);
   }
-  drop(q) {
-    this.pending.delete(q);
+  drop(streamId) {
+    this.pending.delete(streamId);
   }
 }
-class N {
+
+// src/web/tunnel-client.ts
+class TunnelClient {
   channel;
   nextStreamId = 1;
   https = new Map();
   wss = new Map();
-  wsRx = new k();
+  wsRx = new WsReassembler();
   textEncoder = new TextEncoder();
-  constructor(q) {
-    this.channel = q;
-    ((q.binaryType = "arraybuffer"), q.addEventListener("message", (z) => this.onFrame(z.data)));
+  constructor(channel) {
+    this.channel = channel;
+    channel.binaryType = "arraybuffer";
+    channel.addEventListener("message", (ev) => this.onFrame(ev.data));
   }
   allocId() {
-    let q = this.nextStreamId;
-    return ((this.nextStreamId = (this.nextStreamId + 1) >>> 0 || 1), q);
+    const id = this.nextStreamId;
+    this.nextStreamId = (this.nextStreamId + 1) >>> 0 || 1;
+    return id;
   }
-  onFrame(q) {
-    if (typeof q === "string") return;
-    let { op: z, streamId: K, payload: Q } = J(q);
-    switch (z) {
-      case 4:
-        this.https.get(K)?.onHead(H(Q));
+  onFrame(data) {
+    if (typeof data === "string") return;
+    const { op, streamId, payload } = decodeFrame(data);
+    switch (op) {
+      case 4 /* HttpResHead */:
+        this.https.get(streamId)?.onHead(payloadJson(payload));
         break;
-      case 5:
-        this.https.get(K)?.onBody(Q.slice());
+      case 5 /* HttpResBody */:
+        this.https.get(streamId)?.onBody(payload.slice());
         break;
-      case 6:
-        (this.https.get(K)?.onEnd(), this.https.delete(K));
+      case 6 /* HttpResEnd */:
+        this.https.get(streamId)?.onEnd();
+        this.https.delete(streamId);
         break;
-      case 12: {
-        let X = this.https.get(K);
-        if (X) (X.onError(H(Q).message), this.https.delete(K));
+      case 12 /* Error */: {
+        const waiter = this.https.get(streamId);
+        if (waiter) {
+          waiter.onError(payloadJson(payload).message);
+          this.https.delete(streamId);
+        }
         break;
       }
-      case 8: {
-        let X = H(Q);
-        this.wss.get(K)?.onOpenAck(X.ok, X.protocol);
+      case 8 /* WsOpenAck */: {
+        const info = payloadJson(payload);
+        this.wss.get(streamId)?.onOpenAck(info.ok, info.protocol);
         break;
       }
-      case 13:
-        this.wsRx.cont(K, Q);
+      case 13 /* WsCont */:
+        this.wsRx.cont(streamId, payload);
         break;
-      case 9:
-        this.wss.get(K)?.onText(L(this.wsRx.finish(K, Q)));
+      case 9 /* WsText */:
+        this.wss.get(streamId)?.onText(payloadText(this.wsRx.finish(streamId, payload)));
         break;
-      case 10:
-        this.wss.get(K)?.onBin(this.wsRx.finish(K, Q).slice());
+      case 10 /* WsBin */:
+        this.wss.get(streamId)?.onBin(this.wsRx.finish(streamId, payload).slice());
         break;
-      case 11: {
-        let X = H(Q);
-        (this.wsRx.drop(K),
-          this.wss.get(K)?.onClose(X.code ?? 1000, X.reason ?? ""),
-          this.wss.delete(K));
+      case 11 /* WsClose */: {
+        const info = payloadJson(payload);
+        this.wsRx.drop(streamId);
+        this.wss.get(streamId)?.onClose(info.code ?? 1000, info.reason ?? "");
+        this.wss.delete(streamId);
         break;
       }
     }
   }
-  fetch(q, z, K, Q) {
-    let X = this.allocId();
-    return new Promise((Z, V) => {
-      let D = null,
-        $ = null,
-        j = new ReadableStream({
-          start: (Y) => {
-            $ = Y;
-          },
-        });
-      if (
-        (this.https.set(X, {
-          onHead: (Y) => {
-            ((D = Y),
-              Z(
-                new Response(j, {
-                  status: Y.status === 204 || Y.status === 304 ? Y.status : Y.status,
-                  statusText: Y.statusText,
-                  headers: Y.headers,
-                }),
-              ));
-          },
-          onBody: (Y) => {
-            try {
-              $?.enqueue(Y);
-            } catch {}
-          },
-          onEnd: () => {
-            try {
-              $?.close();
-            } catch {}
-            if (!D) V(Error("stream ended before head"));
-          },
-          onError: (Y) => {
-            try {
-              $?.error(Error(Y));
-            } catch {}
-            if (!D) V(Error(Y));
-          },
-        }),
-        this.send(P(1, X, { method: q, path: z, headers: K })),
-        Q && Q.byteLength)
-      )
-        for (let Y of S(Q)) this.send(G(2, X, Y));
-      this.send(G(3, X));
+  fetch(method, path, headers, body) {
+    const streamId = this.allocId();
+    return new Promise((resolve, reject) => {
+      let head = null;
+      let controller = null;
+      const stream = new ReadableStream({
+        start: (c) => {
+          controller = c;
+        },
+      });
+      this.https.set(streamId, {
+        onHead: (h) => {
+          head = h;
+          resolve(
+            new Response(stream, {
+              status: h.status === 204 || h.status === 304 ? h.status : h.status,
+              statusText: h.statusText,
+              headers: h.headers,
+            }),
+          );
+        },
+        onBody: (b) => {
+          try {
+            controller?.enqueue(b);
+          } catch {}
+        },
+        onEnd: () => {
+          try {
+            controller?.close();
+          } catch {}
+          if (!head) reject(new Error("stream ended before head"));
+        },
+        onError: (msg) => {
+          try {
+            controller?.error(new Error(msg));
+          } catch {}
+          if (!head) reject(new Error(msg));
+        },
+      });
+      this.send(encodeJson(1 /* HttpReq */, streamId, { method, path, headers }));
+      if (body && body.byteLength) {
+        for (const part of chunk(body)) this.send(encodeFrame(2 /* HttpReqBody */, streamId, part));
+      }
+      this.send(encodeFrame(3 /* HttpReqEnd */, streamId));
     });
   }
-  openWs(q, z, K) {
-    let Q = this.allocId();
-    return (
-      this.wss.set(Q, K),
-      this.send(P(7, Q, { path: q, protocols: z })),
-      {
-        sendText: (X) => {
-          for (let Z of M(9, Q, this.textEncoder.encode(X))) this.send(Z);
-        },
-        sendBin: (X) => {
-          for (let Z of M(10, Q, X)) this.send(Z);
-        },
-        close: (X, Z) => {
-          (this.send(P(11, Q, { code: X, reason: Z })), this.wss.delete(Q));
-        },
-      }
-    );
+  openWs(path, protocols, handlers) {
+    const streamId = this.allocId();
+    this.wss.set(streamId, handlers);
+    this.send(encodeJson(7 /* WsOpen */, streamId, { path, protocols }));
+    return {
+      sendText: (text) => {
+        for (const f of wsMessageFrames(9 /* WsText */, streamId, this.textEncoder.encode(text)))
+          this.send(f);
+      },
+      sendBin: (data) => {
+        for (const f of wsMessageFrames(10 /* WsBin */, streamId, data)) this.send(f);
+      },
+      close: (code, reason) => {
+        this.send(encodeJson(11 /* WsClose */, streamId, { code, reason }));
+        this.wss.delete(streamId);
+      },
+    };
   }
-  send(q) {
+  send(frame) {
     if (this.channel.readyState === "open") {
-      let z = new Uint8Array(q.byteLength);
-      (z.set(q), this.channel.send(z.buffer));
+      const copy = new Uint8Array(frame.byteLength);
+      copy.set(frame);
+      this.channel.send(copy.buffer);
     }
   }
   get ready() {
     return this.channel.readyState === "open";
   }
 }
-var w = "wss://signal.codehost.dev";
-class R {
+
+// src/web/room-client.ts
+var DEFAULT_SIGNAL_URL = "wss://signal.codehost.dev";
+var DIAL_FAIL_COOLDOWN_MS = 1e4;
+
+class CodehostRoom {
   peers = [];
   signaling;
   rtcs = new Map();
   tunnels = new Map();
-  closed = !1;
-  constructor(q) {
-    ((this.signaling = new U({
-      url: q.signalUrl ?? w,
-      token: q.token,
+  dialFailedAt = new Map();
+  closed = false;
+  constructor(opts) {
+    this.signaling = new SignalingClient({
+      url: opts.signalUrl ?? DEFAULT_SIGNAL_URL,
+      token: opts.token,
       role: "viewer",
-      onOpen: () => q.onStatus?.(!0),
-      onClose: () => q.onStatus?.(!1),
-      onPeers: (z) => {
-        ((this.peers = z.filter((K) => K.role === "server")), q.onPeers?.(this.peers));
+      onOpen: () => opts.onStatus?.(true),
+      onClose: () => opts.onStatus?.(false),
+      onPeers: (peers) => {
+        this.peers = peers.filter((p) => p.role === "server");
+        opts.onPeers?.(this.peers);
       },
-      onSignal: (z, K) => void this.rtcs.get(z)?.handleSignal(K),
-    })),
-      this.signaling.connect());
+      onSignal: (from, data) => void this.rtcs.get(from)?.handleSignal(data),
+    });
+    this.signaling.connect();
   }
-  async fetch(q, z, K, Q = {}) {
-    let X = await this.dial(q),
-      Z = typeof Q.body === "string" ? new TextEncoder().encode(Q.body) : Q.body;
-    return X.fetch(z, K, Q.headers ?? {}, Z);
+  async fetch(peerId, method, path, init = {}) {
+    const tunnel = await this.dial(peerId);
+    const body = typeof init.body === "string" ? new TextEncoder().encode(init.body) : init.body;
+    return tunnel.fetch(method, path, init.headers ?? {}, body);
   }
-  dial(q) {
-    let z = this.tunnels.get(q);
-    if (z) return z;
-    let K = () => {
-        (this.tunnels.delete(q), this.rtcs.get(q)?.close(), this.rtcs.delete(q));
-      },
-      Q = new Promise((X, Z) => {
-        let V = setTimeout(() => {
-            (K(), Z(Error("dial timed out")));
-          }, 15000),
-          D = new B({
-            sendSignal: ($) => this.signaling.sendSignal(q, $),
-            onOpen: ($) => {
-              (clearTimeout(V), X(new N($)));
-            },
-            onClose: K,
-            onState: ($) => {
-              if ($ === "failed" || $ === "disconnected") K();
-            },
-          });
-        (this.rtcs.set(q, D),
-          D.start().catch(($) => {
-            (clearTimeout(V), K(), Z($));
-          }));
+  dial(peerId) {
+    const existing = this.tunnels.get(peerId);
+    if (existing) return existing;
+    const failedAt = this.dialFailedAt.get(peerId);
+    if (failedAt != null && Date.now() - failedAt < DIAL_FAIL_COOLDOWN_MS) {
+      return Promise.reject(new Error("dial failed recently; cooling down"));
+    }
+    const drop = () => {
+      this.tunnels.delete(peerId);
+      this.rtcs.get(peerId)?.close();
+      this.rtcs.delete(peerId);
+    };
+    const dialing = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        drop();
+        reject(new Error("dial timed out"));
+      }, 15000);
+      const rtc = new RtcClient({
+        sendSignal: (data) => this.signaling.sendSignal(peerId, data),
+        onOpen: (channel) => {
+          clearTimeout(timer);
+          this.dialFailedAt.delete(peerId);
+          resolve(new TunnelClient(channel));
+        },
+        onClose: drop,
+        onState: (state) => {
+          if (state === "failed" || state === "disconnected") drop();
+        },
       });
-    return (this.tunnels.set(q, Q), Q.catch(() => this.tunnels.delete(q)), Q);
+      this.rtcs.set(peerId, rtc);
+      rtc.start().catch((err) => {
+        clearTimeout(timer);
+        drop();
+        reject(err);
+      });
+    });
+    this.tunnels.set(peerId, dialing);
+    dialing.catch(() => {
+      this.dialFailedAt.set(peerId, Date.now());
+      this.tunnels.delete(peerId);
+    });
+    return dialing;
   }
   close() {
     if (this.closed) return;
-    this.closed = !0;
-    for (let q of this.rtcs.values()) q.close();
-    (this.rtcs.clear(), this.tunnels.clear(), this.signaling.close());
+    this.closed = true;
+    for (const rtc of this.rtcs.values()) rtc.close();
+    this.rtcs.clear();
+    this.tunnels.clear();
+    this.signaling.close();
   }
 }
-function n(q) {
-  return new R(q);
+function joinRoom(opts) {
+  return new CodehostRoom(opts);
 }
-export { n as joinRoom, w as DEFAULT_SIGNAL_URL, R as CodehostRoom };
+export { joinRoom, DEFAULT_SIGNAL_URL, CodehostRoom };
