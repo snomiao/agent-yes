@@ -5,6 +5,9 @@
 // lab/ui/cf/worker.ts for the signaling protocol and lab/ui/index.html for the
 // browser side.
 import { randomBytes } from "crypto";
+import { mkdir, readFile, writeFile } from "fs/promises";
+import { homedir } from "os";
+import path from "path";
 
 const SUB = "ay-signal-1";
 const ICE = [{ urls: "stun:stun.l.google.com:19302" }];
@@ -12,7 +15,8 @@ const MAX_CHUNK = 15_000; // keep DataChannel messages under the SCTP limit
 const DEFAULT_SIGHOST = "s.agent-yes.com";
 
 export interface ShareOpts {
-  /** webrtc://room:token@host, or undefined to mint a fresh room+token */
+  /** webrtc://room:token@host, or undefined to mint a fresh (unpersisted)
+   *  room+token — callers wanting a stable room use loadOrCreateShareRoom() */
   url?: string;
   /** signaling host when minting (default s.agent-yes.com) */
   sighost?: string;
@@ -20,6 +24,30 @@ export interface ShareOpts {
   localFetch: (req: Request) => Promise<Response>;
   /** bearer token for the local ay-serve API */
   apiToken: string;
+}
+
+// The room+token persist like the serve token, so the share link (and any
+// browser that saved the room) survives restarts — important for daemons,
+// which would otherwise mint a new link on every restart. Delete the file to
+// rotate the room.
+function shareRoomPath(): string {
+  const home = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
+  return path.join(home, ".share-room");
+}
+
+export async function loadOrCreateShareRoom(sighost = DEFAULT_SIGHOST): Promise<string> {
+  try {
+    const url = (await readFile(shareRoomPath(), "utf-8")).trim();
+    if (url.startsWith("webrtc://")) return url;
+  } catch {
+    /* not yet minted */
+  }
+  const room = "r" + randomBytes(3).toString("hex");
+  const token = randomBytes(32).toString("hex");
+  const url = `webrtc://${room}:${token}@${sighost}`;
+  await mkdir(path.dirname(shareRoomPath()), { recursive: true });
+  await writeFile(shareRoomPath(), url, { mode: 0o600 });
+  return url;
 }
 
 function parseShareUrl(s: string): { room: string; token: string; host: string } {

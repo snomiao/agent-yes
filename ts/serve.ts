@@ -83,8 +83,11 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
 
   if (sub === "install") {
     const token = await loadOrCreateToken(undefined);
-    // Build the ay serve command with forwarded args (port, host, --webrtc, etc.)
-    const serveCmd = ["ay", "serve", ...args].join(" ");
+    // Build the ay serve command with forwarded args (port, host, --webrtc, etc.).
+    // Absolute paths: oxmgr's daemon environment may not have ~/.bun/bin in
+    // PATH, so a bare `ay` (or its `#!/usr/bin/env bun` shebang) fails to spawn.
+    const ayBin = Bun.which("ay");
+    const serveCmd = [...(ayBin ? [process.execPath, ayBin] : ["ay"]), "serve", ...args].join(" ");
     const proc = Bun.spawn(
       [oxmgrBin, "start", serveCmd, "--name", DAEMON_NAME, "--restart", "always"],
       { stdio: ["ignore", "inherit", "inherit"] },
@@ -93,15 +96,23 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     if (code === 0) {
       const portM = /--port[=\s](\d+)/.exec(args.join(" "));
       const port = portM ? Number(portM[1]) : DEFAULT_PORT;
+      // Mirror cmdServe's mode resolution: webrtc-only daemons open no HTTP port.
+      const webrtcish = args.some((a) => a.startsWith("--webrtc") || a.startsWith("--share"));
+      const httpish =
+        args.some((a) => a.startsWith("--http") || a.startsWith("--share")) ||
+        !args.some((a) => a.startsWith("--webrtc"));
       process.stdout.write(`\ninstalled '${DAEMON_NAME}' as a daemon via oxmgr\n`);
       process.stdout.write(`token: ${token}\n\n`);
-      process.stdout.write(`  ay ls   ${token}@<host>:${port}\n`);
-      process.stdout.write(`  ay remote add <alias> http://${token}@<host>:${port}\n`);
+      if (httpish) {
+        process.stdout.write(`  ay ls   ${token}@<host>:${port}\n`);
+        process.stdout.write(`  ay remote add <alias> http://${token}@<host>:${port}\n`);
+      }
       process.stdout.write(`  ay serve logs                # view server logs\n`);
       process.stdout.write(`  ay serve uninstall           # remove daemon\n`);
-      if (args.some((a) => a.startsWith("--webrtc") || a.startsWith("--share"))) {
+      if (webrtcish) {
         process.stdout.write(
-          `\nthe WebRTC share link is printed by the daemon — see: ay serve logs\n`,
+          `\nthe WebRTC share link is printed by the daemon — see: ay serve logs\n` +
+            `(the room persists in ~/.agent-yes/.share-room, so the link survives restarts)\n`,
         );
       }
     }
@@ -140,11 +151,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  --webrtc [URL]    Share over WebRTC (bare flag mints a room+link on\n` +
         `                    agent-yes.com, or pass webrtc://room:token@host).\n` +
         `                    Alone it needs NO port — combine with --http for both.\n` +
+        `                    The minted room persists in ~/.agent-yes/.share-room\n` +
+        `                    (stable link across restarts; delete the file to rotate).\n` +
         `  --share [URL]     Legacy alias for --http --webrtc\n\n` +
         `Options:\n` +
         `  --port N          Port to listen on (default: ${DEFAULT_PORT})\n` +
         `  --host HOST       Interface to bind (default: 127.0.0.1; use 0.0.0.0 to expose)\n` +
         `  --token TOKEN     Auth token (auto-generated and saved if omitted)\n` +
+        `  -d, --daemon      Install these flags as a background daemon via oxmgr\n` +
+        `                    (same as: ay serve install <flags>)\n` +
         `  --allow-spawn     Deprecated no-op — the console can always spawn agents\n` +
         `  --tls-cert FILE   TLS certificate PEM\n` +
         `  --tls-key  FILE   TLS private key PEM\n\n` +
@@ -205,6 +220,14 @@ export async function cmdServe(rest: string[]): Promise<number> {
     .exitProcess(false);
 
   const argv = await y.parseAsync();
+
+  // --daemon/-d: install these exact flags as the oxmgr daemon instead of
+  // serving in the foreground (sugar for `ay serve install <flags>`).
+  if (argv.daemon) {
+    const fwd = rest.filter((a) => a !== "--daemon" && a !== "-d");
+    return cmdServeDaemon("install", fwd);
+  }
+
   const port = (argv.port as number) ?? DEFAULT_PORT;
   const host = (argv.host as string) ?? "127.0.0.1";
   const tokenFlag = typeof argv.token === "string" ? argv.token : undefined;
@@ -651,17 +674,22 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // webrtc:// value joins an explicit one.
   if (wantWebrtc) {
     const webrtcVal = (argv.webrtc ?? argv.share) as string | undefined;
-    const shareUrl =
+    const explicitUrl =
       typeof webrtcVal === "string" && webrtcVal.startsWith("webrtc://") ? webrtcVal : undefined;
     try {
-      const { startShare } = await import("./share.ts");
+      const { startShare, loadOrCreateShareRoom } = await import("./share.ts");
+      // No explicit webrtc:// URL → reuse the persisted room (minted once and
+      // saved like the serve token), so the link is stable across restarts.
       const { link } = await startShare({
-        url: shareUrl,
+        url: explicitUrl ?? (await loadOrCreateShareRoom()),
         localFetch: apiFetch,
         apiToken: token,
       });
       process.stdout.write(
-        `${wantHttp ? "\n" : ""}shared over WebRTC — open this link (the token is eaten from the URL on open):\n  ${link}\n\n`,
+        `${wantHttp ? "\n" : ""}shared over WebRTC — open this link (the token is eaten from the URL on open):\n  ${link}\n` +
+          (explicitUrl
+            ? "\n"
+            : `  (persistent room — same link across restarts; delete ~/.agent-yes/.share-room to rotate)\n\n`),
       );
     } catch (e) {
       process.stderr.write(`ay serve --webrtc failed: ${(e as Error).message}\n`);
