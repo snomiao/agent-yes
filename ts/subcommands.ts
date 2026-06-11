@@ -141,6 +141,7 @@ const SUBCOMMANDS = new Set([
   "restart",
   "note",
   "serve",
+  "setup",
   "remote",
   "help",
 ]);
@@ -190,6 +191,10 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         const { cmdServe } = await import("./serve.ts");
         return cmdServe(rest);
       }
+      case "setup": {
+        const { cmdSetup } = await import("./setup.ts");
+        return cmdSetup(rest);
+      }
       case "remote": {
         const { cmdRemote } = await import("./remotes.ts");
         return cmdRemote(rest);
@@ -225,6 +230,7 @@ export function cmdHelp(): number {
       `  ay status <keyword>                 agent status snapshot\n` +
       `\n` +
       `Remote:\n` +
+      `  ay setup                            guided setup: pick a workspace, share to agent-yes.com\n` +
       `  ay serve [--port N]                 start HTTP API server (prints token)\n` +
       `  ay remote add <alias> http://<token>@<host>:<port>\n` +
       `  ay remote ls / rm <alias>           manage saved remotes\n` +

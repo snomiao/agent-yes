@@ -1,7 +1,8 @@
-function _() {
+function W() {
   return crypto.randomUUID();
 }
-var R = 1e4;
+var E = 1e4,
+  T = 1e4;
 class U {
   opts;
   peerId;
@@ -13,7 +14,7 @@ class U {
   openedAt = 0;
   constructor(q) {
     this.opts = q;
-    this.peerId = q.peerId ?? _();
+    this.peerId = q.peerId ?? W();
   }
   connect() {
     ((this.closed = !1), this.open());
@@ -23,37 +24,44 @@ class U {
   }
   open() {
     let q = new WebSocket(this.roomUrl());
-    ((this.ws = q),
-      (q.onopen = () => {
-        ((this.openedAt = Date.now()),
-          this.clearStableTimer(),
-          (this.stableTimer = setTimeout(() => {
-            this.reconnectDelay = 1000;
-          }, R)));
-        let z = {
-          type: "hello",
-          role: this.opts.role,
-          peerId: this.peerId,
-          ...(this.opts.meta ? { meta: this.opts.meta } : {}),
-        };
-        (q.send(JSON.stringify(z)), this.startHeartbeat(), this.opts.onOpen?.());
-      }),
-      (q.onmessage = (z) => {
-        let K;
+    this.ws = q;
+    let z = setTimeout(() => {
+      if (q.readyState === 0)
         try {
-          K = JSON.parse(String(z.data));
+          q.close();
+        } catch {}
+    }, T);
+    ((q.onopen = () => {
+      (clearTimeout(z),
+        (this.openedAt = Date.now()),
+        this.clearStableTimer(),
+        (this.stableTimer = setTimeout(() => {
+          this.reconnectDelay = 1000;
+        }, E)));
+      let K = {
+        type: "hello",
+        role: this.opts.role,
+        peerId: this.peerId,
+        ...(this.opts.meta ? { meta: this.opts.meta } : {}),
+      };
+      (q.send(JSON.stringify(K)), this.startHeartbeat(), this.opts.onOpen?.());
+    }),
+      (q.onmessage = (K) => {
+        let Q;
+        try {
+          Q = JSON.parse(String(K.data));
         } catch {
           return;
         }
-        if (K.type === "peers") this.opts.onPeers?.(K.peers);
-        else if (K.type === "signal") this.opts.onSignal?.(K.from, K.data);
+        if (Q.type === "peers") this.opts.onPeers?.(Q.peers);
+        else if (Q.type === "signal") this.opts.onSignal?.(Q.from, Q.data);
       }),
-      (q.onclose = (z) => {
-        (this.clearStableTimer(), this.stopHeartbeat());
-        let K = this.openedAt ? Date.now() - this.openedAt : 0;
+      (q.onclose = (K) => {
+        (clearTimeout(z), this.clearStableTimer(), this.stopHeartbeat());
+        let Q = this.openedAt ? Date.now() - this.openedAt : 0;
         if (
           ((this.openedAt = 0),
-          this.opts.onClose?.({ code: z?.code ?? 0, reason: z?.reason ?? "", ms: K }),
+          this.opts.onClose?.({ code: K?.code ?? 0, reason: K?.reason ?? "", ms: Q }),
           !this.closed)
         )
           this.scheduleReconnect();
@@ -102,15 +110,15 @@ class U {
     } catch {}
   }
 }
-var k = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
-  W = "codehost";
-class M {
+var A = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
+  _ = "codehost";
+class B {
   opts;
   pc;
   channel = null;
   constructor(q) {
     this.opts = q;
-    ((this.pc = new RTCPeerConnection({ iceServers: k.map((z) => ({ urls: z })) })),
+    ((this.pc = new RTCPeerConnection({ iceServers: A.map((z) => ({ urls: z })) })),
       (this.pc.onicecandidate = (z) => {
         if (z.candidate)
           this.opts.sendSignal({
@@ -124,7 +132,7 @@ class M {
       }));
   }
   async start() {
-    let q = this.pc.createDataChannel(W, { ordered: !0 });
+    let q = this.pc.createDataChannel(_, { ordered: !0 });
     ((q.binaryType = "arraybuffer"),
       (this.channel = q),
       (q.onopen = () => this.opts.onOpen?.(q)),
@@ -156,8 +164,8 @@ class M {
     } catch {}
   }
 }
-var j = new TextEncoder(),
-  A = new TextDecoder();
+var F = new TextEncoder(),
+  x = new TextDecoder();
 function G(q, z, K) {
   let Q = K?.byteLength ?? 0,
     X = new Uint8Array(5 + Q);
@@ -165,9 +173,9 @@ function G(q, z, K) {
   return X;
 }
 function P(q, z, K) {
-  return G(q, z, j.encode(JSON.stringify(K)));
+  return G(q, z, F.encode(JSON.stringify(K)));
 }
-function S(q) {
+function J(q) {
   let z = q instanceof Uint8Array ? q : new Uint8Array(q),
     K = z[0],
     Q = new DataView(z.buffer, z.byteOffset, z.byteLength).getUint32(1, !1),
@@ -175,12 +183,12 @@ function S(q) {
   return { op: K, streamId: Q, payload: X };
 }
 function H(q) {
-  return JSON.parse(A.decode(q));
+  return JSON.parse(x.decode(q));
 }
-function x(q) {
-  return A.decode(q);
+function L(q) {
+  return x.decode(q);
 }
-function* E(q) {
+function* S(q) {
   for (let z = 0; z < q.byteLength; z += 16379) yield q.slice(z, Math.min(z + 16379, q.byteLength));
 }
 function C(q) {
@@ -191,12 +199,12 @@ function C(q) {
   for (let X of q) (K.set(X, Q), (Q += X.byteLength));
   return K;
 }
-function* N(q, z, K) {
+function* M(q, z, K) {
   let Q = 0;
   while (K.byteLength - Q > 16379) (yield G(13, z, K.subarray(Q, Q + 16379)), (Q += 16379));
   yield G(q, z, K.subarray(Q));
 }
-class B {
+class k {
   pending = new Map();
   cont(q, z) {
     let K = this.pending.get(q);
@@ -212,12 +220,12 @@ class B {
     this.pending.delete(q);
   }
 }
-class T {
+class N {
   channel;
   nextStreamId = 1;
   https = new Map();
   wss = new Map();
-  wsRx = new B();
+  wsRx = new k();
   textEncoder = new TextEncoder();
   constructor(q) {
     this.channel = q;
@@ -229,7 +237,7 @@ class T {
   }
   onFrame(q) {
     if (typeof q === "string") return;
-    let { op: z, streamId: K, payload: Q } = S(q);
+    let { op: z, streamId: K, payload: Q } = J(q);
     switch (z) {
       case 4:
         this.https.get(K)?.onHead(H(Q));
@@ -254,7 +262,7 @@ class T {
         this.wsRx.cont(K, Q);
         break;
       case 9:
-        this.wss.get(K)?.onText(x(this.wsRx.finish(K, Q)));
+        this.wss.get(K)?.onText(L(this.wsRx.finish(K, Q)));
         break;
       case 10:
         this.wss.get(K)?.onBin(this.wsRx.finish(K, Q).slice());
@@ -273,7 +281,7 @@ class T {
     return new Promise((Z, V) => {
       let D = null,
         $ = null,
-        L = new ReadableStream({
+        j = new ReadableStream({
           start: (Y) => {
             $ = Y;
           },
@@ -283,14 +291,18 @@ class T {
           onHead: (Y) => {
             ((D = Y),
               Z(
-                new Response(L, {
+                new Response(j, {
                   status: Y.status === 204 || Y.status === 304 ? Y.status : Y.status,
                   statusText: Y.statusText,
                   headers: Y.headers,
                 }),
               ));
           },
-          onBody: (Y) => $?.enqueue(Y),
+          onBody: (Y) => {
+            try {
+              $?.enqueue(Y);
+            } catch {}
+          },
           onEnd: () => {
             try {
               $?.close();
@@ -307,7 +319,7 @@ class T {
         this.send(P(1, X, { method: q, path: z, headers: K })),
         Q && Q.byteLength)
       )
-        for (let Y of E(Q)) this.send(G(2, X, Y));
+        for (let Y of S(Q)) this.send(G(2, X, Y));
       this.send(G(3, X));
     });
   }
@@ -318,10 +330,10 @@ class T {
       this.send(P(7, Q, { path: q, protocols: z })),
       {
         sendText: (X) => {
-          for (let Z of N(9, Q, this.textEncoder.encode(X))) this.send(Z);
+          for (let Z of M(9, Q, this.textEncoder.encode(X))) this.send(Z);
         },
         sendBin: (X) => {
-          for (let Z of N(10, Q, X)) this.send(Z);
+          for (let Z of M(10, Q, X)) this.send(Z);
         },
         close: (X, Z) => {
           (this.send(P(11, Q, { code: X, reason: Z })), this.wss.delete(Q));
@@ -339,18 +351,16 @@ class T {
     return this.channel.readyState === "open";
   }
 }
-var F = "wss://signal.codehost.dev";
-class J {
-  opts;
+var w = "wss://signal.codehost.dev";
+class R {
   peers = [];
   signaling;
   rtcs = new Map();
   tunnels = new Map();
   closed = !1;
   constructor(q) {
-    this.opts = q;
     ((this.signaling = new U({
-      url: q.signalUrl ?? F,
+      url: q.signalUrl ?? w,
       token: q.token,
       role: "viewer",
       onOpen: () => q.onStatus?.(!0),
@@ -377,10 +387,10 @@ class J {
         let V = setTimeout(() => {
             (K(), Z(Error("dial timed out")));
           }, 15000),
-          D = new M({
+          D = new B({
             sendSignal: ($) => this.signaling.sendSignal(q, $),
             onOpen: ($) => {
-              (clearTimeout(V), X(new T($)));
+              (clearTimeout(V), X(new N($)));
             },
             onClose: K,
             onState: ($) => {
@@ -401,7 +411,7 @@ class J {
     (this.rtcs.clear(), this.tunnels.clear(), this.signaling.close());
   }
 }
-function l(q) {
-  return new J(q);
+function n(q) {
+  return new R(q);
 }
-export { l as joinRoom, F as DEFAULT_SIGNAL_URL, J as CodehostRoom };
+export { n as joinRoom, w as DEFAULT_SIGNAL_URL, R as CodehostRoom };

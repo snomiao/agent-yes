@@ -1,8 +1,9 @@
-// `ay serve --share` host peer: connect to the signaling server as a room host
-// and bridge each browser peer's WebRTC DataChannel to this machine's local
-// `ay serve` HTTP API. The browser (agent-yes.com) thus reaches local agents
-// peer-to-peer — no public port, no tunnel. See lab/ui/cf/worker.ts for the
-// signaling protocol and lab/ui/index.html for the browser side.
+// `ay serve --webrtc` host peer: connect to the signaling server as a room host
+// and bridge each browser peer's WebRTC DataChannel to this machine's `ay serve`
+// API handler, called in-process — no HTTP listener, no port, no tunnel. The
+// browser (agent-yes.com) thus reaches local agents peer-to-peer. See
+// lab/ui/cf/worker.ts for the signaling protocol and lab/ui/index.html for the
+// browser side.
 import { randomBytes } from "crypto";
 
 const SUB = "ay-signal-1";
@@ -15,8 +16,8 @@ export interface ShareOpts {
   url?: string;
   /** signaling host when minting (default s.agent-yes.com) */
   sighost?: string;
-  /** local ay-serve base URL the channel bridges to */
-  apiUrl: string;
+  /** the local ay-serve API handler the channel bridges to (called in-process) */
+  localFetch: (req: Request) => Promise<Response>;
   /** bearer token for the local ay-serve API */
   apiToken: string;
 }
@@ -157,15 +158,18 @@ export async function startShare(opts: ShareOpts): Promise<{ room: string; link:
     const ac = new AbortController();
     aborts.set(id, ac);
     try {
-      const res = await fetch(opts.apiUrl + p, {
-        method,
-        headers: {
-          Authorization: `Bearer ${opts.apiToken}`,
-          ...(body ? { "Content-Type": "application/json" } : {}),
-        },
-        body: body ?? undefined,
-        signal: ac.signal,
-      });
+      // The host part is a placeholder — the handler only routes on the path.
+      const res = await opts.localFetch(
+        new Request(`http://ay.local${p}`, {
+          method,
+          headers: {
+            Authorization: `Bearer ${opts.apiToken}`,
+            ...(body ? { "Content-Type": "application/json" } : {}),
+          },
+          body: body ?? undefined,
+          signal: ac.signal,
+        }),
+      );
       send(dc, { t: "res", id, status: res.status, ct: res.headers.get("content-type") ?? "" });
       const reader = res.body!.getReader();
       const dec = new TextDecoder();

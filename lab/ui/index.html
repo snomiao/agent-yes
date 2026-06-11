@@ -893,13 +893,24 @@
         }
       }
 
+      // `ay serve --http` serves this page itself and prints a #k=<token> link;
+      // boot() stores the token and local /api calls carry it as ?token= (query,
+      // not header — EventSource can't set headers). When served via the lab
+      // proxy instead, no token is stored and paths stay bare (proxy injects).
+      const withTok = (path) => {
+        const t = localStorage.getItem("ay.localToken");
+        return t
+          ? path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(t)
+          : path;
+      };
+
       const Conn = {
         rtc: null, // RTCClient when remote (ay share), null when local
         ch: null, // CodehostClient when viewing a codehost room
         async fetchJSON(path) {
           if (this.ch) return this.ch.fetchJSON(path);
           if (this.rtc) return JSON.parse((await this.rtc.req("GET", path)).text);
-          return (await fetch(path)).json();
+          return (await fetch(withTok(path))).json();
         },
         async post(path, bodyObj) {
           if (this.ch) return this.ch.post(path, bodyObj);
@@ -907,7 +918,7 @@
             const r = await this.rtc.req("POST", path, JSON.stringify(bodyObj));
             return { ok: r.status >= 200 && r.status < 300, text: r.text };
           }
-          const r = await fetch(path, {
+          const r = await fetch(withTok(path), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(bodyObj),
@@ -935,7 +946,7 @@
               }
             });
           }
-          const ev = new EventSource(path);
+          const ev = new EventSource(withTok(path));
           ev.onopen = () => onOpen && onOpen();
           ev.onmessage = (e) => onText(JSON.parse(e.data));
           ev.onerror = () => onError && onError();
@@ -1461,6 +1472,19 @@
           } catch {}
           history.replaceState(null, document.title, location.pathname + location.search); // eat launch params
           if (spec) showLaunch(spec);
+          setConn("● local", "var(--muted)");
+          loadList();
+          setInterval(loadList, 3000);
+          return;
+        }
+        // #k=<token> — local-mode auth from `ay serve --http`'s printed link.
+        // Store it and stay local (don't fall through to the saved-room reconnect).
+        if (raw.startsWith("k=")) {
+          try {
+            localStorage.setItem("ay.localToken", decodeURIComponent(raw.slice(2)));
+          } catch {}
+          // SECURITY: strip the token from the URL immediately.
+          history.replaceState(null, document.title, location.pathname + location.search);
           setConn("● local", "var(--muted)");
           loadList();
           setInterval(loadList, 3000);
