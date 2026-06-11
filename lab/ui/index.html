@@ -316,6 +316,24 @@
       .newbtn:hover {
         filter: brightness(1.12);
       }
+      .viewbtn {
+        background: transparent;
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--muted);
+        font-size: 11.5px;
+        padding: 3px 9px;
+        cursor: pointer;
+        line-height: 1.6;
+      }
+      .viewbtn:hover {
+        color: var(--fg);
+        border-color: var(--accent);
+      }
+      .viewbtn.on {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
       .lcard .nfield {
         margin-top: 12px;
       }
@@ -427,6 +445,32 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      /* compact view: one line per agent — dot + cli + live title (or prompt), age */
+      .row.crow {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 18px;
+      }
+      .crow .cname {
+        font-weight: 600;
+        flex: none;
+      }
+      .crow .ctitle {
+        flex: 1;
+        min-width: 0;
+        font-size: 12.5px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .crow .ctitle.dim {
+        color: var(--muted);
+      }
+      .crow .age {
+        margin-left: 0;
+        flex: none;
       }
       .rowtags {
         display: flex;
@@ -589,6 +633,7 @@
           <div class="meta">
             <span id="count"></span>
             <span class="metaright">
+              <button id="viewbtn" class="viewbtn" title="toggle compact list">☰</button>
               <button id="newbtn" class="newbtn" title="spawn a new agent on this fleet">
                 + New agent
               </button>
@@ -1005,10 +1050,28 @@
         });
       }
 
+      // Compact list: one line per agent (dot + cli + title), persisted per device.
+      let compactList = localStorage.getItem("ay.compactList") === "1";
+
       function renderList() {
         const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
         const shown = entries.filter((e) => matches(e, toks));
         $("count").textContent = `${shown.length} / ${entries.length} agents`;
+        $("viewbtn").classList.toggle("on", compactList);
+        if (compactList) {
+          $("list").innerHTML =
+            shown
+              .map((e) => {
+                const t = e.title || e.prompt || "";
+                return `<div class="row crow ${String(e.pid) === sel ? "sel" : ""}" data-pid="${e.pid}">
+        <span class="dot ${esc(e.status)}"></span>
+        <span class="cname">${esc(e.cli)}</span>
+        <span class="ctitle ${e.title ? "" : "dim"}" title="${esc(t)}">${esc(t)}</span>
+        <span class="age">${age(e)}</span></div>`;
+              })
+              .join("") || `<div class="empty">no match</div>`;
+          return;
+        }
         $("list").innerHTML =
           shown
             .map((e) => {
@@ -1186,6 +1249,11 @@
         if (row) select(row.dataset.pid);
       });
       $("q").addEventListener("input", renderList);
+      $("viewbtn").addEventListener("click", () => {
+        compactList = !compactList;
+        localStorage.setItem("ay.compactList", compactList ? "1" : "0");
+        renderList();
+      });
       window.addEventListener("resize", () => {
         if (fit)
           try {
