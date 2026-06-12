@@ -1,17 +1,17 @@
-function F() {
+function k() {
   return crypto.randomUUID();
 }
-var v = 60000,
-  w = 1e4,
-  M = 1000,
-  u = 120000,
-  b = 25000;
-class H {
+var g = 60000,
+  u = 1e4,
+  L = 1000,
+  b = 120000,
+  O = 25000;
+class j {
   opts;
   peerId;
   ws = null;
   closed = !1;
-  reconnectDelay = M;
+  reconnectDelay = L;
   reconnectTimer = null;
   dormant = !1;
   heartbeat = null;
@@ -19,7 +19,7 @@ class H {
   openedAt = 0;
   constructor(z) {
     this.opts = z;
-    this.peerId = z.peerId ?? F();
+    this.peerId = z.peerId ?? k();
   }
   connect() {
     ((this.closed = !1), this.attachWakeListeners(), this.open());
@@ -42,13 +42,13 @@ class H {
   }
   attachWakeListeners() {
     globalThis.document?.addEventListener("visibilitychange", this.onWake);
-    let K = globalThis.window;
-    (K?.addEventListener("focus", this.onWake), K?.addEventListener("online", this.onWake));
+    let Q = globalThis.window;
+    (Q?.addEventListener("focus", this.onWake), Q?.addEventListener("online", this.onWake));
   }
   detachWakeListeners() {
     globalThis.document?.removeEventListener("visibilitychange", this.onWake);
-    let K = globalThis.window;
-    (K?.removeEventListener("focus", this.onWake), K?.removeEventListener("online", this.onWake));
+    let Q = globalThis.window;
+    (Q?.removeEventListener("focus", this.onWake), Q?.removeEventListener("online", this.onWake));
   }
   roomUrl() {
     return `${this.opts.url.replace(/\/+$/, "")}/room/${encodeURIComponent(this.opts.token)}`;
@@ -56,43 +56,43 @@ class H {
   open() {
     let z = new WebSocket(this.roomUrl());
     this.ws = z;
-    let K = setTimeout(() => {
+    let Q = setTimeout(() => {
       if (z.readyState === 0)
         try {
           z.close();
         } catch {}
-    }, w);
+    }, u);
     ((z.onopen = () => {
-      (clearTimeout(K),
+      (clearTimeout(Q),
         (this.openedAt = Date.now()),
         this.clearStableTimer(),
         (this.stableTimer = setTimeout(() => {
-          this.reconnectDelay = M;
-        }, v)));
-      let Q = {
+          this.reconnectDelay = L;
+        }, g)));
+      let Y = {
         type: "hello",
         role: this.opts.role,
         peerId: this.peerId,
         ...(this.opts.meta ? { meta: this.opts.meta } : {}),
       };
-      (z.send(JSON.stringify(Q)), this.startHeartbeat(), this.opts.onOpen?.());
+      (z.send(JSON.stringify(Y)), this.startHeartbeat(), this.opts.onOpen?.());
     }),
-      (z.onmessage = (Q) => {
-        let Y;
+      (z.onmessage = (Y) => {
+        let Z;
         try {
-          Y = JSON.parse(String(Q.data));
+          Z = JSON.parse(String(Y.data));
         } catch {
           return;
         }
-        if (Y.type === "peers") this.opts.onPeers?.(Y.peers);
-        else if (Y.type === "signal") this.opts.onSignal?.(Y.from, Y.data);
+        if (Z.type === "peers") this.opts.onPeers?.(Z.peers);
+        else if (Z.type === "signal") this.opts.onSignal?.(Z.from, Z.data);
       }),
-      (z.onclose = (Q) => {
-        (clearTimeout(K), this.clearStableTimer(), this.stopHeartbeat());
-        let Y = this.openedAt ? Date.now() - this.openedAt : 0;
+      (z.onclose = (Y) => {
+        (clearTimeout(Q), this.clearStableTimer(), this.stopHeartbeat());
+        let Z = this.openedAt ? Date.now() - this.openedAt : 0;
         if (
           ((this.openedAt = 0),
-          this.opts.onClose?.({ code: Q?.code ?? 0, reason: Q?.reason ?? "", ms: Y }),
+          this.opts.onClose?.({ code: Y?.code ?? 0, reason: Y?.reason ?? "", ms: Z }),
           !this.closed)
         )
           this.scheduleReconnect();
@@ -109,7 +109,7 @@ class H {
         try {
           this.ws?.send(JSON.stringify({ type: "ping" }));
         } catch {}
-      }, b)));
+      }, O)));
   }
   stopHeartbeat() {
     if (this.heartbeat != null) (clearInterval(this.heartbeat), (this.heartbeat = null));
@@ -123,7 +123,7 @@ class H {
       return;
     }
     let z = Math.round(this.reconnectDelay * (0.75 + Math.random() * 0.5));
-    ((this.reconnectDelay = Math.min(this.reconnectDelay * 2, u)),
+    ((this.reconnectDelay = Math.min(this.reconnectDelay * 2, b)),
       this.clearReconnectTimer(),
       (this.reconnectTimer = setTimeout(() => {
         if (((this.reconnectTimer = null), this.closed)) return;
@@ -138,14 +138,14 @@ class H {
     if (this.reconnectTimer != null)
       (clearTimeout(this.reconnectTimer), (this.reconnectTimer = null));
   }
-  sendSignal(z, K) {
-    let Q = { type: "signal", to: z, data: K };
-    this.ws?.send(JSON.stringify(Q));
+  sendSignal(z, Q) {
+    let Y = { type: "signal", to: z, data: Q };
+    this.ws?.send(JSON.stringify(Y));
   }
   updateMeta(z) {
     if (((this.opts.meta = z), this.ws?.readyState === 1)) {
-      let K = { type: "meta", meta: z };
-      this.ws.send(JSON.stringify(K));
+      let Q = { type: "meta", meta: z };
+      this.ws.send(JSON.stringify(Q));
     }
   }
   close() {
@@ -160,21 +160,23 @@ class H {
     } catch {}
   }
 }
-var R = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
-  A = "codehost";
-class x {
+var A = ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"],
+  N = "codehost",
+  _ = "codehost-bulk";
+class B {
   opts;
   pc;
   channel = null;
+  bulk = null;
   constructor(z) {
     this.opts = z;
-    ((this.pc = new RTCPeerConnection({ iceServers: R.map((K) => ({ urls: K })) })),
-      (this.pc.onicecandidate = (K) => {
-        if (K.candidate)
+    ((this.pc = new RTCPeerConnection({ iceServers: A.map((Q) => ({ urls: Q })) })),
+      (this.pc.onicecandidate = (Q) => {
+        if (Q.candidate)
           this.opts.sendSignal({
             kind: "candidate",
-            candidate: K.candidate.candidate,
-            mid: K.candidate.sdpMid ?? "0",
+            candidate: Q.candidate.candidate,
+            mid: Q.candidate.sdpMid ?? "0",
           });
       }),
       (this.pc.onconnectionstatechange = () => {
@@ -182,60 +184,65 @@ class x {
       }));
   }
   async start() {
-    let z = this.pc.createDataChannel(A, { ordered: !0 });
+    let z = this.pc.createDataChannel(N, { ordered: !0 });
     ((z.binaryType = "arraybuffer"),
       (this.channel = z),
       (z.onopen = () => this.opts.onOpen?.(z)),
       (z.onclose = () => this.opts.onClose?.()));
-    let K = await this.pc.createOffer();
-    (await this.pc.setLocalDescription(K),
-      this.opts.sendSignal({ kind: "offer", type: "offer", sdp: K.sdp ?? "" }));
+    let Q = this.pc.createDataChannel(_, { ordered: !0 });
+    ((Q.binaryType = "arraybuffer"), (this.bulk = Q));
+    let Y = await this.pc.createOffer();
+    (await this.pc.setLocalDescription(Y),
+      this.opts.sendSignal({ kind: "offer", type: "offer", sdp: Y.sdp ?? "" }));
   }
   async handleSignal(z) {
-    let K = z;
-    if (!K || typeof K !== "object") return;
-    if (K.kind === "answer") await this.pc.setRemoteDescription({ type: "answer", sdp: K.sdp });
-    else if (K.kind === "candidate")
+    let Q = z;
+    if (!Q || typeof Q !== "object") return;
+    if (Q.kind === "answer") await this.pc.setRemoteDescription({ type: "answer", sdp: Q.sdp });
+    else if (Q.kind === "candidate")
       try {
-        await this.pc.addIceCandidate({ candidate: K.candidate, sdpMid: K.mid });
-      } catch (Q) {
-        console.error("[rtc] addIceCandidate failed:", Q);
+        await this.pc.addIceCandidate({ candidate: Q.candidate, sdpMid: Q.mid });
+      } catch (Y) {
+        console.error("[rtc] addIceCandidate failed:", Y);
       }
   }
   get dataChannel() {
     return this.channel;
   }
+  get bulkChannel() {
+    return this.bulk;
+  }
   async selectedPath() {
     try {
       let z = await this.pc.getStats(),
-        K = null;
-      z.forEach(($) => {
-        if ($.type === "transport" && $.selectedCandidatePairId) K = $.selectedCandidatePairId;
+        Q = null;
+      z.forEach((q) => {
+        if (q.type === "transport" && q.selectedCandidatePairId) Q = q.selectedCandidatePairId;
       });
-      let Q = null;
+      let Y = null;
       if (
-        (z.forEach(($) => {
+        (z.forEach((q) => {
           if (
-            K ? $.id === K : $.type === "candidate-pair" && $.state === "succeeded" && $.nominated
+            Q ? q.id === Q : q.type === "candidate-pair" && q.state === "succeeded" && q.nominated
           )
-            Q = $;
+            Y = q;
         }),
-        !Q)
+        !Y)
       )
         return null;
-      let { localCandidateId: Y, remoteCandidateId: Z } = Q,
-        q = !0,
-        X = 0;
+      let { localCandidateId: Z, remoteCandidateId: $ } = Y,
+        G = !0,
+        V = 0;
       if (
-        (z.forEach(($) => {
-          if ($.id === Y || $.id === Z) {
-            if ((X++, $.candidateType !== "host")) q = !1;
+        (z.forEach((q) => {
+          if (q.id === Z || q.id === $) {
+            if ((V++, q.candidateType !== "host")) G = !1;
           }
         }),
-        X < 2)
+        V < 2)
       )
         return null;
-      return q ? "lan" : "p2p";
+      return G ? "lan" : "p2p";
     } catch {
       return null;
     }
@@ -245,76 +252,86 @@ class x {
       this.channel?.close();
     } catch {}
     try {
+      this.bulk?.close();
+    } catch {}
+    try {
       this.pc.close();
     } catch {}
   }
 }
-var g = new TextEncoder(),
-  N = new TextDecoder();
-function D(z, K, Q) {
-  let Y = Q?.byteLength ?? 0,
-    Z = new Uint8Array(5 + Y);
-  if (((Z[0] = z), new DataView(Z.buffer).setUint32(1, K >>> 0, !1), Q && Y)) Z.set(Q, 5);
-  return Z;
+var y = new TextEncoder(),
+  S = new TextDecoder();
+function P(z, Q, Y) {
+  let Z = Y?.byteLength ?? 0,
+    $ = new Uint8Array(5 + Z);
+  if ((($[0] = z), new DataView($.buffer).setUint32(1, Q >>> 0, !1), Y && Z)) $.set(Y, 5);
+  return $;
 }
-function k(z, K, Q) {
-  return D(z, K, g.encode(JSON.stringify(Q)));
-}
-function S(z) {
-  let K = z instanceof Uint8Array ? z : new Uint8Array(z),
-    Q = K[0],
-    Y = new DataView(K.buffer, K.byteOffset, K.byteLength).getUint32(1, !1),
-    Z = K.subarray(5);
-  return { op: Q, streamId: Y, payload: Z };
-}
-function U(z) {
-  return JSON.parse(N.decode(z));
+function J(z, Q, Y) {
+  return P(z, Q, y.encode(JSON.stringify(Y)));
 }
 function T(z) {
-  return N.decode(z);
+  let Q = z instanceof Uint8Array ? z : new Uint8Array(z),
+    Y = Q[0],
+    Z = new DataView(Q.buffer, Q.byteOffset, Q.byteLength).getUint32(1, !1),
+    $ = Q.subarray(5);
+  return { op: Y, streamId: Z, payload: $ };
 }
-function* _(z) {
-  for (let K = 0; K < z.byteLength; K += 65531) yield z.slice(K, Math.min(K + 65531, z.byteLength));
+function U(z) {
+  return JSON.parse(S.decode(z));
 }
-function O(z) {
+function E(z) {
+  return S.decode(z);
+}
+function* C(z) {
+  for (let Q = 0; Q < z.byteLength; Q += 65531) yield z.slice(Q, Math.min(Q + 65531, z.byteLength));
+}
+function f(z) {
   if (z.length === 1) return z[0];
-  let K = z.reduce((Z, q) => Z + q.byteLength, 0),
-    Q = new Uint8Array(K),
-    Y = 0;
-  for (let Z of z) (Q.set(Z, Y), (Y += Z.byteLength));
-  return Q;
+  let Q = z.reduce(($, G) => $ + G.byteLength, 0),
+    Y = new Uint8Array(Q),
+    Z = 0;
+  for (let $ of z) (Y.set($, Z), (Z += $.byteLength));
+  return Y;
 }
-function* J(z, K, Q) {
-  let Y = 0;
-  while (Q.byteLength - Y > 65531) (yield D(13, K, Q.subarray(Y, Y + 65531)), (Y += 65531));
-  yield D(z, K, Q.subarray(Y));
+function* H(z, Q, Y) {
+  let Z = 0;
+  while (Y.byteLength - Z > 65531) (yield P(13, Q, Y.subarray(Z, Z + 65531)), (Z += 65531));
+  yield P(z, Q, Y.subarray(Z));
 }
-class W {
+class F {
   pending = new Map();
-  cont(z, K) {
-    let Q = this.pending.get(z);
-    if (Q) Q.push(K.slice());
-    else this.pending.set(z, [K.slice()]);
+  cont(z, Q) {
+    let Y = this.pending.get(z);
+    if (Y) Y.push(Q.slice());
+    else this.pending.set(z, [Q.slice()]);
   }
-  finish(z, K) {
-    let Q = this.pending.get(z);
-    if (!Q) return K;
-    return (this.pending.delete(z), Q.push(K), O(Q));
+  finish(z, Q) {
+    let Y = this.pending.get(z);
+    if (!Y) return Q;
+    return (this.pending.delete(z), Y.push(Q), f(Y));
   }
   drop(z) {
     this.pending.delete(z);
   }
 }
-class j {
+class R {
   channel;
+  bulk;
   nextStreamId = 1;
   https = new Map();
   wss = new Map();
-  wsRx = new W();
+  wsRx = new F();
   textEncoder = new TextEncoder();
-  constructor(z) {
+  constructor(z, Q = null) {
     this.channel = z;
-    ((z.binaryType = "arraybuffer"), z.addEventListener("message", (K) => this.onFrame(K.data)));
+    this.bulk = Q;
+    if (
+      ((z.binaryType = "arraybuffer"),
+      z.addEventListener("message", (Y) => this.onFrame(Y.data)),
+      Q)
+    )
+      ((Q.binaryType = "arraybuffer"), Q.addEventListener("message", (Y) => this.onFrame(Y.data)));
   }
   allocId() {
     let z = this.nextStreamId;
@@ -322,130 +339,131 @@ class j {
   }
   onFrame(z) {
     if (typeof z === "string") return;
-    let { op: K, streamId: Q, payload: Y } = S(z);
-    switch (K) {
+    let { op: Q, streamId: Y, payload: Z } = T(z);
+    switch (Q) {
       case 4:
-        this.https.get(Q)?.onHead(U(Y));
+        this.https.get(Y)?.onHead(U(Z));
         break;
       case 5:
-        this.https.get(Q)?.onBody(Y.slice());
+        this.https.get(Y)?.onBody(Z.slice());
         break;
       case 6:
-        (this.https.get(Q)?.onEnd(), this.https.delete(Q));
+        (this.https.get(Y)?.onEnd(), this.https.delete(Y));
         break;
       case 12: {
-        let Z = this.https.get(Q);
-        if (Z) (Z.onError(U(Y).message), this.https.delete(Q));
+        let $ = this.https.get(Y);
+        if ($) ($.onError(U(Z).message), this.https.delete(Y));
         break;
       }
       case 8: {
-        let Z = U(Y);
-        this.wss.get(Q)?.onOpenAck(Z.ok, Z.protocol);
+        let $ = U(Z);
+        this.wss.get(Y)?.onOpenAck($.ok, $.protocol);
         break;
       }
       case 13:
-        this.wsRx.cont(Q, Y);
+        this.wsRx.cont(Y, Z);
         break;
       case 9:
-        this.wss.get(Q)?.onText(T(this.wsRx.finish(Q, Y)));
+        this.wss.get(Y)?.onText(E(this.wsRx.finish(Y, Z)));
         break;
       case 10:
-        this.wss.get(Q)?.onBin(this.wsRx.finish(Q, Y).slice());
+        this.wss.get(Y)?.onBin(this.wsRx.finish(Y, Z).slice());
         break;
       case 11: {
-        let Z = U(Y);
-        (this.wsRx.drop(Q),
-          this.wss.get(Q)?.onClose(Z.code ?? 1000, Z.reason ?? ""),
-          this.wss.delete(Q));
+        let $ = U(Z);
+        (this.wsRx.drop(Y),
+          this.wss.get(Y)?.onClose($.code ?? 1000, $.reason ?? ""),
+          this.wss.delete(Y));
         break;
       }
     }
   }
-  fetch(z, K, Q, Y) {
-    let Z = this.allocId();
-    return new Promise((q, X) => {
-      let $ = null,
-        P = null,
-        V = new ReadableStream({
-          start: (G) => {
-            P = G;
+  fetch(z, Q, Y, Z) {
+    let $ = this.allocId();
+    return new Promise((G, V) => {
+      let q = null,
+        D = null,
+        X = new ReadableStream({
+          start: (K) => {
+            D = K;
           },
         }),
-        C = typeof DecompressionStream < "u" ? { ...Q, "x-codehost-accept-gzip": "1" } : Q;
-      if (
-        (this.https.set(Z, {
-          onHead: (G) => {
-            $ = G;
-            let B = new Headers(G.headers),
-              L = V;
-            if (B.get("content-encoding") === "gzip")
-              ((L = V.pipeThrough(new DecompressionStream("gzip"))),
-                B.delete("content-encoding"),
-                B.delete("content-length"));
-            q(
-              new Response(L, {
-                status: G.status === 204 || G.status === 304 ? G.status : G.status,
-                statusText: G.statusText,
-                headers: B,
-              }),
-            );
-          },
-          onBody: (G) => {
-            try {
-              P?.enqueue(G);
-            } catch {}
-          },
-          onEnd: () => {
-            try {
-              P?.close();
-            } catch {}
-            if (!$) X(Error("stream ended before head"));
-          },
-          onError: (G) => {
-            try {
-              P?.error(Error(G));
-            } catch {}
-            if (!$) X(Error(G));
-          },
-        }),
-        this.send(k(1, Z, { method: z, path: K, headers: C })),
-        Y && Y.byteLength)
-      )
-        for (let G of _(Y)) this.send(D(2, Z, G));
-      this.send(D(3, Z));
+        v = typeof DecompressionStream < "u" ? { ...Y, "x-codehost-accept-gzip": "1" } : Y;
+      this.https.set($, {
+        onHead: (K) => {
+          q = K;
+          let x = new Headers(K.headers),
+            M = X;
+          if (x.get("content-encoding") === "gzip")
+            ((M = X.pipeThrough(new DecompressionStream("gzip"))),
+              x.delete("content-encoding"),
+              x.delete("content-length"));
+          G(
+            new Response(M, {
+              status: K.status === 204 || K.status === 304 ? K.status : K.status,
+              statusText: K.statusText,
+              headers: x,
+            }),
+          );
+        },
+        onBody: (K) => {
+          try {
+            D?.enqueue(K);
+          } catch {}
+        },
+        onEnd: () => {
+          try {
+            D?.close();
+          } catch {}
+          if (!q) V(Error("stream ended before head"));
+        },
+        onError: (K) => {
+          try {
+            D?.error(Error(K));
+          } catch {}
+          if (!q) V(Error(K));
+        },
+      });
+      let W = this.bulk?.readyState === "open" ? this.bulk : this.channel;
+      if ((this.sendOn(W, J(1, $, { method: z, path: Q, headers: v })), Z && Z.byteLength))
+        for (let K of C(Z)) this.sendOn(W, P(2, $, K));
+      this.sendOn(W, P(3, $));
     });
   }
-  openWs(z, K, Q) {
-    let Y = this.allocId();
+  openWs(z, Q, Y) {
+    let Z = this.allocId();
     return (
-      this.wss.set(Y, Q),
-      this.send(k(7, Y, { path: z, protocols: K })),
+      this.wss.set(Z, Y),
+      this.send(J(7, Z, { path: z, protocols: Q })),
       {
-        sendText: (Z) => {
-          for (let q of J(9, Y, this.textEncoder.encode(Z))) this.send(q);
+        sendText: ($) => {
+          for (let G of H(9, Z, this.textEncoder.encode($))) this.send(G);
         },
-        sendBin: (Z) => {
-          for (let q of J(10, Y, Z)) this.send(q);
+        sendBin: ($) => {
+          for (let G of H(10, Z, $)) this.send(G);
         },
-        close: (Z, q) => {
-          (this.send(k(11, Y, { code: Z, reason: q })), this.wss.delete(Y));
+        close: ($, G) => {
+          (this.send(J(11, Z, { code: $, reason: G })), this.wss.delete(Z));
         },
       }
     );
   }
   send(z) {
-    if (this.channel.readyState === "open") {
-      let K = new Uint8Array(z.byteLength);
-      (K.set(z), this.channel.send(K.buffer));
+    this.sendOn(this.channel, z);
+  }
+  sendOn(z, Q) {
+    if (z.readyState === "open") {
+      let Y = new Uint8Array(Q.byteLength);
+      (Y.set(Q), z.send(Y.buffer));
     }
   }
   get ready() {
     return this.channel.readyState === "open";
   }
 }
-var f = "wss://signal.codehost.dev",
-  y = 1e4;
-class E {
+var I = "wss://signal.codehost.dev",
+  h = 1e4;
+class w {
   peers = [];
   signaling;
   rtcs = new Map();
@@ -453,58 +471,58 @@ class E {
   dialFailedAt = new Map();
   closed = !1;
   constructor(z) {
-    ((this.signaling = new H({
-      url: z.signalUrl ?? f,
+    ((this.signaling = new j({
+      url: z.signalUrl ?? I,
       token: z.token,
       role: "viewer",
       onOpen: () => z.onStatus?.(!0),
       onClose: () => z.onStatus?.(!1),
-      onPeers: (K) => {
-        ((this.peers = K.filter((Q) => Q.role === "server")), z.onPeers?.(this.peers));
+      onPeers: (Q) => {
+        ((this.peers = Q.filter((Y) => Y.role === "server")), z.onPeers?.(this.peers));
       },
-      onSignal: (K, Q) => void this.rtcs.get(K)?.handleSignal(Q),
+      onSignal: (Q, Y) => void this.rtcs.get(Q)?.handleSignal(Y),
     })),
       this.signaling.connect());
   }
-  async fetch(z, K, Q, Y = {}) {
-    let Z = await this.dial(z),
-      q = typeof Y.body === "string" ? new TextEncoder().encode(Y.body) : Y.body;
-    return Z.fetch(K, Q, Y.headers ?? {}, q);
+  async fetch(z, Q, Y, Z = {}) {
+    let $ = await this.dial(z),
+      G = typeof Z.body === "string" ? new TextEncoder().encode(Z.body) : Z.body;
+    return $.fetch(Q, Y, Z.headers ?? {}, G);
   }
   dial(z) {
-    let K = this.tunnels.get(z);
-    if (K) return K;
-    let Q = this.dialFailedAt.get(z);
-    if (Q != null && Date.now() - Q < y)
+    let Q = this.tunnels.get(z);
+    if (Q) return Q;
+    let Y = this.dialFailedAt.get(z);
+    if (Y != null && Date.now() - Y < h)
       return Promise.reject(Error("dial failed recently; cooling down"));
-    let Y = () => {
+    let Z = () => {
         (this.tunnels.delete(z), this.rtcs.get(z)?.close(), this.rtcs.delete(z));
       },
-      Z = new Promise((q, X) => {
-        let $ = setTimeout(() => {
-            (Y(), X(Error("dial timed out")));
+      $ = new Promise((G, V) => {
+        let q = setTimeout(() => {
+            (Z(), V(Error("dial timed out")));
           }, 15000),
-          P = new x({
-            sendSignal: (V) => this.signaling.sendSignal(z, V),
-            onOpen: (V) => {
-              (clearTimeout($), this.dialFailedAt.delete(z), q(new j(V)));
+          D = new B({
+            sendSignal: (X) => this.signaling.sendSignal(z, X),
+            onOpen: (X) => {
+              (clearTimeout(q), this.dialFailedAt.delete(z), G(new R(X, D.bulkChannel)));
             },
-            onClose: Y,
-            onState: (V) => {
-              if (V === "failed" || V === "disconnected") Y();
+            onClose: Z,
+            onState: (X) => {
+              if (X === "failed" || X === "disconnected") Z();
             },
           });
-        (this.rtcs.set(z, P),
-          P.start().catch((V) => {
-            (clearTimeout($), Y(), X(V));
+        (this.rtcs.set(z, D),
+          D.start().catch((X) => {
+            (clearTimeout(q), Z(), V(X));
           }));
       });
     return (
-      this.tunnels.set(z, Z),
-      Z.catch(() => {
+      this.tunnels.set(z, $),
+      $.catch(() => {
         (this.dialFailedAt.set(z, Date.now()), this.tunnels.delete(z));
       }),
-      Z
+      $
     );
   }
   close() {
@@ -514,7 +532,7 @@ class E {
     (this.rtcs.clear(), this.tunnels.clear(), this.signaling.close());
   }
 }
-function a(z) {
-  return new E(z);
+function zz(z) {
+  return new w(z);
 }
-export { a as joinRoom, f as DEFAULT_SIGNAL_URL, E as CodehostRoom };
+export { zz as joinRoom, I as DEFAULT_SIGNAL_URL, w as CodehostRoom };
