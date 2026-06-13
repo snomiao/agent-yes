@@ -1,0 +1,59 @@
+name: Deploy Cloudflare Worker (agent-yes.com)
+
+# Ships the remote console + WebRTC signaling Worker (`agent-yes-signal`) to the
+# SNOLAB Cloudflare account, serving agent-yes.com (UI) and s.agent-yes.com
+# (signaling). Mirrors the local `bun run cf deploy` flow (scripts/cf.ts), minus
+# the OAuth-config juggling that's only needed on a dev machine — in CI the only
+# credential is the CLOUDFLARE_API_TOKEN secret (the SNOLAB token from
+# .env.local), and account_id lives in lab/ui/cf/wrangler.jsonc.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "lab/ui/**"
+      - ".github/workflows/deploy-cf.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-cf
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # public/ is a gitignored deploy artifact with no build step — the source
+      # of truth is lab/ui/{index.html,room-client.js}. Copy them in, exactly as
+      # a local deploy does by hand (see agent-yes-ui-edit-gotchas).
+      - name: Sync UI assets into worker public/
+        run: |
+          mkdir -p lab/ui/cf/public
+          cp lab/ui/index.html      lab/ui/cf/public/index.html
+          cp lab/ui/room-client.js  lab/ui/cf/public/room-client.js
+
+      # The SNOLAB token (`agent-yes-snolab`) lacks Workers Routes edit, so
+      # wrangler exits non-zero when it re-asserts the already-existing custom
+      # domains — harmless. Gate success on the Worker upload line instead.
+      - name: Deploy with Wrangler
+        working-directory: lab/ui/cf
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          set -o pipefail
+          bunx wrangler deploy 2>&1 | tee deploy.log || true
+          if grep -Eq "Uploaded agent-yes-signal|Deployed agent-yes-signal|Current Version ID" deploy.log; then
+            echo "::notice::Worker uploaded — any route re-assert error above is harmless (token lacks Routes edit)."
+          else
+            echo "::error::Wrangler did not upload the Worker."
+            exit 1
+          fi
