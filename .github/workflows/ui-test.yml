@@ -1,0 +1,47 @@
+name: UI Test
+
+# The console's pure logic (lab/ui/console-logic.js) is unit-tested in the main
+# Matrix Test suite. THIS workflow runs the heavier xterm.js render test
+# (tests/ui-test) — Playwright screenshots judged by Gemini Vision. It is:
+#   - scoped to lab/ui changes (and manual dispatch) so it doesn't run on every push,
+#   - non-blocking (continue-on-error) because the Gemini judge is non-deterministic
+#     and needs the GEMINI_API_KEY secret (without it the test self-skips).
+# Screenshots are uploaded as artifacts for human inspection regardless.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "lab/ui/**"
+      - "tests/ui-test/**"
+      - ".github/workflows/ui-test.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "lab/ui/**"
+      - "tests/ui-test/**"
+
+jobs:
+  ui-render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+      - name: Run UI render test (xterm.js → Gemini Vision judge)
+        continue-on-error: true
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: bun run test:ui
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ui-screenshots
+          path: tests/ui-test/screenshots/
+          if-no-files-found: ignore
