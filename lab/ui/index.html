@@ -1238,6 +1238,34 @@
           } catch {}
       });
 
+      // Step the selection up/down the (filtered) list — same order the left panel
+      // renders. Clamps at the ends, scrolls the row into view.
+      function stepSelection(dir) {
+        const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
+        const shown = entries.filter((e) => matches(e, toks));
+        if (!shown.length) return;
+        let i = shown.findIndex((e) => String(e.pid) === sel);
+        if (i < 0) i = dir > 0 ? 0 : shown.length - 1;
+        else i = Math.max(0, Math.min(shown.length - 1, i + dir));
+        const next = shown[i];
+        select(String(next.pid));
+        const row = $("list").querySelector('.row[data-pid="' + next.pid + '"]');
+        if (row) row.scrollIntoView({ block: "nearest" });
+      }
+      // Alt+PageDown / Alt+PageUp cycles agents. Capture phase on window so it
+      // fires BEFORE xterm's textarea handler — stopPropagation then keeps the
+      // combo from being forwarded to the focused agent's PTY as keystrokes.
+      window.addEventListener(
+        "keydown",
+        (e) => {
+          if (!e.altKey || (e.key !== "PageDown" && e.key !== "PageUp")) return;
+          e.preventDefault();
+          e.stopPropagation();
+          stepSelection(e.key === "PageDown" ? 1 : -1);
+        },
+        true,
+      );
+
       // ---- rooms: localStorage cache + a manager you open by clicking the badge ----
       const ROOMS_KEY = "ay.rooms";
       let curRoom = null;
