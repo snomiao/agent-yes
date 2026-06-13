@@ -620,6 +620,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return serveUiFile("index.html", "text/html; charset=utf-8");
     if (req.method === "GET" && p === "/room-client.js")
       return serveUiFile("room-client.js", "text/javascript; charset=utf-8");
+    if (req.method === "GET" && p === "/console-logic.js")
+      return serveUiFile("console-logic.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/favicon.ico") return new Response(null, { status: 204 });
     return apiFetch(req);
   };

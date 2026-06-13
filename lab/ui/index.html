@@ -650,7 +650,21 @@
     <div class="launchoverlay" id="launch" style="display: none"></div>
     <div class="launchoverlay" id="newform" style="display: none"></div>
 
-    <script>
+    <script type="module">
+      // Pure list/identity/filter helpers live in a sibling module so they can be
+      // unit-tested (tests/ui-logic/console-logic.spec.ts) without a DOM. This
+      // script is a module (deferred, runs after the codehost shim above sets
+      // window.__codehost), so a static import is safe.
+      import {
+        cliLabel,
+        repoBranch,
+        ident,
+        tagsFor,
+        age,
+        matches,
+        nextIndex,
+      } from "./console-logic.js";
+
       let entries = [];
       let sel = null; // selected keyword (pid as string)
       let es = null; // live-tail subscription closer
@@ -984,66 +998,6 @@
         },
       };
 
-      // claude is the default CLI — show the cli name only when it differs, so the
-      // common case stays uncluttered and the identity (repo/branch) leads instead.
-      const cliLabel = (e) => (e.cli && e.cli !== "claude" ? e.cli : "");
-      // Parse owner/repo/branch from a cwd like .../ws/<owner>/<repo>/tree/<branch>.
-      function repoBranch(e) {
-        const m = /\/([^/]+)\/([^/]+)\/tree\/([^/]+)/.exec(e.cwd || "");
-        return m ? { owner: m[1], repo: m[2], branch: m[3] } : null;
-      }
-      // Identity string for the left panel. cap=true → repo/branch each clipped to
-      // 3 chars for the compact one-line view (e.g. "age/mai").
-      function ident(e, cap) {
-        const rb = repoBranch(e);
-        if (!rb) return "";
-        const c = (s) => (cap && s.length > 3 ? s.slice(0, 3) : s);
-        return `${c(rb.repo)}/${c(rb.branch)}`;
-      }
-
-      // Derive codehost-style mnemonic tags from a cwd like .../ws/<owner>/<repo>/tree/<wt>
-      function tagsFor(e) {
-        const t = [];
-        const rb = repoBranch(e);
-        if (rb) {
-          t.push(["repo", `${rb.owner}/${rb.repo}`], ["wt", rb.branch]);
-        }
-        const cli = cliLabel(e);
-        if (cli) t.push(["cli", cli]);
-        if (e._host) t.push(["host", e._host]); // codehost rooms: which machine
-        return t;
-      }
-      function age(e) {
-        if (!e.started_at) return "";
-        const s = Math.max(0, (Date.now() - e.started_at) / 1000);
-        if (s < 60) return Math.floor(s) + "s";
-        if (s < 3600) return Math.floor(s / 60) + "m";
-        return Math.floor(s / 3600) + "h";
-      }
-
-      function matches(e, toks) {
-        const hay =
-          (e.title || "") +
-          " " +
-          (e.prompt || "") +
-          " " +
-          e.cli +
-          " " +
-          (e.cwd || "") +
-          " " +
-          e.status;
-        return toks.every((tok) => {
-          tok = tok.toLowerCase();
-          const ci = tok.indexOf(":");
-          if (ci > 0) {
-            const k = tok.slice(0, ci),
-              v = tok.slice(ci + 1);
-            return tagsFor(e).some(([tk, tv]) => tk === k && tv.toLowerCase().includes(v));
-          }
-          return hay.toLowerCase().includes(tok);
-        });
-      }
-
       // Compact list: one line per agent (dot + cli + title), persisted per device.
       let compactList = localStorage.getItem("ay.compactList") === "1";
 
@@ -1244,10 +1198,8 @@
         const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
         const shown = entries.filter((e) => matches(e, toks));
         if (!shown.length) return;
-        let i = shown.findIndex((e) => String(e.pid) === sel);
-        if (i < 0) i = dir > 0 ? 0 : shown.length - 1;
-        else i = Math.max(0, Math.min(shown.length - 1, i + dir));
-        const next = shown[i];
+        const cur = shown.findIndex((e) => String(e.pid) === sel);
+        const next = shown[nextIndex(shown.length, cur, dir)];
         select(String(next.pid));
         const row = $("list").querySelector('.row[data-pid="' + next.pid + '"]');
         if (row) row.scrollIntoView({ block: "nearest" });

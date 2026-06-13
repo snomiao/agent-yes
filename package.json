@@ -55,6 +55,7 @@
     "ts/*.ts",
     "!dist/**/*.map",
     "dist/**/*.js",
+    "lab/ui/console-logic.js",
     "lab/ui/index.html",
     "lab/ui/room-client.js"
   ],
