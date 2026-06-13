@@ -52,14 +52,34 @@
      flex children actually shrink — without it overflow:auto never engages). */
       .app {
         display: grid;
-        grid-template-columns: minmax(360px, 42%) 1fr;
+        grid-template-columns: var(--leftw, 42%) 1px 1fr;
         grid-template-rows: minmax(0, 1fr);
         height: 100vh;
       }
 
+      /* VSCode-style splitter: the visible divider stays 1px, but a ::before
+         overlay widens the pointer hit area to ~11px so it's easy to grab. */
+      .splitter {
+        position: relative;
+        background: var(--line);
+        cursor: col-resize;
+        z-index: 5;
+      }
+      .splitter::before {
+        content: "";
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        left: -5px;
+        right: -5px;
+      }
+      .splitter:hover,
+      .splitter.drag {
+        background: var(--accent);
+      }
+
       /* ---- left: list ---- */
       .left {
-        border-right: 1px solid var(--line);
         display: flex;
         flex-direction: column;
         min-width: 0;
@@ -453,8 +473,15 @@
         gap: 8px;
         padding: 6px 18px;
       }
+      .crow .cident {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        color: var(--green);
+        flex: none;
+      }
       .crow .cname {
         font-weight: 600;
+        color: var(--purple);
         flex: none;
       }
       .crow .ctitle {
@@ -553,50 +580,6 @@
         color: var(--muted);
         font-size: 14px;
       }
-      .composer {
-        border-top: 1px solid var(--line);
-        padding: 12px 16px;
-        display: flex;
-        gap: 8px;
-        align-items: flex-end;
-      }
-      .composer textarea {
-        flex: 1;
-        resize: none;
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 9px;
-        color: var(--fg);
-        font: 13px var(--mono);
-        padding: 9px 12px;
-        outline: 0;
-        min-height: 40px;
-        max-height: 160px;
-      }
-      .composer textarea:focus {
-        border-color: var(--accent);
-      }
-      .send {
-        background: var(--accent);
-        color: var(--bg);
-        border: 0;
-        border-radius: 9px;
-        font-weight: 600;
-        padding: 10px 18px;
-        cursor: pointer;
-        font-size: 13px;
-      }
-      .send:disabled {
-        opacity: 0.45;
-        cursor: not-allowed;
-      }
-      .hint {
-        color: var(--muted);
-        font-size: 11px;
-        font-family: var(--mono);
-        margin-top: 6px;
-        padding: 0 16px 10px;
-      }
     </style>
     <link
       rel="stylesheet"
@@ -645,6 +628,8 @@
         <div class="list" id="list"></div>
       </div>
 
+      <div class="splitter" id="splitter" title="drag to resize"></div>
+
       <div class="right">
         <div class="rhead" id="rhead" style="display: none">
           <span class="dot" id="rdot"></span>
@@ -655,18 +640,9 @@
           >
         </div>
         <div class="log" id="log">
-          <div class="placeholder">← pick an agent to tail its log and send it a message</div>
-        </div>
-        <div class="composer" id="composer" style="display: none">
-          <textarea
-            id="msg"
-            rows="1"
-            placeholder="message to send to the agent…  (⌘/Ctrl+Enter)"
-          ></textarea>
-          <button class="send" id="send">Send ⏎</button>
-        </div>
-        <div class="hint" id="hint" style="display: none">
-          POST /api/send → writes to the agent's stdin fifo, then Enter.
+          <div class="placeholder">
+            ← pick an agent to tail its log; type directly into the terminal
+          </div>
         </div>
       </div>
     </div>
@@ -1008,14 +984,32 @@
         },
       };
 
+      // claude is the default CLI — show the cli name only when it differs, so the
+      // common case stays uncluttered and the identity (repo/branch) leads instead.
+      const cliLabel = (e) => (e.cli && e.cli !== "claude" ? e.cli : "");
+      // Parse owner/repo/branch from a cwd like .../ws/<owner>/<repo>/tree/<branch>.
+      function repoBranch(e) {
+        const m = /\/([^/]+)\/([^/]+)\/tree\/([^/]+)/.exec(e.cwd || "");
+        return m ? { owner: m[1], repo: m[2], branch: m[3] } : null;
+      }
+      // Identity string for the left panel. cap=true → repo/branch each clipped to
+      // 3 chars for the compact one-line view (e.g. "age/mai").
+      function ident(e, cap) {
+        const rb = repoBranch(e);
+        if (!rb) return "";
+        const c = (s) => (cap && s.length > 3 ? s.slice(0, 3) : s);
+        return `${c(rb.repo)}/${c(rb.branch)}`;
+      }
+
       // Derive codehost-style mnemonic tags from a cwd like .../ws/<owner>/<repo>/tree/<wt>
       function tagsFor(e) {
         const t = [];
-        const m = /\/([^/]+)\/([^/]+)\/tree\/([^/]+)/.exec(e.cwd || "");
-        if (m) {
-          t.push(["repo", `${m[1]}/${m[2]}`], ["wt", m[3]]);
+        const rb = repoBranch(e);
+        if (rb) {
+          t.push(["repo", `${rb.owner}/${rb.repo}`], ["wt", rb.branch]);
         }
-        if (e.cli) t.push(["cli", e.cli]);
+        const cli = cliLabel(e);
+        if (cli) t.push(["cli", cli]);
         if (e._host) t.push(["host", e._host]); // codehost rooms: which machine
         return t;
       }
@@ -1063,9 +1057,12 @@
             shown
               .map((e) => {
                 const t = e.title || e.prompt || "";
+                const id = ident(e, true);
+                const cli = cliLabel(e);
                 return `<div class="row crow ${String(e.pid) === sel ? "sel" : ""}" data-pid="${e.pid}">
         <span class="dot ${esc(e.status)}"></span>
-        <span class="cname">${esc(e.cli)}</span>
+        ${id ? `<span class="cident" title="${esc(ident(e))}">${esc(id)}</span>` : ""}
+        ${cli ? `<span class="cname">${esc(cli)}</span>` : ""}
         <span class="ctitle ${e.title ? "" : "dim"}" title="${esc(t)}">${esc(t)}</span>
         <span class="age">${age(e)}</span></div>`;
               })
@@ -1083,7 +1080,7 @@
                 .join("");
               return `<div class="row ${String(e.pid) === sel ? "sel" : ""}" data-pid="${e.pid}">
         <div class="r1"><span class="dot ${esc(e.status)}"></span>
-          <span class="name">${esc(e.cli)}</span>
+          <span class="name">${esc(cliLabel(e) || ident(e) || "agent")}</span>
           <span class="badge">pid ${e.pid}</span>
           <span class="age">${age(e)}</span></div>
         ${e.title ? `<div class="rowtitle" title="${esc(e.title)}">${esc(e.title)}</div>` : ""}
@@ -1123,12 +1120,9 @@
         if (!e) return;
         renderList();
         $("rhead").style.display = "flex";
-        $("composer").style.display = "flex";
-        $("hint").style.display = "block";
         $("rdot").className = "dot " + e.status;
-        $("rname").textContent = e.title || e.cli;
+        $("rname").textContent = e.title || cliLabel(e) || ident(e) || "agent";
         $("rpid").textContent = "pid " + e.pid;
-        $("msg").focus();
 
         // Render the agent's native TUI with xterm.js by feeding it the raw PTY
         // stream (ANSI/cursor control intact) — see /api/tail?raw=1.
@@ -1151,6 +1145,7 @@
         fit = new FitAddon.FitAddon();
         term.loadAddon(fit);
         term.open(logEl);
+        term.focus();
         // An agent can rename itself by emitting an OSC 0/2 title sequence
         // (\x1b]2;my-name\x07); xterm parses it out of the raw PTY stream we already
         // feed it, so we just surface the latest title as the header name. Falls
@@ -1226,24 +1221,6 @@
         es = { close };
       }
 
-      async function send() {
-        if (!sel) return;
-        const msg = $("msg").value;
-        if (!msg.trim()) return;
-        $("send").disabled = true;
-        try {
-          const r = await Conn.post("/api/send", { keyword: sel, msg, code: "enter" });
-          if (r.ok) {
-            $("msg").value = "";
-          } else {
-            alert("send failed: " + r.text);
-          }
-        } finally {
-          $("send").disabled = false;
-          $("msg").focus();
-        }
-      }
-
       $("list").addEventListener("click", (ev) => {
         const row = ev.target.closest(".row");
         if (row) select(row.dataset.pid);
@@ -1259,13 +1236,6 @@
           try {
             fit.fit();
           } catch {}
-      });
-      $("send").addEventListener("click", send);
-      $("msg").addEventListener("keydown", (ev) => {
-        if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) {
-          ev.preventDefault();
-          send();
-        }
       });
 
       // ---- rooms: localStorage cache + a manager you open by clicking the badge ----
@@ -1572,8 +1542,7 @@
           history.replaceState(null, document.title, location.pathname + location.search); // eat launch params
           if (spec) showLaunch(spec);
           setConn("● local", "var(--muted)");
-          loadList();
-          setInterval(loadList, 3000);
+          startPolling();
           return;
         }
         // #k=<token> — local-mode auth from `ay serve --http`'s printed link.
@@ -1585,8 +1554,7 @@
           // SECURITY: strip the token from the URL immediately.
           history.replaceState(null, document.title, location.pathname + location.search);
           setConn("● local", "var(--muted)");
-          loadList();
-          setInterval(loadList, 3000);
+          startPolling();
           return;
         }
         const h = decodeURIComponent(raw);
@@ -1635,10 +1603,97 @@
         // Render the UI immediately and refresh on a timer; connect to a room (if
         // any) in the BACKGROUND so a dead/slow cached room never blanks the page.
         if (!pending) setConn("● local", "var(--muted)");
-        loadList();
-        setInterval(loadList, 3000); // refresh statuses / new agents
+        startPolling();
         if (pending) connectRoom(pending.room, pending.token, pending.host);
       }
+
+      // ---- activity-gated polling + auto-reload on new deploy ----------------
+      // Poll the agent list while the page is actually in use; pause when the tab
+      // is hidden or the user has been idle for IDLE_MS, so an unattended console
+      // stops making requests. On returning to the tab we refresh immediately.
+      let lastActivity = Date.now();
+      const IDLE_MS = 60_000; // no interaction for 1 min → idle → stop polling
+      ["mousemove", "keydown", "pointerdown", "wheel", "touchstart"].forEach((ev) =>
+        window.addEventListener(ev, () => (lastActivity = Date.now()), { passive: true }),
+      );
+      const isActive = () =>
+        document.visibilityState === "visible" && Date.now() - lastActivity < IDLE_MS;
+
+      let polling = false;
+      function startPolling() {
+        if (polling) return;
+        polling = true;
+        loadList();
+        setInterval(() => {
+          if (isActive()) loadList();
+        }, 3000); // refresh statuses / new agents — only while active
+        document.addEventListener("visibilitychange", () => {
+          if (document.visibilityState === "visible") {
+            lastActivity = Date.now();
+            loadList();
+          }
+        });
+        watchVersion();
+      }
+
+      // Auto-reload when the console's own assets change (a new deploy). HEAD the
+      // page once a minute and compare the cache validator; reload on change.
+      // Best-effort — ignores failures (e.g. remote rooms / cross-origin).
+      function watchVersion() {
+        let seen = null;
+        const check = async () => {
+          if (!isActive()) return;
+          try {
+            const r = await fetch(location.pathname, { method: "HEAD", cache: "no-store" });
+            const tag = r.headers.get("etag") || r.headers.get("last-modified");
+            if (!tag) return;
+            if (seen && seen !== tag) return location.reload();
+            seen = tag;
+          } catch {}
+        };
+        check();
+        setInterval(check, 60_000);
+      }
+
+      // ---- draggable middle splitter (VSCode-style) -------------------------
+      // Drag adjusts the left column width (a CSS var on .app), clamped so neither
+      // pane collapses, persisted per device, and refits the terminal as it moves.
+      (function () {
+        const sp = $("splitter");
+        const app = document.querySelector(".app");
+        const saved = localStorage.getItem("ay.leftw");
+        if (saved) app.style.setProperty("--leftw", saved);
+        let dragging = false;
+        sp.addEventListener("pointerdown", (e) => {
+          dragging = true;
+          sp.classList.add("drag");
+          sp.setPointerCapture(e.pointerId);
+          e.preventDefault();
+        });
+        sp.addEventListener("pointermove", (e) => {
+          if (!dragging) return;
+          const w = Math.min(Math.max(e.clientX, 280), window.innerWidth - 360);
+          app.style.setProperty("--leftw", w + "px");
+          if (fit)
+            try {
+              fit.fit();
+            } catch {}
+        });
+        const end = (e) => {
+          if (!dragging) return;
+          dragging = false;
+          sp.classList.remove("drag");
+          try {
+            sp.releasePointerCapture(e.pointerId);
+          } catch {}
+          localStorage.setItem(
+            "ay.leftw",
+            getComputedStyle(app).getPropertyValue("--leftw").trim(),
+          );
+        };
+        sp.addEventListener("pointerup", end);
+        sp.addEventListener("pointercancel", end);
+      })();
       boot();
     </script>
   </body>
