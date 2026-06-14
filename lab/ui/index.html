@@ -790,6 +790,7 @@
       } from "./console-logic.js";
 
       let entries = [];
+      let wantRemote = false; // a room hash/cached room is in play — don't poll the cloud origin's (nonexistent) /api before the tunnel opens
       let sel = null; // selected keyword (pid as string)
       let es = null; // live-tail subscription closer
       let term = null; // xterm.js Terminal rendering the raw PTY stream
@@ -1196,6 +1197,14 @@
 
       async function loadList() {
         const remote = Conn.ch || Conn.rtc;
+        // A room was requested but its WebRTC tunnel isn't up yet: the cloud
+        // origin serves only this static page, so a same-origin /api/ls fetch
+        // here just 404s. Skip it — connectRoom() drives loadList once the data
+        // channel opens (and again on every interval tick thereafter).
+        if (wantRemote && !remote) {
+          renderList();
+          return;
+        }
         try {
           entries = await Conn.fetchJSON("/api/ls?all=1");
           setConn(remote ? "● " + (curRoom || "remote") : "● local", "var(--green)");
@@ -1445,6 +1454,7 @@
 
       async function connectRoom(room, token, host) {
         host = host || SIG_DEFAULT;
+        wantRemote = true; // from here on, loadList waits for the tunnel instead of hitting the origin
         saveRoom(room, token, host); // cache so the badge can list & reconnect later
         try {
           localStorage.setItem("ay.lastRoom", room); // reconnect here on a bare open
@@ -1764,6 +1774,7 @@
         // Render the UI immediately and refresh on a timer; connect to a room (if
         // any) in the BACKGROUND so a dead/slow cached room never blanks the page.
         if (!pending) setConn("● local", "var(--muted)");
+        else wantRemote = true; // remote room in play — loadList waits for the tunnel
         startPolling();
         if (pending) connectRoom(pending.room, pending.token, pending.host);
       }

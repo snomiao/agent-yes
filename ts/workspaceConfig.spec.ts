@@ -57,7 +57,10 @@ describe("workspaceConfig", () => {
     });
 
     it("absolute path → used as-is", () => {
-      expect(resolveSpawnCwd("/tmp/elsewhere")).toBe("/tmp/elsewhere");
+      // path.resolve keeps a POSIX-absolute path on Unix but anchors it to the
+      // current drive on Windows (→ C:\tmp\elsewhere); compare against the same
+      // resolution the impl uses so the assertion holds on both (cf. "a/b" below).
+      expect(resolveSpawnCwd("/tmp/elsewhere")).toBe(path.resolve("/tmp/elsewhere"));
     });
 
     it("tilde path → home-based", () => {
