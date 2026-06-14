@@ -1181,7 +1181,11 @@
       // that agent as soon as it shows up in the list, then forgets itself. With
       // no ?pid, fall back to the agent this device last had selected — so a
       // refresh lands you back on the same agent instead of the placeholder.
+      // autoPidExplicit distinguishes the two: an explicit link opens the agent
+      // even on mobile (it's a deliberate "take me here"), whereas a merely
+      // restored selection only re-highlights the row on a phone — see loadList.
       let autoPid = new URLSearchParams(location.search).get("pid");
+      let autoPidExplicit = !!autoPid;
       if (autoPid) {
         history.replaceState(null, document.title, location.pathname + location.hash);
       } else {
@@ -1202,7 +1206,17 @@
         if (autoPid && entries.some((x) => String(x.pid) === String(autoPid))) {
           const pid = autoPid;
           autoPid = null;
-          select(pid);
+          // On a phone, a restored selection re-highlights the row but stays on
+          // the list — opening it would flip straight into the full-screen
+          // terminal (show-detail) and hide the list. An explicit ?pid= link is
+          // a deliberate jump, so it still opens. Desktop shows both panes, so
+          // there's nothing to scope — always open.
+          if (autoPidExplicit || window.innerWidth > 720) {
+            select(pid);
+          } else {
+            sel = pid;
+            renderList();
+          }
         }
       }
 

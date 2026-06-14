@@ -26,8 +26,9 @@ const FITADDON_STUB = "window.FitAddon={FitAddon:class{activate(){}dispose(){}fi
 async function openConsole(
   browser: Browser,
   url: string,
+  viewport: { width: number; height: number } = { width: 1280, height: 800 },
 ): Promise<{ ctx: BrowserContext; page: Page }> {
-  const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
+  const ctx = await browser.newContext({ viewport });
   await ctx.route(/cdn\.jsdelivr\.net/, (route) => {
     const body = route.request().url().includes("addon-fit") ? FITADDON_STUB : TERMINAL_STUB;
     route.fulfill({ status: 200, contentType: "application/javascript", body });
@@ -106,6 +107,40 @@ describe("console DOM behaviour", () => {
     } finally {
       // localStorage is per-context; closing it clears the persisted keys so the
       // other tests start clean.
+      await ctx.close();
+    }
+  });
+
+  it("on mobile, a restored selection highlights the row but stays on the list", async () => {
+    // Phone width (≤720px) is the single-column master/detail layout: opening an
+    // agent flips to the full-screen terminal (.show-detail). A *restored*
+    // selection should re-highlight the row WITHOUT that flip, so reopening the
+    // site lands on the list, not a terminal.
+    const { ctx, page } = await openConsole(browser, url, { width: 390, height: 844 });
+    try {
+      await page.click('.list .row[data-pid="102"]');
+      await expect
+        .poll(() =>
+          page.evaluate(() => document.querySelector(".app")!.classList.contains("show-detail")),
+        )
+        .toBe(true);
+
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForSelector('.list .row[data-pid="102"]', { state: "attached" });
+
+      // row stays selected…
+      await expect
+        .poll(() =>
+          page.evaluate(() => document.querySelector(".row.sel")?.getAttribute("data-pid") ?? null),
+        )
+        .toBe("102");
+      // …but we're back on the list, not flipped into the terminal.
+      expect(
+        await page.evaluate(() =>
+          document.querySelector(".app")!.classList.contains("show-detail"),
+        ),
+      ).toBe(false);
+    } finally {
       await ctx.close();
     }
   });
