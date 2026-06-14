@@ -1339,16 +1339,16 @@
         const row = $("list").querySelector('.row[data-pid="' + next.pid + '"]');
         if (row) row.scrollIntoView({ block: "nearest" });
       }
-      // Alt+PageDown / Alt+PageUp cycles agents. Capture phase on window so it
+      // Alt+ArrowDown / Alt+ArrowUp cycles agents. Capture phase on window so it
       // fires BEFORE xterm's textarea handler — stopPropagation then keeps the
       // combo from being forwarded to the focused agent's PTY as keystrokes.
       window.addEventListener(
         "keydown",
         (e) => {
-          if (!e.altKey || (e.key !== "PageDown" && e.key !== "PageUp")) return;
+          if (!e.altKey || (e.key !== "ArrowDown" && e.key !== "ArrowUp")) return;
           e.preventDefault();
           e.stopPropagation();
-          stepSelection(e.key === "PageDown" ? 1 : -1);
+          stepSelection(e.key === "ArrowDown" ? 1 : -1);
         },
         true,
       );

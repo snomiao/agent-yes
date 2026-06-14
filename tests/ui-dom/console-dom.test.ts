@@ -7,7 +7,7 @@
  * scripts are intercepted and replaced with a tiny stub so the page is hermetic.
  *
  * Covers the UI wiring that the console-logic unit tests can't: list rendering,
- * the filter box, the compact toggle, Alt+PageUp/PageDown navigation (incl. the
+ * the filter box, the compact toggle, Alt+ArrowUp/ArrowDown navigation (incl. the
  * capture-phase intercept that stops the combo reaching xterm), the draggable
  * splitter, and the absence of the removed stdin composer.
  */
@@ -102,7 +102,7 @@ describe("console DOM behaviour", () => {
     }
   });
 
-  it("Alt+PageDown/PageUp cycles selection and is intercepted before xterm", async () => {
+  it("Alt+ArrowDown/ArrowUp cycles selection and is intercepted before xterm", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
       // Select the first agent (builds the stubbed terminal + focuses it).
@@ -110,26 +110,26 @@ describe("console DOM behaviour", () => {
       await expect.poll(() => page.locator(".row.sel").getAttribute("data-pid")).toBe("101");
 
       // Spy on document keydown in the BUBBLE phase: the page's capture-phase
-      // handler calls stopPropagation, so these Alt+Page* combos must never
+      // handler calls stopPropagation, so these Alt+Arrow combos must never
       // reach here (i.e. they never reach xterm's textarea either).
       await page.evaluate(() => {
         (window as any).__bubble = [];
         document.addEventListener(
           "keydown",
           (e) => {
-            if (e.altKey && e.key.startsWith("Page")) (window as any).__bubble.push(e.key);
+            if (e.altKey && e.key.startsWith("Arrow")) (window as any).__bubble.push(e.key);
           },
           false,
         );
       });
 
-      await page.keyboard.press("Alt+PageDown");
+      await page.keyboard.press("Alt+ArrowDown");
       await expect.poll(() => page.locator(".row.sel").getAttribute("data-pid")).toBe("102");
-      await page.keyboard.press("Alt+PageDown");
+      await page.keyboard.press("Alt+ArrowDown");
       await expect.poll(() => page.locator(".row.sel").getAttribute("data-pid")).toBe("103");
-      await page.keyboard.press("Alt+PageDown"); // clamps at the bottom
+      await page.keyboard.press("Alt+ArrowDown"); // clamps at the bottom
       await expect.poll(() => page.locator(".row.sel").getAttribute("data-pid")).toBe("103");
-      await page.keyboard.press("Alt+PageUp");
+      await page.keyboard.press("Alt+ArrowUp");
       await expect.poll(() => page.locator(".row.sel").getAttribute("data-pid")).toBe("102");
 
       // The combo was swallowed by the capture-phase intercept.
