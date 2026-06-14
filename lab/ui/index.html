@@ -30,7 +30,9 @@
         background: var(--bg);
         color: var(--fg);
         height: 100vh;
+        height: 100dvh; /* dodge the iOS/Android dynamic toolbar resize */
         overflow: hidden;
+        -webkit-text-size-adjust: 100%;
         font:
           14px/1.55 -apple-system,
           BlinkMacSystemFont,
@@ -55,6 +57,7 @@
         grid-template-columns: var(--leftw, 42%) 1px 1fr;
         grid-template-rows: minmax(0, 1fr);
         height: 100vh;
+        height: 100dvh;
       }
 
       /* VSCode-style splitter: the visible divider stays 1px, but a ::before
@@ -113,10 +116,8 @@
       .install code:hover {
         filter: brightness(1.25);
       }
-      @media (max-width: 720px) {
-        .install .winhint {
-          display: none;
-        }
+      .install code {
+        word-break: break-all;
       }
       .ibox {
         display: flex;
@@ -563,6 +564,28 @@
       .rhead .name {
         font-size: 15px;
       }
+      /* back-to-list affordance — only surfaces in the single-column mobile view */
+      .rback {
+        display: none;
+        align-items: center;
+        justify-content: center;
+        flex: none;
+        width: 30px;
+        height: 30px;
+        margin: -4px 2px -4px -6px;
+        padding: 0;
+        background: transparent;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--fg);
+        font-size: 19px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .rback:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
       .rhead .live {
         margin-left: auto;
         font-size: 11px;
@@ -596,6 +619,79 @@
         height: 100%;
         color: var(--muted);
         font-size: 14px;
+      }
+
+      /* ---- mobile: collapse the two-pane desktop layout into a single column ----
+         The list and the terminal stack into the same cell; only one is visible at
+         a time. The list is the default ("master"); tapping an agent flips .app to
+         .show-detail to reveal the terminal ("detail"), and the ‹ back button flips
+         it back. The drag splitter is meaningless with one column, so it's hidden. */
+      @media (max-width: 720px) {
+        .install .winhint {
+          display: none;
+        }
+        .app {
+          grid-template-columns: 1fr;
+          grid-template-rows: minmax(0, 1fr);
+        }
+        .splitter {
+          display: none;
+        }
+        /* both panes occupy the single grid cell; visibility picks the active one */
+        .left,
+        .right {
+          grid-column: 1;
+          grid-row: 1;
+          min-width: 0;
+        }
+        .right {
+          display: none;
+        }
+        .app.show-detail .left {
+          display: none;
+        }
+        .app.show-detail .right {
+          display: flex;
+        }
+        .rback {
+          display: inline-flex;
+        }
+
+        .head {
+          padding: 12px 14px 8px;
+        }
+        h1 {
+          font-size: 17px;
+        }
+        /* roomier tap targets for the header controls */
+        .newbtn,
+        .viewbtn {
+          padding: 7px 12px;
+          font-size: 12.5px;
+        }
+        .meta {
+          align-items: center;
+        }
+        .metaright {
+          gap: 8px;
+        }
+        .row {
+          padding: 13px 14px;
+        }
+        .row.crow {
+          padding: 10px 14px;
+        }
+        .rhead {
+          padding: 12px 14px;
+        }
+        .list .row,
+        .rooms .ritem,
+        .rooms .rx,
+        .connbadge,
+        .install code,
+        code.copy {
+          -webkit-tap-highlight-color: transparent;
+        }
       }
     </style>
     <link
@@ -659,6 +755,7 @@
 
       <div class="right">
         <div class="rhead" id="rhead" style="display: none">
+          <button class="rback" id="rback" title="back to list" aria-label="back to list">‹</button>
           <span class="dot" id="rdot"></span>
           <span class="name" id="rname"></span>
           <span class="badge" id="rpid"></span>
@@ -1100,6 +1197,9 @@
         const e = entries.find((x) => String(x.pid) === sel);
         if (!e) return;
         renderList();
+        // Mobile: flip the single-column layout to the terminal ("detail") pane.
+        // Done BEFORE term.open below so xterm measures a visible container.
+        document.querySelector(".app").classList.add("show-detail");
         $("rhead").style.display = "flex";
         $("rdot").className = "dot " + e.status;
         $("rname").textContent = e.title || cliLabel(e) || ident(e) || "agent";
@@ -1126,7 +1226,10 @@
         fit = new FitAddon.FitAddon();
         term.loadAddon(fit);
         term.open(logEl);
-        term.focus();
+        // On a phone, auto-focusing yanks up the soft keyboard the moment you open
+        // an agent — even when you only meant to read the tail. Skip it there; a tap
+        // on the terminal still focuses to type. Desktop keeps instant keyboard input.
+        if (window.innerWidth > 720) term.focus();
         // An agent can rename itself by emitting an OSC 0/2 title sequence
         // (\x1b]2;my-name\x07); xterm parses it out of the raw PTY stream we already
         // feed it, so we just surface the latest title as the header name. Falls
@@ -1205,6 +1308,11 @@
       $("list").addEventListener("click", (ev) => {
         const row = ev.target.closest(".row");
         if (row) select(row.dataset.pid);
+      });
+      // Mobile back button: return to the list pane. The tail keeps streaming in the
+      // background (selection unchanged), so reopening the agent is instant.
+      $("rback").addEventListener("click", () => {
+        document.querySelector(".app").classList.remove("show-detail");
       });
       $("q").addEventListener("input", renderList);
       $("viewbtn").addEventListener("click", () => {
