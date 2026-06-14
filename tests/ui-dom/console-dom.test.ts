@@ -86,6 +86,30 @@ describe("console DOM behaviour", () => {
     }
   });
 
+  it("restores the filter and the selected agent across a reload", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      // Narrow the list and open an agent.
+      await page.fill("#q", "codex");
+      await expect.poll(() => page.locator(".list .row").count()).toBe(1);
+      await page.click('.list .row[data-pid="102"]');
+      await expect.poll(() => page.locator(".row.sel").getAttribute("data-pid")).toBe("102");
+
+      // A refresh (manual, or the auto-reload on a new deploy) must not lose them.
+      await page.reload({ waitUntil: "domcontentloaded" });
+      await page.waitForSelector(".list .row");
+
+      expect(await page.inputValue("#q")).toBe("codex");
+      await expect.poll(() => page.locator(".list .row").count()).toBe(1);
+      await expect.poll(() => page.locator(".row.sel").getAttribute("data-pid")).toBe("102");
+      await expect.poll(() => page.locator("#rhead").isVisible()).toBe(true);
+    } finally {
+      // localStorage is per-context; closing it clears the persisted keys so the
+      // other tests start clean.
+      await ctx.close();
+    }
+  });
+
   it("compact toggle collapses rows and caps repo/branch to 3 chars", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {

@@ -1169,11 +1169,25 @@
             .join("") || `<div class="empty">no match</div>`;
       }
 
+      // Restore the last filter so a refresh (incl. the auto-reload on a new
+      // deploy) doesn't wipe what you were narrowing to. Set before the first
+      // render so the list comes up already filtered.
+      try {
+        const savedFilter = localStorage.getItem("ay.filter");
+        if (savedFilter) $("q").value = savedFilter;
+      } catch {}
+
       // A ?pid=<pid> in the URL (codehost.dev's agent chips link here) selects
-      // that agent as soon as it shows up in the list, then forgets itself.
+      // that agent as soon as it shows up in the list, then forgets itself. With
+      // no ?pid, fall back to the agent this device last had selected — so a
+      // refresh lands you back on the same agent instead of the placeholder.
       let autoPid = new URLSearchParams(location.search).get("pid");
       if (autoPid) {
         history.replaceState(null, document.title, location.pathname + location.hash);
+      } else {
+        try {
+          autoPid = localStorage.getItem("ay.sel");
+        } catch {}
       }
 
       async function loadList() {
@@ -1194,6 +1208,10 @@
 
       function select(pid) {
         sel = String(pid);
+        // Remember the selection so a refresh re-opens this agent (see boot/autoPid).
+        try {
+          localStorage.setItem("ay.sel", sel);
+        } catch {}
         const e = entries.find((x) => String(x.pid) === sel);
         if (!e) return;
         renderList();
@@ -1314,7 +1332,12 @@
       $("rback").addEventListener("click", () => {
         document.querySelector(".app").classList.remove("show-detail");
       });
-      $("q").addEventListener("input", renderList);
+      $("q").addEventListener("input", () => {
+        try {
+          localStorage.setItem("ay.filter", $("q").value);
+        } catch {}
+        renderList();
+      });
       $("viewbtn").addEventListener("click", () => {
         compactList = !compactList;
         localStorage.setItem("ay.compactList", compactList ? "1" : "0");
@@ -1760,18 +1783,26 @@
         watchVersion();
       }
 
-      // Auto-reload when the console's own assets change (a new deploy). HEAD the
-      // page once a minute and compare the cache validator; reload on change.
-      // Best-effort — ignores failures (e.g. remote rooms / cross-origin).
+      // Auto-reload when the console's own assets change (a new deploy). We'd
+      // prefer to compare a cheap HEAD validator, but Cloudflare's asset
+      // responses for this page carry no etag/last-modified — so we GET the page
+      // once a minute and hash the body (FNV-1a) ourselves, reloading when the
+      // hash moves. Still one request/min, and only while the tab is active; the
+      // selection + filter are restored on reload so it's seamless. Best-effort —
+      // ignores failures (e.g. remote rooms / cross-origin).
       function watchVersion() {
         let seen = null;
         const check = async () => {
           if (!isActive()) return;
           try {
-            const r = await fetch(location.pathname, { method: "HEAD", cache: "no-store" });
-            const tag = r.headers.get("etag") || r.headers.get("last-modified");
-            if (!tag) return;
-            if (seen && seen !== tag) return location.reload();
+            const body = await (await fetch(location.pathname, { cache: "no-store" })).text();
+            let h = 0x811c9dc5;
+            for (let i = 0; i < body.length; i++) {
+              h ^= body.charCodeAt(i);
+              h = Math.imul(h, 0x01000193);
+            }
+            const tag = h >>> 0;
+            if (seen !== null && seen !== tag) return location.reload();
             seen = tag;
           } catch {}
         };
