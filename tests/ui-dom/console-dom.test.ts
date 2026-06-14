@@ -165,6 +165,17 @@ describe("console DOM behaviour", () => {
     }
   });
 
+  it("shows the install one-liner on the home page", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      const install = (await page.locator(".install").innerText()).toLowerCase();
+      expect(install).toContain("curl -fssl https://agent-yes.com/setup.sh | sh");
+      expect(install).toContain("irm https://agent-yes.com/setup.ps1 | iex");
+    } finally {
+      await ctx.close();
+    }
+  });
+
   it("has no stdin composer (xterm is the input)", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {

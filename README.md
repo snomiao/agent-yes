@@ -4,6 +4,28 @@ A wrapper tool that automates interactions with various AI CLI tools by automati
 
 ⚠️ **Important Security Warning**: Only run this on trusted repositories. This tool automatically responds to prompts and can execute commands without user confirmation. Be aware of potential prompt injection attacks where malicious code or instructions could be embedded in files or user inputs to manipulate the automated responses.
 
+## Install
+
+One-liner (installs Bun if needed, then the `ay` / `cy` / `claude-yes` … CLIs):
+
+```bash
+# macOS / Linux
+curl -fsSL https://agent-yes.com/setup.sh | sh
+```
+
+```powershell
+# Windows (PowerShell)
+irm https://agent-yes.com/setup.ps1 | iex
+```
+
+Or with a package manager you already have:
+
+```bash
+bun add -g agent-yes      # or: npm install -g agent-yes
+```
+
+Then: `ay claude` (run an agent with auto-yes) · `ay serve share` (web console + shareable link) · live console at https://agent-yes.com
+
 ## Features
 
 - **Multi-CLI Support**: Works with Claude, Gemini, Codex, Copilot, and Cursor CLI tools

@@ -101,6 +101,23 @@
         color: var(--muted);
         font-size: 12.5px;
       }
+      .install {
+        margin-top: 8px;
+        color: var(--muted);
+        font-size: 11.5px;
+      }
+      .install code {
+        cursor: pointer;
+        color: var(--green);
+      }
+      .install code:hover {
+        filter: brightness(1.25);
+      }
+      @media (max-width: 720px) {
+        .install .winhint {
+          display: none;
+        }
+      }
       .ibox {
         display: flex;
         align-items: center;
@@ -603,6 +620,14 @@
           <h1><span class="tag">agent-yes</span> · console</h1>
           <div class="sub">
             Live <code>ay ls</code> + per-agent tail &amp; send. Backed by <code>ay serve</code>.
+          </div>
+          <div class="install" title="click to copy">
+            install:
+            <code class="copy">curl -fsSL https://agent-yes.com/setup.sh | sh</code>
+            <span class="winhint"
+              >·&nbsp;Windows:
+              <code class="copy">irm https://agent-yes.com/setup.ps1 | iex</code></span
+            >
           </div>
           <div class="ibox">
             <span class="mag">⌕</span>
@@ -1336,8 +1361,12 @@
           : `<div class="empty2">no saved rooms — paste a share link below</div>`;
         $("rooms").innerHTML = `<div class="rtitle">rooms · stored on this device</div>${items}
       <div class="radd"><input id="roomin" placeholder="room:token  or  https://…/#room:token" /><button id="roomadd">add</button></div>
+      <div class="rconnect">new here? install agent-yes (bun or npm, auto):
+        <code id="cmdinstall" class="copy" title="click to copy">curl -fsSL https://agent-yes.com/setup.sh | sh</code>
+        <span style="opacity:.6">Windows:</span>
+        <code id="cmdinstallwin" class="copy" title="click to copy">irm https://agent-yes.com/setup.ps1 | iex</code></div>
       <div class="rconnect">share your own fleet — run this, then open the printed link:
-        <code id="cmd" title="click to copy">bunx agent-yes serve --share</code></div>
+        <code id="cmd" class="copy" title="click to copy">ay serve share</code></div>
       <div class="rconnect">or view a <b>codehost</b> room — paste <code>ch:&lt;room-token&gt;</code> (or a
         codehost.dev share link) above; every machine in the room shows its agents here.</div>`;
       }
@@ -1373,15 +1402,20 @@
             $("rooms").style.display = "none";
           } else alert("expected  room:token  or a share link");
         }
-        if (ev.target.id === "cmd") {
-          navigator.clipboard?.writeText(ev.target.textContent).then(() => {
-            const o = ev.target.textContent;
-            ev.target.textContent = "copied ✓";
-            setTimeout(() => {
-              ev.target.textContent = o;
-            }, 1000);
-          });
-        }
+      });
+
+      // Click-to-copy for any <code class="copy"> (install one-liners, share cmd…),
+      // wherever it lives — header or the rooms panel.
+      document.addEventListener("click", (ev) => {
+        const c = ev.target.closest && ev.target.closest("code.copy");
+        if (!c) return;
+        navigator.clipboard?.writeText(c.textContent).then(() => {
+          const o = c.textContent;
+          c.textContent = "copied ✓";
+          setTimeout(() => {
+            c.textContent = o;
+          }, 1000);
+        });
       });
 
       // ---- launch: command-only URLs (#launch=<json>, NO token) ----

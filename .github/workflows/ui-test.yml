@@ -77,7 +77,8 @@ jobs:
       - name: Stage console assets
         run: |
           mkdir -p lab/ui/cf/public
-          cp lab/ui/index.html lab/ui/room-client.js lab/ui/console-logic.js lab/ui/cf/public/
+          cp lab/ui/index.html lab/ui/room-client.js lab/ui/console-logic.js \
+             lab/ui/setup.sh lab/ui/setup.ps1 lab/ui/cf/public/
       # The SNOLAB token (`agent-yes-snolab`) lacks Workers Routes / User-Details
       # read, so wrangler prints an "Authentication error [code: 10000]" and
       # exits non-zero AFTER the Worker version + assets have already uploaded —
