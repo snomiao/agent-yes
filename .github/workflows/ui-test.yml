@@ -23,6 +23,21 @@ on:
       - "tests/ui-test/**"
 
 jobs:
+  # Deterministic, hermetic DOM test of the real console — blocking.
+  ui-dom:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install
+      - name: Install Playwright Chromium
+        run: bunx playwright install --with-deps chromium
+      - name: Run deterministic console DOM test
+        run: bun run test:ui-dom
+
+  # Heavier xterm render fidelity test (Gemini Vision) — non-blocking.
   ui-render:
     runs-on: ubuntu-latest
     steps:

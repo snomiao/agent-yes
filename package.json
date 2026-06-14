@@ -87,7 +87,8 @@
     "release:beta": "standard-version && npm publish --tag beta",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
-    "test:ui": "vitest run --config tests/ui-test/vitest.config.ts"
+    "test:ui": "vitest run --config tests/ui-test/vitest.config.ts",
+    "test:ui-dom": "vitest run --config tests/ui-dom/vitest.config.ts"
   },
   "dependencies": {
     "@snomiao/bun-pty": "^0.3.4",
