@@ -170,7 +170,7 @@ describe("console DOM behaviour", () => {
     try {
       const install = (await page.locator(".install").innerText()).toLowerCase();
       expect(install).toContain("curl -fssl https://agent-yes.com/setup.sh | sh");
-      expect(install).toContain("irm https://agent-yes.com/setup.ps1 | iex");
+      expect(install).toContain('powershell -c "irm https://agent-yes.com/setup.ps1 | iex"');
     } finally {
       await ctx.close();
     }

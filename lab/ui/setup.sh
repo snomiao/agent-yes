@@ -36,6 +36,14 @@ say "Installing agent-yes with $RT…"
 # shellcheck disable=SC2086
 $PM agent-yes
 
+# bun blocks dependency postinstalls by default, which skips node-datachannel's
+# native build — the addon that powers `ay serve --webrtc` / `ay serve share`.
+# Trust it so the WebRTC sharing feature works out of the box. (npm runs
+# postinstalls already, so this is bun-only and harmless if it no-ops.)
+if [ "$RT" = "bun" ]; then
+  bun pm -g trust node-datachannel >/dev/null 2>&1 || true
+fi
+
 # --- verify + next steps ----------------------------------------------------
 if command -v ay >/dev/null 2>&1; then
   say "Installed: $(ay --version 2>/dev/null || echo agent-yes)"

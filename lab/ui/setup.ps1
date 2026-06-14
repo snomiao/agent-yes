@@ -1,4 +1,5 @@
-# agent-yes installer (Windows) — irm https://agent-yes.com/setup.ps1 | iex
+# agent-yes installer (Windows) — powershell -c "irm https://agent-yes.com/setup.ps1 | iex"
+# (the powershell -c wrapper lets the same one-liner run from cmd too)
 #
 # Installs the agent-yes CLI (ay / cy / claude-yes / …) globally. agent-yes is a
 # JS package, so it needs a JS runtime + package manager: we use whichever of

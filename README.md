@@ -14,8 +14,8 @@ curl -fsSL https://agent-yes.com/setup.sh | sh
 ```
 
 ```powershell
-# Windows (PowerShell)
-irm https://agent-yes.com/setup.ps1 | iex
+# Windows (works in both PowerShell and cmd)
+powershell -c "irm https://agent-yes.com/setup.ps1 | iex"
 ```
 
 Or with a package manager you already have:
