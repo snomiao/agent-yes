@@ -524,6 +524,7 @@ async function runRemoteRead(
   follow: boolean,
   n: number,
   reconnectTimeoutMs = 120_000,
+  _plain = false,
 ): Promise<number> {
   const keyword = remote.keyword ?? "";
   if (!keyword) {
@@ -535,7 +536,12 @@ async function runRemoteRead(
 
   if (mode === "tail" && follow) {
     const ac = new AbortController();
-    process.on("SIGINT", () => ac.abort());
+    // SIGINT/SIGTERM/SIGHUP and a closed pipe all abort the stream, so
+    // `timeout … ay tail -f` and `kill` terminate promptly (was SIGINT-only,
+    // which let `timeout` run the full --reconnect-timeout window). The server
+    // already sends rendered, newline-delimited text, so the wire is plain.
+    const disposeSignals = installStreamSignals(() => ac.abort());
+    ac.signal.addEventListener("abort", disposeSignals, { once: true });
     const deadline = Date.now() + reconnectTimeoutMs;
     let delay = 1_000;
     let attempt = 0;
@@ -988,6 +994,13 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
       description: "Follow log output (Ctrl-C to stop)",
     })
     .option("n", { type: "number", description: "Number of lines (default: 96 for tail/head)" })
+    .option("plain", {
+      type: "boolean",
+      default: false,
+      description:
+        "Line-buffered plain text for pipes/scripts (no ANSI redraws or spinner). " +
+        "Auto-enabled when stdout is not a TTY.",
+    })
     .option("all", { type: "boolean", default: false, description: "Include exited agents" })
     .option("latest", {
       type: "boolean",
@@ -1005,6 +1018,12 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
     .exitProcess(false);
 
   const argv = await y.parseAsync();
+  // A closed downstream pipe (e.g. `… | head -3`) makes stdout writes fail with
+  // EPIPE. Treat it as a clean exit — the reader is gone, our job is done.
+  ensureEpipeExit();
+  // Pipes/scripts get line-buffered plain text by default; an explicit --plain
+  // forces it even on a TTY. See followPlainLocal / runRemoteRead.
+  const plain = Boolean(argv.plain) || !process.stdout.isTTY;
   const opts: CommonOpts = {
     all: argv.all,
     active: false,
@@ -1023,7 +1042,7 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
           ? 0
           : 96;
     const reconnectTimeoutMs = ((argv["reconnect-timeout"] as number) ?? 120) * 1000;
-    if (remote) return runRemoteRead(remote, mode, argv.follow, n2, reconnectTimeoutMs);
+    if (remote) return runRemoteRead(remote, mode, argv.follow, n2, reconnectTimeoutMs, plain);
   }
   const follow = argv.follow;
   const nFlag = argv.n;
@@ -1062,28 +1081,7 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
   if (!rendered.endsWith("\n")) process.stdout.write("\n");
 
   if (follow) {
-    process.stderr.write(`following... (Ctrl-C to stop)\n`);
-    let offset = buf.length;
-    const { watch } = await import("fs");
-    // oxlint-disable-next-line no-control-regex -- intentional: strip ANSI/control
-    const ansiRe = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
-    // oxlint-disable-next-line no-control-regex -- intentional: strip control chars
-    const ctrlRe = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
-    await new Promise<void>((resolve) => {
-      const watcher = watch(logPath, async () => {
-        const full = await readFile(logPath);
-        if (full.length <= offset) return;
-        const chunk = full.slice(offset);
-        offset = full.length;
-        const text = new TextDecoder().decode(chunk).replace(ansiRe, "").replace(ctrlRe, "");
-        if (text.trim()) process.stdout.write(text.trimStart());
-      });
-      process.on("SIGINT", () => {
-        watcher.close();
-        resolve();
-      });
-    });
-    return 0;
+    return plain ? followPlainLocal(logPath, buf) : followRawLocal(logPath, buf);
   }
 
   process.stderr.write(
@@ -1092,6 +1090,206 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
       `  ay tail -f ${record.pid}              # follow live output\n` +
       `  ay send ${record.pid} "next: ..."      # send a prompt\n` +
       `  ay send ${record.pid} "" --code=ctrl-c # interrupt\n`,
+  );
+  return 0;
+}
+
+/**
+ * Exit cleanly when stdout's downstream closes (EPIPE). Node ignores SIGPIPE and
+ * surfaces a broken pipe as a stream 'error'; with no listener it throws, and in
+ * follow mode the watch loop would otherwise hang. Idempotent — one listener for
+ * the life of the process, tagged on stdout so repeated calls (and module
+ * reloads in tests) don't pile up listeners.
+ */
+function ensureEpipeExit(): void {
+  const TAG = "__ayEpipeExit";
+  if ((process.stdout as unknown as Record<string, boolean>)[TAG]) return;
+  (process.stdout as unknown as Record<string, boolean>)[TAG] = true;
+  process.stdout.on("error", (e: NodeJS.ErrnoException) => {
+    if (e?.code === "EPIPE") process.exit(0);
+  });
+}
+
+/**
+ * Install signal handlers for a streaming follower so it terminates promptly
+ * under automation, not just on an interactive Ctrl-C. SIGINT/SIGTERM/SIGHUP all
+ * run `stop` (so `timeout … ay tail -f` and `kill` both work); a closed stdout
+ * (EPIPE) exits cleanly via ensureEpipeExit. Returns a disposer that removes the
+ * signal listeners.
+ */
+function installStreamSignals(stop: () => void): () => void {
+  ensureEpipeExit();
+  const onSig = () => stop();
+  process.on("SIGINT", onSig);
+  process.on("SIGTERM", onSig);
+  process.on("SIGHUP", onSig);
+  return () => {
+    process.off("SIGINT", onSig);
+    process.off("SIGTERM", onSig);
+    process.off("SIGHUP", onSig);
+  };
+}
+
+/**
+ * Coalescing file watcher: re-reads `logPath` on every change, hands each newly
+ * appended byte range to `onChunk`, and never overlaps reads (a change that
+ * arrives mid-read is serviced once the current read finishes). `startOffset`
+ * is where the already-emitted prefix ends. Resolves when `stop` is signalled.
+ */
+async function watchAppend(
+  logPath: string,
+  startOffset: number,
+  onChunk: (chunk: Uint8Array) => Promise<void> | void,
+  onStop: () => void,
+): Promise<void> {
+  const { watch } = await import("fs");
+  let offset = startOffset;
+  let reading = false;
+  let pending = false;
+  await new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      try {
+        watcher.close();
+      } catch {}
+      dispose();
+      onStop();
+      resolve();
+    };
+    const dispose = installStreamSignals(finish);
+    const pump = async () => {
+      if (reading) {
+        pending = true;
+        return;
+      }
+      reading = true;
+      do {
+        pending = false;
+        let full: Uint8Array;
+        try {
+          full = await readFile(logPath);
+        } catch {
+          break;
+        }
+        if (full.length > offset) {
+          const chunk = full.slice(offset);
+          offset = full.length;
+          await onChunk(chunk);
+        }
+      } while (pending && !done);
+      reading = false;
+    };
+    const watcher = watch(logPath, () => void pump());
+    // The file may have grown between our initial read and the watch starting.
+    void pump();
+  });
+}
+
+/**
+ * Default (interactive) follow: append each new byte range with ANSI/control
+ * sequences stripped. Mirrors the historical behaviour, plus prompt signal /
+ * pipe-close handling.
+ */
+async function followRawLocal(logPath: string, buf: Uint8Array): Promise<number> {
+  process.stderr.write(`following... (Ctrl-C to stop)\n`);
+  // oxlint-disable-next-line no-control-regex -- intentional: strip ANSI/control
+  const ansiRe = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
+  // oxlint-disable-next-line no-control-regex -- intentional: strip control chars
+  const ctrlRe = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
+  await watchAppend(
+    logPath,
+    buf.length,
+    (chunk) => {
+      const text = new TextDecoder().decode(chunk).replace(ansiRe, "").replace(ctrlRe, "");
+      if (text.trim()) process.stdout.write(text.trimStart());
+    },
+    () => {},
+  );
+  return 0;
+}
+
+/**
+ * Minimal view of an @xterm/headless buffer — just what the line-finalization
+ * logic needs, so it can be unit-tested against a real Terminal or a stub.
+ */
+export interface PlainTermView {
+  buffer: {
+    active: {
+      baseY: number;
+      cursorY: number;
+      getLine(i: number): { translateToString(trim: boolean): string } | undefined;
+    };
+  };
+}
+
+/** Absolute index (scrollback + viewport row) of the row the cursor sits on. */
+export function cursorAbs(term: PlainTermView): number {
+  return term.buffer.active.baseY + term.buffer.active.cursorY;
+}
+
+/**
+ * The lines in [fromAbs, cursorRow) — rows the cursor has moved PAST, i.e.
+ * finalized text. A row still being rewritten in place (spinner, progress bar,
+ * TUI repaint) is the cursor's own row and is excluded until the cursor leaves
+ * it, which is what keeps redraw churn out of the plain stream.
+ */
+export function finalizedLines(term: PlainTermView, fromAbs: number): string[] {
+  const a = term.buffer.active;
+  const cur = a.baseY + a.cursorY;
+  const out: string[] = [];
+  for (let i = Math.max(0, fromAbs); i < cur; i++) {
+    const l = a.getLine(i);
+    out.push(l ? l.translateToString(false).trimEnd() : "");
+  }
+  return out;
+}
+
+/**
+ * Plain (pipe/script) follow: feed the live PTY stream through @xterm/headless
+ * and emit each line only once it's finalized — i.e. once the cursor has moved
+ * off it. In-place redraws (spinners, progress bars that rewrite the current
+ * line, full-screen TUI repaints) churn the cursor's row and never emit until
+ * settled, so the output is clean, newline-terminated, line-buffered text a
+ * script can read. On stop, flush the line the cursor is still sitting on.
+ */
+async function followPlainLocal(logPath: string, buf: Uint8Array): Promise<number> {
+  process.stderr.write(`following... (plain; Ctrl-C / SIGTERM to stop)\n`);
+  const { Terminal } = await import("@xterm/headless");
+  const term = new Terminal({ cols: 200, rows: 50, scrollback: 50000, allowProposedApi: true });
+  const feed = (b: Uint8Array) => new Promise<void>((r) => term.write(b, () => r()));
+  const lineAt = (i: number) => {
+    const l = term.buffer.active.getLine(i);
+    return l ? l.translateToString(false).trimEnd() : "";
+  };
+
+  // Seed with the existing log so we start streaming from the live frontier —
+  // the recent context was already printed by the static tail above.
+  await feed(buf);
+  let emitted = cursorAbs(term);
+
+  // `emitted` only advances, so a redraw that moves the cursor back up doesn't
+  // re-emit lines it then rewrites.
+  const flushCommitted = () => {
+    for (const line of finalizedLines(term, emitted)) process.stdout.write(line + "\n");
+    emitted = cursorAbs(term);
+  };
+
+  await watchAppend(
+    logPath,
+    buf.length,
+    async (chunk) => {
+      await feed(chunk);
+      flushCommitted();
+    },
+    () => {
+      // Final flush: include the cursor's own row if it has content, so the last
+      // partial line isn't lost when we're killed mid-stream.
+      flushCommitted();
+      const last = lineAt(cursorAbs(term));
+      if (last) process.stdout.write(last + "\n");
+    },
   );
   return 0;
 }

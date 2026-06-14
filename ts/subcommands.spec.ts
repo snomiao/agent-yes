@@ -458,6 +458,45 @@ describe("subcommands.cmdRead renders raw log via xterm-headless", () => {
   });
 });
 
+// The plain (pipe/script) follow mode emits a line only once the cursor has
+// moved off it, so in-place redraws (spinners, progress bars, TUI repaints) stay
+// out of the stream. finalizedLines() is that rule; drive it with a real
+// @xterm/headless terminal so the assertions reflect actual PTY semantics.
+describe("subcommands.finalizedLines (plain follow line discipline)", () => {
+  async function newTerm() {
+    const { Terminal } = await import("@xterm/headless");
+    return new Terminal({ cols: 80, rows: 10, scrollback: 1000, allowProposedApi: true });
+  }
+  const feed = (term: any, s: string) =>
+    new Promise<void>((r) => term.write(new TextEncoder().encode(s), () => r()));
+
+  it("emits newline-finalized lines and suppresses in-place redraws", async () => {
+    const { finalizedLines, cursorAbs } = await loadModule();
+    const term = await newTerm();
+
+    await feed(term, "line A\r\nline B\r\n");
+    // Cursor is now on the empty row 2; rows 0–1 are finalized.
+    expect(finalizedLines(term as any, 0)).toEqual(["line A", "line B"]);
+
+    // A spinner rewrites the current row in place (CR, no newline) — not finalized.
+    let mark = cursorAbs(term as any);
+    await feed(term, "\x1b[33mWorking |\x1b[0m");
+    expect(finalizedLines(term as any, mark)).toEqual([]);
+    await feed(term, "\rWorking /"); // redraw same row
+    expect(finalizedLines(term as any, mark)).toEqual([]);
+
+    // Once the line is overwritten with real content AND terminated, it commits.
+    await feed(term, "\rdownload complete\r\n");
+    expect(finalizedLines(term as any, mark)).toEqual(["download complete"]);
+
+    // Advancing the high-water mark, nothing new is finalized until more arrives.
+    mark = cursorAbs(term as any);
+    expect(finalizedLines(term as any, mark)).toEqual([]);
+    await feed(term, "next line\r\n");
+    expect(finalizedLines(term as any, mark)).toEqual(["next line"]);
+  });
+});
+
 describe("subcommands.cmdSend writes bytes to FIFO", () => {
   // Skip on non-unix because FIFO creation requires mkfifo
   const itUnix = process.platform === "linux" || process.platform === "darwin";
