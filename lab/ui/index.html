@@ -1450,7 +1450,20 @@
         // feed it, so we just surface the latest title as the header name. Falls
         // back to the cli name when the agent never sets one.
         term.onTitleChange((t) => {
-          if (sel === e._key && t && t.trim()) $("rname").textContent = t.trim();
+          const title = t && t.trim();
+          if (sel !== e._key || !title) return;
+          $("rname").textContent = title;
+          // Keep the left panel in lockstep with the terminal header. The row
+          // title otherwise only refreshes on the 3s /api/ls poll, so it visibly
+          // lagged the live terminal. Patch the current entry (entries is
+          // replaced wholesale each poll, so look it up by _key, not via the
+          // captured `e`) and re-render — but only when the title actually
+          // changed, so a TUI re-emitting the same OSC doesn't churn the list.
+          const ent = entries.find((x) => x._key === e._key);
+          if (ent && ent.title !== title) {
+            ent.title = title;
+            renderList();
+          }
         });
         // Adapt: drive the agent's PTY to the browser terminal size (POST
         // /api/resize → winsize + SIGWINCH) so its TUI reflows to match what we
