@@ -133,18 +133,32 @@ function ayServeArgv(args: string[]): string[] {
   return [...launcher, "serve", ...args];
 }
 
-// Register the daemon with the platform init system so it comes back after a
-// *reboot*, not just a crash. oxmgr wires launchd/systemd/Task Scheduler via
-// `oxmgr service install`; pm2 persists its process list with `pm2 save` (a
-// once-installed `pm2 startup` hook then resurrects it on boot). Idempotent and
-// best-effort: returns false on any failure without aborting the install — the
-// process is still crash-managed, just not guaranteed boot-persistent.
+// Register the daemon to come up automatically. The *scope* is per-platform by
+// design: Linux → at system boot (before login); Windows → at user login.
+//   - Linux (oxmgr): `oxmgr service install` wires a systemd **--user** unit,
+//     which on its own only starts after the user logs in. To make it start at
+//     boot without requiring root (no system-scope unit, no sudo), we also
+//     `loginctl enable-linger`, which keeps the user's systemd instance — and
+//     thus our service — running from boot. Best-effort; linger failing just
+//     downgrades us to login-scope.
+//   - Windows (pm2): `pm2 save` persists the process list so the once-installed
+//     `pm2 startup` logon hook resurrects it at user login.
+// Idempotent and best-effort: returns false on failure without aborting the
+// install — the process is still crash-managed, just not boot/login-persistent.
 async function ensureBootAutostart(mgr: DaemonManager): Promise<boolean> {
   try {
+    if (mgr.id !== "oxmgr") {
+      // pm2 (Windows): logon-scoped resurrect via the saved process list.
+      return (await spawnExit([mgr.bin, "save"])) === 0;
+    }
     // oxmgr's --system defaults to "auto" (launchd/systemd/Task Scheduler); it's
     // a `service`-level flag, so it goes before the subcommand, not after.
-    const cmd = mgr.id === "oxmgr" ? [mgr.bin, "service", "install"] : [mgr.bin, "save"];
-    return (await Bun.spawn(cmd, { stdio: ["ignore", "ignore", "ignore"] }).exited) === 0;
+    const installed = (await spawnExit([mgr.bin, "service", "install"])) === 0;
+    if (installed && process.platform === "linux") {
+      // Upgrade login-scope → boot-scope: linger starts the user manager at boot.
+      await spawnExit(["loginctl", "enable-linger", userInfo().username]);
+    }
+    return installed;
   } catch {
     return false;
   }
@@ -281,14 +295,14 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       if (mgr.id === "oxmgr")
         process.stdout.write(
           onBoot
-            ? `start-on-boot: enabled (oxmgr registered with the system init)\n`
-            : `start-on-boot: not registered — run \`oxmgr service install\` to enable\n`,
+            ? `start-on-boot: enabled (systemd --user + linger, starts at boot)\n`
+            : `start-on-boot: not registered — needs a user systemd session; run \`oxmgr service install\` to enable\n`,
         );
       else
         process.stdout.write(
           onBoot
-            ? `start-on-boot: pm2 list saved (run \`pm2 startup\` once for boot resurrect)\n`
-            : `start-on-boot: \`pm2 save\` failed — run it manually to persist across reboots\n`,
+            ? `start-on-login: enabled (pm2 list saved; run \`pm2 startup\` once if logon resurrect is not yet installed)\n`
+            : `start-on-login: \`pm2 save\` failed — run it manually to persist across logins\n`,
         );
       process.stdout.write(`token: ${token}\n\n`);
       if (httpish) {
