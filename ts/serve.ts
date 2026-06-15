@@ -320,6 +320,93 @@ export async function cmdServe(rest: string[]): Promise<number> {
       }
     }
 
+    // GET /api/ls/subscribe — SSE: throttled live deltas of the agent list.
+    // The console used to re-poll /api/ls every 3s; this streams the SAME records
+    // (incl. each agent's OSC title) but only what CHANGED since the last tick, so
+    // an idle fleet costs ~nothing on the wire. The first event is a full snapshot
+    // ({ full:true, upsert:[all] }); each later event carries { upsert:[changed
+    // records], remove:[gone pids] }. listRecords is a couple of JSONL reads and
+    // logTitle is cached by (size,mtime), so the 1s tick stays cheap.
+    if (req.method === "GET" && p === "/api/ls/subscribe") {
+      const keyword = url.searchParams.get("keyword") ?? undefined;
+      const opts = defaultOpts({
+        all: url.searchParams.get("all") === "1",
+        active: url.searchParams.get("active") === "1",
+      });
+      const enc = new TextEncoder();
+      const stream = new ReadableStream({
+        async start(ctrl) {
+          let closed = false;
+          const send = (obj: unknown) => {
+            try {
+              ctrl.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
+            } catch {
+              /* stream already closed */
+            }
+          };
+          // pid -> JSON of the last record we sent, for cheap change detection.
+          const sent = new Map<number, string>();
+          const compute = async () => {
+            const records = await listRecords(keyword, opts);
+            return Promise.all(
+              records.map(async (r) => ({ ...r, title: await logTitle(r.log_file) })),
+            );
+          };
+          const tick = async (first: boolean) => {
+            if (closed) return;
+            // Transient read error → skip this tick, retry on the next.
+            const list = await compute().catch(() => null);
+            if (!list) return;
+            const upsert: typeof list = [];
+            const seen = new Set<number>();
+            for (const r of list) {
+              seen.add(r.pid);
+              const j = JSON.stringify(r);
+              if (sent.get(r.pid) !== j) {
+                upsert.push(r);
+                sent.set(r.pid, j);
+              }
+            }
+            const remove: number[] = [];
+            for (const pid of sent.keys())
+              if (!seen.has(pid)) {
+                remove.push(pid);
+                sent.delete(pid);
+              }
+            if (first) send({ full: true, upsert: list, remove: [] });
+            else if (upsert.length || remove.length) send({ upsert, remove });
+          };
+
+          await tick(true);
+          const timer = setInterval(() => void tick(false), 1000);
+          const heartbeat = setInterval(() => {
+            try {
+              ctrl.enqueue(enc.encode(": ping\n\n"));
+            } catch {
+              /* closed */
+            }
+          }, 15_000);
+          req.signal.addEventListener("abort", () => {
+            closed = true;
+            clearInterval(timer);
+            clearInterval(heartbeat);
+            try {
+              ctrl.close();
+            } catch {
+              /* already closed */
+            }
+          });
+        },
+      });
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
+      });
+    }
+
     // GET /api/whoami — this host's device label (user@host), so a remote
     // console can tag each agent with the machine it came from. Unlike codehost,
     // `ay serve --share` carries no per-agent device id; the viewer fetches this

@@ -1227,7 +1227,7 @@
         const hasToken = !!localStorage.getItem("ay.localToken");
         const enabled = isLocalhost || hasToken || Object.keys(loadRooms()).length === 0;
         if (enabled && !sources.has(LOCAL)) {
-          sources.set(LOCAL, {
+          const s = {
             id: LOCAL,
             host: "local",
             kind: "local",
@@ -1237,8 +1237,11 @@
             tried: true, // no connect phase — polled directly
             devices: new Set(),
             serverCount: 0,
-          });
-        } else if (!enabled) {
+          };
+          sources.set(LOCAL, s);
+          subscribeSource(s);
+        } else if (!enabled && sources.has(LOCAL)) {
+          unsubscribeSource(sources.get(LOCAL));
           sources.delete(LOCAL);
         }
       }
@@ -1246,28 +1249,85 @@
       // Pull one source's agent list, tagging each row with its origin + a
       // composite key (pids can collide across rooms). Updates the source's live
       // flag, device set, and server count for the rooms panel.
+      // Stamp a source's raw /api/ls records with their origin + composite key
+      // (pids collide across rooms) and recompute the source's device set + server
+      // count for the rooms panel. Pure transform of the source's current records.
+      function stampAgents(s) {
+        s.devices = new Set();
+        const out = [...(s.byPid?.values() || [])].map((e) => {
+          // codehost stamps _host per agent; agent-yes share rooms fall back to
+          // the room's device label (from /api/whoami). Local stays unlabelled
+          // (no deviceLabel) so a single-machine view keeps its clean path-only
+          // identity instead of a blank "@:" prefix.
+          const host = e._host || s.deviceLabel || "";
+          if (host) s.devices.add(host);
+          return { ...e, _room: s.id, _key: s.id + "#" + e.pid, _host: host };
+        });
+        s.serverCount =
+          s.kind === "ch" ? s.client?.hosts().length || 0 : s.devices.size || (s.live ? 1 : 0);
+        s.agents = out;
+      }
+
+      // Replace a source's whole record set (full /api/ls fetch or a stream
+      // snapshot). Resets byPid so later stream deltas diff against it cleanly.
+      function applyFull(s, arr) {
+        s.byPid = new Map((Array.isArray(arr) ? arr : []).map((r) => [r.pid, r]));
+        s.live = true;
+        stampAgents(s);
+      }
+
+      // Apply one stream event: a full snapshot, or an incremental
+      // { upsert:[changed], remove:[gone pids] } delta from /api/ls/subscribe.
+      function applyDelta(s, ev) {
+        if (ev.full) return applyFull(s, ev.upsert);
+        if (!s.byPid) s.byPid = new Map();
+        for (const r of ev.upsert || []) s.byPid.set(r.pid, r);
+        for (const pid of ev.remove || []) s.byPid.delete(pid);
+        s.live = true;
+        stampAgents(s);
+      }
+
+      // Fallback poll for a source that isn't streaming (older host with no
+      // /api/ls/subscribe, or before its first delta lands).
       async function listSource(s) {
         try {
-          const arr = await s.tx.fetchJSON("/api/ls?all=1");
-          s.live = true;
-          s.devices = new Set();
-          const out = (Array.isArray(arr) ? arr : []).map((e) => {
-            // codehost stamps _host per agent; agent-yes share rooms fall back to
-            // the room's device label (from /api/whoami). Local stays unlabelled
-            // (no deviceLabel) so a single-machine view keeps its clean path-only
-            // identity instead of a blank "@:" prefix.
-            const host = e._host || s.deviceLabel || "";
-            if (host) s.devices.add(host);
-            return { ...e, _room: s.id, _key: s.id + "#" + e.pid, _host: host };
-          });
-          s.serverCount =
-            s.kind === "ch" ? s.client?.hosts().length || 0 : s.devices.size || (s.live ? 1 : 0);
-          return out;
+          applyFull(s, await s.tx.fetchJSON("/api/ls?all=1"));
+          return s.agents;
         } catch {
           s.live = false;
           s.serverCount = 0;
+          s.byPid = new Map();
+          s.agents = [];
           return [];
         }
+      }
+
+      // Subscribe to a source's throttled delta stream instead of re-polling its
+      // whole list. The first event flips `streaming` on, so the reconcile poll
+      // skips this source — no duplicate full-list bytes on the wire. Older hosts
+      // without the endpoint never send an event, so the poll keeps covering them.
+      function subscribeSource(s) {
+        if (!s.tx || s.unsub) return;
+        s.unsub = s.tx.subscribe(
+          "/api/ls/subscribe?all=1",
+          (ev) => {
+            if (!ev || typeof ev !== "object") return;
+            s.streaming = true;
+            applyDelta(s, ev);
+            mergeRender();
+          },
+          null,
+          () => {
+            s.streaming = false;
+          },
+        );
+      }
+      function unsubscribeSource(s) {
+        try {
+          s.unsub?.();
+        } catch {}
+        s.unsub = null;
+        s.streaming = false;
       }
 
       // Compact list: one line per agent (dot + cli + title), persisted per device.
@@ -1354,10 +1414,23 @@
       // composite key (room#pid) or a bare pid (?pid= deep links, legacy ay.sel).
       const matchSel = (e, token) => e._key === token || String(e.pid) === String(token);
 
+      // Reconcile poll: refresh only the sources that aren't streaming (older
+      // hosts, or ones whose stream hasn't delivered its first snapshot yet) and
+      // re-render. Streaming sources keep themselves current via subscribeSource,
+      // so this stays a no-op on the wire for a modern fleet — it still re-renders
+      // every tick, which keeps the relative "age" column fresh.
       async function loadList() {
         const srcs = [...sources.values()];
-        const lists = await Promise.all(srcs.map(listSource));
-        entries = lists.flat();
+        await Promise.all(srcs.filter((s) => !s.streaming).map(listSource));
+        mergeRender();
+      }
+
+      // Merge every source's stamped agents into the flat `entries` list, update
+      // the connection badge + rooms panel, and re-render. Called after every poll
+      // and every stream delta.
+      function mergeRender() {
+        const srcs = [...sources.values()];
+        entries = srcs.flatMap((s) => s.agents || []);
         // Badge: total agents + how many rooms are live. Red only when nothing
         // at all is reachable (no source answered).
         const roomSrcs = srcs.filter((s) => s.id !== LOCAL);
@@ -1636,6 +1709,7 @@
       function removeSource(room) {
         const s = sources.get(room);
         if (!s) return;
+        unsubscribeSource(s);
         try {
           s.client?.close?.();
           s.client?.pc?.close?.();
@@ -1703,6 +1777,7 @@
         }
         s.tried = true;
         renderRoomsIfOpen();
+        if (s.live) subscribeSource(s);
         loadList();
       }
 
