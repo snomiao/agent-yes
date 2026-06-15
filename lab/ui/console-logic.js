@@ -115,6 +115,20 @@ export function tagsFor(e) {
   return t;
 }
 
+// Compact git indicator from the record's `git` snapshot (server-side
+// `git status --porcelain --branch`): "±3" changed files, "↑1" ahead, "↓2"
+// behind. Returns "" when there's no git info or the tree is clean and in sync,
+// so a tidy repo adds no noise. Branch itself is shown via the path identity.
+export function gitLabel(e) {
+  const g = e.git;
+  if (!g) return "";
+  const parts = [];
+  if (g.changed > 0) parts.push("±" + g.changed);
+  if (g.ahead > 0) parts.push("↑" + g.ahead);
+  if (g.behind > 0) parts.push("↓" + g.behind);
+  return parts.join(" ");
+}
+
 // Human age of an agent ("12s" / "5m" / "3h"). `now` is injectable so tests
 // don't depend on the wall clock; the browser calls age(e) and gets Date.now().
 export function age(e, now = Date.now()) {
@@ -130,7 +144,16 @@ export function age(e, now = Date.now()) {
 // case-insensitive substring search over title/prompt/cli/cwd/status.
 export function matches(e, toks) {
   const hay =
-    (e.title || "") + " " + (e.prompt || "") + " " + e.cli + " " + (e.cwd || "") + " " + e.status;
+    (e.title || "") +
+    " " +
+    (e.prompt || "") +
+    " " +
+    e.cli +
+    " " +
+    (e.cwd || "") +
+    " " +
+    e.status +
+    (e.git?.dirty ? " dirty" : "");
   return toks.every((tok) => {
     tok = tok.toLowerCase();
     const ci = tok.indexOf(":");

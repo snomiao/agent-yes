@@ -505,6 +505,17 @@
         color: var(--muted);
         font-size: 11.5px;
       }
+      /* git chip: ±changed ↑ahead ↓behind, amber when the worktree is dirty */
+      .git {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--muted);
+        white-space: nowrap;
+        flex: none;
+      }
+      .git.dirty {
+        color: var(--amber);
+      }
       .detail {
         color: var(--muted);
         font-size: 12.5px;
@@ -821,6 +832,7 @@
         repoBranch,
         ident,
         tagsFor,
+        gitLabel,
         age,
         matches,
         nextIndex,
@@ -1333,6 +1345,16 @@
       // Compact list: one line per agent (dot + cli + title), persisted per device.
       let compactList = localStorage.getItem("ay.compactList") === "1";
 
+      // A small git chip (±changed ↑ahead ↓behind) for a row, amber when the tree
+      // is dirty. Empty for clean/in-sync repos and non-git cwds — no noise.
+      function gitChipHtml(e) {
+        const label = gitLabel(e);
+        if (!label) return "";
+        const g = e.git || {};
+        const tip = `git: ${g.changed || 0} changed · ${g.ahead || 0} ahead · ${g.behind || 0} behind`;
+        return `<span class="git${g.dirty ? " dirty" : ""}" title="${esc(tip)}">${esc(label)}</span>`;
+      }
+
       function renderList() {
         const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
         const shown = entries.filter((e) => matches(e, toks));
@@ -1355,6 +1377,7 @@
         ${hasIdent(id) ? `<span class="cident" title="${esc(fullIdent(e))}">${esc(id)}</span>` : ""}
         ${cli ? `<span class="cname">${esc(cli)}</span>` : ""}
         <span class="ctitle ${e.title ? "" : "dim"}" title="${esc(t)}">${esc(t)}</span>
+        ${gitChipHtml(e)}
         <span class="age">${age(e)}</span></div>`;
               })
               .join("") || `<div class="empty">no match</div>`;
@@ -1376,6 +1399,7 @@
         <div class="r1"><span class="dot ${esc(e.status)}"></span>
           <span class="name">${esc(cliLabel(e) || ident(e) || "agent")}</span>
           <span class="badge">pid ${e.pid}</span>
+          ${gitChipHtml(e)}
           <span class="age">${age(e)}</span></div>
         ${e.title ? `<div class="rowtitle" title="${esc(e.title)}">${esc(e.title)}</div>` : ""}
         ${e.prompt ? `<div class="detail" title="${esc(e.prompt)}">${esc(e.prompt)}</div>` : ""}

@@ -8,6 +8,7 @@ import {
   repoBranch,
   ident,
   tagsFor,
+  gitLabel,
   age,
   matches,
   nextIndex,
@@ -181,6 +182,20 @@ describe("tagsFor", () => {
     const tags = tagsFor(agent({ cli: "codex", _host: "laptop" }));
     expect(tags).toContainEqual(["cli", "codex"]);
     expect(tags).toContainEqual(["host", "laptop"]);
+  });
+});
+
+describe("gitLabel", () => {
+  it("is empty without git info or for a clean, in-sync repo", () => {
+    expect(gitLabel(agent())).toBe("");
+    expect(gitLabel(agent({ git: { dirty: false, changed: 0, ahead: 0, behind: 0 } }))).toBe("");
+  });
+  it("shows ±changed, ↑ahead, ↓behind, omitting the zero parts", () => {
+    expect(gitLabel(agent({ git: { dirty: true, changed: 3, ahead: 0, behind: 0 } }))).toBe("±3");
+    expect(gitLabel(agent({ git: { dirty: true, changed: 2, ahead: 1, behind: 4 } }))).toBe(
+      "±2 ↑1 ↓4",
+    );
+    expect(gitLabel(agent({ git: { dirty: false, changed: 0, ahead: 5, behind: 0 } }))).toBe("↑5");
   });
 });
 

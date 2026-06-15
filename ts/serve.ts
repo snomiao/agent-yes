@@ -291,6 +291,62 @@ export async function cmdServe(rest: string[]): Promise<number> {
     }
   };
 
+  // Per-cwd git snapshot for the list: branch + dirty/changed count + ahead/behind
+  // vs upstream, all from a single `git status --porcelain --branch`. Cached per
+  // cwd with a short TTL so the 1s subscribe tick (and /api/ls polls) spawn at most
+  // one git per repo every few seconds — agents sharing a cwd share the result.
+  // Non-git dirs, errors, and timeouts cache as null.
+  interface GitInfo {
+    branch: string | null;
+    dirty: boolean;
+    changed: number;
+    ahead: number;
+    behind: number;
+  }
+  const GIT_TTL_MS = 5000;
+  const gitCache = new Map<string, { at: number; val: GitInfo | null }>();
+  const gitStatus = async (cwd: string | null | undefined): Promise<GitInfo | null> => {
+    if (!cwd) return null;
+    const now = Date.now();
+    const hit = gitCache.get(cwd);
+    if (hit && now - hit.at < GIT_TTL_MS) return hit.val;
+    let val: GitInfo | null = null;
+    try {
+      const proc = Bun.spawn(["git", "status", "--porcelain", "--branch"], {
+        cwd,
+        stdout: "pipe",
+        stderr: "ignore",
+        signal: AbortSignal.timeout(2000),
+      });
+      const out = await new Response(proc.stdout).text();
+      await proc.exited;
+      if (proc.exitCode === 0) {
+        const lines = out.split("\n");
+        // Branch header, e.g. "## main...origin/main [ahead 1, behind 2]",
+        // "## main" (no upstream), "## HEAD (no branch)", or "## No commits yet on x".
+        const h = /^## (.+)$/.exec(lines[0] ?? "")?.[1] ?? "";
+        const unborn = /^No commits yet on (.+)$/.exec(h);
+        const branch = unborn ? unborn[1]! : /^(.+?)(?:\.\.\.|\s|$)/.exec(h)?.[1] || null;
+        const ahead = Number(/\bahead (\d+)/.exec(h)?.[1] ?? 0);
+        const behind = Number(/\bbehind (\d+)/.exec(h)?.[1] ?? 0);
+        const changed = lines.slice(1).filter((l) => l.trim().length > 0).length;
+        val = { branch, dirty: changed > 0, changed, ahead, behind };
+      }
+    } catch {
+      val = null; // git missing, not a repo, or timed out
+    }
+    gitCache.set(cwd, { at: now, val });
+    return val;
+  };
+
+  // One agent record decorated for the console: the latest OSC title + a git
+  // snapshot (skipped for exited agents — their repo state is no longer live).
+  const withMeta = async (r: Awaited<ReturnType<typeof listRecords>>[number]) => ({
+    ...r,
+    title: await logTitle(r.log_file),
+    git: r.status === "exited" ? null : await gitStatus(r.cwd),
+  });
+
   // The whole API as a plain handler: served over HTTP by Bun.serve (--http)
   // and called in-process by the WebRTC bridge (--webrtc) — the latter needs
   // no TCP port at all.
@@ -311,10 +367,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       });
       try {
         const records = await listRecords(keyword, opts);
-        const withTitles = await Promise.all(
-          records.map(async (r) => ({ ...r, title: await logTitle(r.log_file) })),
-        );
-        return Response.json(withTitles);
+        return Response.json(await Promise.all(records.map(withMeta)));
       } catch (e) {
         return new Response((e as Error).message, { status: 500 });
       }
@@ -348,9 +401,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
           const sent = new Map<number, string>();
           const compute = async () => {
             const records = await listRecords(keyword, opts);
-            return Promise.all(
-              records.map(async (r) => ({ ...r, title: await logTitle(r.log_file) })),
-            );
+            return Promise.all(records.map(withMeta));
           };
           const tick = async (first: boolean) => {
             if (closed) return;
