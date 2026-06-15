@@ -18,6 +18,11 @@ const PATH_SEP = IS_WINDOWS ? ";" : ":";
 const ROOT = process.cwd();
 const AGENT_YES_CLI = join(ROOT, "ts/cli.ts");
 const TEST_DIR = join(ROOT, "tmp-test-shared-e2e");
+// Scope every run's agent-yes home INSIDE the scratch dir. Without this the e2e
+// shares the real ~/.agent-yes with every other spec, and a parallel test that
+// rewrites/compacts the global pid index or wipes the FIFO dir mid-run could
+// race this agent's mkfifo/log — the source of the rare full-suite-only flake.
+const E2E_HOME = join(TEST_DIR, "home");
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -30,11 +35,14 @@ function runAgentYes(
   cliAndArgs: string[],
   opts: { cwd?: string; env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
 ): Promise<RunResult> {
-  const { cwd = ROOT, env = process.env, timeoutMs = 15_000 } = opts;
+  const { cwd = ROOT, env, timeoutMs = 15_000 } = opts;
   const args = ["bun", AGENT_YES_CLI, ...implArgs, ...cliAndArgs];
+  // Force the isolated home onto whatever env the caller passed, so no run ever
+  // touches the shared global ~/.agent-yes.
+  const runEnv: NodeJS.ProcessEnv = { ...process.env, ...env, AGENT_YES_HOME: E2E_HOME };
 
   return new Promise((resolve) => {
-    const proc = spawn(args[0]!, args.slice(1), { cwd, env });
+    const proc = spawn(args[0]!, args.slice(1), { cwd, env: runEnv });
     let stdout = "";
     let stderr = "";
 

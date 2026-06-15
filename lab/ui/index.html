@@ -1618,10 +1618,11 @@
         });
         // Adapt: drive the agent's PTY to the browser terminal size (POST
         // /api/resize → winsize + SIGWINCH) so its TUI reflows to match what we
-        // render. Suppressed while we're merely adopting the agent's OWN size.
-        let adoptingAgentSize = false;
+        // render. Suppressed during the initial fit below, which does its own
+        // one-shot "push only if the agent is out of sync" check.
+        let suppressPush = true;
         const pushSize = () => {
-          if (term && sel === e._key && !adoptingAgentSize)
+          if (term && sel === e._key && !suppressPush)
             tx.post("/api/resize/" + encodeURIComponent(pid), {
               cols: term.cols,
               rows: term.rows,
@@ -1642,28 +1643,32 @@
         };
         term.onData(fwd);
         term.onBinary(fwd);
-        // Render the existing buffer at the AGENT's current width first so its
-        // wrapping is correct, instead of forcing our viewport width onto stale
-        // content. The user adapts to the window by resizing it (fit → push).
+        // On switch, render at OUR pane size and make the agent match it: fit
+        // xterm to the viewport, then — if the agent's PTY winsize differs from
+        // what we're now rendering — push a resize so its TUI reflows to fill the
+        // pane. The agent may have been sized by a different viewer/terminal, or
+        // our window changed while this agent was in the background; either way a
+        // mismatch leaves the TUI clipped or boxed-in until something nudges it.
+        // Only push when it actually differs, so an already-matching agent isn't
+        // poked with a redundant SIGWINCH. After this, live window resizes push
+        // automatically (suppressPush flips off).
         const selKey = e._key;
+        const fitAndSync = (sz) => {
+          if (sel !== selKey || !term) return;
+          try {
+            fit.fit();
+          } catch {}
+          if (!sz || sz.cols !== term.cols || sz.rows !== term.rows) {
+            tx.post("/api/resize/" + encodeURIComponent(pid), {
+              cols: term.cols,
+              rows: term.rows,
+            }).catch(() => {});
+          }
+          suppressPush = false;
+        };
         tx.fetchJSON("/api/size/" + encodeURIComponent(pid))
-          .then((sz) => {
-            if (sel !== selKey || !term) return;
-            if (sz && sz.cols && sz.rows) {
-              adoptingAgentSize = true;
-              term.resize(sz.cols, sz.rows);
-              adoptingAgentSize = false;
-            } else {
-              try {
-                fit.fit();
-              } catch {}
-            }
-          })
-          .catch(() => {
-            try {
-              fit.fit();
-            } catch {}
-          });
+          .then(fitAndSync)
+          .catch(() => fitAndSync(null));
 
         // True live tail via ay serve's SSE stream. First event is an xterm-rendered
         // tail snapshot; later events are incremental deltas. We normalise terminal
