@@ -65,6 +65,33 @@ const defaultOpts = (overrides: Partial<CommonOpts> = {}): CommonOpts => ({
   ...overrides,
 });
 
+// The vars that pin a process to a PARENT Claude Code session — NOT the many
+// other CLAUDE_CODE_* settings that configure provider/auth/limits (USE_BEDROCK,
+// USE_VERTEX, MAX_OUTPUT_TOKENS, …), which must pass through untouched.
+const SESSION_PIN_ENV = new Set([
+  "CLAUDECODE",
+  "CLAUDE_CODE_SSE_PORT",
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_CODE_ENTRYPOINT",
+]);
+
+// Env for a console-spawned agent, minus only the session-pinning vars above. If
+// `ay serve` was launched from inside Claude Code (or any shell carrying these),
+// it would otherwise leak the parent's SSE port / session id into every spawned
+// agent — so the new `claude` thinks it's a nested child and tries to attach to a
+// stale port, surfacing as "fail to connect". Dropping them makes each agent a
+// clean top-level session; all config/provider env (CLAUDE_EFFORT, CLAUDE_CODE_*
+// settings) is preserved.
+function freshAgentEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v === undefined || SESSION_PIN_ENV.has(k)) continue;
+    env[k] = v;
+  }
+  return env;
+}
+
 // ---------------------------------------------------------------------------
 // ay serve install / uninstall / logs  (oxmgr daemon management)
 // ---------------------------------------------------------------------------
@@ -860,6 +887,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       try {
         const child = Bun.spawn(["ay", cli, ...(prompt ? ["--", prompt] : [])], {
           cwd,
+          env: freshAgentEnv(), // don't leak our Claude Code session into the agent
           stdin: "ignore",
           stdout: "ignore",
           stderr: "ignore",
