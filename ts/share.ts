@@ -60,31 +60,63 @@ function parseShareUrl(s: string): { room: string; token: string; host: string }
 // from the global cache where the prebuilt .node isn't linked; this best-effort
 // shim symlinks it in before we import. In a normal npm/bunx install the binary
 // resolves from node_modules and the first import just works.
+async function linkFromBunCache(): Promise<void> {
+  const { existsSync, symlinkSync, mkdirSync, readdirSync } = await import("fs");
+  const path = (await import("path")).default;
+  const { createRequire } = await import("module");
+  const require = createRequire(import.meta.url);
+  const pkg = path.dirname(require.resolve("node-datachannel/package.json"));
+  const bin = path.join(pkg, "build", "Release", "node_datachannel.node");
+  const cacheRoot = path.join((await import("os")).homedir(), ".bun", "install", "cache");
+  if (existsSync(bin) && existsSync(cacheRoot)) {
+    for (const d of readdirSync(cacheRoot)) {
+      if (!d.startsWith("node-datachannel@")) continue;
+      const dst = path.join(cacheRoot, d, "build", "Release");
+      mkdirSync(dst, { recursive: true });
+      const link = path.join(dst, "node_datachannel.node");
+      if (!existsSync(link)) symlinkSync(bin, link);
+    }
+  }
+}
+
+// `bunx agent-yes` / `bun add -g agent-yes` skip node-datachannel's install
+// script (bun only honors trustedDependencies from the *root* package, and there
+// agent-yes is a dependency), so the prebuilt .node is never downloaded and
+// `--webrtc`/`--share` can't load the addon. Fetch it on demand with the
+// prebuild-install CLI that ships in node-datachannel's dependency tree — the
+// same `prebuild-install -r napi` its install script would have run.
+async function fetchPrebuiltAddon(): Promise<boolean> {
+  try {
+    const path = (await import("path")).default;
+    const { createRequire } = await import("module");
+    const require = createRequire(import.meta.url);
+    const ndDir = path.dirname(require.resolve("node-datachannel/package.json"));
+    const binJs = require.resolve("prebuild-install/bin.js", { paths: [ndDir] });
+    const { spawnSync } = await import("child_process");
+    process.stderr.write("fetching node-datachannel prebuilt binary (one-time)…\n");
+    // process.execPath is bun (or node) — both execute the prebuild-install CLI.
+    const res = spawnSync(process.execPath, [binJs, "-r", "napi"], { cwd: ndDir, stdio: "ignore" });
+    return res.status === 0;
+  } catch {
+    return false;
+  }
+}
+
 async function importRTC(): Promise<any> {
   try {
     return (await import("node-datachannel/polyfill")).RTCPeerConnection;
-  } catch {
+  } catch (firstErr) {
+    // Heal 1: symlink a built .node from the bun global cache into the resolved pkg.
+    await linkFromBunCache().catch(() => {});
     try {
-      const { existsSync, symlinkSync, mkdirSync, readdirSync } = await import("fs");
-      const path = (await import("path")).default;
-      const { createRequire } = await import("module");
-      const require = createRequire(import.meta.url);
-      const pkg = path.dirname(require.resolve("node-datachannel/package.json"));
-      const bin = path.join(pkg, "build", "Release", "node_datachannel.node");
-      const cacheRoot = path.join((await import("os")).homedir(), ".bun", "install", "cache");
-      if (existsSync(bin) && existsSync(cacheRoot)) {
-        for (const d of readdirSync(cacheRoot)) {
-          if (!d.startsWith("node-datachannel@")) continue;
-          const dst = path.join(cacheRoot, d, "build", "Release");
-          mkdirSync(dst, { recursive: true });
-          const link = path.join(dst, "node_datachannel.node");
-          if (!existsSync(link)) symlinkSync(bin, link);
-        }
-      }
+      return (await import("node-datachannel/polyfill")).RTCPeerConnection;
     } catch {
-      /* fall through — rethrow the original import error below */
+      /* still missing — try downloading the prebuilt binary below */
     }
-    return (await import("node-datachannel/polyfill")).RTCPeerConnection;
+    // Heal 2: the prebuilt binary was never downloaded — fetch it, then retry.
+    if (await fetchPrebuiltAddon())
+      return (await import("node-datachannel/polyfill")).RTCPeerConnection;
+    throw firstErr;
   }
 }
 
