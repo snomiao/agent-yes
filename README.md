@@ -24,7 +24,7 @@ Or with a package manager you already have:
 bun add -g agent-yes      # or: npm install -g agent-yes
 ```
 
-Then: `ay claude` (run an agent with auto-yes) · `ay serve share` (web console + shareable link) · live console at https://agent-yes.com
+Then: `ay claude` (run an agent with auto-yes) · `ay serve --share` (web console + shareable link) · live console at https://agent-yes.com
 
 ## Features
 

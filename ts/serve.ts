@@ -228,6 +228,18 @@ export async function cmdServe(rest: string[]): Promise<number> {
     return cmdServeDaemon("install", fwd);
   }
 
+  // `ay serve` takes only flags (plus the install/uninstall/logs subcommands
+  // handled above). A bare word like `ay serve share` is silently dropped into
+  // argv._ by yargs and would otherwise start in the wrong mode — most often
+  // it's a typo for the `--share` flag — so warn instead of quietly ignoring it.
+  const stray = (argv._ as Array<string | number>).map(String);
+  if (stray.length) {
+    const hint = stray.includes("share") ? " (did you mean --share?)" : "";
+    process.stderr.write(
+      `ay serve: ignoring unknown argument${stray.length > 1 ? "s" : ""}: ${stray.join(" ")}${hint}\n`,
+    );
+  }
+
   const port = (argv.port as number) ?? DEFAULT_PORT;
   const host = (argv.host as string) ?? "127.0.0.1";
   const tokenFlag = typeof argv.token === "string" ? argv.token : undefined;
