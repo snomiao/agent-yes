@@ -336,7 +336,7 @@ describe("shared e2e: ts vs rs", () => {
           "sleep 0.3",
           "stty cols 132 rows 50",
           "kill -WINCH -$$",
-          "sleep 0.5",
+          "sleep 1.5", // settle margin: SIGWINCH→resize can lag under full-suite load
           "stty size",
           "sleep 3",
           "exit 0",
@@ -403,7 +403,7 @@ describe("shared e2e: ts vs rs", () => {
         "stty cols 132 rows 50",
         "echo SIZE_CHANGED",
         "kill -WINCH $PPID", // SIGWINCH → agent-yes → pty.resize(80,24)
-        "sleep 0.5",
+        "sleep 1.5", // settle margin: SIGWINCH→resize can lag under full-suite load
         "stty size", // should print "24 80" after resize
         "sleep 3",
         "exit 0",
