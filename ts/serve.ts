@@ -2,7 +2,7 @@ import { mkdir, open, readFile, writeFile } from "fs/promises";
 import { watch } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
-import { homedir } from "os";
+import { homedir, hostname, userInfo } from "os";
 import path from "path";
 import yargs from "yargs";
 import {
@@ -318,6 +318,22 @@ export async function cmdServe(rest: string[]): Promise<number> {
       } catch (e) {
         return new Response((e as Error).message, { status: 500 });
       }
+    }
+
+    // GET /api/whoami — this host's device label (user@host), so a remote
+    // console can tag each agent with the machine it came from. Unlike codehost,
+    // `ay serve --share` carries no per-agent device id; the viewer fetches this
+    // once per room and stamps it. os.userInfo()/hostname() are cross-platform
+    // (Windows included), so every machine reports a name, not just Unix ones.
+    if (req.method === "GET" && p === "/api/whoami") {
+      let user = "";
+      try {
+        user = userInfo().username;
+      } catch {
+        /* userInfo throws if there's no passwd entry (some containers) */
+      }
+      const host = hostname();
+      return Response.json({ host: user ? `${user}@${host}` : host });
     }
 
     // GET /api/notes

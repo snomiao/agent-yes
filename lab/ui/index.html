@@ -1252,7 +1252,11 @@
           s.live = true;
           s.devices = new Set();
           const out = (Array.isArray(arr) ? arr : []).map((e) => {
-            const host = e._host || "";
+            // codehost stamps _host per agent; agent-yes share rooms fall back to
+            // the room's device label (from /api/whoami). Local stays unlabelled
+            // (no deviceLabel) so a single-machine view keeps its clean path-only
+            // identity instead of a blank "@:" prefix.
+            const host = e._host || s.deviceLabel || "";
             if (host) s.devices.add(host);
             return { ...e, _room: s.id, _key: s.id + "#" + e.pid, _host: host };
           });
@@ -1661,6 +1665,15 @@
             await c.connect();
             s.client = c;
             s.tx = rtcTx(c);
+            // agent-yes share (unlike codehost) sends no per-agent device id, so
+            // every machine's rows would be unlabelled. Ask the host who it is
+            // once and tag this room's agents with it in listSource. Best-effort:
+            // an older host with no /api/whoami just leaves rows device-less.
+            try {
+              s.deviceLabel = (await s.tx.fetchJSON("/api/whoami"))?.host || "";
+            } catch {
+              s.deviceLabel = "";
+            }
           }
           s.live = true;
         } catch (e) {
