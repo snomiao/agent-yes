@@ -79,44 +79,59 @@ async function linkFromBunCache(): Promise<void> {
   }
 }
 
-// `bunx agent-yes` / `bun add -g agent-yes` skip node-datachannel's install
-// script (bun only honors trustedDependencies from the *root* package, and there
-// agent-yes is a dependency), so the prebuilt .node is never downloaded and
-// `--webrtc`/`--share` can't load the addon. Fetch it on demand with the
-// prebuild-install CLI that ships in node-datachannel's dependency tree — the
-// same `prebuild-install -r napi` its install script would have run.
-async function fetchPrebuiltAddon(): Promise<boolean> {
+// Resolve node-datachannel's package dir — where its loader expects the native
+// addon at build/Release/node_datachannel.node. null if it can't be resolved.
+async function ndPackageDir(): Promise<string | null> {
   try {
     const path = (await import("path")).default;
     const { createRequire } = await import("module");
     const require = createRequire(import.meta.url);
-    const ndDir = path.dirname(require.resolve("node-datachannel/package.json"));
+    return path.dirname(require.resolve("node-datachannel/package.json"));
+  } catch {
+    return null;
+  }
+}
+
+// `bunx agent-yes` / `bun add -g agent-yes` skip node-datachannel's install
+// script (bun only honors trustedDependencies from the *root* package, and there
+// agent-yes is a dependency), so the prebuilt .node is never downloaded. Fetch it
+// with the prebuild-install CLI from node-datachannel's own dependency tree — the
+// exact `prebuild-install -r napi` its install script would have run. Must run
+// BEFORE the first import: Bun caches a failed dynamic import, so downloading
+// after a miss wouldn't take effect until the process restarts.
+async function ensureAddon(ndDir: string): Promise<void> {
+  const { existsSync } = await import("fs");
+  const path = (await import("path")).default;
+  if (existsSync(path.join(ndDir, "build", "Release", "node_datachannel.node"))) return;
+  try {
+    const { createRequire } = await import("module");
+    const require = createRequire(import.meta.url);
     const binJs = require.resolve("prebuild-install/bin.js", { paths: [ndDir] });
     const { spawnSync } = await import("child_process");
     process.stderr.write("fetching node-datachannel prebuilt binary (one-time)…\n");
     // process.execPath is bun (or node) — both execute the prebuild-install CLI.
-    const res = spawnSync(process.execPath, [binJs, "-r", "napi"], { cwd: ndDir, stdio: "ignore" });
-    return res.status === 0;
+    spawnSync(process.execPath, [binJs, "-r", "napi"], { cwd: ndDir, stdio: "ignore" });
   } catch {
-    return false;
+    /* best effort — the import below surfaces a clear error if it's still missing */
   }
 }
 
 async function importRTC(): Promise<any> {
+  // Ensure the native addon is on disk before the first import — a failed
+  // dynamic import is cached by Bun, so post-import healing can't recover it.
+  const ndDir = await ndPackageDir();
+  if (ndDir) await ensureAddon(ndDir);
   try {
     return (await import("node-datachannel/polyfill")).RTCPeerConnection;
   } catch (firstErr) {
-    // Heal 1: symlink a built .node from the bun global cache into the resolved pkg.
+    // Fallback for linked/global installs: the binary lives in the resolved pkg
+    // but Bun's cache copy lacks it — symlink it across, then retry once.
     await linkFromBunCache().catch(() => {});
     try {
       return (await import("node-datachannel/polyfill")).RTCPeerConnection;
     } catch {
-      /* still missing — try downloading the prebuilt binary below */
+      throw firstErr;
     }
-    // Heal 2: the prebuilt binary was never downloaded — fetch it, then retry.
-    if (await fetchPrebuiltAddon())
-      return (await import("node-datachannel/polyfill")).RTCPeerConnection;
-    throw firstErr;
   }
 }
 
