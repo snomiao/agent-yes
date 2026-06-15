@@ -922,6 +922,7 @@
         connect() {
           return new Promise((resolve, reject) => {
             const ws = new WebSocket(`wss://${this.host}/${this.room}`, [SUB]);
+            this.ws = ws; // kept so close() can drop the signaling registration too
             let pc,
               settled = false;
             const fail = (e) => {
@@ -979,6 +980,7 @@
             if (stream) stream(r.chunk);
           } else if (r.t === "end") {
             if (call) {
+              clearTimeout(call.timer);
               this.calls.delete(r.id);
               r.error
                 ? call.reject(new Error(r.error))
@@ -989,8 +991,21 @@
         req(method, path, body) {
           const id = this.nextId++;
           return new Promise((resolve, reject) => {
-            this.calls.set(id, { status: 0, body: "", resolve, reject });
-            this.dc.send(JSON.stringify({ t: "req", id, method, path, body }));
+            // Without a deadline a request over a silently-dead DataChannel (host
+            // gone, ICE not yet timed out) never settles, so the caller — and the
+            // poll loop — hangs forever and the room never reconnects. Reject on a
+            // timeout so listSource sees the failure and triggers backoff.
+            const timer = setTimeout(() => {
+              if (this.calls.delete(id)) reject(new Error("request timed out"));
+            }, 12000);
+            this.calls.set(id, { status: 0, body: "", resolve, reject, timer });
+            try {
+              this.dc.send(JSON.stringify({ t: "req", id, method, path, body }));
+            } catch (e) {
+              clearTimeout(timer);
+              this.calls.delete(id);
+              reject(e); // channel already torn down
+            }
           });
         }
         subscribe(path, onRaw) {
@@ -1003,6 +1018,26 @@
               this.dc.send(JSON.stringify({ t: "abort", id }));
             } catch {}
           };
+        }
+        // Tear down BOTH wires. Closing only the pc leaves the signaling socket
+        // open and this client registered in the room, so each reconnect would
+        // leak another peer on the host. onstate is detached by the caller first.
+        close() {
+          try {
+            this.ws?.close();
+          } catch {}
+          try {
+            this.pc?.close();
+          } catch {}
+          this.dc = null;
+          // Settle anything still in flight now, rather than letting each req's
+          // 12s timeout fire long after the client is gone.
+          for (const c of this.calls.values()) {
+            clearTimeout(c.timer);
+            c.reject(new Error("connection closed"));
+          }
+          this.calls.clear();
+          this.streams.clear();
         }
       }
 
@@ -1311,6 +1346,11 @@
           s.serverCount = 0;
           s.byPid = new Map();
           s.agents = [];
+          // A failed poll on an agent-yes room means the tunnel is unresponsive
+          // (host gone/restarted) — the fastest, most reliable drop signal we get,
+          // since WebRTC's own failed/closed state can lag 15-30s. Kick off the
+          // backoff reconnect (no-op if one's already queued or the room's gone).
+          if (s.kind === "rtc") scheduleRtcReconnect(s);
           return [];
         }
       }
@@ -1747,12 +1787,105 @@
       function removeSource(room) {
         const s = sources.get(room);
         if (!s) return;
+        s.removed = true; // stop any pending exp-backoff reconnect (see below)
+        clearTimeout(s.reconnectTimer);
         unsubscribeSource(s);
         try {
           s.client?.close?.();
           s.client?.pc?.close?.();
         } catch {}
         sources.delete(room);
+      }
+
+      // Exponential-backoff reconnect for an agent-yes share room (the RTCClient
+      // wire). codehost rooms already self-heal via room-client.js; the agent-yes
+      // viewer was one-shot, so a dropped DataChannel (e.g. the host restarting)
+      // left the room dead until a manual reload. Retry with jittered backoff
+      // until the room is forgotten.
+      const RTC_BACKOFF_MIN = 1000,
+        RTC_BACKOFF_MAX = 30000;
+      async function connectRtcSource(s) {
+        s.reconnecting = true; // block overlapping attempts while this one is in flight
+        try {
+          // Detach the stale peer's onstate BEFORE closing it — otherwise its own
+          // "closed" event schedules another reconnect mid-replace, and that timer
+          // fires after we've already recovered, churning a healthy channel forever.
+          if (s.client) s.client.onstate = () => {};
+          // The delta stream died silently with the old client (RTCClient never
+          // fires onError), leaving s.streaming=true and s.unsub set — which would
+          // make the reconcile poll skip this source AND block re-subscription.
+          // Clear it so the fresh transport below re-establishes the stream.
+          unsubscribeSource(s);
+          try {
+            s.client?.close?.(); // drop the stale peer AND its signaling socket
+          } catch {}
+          const c = new RTCClient(s.host, s.id, s.token);
+          c.onstate = (st) => {
+            if (st === "failed" || st === "closed") {
+              s.live = false;
+              renderRoomsIfOpen();
+              scheduleRtcReconnect(s); // "disconnected" is transient; ignore it
+            }
+          };
+          try {
+            await c.connect();
+          } catch (e) {
+            c.close(); // connect() already opened the signaling socket — don't
+            throw e; //  leak it on every failed retry of an offline room
+          }
+          if (s.removed) {
+            c.close(); // room was forgotten mid-connect — don't install/leak it
+            return;
+          }
+          s.client = c;
+          s.tx = rtcTx(c);
+          s.reconnectDelay = RTC_BACKOFF_MIN; // a healthy connect resets the backoff
+          clearTimeout(s.reconnectTimer); // cancel any reconnect queued during replace
+          s.reconnectTimer = null;
+          subscribeSource(s); // re-establish the live delta stream over the new wire
+          // agent-yes share (unlike codehost) sends no per-agent device id, so
+          // every machine's rows would be unlabelled. Ask the host who it is once
+          // and tag this room's agents with it in listSource. Best-effort: an older
+          // host with no /api/whoami just leaves rows device-less.
+          try {
+            s.deviceLabel = (await s.tx.fetchJSON("/api/whoami"))?.host || "";
+            // whoami resolves after the first listSource may have already rendered
+            // this room's rows device-less (and activity-gated polling might not
+            // re-fire soon on a backgrounded tab). Re-render now so the host label
+            // lands immediately instead of lagging a poll.
+            if (s.deviceLabel) loadList();
+          } catch {
+            s.deviceLabel = "";
+          }
+        } finally {
+          s.reconnecting = false;
+        }
+      }
+      function scheduleRtcReconnect(s) {
+        // forgotten, already queued, or a connect is already in flight
+        if (s.removed || s.reconnectTimer || s.reconnecting) return;
+        const base = s.reconnectDelay || RTC_BACKOFF_MIN;
+        const delay = Math.round(base * (0.75 + Math.random() * 0.5)); // jitter
+        s.reconnectDelay = Math.min(base * 2, RTC_BACKOFF_MAX);
+        s.reconnectTimer = setTimeout(async () => {
+          s.reconnectTimer = null;
+          if (s.removed || s.reconnecting) return;
+          try {
+            await connectRtcSource(s);
+            s.live = true;
+            renderRoomsIfOpen();
+            // Await the refresh: a prior failed poll cleared `entries`, so select()
+            // below would find nothing and skip the rebind until the list is back.
+            await loadList();
+            // A terminal opened before the drop still holds the dead tx (its tail
+            // subscription + send closures). Re-select to rebind it to the new
+            // transport, else the room looks live but the terminal stays frozen.
+            if (sel && sel.startsWith(s.id + "#")) select(sel);
+          } catch {
+            s.live = false;
+            scheduleRtcReconnect(s); // keep trying
+          }
+        }, delay);
       }
 
       // Add a room to the fleet and connect it — WITHOUT dropping the others, so
@@ -1789,29 +1922,13 @@
             s.client = c;
             s.tx = c;
           } else {
-            const c = new RTCClient(host, room, token);
-            c.onstate = (st) => {
-              if (st === "failed" || st === "closed") {
-                s.live = false;
-                renderRoomsIfOpen();
-              }
-            };
-            await c.connect();
-            s.client = c;
-            s.tx = rtcTx(c);
-            // agent-yes share (unlike codehost) sends no per-agent device id, so
-            // every machine's rows would be unlabelled. Ask the host who it is
-            // once and tag this room's agents with it in listSource. Best-effort:
-            // an older host with no /api/whoami just leaves rows device-less.
-            try {
-              s.deviceLabel = (await s.tx.fetchJSON("/api/whoami"))?.host || "";
-            } catch {
-              s.deviceLabel = "";
-            }
+            s.token = token;
+            await connectRtcSource(s);
           }
           s.live = true;
         } catch (e) {
           s.live = false;
+          if (s.kind === "rtc") scheduleRtcReconnect(s);
         }
         s.tried = true;
         renderRoomsIfOpen();

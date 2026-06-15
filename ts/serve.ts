@@ -840,6 +840,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // can reach this machine peer-to-peer. The bridge calls apiFetch in-process,
   // so without --http no port is opened at all. Bare flag mints a room; a
   // webrtc:// value joins an explicit one.
+  let closeShare: (() => void) | undefined; // closes WebRTC peers on shutdown
   if (wantWebrtc) {
     const webrtcVal = (argv.webrtc ?? argv.share) as string | undefined;
     const explicitUrl =
@@ -848,11 +849,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
       const { startShare, loadOrCreateShareRoom } = await import("./share.ts");
       // No explicit webrtc:// URL → reuse the persisted room (minted once and
       // saved like the serve token), so the link is stable across restarts.
-      const { link } = await startShare({
+      const { link, close } = await startShare({
         url: explicitUrl ?? (await loadOrCreateShareRoom()),
         localFetch: apiFetch,
         apiToken: token,
       });
+      closeShare = close;
       process.stdout.write(
         `${wantHttp ? "\n" : ""}shared over WebRTC — open this link (the token is eaten from the URL on open):\n  ${link}\n` +
           (explicitUrl
@@ -869,10 +871,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
 
   await new Promise<void>((resolve) => {
     process.on("SIGINT", () => {
+      closeShare?.();
       server?.stop();
       resolve();
     });
     process.on("SIGTERM", () => {
+      closeShare?.();
       server?.stop();
       resolve();
     });

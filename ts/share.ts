@@ -90,7 +90,9 @@ async function importRTC(): Promise<any> {
 
 /** Start the share bridge. Resolves once signaling is connected; runs until the
  *  process exits, reconnecting signaling on drop. Returns the shareable link. */
-export async function startShare(opts: ShareOpts): Promise<{ room: string; link: string }> {
+export async function startShare(
+  opts: ShareOpts,
+): Promise<{ room: string; link: string; close: () => void }> {
   const minted = !opts.url;
   const sighost = opts.sighost ?? DEFAULT_SIGHOST;
   const { room, token, host } = opts.url
@@ -109,9 +111,13 @@ export async function startShare(opts: ShareOpts): Promise<{ room: string; link:
 
   type Peer = { pc: any; aborts: Map<number, AbortController> };
   const peers = new Map<string, Peer>();
+  let closed = false; // set by close(); stops signaling reconnect + new peers
+  let currentWs: WebSocket | undefined; // the live rendezvous socket, for close()
 
   const connectSignaling = (onReady: () => void) => {
+    if (closed) return; // a reconnect timer queued before close() must not revive it
     const ws = new WebSocket(`${wsScheme}://${host}/${room}`, [SUB]);
+    currentWs = ws;
     let ready = false;
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: "hello", role: "host", token }));
@@ -119,6 +125,7 @@ export async function startShare(opts: ShareOpts): Promise<{ room: string; link:
       onReady();
     };
     ws.onmessage = async (ev) => {
+      if (closed) return;
       const m = JSON.parse(ev.data as string);
       if (m.type === "peer-join") startPeer(ws, m.peer);
       else if (m.type === "answer")
@@ -131,6 +138,7 @@ export async function startShare(opts: ShareOpts): Promise<{ room: string; link:
       else if (m.type === "peer-leave") closePeer(m.peer);
     };
     ws.onclose = () => {
+      if (closed) return; // shutting down — don't resurrect the rendezvous
       // Keep established WebRTC peers; just re-establish the rendezvous so new
       // browsers can still join. Backoff a little to avoid hot-looping.
       setTimeout(() => connectSignaling(() => {}), ready ? 1500 : 4000);
@@ -172,7 +180,16 @@ export async function startShare(opts: ShareOpts): Promise<{ room: string; link:
   }
 
   function send(dc: any, obj: object) {
-    if (dc.readyState === "open") dc.send(JSON.stringify(obj));
+    // readyState alone is racy: node-datachannel can still report "open" for a
+    // tick after a dropped peer's channel is torn down underneath, so dc.send()
+    // throws "DataChannel is closed". Swallow it — the frame is for a peer that's
+    // already gone (closePeer aborts its in-flight requests right behind this).
+    if (dc.readyState !== "open") return;
+    try {
+      dc.send(JSON.stringify(obj));
+    } catch {
+      /* peer vanished mid-send; dropping the frame is correct */
+    }
   }
 
   async function onReq(dc: any, aborts: Map<number, AbortController>, req: any) {
@@ -218,5 +235,19 @@ export async function startShare(opts: ShareOpts): Promise<{ room: string; link:
 
   await new Promise<void>((resolve) => connectSignaling(resolve));
   void minted; // (informational) caller decides how to surface the link
-  return { room, link };
+
+  // Clean shutdown: stop the rendezvous (so it can't reconnect or accept new
+  // peers) and close every peer connection so browsers get an immediate
+  // DataChannel close and reconnect right away, instead of waiting out the
+  // ~15-30s ICE timeout that an abrupt process exit would otherwise force.
+  const close = () => {
+    closed = true;
+    try {
+      currentWs?.close();
+    } catch {
+      /* already closing */
+    }
+    for (const peerId of [...peers.keys()]) closePeer(peerId);
+  };
+  return { room, link, close };
 }
