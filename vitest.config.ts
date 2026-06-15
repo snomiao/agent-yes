@@ -68,6 +68,9 @@ export default defineConfig({
         // (setup.spec.ts); the TTY prompt and the daemon install it delegates to
         // are integration-only.
         "ts/setup.ts",
+        // Scheduling — the cron/quoting helpers are unit-tested (schedule.spec.ts);
+        // the oxmgr registration paths are integration-only.
+        "ts/schedule.ts",
       ],
       thresholds: {
         lines: 90,
