@@ -1563,13 +1563,19 @@
         const row = $("list").querySelector('.row[data-key="' + CSS.escape(next._key) + '"]');
         if (row) row.scrollIntoView({ block: "nearest" });
       }
-      // Alt+ArrowDown / Alt+ArrowUp cycles agents. Capture phase on window so it
-      // fires BEFORE xterm's textarea handler — stopPropagation then keeps the
-      // combo from being forwarded to the focused agent's PTY as keystrokes.
+      // Cmd+ArrowDown/Up (Mac) or Alt+ArrowDown/Up (Windows/Linux) cycles agents.
+      // The modifier differs per-OS because horizontal arrows mean "go forward/back":
+      // Mac uses Cmd+Left/Right for that, Windows/Linux use Alt+Left/Right — so we
+      // pick the platform's own modifier for the vertical agent-switch combo.
+      // Capture phase on window so it fires BEFORE xterm's textarea handler —
+      // stopPropagation then keeps the combo from being forwarded to the focused
+      // agent's PTY as keystrokes.
+      const IS_MAC = /Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || "");
       window.addEventListener(
         "keydown",
         (e) => {
-          if (!e.altKey || (e.key !== "ArrowDown" && e.key !== "ArrowUp")) return;
+          const mod = IS_MAC ? e.metaKey : e.altKey;
+          if (!mod || (e.key !== "ArrowDown" && e.key !== "ArrowUp")) return;
           e.preventDefault();
           e.stopPropagation();
           stepSelection(e.key === "ArrowDown" ? 1 : -1);
