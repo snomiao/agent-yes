@@ -64,6 +64,10 @@ export default defineConfig({
         // WebRTC share bridge — needs a peer + signaling server; proven e2e, not
         // unit-testable.
         "ts/share.ts",
+        // Guided onboarding — the workspace-setting path is unit-tested
+        // (setup.spec.ts); the TTY prompt and the daemon install it delegates to
+        // are integration-only.
+        "ts/setup.ts",
       ],
       thresholds: {
         lines: 90,
