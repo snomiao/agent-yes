@@ -537,6 +537,13 @@ describe("subcommands.cmdSend writes bytes to FIFO", () => {
         stdout.push(String(s));
         return true;
       };
+      // Isolate from the send-safety guard: if the suite itself runs inside an
+      // ay-managed agent, AGENT_YES_PID would make cmdSend treat this as an agent
+      // sender (adding a "from …" prefix / blocking). Force-send to test pure
+      // byte delivery. --force keeps the agent prefix off only when no agent
+      // context resolves, so also clear AGENT_YES_PID for determinism.
+      const savedAyPid = process.env.AGENT_YES_PID;
+      delete process.env.AGENT_YES_PID;
       try {
         const code = await runSubcommand([
           "bun",
@@ -544,11 +551,13 @@ describe("subcommands.cmdSend writes bytes to FIFO", () => {
           "send",
           String(process.pid),
           "hello-fifo",
+          "--force",
         ]);
         expect(code).toBe(0);
         expect(stdout.join("")).toMatch(/sent to pid/);
       } finally {
         process.stdout.write = orig;
+        if (savedAyPid !== undefined) process.env.AGENT_YES_PID = savedAyPid;
       }
 
       // Now read the bytes back from our RDWR fd.
@@ -565,6 +574,47 @@ describe("subcommands.cmdSend writes bytes to FIFO", () => {
   it("--code=none skips the trailing CR", async () => {
     const { controlCodeFromName } = await loadModule();
     expect(controlCodeFromName("none")).toBe("");
+  });
+});
+
+describe("subcommands.cmdSend safety guards", () => {
+  it("maps AGENT_YES_PID→wrapper_pid and blocks an agent from sending to itself", async () => {
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    // We register an agent whose wrapper_pid is a known value, then run `ay send`
+    // with AGENT_YES_PID set to that wrapper — so resolveSender maps it back to
+    // this same agent, and sending to its own pid trips the self-send guard.
+    const wrapperPid = 424242;
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: null,
+      cwd: process.cwd(),
+      log_file: null,
+      fifo_file: "/tmp/ay-guard-test.fifo",
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: wrapperPid,
+    });
+    const stderr: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (s: any) => {
+      stderr.push(String(s));
+      return true;
+    };
+    const savedAyPid = process.env.AGENT_YES_PID;
+    process.env.AGENT_YES_PID = String(wrapperPid);
+    try {
+      const code = await runSubcommand(["bun", "cli.js", "send", String(process.pid), "loop?"]);
+      expect(code).toBe(1);
+      expect(stderr.join("")).toMatch(/refusing to send to yourself/);
+    } finally {
+      process.stderr.write = orig;
+      if (savedAyPid === undefined) delete process.env.AGENT_YES_PID;
+      else process.env.AGENT_YES_PID = savedAyPid;
+    }
   });
 });
 

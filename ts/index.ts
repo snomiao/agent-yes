@@ -374,7 +374,16 @@ export default async function agentYes({
 
   // Register process in pidStore (non-blocking - failures should not prevent agent from running)
   try {
-    await pidStore.registerProcess({ pid: shell.pid, cli, args: cliArgs, prompt, cwd: workingDir });
+    await pidStore.registerProcess({
+      pid: shell.pid,
+      cli,
+      args: cliArgs,
+      prompt,
+      cwd: workingDir,
+      // We inject our own pid as AGENT_YES_PID into the agent's env above; record
+      // it so a child `ay send` can map that env value back to this agent.
+      wrapperPid: process.pid,
+    });
   } catch (error) {
     logger.warn(`[pidStore] Failed to register process ${shell.pid}:`, error);
   }

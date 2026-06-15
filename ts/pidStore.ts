@@ -54,12 +54,14 @@ export class PidStore {
     args,
     prompt,
     cwd,
+    wrapperPid,
   }: {
     pid: number;
     cli: string;
     args: string[];
     prompt?: string;
     cwd: string;
+    wrapperPid?: number;
   }): Promise<PidRecord> {
     const now = Date.now();
     const argsJson = JSON.stringify(args);
@@ -113,6 +115,7 @@ export class PidStore {
       exit_code: null,
       exit_reason: null,
       started_at: now,
+      wrapper_pid: wrapperPid ?? null,
     })
       .then(() => maybeCompactGlobalPids())
       .catch(() => null);

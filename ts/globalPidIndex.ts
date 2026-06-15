@@ -36,6 +36,11 @@ export interface GlobalPidRecord {
   exit_code: number | null;
   exit_reason: string | null;
   started_at: number;
+  // The `ay` wrapper process pid that spawned this agent. The wrapper injects
+  // its own pid as AGENT_YES_PID into the agent's env (the agent's OWN pid isn't
+  // known until after spawn), so this maps that env value back to the agent's
+  // canonical record — see resolveSender() in subcommands.ts.
+  wrapper_pid?: number | null;
 }
 
 /**
