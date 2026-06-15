@@ -98,20 +98,53 @@ function freshAgentEnv(): Record<string, string> {
 
 const DAEMON_NAME = "agent-yes";
 
-// Register the oxmgr daemon with the platform init system (launchd on macOS,
-// systemd on Linux, Task Scheduler on Windows) so managed processes — including
-// the agent-yes daemon — come back after a *reboot*, not just a crash. Idempotent:
-// a no-op if the service is already installed. Best-effort: returns false on any
-// failure (e.g. a system-level systemd unit that needs sudo) without aborting the
-// install — the process is still managed, just not boot-persistent.
-async function ensureBootAutostart(oxmgrBin: string): Promise<boolean> {
+type DaemonManager = { id: "oxmgr" | "pm2"; bin: string };
+
+// Pick the process manager used to daemonize `ay serve`. oxmgr's daemon talks
+// over a fixed TCP port; on Windows a crashed daemon routinely leaves the
+// socket orphaned on a dead PID, which wedges every subsequent oxmgr command
+// with "daemon did not become ready in time". pm2's named-pipe daemon does not
+// have that failure mode, so we prefer pm2 on Windows. Elsewhere oxmgr stays
+// the default. AGENT_YES_DAEMON_MANAGER=pm2|oxmgr forces a choice.
+function resolveDaemonManager(): DaemonManager | null {
+  const oxmgr = Bun.which("oxmgr");
+  const pm2 = Bun.which("pm2");
+  const override = process.env.AGENT_YES_DAEMON_MANAGER?.toLowerCase();
+  if (override === "pm2") return pm2 ? { id: "pm2", bin: pm2 } : null;
+  if (override === "oxmgr") return oxmgr ? { id: "oxmgr", bin: oxmgr } : null;
+  const order: Array<DaemonManager | null> =
+    process.platform === "win32"
+      ? [pm2 && { id: "pm2", bin: pm2 }, oxmgr && { id: "oxmgr", bin: oxmgr }]
+      : [oxmgr && { id: "oxmgr", bin: oxmgr }, pm2 && { id: "pm2", bin: pm2 }];
+  return order.find((m): m is DaemonManager => !!m) ?? null;
+}
+
+// Resolve the argv that launches `ay serve …` from the daemon. The daemon's
+// environment may not have ~/.bun/bin on PATH, so we use an absolute path.
+// On Windows the `ay` bin is a self-contained launcher (ay.exe) we exec
+// directly; on POSIX it's a `#!/usr/bin/env bun` script we run through bun.
+function ayServeArgv(args: string[]): string[] {
+  const ayBin = Bun.which("ay");
+  const launcher = ayBin
+    ? process.platform === "win32"
+      ? [ayBin]
+      : [process.execPath, ayBin]
+    : ["ay"];
+  return [...launcher, "serve", ...args];
+}
+
+// Register the daemon with the platform init system so it comes back after a
+// *reboot*, not just a crash. oxmgr wires launchd/systemd/Task Scheduler via
+// `oxmgr service install`; pm2 persists its process list with `pm2 save` (a
+// once-installed `pm2 startup` hook then resurrects it on boot). Idempotent and
+// best-effort: returns false on any failure without aborting the install — the
+// process is still crash-managed, just not guaranteed boot-persistent.
+async function ensureBootAutostart(mgr: DaemonManager): Promise<boolean> {
   try {
-    // --system defaults to "auto" (launchd/systemd/Task Scheduler by platform);
-    // it's a `service`-level flag, so passing it after `install` is rejected.
-    const svc = Bun.spawn([oxmgrBin, "service", "install"], {
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    return (await svc.exited) === 0;
+    // oxmgr's --system defaults to "auto" (launchd/systemd/Task Scheduler); it's
+    // a `service`-level flag, so it goes before the subcommand, not after.
+    const cmd = mgr.id === "oxmgr" ? [mgr.bin, "service", "install"] : [mgr.bin, "save"];
+    return (await Bun.spawn(cmd, { stdio: ["ignore", "ignore", "ignore"] }).exited) === 0;
   } catch {
     return false;
   }
@@ -125,18 +158,29 @@ async function spawnExit(cmd: string[]): Promise<number> {
   }
 }
 
-// The `serve` args the running daemon was started with, parsed out of oxmgr's
-// stored command line (`… ay serve --share --port 7433`). null when no daemon is
-// registered. Lets a bare `ay serve install` re-launch with the SAME args.
-async function readDaemonServeArgs(oxmgrBin: string): Promise<string[] | null> {
+// The `serve` args the running daemon was started with, so a bare
+// `ay serve install` can re-launch with the SAME args. null when no daemon is
+// registered. oxmgr stores the full command line (`… ay serve --share`); pm2
+// keeps the post-`--` argv in pm2_env.args (with a leading "serve" we strip).
+async function readDaemonServeArgs(mgr: DaemonManager): Promise<string[] | null> {
   try {
-    const p = Bun.spawn([oxmgrBin, "status", DAEMON_NAME], { stdout: "pipe", stderr: "ignore" });
+    if (mgr.id === "oxmgr") {
+      const p = Bun.spawn([mgr.bin, "status", DAEMON_NAME], { stdout: "pipe", stderr: "ignore" });
+      const out = await new Response(p.stdout).text();
+      if ((await p.exited) !== 0) return null;
+      const m = /Command:\s*(.+)/.exec(out);
+      if (!m) return null;
+      const after = /\bserve\b\s*(.*)$/.exec(m[1]!.trim());
+      return after ? after[1]!.split(/\s+/).filter(Boolean) : [];
+    }
+    const p = Bun.spawn([mgr.bin, "jlist"], { stdout: "pipe", stderr: "ignore" });
     const out = await new Response(p.stdout).text();
     if ((await p.exited) !== 0) return null;
-    const m = /Command:\s*(.+)/.exec(out);
-    if (!m) return null;
-    const after = /\bserve\b\s*(.*)$/.exec(m[1]!.trim());
-    return after ? after[1]!.split(/\s+/).filter(Boolean) : [];
+    const list = JSON.parse(out) as Array<{ name?: string; pm2_env?: { args?: string[] } }>;
+    const proc = list.find((x) => x.name === DAEMON_NAME);
+    if (!proc) return null;
+    const a = proc.pm2_env?.args ?? [];
+    return a[0] === "serve" ? a.slice(1) : a;
   } catch {
     return null;
   }
@@ -164,12 +208,12 @@ async function fetchDaemonVersion(port: number, token: string): Promise<string |
 }
 
 async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
-  const oxmgrBin = Bun.which("oxmgr");
-  if (!oxmgrBin) {
+  const mgr = resolveDaemonManager();
+  if (!mgr) {
     process.stderr.write(
-      "ay serve install: oxmgr not found\n" +
-        "  install with:  cargo install oxmgr\n" +
-        "             or: bun add -g oxmgr\n",
+      "ay serve install: no process manager found (need pm2 or oxmgr)\n" +
+        "  install with:  bun add -g pm2\n" +
+        "             or: cargo install oxmgr\n",
     );
     return 1;
   }
@@ -181,7 +225,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     // started with (so a bare `ay serve install` stays "the same daemon"), unless
     // new args are given. The persisted room + token mean the share link is
     // unchanged across the restart.
-    const priorArgs = await readDaemonServeArgs(oxmgrBin);
+    const priorArgs = await readDaemonServeArgs(mgr);
     const effArgs = args.length ? args : (priorArgs ?? []);
     const current = getInstalledPackage().version;
 
@@ -189,34 +233,42 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       // A daemon already exists — only disturb it if it's actually outdated.
       const runningVer = await fetchDaemonVersion(portFromArgs(effArgs), token);
       if (runningVer === current) {
-        await ensureBootAutostart(oxmgrBin);
+        await ensureBootAutostart(mgr);
         process.stdout.write(`'${DAEMON_NAME}' already running v${current} (up to date)\n`);
         return 0;
       }
       // Outdated (or unreachable/too-old to report) → graceful roll-forward.
-      // `oxmgr stop` sends SIGTERM, which cmdServe handles cleanly (closing share
+      // `stop` sends SIGTERM, which cmdServe handles cleanly (closing share
       // peers so browsers reconnect fast), then we re-create with the new binary.
       process.stdout.write(
         `rolling '${DAEMON_NAME}' ${runningVer ? `v${runningVer}` : "(unknown)"} → v${current}…\n`,
       );
-      await spawnExit([oxmgrBin, "stop", DAEMON_NAME]);
-      await spawnExit([oxmgrBin, "delete", DAEMON_NAME]);
+      await spawnExit([mgr.bin, "stop", DAEMON_NAME]);
+      await spawnExit([mgr.bin, "delete", DAEMON_NAME]);
     }
 
-    // Build the ay serve command with forwarded args (port, host, --webrtc, etc.).
-    // Absolute paths: oxmgr's daemon environment may not have ~/.bun/bin in
-    // PATH, so a bare `ay` (or its `#!/usr/bin/env bun` shebang) fails to spawn.
-    const ayBin = Bun.which("ay");
-    const serveCmd = [...(ayBin ? [process.execPath, ayBin] : ["ay"]), "serve", ...effArgs].join(
-      " ",
-    );
-    const proc = Bun.spawn(
-      [oxmgrBin, "start", serveCmd, "--name", DAEMON_NAME, "--restart", "always"],
-      { stdio: ["ignore", "inherit", "inherit"] },
-    );
+    // oxmgr takes the command as one string; pm2 takes the binary plus its
+    // args after `--`. Both auto-restart on crash by default (pm2) / via the
+    // explicit flag (oxmgr).
+    const serveArgv = ayServeArgv(effArgs);
+    const startArgv =
+      mgr.id === "oxmgr"
+        ? [mgr.bin, "start", serveArgv.join(" "), "--name", DAEMON_NAME, "--restart", "always"]
+        : [
+            mgr.bin,
+            "start",
+            serveArgv[0]!,
+            "--name",
+            DAEMON_NAME,
+            "--interpreter",
+            "none",
+            "--",
+            ...serveArgv.slice(1),
+          ];
+    const proc = Bun.spawn(startArgv, { stdio: ["ignore", "inherit", "inherit"] });
     const code = await proc.exited;
     if (code === 0) {
-      const onBoot = await ensureBootAutostart(oxmgrBin);
+      const onBoot = await ensureBootAutostart(mgr);
       const port = portFromArgs(effArgs);
       // Mirror cmdServe's mode resolution: webrtc-only daemons open no HTTP port.
       const webrtcish = effArgs.some((a) => a.startsWith("--webrtc") || a.startsWith("--share"));
@@ -224,13 +276,20 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
         effArgs.some((a) => a.startsWith("--http") || a.startsWith("--share")) ||
         !effArgs.some((a) => a.startsWith("--webrtc"));
       process.stdout.write(
-        `\n${priorArgs !== null ? `rolled '${DAEMON_NAME}' forward to` : `installed '${DAEMON_NAME}' as a daemon via oxmgr —`} v${current}\n`,
+        `\n${priorArgs !== null ? `rolled '${DAEMON_NAME}' forward to` : `installed '${DAEMON_NAME}' as a daemon via ${mgr.id} —`} v${current}\n`,
       );
-      process.stdout.write(
-        onBoot
-          ? `start-on-boot: enabled (oxmgr registered with the system init)\n`
-          : `start-on-boot: not registered — run \`oxmgr service install\` to enable\n`,
-      );
+      if (mgr.id === "oxmgr")
+        process.stdout.write(
+          onBoot
+            ? `start-on-boot: enabled (oxmgr registered with the system init)\n`
+            : `start-on-boot: not registered — run \`oxmgr service install\` to enable\n`,
+        );
+      else
+        process.stdout.write(
+          onBoot
+            ? `start-on-boot: pm2 list saved (run \`pm2 startup\` once for boot resurrect)\n`
+            : `start-on-boot: \`pm2 save\` failed — run it manually to persist across reboots\n`,
+        );
       process.stdout.write(`token: ${token}\n\n`);
       if (httpish) {
         process.stdout.write(`  ay ls   ${token}@<host>:${port}\n`);
@@ -249,14 +308,18 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
   }
 
   if (sub === "uninstall") {
-    const proc = Bun.spawn([oxmgrBin, "delete", DAEMON_NAME], {
+    const proc = Bun.spawn([mgr.bin, "delete", DAEMON_NAME], {
       stdio: ["ignore", "inherit", "inherit"],
     });
-    return (await proc.exited) ?? 1;
+    const code = (await proc.exited) ?? 1;
+    // Drop it from the persisted pm2 list too, so `pm2 resurrect` won't revive it.
+    if (mgr.id === "pm2" && code === 0)
+      await Bun.spawn([mgr.bin, "save"], { stdio: ["ignore", "ignore", "ignore"] }).exited;
+    return code;
   }
 
   if (sub === "logs") {
-    const proc = Bun.spawn([oxmgrBin, "logs", DAEMON_NAME, ...args], {
+    const proc = Bun.spawn([mgr.bin, "logs", DAEMON_NAME, ...args], {
       stdio: ["ignore", "inherit", "inherit"],
     });
     return (await proc.exited) ?? 1;
@@ -287,13 +350,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  --port N          Port to listen on (default: ${DEFAULT_PORT})\n` +
         `  --host HOST       Interface to bind (default: 127.0.0.1; use 0.0.0.0 to expose)\n` +
         `  --token TOKEN     Auth token (auto-generated and saved if omitted)\n` +
-        `  -d, --daemon      Install these flags as a background daemon via oxmgr\n` +
+        `  -d, --daemon      Install these flags as a background daemon (pm2/oxmgr)\n` +
         `                    (same as: ay serve install <flags>)\n` +
         `  --allow-spawn     Deprecated no-op — the console can always spawn agents\n` +
         `  --tls-cert FILE   TLS certificate PEM\n` +
         `  --tls-key  FILE   TLS private key PEM\n\n` +
         `Subcommands:\n` +
-        `  ay serve install    install as background daemon via oxmgr\n` +
+        `  ay serve install    install as background daemon (pm2 on Windows, else oxmgr)\n` +
         `  ay serve uninstall  remove daemon\n` +
         `  ay serve logs       view daemon logs\n\n` +
         `Once running, connect from another machine:\n` +
@@ -337,7 +400,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       alias: "d",
       type: "boolean",
       default: false,
-      description: "Install as a background daemon via oxmgr (same as: ay serve install <flags>)",
+      description: "Install as a background daemon (same as: ay serve install <flags>)",
     })
     .option("allow-spawn", {
       type: "boolean",
@@ -350,7 +413,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
 
   const argv = await y.parseAsync();
 
-  // --daemon/-d: install these exact flags as the oxmgr daemon instead of
+  // --daemon/-d: install these exact flags as the background daemon instead of
   // serving in the foreground (sugar for `ay serve install <flags>`).
   if (argv.daemon) {
     const fwd = rest.filter((a) => a !== "--daemon" && a !== "-d");
