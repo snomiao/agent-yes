@@ -1545,6 +1545,15 @@
         try {
           localStorage.setItem("ay.sel", sel);
         } catch {}
+        // Reflect it in the URL hash as #room:pid. The fragment is never sent in
+        // any request, so — unlike the old ?pid= query that landed in the server's
+        // access logs — the agent id stays client-side, while still surviving a
+        // refresh and being copy-pasteable as a deep link.
+        try {
+          const want = "#" + e._room + ":" + e.pid;
+          if (location.hash !== want)
+            history.replaceState(null, document.title, location.pathname + want);
+        } catch {}
         // pid + tx are how we talk to the agent's own host; sel (composite) is
         // only for UI identity/highlight, since pids can collide across rooms.
         const pid = e.pid;
@@ -2256,7 +2265,23 @@
         }
         const full = pending ? null : /^([A-Za-z0-9_-]+):([^@]+)(?:@(.+))?$/.exec(h);
         const bare = /^([A-Za-z0-9_-]+)$/.exec(h);
-        if (full) {
+        // Treat the colon form as #room:agentId only when there's no @host, the id
+        // is a bare pid (digits), AND we can actually reconnect that room (it's
+        // cached or local). Otherwise the second part must be the token we need to
+        // connect — so a fresh browser still honours #room:token even when the token
+        // is custom and happens to be all digits.
+        // …and bounded to a plausible pid width (≤7 digits) so a long numeric
+        // custom token can't be mistaken for an agent id. A returning user's room
+        // token is persisted, so even a short numeric token reconnects fine from
+        // cache; only the share-link form needs the token, which stays uneaten.
+        const aidLike =
+          full &&
+          !full[3] &&
+          /^\d{1,7}$/.test(full[2]) &&
+          (full[1] === LOCAL || !!loadRooms()[full[1]]);
+        if (full && !aidLike) {
+          // #room:token — a share link. Connect, then eat the token so only #room
+          // lingers.
           const [, room, token, host] = full;
           // SECURITY: strip the token from the URL immediately so it never lingers in
           // the omnibox, history, or a screenshot. Keep only the room mnemonic.
@@ -2266,6 +2291,16 @@
             location.pathname + location.search + "#" + room,
           );
           pending = { room, token, host };
+        } else if (full) {
+          // #room:agentId — a deep link to one agent in a (cached) room. The id is
+          // not a secret, so it stays in the hash; reconnect the room from its
+          // cached token and select the agent once it streams in. autoPid uses the
+          // composite key so it picks the right host when pids collide across rooms.
+          const [, room, aid] = full;
+          autoPid = room + "#" + aid;
+          autoPidExplicit = true;
+          const r = loadRooms()[room];
+          if (r) pending = { room, token: r.token, host: r.host };
         } else if (bare && loadRooms()[bare[1]]) {
           const r = loadRooms()[bare[1]];
           pending = { room: bare[1], token: r.token, host: r.host };
