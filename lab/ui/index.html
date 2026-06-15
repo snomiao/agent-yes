@@ -1469,9 +1469,12 @@
         // tracking — click / drag-motion / wheel as SGR mouse reports. onBinary
         // covers the UTF-8 mouse encoding (DECSET 1005). Verified end-to-end:
         // a drag emits \x1b[<0;..M / \x1b[<32;..M / \x1b[<0;..m, wheel \x1b[<64/65..M.
+        // keyword MUST be a string — ay serve's POST /api/send rejects a numeric
+        // keyword with 400 (pid arrives as a number from /api/ls JSON).
+        const kw = String(pid);
         const fwd = (d) => {
           if (sel === e._key)
-            tx.post("/api/send", { keyword: pid, msg: d, code: "none" }).catch(() => {});
+            tx.post("/api/send", { keyword: kw, msg: d, code: "none" }).catch(() => {});
         };
         term.onData(fwd);
         term.onBinary(fwd);

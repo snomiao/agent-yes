@@ -17,9 +17,11 @@ import { startServer } from "./server.ts";
 
 // Stub the two xterm CDN scripts so creating a Terminal never touches the
 // network. Only the methods the console calls are implemented.
+// onData captures the keystroke handler on window so a test can drive it (xterm
+// would normally call it from real key events, which the stub can't synthesize).
 const TERMINAL_STUB =
   "window.Terminal=class{constructor(){this.cols=80;this.rows=24;}" +
-  "loadAddon(){}open(){}focus(){}onTitleChange(){}onResize(){}onData(){}" +
+  "loadAddon(){}open(){}focus(){}onTitleChange(){}onResize(){}onData(f){window.__onData=f;}" +
   "onBinary(){}write(){}resize(c,r){this.cols=c;this.rows=r;}dispose(){}};";
 const FITADDON_STUB = "window.FitAddon={FitAddon:class{activate(){}dispose(){}fit(){}}};";
 
@@ -194,6 +196,36 @@ describe("console DOM behaviour", () => {
 
       // The combo was swallowed by the capture-phase intercept.
       expect(await page.evaluate(() => (window as any).__bubble)).toEqual([]);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("forwards keystrokes as POST /api/send with a STRING keyword", async () => {
+    // Regression: ay serve rejects a numeric keyword with 400, so a keystroke
+    // POST must send keyword as a string even though pid arrives as a number
+    // from /api/ls. (Tail still works — its pid lives in the URL path — which is
+    // exactly the "see output, can't type" symptom this guards against.)
+    const { ctx, page } = await openConsole(browser, url);
+    const sends: any[] = [];
+    page.on("request", (r) => {
+      if (r.method() === "POST" && r.url().includes("/api/send")) {
+        try {
+          sends.push(r.postDataJSON());
+        } catch {}
+      }
+    });
+    try {
+      await page.click('.list .row[data-key="local#102"]');
+      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#102");
+      // Drive the captured xterm onData handler as a real keystroke would.
+      await page.waitForFunction(() => typeof (window as any).__onData === "function");
+      await page.evaluate(() => (window as any).__onData("h"));
+
+      await expect.poll(() => sends.length).toBeGreaterThan(0);
+      expect(typeof sends[0].keyword).toBe("string");
+      expect(sends[0].keyword).toBe("102");
+      expect(sends[0].msg).toBe("h");
     } finally {
       await ctx.close();
     }
