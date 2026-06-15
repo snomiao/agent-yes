@@ -1,4 +1,4 @@
-import { execaCommandSync } from "execa";
+import { execaSync } from "execa";
 import { fromReadable } from "from-node-stream";
 import { closeSync, constants, createReadStream, mkdirSync, openSync } from "fs";
 import { unlink } from "fs/promises";
@@ -152,15 +152,19 @@ async function createLinuxFifo(
       return null;
     }
 
-    // Create the named pipe using mkfifo with proper shell escaping
-    const escapedPath = fifoPath.replace(/'/g, "'\"'\"'");
-    const mkfifoResult = execaCommandSync(`mkfifo '${escapedPath}'`, {
+    // Create the named pipe. Pass the path as a single argv entry (array form) —
+    // NOT a command string: execaCommandSync splits on whitespace and does NOT
+    // interpret shell quotes, so a quoted `mkfifo '<path>'` string handed mkfifo
+    // the literal quotes, turning an absolute path into a bogus relative one
+    // ("No such file or directory" even though the dir exists). argv form needs
+    // no quoting and handles spaces/special chars in the path safely.
+    const mkfifoResult = execaSync("mkfifo", [fifoPath], {
       reject: false,
     });
 
     if (mkfifoResult.exitCode !== 0) {
       logger.warn(`[${cli}-yes] mkfifo command failed with exit code ${mkfifoResult.exitCode}`);
-      logger.warn(`[${cli}-yes] Command: mkfifo '${escapedPath}'`);
+      logger.warn(`[${cli}-yes] Command: mkfifo ${fifoPath}`);
       if (mkfifoResult.stderr) {
         logger.warn(`[${cli}-yes] mkfifo stderr: ${mkfifoResult.stderr}`);
       }
