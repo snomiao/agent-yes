@@ -8,10 +8,24 @@ import { randomBytes } from "crypto";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
+import {
+  CONFIRM_TIMEOUT_MS,
+  FLAG_CONFIRM,
+  MARKER,
+  MAX_CHUNK,
+  computeTranscriptHash,
+  deriveAuthToken,
+  deriveDirKeys,
+  open as e2eOpen,
+  seal as e2eSeal,
+  packEnvelope,
+  parseSecret,
+  randomHex,
+  unpackEnvelope,
+} from "../lab/ui/e2e.js";
 
 const SUB = "ay-signal-1";
 const ICE = [{ urls: "stun:stun.l.google.com:19302" }];
-const MAX_CHUNK = 15_000; // keep DataChannel messages under the SCTP limit
 const DEFAULT_SIGHOST = "s.agent-yes.com";
 
 export interface ShareOpts {
@@ -38,13 +52,20 @@ function shareRoomPath(): string {
 export async function loadOrCreateShareRoom(sighost = DEFAULT_SIGHOST): Promise<string> {
   try {
     const url = (await readFile(shareRoomPath(), "utf-8")).trim();
-    if (url.startsWith("webrtc://")) return url;
+    if (url.startsWith("webrtc://")) {
+      // A v2 (encrypted) room carries the e1. marker on its secret — reuse it.
+      // A legacy markerless room is rotated to a fresh encrypted room below: the
+      // signaling DO has pinned the old room to its plaintext token, so we must
+      // mint a NEW room name. This is a one-time, deliberate security upgrade —
+      // old share links stop working; re-open the new printed link.
+      if (parseShareUrl(url).token.startsWith(MARKER)) return url;
+    }
   } catch {
     /* not yet minted */
   }
   const room = "r" + randomBytes(3).toString("hex");
-  const token = randomBytes(32).toString("hex");
-  const url = `webrtc://${room}:${token}@${sighost}`;
+  const s = randomBytes(32).toString("hex");
+  const url = `webrtc://${room}:${MARKER}${s}@${sighost}`;
   await mkdir(path.dirname(shareRoomPath()), { recursive: true });
   await writeFile(shareRoomPath(), url, { mode: 0o600 });
   return url;
@@ -146,17 +167,46 @@ export async function startShare(
     ? parseShareUrl(opts.url)
     : {
         room: "r" + randomBytes(3).toString("hex"),
-        token: randomBytes(32).toString("hex"),
+        token: `${MARKER}${randomBytes(32).toString("hex")}`,
         host: sighost,
       };
+
+  // E2E: the URL secret S splits into authToken (the only value the server sees,
+  // for room matching) and per-connection AES keys the server never sees. We
+  // refuse to host a legacy plaintext room — old rooms are auto-rotated to v2 by
+  // loadOrCreateShareRoom (delete ~/.agent-yes/.share-room to force a rotation).
+  const { s: S, v2 } = parseSecret(token);
+  if (!v2) {
+    throw new Error(
+      "refusing to host an unencrypted room — delete ~/.agent-yes/.share-room to rotate to an encrypted link",
+    );
+  }
+  const authToken = await deriveAuthToken(S, room, host);
 
   const RTCPeerConnection = await importRTC();
   const wsScheme = host.startsWith("localhost") || host.startsWith("127.") ? "ws" : "wss";
   const ui = host === "s.agent-yes.com" ? "https://agent-yes.com" : "http://localhost:7778";
   const suffix = host === "s.agent-yes.com" ? "" : "@" + host;
-  const link = `${ui}/#${room}:${token}${suffix}`;
+  const link = `${ui}/#${room}:${MARKER}${S}${suffix}`;
 
-  type Peer = { pc: any; aborts: Map<number, AbortController> };
+  type Peer = {
+    pc: any;
+    aborts: Map<string, AbortController>;
+    send: { sendCtr: bigint };
+    recv: { lastSeen: bigint };
+    th?: Uint8Array;
+    keyH2C?: CryptoKey; // host encrypts with H2C, decrypts with C2H
+    keyC2H?: CryptoKey;
+    keysReady: Promise<void>;
+    resolveKeys: () => void;
+    myNonce: string;
+    confirmedIn: boolean; // peer echoed our nonce
+    confirmedOut: boolean; // we echoed peer's nonce
+    confirmed: boolean;
+    confirmTimer?: ReturnType<typeof setTimeout>;
+    recvChain: Promise<void>; // serialize decrypts so the replay counter stays ordered
+    sendChain: Promise<void>; // serialize seals so wire order == counter order
+  };
   const peers = new Map<string, Peer>();
   let closed = false; // set by close(); stops signaling reconnect + new peers
   let currentWs: WebSocket | undefined; // the live rendezvous socket, for close()
@@ -167,7 +217,7 @@ export async function startShare(
     currentWs = ws;
     let ready = false;
     ws.onopen = () => {
-      ws.send(JSON.stringify({ type: "hello", role: "host", token }));
+      ws.send(JSON.stringify({ type: "hello", role: "host", v: 2, token: authToken }));
       ready = true;
       onReady();
     };
@@ -175,17 +225,44 @@ export async function startShare(
       if (closed) return;
       const m = JSON.parse(ev.data as string);
       if (m.type === "peer-join") startPeer(ws, m.peer);
-      else if (m.type === "answer")
-        await peers.get(m.from)?.pc.setRemoteDescription({ type: "answer", sdp: m.sdp });
-      else if (m.type === "candidate")
+      else if (m.type === "answer") {
+        const peer = peers.get(m.from);
+        if (!peer) return;
+        try {
+          await peer.pc.setRemoteDescription({ type: "answer", sdp: m.sdp });
+          // Derive per-connection keys the moment both descriptions are stable —
+          // before the DataChannel can open and deliver a frame. Host's offer is
+          // local, the browser's answer is remote.
+          peer.th = await computeTranscriptHash(
+            peer.pc.localDescription.sdp,
+            peer.pc.remoteDescription.sdp,
+          );
+          const { keyH2C, keyC2H } = await deriveDirKeys(S, peer.th);
+          peer.keyH2C = keyH2C;
+          peer.keyC2H = keyC2H;
+          peer.resolveKeys();
+        } catch {
+          closePeer(m.from);
+        }
+      } else if (m.type === "candidate")
         await peers
           .get(m.from)
           ?.pc.addIceCandidate(m.candidate)
           .catch(() => {});
       else if (m.type === "peer-leave") closePeer(m.peer);
     };
-    ws.onclose = () => {
+    ws.onclose = (ev: any) => {
       if (closed) return; // shutting down — don't resurrect the rendezvous
+      // The signaling server pins a room to its first host's authToken. A 1008
+      // means a different generation already owns this room — don't hot-loop;
+      // tell the operator to rotate. (Secret-free message.)
+      if (ev?.code === 1008) {
+        closed = true;
+        process.stderr.write(
+          "[share] room rejected by signaling server — delete ~/.agent-yes/.share-room to rotate the room\n",
+        );
+        return;
+      }
       // Keep established WebRTC peers; just re-establish the rendezvous so new
       // browsers can still join. Backoff a little to avoid hot-looping.
       setTimeout(() => connectSignaling(() => {}), ready ? 1500 : 4000);
@@ -196,8 +273,23 @@ export async function startShare(
 
   function startPeer(ws: WebSocket, peerId: string) {
     const pc = new RTCPeerConnection({ iceServers: ICE });
-    const aborts = new Map<number, AbortController>();
-    peers.set(peerId, { pc, aborts });
+    let resolveKeys!: () => void;
+    const keysReady = new Promise<void>((r) => (resolveKeys = r));
+    const peer: Peer = {
+      pc,
+      aborts: new Map<string, AbortController>(),
+      send: { sendCtr: 0n },
+      recv: { lastSeen: -1n },
+      keysReady,
+      resolveKeys,
+      myNonce: randomHex(16),
+      confirmedIn: false,
+      confirmedOut: false,
+      confirmed: false,
+      recvChain: Promise.resolve(),
+      sendChain: Promise.resolve(),
+    };
+    peers.set(peerId, peer);
     pc.onicecandidate = (e: any) => {
       if (e.candidate)
         ws.send(JSON.stringify({ type: "candidate", to: peerId, candidate: e.candidate }));
@@ -206,7 +298,26 @@ export async function startShare(
       if (["failed", "closed", "disconnected"].includes(pc.connectionState)) closePeer(peerId);
     };
     const dc = pc.createDataChannel("api");
-    dc.onmessage = (e: any) => onReq(dc, aborts, JSON.parse(e.data));
+    dc.binaryType = "arraybuffer";
+    dc.onopen = async () => {
+      try {
+        await peer.keysReady; // keys derived in the answer handler
+        // Open the mandatory bidirectional key-confirmation handshake. Nothing
+        // the peer sends is acted on until BOTH directions confirm (see onFrame).
+        enqueueSeal(peerId, dc, peer, FLAG_CONFIRM, { t: "confirm", nonce: peer.myNonce });
+        peer.confirmTimer = setTimeout(() => {
+          if (!peer.confirmed) closePeer(peerId);
+        }, CONFIRM_TIMEOUT_MS);
+      } catch {
+        closePeer(peerId);
+      }
+    };
+    // Serialize decrypts: WebCrypto open() is async, and a reliable+ordered
+    // channel must be processed in order or the monotonic replay check would
+    // spuriously reject a reordered await.
+    dc.onmessage = (e: any) => {
+      peer.recvChain = peer.recvChain.then(() => onFrame(peerId, dc, peer, e.data)).catch(() => {});
+    };
     pc.createOffer()
       .then((o: any) => pc.setLocalDescription(o))
       .then(() =>
@@ -217,6 +328,7 @@ export async function startShare(
   function closePeer(peerId: string) {
     const p = peers.get(peerId);
     if (!p) return;
+    if (p.confirmTimer) clearTimeout(p.confirmTimer);
     for (const a of p.aborts.values()) a.abort();
     try {
       p.pc.close();
@@ -226,29 +338,72 @@ export async function startShare(
     peers.delete(peerId);
   }
 
-  function send(dc: any, obj: object) {
-    // readyState alone is racy: node-datachannel can still report "open" for a
-    // tick after a dropped peer's channel is torn down underneath, so dc.send()
-    // throws "DataChannel is closed". Swallow it — the frame is for a peer that's
-    // already gone (closePeer aborts its in-flight requests right behind this).
-    if (dc.readyState !== "open") return;
-    try {
-      dc.send(JSON.stringify(obj));
-    } catch {
-      /* peer vanished mid-send; dropping the frame is correct */
-    }
+  // Seal an envelope and send it, serialized per peer so the wire order matches
+  // the nonce-counter order (so the receiver's monotonic check never trips).
+  function enqueueSeal(peerId: string, dc: any, peer: Peer, flags: number, obj: object) {
+    peer.sendChain = peer.sendChain.then(async () => {
+      if (dc.readyState !== "open" || !peer.keyH2C || !peer.th) return;
+      let frame: ArrayBuffer;
+      try {
+        frame = await e2eSeal(peer.keyH2C, peer.send, flags, peer.th, packEnvelope(obj));
+      } catch {
+        closePeer(peerId); // counter overflow — fail closed
+        return;
+      }
+      try {
+        dc.send(frame);
+      } catch {
+        /* peer vanished mid-send; dropping the frame is correct */
+      }
+    });
+    return peer.sendChain;
   }
 
-  async function onReq(dc: any, aborts: Map<number, AbortController>, req: any) {
+  // Decrypt + route one inbound frame. Fail-closed: any decryption failure,
+  // replay, pre-confirmation app frame, or string frame closes the peer.
+  async function onFrame(peerId: string, dc: any, peer: Peer, data: any) {
+    if (!peers.has(peerId)) return;
+    if (typeof data === "string" || !peer.keyC2H || !peer.th) return closePeer(peerId);
+    let env: any;
+    try {
+      const { plaintext } = await e2eOpen(peer.keyC2H, data, peer.th, peer.recv);
+      env = unpackEnvelope(plaintext);
+    } catch {
+      return closePeer(peerId); // bad version/epoch/tag/AAD or replay
+    }
+    if (!peer.confirmed) {
+      if (!env || env.t !== "confirm") return closePeer(peerId);
+      if (typeof env.nonce === "string" && !peer.confirmedOut) {
+        // Flush our echo before marking confirmed-out (so no app frame is acted on
+        // until the peer can also complete its side).
+        await enqueueSeal(peerId, dc, peer, FLAG_CONFIRM, {
+          t: "confirm",
+          nonce: peer.myNonce,
+          echo: env.nonce,
+        });
+        peer.confirmedOut = true;
+      }
+      if (env.echo && env.echo === peer.myNonce) peer.confirmedIn = true;
+      if (peer.confirmedIn && peer.confirmedOut) {
+        peer.confirmed = true;
+        if (peer.confirmTimer) clearTimeout(peer.confirmTimer);
+      }
+      return;
+    }
+    if (!env || env.t === "confirm") return; // stray confirm after handshake — ignore
+    onReq(peerId, dc, peer, env);
+  }
+
+  async function onReq(peerId: string, dc: any, peer: Peer, req: any) {
     if (req.t === "abort") {
-      aborts.get(req.id)?.abort();
-      aborts.delete(req.id);
+      peer.aborts.get(req.id)?.abort();
+      peer.aborts.delete(req.id);
       return;
     }
     if (req.t !== "req") return;
     const { id, method, path: p, body } = req;
     const ac = new AbortController();
-    aborts.set(id, ac);
+    peer.aborts.set(id, ac);
     try {
       // The host part is a placeholder — the handler only routes on the path.
       const res = await opts.localFetch(
@@ -262,21 +417,39 @@ export async function startShare(
           signal: ac.signal,
         }),
       );
-      send(dc, { t: "res", id, status: res.status, ct: res.headers.get("content-type") ?? "" });
+      enqueueSeal(peerId, dc, peer, 0, {
+        t: "res",
+        id,
+        status: res.status,
+        ct: res.headers.get("content-type") ?? "",
+      });
       const reader = res.body!.getReader();
       const dec = new TextDecoder();
+      let seq = 0;
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         const text = dec.decode(value, { stream: true });
+        // Slice on UTF-16 boundaries: JSON round-trips lone surrogates as \uXXXX,
+        // so the receiver reassembles the exact text by concatenating in seq order.
         for (let i = 0; i < text.length; i += MAX_CHUNK)
-          send(dc, { t: "data", id, chunk: text.slice(i, i + MAX_CHUNK) });
+          enqueueSeal(peerId, dc, peer, 0, {
+            t: "data",
+            id,
+            seq: seq++,
+            chunk: text.slice(i, i + MAX_CHUNK),
+          });
       }
-      send(dc, { t: "end", id });
+      enqueueSeal(peerId, dc, peer, 0, { t: "end", id, seq });
     } catch (e) {
-      if ((e as Error).name !== "AbortError") send(dc, { t: "end", id, error: String(e) });
+      if ((e as Error).name !== "AbortError")
+        enqueueSeal(peerId, dc, peer, 0, {
+          t: "end",
+          id,
+          error: String((e as Error).message ?? e),
+        });
     } finally {
-      aborts.delete(id);
+      peer.aborts.delete(id);
     }
   }
 

@@ -1,0 +1,299 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>End-to-end encryption for agent-yes share links</title>
+    <meta
+      name="description"
+      content="How agent-yes share links stay private even if the signaling relay is hacked: an HKDF key split, AES-256-GCM with per-connection keys, and a fail-closed handshake."
+    />
+    <style>
+      :root {
+        --bg: #0d1117;
+        --fg: #e6edf3;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --green: #3fb950;
+        --red: #f85149;
+        --card: #161b22;
+        --border: #30363d;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #ffffff;
+          --fg: #1f2328;
+          --muted: #59636e;
+          --accent: #0969da;
+          --green: #1a7f37;
+          --red: #cf222e;
+          --card: #f6f8fa;
+          --border: #d0d7de;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          16px/1.65 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          Helvetica,
+          Arial,
+          sans-serif;
+        margin: 0;
+        padding: 0 20px;
+      }
+      main {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 56px 0 96px;
+      }
+      .tag {
+        background: var(--accent);
+        color: #fff;
+        padding: 2px 8px;
+        border-radius: 6px;
+        font-size: 0.8em;
+        letter-spacing: 0.02em;
+      }
+      h1 {
+        font-size: 2em;
+        line-height: 1.2;
+        margin: 18px 0 8px;
+      }
+      h2 {
+        font-size: 1.3em;
+        margin: 40px 0 10px;
+        border-top: 1px solid var(--border);
+        padding-top: 28px;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 1.05em;
+      }
+      a {
+        color: var(--accent);
+      }
+      code {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        padding: 1px 5px;
+        font-size: 0.88em;
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      }
+      pre {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px;
+        overflow-x: auto;
+        font-size: 0.86em;
+        line-height: 1.5;
+      }
+      pre code {
+        background: none;
+        border: 0;
+        padding: 0;
+      }
+      .note {
+        border-left: 3px solid var(--accent);
+        background: var(--card);
+        padding: 10px 16px;
+        border-radius: 0 8px 8px 0;
+        margin: 18px 0;
+      }
+      .ok {
+        color: var(--green);
+      }
+      .no {
+        color: var(--red);
+      }
+      footer {
+        color: var(--muted);
+        font-size: 0.9em;
+        margin-top: 48px;
+        border-top: 1px solid var(--border);
+        padding-top: 20px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 16px 0;
+        font-size: 0.92em;
+      }
+      th,
+      td {
+        border: 1px solid var(--border);
+        padding: 8px 10px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: var(--card);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p><span class="tag">agent-yes</span> · engineering</p>
+      <h1>End-to-end encryption for share links: even a hacked relay can't read your terminal</h1>
+      <p class="sub">
+        agent-yes share links now run an end-to-end-encrypted protocol. The signaling server that
+        introduces your browser to your machine never sees a key — so even if it is fully
+        compromised, it cannot read your terminal, type into your agents, or spawn new ones.
+      </p>
+
+      <h2>What a share link does</h2>
+      <p>
+        When you run <code>ay serve --webrtc</code>, your machine connects to a tiny Cloudflare
+        signaling server and waits for a browser to open the printed link on
+        <code>agent-yes.com</code>. The signaling server is only a <em>matchmaker</em>: it relays
+        the WebRTC handshake (SDP + ICE) so the two sides can find each other, then your terminal
+        traffic flows <strong>peer-to-peer</strong> over an encrypted WebRTC DataChannel — it never
+        passes through the server. The room link looks like:
+      </p>
+      <pre><code>https://agent-yes.com/#&lt;room&gt;:e1.&lt;secret&gt;</code></pre>
+
+      <h2>The threat: "what if the matchmaker is hacked?"</h2>
+      <p>
+        Previously, the link's token did double duty — it was both the value the server used to
+        match peers <em>and</em> the only shared secret. That meant the server
+        <em>saw the secret</em>. A compromised signaling server could therefore impersonate a
+        browser or man-in-the-middle the connection, and a breach would expose <em>every</em> user's
+        token at once. The bar we want instead:
+      </p>
+      <div class="note">
+        A fully compromised signaling server (or an active network attacker who can rewrite the
+        relayed handshake) may slow you down or learn metadata — but must
+        <strong>never</strong> read terminal I/O, inject input, spawn agents, or recover any key.
+      </div>
+
+      <h2>One secret, two derived keys (the HKDF split)</h2>
+      <p>
+        The link still carries one 32-byte secret <code>S</code>. We run it through HKDF-SHA256 to
+        derive two unrelated values:
+      </p>
+      <pre><code>authToken = HKDF(S, "ay/ay-e2e-1/auth")   →  the ONLY value the server sees
+e2e keys  = HKDF(S, "ay/ay-e2e-1/key/…")  →  never leave your machine or browser</code></pre>
+      <p>
+        HKDF is one-way, so from <code>authToken</code> the server cannot recover <code>S</code> or
+        the encryption keys. The actual terminal frames are sealed with AES-256-GCM under keys the
+        server has never seen. Because the link is pasted directly between the two endpoints, both
+        sides already share <code>S</code> without the server ever being told it.
+      </p>
+
+      <h2>The subtle part nobody gets right: nonce reuse</h2>
+      <p>
+        AES-GCM is catastrophic if a <code>(key, nonce)</code> pair ever repeats — it leaks
+        plaintext <em>and</em> lets an attacker forge messages. The naive design (one key per room
+        plus a per-connection counter) reuses nonces across reconnects, host restarts, and multiple
+        browsers in the same room. Our fix: derive the encryption keys
+        <strong>per connection</strong> by folding the live DTLS handshake fingerprint into HKDF as
+        the salt. Every session and every peer therefore gets fresh keys, so a counter that restarts
+        at 0 is always paired with a never-before-used key. We also use
+        <strong>directional keys</strong>
+        (host→client and client→host are different keys), so the two senders never share a nonce
+        space.
+      </p>
+
+      <h2>Binding to the real connection (anti-MITM), done right</h2>
+      <p>
+        We hash both peers' DTLS fingerprints — plus the handshake role and ICE ufrag — from the
+        negotiated session, and use that hash as <strong>both</strong> the HKDF salt for the keys
+        <strong>and</strong> the authenticated data on every frame. On top of that, the channel runs
+        a mandatory, bidirectional <strong>key-confirmation handshake</strong> (each side sends a
+        fresh challenge nonce and must see it echoed back) that has to complete in
+        <em>both</em> directions before a single byte of terminal I/O is processed. If a relay sat
+        in the middle, the fingerprints differ, the keys differ, confirmation fails, and the
+        connection <span class="no">closes</span> — there is no "connected but unverified" window
+        and no silent fallback.
+      </p>
+
+      <h2>Replay, reordering, and forged aborts</h2>
+      <p>
+        The DataChannel is reliable and ordered, and we add a mandatory monotonic frame counter,
+        128-bit random request ids, and per-stream sequence numbers. So a captured frame can't be
+        replayed to re-run a command, a stale "abort" can't cancel a fresh request, and a truncated
+        stream can't masquerade as a complete response.
+      </p>
+
+      <h2>Fail closed, always</h2>
+      <p>
+        Encrypted links carry a version marker (<code>#room:e1.&lt;secret&gt;</code>). The grammar
+        is strict: anything that looks like a marker but isn't exactly <code>e1.</code> + 64 hex is
+        rejected, never quietly treated as a legacy link. Legacy plaintext is hard-disabled in the
+        client, the host refuses to bridge a plaintext channel for an encrypted room, and on any
+        version skew, missing marker, bad tag, fingerprint mismatch, or confirmation timeout we
+        <span class="no">refuse</span> rather than downgrade.
+      </p>
+
+      <h2>One implementation, no dependencies</h2>
+      <p>
+        The crypto is a single WebCrypto module shared by both ends — the browser imports it, and
+        the host (running on Bun, which ships WebCrypto) bundles the exact same file. One
+        implementation means the two sides can't drift apart, and there are no new dependencies. A
+        test suite pins the key derivation, the frame format, and every fail-closed path.
+      </p>
+
+      <h2>What a hacked server gets — and doesn't</h2>
+      <table>
+        <tr>
+          <th></th>
+          <th>Before</th>
+          <th>Now</th>
+        </tr>
+        <tr>
+          <td>Read your terminal I/O</td>
+          <td class="no">possible (sees the secret)</td>
+          <td class="ok">no — keys never reach the server</td>
+        </tr>
+        <tr>
+          <td>Inject input / spawn agents</td>
+          <td class="no">possible</td>
+          <td class="ok">no — frames it forges fail decryption</td>
+        </tr>
+        <tr>
+          <td>Harvest every user's secret in a breach</td>
+          <td class="no">yes (stores raw tokens)</td>
+          <td class="ok">no — only one-way authTokens</td>
+        </tr>
+        <tr>
+          <td>DoS / see metadata (rooms, timing, IPs)</td>
+          <td class="no">yes</td>
+          <td class="no">still yes</td>
+        </tr>
+      </table>
+
+      <h2>What changed for you</h2>
+      <p>
+        Old share links rotate to a fresh encrypted room automatically on upgrade — re-open the new
+        printed link (or <code>rm ~/.agent-yes/.share-room</code> to force a rotation). The
+        signaling server got one small additive change (it pins a protocol version) but still never
+        sees a key.
+      </p>
+
+      <h2>Honest limitations</h2>
+      <p>
+        End-to-end encryption protects the <em>channel</em>, not the <em>capability</em>: anyone you
+        hand the full link to gets control, so treat it like an SSH key. The server can still deny
+        service and observe metadata (which rooms exist, connection timing, IPs via ICE). The
+        channel binding uses DTLS fingerprints from the SDP rather than a true RFC 5705 keying
+        exporter (a limitation of the host's WebRTC stack today), and the secret still sits in your
+        browser's local storage until it ages out. Forward secrecy / rekeying, and the separate
+        codehost transport, are future work.
+      </p>
+
+      <footer>
+        Curious how it's built? The whole thing is about 200 lines:
+        <code>lab/ui/e2e.js</code> (the shared crypto), <code>ts/share.ts</code> (host), and the
+        console client in <code>lab/ui/index.html</code>. ·
+        <a href="https://agent-yes.com/">← back to the console</a>
+      </footer>
+    </main>
+  </body>
+</html>

@@ -5,10 +5,17 @@
 // (role=client). It is a *rendezvous* only — media/data never flow through here,
 // they go peer-to-peer over the WebRTC DataChannel once signaling completes.
 //
-// Auth: the room token is carried in the WebSocket subprotocol (NOT the URL, so
-// it can't leak into request logs). The first peer to open a room fixes its
-// token; every later peer must present the same token or it is rejected. The
-// token is never logged.
+// Auth: the room token is carried in the first WS message (NOT the URL, so it
+// can't leak into request logs). The first peer to open a room fixes its token;
+// every later peer must present the same token or it is rejected. The token is
+// never logged.
+//
+// For the v2 (e2e) protocol the token a peer sends is `authToken = HKDF(S,…)`,
+// NOT the URL secret S — so even a fully compromised server learns nothing it
+// could use to read or inject traffic (the AES keys never leave the endpoints;
+// see lab/ui/e2e.js). This DO additionally TOFU-pins the protocol version so an
+// HONEST server fails a cross-generation join closed; that pin is a UX/migration
+// aid only — the real confidentiality/integrity guarantees are client-enforced.
 
 export interface Env {
   ROOMS: DurableObjectNamespace;
@@ -30,8 +37,18 @@ export default {
       return env.ROOMS.get(id).fetch(req);
     }
 
-    // Everything else → the static console UI (agent-yes.com).
-    return env.ASSETS.fetch(req);
+    // Everything else → the static console UI (agent-yes.com). Serve the console
+    // and its scripts with no-cache so a CDN/browser can't pin a stale client that
+    // predates a protocol upgrade — combined with the v:2 hello assertion, a stale
+    // client fails closed ("update required") rather than running an old wire.
+    const res = await env.ASSETS.fetch(req);
+    const ct = res.headers.get("content-type") ?? "";
+    if (ct.includes("text/html") || ct.includes("javascript")) {
+      const h = new Headers(res.headers);
+      h.set("Cache-Control", "no-cache");
+      return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
+    }
+    return res;
   },
 };
 
@@ -80,16 +97,20 @@ export class Room {
       if (msg.type !== "hello") return ws.close(1008, "expected hello");
       const role: "host" | "client" = msg.role === "host" ? "host" : "client";
       const token = String(msg.token ?? "");
+      const proto = Number(msg.v ?? 1); // protocol generation (v2 = e2e)
       const stored = await this.state.storage.get<string>("token");
+      const storedProto = (await this.state.storage.get<number>("proto")) ?? 1;
       if (stored === undefined) {
         if (role !== "host") return ws.close(1008, "room not open");
         await this.state.storage.put("token", token);
-      } else if (stored !== token) {
-        return ws.close(1008, "forbidden"); // token never echoed
+        await this.state.storage.put("proto", proto);
+      } else {
+        if (stored !== token) return ws.close(1008, "forbidden"); // token never echoed
+        if (storedProto !== proto) return ws.close(1008, "protocol mismatch");
       }
       const peer = role === "host" ? "host" : crypto.randomUUID().slice(0, 8);
       ws.serializeAttachment({ authed: true, role, peer } satisfies Attach);
-      ws.send(JSON.stringify({ type: "welcome", peer, role }));
+      ws.send(JSON.stringify({ type: "welcome", peer, role, v: proto }));
       if (role === "client") this.toHost({ type: "peer-join", peer });
       return;
     }
