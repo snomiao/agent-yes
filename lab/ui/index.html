@@ -748,6 +748,7 @@
     />
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
     <script type="module">
       // codehost room transport — vendored from codehost's `bun run build:lib`.
       // Loaded as a module (deferred), so the classic script below awaits the
@@ -1537,6 +1538,19 @@
         });
         fit = new FitAddon.FitAddon();
         term.loadAddon(fit);
+        // Make plain URLs in the output clickable. Agents that emit OSC 8
+        // hyperlinks already get clickable text, but most output is bare URLs —
+        // this addon scans the rendered buffer and links them too. Click opens a
+        // new tab (noopener so the page can't be tampered with via window.opener).
+        try {
+          term.loadAddon(
+            new WebLinksAddon.WebLinksAddon((e, uri) =>
+              window.open(uri, "_blank", "noopener,noreferrer"),
+            ),
+          );
+        } catch {
+          /* addon CDN blocked — terminal still works, just without auto-links */
+        }
         term.open(logEl);
         // On a phone, auto-focusing yanks up the soft keyboard the moment you open
         // an agent — even when you only meant to read the tail. Skip it there; a tap
