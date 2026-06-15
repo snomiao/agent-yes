@@ -28,6 +28,80 @@ export function ident(e, cap) {
   return `${c(rb.repo)}/${c(rb.branch)}`;
 }
 
+// ---- device-aware identity (multi-room) -----------------------------------
+// When several machines' agents are aggregated into one list, an agent's full
+// identity is user@host:owner/repo/branch. The device (user@host) comes from the
+// codehost peer label on `_host`; the path (owner/repo/branch) from the cwd.
+
+// Split a codehost device label into { user, host }. "sno@taka" → both parts;
+// "taka" (no @) → host only; "" / missing → both empty (a local/unknown device).
+export function deviceParts(host) {
+  if (!host) return { user: "", host: "" };
+  const at = String(host).indexOf("@");
+  return at >= 0
+    ? { user: String(host).slice(0, at), host: String(host).slice(at + 1) }
+    : { user: "", host: String(host) };
+}
+
+// The five identity fields, in display order, for one agent.
+export function identFields(e) {
+  const d = deviceParts(e._host);
+  const rb = repoBranch(e) || { owner: "", repo: "", branch: "" };
+  return { user: d.user, host: d.host, owner: rb.owner, repo: rb.repo, branch: rb.branch };
+}
+
+const IDENT_ORDER = ["user", "host", "owner", "repo", "branch"];
+
+// Precompute, over the whole shown list: which fields are uniform (identical for
+// every agent — so they can be omitted) and whether any device info exists at
+// all (if not, we render the legacy path-only identity, no user@host: prefix).
+export function identContext(entries) {
+  const fields = entries.map(identFields);
+  const uniform = {};
+  for (const f of IDENT_ORDER) uniform[f] = new Set(fields.map((x) => x[f])).size <= 1;
+  const anyDevice = fields.some((x) => x.user || x.host);
+  return { uniform, anyDevice };
+}
+
+// Build an agent's compact identity against a precomputed identContext. Each
+// field is clipped to `cap` chars (compact one-liner) and BLANKED when uniform
+// across the list — but the separators (@ : / /) are kept so the string stays
+// machine-parseable: e.g. all on one device → "@:age/mai", a mixed-device list →
+// "sno@tak:age/mai". A purely local list (no devices anywhere) falls back to the
+// legacy "own/rep/bra" with no device prefix.
+export function compactIdent(e, ctx, cap = 3) {
+  const m = identFields(e);
+  const clip = (s) => (cap && s.length > cap ? s.slice(0, cap) : s);
+  const v = (f) => (ctx.uniform[f] ? "" : clip(m[f]));
+  const path = `${v("owner")}/${v("repo")}/${v("branch")}`;
+  return ctx.anyDevice ? `${v("user")}@${v("host")}:${path}` : path;
+}
+
+// The full, uncapped identity for a hover title — every field shown, device
+// prefix only when this agent actually has device info.
+export function fullIdent(e) {
+  const m = identFields(e);
+  const path = `${m.owner}/${m.repo}/${m.branch}`;
+  return m.user || m.host ? `${m.user}@${m.host}:${path}` : path;
+}
+
+// True when a compact identity carries at least one real character (not just
+// separators) — used to decide whether to render the identity span at all.
+export function hasIdent(s) {
+  return /[^@:/]/.test(s || "");
+}
+
+// Count of distinct devices (user@host) present in the list. >1 means "not
+// alone" → worth showing the device tag in the detailed view.
+export function deviceCount(entries) {
+  const set = new Set();
+  for (const e of entries) {
+    const { user, host } = deviceParts(e._host);
+    if (user || host) set.add(user + "@" + host);
+  }
+  return set.size;
+}
+
 // Derive codehost-style mnemonic tags from a cwd like .../ws/<owner>/<repo>/tree/<wt>.
 export function tagsFor(e) {
   const t = [];
@@ -63,6 +137,15 @@ export function matches(e, toks) {
     if (ci > 0) {
       const k = tok.slice(0, ci),
         v = tok.slice(ci + 1);
+      // room: / device: filter the aggregation by source and machine.
+      if (k === "room")
+        return String(e._room || "")
+          .toLowerCase()
+          .includes(v);
+      if (k === "device" || k === "dev")
+        return String(e._host || "")
+          .toLowerCase()
+          .includes(v);
       return tagsFor(e).some(([tk, tv]) => tk === k && tv.toLowerCase().includes(v));
     }
     return hay.toLowerCase().includes(tok);

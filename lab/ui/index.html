@@ -186,6 +186,19 @@
       .rooms .ritem.cur {
         box-shadow: inset 2px 0 0 var(--green);
       }
+      .rooms .rstat {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        flex: none;
+        min-width: 18px;
+      }
+      .rooms .rstat.on {
+        color: var(--green);
+      }
+      .rooms .rstat.off {
+        color: var(--muted);
+        opacity: 0.6;
+      }
       .rooms .rname {
         font-family: var(--mono);
         color: var(--accent);
@@ -787,11 +800,15 @@
         age,
         matches,
         nextIndex,
+        identContext,
+        compactIdent,
+        fullIdent,
+        hasIdent,
+        deviceCount,
       } from "./console-logic.js";
 
       let entries = [];
-      let wantRemote = false; // a room hash/cached room is in play — don't poll the cloud origin's (nonexistent) /api before the tunnel opens
-      let sel = null; // selected keyword (pid as string)
+      let sel = null; // selected agent's composite key (room#pid)
       let es = null; // live-tail subscription closer
       let term = null; // xterm.js Terminal rendering the raw PTY stream
       let fit = null;
@@ -1073,20 +1090,14 @@
           : path;
       };
 
-      const Conn = {
-        rtc: null, // RTCClient when remote (ay share), null when local
-        ch: null, // CodehostClient when viewing a codehost room
+      // ---- transports: a uniform { fetchJSON, post, subscribe } over each wire ----
+      // local (same-origin ay serve), an ay-share RTCClient, or a codehost room.
+      // CodehostClient already exposes this shape, so it's used as a tx directly.
+      const localTx = {
         async fetchJSON(path) {
-          if (this.ch) return this.ch.fetchJSON(path);
-          if (this.rtc) return JSON.parse((await this.rtc.req("GET", path)).text);
           return (await fetch(withTok(path))).json();
         },
         async post(path, bodyObj) {
-          if (this.ch) return this.ch.post(path, bodyObj);
-          if (this.rtc) {
-            const r = await this.rtc.req("POST", path, JSON.stringify(bodyObj));
-            return { ok: r.status >= 200 && r.status < 300, text: r.text };
-          }
           const r = await fetch(withTok(path), {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -1094,13 +1105,27 @@
           });
           return { ok: r.ok, text: await r.text() };
         },
-        // onText gets each parsed SSE data payload (same shape as the local EventSource path).
         subscribe(path, onText, onOpen, onError) {
-          if (this.ch) return this.ch.subscribe(path, onText, onOpen, onError);
-          if (this.rtc) {
+          const ev = new EventSource(withTok(path));
+          ev.onopen = () => onOpen && onOpen();
+          ev.onmessage = (e) => onText(JSON.parse(e.data));
+          ev.onerror = () => onError && onError();
+          return () => ev.close();
+        },
+      };
+      function rtcTx(rtc) {
+        return {
+          async fetchJSON(path) {
+            return JSON.parse((await rtc.req("GET", path)).text);
+          },
+          async post(path, bodyObj) {
+            const r = await rtc.req("POST", path, JSON.stringify(bodyObj));
+            return { ok: r.status >= 200 && r.status < 300, text: r.text };
+          },
+          subscribe(path, onText, onOpen, onError) {
             onOpen && onOpen();
             let buf = "";
-            return this.rtc.subscribe(path, (raw) => {
+            return rtc.subscribe(path, (raw) => {
               buf += raw;
               let i;
               while ((i = buf.indexOf("\n\n")) >= 0) {
@@ -1114,14 +1139,66 @@
                   }
               }
             });
-          }
-          const ev = new EventSource(withTok(path));
-          ev.onopen = () => onOpen && onOpen();
-          ev.onmessage = (e) => onText(JSON.parse(e.data));
-          ev.onerror = () => onError && onError();
-          return () => ev.close();
-        },
-      };
+          },
+        };
+      }
+
+      // ---- fleet: local + every saved room, all connected at once ------------
+      // Each source contributes its agents to one merged list (tagged with the
+      // owning source on `_room`/`_key`); per-agent ops route back via srcFor/txFor.
+      // Live counts in the rooms panel come from each source's serverCount/devices.
+      const LOCAL = "local";
+      const sources = new Map(); // id -> { id, host, kind, tx, client, live, devices, serverCount }
+      const srcFor = (e) => (e && sources.get(e._room)) || sources.get(LOCAL) || null;
+      const txFor = (e) => srcFor(e)?.tx || localTx;
+
+      // The local source is only worth polling when this page is actually backed
+      // by an ay serve: localhost, or served by `ay serve --http` (which leaves a
+      // token), or when there are no rooms to fall back on. On the public origin
+      // with rooms, skip it so we don't hammer a 404 every poll.
+      function ensureLocalSource() {
+        const isLocalhost = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+        const hasToken = !!localStorage.getItem("ay.localToken");
+        const enabled = isLocalhost || hasToken || Object.keys(loadRooms()).length === 0;
+        if (enabled && !sources.has(LOCAL)) {
+          sources.set(LOCAL, {
+            id: LOCAL,
+            host: "local",
+            kind: "local",
+            tx: localTx,
+            client: null,
+            live: false,
+            tried: true, // no connect phase — polled directly
+            devices: new Set(),
+            serverCount: 0,
+          });
+        } else if (!enabled) {
+          sources.delete(LOCAL);
+        }
+      }
+
+      // Pull one source's agent list, tagging each row with its origin + a
+      // composite key (pids can collide across rooms). Updates the source's live
+      // flag, device set, and server count for the rooms panel.
+      async function listSource(s) {
+        try {
+          const arr = await s.tx.fetchJSON("/api/ls?all=1");
+          s.live = true;
+          s.devices = new Set();
+          const out = (Array.isArray(arr) ? arr : []).map((e) => {
+            const host = e._host || "";
+            if (host) s.devices.add(host);
+            return { ...e, _room: s.id, _key: s.id + "#" + e.pid, _host: host };
+          });
+          s.serverCount =
+            s.kind === "ch" ? s.client?.hosts().length || 0 : s.devices.size || (s.live ? 1 : 0);
+          return out;
+        } catch {
+          s.live = false;
+          s.serverCount = 0;
+          return [];
+        }
+      }
 
       // Compact list: one line per agent (dot + cli + title), persisted per device.
       let compactList = localStorage.getItem("ay.compactList") === "1";
@@ -1131,16 +1208,21 @@
         const shown = entries.filter((e) => matches(e, toks));
         $("count").textContent = `${shown.length} / ${entries.length} agents`;
         $("viewbtn").classList.toggle("on", compactList);
+        // identContext blanks any field uniform across the shown list (so a
+        // single-device fleet shows no device); multiDevice gates the detailed
+        // host tag so it only appears when machines are actually mixed.
+        const ctx = identContext(shown);
+        const multiDevice = deviceCount(shown) > 1;
         if (compactList) {
           $("list").innerHTML =
             shown
               .map((e) => {
                 const t = e.title || e.prompt || "";
-                const id = ident(e, true);
+                const id = compactIdent(e, ctx);
                 const cli = cliLabel(e);
-                return `<div class="row crow ${String(e.pid) === sel ? "sel" : ""}" data-pid="${e.pid}">
+                return `<div class="row crow ${e._key === sel ? "sel" : ""}" data-key="${esc(e._key)}">
         <span class="dot ${esc(e.status)}"></span>
-        ${id ? `<span class="cident" title="${esc(ident(e))}">${esc(id)}</span>` : ""}
+        ${hasIdent(id) ? `<span class="cident" title="${esc(fullIdent(e))}">${esc(id)}</span>` : ""}
         ${cli ? `<span class="cname">${esc(cli)}</span>` : ""}
         <span class="ctitle ${e.title ? "" : "dim"}" title="${esc(t)}">${esc(t)}</span>
         <span class="age">${age(e)}</span></div>`;
@@ -1151,13 +1233,16 @@
         $("list").innerHTML =
           shown
             .map((e) => {
+              // The host tag only earns its place when several machines are in
+              // play; otherwise it's noise (every row would carry the same one).
               const tags = tagsFor(e)
+                .filter(([k]) => k !== "host" || multiDevice)
                 .map(
                   ([k, v]) =>
                     `<span class="rtag" data-k="${k}"><span style="opacity:.55">${k}:</span>${esc(v)}</span>`,
                 )
                 .join("");
-              return `<div class="row ${String(e.pid) === sel ? "sel" : ""}" data-pid="${e.pid}">
+              return `<div class="row ${e._key === sel ? "sel" : ""}" data-key="${esc(e._key)}">
         <div class="r1"><span class="dot ${esc(e.status)}"></span>
           <span class="name">${esc(cliLabel(e) || ident(e) || "agent")}</span>
           <span class="badge">pid ${e.pid}</span>
@@ -1195,48 +1280,67 @@
         } catch {}
       }
 
+      // Match a stored/linked selection token against an entry: either the full
+      // composite key (room#pid) or a bare pid (?pid= deep links, legacy ay.sel).
+      const matchSel = (e, token) => e._key === token || String(e.pid) === String(token);
+
       async function loadList() {
-        const remote = Conn.ch || Conn.rtc;
-        // A room was requested but its WebRTC tunnel isn't up yet: the cloud
-        // origin serves only this static page, so a same-origin /api/ls fetch
-        // here just 404s. Skip it — connectRoom() drives loadList once the data
-        // channel opens (and again on every interval tick thereafter).
-        if (wantRemote && !remote) {
-          renderList();
-          return;
+        const srcs = [...sources.values()];
+        const lists = await Promise.all(srcs.map(listSource));
+        entries = lists.flat();
+        // Badge: total agents + how many rooms are live. Red only when nothing
+        // at all is reachable (no source answered).
+        const roomSrcs = srcs.filter((s) => s.id !== LOCAL);
+        const liveRooms = roomSrcs.filter((s) => s.live).length;
+        const anyLive = srcs.some((s) => s.live);
+        const connecting = roomSrcs.some((s) => !s.tried);
+        const n = entries.length;
+        if (!srcs.length) {
+          setConn("● no fleet", "var(--muted)");
+        } else if (!anyLive) {
+          if (connecting) setConn("● connecting…", "var(--amber)");
+          else setConn(roomSrcs.length ? "● rooms offline" : "● ay serve down", "var(--red)");
+        } else {
+          const roomBit = liveRooms ? ` · ${liveRooms} room${liveRooms === 1 ? "" : "s"}` : "";
+          setConn(`● ${n} agent${n === 1 ? "" : "s"}${roomBit}`, "var(--green)");
         }
-        try {
-          entries = await Conn.fetchJSON("/api/ls?all=1");
-          setConn(remote ? "● " + (curRoom || "remote") : "● local", "var(--green)");
-        } catch (e) {
-          setConn(remote ? "● peer down" : "● ay serve down", "var(--red)");
-        }
+        renderRoomsIfOpen();
         renderList();
-        if (autoPid && entries.some((x) => String(x.pid) === String(autoPid))) {
-          const pid = autoPid;
+        if (autoPid && entries.some((x) => matchSel(x, autoPid))) {
+          const tok = autoPid;
           autoPid = null;
+          const e = entries.find((x) => matchSel(x, tok));
           // On a phone, a restored selection re-highlights the row but stays on
           // the list — opening it would flip straight into the full-screen
           // terminal (show-detail) and hide the list. An explicit ?pid= link is
           // a deliberate jump, so it still opens. Desktop shows both panes, so
           // there's nothing to scope — always open.
           if (autoPidExplicit || window.innerWidth > 720) {
-            select(pid);
+            select(e._key);
           } else {
-            sel = pid;
+            sel = e._key;
             renderList();
           }
         }
       }
 
-      function select(pid) {
-        sel = String(pid);
+      function select(keyOrPid) {
+        const e =
+          entries.find((x) => x._key === keyOrPid) ||
+          entries.find((x) => String(x.pid) === String(keyOrPid));
+        if (!e) {
+          sel = String(keyOrPid);
+          return;
+        }
+        sel = e._key;
         // Remember the selection so a refresh re-opens this agent (see boot/autoPid).
         try {
           localStorage.setItem("ay.sel", sel);
         } catch {}
-        const e = entries.find((x) => String(x.pid) === sel);
-        if (!e) return;
+        // pid + tx are how we talk to the agent's own host; sel (composite) is
+        // only for UI identity/highlight, since pids can collide across rooms.
+        const pid = e.pid;
+        const tx = txFor(e);
         renderList();
         // Mobile: flip the single-column layout to the terminal ("detail") pane.
         // Done BEFORE term.open below so xterm measures a visible container.
@@ -1276,15 +1380,15 @@
         // feed it, so we just surface the latest title as the header name. Falls
         // back to the cli name when the agent never sets one.
         term.onTitleChange((t) => {
-          if (sel === String(e.pid) && t && t.trim()) $("rname").textContent = t.trim();
+          if (sel === e._key && t && t.trim()) $("rname").textContent = t.trim();
         });
         // Adapt: drive the agent's PTY to the browser terminal size (POST
         // /api/resize → winsize + SIGWINCH) so its TUI reflows to match what we
         // render. Suppressed while we're merely adopting the agent's OWN size.
         let adoptingAgentSize = false;
         const pushSize = () => {
-          if (term && sel && !adoptingAgentSize)
-            Conn.post("/api/resize/" + encodeURIComponent(sel), {
+          if (term && sel === e._key && !adoptingAgentSize)
+            tx.post("/api/resize/" + encodeURIComponent(pid), {
               cols: term.cols,
               rows: term.rows,
             }).catch(() => {});
@@ -1296,17 +1400,18 @@
         // covers the UTF-8 mouse encoding (DECSET 1005). Verified end-to-end:
         // a drag emits \x1b[<0;..M / \x1b[<32;..M / \x1b[<0;..m, wheel \x1b[<64/65..M.
         const fwd = (d) => {
-          if (sel) Conn.post("/api/send", { keyword: sel, msg: d, code: "none" }).catch(() => {});
+          if (sel === e._key)
+            tx.post("/api/send", { keyword: pid, msg: d, code: "none" }).catch(() => {});
         };
         term.onData(fwd);
         term.onBinary(fwd);
         // Render the existing buffer at the AGENT's current width first so its
         // wrapping is correct, instead of forcing our viewport width onto stale
         // content. The user adapts to the window by resizing it (fit → push).
-        const selPid = sel;
-        Conn.fetchJSON("/api/size/" + encodeURIComponent(selPid))
+        const selKey = e._key;
+        tx.fetchJSON("/api/size/" + encodeURIComponent(pid))
           .then((sz) => {
-            if (sel !== selPid || !term) return;
+            if (sel !== selKey || !term) return;
             if (sz && sz.cols && sz.rows) {
               adoptingAgentSize = true;
               term.resize(sz.cols, sz.rows);
@@ -1329,8 +1434,8 @@
         // viewer is pinned to the bottom, and cap the buffer so it can't grow forever.
         $("livedot").className = "dot idle";
         $("livetxt").textContent = "connecting…";
-        const close = Conn.subscribe(
-          "/api/tail/" + encodeURIComponent(sel) + "?raw=1",
+        const close = tx.subscribe(
+          "/api/tail/" + encodeURIComponent(pid) + "?raw=1",
           (raw) => {
             if (term) term.write(raw);
           },
@@ -1348,7 +1453,7 @@
 
       $("list").addEventListener("click", (ev) => {
         const row = ev.target.closest(".row");
-        if (row) select(row.dataset.pid);
+        if (row) select(row.dataset.key);
       });
       // Mobile back button: return to the list pane. The tail keeps streaming in the
       // background (selection unchanged), so reopening the agent is instant.
@@ -1379,10 +1484,10 @@
         const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
         const shown = entries.filter((e) => matches(e, toks));
         if (!shown.length) return;
-        const cur = shown.findIndex((e) => String(e.pid) === sel);
+        const cur = shown.findIndex((e) => e._key === sel);
         const next = shown[nextIndex(shown.length, cur, dir)];
-        select(String(next.pid));
-        const row = $("list").querySelector('.row[data-pid="' + next.pid + '"]');
+        select(next._key);
+        const row = $("list").querySelector('.row[data-key="' + CSS.escape(next._key) + '"]');
         if (row) row.scrollIntoView({ block: "nearest" });
       }
       // Alt+ArrowDown / Alt+ArrowUp cycles agents. Capture phase on window so it
@@ -1401,7 +1506,6 @@
 
       // ---- rooms: localStorage cache + a manager you open by clicking the badge ----
       const ROOMS_KEY = "ay.rooms";
-      let curRoom = null;
       const loadRooms = () => {
         try {
           return JSON.parse(localStorage.getItem(ROOMS_KEY) || "{}");
@@ -1437,57 +1541,78 @@
         return "ch-" + (h >>> 0).toString(36).slice(0, 4).padStart(4, "0");
       }
 
-      function dropConn() {
-        if (Conn.rtc) {
-          try {
-            Conn.rtc.pc?.close();
-          } catch {}
-          Conn.rtc = null;
-        }
-        if (Conn.ch) {
-          try {
-            Conn.ch.close();
-          } catch {}
-          Conn.ch = null;
-        }
+      function removeSource(room) {
+        const s = sources.get(room);
+        if (!s) return;
+        try {
+          s.client?.close?.();
+          s.client?.pc?.close?.();
+        } catch {}
+        sources.delete(room);
       }
 
-      async function connectRoom(room, token, host) {
+      // Add a room to the fleet and connect it — WITHOUT dropping the others, so
+      // every saved room streams its agents at once. Idempotent: a room already
+      // in the fleet just refreshes. The connection runs in the background; the
+      // next poll picks up its agents once the tunnel is open.
+      async function addRoomSource(room, token, host) {
         host = host || SIG_DEFAULT;
-        wantRemote = true; // from here on, loadList waits for the tunnel instead of hitting the origin
         saveRoom(room, token, host); // cache so the badge can list & reconnect later
-        try {
-          localStorage.setItem("ay.lastRoom", room); // reconnect here on a bare open
-        } catch {}
-        curRoom = room;
-        dropConn();
-        setConn("● connecting " + room + "…", "var(--amber)");
-        if (host === CH_HOST) {
-          const c = new CodehostClient(token);
-          c.onstate = (s) => {
-            if (s === "closed") setConn("● room lost", "var(--red)");
-          };
-          try {
-            await c.connect();
-            Conn.ch = c;
-          } catch (e) {
-            setConn("● connect failed", "var(--red)");
-          }
-          loadList();
-          return;
-        }
-        const c = new RTCClient(host, room, token);
-        c.onstate = (s) => {
-          if (s === "failed" || s === "closed") setConn("● peer lost", "var(--red)");
+        if (sources.has(room)) return;
+        const s = {
+          id: room,
+          host,
+          kind: host === CH_HOST ? "ch" : "rtc",
+          tx: null,
+          client: null,
+          live: false,
+          tried: false,
+          devices: new Set(),
+          serverCount: 0,
         };
+        sources.set(room, s);
+        renderRoomsIfOpen();
         try {
-          await c.connect();
-          Conn.rtc = c;
+          if (host === CH_HOST) {
+            const c = new CodehostClient(token);
+            c.onstate = (st) => {
+              if (st === "closed") {
+                s.live = false;
+                renderRoomsIfOpen();
+              }
+            };
+            await c.connect();
+            s.client = c;
+            s.tx = c;
+          } else {
+            const c = new RTCClient(host, room, token);
+            c.onstate = (st) => {
+              if (st === "failed" || st === "closed") {
+                s.live = false;
+                renderRoomsIfOpen();
+              }
+            };
+            await c.connect();
+            s.client = c;
+            s.tx = rtcTx(c);
+          }
+          s.live = true;
         } catch (e) {
-          setConn("● connect failed", "var(--red)");
+          s.live = false;
         }
+        s.tried = true;
+        renderRoomsIfOpen();
         loadList();
       }
+
+      // Connect to every saved room at once (called on boot).
+      function connectAllRooms() {
+        const r = loadRooms();
+        for (const name of Object.keys(r)) addRoomSource(name, r[name].token, r[name].host);
+      }
+
+      // Back-compat alias: a freshly pasted/linked room is added like any other.
+      const connectRoom = (room, token, host) => addRoomSource(room, token, host);
 
       function parseRoomInput(s) {
         s = s.trim();
@@ -1503,13 +1628,32 @@
         return m ? { room: m[1], token: m[2], host: m[3] } : null;
       }
 
+      // Re-render the rooms panel only if it's currently open (so live-count
+      // updates from connect/poll land without forcing it open).
+      function renderRoomsIfOpen() {
+        if ($("rooms").style.display !== "none") renderRooms();
+      }
+
+      // A room's live state: a room is reachable whenever we can join its
+      // signaling server, so "live" really means "how many serving machines are
+      // in it right now". The signaling layer can't tell us the count until we've
+      // connected, so we show the source's last-known serverCount.
+      function roomStatus(n) {
+        const s = sources.get(n);
+        if (!s) return `<span class="rstat off">○</span>`;
+        if (!s.live) return `<span class="rstat off" title="offline">○</span>`;
+        const c = s.serverCount;
+        return `<span class="rstat on" title="${c} live ${c === 1 ? "server" : "servers"}">● ${c}</span>`;
+      }
+
       function renderRooms() {
         const r = loadRooms();
         const names = Object.keys(r).sort((a, b) => r[b].ts - r[a].ts);
         const items = names.length
           ? names
               .map(
-                (n) => `<div class="ritem ${n === curRoom ? "cur" : ""}">
+                (n) => `<div class="ritem ${sources.get(n)?.live ? "cur" : ""}">
+          ${roomStatus(n)}
           <span class="rname" data-room="${esc(n)}">${esc(n)}</span>
           <span class="rhost">${esc(r[n].host)}</span>
           <span class="rx" data-del="${esc(n)}" title="forget">✕</span></div>`,
@@ -1539,17 +1683,26 @@
       $("rooms").addEventListener("click", (ev) => {
         const name = ev.target.closest(".rname");
         if (name) {
+          // Rooms are all connected at once now; clicking one filters the list to
+          // it (and re-adds it if it was forgotten/offline), rather than switching.
           const r = loadRooms()[name.dataset.room];
           if (r) {
             connectRoom(name.dataset.room, r.token, r.host);
+            $("q").value = "room:" + name.dataset.room;
+            try {
+              localStorage.setItem("ay.filter", $("q").value);
+            } catch {}
+            renderList();
             $("rooms").style.display = "none";
           }
           return;
         }
         const del = ev.target.closest(".rx");
         if (del) {
+          removeSource(del.dataset.del);
           dropRoom(del.dataset.del);
           renderRooms();
+          loadList();
           return;
         }
         if (ev.target.id === "roomadd") {
@@ -1597,16 +1750,33 @@
         $("launch").style.display = "flex";
       }
 
-      // Spawn a new agent on the CURRENT connection (local same-origin, or the
-      // connected remote fleet) and select it once it registers. Shared by the
-      // launch-URL flow and the "+ New agent" button. Returns false on a spawn
-      // error (the alert is already shown), true otherwise.
-      async function spawnAndSelect(spec) {
+      // Pick the fleet to spawn on: an explicit roomId, else the selected agent's
+      // source, else local, else any live source.
+      function spawnTarget(roomId) {
+        return (
+          sources.get(roomId) ||
+          srcFor(entries.find((e) => e._key === sel)) ||
+          sources.get(LOCAL) ||
+          [...sources.values()].find((s) => s.live) ||
+          [...sources.values()][0] ||
+          null
+        );
+      }
+
+      // Spawn a new agent on the chosen fleet and select it once it registers.
+      // Shared by the launch-URL flow and the "+ New agent" button. Returns false
+      // on a spawn error (the alert is already shown), true otherwise.
+      async function spawnAndSelect(spec, roomId) {
         await loadList();
-        // Match by "newest agent that wasn't here before" — the spawn returns the
-        // wrapper pid, but the agent registers under the runtime's own pid.
-        const before = new Set(entries.map((e) => e.pid));
-        const res = await Conn.post("/api/spawn", {
+        const target = spawnTarget(roomId);
+        if (!target) {
+          alert("no fleet to launch on — connect a room or run `ay serve` locally");
+          return false;
+        }
+        // Match by "newest agent that wasn't here before" ON THIS fleet — the
+        // spawn returns the wrapper pid, but the agent registers under its own.
+        const before = new Set(entries.filter((e) => e._room === target.id).map((e) => e.pid));
+        const res = await target.tx.post("/api/spawn", {
           cli: spec.cli || "claude",
           cwd: spec.cwd || undefined,
           prompt: spec.prompt || undefined,
@@ -1618,10 +1788,10 @@
         for (let i = 0; i < 14; i++) {
           await loadList();
           const fresh = entries
-            .filter((e) => !before.has(e.pid))
+            .filter((e) => e._room === target.id && !before.has(e.pid))
             .sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
           if (fresh.length) {
-            select(fresh[0].pid);
+            select(fresh[0]._key);
             return true;
           }
           await new Promise((r) => setTimeout(r, 800));
@@ -1634,7 +1804,7 @@
         if (!r) return;
         $("launch").style.display = "none";
         await connectRoom(room, r.token, r.host);
-        await spawnAndSelect(spec);
+        await spawnAndSelect(spec, room);
       }
 
       $("launch").addEventListener("click", (ev) => {
@@ -1651,9 +1821,11 @@
       // when there is one, prompt optional) → POST /api/spawn on this connection.
       // Always allowed: the console already controls every running agent's stdin.
       function showNew() {
-        const here = entries.find((x) => String(x.pid) === sel);
+        const here = entries.find((x) => x._key === sel);
         const cwd = here?.cwd || "";
-        const where = Conn.rtc ? curRoom || "remote fleet" : "local";
+        const target = spawnTarget();
+        const where = target ? (target.id === LOCAL ? "local" : target.id) : "local";
+        $("newform").dataset.room = target ? target.id : "";
         $("newform").innerHTML = `<div class="lcard">
       <div class="ltitle">New agent · ${esc(where)}</div>
       <div class="nfield"><label>CLI</label><input id="nf-cli" value="claude" spellcheck="false" autocapitalize="off" /></div>
@@ -1678,7 +1850,7 @@
         };
         go.disabled = true;
         go.textContent = "launching…";
-        const ok = await spawnAndSelect(spec);
+        const ok = await spawnAndSelect(spec, $("newform").dataset.room || undefined);
         if (ok) {
           $("newform").style.display = "none";
         } else {
@@ -1704,6 +1876,7 @@
       // boot: a launch URL opens the launcher; otherwise connect from the hash (then
       // eat the token); a bare #room reconnects from the cached token; else local.
       async function boot() {
+        ensureLocalSource();
         const raw = location.hash.replace(/^#/, "");
         if (raw.startsWith("launch=")) {
           let spec = null;
@@ -1712,8 +1885,8 @@
           } catch {}
           history.replaceState(null, document.title, location.pathname + location.search); // eat launch params
           if (spec) showLaunch(spec);
-          setConn("● local", "var(--muted)");
           startPolling();
+          connectAllRooms();
           return;
         }
         // #k=<token> — local-mode auth from `ay serve --http`'s printed link.
@@ -1724,8 +1897,9 @@
           } catch {}
           // SECURITY: strip the token from the URL immediately.
           history.replaceState(null, document.title, location.pathname + location.search);
-          setConn("● local", "var(--muted)");
+          ensureLocalSource();
           startPolling();
+          connectAllRooms();
           return;
         }
         const h = decodeURIComponent(raw);
@@ -1759,24 +1933,13 @@
         } else if (bare && loadRooms()[bare[1]]) {
           const r = loadRooms()[bare[1]];
           pending = { room: bare[1], token: r.token, host: r.host };
-        } else if (!raw) {
-          // No hash → reconnect to the last-used room (or the most recent saved
-          // one), so opening agent-yes.com brings back your list automatically.
-          const rooms = loadRooms();
-          const names = Object.keys(rooms);
-          if (names.length) {
-            const last = localStorage.getItem("ay.lastRoom");
-            const pick =
-              last && rooms[last] ? last : names.sort((a, b) => rooms[b].ts - rooms[a].ts)[0];
-            pending = { room: pick, token: rooms[pick].token, host: rooms[pick].host };
-          }
         }
-        // Render the UI immediately and refresh on a timer; connect to a room (if
-        // any) in the BACKGROUND so a dead/slow cached room never blanks the page.
-        if (!pending) setConn("● local", "var(--muted)");
-        else wantRemote = true; // remote room in play — loadList waits for the tunnel
+        // Render the UI immediately and refresh on a timer; connect to every
+        // saved room in the BACKGROUND so a dead/slow room never blanks the page,
+        // and they all stream their agents into one list at once.
         startPolling();
         if (pending) connectRoom(pending.room, pending.token, pending.host);
+        connectAllRooms();
       }
 
       // ---- activity-gated polling + auto-reload on new deploy ----------------

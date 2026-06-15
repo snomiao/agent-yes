@@ -11,6 +11,13 @@ import {
   age,
   matches,
   nextIndex,
+  deviceParts,
+  identFields,
+  identContext,
+  compactIdent,
+  fullIdent,
+  hasIdent,
+  deviceCount,
 } from "../../lab/ui/console-logic.js";
 
 const agent = (over = {}) => ({
@@ -62,6 +69,104 @@ describe("ident", () => {
   });
   it("is empty when there's no repo/branch", () => {
     expect(ident(agent({ cwd: "/tmp" }), true)).toBe("");
+  });
+});
+
+describe("deviceParts", () => {
+  it("splits user@host", () => {
+    expect(deviceParts("sno@taka")).toEqual({ user: "sno", host: "taka" });
+  });
+  it("treats a bare label as host-only", () => {
+    expect(deviceParts("laptop")).toEqual({ user: "", host: "laptop" });
+  });
+  it("is empty for missing/empty device", () => {
+    expect(deviceParts("")).toEqual({ user: "", host: "" });
+    expect(deviceParts(undefined)).toEqual({ user: "", host: "" });
+  });
+});
+
+describe("identFields", () => {
+  it("combines device (user/host) and path (owner/repo/branch)", () => {
+    expect(identFields(agent({ _host: "sno@taka" }))).toEqual({
+      user: "sno",
+      host: "taka",
+      owner: "snomiao",
+      repo: "agent-yes",
+      branch: "main",
+    });
+  });
+  it("leaves device empty for a local agent and path empty off-layout", () => {
+    expect(identFields(agent({ cwd: "/tmp" }))).toEqual({
+      user: "",
+      host: "",
+      owner: "",
+      repo: "",
+      branch: "",
+    });
+  });
+});
+
+describe("compactIdent (omit-if-uniform, separators kept)", () => {
+  it("local-only list: path-only (owner/repo/branch), no device prefix", () => {
+    const list = [agent(), agent({ cwd: "/x/me/widgets/tree/dev" })];
+    const ctx = identContext(list);
+    expect(ctx.anyDevice).toBe(false);
+    expect(compactIdent(list[0], ctx)).toBe("sno/age/mai");
+    expect(compactIdent(list[1], ctx)).toBe("me/wid/dev");
+  });
+  it("all on one device: device blanked but @ : kept", () => {
+    const list = [
+      agent({ _host: "sno@taka" }),
+      agent({ _host: "sno@taka", cwd: "/x/me/widgets/tree/dev" }),
+    ];
+    const ctx = identContext(list);
+    expect(compactIdent(list[0], ctx)).toBe("@:sno/age/mai");
+    expect(compactIdent(list[1], ctx)).toBe("@:me/wid/dev");
+  });
+  it("mixed devices: device shown and capped; uniform user blanked", () => {
+    const list = [
+      agent({ _host: "sno@taka" }),
+      agent({ _host: "sno@beelink", cwd: "/x/me/widgets/tree/dev" }),
+    ];
+    const ctx = identContext(list);
+    // user "sno" is uniform → blanked; host differs → shown, capped to 3.
+    expect(compactIdent(list[0], ctx)).toBe("@tak:sno/age/mai");
+    expect(compactIdent(list[1], ctx)).toBe("@bee:me/wid/dev");
+  });
+  it("uniform owner blanked in a local list (separators kept)", () => {
+    const list = [agent(), agent({ cwd: "/home/u/ws/snomiao/widgets/tree/dev" })];
+    const ctx = identContext(list);
+    // same owner snomiao → blanked; repo/branch differ.
+    expect(compactIdent(list[0], ctx)).toBe("/age/mai");
+    expect(compactIdent(list[1], ctx)).toBe("/wid/dev");
+  });
+  it("uniform repo blanked while branch differs (separators preserved)", () => {
+    const list = [
+      agent({ _host: "a@h1", cwd: "/x/me/repo/tree/main" }),
+      agent({ _host: "b@h2", cwd: "/x/me/repo/tree/dev" }),
+    ];
+    const ctx = identContext(list);
+    // owner+repo uniform → blanked; user+host+branch differ.
+    expect(compactIdent(list[0], ctx)).toBe("a@h1://mai");
+    expect(compactIdent(list[1], ctx)).toBe("b@h2://dev");
+  });
+});
+
+describe("fullIdent / hasIdent / deviceCount", () => {
+  it("fullIdent is uncapped with device prefix only when present", () => {
+    expect(fullIdent(agent({ _host: "sno@taka" }))).toBe("sno@taka:snomiao/agent-yes/main");
+    expect(fullIdent(agent())).toBe("snomiao/agent-yes/main");
+  });
+  it("hasIdent is false for separator-only strings", () => {
+    expect(hasIdent("@://")).toBe(false);
+    expect(hasIdent("@:age/mai")).toBe(true);
+    expect(hasIdent("")).toBe(false);
+  });
+  it("deviceCount counts distinct devices, ignoring local", () => {
+    expect(deviceCount([agent(), agent()])).toBe(0);
+    expect(
+      deviceCount([agent({ _host: "a@h" }), agent({ _host: "a@h" }), agent({ _host: "b@h" })]),
+    ).toBe(2);
   });
 });
 

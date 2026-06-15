@@ -93,8 +93,8 @@ describe("console DOM behaviour", () => {
       // Narrow the list and open an agent.
       await page.fill("#q", "codex");
       await expect.poll(() => page.locator(".list .row").count()).toBe(1);
-      await page.click('.list .row[data-pid="102"]');
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-pid")).toBe("102");
+      await page.click('.list .row[data-key="local#102"]');
+      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#102");
 
       // A refresh (manual, or the auto-reload on a new deploy) must not lose them.
       await page.reload({ waitUntil: "domcontentloaded" });
@@ -102,7 +102,7 @@ describe("console DOM behaviour", () => {
 
       expect(await page.inputValue("#q")).toBe("codex");
       await expect.poll(() => page.locator(".list .row").count()).toBe(1);
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-pid")).toBe("102");
+      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#102");
       await expect.poll(() => page.locator("#rhead").isVisible()).toBe(true);
     } finally {
       // localStorage is per-context; closing it clears the persisted keys so the
@@ -118,7 +118,7 @@ describe("console DOM behaviour", () => {
     // site lands on the list, not a terminal.
     const { ctx, page } = await openConsole(browser, url, { width: 390, height: 844 });
     try {
-      await page.click('.list .row[data-pid="102"]');
+      await page.click('.list .row[data-key="local#102"]');
       await expect
         .poll(() =>
           page.evaluate(() => document.querySelector(".app")!.classList.contains("show-detail")),
@@ -126,14 +126,14 @@ describe("console DOM behaviour", () => {
         .toBe(true);
 
       await page.reload({ waitUntil: "domcontentloaded" });
-      await page.waitForSelector('.list .row[data-pid="102"]', { state: "attached" });
+      await page.waitForSelector('.list .row[data-key="local#102"]', { state: "attached" });
 
       // row stays selected…
       await expect
         .poll(() =>
-          page.evaluate(() => document.querySelector(".row.sel")?.getAttribute("data-pid") ?? null),
+          page.evaluate(() => document.querySelector(".row.sel")?.getAttribute("data-key") ?? null),
         )
-        .toBe("102");
+        .toBe("local#102");
       // …but we're back on the list, not flipped into the terminal.
       expect(
         await page.evaluate(() =>
@@ -145,14 +145,15 @@ describe("console DOM behaviour", () => {
     }
   });
 
-  it("compact toggle collapses rows and caps repo/branch to 3 chars", async () => {
+  it("compact toggle collapses rows; identity is owner/repo/branch capped to 3", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
       await page.click("#viewbtn");
       await page.waitForSelector(".list .row.crow");
+      // All local (no devices) → path-only identity owner/repo/branch, each ≤3 chars.
       const idents = await page.locator(".crow .cident").allInnerTexts();
-      expect(idents).toContain("age/mai"); // agent-yes/main
-      expect(idents).toContain("wid/dev"); // widgets/dev
+      expect(idents).toContain("sno/age/mai"); // snomiao/agent-yes/main
+      expect(idents).toContain("acm/wid/dev"); // acme/widgets/dev
       // codex row shows its cli; claude rows don't
       const names = await page.locator(".crow .cname").allInnerTexts();
       expect(names).toEqual(["codex"]);
@@ -165,8 +166,8 @@ describe("console DOM behaviour", () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
       // Select the first agent (builds the stubbed terminal + focuses it).
-      await page.click('.list .row[data-pid="101"]');
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-pid")).toBe("101");
+      await page.click('.list .row[data-key="local#101"]');
+      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#101");
 
       // Spy on document keydown in the BUBBLE phase: the page's capture-phase
       // handler calls stopPropagation, so these Alt+Arrow combos must never
@@ -183,13 +184,13 @@ describe("console DOM behaviour", () => {
       });
 
       await page.keyboard.press("Alt+ArrowDown");
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-pid")).toBe("102");
+      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#102");
       await page.keyboard.press("Alt+ArrowDown");
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-pid")).toBe("103");
+      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#103");
       await page.keyboard.press("Alt+ArrowDown"); // clamps at the bottom
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-pid")).toBe("103");
+      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#103");
       await page.keyboard.press("Alt+ArrowUp");
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-pid")).toBe("102");
+      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#102");
 
       // The combo was swallowed by the capture-phase intercept.
       expect(await page.evaluate(() => (window as any).__bubble)).toEqual([]);
