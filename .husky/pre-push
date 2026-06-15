@@ -1,0 +1,15 @@
+#!/usr/bin/env sh
+set -e
+
+# Guard the console's OS light/dark adaptation before it can ship. Only when the
+# UI source actually changed since upstream, so unrelated pushes stay fast. The
+# CI deploy job (ui-test.yml) ships lab/ui to agent-yes.com on merge, so this is
+# the last local gate before that. Runs a headless Chrome that emulates the OS
+# color-scheme and asserts the palette + xterm ANSI theme flip live (no reload).
+UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || echo origin/main)
+if git diff --quiet "$UPSTREAM" -- lab/ui/index.html tests/ui-test/theme.e2e.mjs 2>/dev/null; then
+  exit 0
+fi
+
+echo "[pre-push] lab/ui changed — running console theme e2e"
+bun run test:theme

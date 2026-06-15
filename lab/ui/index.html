@@ -7,6 +7,8 @@
     <style>
       /* Palette borrowed from codehost (GitHub-dark) so the two feel like one system. */
       :root {
+        /* Adapt native form controls / scrollbars to the OS theme too. */
+        color-scheme: light dark;
         --bg: #0d1117;
         --panel: #161b22;
         --panel2: #1c2430;
@@ -21,6 +23,28 @@
         --pink: #f778ba;
         --red: #f85149;
         --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+      }
+      /* Light theme — GitHub-light, the daylight counterpart of the dark palette
+         above. prefers-color-scheme is re-evaluated by the browser the moment the
+         OS flips, so every var() consumer recolors in real time, no JS, no reload.
+         (The xterm canvas is the one exception — it's repainted from JS, see
+         termTheme() below.) */
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #ffffff;
+          --panel: #f6f8fa;
+          --panel2: #eaeef2;
+          --line: #d1d9e0;
+          --line2: #d8dee4;
+          --fg: #1f2328;
+          --muted: #59636e;
+          --accent: #0969da;
+          --green: #1a7f37;
+          --amber: #9a6700;
+          --purple: #8250df;
+          --pink: #bf3989;
+          --red: #cf222e;
+        }
       }
       * {
         box-sizing: border-box;
@@ -617,7 +641,7 @@
         min-height: 0;
         overflow: hidden;
         padding: 8px 10px;
-        background: #0d1117;
+        background: var(--bg);
       }
       .log .xterm {
         height: 100%;
@@ -812,6 +836,48 @@
       let es = null; // live-tail subscription closer
       let term = null; // xterm.js Terminal rendering the raw PTY stream
       let fit = null;
+
+      // xterm paints to a <canvas>, so unlike the CSS var() consumers it can't
+      // ride prefers-color-scheme on its own — its theme is a JS object. Mirror
+      // the OS preference here and re-apply it live when the system flips, so the
+      // terminal recolors in lockstep with the rest of the UI.
+      const prefersLight = window.matchMedia("(prefers-color-scheme: light)");
+      const termTheme = () =>
+        prefersLight.matches
+          ? {
+              // GitHub-light terminal palette. xterm's default ANSI slots are
+              // tuned for a dark background, so setting only bg/fg/cursor leaves
+              // white & bright-white SGR text (37/97) — common in CLI output —
+              // near-invisible on #ffffff. Remap the white slots to dark grays
+              // and darken the rest so every ANSI color stays legible on light.
+              background: "#ffffff",
+              foreground: "#1f2328",
+              cursor: "#1f2328",
+              selectionBackground: "#b6d6ff",
+              black: "#24292e",
+              red: "#cf222e",
+              green: "#116329",
+              yellow: "#4d2d00",
+              blue: "#0969da",
+              magenta: "#8250df",
+              cyan: "#1b7c83",
+              white: "#6e7781",
+              brightBlack: "#57606a",
+              brightRed: "#a40e26",
+              brightGreen: "#1a7f37",
+              brightYellow: "#633c01",
+              brightBlue: "#218bff",
+              brightMagenta: "#a475f9",
+              brightCyan: "#3192aa",
+              brightWhite: "#1f2328",
+            }
+          : { background: "#0d1117", foreground: "#c9d1d9", cursor: "#0d1117" };
+      // Exposed so the headless theme e2e can assert the light ANSI palette
+      // keeps the white slots dark (legible on a white terminal background).
+      window.__termTheme = termTheme;
+      prefersLight.addEventListener("change", () => {
+        if (term) term.options.theme = termTheme();
+      });
 
       const $ = (id) => document.getElementById(id);
       const esc = (s) =>
@@ -1366,7 +1432,7 @@
           scrollback: 5000,
           fontSize: 12,
           fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
-          theme: { background: "#0d1117", foreground: "#c9d1d9", cursor: "#0d1117" },
+          theme: termTheme(),
         });
         fit = new FitAddon.FitAddon();
         term.loadAddon(fit);
