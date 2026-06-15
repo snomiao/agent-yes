@@ -18,3 +18,15 @@ bun run build:rs && bun run build && bun link
 
 `build:rs` runs `cargo install --path rs` (release build, installs to `~/.cargo/bin/agent-yes`).
 Must be done whenever any `.rs` file changes, otherwise the old binary stays in place.
+
+`rs/default.config.yaml` is embedded into the Rust binary at compile time via
+`include_str!` (see `rs/src/config.rs`), so editing the CLI ready/enter/etc. markers
+also requires `build:rs` to take effect — a TS-only build won't update the Rust binary.
+
+**Prerequisite: Rust toolchain.** `build:rs` needs `cargo`. If it's missing (`cargo: command
+not found`), install rustup first, then re-source the env:
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+. "$HOME/.cargo/env"
+```
