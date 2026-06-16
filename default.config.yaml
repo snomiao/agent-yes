@@ -90,10 +90,21 @@ clis:
       - ⏎ send
       - "› "
       - '\? for shortcuts'
+    working:
+      # codex shows "• Working (… • esc to interrupt)" while streaming/running.
+      # (Approval dialogs say "esc to cancel", so this only marks real work.)
+      - esc to interrupt
     enter:
-      - "> 1. Yes,"
-      - "> 1. Yes, allow Codex to work in this folder"
-      - "> 1. Approve and run now"
+      # codex highlights the selected option with "›" (U+203A), NOT ASCII ">".
+      # Match the affirmative first option (Yes / Approve / Allow) when it is the
+      # highlighted choice. The "[›>]" class keeps matching the old ASCII bullet
+      # too, in case an older/newer codex reverts the glyph.
+      - pattern: '[›>] ?1\. ?Yes'
+        flags: m
+      - pattern: '[›>] ?1\. ?Approve'
+        flags: m
+      - pattern: '[›>] ?1\. ?Allow'
+        flags: m
     fatal:
       - "Error: The cursor position could not be read within"
     defaultArgs:

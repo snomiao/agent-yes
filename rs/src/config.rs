@@ -327,6 +327,23 @@ mod tests {
         assert!(config.ready[0].is_match("⏎ send"));
         assert!(config.ready.iter().any(|rx| rx.is_match("› ")));
         assert!(!config.enter.is_empty());
+        // codex 0.140 highlights the selected option with "›" (U+203A); the
+        // enter patterns must match that glyph (the old ASCII ">" never did).
+        assert!(config
+            .enter
+            .iter()
+            .any(|rx| rx.is_match("› 1. Yes, proceed (y)")));
+        assert!(config
+            .enter
+            .iter()
+            .any(|rx| rx.is_match("› 1. Approve and run now")));
+        // …and not the non-affirmative option when it is the highlighted one.
+        assert!(!config
+            .enter
+            .iter()
+            .any(|rx| rx.is_match("› 3. No, and tell Codex what to do differently (esc)")));
+        assert!(!config.working.is_empty());
+        assert!(config.working[0].is_match("Working (10s • esc to interrupt)"));
         assert!(!config.fatal.is_empty());
         assert!(!config.update_available.is_empty());
         assert!(config.update_available[0].is_match("✨⬆️ Update available!"));
