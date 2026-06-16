@@ -61,15 +61,6 @@ function isTrayProcessRunning(pid: number): boolean {
 }
 
 /**
- * Write the current process PID to the tray PID file
- */
-async function writeTrayPid(): Promise<void> {
-  const dir = getTrayDir();
-  await mkdir(dir, { recursive: true });
-  await writeFile(getTrayPidFile(), String(process.pid), "utf8");
-}
-
-/**
  * Remove the tray PID file
  */
 async function removeTrayPid(): Promise<void> {
@@ -78,6 +69,28 @@ async function removeTrayPid(): Promise<void> {
   } catch {
     // ignore
   }
+}
+
+/**
+ * Atomically claim the tray singleton. Exclusive create (flag "wx") fails if a
+ * pidfile already exists, so two trays racing startup can't BOTH pass a
+ * check-then-act and survive (that race is how N agents ended up with N trays).
+ * If an existing pidfile belongs to a DEAD tray it's stale — take it over.
+ * Returns true if this process is now the singleton owner.
+ */
+async function claimTraySingleton(): Promise<boolean> {
+  const pidFile = getTrayPidFile();
+  await mkdir(getTrayDir(), { recursive: true });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await writeFile(pidFile, String(process.pid), { flag: "wx" });
+      return true; // won the exclusive create
+    } catch {
+      if (await isTrayRunning()) return false; // a live tray owns it
+      await removeTrayPid(); // stale pidfile from a dead tray — drop and retry
+    }
+  }
+  return false;
 }
 
 /**
@@ -102,6 +115,11 @@ export async function isTrayRunning(): Promise<boolean> {
  */
 export async function ensureTray(): Promise<void> {
   if (!isDesktopOS()) return;
+  // OPT-IN: the systray2 helper busy-loops at ~100% CPU under Bun (its stdio
+  // read loop spins), and every TS-runtime agent calls this — so N concurrent
+  // agents used to each spawn a tray and pin N cores. Auto-spawn is disabled by
+  // default until the busy-loop is fixed; set AGENT_YES_TRAY=1 to opt in.
+  if (process.env.AGENT_YES_TRAY !== "1") return;
   if (await isTrayRunning()) return;
 
   try {
@@ -127,14 +145,12 @@ export async function startTray(): Promise<void> {
     return;
   }
 
-  // Check if another tray is already running
-  if (await isTrayRunning()) {
+  // Atomically claim the singleton (exclusive create) — prevents the
+  // check-then-act race that let concurrent agents each keep a tray alive.
+  if (!(await claimTraySingleton())) {
     console.error("Tray is already running.");
     return;
   }
-
-  // Register our PID
-  await writeTrayPid();
 
   let SysTray: typeof import("systray2").default;
   try {
