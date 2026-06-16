@@ -1,6 +1,6 @@
 //! Integration tests for agent-yes Rust implementation
 
-use assert_cmd::Command;
+use assert_cmd::cargo::cargo_bin_cmd;
 use std::fs::{self, File};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -340,7 +340,9 @@ fi
         .unwrap_or(false);
     if still_alive {
         // best-effort cleanup so a failed run doesn't leak the runaway
-        let _ = std::process::Command::new("kill").args(["-9", yespid]).status();
+        let _ = std::process::Command::new("kill")
+            .args(["-9", yespid])
+            .status();
     }
     assert!(
         !still_alive,
@@ -350,7 +352,7 @@ fi
 
 #[test]
 fn test_version() {
-    let mut cmd = Command::cargo_bin("agent-yes").unwrap();
+    let mut cmd = cargo_bin_cmd!("agent-yes");
     cmd.arg("--version")
         .assert()
         .success()
@@ -359,7 +361,7 @@ fn test_version() {
 
 #[test]
 fn test_help() {
-    let mut cmd = Command::cargo_bin("agent-yes").unwrap();
+    let mut cmd = cargo_bin_cmd!("agent-yes");
     cmd.arg("--help")
         .assert()
         .success()
@@ -368,7 +370,7 @@ fn test_help() {
 
 #[test]
 fn test_unknown_cli() {
-    let mut cmd = Command::cargo_bin("agent-yes").unwrap();
+    let mut cmd = cargo_bin_cmd!("agent-yes");
     cmd.arg("--cli").arg("unknown_cli").assert().failure();
 }
 
@@ -420,7 +422,7 @@ fn test_cwd_is_preserved() {
     fs::create_dir_all(&home_dir).unwrap();
 
     // Run agent-yes from the test subdirectory
-    let mut cmd = Command::cargo_bin("agent-yes").unwrap();
+    let mut cmd = cargo_bin_cmd!("agent-yes");
     cmd.current_dir(&test_subdir)
         .env("PATH", new_path)
         .env("HOME", &home_dir)
@@ -467,7 +469,7 @@ fn test_cwd_flag_overrides_current_dir() {
     let home_dir = temp_dir.path().join("home");
     fs::create_dir_all(&home_dir).unwrap();
 
-    let mut cmd = Command::cargo_bin("agent-yes").unwrap();
+    let mut cmd = cargo_bin_cmd!("agent-yes");
     cmd.current_dir(&invocation_dir)
         .env("PATH", new_path)
         .env("HOME", &home_dir)
@@ -520,7 +522,7 @@ fn test_cwd_flag_rejects_missing_directory() {
     let home_dir = temp_dir.path().join("home");
     fs::create_dir_all(&home_dir).unwrap();
 
-    let mut cmd = Command::cargo_bin("agent-yes").unwrap();
+    let mut cmd = cargo_bin_cmd!("agent-yes");
     cmd.env("PATH", new_path)
         .env("HOME", &home_dir)
         .arg("--cli")
@@ -578,7 +580,7 @@ exit 0
     // Scope `cmd` so that `output()` returns and we no longer hold any
     // borrow before we read the registry file.
     let _output = {
-        let mut cmd = Command::cargo_bin("agent-yes").unwrap();
+        let mut cmd = cargo_bin_cmd!("agent-yes");
         cmd.env("PATH", new_path)
             .env("HOME", &home_dir)
             .current_dir(&project_dir)

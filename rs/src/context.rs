@@ -654,7 +654,10 @@ impl AgentContext {
                     self.auto_retry_next_at = Some(now + Duration::from_millis(500));
                 } else {
                     self.auto_retry_streak = self.auto_retry_streak.saturating_add(1);
-                    warn!("Auto-retry: typing 'retry' (attempt {})", self.auto_retry_streak);
+                    warn!(
+                        "Auto-retry: typing 'retry' (attempt {})",
+                        self.auto_retry_streak
+                    );
                     self.do_send_retry(msg_ctx)?;
                     // Self-schedule the next retry with escalated backoff. Leaving
                     // this None and re-arming from check_patterns would tight-loop
