@@ -40,6 +40,26 @@ async function loadOrCreateToken(tokenFlag?: string): Promise<string> {
   }
 }
 
+// Read the serve token WITHOUT creating one — `ay serve status` must be a pure
+// read (creating a token as a side effect of asking "is it running?" is wrong).
+async function loadTokenReadOnly(): Promise<string | null> {
+  try {
+    return (await readFile(tokenPath(), "utf-8")).trim();
+  } catch {
+    return null;
+  }
+}
+
+// The persisted WebRTC share link (mode 0600), written by a --share/--webrtc
+// daemon so the secret-bearing link survives restarts. null if not sharing.
+async function readShareLink(): Promise<string | null> {
+  try {
+    return (await readFile(path.join(agentYesHome(), ".share-link"), "utf-8")).trim();
+  } catch {
+    return null;
+  }
+}
+
 function tokenEqual(provided: string, expectedToken: string): boolean {
   // Constant-time compare; pad both to the same length first
   const maxLen = Math.max(provided.length, expectedToken.length);
@@ -388,6 +408,84 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
   return 1;
 }
 
+// ay serve status — report whether the server is installed as a daemon and/or
+// currently reachable, plus its mode, port, version, token, and share link.
+// Read-only: never mints a token or disturbs the daemon. `--json` for scripts.
+async function cmdServeStatus(args: string[]): Promise<number> {
+  const json = args.includes("--json");
+  const mgr = resolveDaemonManager();
+  const token = await loadTokenReadOnly();
+  const shareLink = await readShareLink();
+
+  // A non-null arg list means the daemon is registered with the manager.
+  const daemonArgs = mgr ? await readDaemonServeArgs(mgr) : null;
+  const installed = daemonArgs !== null;
+  const a = daemonArgs ?? [];
+  const port = portFromArgs(a);
+  // Mirror cmdServe/install mode resolution: webrtc when --webrtc/--share; http
+  // when --http/--share OR no --webrtc at all (http is the implicit default).
+  const webrtcish = a.some((x) => x.startsWith("--webrtc") || x.startsWith("--share"));
+  const httpish =
+    a.some((x) => x.startsWith("--http") || x.startsWith("--share")) ||
+    !a.some((x) => x.startsWith("--webrtc"));
+  const mode = httpish && webrtcish ? "http+webrtc" : webrtcish ? "webrtc" : "http";
+
+  // Probe the local HTTP API — catches both a daemon and a foreground `ay serve`.
+  // Webrtc-only servers open no port, so a null probe there is expected, not down.
+  const runningVersion = httpish && token ? await fetchDaemonVersion(port, token) : null;
+  const current = getInstalledPackage().version;
+
+  if (json) {
+    process.stdout.write(
+      JSON.stringify(
+        {
+          manager: mgr?.id ?? null,
+          installed,
+          mode,
+          port: httpish ? port : null,
+          reachable: runningVersion !== null,
+          runningVersion,
+          currentVersion: current,
+          upToDate: runningVersion !== null && runningVersion === current,
+          args: a,
+          hasToken: !!token,
+          shareLink,
+        },
+        null,
+        2,
+      ) + "\n",
+    );
+    return 0;
+  }
+
+  const w = (s = "") => process.stdout.write(s + "\n");
+  w(`daemon name:  ${DAEMON_NAME}`);
+  w(`manager:      ${mgr ? mgr.id : "none — install pm2 or oxmgr to daemonize"}`);
+  if (installed) {
+    w(`installed:    yes (via ${mgr!.id})`);
+    w(`mode:         ${mode}${httpish ? `  (port ${port})` : ""}`);
+    if (a.length) w(`args:         ${a.join(" ")}`);
+  } else {
+    w(`installed:    no — start a daemon with:  ay serve install [--share]`);
+  }
+  if (runningVersion !== null) {
+    const tag = runningVersion === current ? "up to date" : `outdated (current v${current})`;
+    w(`http api:     reachable on 127.0.0.1:${port} — v${runningVersion} (${tag})`);
+  } else if (mode === "webrtc") {
+    w(`http api:     none (webrtc-only)`);
+  } else {
+    w(`http api:     not reachable on 127.0.0.1:${port} (not running)`);
+  }
+  w(`token:        ${token ?? "(none yet — created on first serve)"}`);
+  if (shareLink) w(`share link:   ${shareLink}`);
+  if (token && httpish) {
+    w();
+    w(`connect:  ay ls   ${token}@<host>:${port}`);
+    w(`          ay remote add <alias> http://${token}@<host>:${port}`);
+  }
+  return 0;
+}
+
 // ---------------------------------------------------------------------------
 // ay serve
 // ---------------------------------------------------------------------------
@@ -417,6 +515,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  --tls-key  FILE   TLS private key PEM\n\n` +
         `Subcommands:\n` +
         `  ay serve install    install as background daemon (pm2 on Windows, else oxmgr)\n` +
+        `  ay serve status     show daemon/server status (add --json for scripts)\n` +
         `  ay serve uninstall  remove daemon\n` +
         `  ay serve logs       view daemon logs\n\n` +
         `Once running, connect from another machine:\n` +
@@ -428,6 +527,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
 
   // Daemon subcommands
   const sub = rest[0];
+  if (sub === "status") return cmdServeStatus(rest.slice(1));
   if (sub === "install" || sub === "uninstall" || sub === "logs") {
     return cmdServeDaemon(sub, rest.slice(1));
   }
