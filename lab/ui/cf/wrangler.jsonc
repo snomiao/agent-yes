@@ -11,7 +11,9 @@
   // workflow is how agent-yes.com ended up serving a stale console). public/ is
   // a generated copy and is gitignored. Runs from this config's directory.
   "build": {
-    "command": "mkdir -p ./public && cp ../index.html ../room-client.js ../console-logic.js ./public/",
+    // Copy index.html + EVERY UI script (room-client.js, console-logic.js,
+    // e2e.js, …) — a fixed list silently breaks when the UI gains a new import.
+    "command": "mkdir -p ./public && cp ../index.html ../*.js ./public/",
   },
   // Static console UI (served for every non-WebSocket request).
   "assets": { "directory": "./public", "binding": "ASSETS" },
