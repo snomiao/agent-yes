@@ -149,10 +149,33 @@ impl PtyContext {
         Ok(self.child.wait()?)
     }
 
-    /// Kill the child process
+    /// Kill the child process (and its whole process group).
     pub fn kill(&mut self) -> Result<()> {
+        self.reap_group(); // take leaked descendants (a `yes | cmd`, etc.) with it
         self.child.kill()?;
         Ok(())
+    }
+
+    /// SIGKILL the child's entire process group. The PTY child is its own
+    /// session/group leader (portable_pty calls setsid), so descendants it
+    /// spawned share its pgid — even after the child exits and they reparent to
+    /// PID 1, because reparenting changes ppid but not pgid. Without this a
+    /// leaked `yes | cmd` (and the like) spins at ~100% CPU forever. Targets the
+    /// recorded pgid, never ppid==1, so it's container-safe and never touches
+    /// processes outside this agent's session.
+    pub fn reap_group(&self) {
+        #[cfg(unix)]
+        if let Some(pid) = self.child.process_id() {
+            let pid = pid as i32;
+            // Resolve the child's group; fall back to its pid (== pgid for a
+            // session leader) if it has already exited and getpgid fails.
+            let pgid = unsafe { libc::getpgid(pid) };
+            let target = if pgid > 0 { pgid } else { pid };
+            // Negative target == "every process in group `target`".
+            unsafe {
+                libc::kill(-target, libc::SIGKILL);
+            }
+        }
     }
 
     /// Resize the PTY

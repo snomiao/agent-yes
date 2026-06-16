@@ -151,9 +151,15 @@ async function ensureBootAutostart(mgr: DaemonManager): Promise<boolean> {
       // pm2 (Windows): logon-scoped resurrect via the saved process list.
       return (await spawnExit([mgr.bin, "save"])) === 0;
     }
+    // Skip `service install` when the service is ALREADY registered: re-running
+    // it re-bootstraps the oxmgr daemon, which restarts every managed process —
+    // it once took down a VS Code serve-web session on each `ay serve install`.
+    // `oxmgr service status` exits 0 only when already installed.
     // oxmgr's --system defaults to "auto" (launchd/systemd/Task Scheduler); it's
     // a `service`-level flag, so it goes before the subcommand, not after.
-    const installed = (await spawnExit([mgr.bin, "service", "install"])) === 0;
+    const installed =
+      (await spawnExit([mgr.bin, "service", "status"])) === 0 ||
+      (await spawnExit([mgr.bin, "service", "install"])) === 0;
     if (installed && process.platform === "linux") {
       // Upgrade login-scope → boot-scope: linger starts the user manager at boot.
       await spawnExit(["loginctl", "enable-linger", userInfo().username]);

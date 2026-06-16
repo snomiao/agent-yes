@@ -990,38 +990,45 @@
               if (m.type === "welcome") {
                 if (this._v2 && m.v !== 2)
                   return fail(new Error("host is running an old agent-yes — ask it to upgrade"));
-                pc = new RTCPeerConnection({
-                  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-                });
-                this.pc = pc;
-                pc.onicecandidate = (e) => {
-                  if (e.candidate)
-                    ws.send(JSON.stringify({ type: "candidate", candidate: e.candidate }));
-                };
-                pc.onconnectionstatechange = () => this.onstate(pc.connectionState);
-                pc.ondatachannel = (e) => {
-                  this.dc = e.channel;
-                  this.dc.binaryType = "arraybuffer";
-                  this.dc.onopen = async () => {
-                    try {
-                      await this._keysReady;
-                      // Open the bidirectional confirmation handshake.
-                      this._dcSend(FLAG_CONFIRM, { t: "confirm", nonce: this._myNonce });
-                      this._confirmTimer = setTimeout(() => {
-                        if (!this._confirmed) fail(new Error("key confirmation timed out"));
-                      }, CONFIRM_TIMEOUT_MS);
-                    } catch (err) {
-                      fail(err);
-                    }
-                  };
-                  this.dc.onmessage = (ev2) => {
-                    this._recvChain = this._recvChain
-                      .then(() => this._dcRecv(ev2.data, done))
-                      .catch(() => {});
-                  };
-                  this.dc.onclose = () => this.onstate("closed");
-                };
+                // pc is created on the offer below so it can use the host-supplied
+                // iceServers (incl. short-lived TURN creds for relaying behind NAT).
               } else if (m.type === "offer") {
+                if (!pc) {
+                  pc = new RTCPeerConnection({
+                    iceServers:
+                      m.iceServers && m.iceServers.length
+                        ? m.iceServers
+                        : [{ urls: "stun:stun.l.google.com:19302" }],
+                  });
+                  this.pc = pc;
+                  pc.onicecandidate = (e) => {
+                    if (e.candidate)
+                      ws.send(JSON.stringify({ type: "candidate", candidate: e.candidate }));
+                  };
+                  pc.onconnectionstatechange = () => this.onstate(pc.connectionState);
+                  pc.ondatachannel = (e) => {
+                    this.dc = e.channel;
+                    this.dc.binaryType = "arraybuffer";
+                    this.dc.onopen = async () => {
+                      try {
+                        await this._keysReady;
+                        // Open the bidirectional confirmation handshake.
+                        this._dcSend(FLAG_CONFIRM, { t: "confirm", nonce: this._myNonce });
+                        this._confirmTimer = setTimeout(() => {
+                          if (!this._confirmed) fail(new Error("key confirmation timed out"));
+                        }, CONFIRM_TIMEOUT_MS);
+                      } catch (err) {
+                        fail(err);
+                      }
+                    };
+                    this.dc.onmessage = (ev2) => {
+                      this._recvChain = this._recvChain
+                        .then(() => this._dcRecv(ev2.data, done))
+                        .catch(() => {});
+                    };
+                    this.dc.onclose = () => this.onstate("closed");
+                  };
+                }
                 await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
                 await pc.setLocalDescription(await pc.createAnswer());
                 ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription.sdp }));
@@ -1040,7 +1047,7 @@
                   fail(err);
                 }
               } else if (m.type === "candidate") {
-                await pc.addIceCandidate(m.candidate).catch(() => {});
+                if (pc) await pc.addIceCandidate(m.candidate).catch(() => {});
               }
             };
             ws.onerror = () => fail(new Error("signaling error"));
@@ -2346,9 +2353,33 @@
           cwd: $("nf-cwd").value.trim(),
           prompt: $("nf-prompt").value,
         };
+        const room = $("newform").dataset.room || undefined;
+        // Warn (but allow) when an agent is already running in this cwd on the
+        // target fleet. A 2nd `claude -c` in the same repo fights over the same
+        // session/files and usually exits on startup — which looks like "the new
+        // agent never appears". Let the user pick a different dir or proceed.
+        if (spec.cwd) {
+          await loadList();
+          const norm = (p) => (p || "").replace(/\/+$/, "");
+          const busy = entries.some(
+            (e) =>
+              (room ? e._room === room : true) &&
+              e.exit_code == null &&
+              norm(e.cwd) === norm(spec.cwd),
+          );
+          if (
+            busy &&
+            !confirm(
+              `An agent is already running in:\n${spec.cwd}\n\n` +
+                `Launching another in the same repo can collide (shared session/files) ` +
+                `and the new one may exit immediately. Launch anyway?`,
+            )
+          )
+            return;
+        }
         go.disabled = true;
         go.textContent = "launching…";
-        const ok = await spawnAndSelect(spec, $("newform").dataset.room || undefined);
+        const ok = await spawnAndSelect(spec, room);
         if (ok) {
           $("newform").style.display = "none";
         } else {
