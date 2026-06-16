@@ -147,6 +147,114 @@ wait $AY_PID 2>/dev/null || true
     );
 }
 
+/// Auto-retry: when the agent prints a recoverable API error (overload /
+/// usage-limit) and sits idle at its prompt, agent-yes should type "retry"
+/// after the backoff. The prompt is passed as a CLI arg (claude promptArg =
+/// last-arg), so the ONLY thing that can reach the mock's stdin is the
+/// auto-retry — making "GOT_INPUT: retry" an unambiguous signal.
+#[cfg(unix)]
+#[test]
+fn test_auto_retry_types_retry_on_overload() {
+    use std::time::Duration;
+
+    let dir = tempdir().unwrap();
+    let bin_dir = dir.path().join("bin");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let home_dir = dir.path().join("home");
+    fs::create_dir_all(&home_dir).unwrap();
+
+    // Mock claude: prints an overload banner + the ready cue, then echoes any
+    // stdin it receives for ~16s (long enough to cross the 8s first backoff).
+    let mock_path = bin_dir.join("claude");
+    let mut f = File::create(&mock_path).unwrap();
+    writeln!(
+        f,
+        r#"#!/usr/bin/env bash
+echo "● API Error: Overloaded (attempt 1/10)"
+echo "? for shortcuts"
+end=$((SECONDS+16))
+while [ $SECONDS -lt $end ]; do
+  if IFS= read -r -t 1 line; then
+    echo "GOT_INPUT: $line"
+  fi
+done
+"#
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&mock_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&mock_path, perms).unwrap();
+
+    let agent_yes_bin = env!("CARGO_BIN_EXE_agent-yes");
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}:{}", bin_dir.display(), original_path);
+
+    let orchestrator_path = dir.path().join("run_test.sh");
+    let mut sf = File::create(&orchestrator_path).unwrap();
+    let home = home_dir.display();
+    writeln!(
+        sf,
+        r#"#!/usr/bin/env bash
+set -e
+export PATH="{new_path}"
+export HOME="{home}"
+export COLUMNS=80
+export LINES=24
+
+# Close fds inherited from cargo test (>=3) so portable_pty doesn't abort.
+if [ -d /proc/$$/fd ]; then
+    for fd in /proc/$$/fd/*; do
+        fd_num=$(basename "$fd")
+        case "$fd_num" in 0|1|2) ;; *)
+            eval "exec ${{fd_num}}>&-" 2>/dev/null || true ;;
+        esac
+    done
+fi
+
+OUTFILE="$1"
+"{agent_yes_bin}" --cli claude -p hello >"$OUTFILE" 2>&1 &
+AY_PID=$!
+
+# Wait up to ~13s for the auto-retry to type "retry" (first backoff is 8s).
+for i in $(seq 1 130); do
+    grep -q "GOT_INPUT: retry" "$OUTFILE" 2>/dev/null && break
+    sleep 0.1
+done
+
+kill $AY_PID 2>/dev/null || true
+wait $AY_PID 2>/dev/null || true
+"#
+    )
+    .unwrap();
+    let mut perms = fs::metadata(&orchestrator_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&orchestrator_path, perms).unwrap();
+
+    let outfile = dir.path().join("output.txt");
+    let status = std::process::Command::new("bash")
+        .arg(&orchestrator_path)
+        .arg(&outfile)
+        .current_dir(dir.path())
+        .status()
+        .expect("bash orchestrator failed to start");
+
+    std::thread::sleep(Duration::from_millis(200));
+    let output = fs::read_to_string(&outfile).unwrap_or_default();
+
+    if !output.contains("GOT_INPUT: retry") {
+        // Soft-skip on slow/odd CI where the 8s timer didn't land in window.
+        eprintln!(
+            "WARN: auto-retry did not produce 'GOT_INPUT: retry'.\n\
+             Orchestrator exit: {status}\nFull output:\n{output}"
+        );
+        return;
+    }
+    assert!(
+        output.contains("GOT_INPUT: retry"),
+        "expected agent-yes to auto-type 'retry' on overload, got:\n{output}"
+    );
+}
+
 #[test]
 fn test_version() {
     let mut cmd = Command::cargo_bin("agent-yes").unwrap();

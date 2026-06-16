@@ -17,6 +17,7 @@ type RawCliConfig = Omit<
   | "restartWithoutContinueArg"
   | "updateAvailable"
   | "exitCommands"
+  | "autoRetry"
 > & {
   ready?: RegexSource[];
   fatal?: RegexSource[];
@@ -26,6 +27,7 @@ type RawCliConfig = Omit<
   typingRespond?: Record<string, RegexSource[]>;
   restartWithoutContinueArg?: RegexSource[];
   updateAvailable?: RegexSource[];
+  autoRetry?: RegexSource[];
   exitCommands?: string[];
   exitCommand?: string[];
 };
@@ -78,6 +80,7 @@ export function normalizeCliConfig(raw: RawCliConfig): AgentCliConfig {
     typingRespond,
     restartWithoutContinueArg,
     updateAvailable,
+    autoRetry,
     exitCommands,
     exitCommand,
     ...rest
@@ -93,6 +96,7 @@ export function normalizeCliConfig(raw: RawCliConfig): AgentCliConfig {
     typingRespond: compileTypingRespond(typingRespond),
     restartWithoutContinueArg: compileRegexList(restartWithoutContinueArg),
     updateAvailable: compileRegexList(updateAvailable),
+    autoRetry: compileRegexList(autoRetry),
     exitCommands: exitCommands ?? exitCommand,
   };
 }

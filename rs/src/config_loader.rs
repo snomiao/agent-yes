@@ -88,6 +88,9 @@ pub struct CliConfigOverride {
     /// Restart without continue arg patterns
     #[serde(default)]
     pub restart_without_continue_arg: Option<Vec<RegexSource>>,
+    /// Auto-retry patterns (type "retry" with backoff instead of exiting)
+    #[serde(default)]
+    pub auto_retry: Option<Vec<RegexSource>>,
 }
 
 /// Install configuration override
@@ -184,6 +187,7 @@ impl CliConfigOverride {
             typing_respond,
             restore_args,
             restart_without_continue_arg,
+            auto_retry,
         } = other;
 
         if let Some(install) = install {
@@ -255,6 +259,9 @@ impl CliConfigOverride {
         }
         if restart_without_continue_arg.is_some() {
             self.restart_without_continue_arg = restart_without_continue_arg;
+        }
+        if auto_retry.is_some() {
+            self.auto_retry = auto_retry;
         }
     }
 }
@@ -625,6 +632,7 @@ logsDir: /custom/logs
                 typing_respond: Some(HashMap::from([("1".into(), vec![pattern("old-pattern")])])),
                 restore_args: Some(vec!["old-restore".into()]),
                 restart_without_continue_arg: Some(vec![pattern("old-restart")]),
+                auto_retry: Some(vec![pattern("old-auto-retry")]),
             },
         );
 
@@ -660,6 +668,7 @@ logsDir: /custom/logs
                 restore_args: Some(vec!["new-restore".into()]),
                 typing_respond: Some(tr),
                 restart_without_continue_arg: Some(vec![pattern("new-restart")]),
+                auto_retry: Some(vec![pattern("new-auto-retry")]),
             },
         );
 
@@ -701,6 +710,7 @@ logsDir: /custom/logs
             t.restart_without_continue_arg,
             Some(vec![pattern("new-restart")])
         );
+        assert_eq!(t.auto_retry, Some(vec![pattern("new-auto-retry")]));
         assert!(t.typing_respond.as_ref().unwrap().contains_key("y"));
         assert!(t.typing_respond.as_ref().unwrap().contains_key("1"));
     }

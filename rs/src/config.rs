@@ -46,6 +46,9 @@ pub struct CliConfig {
     pub enter_exclude: Vec<Regex>,
     /// Fatal patterns (exit on match)
     pub fatal: Vec<Regex>,
+    /// Auto-retry patterns: on match, type "retry" with exponential backoff
+    /// (up to 8h) instead of exiting. Checked before `fatal`.
+    pub auto_retry: Vec<Regex>,
     /// Update available banner patterns
     pub update_available: Vec<Regex>,
     /// Typing responses (send text on pattern match)
@@ -138,6 +141,7 @@ fn build_cli_config(raw: CliConfigOverride) -> Result<CliConfig> {
         enter: compile_regex_list(raw.enter)?,
         enter_exclude: compile_regex_list(raw.enter_exclude)?,
         fatal: compile_regex_list(raw.fatal)?,
+        auto_retry: compile_regex_list(raw.auto_retry)?,
         update_available: compile_regex_list(raw.update_available)?,
         typing_respond: compile_typing_respond(raw.typing_respond)?,
         restart_without_continue: compile_regex_list(raw.restart_without_continue_arg)?,
@@ -261,7 +265,17 @@ mod tests {
         assert!(!config.working.is_empty());
         assert!(config.working[0].is_match("esc to interrupt"));
         assert!(!config.fatal.is_empty());
-        assert!(config.fatal[0].is_match("Claude usage limit reached"));
+        assert!(config.fatal[0].is_match("error: unknown option '--foo'"));
+        // Usage-limit / overload are now auto-retried (typed "retry"), not fatal.
+        assert!(!config.auto_retry.is_empty());
+        assert!(config
+            .auto_retry
+            .iter()
+            .any(|rx| rx.is_match("Claude usage limit reached")));
+        assert!(config
+            .auto_retry
+            .iter()
+            .any(|rx| rx.is_match("● API Error: Overloaded")));
         assert!(!config.typing_respond.is_empty());
         assert!(config.typing_respond.contains_key("1\n"));
         assert_eq!(config.restore_args, vec!["--continue"]);

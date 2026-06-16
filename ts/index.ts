@@ -18,6 +18,7 @@ import { logger } from "./logger.ts";
 import { createFifoStream } from "./beta/fifo.ts";
 import { PidStore } from "./pidStore.ts";
 import { sendEnter, sendMessage } from "./core/messaging.ts";
+import { AUTO_RETRY_GIVE_UP_MS, autoRetryBackoffMs } from "./autoRetry.ts";
 import {
   initializeLogPaths,
   setupDebugLogging,
@@ -62,6 +63,7 @@ export type AgentCliConfig = {
   enter?: RegExp[]; // array of regex to match for sending Enter
   enterExclude?: RegExp[]; // array of regex to exclude from auto-enter (even if enter matches)
   typingRespond?: { [message: string]: RegExp[] }; // type specified message to a specified pattern
+  autoRetry?: RegExp[]; // recoverable API errors (overload/rate-limit/usage-limit): type "retry" with exponential backoff (up to 8h) instead of exiting
 
   // crash/resuming-session behaviour
   restoreArgs?: string[]; // arguments to continue the session when crashed
@@ -683,9 +685,51 @@ export default async function agentYes({
   // Heartbeat for auto-response on rendered terminal output
   // This catches patterns that appear via CSI positioning instead of newlines
   let lastHeartbeatRendered = "";
+  // Auto-retry backoff state (mirrors rs/src/context.rs). `streak` doubles the
+  // backoff each consecutive failed retry; `startedAt` anchors the 8h give-up
+  // window; `nextAt` is non-null while a retry is scheduled. `autoRetryScreen`
+  // is the latest rendered screen captured by the stdout pipeline below — the
+  // heartbeat timer reads it (its own xtermProxy.tail() is empty for EOL CLIs).
+  let retryStreak = 0;
+  let retryStartedAt: number | null = null;
+  let retryNextAt: number | null = null;
+  let autoRetryScreen = "";
   const heartbeatInterval = setInterval(async () => {
     try {
       const rendered = removeControlCharacters(xtermProxy.tail(12));
+
+      // Auto-retry backoff timer — fires the scheduled "retry" using the latest
+      // rendered screen captured by the stdout pipeline (consoleResponder). Runs
+      // every tick (independent of output) so it still fires while the agent sits
+      // idle on an error. Arming/reset lives in the stdout pipeline because this
+      // heartbeat's own xtermProxy.tail() is empty for newline (EOL) CLIs like
+      // claude. Only types "retry" when idle at a prompt (never mid-work).
+      if (retryNextAt !== null) {
+        const now = Date.now();
+        if (retryStartedAt !== null && now - retryStartedAt >= AUTO_RETRY_GIVE_UP_MS) {
+          logger.warn(`[${cli}-yes] auto-retry: giving up after 8h with no recovery`);
+          retryNextAt = null;
+          retryStartedAt = null;
+          retryStreak = 0;
+        } else if (now >= retryNextAt) {
+          const working = conf.working?.some((rx: RegExp) => rx.test(autoRetryScreen)) ?? false;
+          const readyNow = conf.ready?.some((rx: RegExp) => rx.test(autoRetryScreen)) ?? false;
+          if (working || !readyNow) {
+            retryNextAt = now + 500; // busy / not at prompt — re-check shortly
+          } else {
+            retryStreak += 1;
+            logger.warn(`[${cli}-yes] auto-retry: typing 'retry' (attempt ${retryStreak})`);
+            // Write "retry" + Enter atomically (mirrors rs do_send_retry); using
+            // sendMessage would split text/Enter across the fast heartbeat ticks.
+            ctx.messageContext.shell.write("retry\r");
+            ctx.idleWaiter.ping();
+            // Self-schedule the next retry with escalated backoff. (Leaving nextAt
+            // null and re-arming from the stdout pipeline would tight-loop while the
+            // error banner stays on screen.) Reset on recovery cancels this.
+            retryNextAt = now + autoRetryBackoffMs(retryStreak);
+          }
+        }
+      }
 
       // Skip if output hasn't changed since last heartbeat
       if (rendered === lastHeartbeatRendered) return;
@@ -1011,6 +1055,35 @@ export default async function agentYes({
             lastRendered = rendered;
 
             logger.debug(`stdout|${line}`);
+
+            // Auto-retry on recoverable API errors (overload / rate-limit / usage-
+            // limit): arm/reset the backoff on the whole rendered screen (the error
+            // banner and the ready prompt are on different lines, so this can't be a
+            // per-line check). The firing happens on the heartbeat timer, which
+            // reads `autoRetryScreen`. Done here, before the `fatal` check below, so
+            // these recoverable errors retry instead of exiting.
+            if (conf.autoRetry?.length) {
+              autoRetryScreen = rendered;
+              const errVisible = conf.autoRetry.some((rx: RegExp) => rx.test(rendered));
+              const readyVisible = conf.ready?.some((rx: RegExp) => rx.test(rendered)) ?? false;
+              if (errVisible && readyVisible) {
+                if (retryNextAt === null) {
+                  if (retryStartedAt === null) retryStartedAt = Date.now();
+                  const delayMs = autoRetryBackoffMs(retryStreak);
+                  retryNextAt = Date.now() + delayMs;
+                  logger.warn(
+                    `[${cli}-yes] auto-retry armed: recoverable error detected, retrying in ${
+                      delayMs / 1000
+                    }s (attempt ${retryStreak + 1})`,
+                  );
+                }
+              } else if (readyVisible && !errVisible && retryStartedAt !== null) {
+                logger.debug(`[${cli}-yes] auto-retry: recovered, resetting backoff`);
+                retryStreak = 0;
+                retryStartedAt = null;
+                retryNextAt = null;
+              }
+            }
 
             // ready matcher: if matched, mark stdin ready
             if (conf.ready?.some((rx: RegExp) => line.match(rx))) {

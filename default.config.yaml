@@ -32,8 +32,20 @@ clis:
       - pattern: Press Enter to continue
         flags: m
     fatal:
-      - Claude usage limit reached
       - "^error: unknown option"
+    # Recoverable API errors: instead of exiting, agent-yes types "retry" with
+    # exponential backoff (8s, 16, 32 … capped) for up to 8h (claude's usage
+    # limit window is ~5h). Checked before `fatal`, so these never kill the run.
+    autoRetry:
+      - pattern: "API Error.*Overloaded"
+        flags: i
+      - Overloaded
+      - Claude usage limit reached
+      - hit your usage limit
+      - pattern: "rate.?limit"
+        flags: i
+      - pattern: "session limit"
+        flags: i
     restoreArgs:
       - --continue
     restartWithoutContinueArg:

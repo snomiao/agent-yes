@@ -24,6 +24,20 @@ const ENTER_RETRY_1_MS: u64 = 500; // Retry after 500ms if no response
 const ENTER_RETRY_2_MS: u64 = 1500; // Retry after 1500ms if no response
 const IDLE_SCAN_INTERVAL_MS: u64 = 60000; // Re-scan rendered screen every 60s of idle
 
+// Auto-retry on recoverable API errors (overload / rate-limit / usage-limit):
+// type "retry" with exponential backoff instead of giving up.
+const RETRY_BASE_SECS: u64 = 8; // first backoff; doubles each consecutive failure
+const RETRY_MAX_DELAY_SECS: u64 = 256; // cap per-retry backoff: 8,16,32,…,256 then hold
+const RETRY_GIVE_UP_SECS: u64 = 8 * 3600; // stop after 8h (claude's usage window is ~5h)
+
+/// Exponential backoff (seconds) for the Nth consecutive auto-retry, capped.
+fn retry_backoff_secs(streak: u32) -> u64 {
+    let shift = streak.min(20); // guard against shift overflow on pathological streaks
+    RETRY_BASE_SECS
+        .saturating_mul(1u64 << shift)
+        .min(RETRY_MAX_DELAY_SECS)
+}
+
 /// Agent context - centralized session state
 pub struct AgentContext {
     pub cli: String,
@@ -69,6 +83,13 @@ pub struct AgentContext {
     pending_enter_detected_at: Option<Instant>,
     enter_sent_at: Option<Instant>,
     enter_retry_count: u8,
+
+    // Auto-retry on recoverable API errors (overload / rate-limit / usage-limit).
+    // `streak` doubles the backoff on each consecutive failed retry; `started_at`
+    // anchors the 8h give-up window; `next_at` is Some while a retry is scheduled.
+    auto_retry_streak: u32,
+    auto_retry_started_at: Option<Instant>,
+    auto_retry_next_at: Option<Instant>,
 
     // Idle screen scanner - re-checks enter patterns after prolonged idle
     last_idle_scan_at: Option<Instant>,
@@ -126,6 +147,9 @@ impl AgentContext {
             pending_enter_detected_at: None,
             enter_sent_at: None,
             enter_retry_count: 0,
+            auto_retry_streak: 0,
+            auto_retry_started_at: None,
+            auto_retry_next_at: None,
             last_idle_scan_at: None,
             stdout_drop_count: 0,
             log_writer: LogWriter::new(pid, &cwd),
@@ -602,6 +626,46 @@ impl AgentContext {
         // Terminal query responses (DSR, DA) are now handled automatically
         // by VTermProxy in handle_output() via vt100 callbacks.
 
+        // Drive the auto-retry backoff timer. Runs every heartbeat (independent of
+        // screen changes) so the delayed "retry" still fires while the agent sits
+        // idle on an error banner producing no new output. Arming/reset happens in
+        // check_patterns(); here we only fire the scheduled send.
+        if let Some(next_at) = self.auto_retry_next_at {
+            let now = Instant::now();
+            // Give up after the outage window (usage limit resets ~5h; allow 8h).
+            if self
+                .auto_retry_started_at
+                .is_some_and(|s| s.elapsed().as_secs() >= RETRY_GIVE_UP_SECS)
+            {
+                warn!(
+                    "Auto-retry: giving up after {}h with no recovery",
+                    RETRY_GIVE_UP_SECS / 3600
+                );
+                self.auto_retry_next_at = None;
+                self.auto_retry_started_at = None;
+                self.auto_retry_streak = 0;
+            } else if now >= next_at {
+                // Re-render the screen to confirm the agent is idle at a prompt —
+                // never type "retry" while it's busy (e.g. the CLI's own retry).
+                let screen = self.vterm.contents();
+                let working = self.cli_config.working.iter().any(|p| p.is_match(&screen));
+                let ready = self.cli_config.ready.iter().any(|p| p.is_match(&screen));
+                if working || !ready {
+                    self.auto_retry_next_at = Some(now + Duration::from_millis(500));
+                } else {
+                    self.auto_retry_streak = self.auto_retry_streak.saturating_add(1);
+                    warn!("Auto-retry: typing 'retry' (attempt {})", self.auto_retry_streak);
+                    self.do_send_retry(msg_ctx)?;
+                    // Self-schedule the next retry with escalated backoff. Leaving
+                    // this None and re-arming from check_patterns would tight-loop
+                    // while the error banner stays on screen. check_patterns resets
+                    // the streak (cancelling this) once the agent recovers.
+                    let next = retry_backoff_secs(self.auto_retry_streak);
+                    self.auto_retry_next_at = Some(now + Duration::from_secs(next));
+                }
+            }
+        }
+
         // Check patterns on heartbeat (for no-EOL CLIs)
         if self.cli_config.no_eol {
             self.check_patterns(msg_ctx).await?;
@@ -713,6 +777,19 @@ impl AgentContext {
         Ok(())
     }
 
+    /// Type "retry" + Enter — the auto-retry response to a recoverable API error.
+    fn do_send_retry(&self, msg_ctx: &MessageContext) -> Result<()> {
+        let mut writer = msg_ctx
+            .writer
+            .lock()
+            .map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
+        writer.write_all(b"retry")?;
+        writer.write_all(b"\r")?;
+        writer.flush()?;
+        self.idle_waiter.ping();
+        Ok(())
+    }
+
     async fn toggle_auto_yes(&mut self) {
         self.auto_yes_enabled = !self.auto_yes_enabled;
         if self.auto_yes_enabled {
@@ -737,6 +814,43 @@ impl AgentContext {
             return Ok(());
         }
         self.last_checked_screen_hash = Some(buffer_hash);
+
+        // Auto-retry on recoverable API errors (overload / rate-limit / usage-
+        // limit). Evaluated BEFORE fatal so these don't kill the session. We only
+        // arm/reset the backoff state here; the actual (back-off-timed) "retry"
+        // send happens in heartbeat_check() once the agent is idle at its prompt.
+        if !self.cli_config.auto_retry.is_empty() {
+            let err = self
+                .cli_config
+                .auto_retry
+                .iter()
+                .any(|p| p.is_match(&buffer));
+            let ready_now = self.cli_config.ready.iter().any(|p| p.is_match(&buffer));
+            if err && ready_now {
+                // Error banner is up AND the agent is back at its prompt: schedule
+                // the next retry unless one is already counting down.
+                if self.auto_retry_next_at.is_none() {
+                    if self.auto_retry_started_at.is_none() {
+                        self.auto_retry_started_at = Some(Instant::now());
+                    }
+                    let delay = retry_backoff_secs(self.auto_retry_streak);
+                    self.auto_retry_next_at = Some(Instant::now() + Duration::from_secs(delay));
+                    warn!(
+                        "Auto-retry armed: recoverable error detected, retrying in {}s (attempt {})",
+                        delay,
+                        self.auto_retry_streak + 1
+                    );
+                }
+            } else if ready_now && !err && self.auto_retry_started_at.is_some() {
+                // Back at a clean prompt with no error → recovered (whether from our
+                // retry or the CLI's own). Reset the backoff ladder and cancel any
+                // pending retry.
+                debug!("Auto-retry: recovered, resetting backoff ladder");
+                self.auto_retry_streak = 0;
+                self.auto_retry_started_at = None;
+                self.auto_retry_next_at = None;
+            }
+        }
 
         // Check fatal patterns first (only if not already matched)
         if !self.is_fatal {
@@ -854,6 +968,20 @@ fn find_char_boundary(s: &str, at: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_retry_backoff_secs_doubles_then_caps() {
+        // 8, 16, 32, 64, 128, 256 …
+        assert_eq!(retry_backoff_secs(0), 8);
+        assert_eq!(retry_backoff_secs(1), 16);
+        assert_eq!(retry_backoff_secs(2), 32);
+        assert_eq!(retry_backoff_secs(3), 64);
+        assert_eq!(retry_backoff_secs(4), 128);
+        assert_eq!(retry_backoff_secs(5), 256);
+        // capped at RETRY_MAX_DELAY_SECS, and no shift overflow for large streaks
+        assert_eq!(retry_backoff_secs(6), 256);
+        assert_eq!(retry_backoff_secs(50), 256);
+    }
 
     #[test]
     fn test_find_char_boundary_ascii() {
