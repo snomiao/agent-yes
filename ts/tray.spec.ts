@@ -243,9 +243,12 @@ describe("tray", () => {
       const originalPlatform = process.platform;
       Object.defineProperty(process, "platform", { value: "darwin" });
 
-      // Simulate existing tray PID file with a live process (our own PID)
+      // Simulate existing tray PID file with a live process (our own PID):
+      // the exclusive-create claim (writeFile flag "wx") fails, and the live
+      // owner check confirms a tray is already running, so we bail.
       mockFs.existsSync.mockReturnValue(true);
       mockFsPromises.readFile.mockResolvedValue(String(process.pid));
+      mockFsPromises.writeFile.mockRejectedValueOnce(new Error("EEXIST"));
 
       const { startTray } = await import("./tray.ts");
       await startTray();
@@ -295,6 +298,9 @@ describe("tray", () => {
       const originalPlatform = process.platform;
       Object.defineProperty(process, "platform", { value: "darwin" });
       mockFs.existsSync.mockReturnValue(false);
+      // Auto-spawn is opt-in (the systray2 helper busy-loops under Bun).
+      const prevTrayEnv = process.env.AGENT_YES_TRAY;
+      process.env.AGENT_YES_TRAY = "1";
 
       const { ensureTray } = await import("./tray.ts");
       await ensureTray();
@@ -306,6 +312,8 @@ describe("tray", () => {
       );
       expect(mockSpawn.child.unref).toHaveBeenCalled();
 
+      if (prevTrayEnv === undefined) delete process.env.AGENT_YES_TRAY;
+      else process.env.AGENT_YES_TRAY = prevTrayEnv;
       Object.defineProperty(process, "platform", { value: originalPlatform });
     });
 

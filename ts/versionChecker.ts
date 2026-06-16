@@ -237,44 +237,41 @@ export function compareVersions(v1: string, v2: string): number {
 
 /**
  * Detect how agent-yes was installed.
- * Returns a short label: "git", "bun link", "bun", "npm", "npx", or "unknown"
+ * Returns a short label: "git", "bun", "npm", "npx", "source", or "unknown".
+ * A bun-link of a git checkout reports "git" (it runs the working tree).
  */
 export function detectInstallMethod(): string {
   try {
-    // Check if running from a file path outside node_modules (git clone / bun link dev)
-    const scriptDir = path.dirname(new URL(import.meta.url).pathname);
+    // fileURLToPath handles Windows drive letters correctly; new URL().pathname
+    // yields "/C:/…", which breaks existsSync and the substring checks below.
+    const scriptDir = path.dirname(fileURLToPath(import.meta.url));
+    const norm = scriptDir.replace(/\\/g, "/");
+    const hasGit = (dir: string) => existsSync(path.join(dir, ".git"));
 
-    if (!scriptDir.includes("node_modules")) {
-      // Running directly from source — is this a git repo?
-      const repoRoot = path.resolve(scriptDir, "..");
-      if (existsSync(path.join(repoRoot, ".git"))) {
-        return "git";
-      }
-      return "source";
+    if (!norm.includes("node_modules")) {
+      // Running directly from a checkout (git clone, or a resolved bun-link).
+      return hasGit(path.resolve(scriptDir, "..")) ? "git" : "source";
     }
 
-    // Check if the node_modules entry is a symlink (bun link)
-    const nodeModulesEntry = scriptDir.replace(/\/dist$/, "");
+    // Inside node_modules: a bun-link symlink points back at the local repo.
+    const nodeModulesEntry = scriptDir.replace(/[\\/]dist$/, "");
     try {
-      const stat = lstatSync(nodeModulesEntry);
-      if (stat.isSymbolicLink()) {
-        const target = readlinkSync(nodeModulesEntry);
-        // bun link creates a symlink to the local repo
-        const resolvedTarget = path.resolve(path.dirname(nodeModulesEntry), target);
-        if (existsSync(path.join(resolvedTarget, ".git"))) {
-          return "bun link (git)";
-        }
-        return "bun link";
+      if (lstatSync(nodeModulesEntry).isSymbolicLink()) {
+        const resolved = path.resolve(
+          path.dirname(nodeModulesEntry),
+          readlinkSync(nodeModulesEntry),
+        );
+        return hasGit(resolved) ? "git" : "bun";
       }
     } catch {
-      // not a symlink, continue
+      // not a symlink — fall through to package-manager detection
     }
 
-    // Detect package manager from path or env
-    if (scriptDir.includes(".bun/")) return "bun";
-    if (scriptDir.includes(".npm/")) return "npx";
-    if (process.env.npm_execpath?.includes("bun")) return "bun";
+    // A real package install — figure out the manager.
+    if (norm.includes("/.bun/")) return "bun";
+    if (norm.includes("/.npm/")) return "npx";
     if (process.env.npm_config_user_agent?.startsWith("bun")) return "bun";
+    if (process.env.npm_execpath?.includes("bun")) return "bun";
     if (process.env.npm_config_user_agent?.startsWith("npm")) return "npm";
 
     return "npm";

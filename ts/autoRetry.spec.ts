@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { AUTO_RETRY_MAX_DELAY_SECS, autoRetryBackoffMs } from "./autoRetry.ts";
 
 describe("autoRetryBackoffMs", () => {
