@@ -1,13 +1,14 @@
 import { createHash } from "node:crypto";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { resolveSpawnCwd } from "./workspaceConfig.ts";
+import { ensureBootAutostart } from "./oxmgrService.ts";
 
 // `ay schedule` — run an agent on a recurring schedule via oxmgr's cron support.
 // A scheduled job runs once immediately AND on every cron tick (with
 // --restart never so it isn't relaunched merely on exit), and — like the share
 // daemon — survives reboot once oxmgr's system service is installed.
 
-const SCHED_PREFIX = "ay-sched-";
+const SCHED_PREFIX = "agent-yes-cron-";
 
 /** `HH:MM` → a daily cron; otherwise a raw 5-field cron passes through. null if neither. */
 export function toCron(spec: string): string | null {
@@ -70,7 +71,7 @@ export async function cmdSchedule(rest: string[]): Promise<number> {
   }
 
   if (sub === "list" || sub === "ls") {
-    // oxmgr lists everything; scheduled agents are the ay-sched-* rows.
+    // oxmgr lists everything; scheduled agents are the agent-yes-cron-* rows.
     process.stdout.write(`scheduled agents are named '${SCHED_PREFIX}*':\n`);
     return (await run([oxmgrBin, "list"])).code;
   }
@@ -115,9 +116,11 @@ export async function cmdSchedule(rest: string[]): Promise<number> {
   }
 
   const cwd = resolveSpawnCwd(cwdFlag);
-  // Absolute interpreter + bin: oxmgr's daemon PATH may lack ~/.bun/bin.
+  // Absolute interpreter + bin: oxmgr's daemon PATH may lack ~/.bun/bin. Quote
+  // every piece — oxmgr shell-parses the command, so a space in the interpreter
+  // path, the ay path, or the prompt would otherwise split into bogus args.
   const ayBin = Bun.which("ay");
-  const ayInvoke = ayBin ? `${process.execPath} ${ayBin}` : "ay";
+  const ayInvoke = ayBin ? `${shellQuote(process.execPath)} ${shellQuote(ayBin)}` : "ay";
   const agentCmd = `${ayInvoke} ${cli}${prompt ? ` -- ${shellQuote(prompt)}` : ""}`;
   const name = schedName(nameFlag, cli, cron + "\0" + prompt + "\0" + cwd);
 
@@ -138,8 +141,10 @@ export async function cmdSchedule(rest: string[]): Promise<number> {
 
   // Persist across reboots (idempotent; same wrapper the daemon install uses).
   // Best-effort: the schedule is already registered, so don't fail the command if
-  // boot registration can't be done here — just report it honestly.
-  const onBoot = (await run([oxmgrBin, "service", "install"], true)).code === 0;
+  // boot registration can't be done here — just report it honestly. This SKIPS
+  // the install when the service is already registered, so it won't bounce the
+  // oxmgr daemon (and every process it manages) on a routine `ay schedule`.
+  const onBoot = await ensureBootAutostart(oxmgrBin);
 
   process.stdout.write(
     `\nscheduled '${name}'\n` +

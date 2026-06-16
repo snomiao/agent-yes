@@ -17,6 +17,7 @@ import {
 } from "./subcommands.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
+import { ensureBootAutostart } from "./oxmgrService.ts";
 
 const DEFAULT_PORT = 7432;
 
@@ -97,25 +98,6 @@ function freshAgentEnv(): Record<string, string> {
 // ---------------------------------------------------------------------------
 
 const DAEMON_NAME = "agent-yes";
-
-// Register the oxmgr daemon with the platform init system (launchd on macOS,
-// systemd on Linux, Task Scheduler on Windows) so managed processes — including
-// the agent-yes daemon — come back after a *reboot*, not just a crash. Idempotent:
-// a no-op if the service is already installed. Best-effort: returns false on any
-// failure (e.g. a system-level systemd unit that needs sudo) without aborting the
-// install — the process is still managed, just not boot-persistent.
-async function ensureBootAutostart(oxmgrBin: string): Promise<boolean> {
-  try {
-    // --system defaults to "auto" (launchd/systemd/Task Scheduler by platform);
-    // it's a `service`-level flag, so passing it after `install` is rejected.
-    const svc = Bun.spawn([oxmgrBin, "service", "install"], {
-      stdio: ["ignore", "ignore", "ignore"],
-    });
-    return (await svc.exited) === 0;
-  } catch {
-    return false;
-  }
-}
 
 async function spawnExit(cmd: string[]): Promise<number> {
   try {
