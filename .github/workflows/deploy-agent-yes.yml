@@ -1,0 +1,33 @@
+name: Deploy agent-yes.com
+
+# agent-yes.com + s.agent-yes.com run on the `agent-yes-signal` Cloudflare Worker
+# (SNOLAB account). Deploying from CI keeps the live console in lockstep with
+# lab/ui/* — wrangler's build step (lab/ui/cf/wrangler.jsonc) re-syncs the UI into
+# ./public on every deploy, so the deployed assets can't drift like they did when
+# deploys were manual (the console went ~1400 lines stale that way).
+#
+# Requires repo secret CLOUDFLARE_API_TOKEN — a token with Workers Scripts:Edit
+# (+ Workers Routes:Edit for the custom domains) on the SNOLAB account.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "lab/ui/**"
+      - ".github/workflows/deploy-agent-yes.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-agent-yes
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Deploy worker + synced UI to Cloudflare
+        working-directory: lab/ui/cf
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: npx --yes wrangler@4 deploy

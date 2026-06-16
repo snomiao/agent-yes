@@ -6,6 +6,13 @@
   "account_id": "0beef4cd2d2da6befa47d8d149d6e157",
   "main": "worker.ts",
   "compatibility_date": "2025-05-01",
+  // Sync the canonical UI (lab/ui/*) into ./public before EVERY deploy/dev, so
+  // the deployed assets can never drift from source again (the old manual-copy
+  // workflow is how agent-yes.com ended up serving a stale console). public/ is
+  // a generated copy and is gitignored. Runs from this config's directory.
+  "build": {
+    "command": "mkdir -p ./public && cp ../index.html ../room-client.js ../console-logic.js ./public/",
+  },
   // Static console UI (served for every non-WebSocket request).
   "assets": { "directory": "./public", "binding": "ASSETS" },
   "durable_objects": {
