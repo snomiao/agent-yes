@@ -936,31 +936,38 @@
             ws.onmessage = async (ev) => {
               const m = JSON.parse(ev.data);
               if (m.type === "welcome") {
-                pc = new RTCPeerConnection({
-                  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-                });
-                this.pc = pc;
-                pc.onicecandidate = (e) => {
-                  if (e.candidate)
-                    ws.send(JSON.stringify({ type: "candidate", candidate: e.candidate }));
-                };
-                pc.onconnectionstatechange = () => this.onstate(pc.connectionState);
-                pc.ondatachannel = (e) => {
-                  this.dc = e.channel;
-                  this.dc.onopen = () => {
-                    settled = true;
-                    this.onstate("open");
-                    resolve();
-                  };
-                  this.dc.onmessage = (ev2) => this._recv(JSON.parse(ev2.data));
-                  this.dc.onclose = () => this.onstate("closed");
-                };
+                // Wait for the host's offer, which carries the ICE servers (incl.
+                // short-lived TURN creds when the host has TURN configured).
               } else if (m.type === "offer") {
+                if (!pc) {
+                  pc = new RTCPeerConnection({
+                    iceServers:
+                      m.iceServers && m.iceServers.length
+                        ? m.iceServers
+                        : [{ urls: "stun:stun.l.google.com:19302" }],
+                  });
+                  this.pc = pc;
+                  pc.onicecandidate = (e) => {
+                    if (e.candidate)
+                      ws.send(JSON.stringify({ type: "candidate", candidate: e.candidate }));
+                  };
+                  pc.onconnectionstatechange = () => this.onstate(pc.connectionState);
+                  pc.ondatachannel = (e) => {
+                    this.dc = e.channel;
+                    this.dc.onopen = () => {
+                      settled = true;
+                      this.onstate("open");
+                      resolve();
+                    };
+                    this.dc.onmessage = (ev2) => this._recv(JSON.parse(ev2.data));
+                    this.dc.onclose = () => this.onstate("closed");
+                  };
+                }
                 await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
                 await pc.setLocalDescription(await pc.createAnswer());
                 ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription.sdp }));
               } else if (m.type === "candidate") {
-                await pc.addIceCandidate(m.candidate).catch(() => {});
+                if (pc) await pc.addIceCandidate(m.candidate).catch(() => {});
               }
             };
             ws.onerror = () => fail(new Error("signaling error"));

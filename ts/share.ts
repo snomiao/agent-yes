@@ -10,10 +10,47 @@ import { homedir } from "os";
 import path from "path";
 
 const SUB = "ay-signal-1";
-const ICE = [{ urls: "stun:stun.l.google.com:19302" }];
 const MAX_CHUNK = 15_000; // keep DataChannel messages under the SCTP limit
 const DEFAULT_SIGHOST = "s.agent-yes.com";
 const HOST_HEARTBEAT_MS = 20000; // keepalive ping to the rendezvous + silent-drop detection
+
+type IceServer = { urls: string | string[]; username?: string; credential?: string };
+const STUN: IceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+
+// Short-lived Cloudflare TURN credentials, minted from a long-term TURN key, so
+// browsers can RELAY when a direct P2P path is impossible (symmetric NAT /
+// CGNAT — the main cause of "rooms offline"). Set CF_TURN_KEY_ID +
+// CF_TURN_API_TOKEN (create a TURN key in the Cloudflare dashboard: Realtime →
+// TURN) to enable; without them we use STUN only, exactly as before. Cached
+// until just before expiry; STUN-only fallback on any error so sharing never
+// breaks because TURN is misconfigured or unreachable.
+let iceCache: { servers: IceServer[]; exp: number } | null = null;
+async function getIceServers(): Promise<IceServer[]> {
+  const keyId = process.env.CF_TURN_KEY_ID;
+  const apiToken = process.env.CF_TURN_API_TOKEN;
+  if (!keyId || !apiToken) return STUN;
+  if (iceCache && iceCache.exp > Date.now()) return iceCache.servers;
+  const ttl = 3600; // credential lifetime, seconds
+  try {
+    const r = await fetch(
+      `https://rtc.live.cloudflare.com/v1/turn/keys/${keyId}/credentials/generate-ice-servers`,
+      {
+        method: "POST",
+        headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ ttl }),
+        signal: AbortSignal.timeout(5000),
+      },
+    );
+    if (!r.ok) throw new Error(`Cloudflare TURN ${r.status}`);
+    const j = (await r.json()) as { iceServers?: IceServer[] };
+    const servers = j.iceServers?.length ? j.iceServers : STUN;
+    iceCache = { servers, exp: Date.now() + (ttl - 300) * 1000 }; // refresh ~5min early
+    return servers;
+  } catch (e) {
+    console.error(`[share] Cloudflare TURN credential fetch failed; using STUN only: ${e}`);
+    return STUN;
+  }
+}
 
 export interface ShareOpts {
   /** webrtc://room:token@host, or undefined to mint a fresh (unpersisted)
@@ -156,7 +193,7 @@ export async function startShare(
       lastRecv = Date.now();
       const m = JSON.parse(ev.data as string);
       if (m.type === "pong") return; // heartbeat ack — liveness already recorded
-      if (m.type === "peer-join") startPeer(ws, m.peer);
+      if (m.type === "peer-join") startPeer(ws, m.peer).catch(() => {});
       else if (m.type === "answer")
         await peers.get(m.from)?.pc.setRemoteDescription({ type: "answer", sdp: m.sdp });
       else if (m.type === "candidate")
@@ -177,8 +214,9 @@ export async function startShare(
     return ws;
   };
 
-  function startPeer(ws: WebSocket, peerId: string) {
-    const pc = new RTCPeerConnection({ iceServers: ICE });
+  async function startPeer(ws: WebSocket, peerId: string) {
+    const iceServers = await getIceServers();
+    const pc = new RTCPeerConnection({ iceServers });
     const aborts = new Map<number, AbortController>();
     peers.set(peerId, { pc, aborts });
     pc.onicecandidate = (e: any) => {
@@ -190,11 +228,13 @@ export async function startShare(
     };
     const dc = pc.createDataChannel("api");
     dc.onmessage = (e: any) => onReq(dc, aborts, JSON.parse(e.data));
-    pc.createOffer()
-      .then((o: any) => pc.setLocalDescription(o))
-      .then(() =>
-        ws.send(JSON.stringify({ type: "offer", to: peerId, sdp: pc.localDescription.sdp })),
-      );
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    // Hand the browser the same ICE servers (incl. the short-lived TURN creds)
+    // so it can relay too when there's no direct path.
+    ws.send(
+      JSON.stringify({ type: "offer", to: peerId, sdp: pc.localDescription.sdp, iceServers }),
+    );
   }
 
   function closePeer(peerId: string) {
