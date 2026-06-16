@@ -23,9 +23,13 @@ clis:
         flags: m
       - pattern: '❯ ?1\. ?Dark mode ?✔'
         flags: m
+      - pattern: '❯ ?1\. ?Auto \(match terminal\)'
+        flags: m
       - pattern: '❯ ?1\. ?Yes'
         flags: m
       - pattern: '^.{0,4} ?1\. ?Dark mode ?✔'
+        flags: m
+      - pattern: '^.{0,4} ?1\. ?Auto \(match terminal\)'
         flags: m
       - pattern: '^.{0,4} ?1\. ?Yes'
         flags: m

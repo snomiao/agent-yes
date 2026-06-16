@@ -843,6 +843,21 @@
         hasIdent,
         deviceCount,
       } from "./console-logic.js";
+      import {
+        MARKER as E2E_MARKER,
+        ALLOW_LEGACY_PLAINTEXT,
+        FLAG_CONFIRM,
+        CONFIRM_TIMEOUT_MS,
+        deriveAuthToken,
+        deriveDirKeys,
+        computeTranscriptHash,
+        seal as e2eSeal,
+        open as e2eOpen,
+        packEnvelope,
+        unpackEnvelope,
+        parseSecret,
+        randomHex,
+      } from "./e2e.js";
 
       let entries = [];
       let sel = null; // selected agent's composite key (room#pid)
@@ -908,18 +923,46 @@
       // envelope in lab/ui/share-host.ts: {t:"req"|"abort"} out, {t:"res"|"data"|"end"} in.
       class RTCClient {
         constructor(host, room, token) {
+          let resolveKeys;
+          const keysReady = new Promise((r) => (resolveKeys = r));
           Object.assign(this, {
             host,
             room,
             token,
             dc: null,
-            nextId: 1,
             calls: new Map(),
             streams: new Map(),
             onstate: () => {},
+            // e2e (v2) per-connection state
+            _s: null,
+            _v2: false,
+            _send: { sendCtr: 0n },
+            _recvState: { lastSeen: -1n },
+            _tHash: null,
+            _keyH2C: null, // host->client: client decrypts with this
+            _keyC2H: null, // client->host: client encrypts with this
+            _keysReady: keysReady,
+            _resolveKeys: resolveKeys,
+            _myNonce: randomHex(16),
+            _confirmedIn: false,
+            _confirmedOut: false,
+            _confirmed: false,
+            _confirmTimer: null,
+            _recvChain: Promise.resolve(), // serialize decrypts (ordered replay check)
+            _sendChain: Promise.resolve(), // serialize seals (wire order == counter order)
           });
         }
-        connect() {
+        async connect() {
+          // Parse the secret marker (fail-closed on malformed) and split into the
+          // server-visible authToken vs the end-to-end keys the server never sees.
+          const { s, v2 } = parseSecret(this.token);
+          this._s = s;
+          this._v2 = v2;
+          if (!v2 && !ALLOW_LEGACY_PLAINTEXT)
+            throw new Error(
+              "this link uses the old unencrypted protocol — ask the host to upgrade",
+            );
+          const authToken = v2 ? await deriveAuthToken(s, this.room, this.host) : this.token;
           return new Promise((resolve, reject) => {
             const ws = new WebSocket(`wss://${this.host}/${this.room}`, [SUB]);
             this.ws = ws; // kept so close() can drop the signaling registration too
@@ -931,13 +974,24 @@
                 reject(e);
               }
             };
+            // Resolve ONLY after the mutual key-confirmation completes (see _dcRecv),
+            // never on bare dc.onopen — there must be no "connected but unverified" window.
+            const done = () => {
+              if (!settled) {
+                settled = true;
+                this.onstate("open");
+                resolve();
+              }
+            };
             ws.onopen = () =>
-              ws.send(JSON.stringify({ type: "hello", role: "client", token: this.token }));
+              ws.send(JSON.stringify({ type: "hello", role: "client", v: 2, token: authToken }));
             ws.onmessage = async (ev) => {
               const m = JSON.parse(ev.data);
               if (m.type === "welcome") {
-                // Wait for the host's offer, which carries the ICE servers (incl.
-                // short-lived TURN creds when the host has TURN configured).
+                if (this._v2 && m.v !== 2)
+                  return fail(new Error("host is running an old agent-yes — ask it to upgrade"));
+                // pc is created on the offer below so it can use the host-supplied
+                // iceServers (incl. short-lived TURN creds for relaying behind NAT).
               } else if (m.type === "offer") {
                 if (!pc) {
                   pc = new RTCPeerConnection({
@@ -954,18 +1008,44 @@
                   pc.onconnectionstatechange = () => this.onstate(pc.connectionState);
                   pc.ondatachannel = (e) => {
                     this.dc = e.channel;
-                    this.dc.onopen = () => {
-                      settled = true;
-                      this.onstate("open");
-                      resolve();
+                    this.dc.binaryType = "arraybuffer";
+                    this.dc.onopen = async () => {
+                      try {
+                        await this._keysReady;
+                        // Open the bidirectional confirmation handshake.
+                        this._dcSend(FLAG_CONFIRM, { t: "confirm", nonce: this._myNonce });
+                        this._confirmTimer = setTimeout(() => {
+                          if (!this._confirmed) fail(new Error("key confirmation timed out"));
+                        }, CONFIRM_TIMEOUT_MS);
+                      } catch (err) {
+                        fail(err);
+                      }
                     };
-                    this.dc.onmessage = (ev2) => this._recv(JSON.parse(ev2.data));
+                    this.dc.onmessage = (ev2) => {
+                      this._recvChain = this._recvChain
+                        .then(() => this._dcRecv(ev2.data, done))
+                        .catch(() => {});
+                    };
                     this.dc.onclose = () => this.onstate("closed");
                   };
                 }
                 await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
                 await pc.setLocalDescription(await pc.createAnswer());
                 ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription.sdp }));
+                // Derive per-connection keys now both descriptions are stable, before
+                // the DataChannel opens. Client: remote=host offer, local=our answer.
+                try {
+                  this._tHash = await computeTranscriptHash(
+                    pc.remoteDescription.sdp,
+                    pc.localDescription.sdp,
+                  );
+                  const { keyH2C, keyC2H } = await deriveDirKeys(this._s, this._tHash);
+                  this._keyH2C = keyH2C;
+                  this._keyC2H = keyC2H;
+                  this._resolveKeys();
+                } catch (err) {
+                  fail(err);
+                }
               } else if (m.type === "candidate") {
                 if (pc) await pc.addIceCandidate(m.candidate).catch(() => {});
               }
@@ -975,28 +1055,93 @@
             setTimeout(() => fail(new Error("connect timeout")), 8000);
           });
         }
+        // Seal an envelope and send it, serialized so wire order == counter order.
+        _dcSend(flags, obj) {
+          this._sendChain = this._sendChain.then(async () => {
+            if (!this.dc || this.dc.readyState !== "open" || !this._keyC2H || !this._tHash) return;
+            let frame;
+            try {
+              frame = await e2eSeal(
+                this._keyC2H,
+                this._send,
+                flags,
+                this._tHash,
+                packEnvelope(obj),
+              );
+            } catch {
+              this.close();
+              return;
+            }
+            try {
+              this.dc.send(frame);
+            } catch {}
+          });
+          return this._sendChain;
+        }
+        // Decrypt + route one frame. Fail-closed: any failure, replay, string
+        // frame, or pre-confirmation app frame closes the connection.
+        async _dcRecv(data, done) {
+          if (!this.dc) return;
+          if (typeof data === "string" || !this._keyH2C || !this._tHash) return this.close();
+          let env;
+          try {
+            const { plaintext } = await e2eOpen(this._keyH2C, data, this._tHash, this._recvState);
+            env = unpackEnvelope(plaintext);
+          } catch {
+            return this.close();
+          }
+          if (!this._confirmed) {
+            if (!env || env.t !== "confirm") return this.close();
+            if (typeof env.nonce === "string" && !this._confirmedOut) {
+              // Send (and flush) our echo BEFORE marking confirmed-out, so connect()
+              // can't resolve and let a req() race ahead of the echo on the wire.
+              await this._dcSend(FLAG_CONFIRM, {
+                t: "confirm",
+                nonce: this._myNonce,
+                echo: env.nonce,
+              });
+              this._confirmedOut = true;
+            }
+            if (env.echo && env.echo === this._myNonce) this._confirmedIn = true;
+            if (this._confirmedIn && this._confirmedOut) {
+              this._confirmed = true;
+              if (this._confirmTimer) clearTimeout(this._confirmTimer);
+              done(); // connect() resolves only now — the channel is mutually verified
+            }
+            return;
+          }
+          if (!env || env.t === "confirm") return; // stray confirm after handshake
+          this._recv(env);
+        }
         _recv(r) {
+          // Frames are authenticated + replay-checked before they reach here, so an
+          // id we don't know is a late/cancelled response from the legitimate host,
+          // not an attack — drop it rather than tear down the channel.
           const call = this.calls.get(r.id),
             stream = this.streams.get(r.id);
           if (r.t === "res") {
-            if (call) {
-              call.status = r.status;
-            }
+            if (call) call.status = r.status;
           } else if (r.t === "data") {
-            if (call) call.body += r.chunk;
+            if (call) {
+              call.body += r.chunk;
+              call.dataCount = (call.dataCount || 0) + 1;
+            }
             if (stream) stream(r.chunk);
           } else if (r.t === "end") {
             if (call) {
               clearTimeout(call.timer);
               this.calls.delete(r.id);
-              r.error
-                ? call.reject(new Error(r.error))
-                : call.resolve({ status: call.status, text: call.body });
+              // end.seq is the count of data frames the host sent; a mismatch means
+              // the stream was truncated, so don't resolve it as complete.
+              if (typeof r.seq === "number" && r.seq !== (call.dataCount || 0))
+                call.reject(new Error("truncated response"));
+              else if (r.error) call.reject(new Error(r.error));
+              else call.resolve({ status: call.status, text: call.body });
             }
           }
         }
         req(method, path, body) {
-          const id = this.nextId++;
+          const id = randomHex(16);
           return new Promise((resolve, reject) => {
             // Without a deadline a request over a silently-dead DataChannel (host
             // gone, ICE not yet timed out) never settles, so the caller — and the
@@ -1005,31 +1150,28 @@
             const timer = setTimeout(() => {
               if (this.calls.delete(id)) reject(new Error("request timed out"));
             }, 12000);
-            this.calls.set(id, { status: 0, body: "", resolve, reject, timer });
-            try {
-              this.dc.send(JSON.stringify({ t: "req", id, method, path, body }));
-            } catch (e) {
+            this.calls.set(id, { status: 0, body: "", dataCount: 0, resolve, reject, timer });
+            this._dcSend(0, { t: "req", id, method, path, body }).catch((e) => {
               clearTimeout(timer);
               this.calls.delete(id);
               reject(e); // channel already torn down
-            }
+            });
           });
         }
         subscribe(path, onRaw) {
-          const id = this.nextId++;
+          const id = randomHex(16);
           this.streams.set(id, onRaw);
-          this.dc.send(JSON.stringify({ t: "req", id, method: "GET", path }));
+          this._dcSend(0, { t: "req", id, method: "GET", path });
           return () => {
             this.streams.delete(id);
-            try {
-              this.dc.send(JSON.stringify({ t: "abort", id }));
-            } catch {}
+            this._dcSend(0, { t: "abort", id });
           };
         }
         // Tear down BOTH wires. Closing only the pc leaves the signaling socket
         // open and this client registered in the room, so each reconnect would
         // leak another peer on the host. onstate is detached by the caller first.
         close() {
+          if (this._confirmTimer) clearTimeout(this._confirmTimer);
           try {
             this.ws?.close();
           } catch {}
@@ -1770,9 +1912,20 @@
 
       // ---- rooms: localStorage cache + a manager you open by clicking the badge ----
       const ROOMS_KEY = "ay.rooms";
+      const ROOM_TTL_MS = 90 * 24 * 60 * 60 * 1000; // evict stale rooms to bound how long a secret lingers in localStorage
       const loadRooms = () => {
         try {
-          return JSON.parse(localStorage.getItem(ROOMS_KEY) || "{}");
+          const r = JSON.parse(localStorage.getItem(ROOMS_KEY) || "{}");
+          const now = Date.now();
+          let changed = false;
+          for (const k of Object.keys(r)) {
+            if (r[k]?.ts && now - r[k].ts > ROOM_TTL_MS) {
+              delete r[k];
+              changed = true;
+            }
+          }
+          if (changed) localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
+          return r;
         } catch {
           return {};
         }
@@ -2308,6 +2461,7 @@
         const aidLike =
           full &&
           !full[3] &&
+          !/^e\d/i.test(full[2]) && // an e<N>. version marker is always a secret, never an agent id
           /^\d{1,7}$/.test(full[2]) &&
           (full[1] === LOCAL || !!loadRooms()[full[1]]);
         if (full && !aidLike) {

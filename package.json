@@ -1,6 +1,6 @@
 {
   "name": "agent-yes",
-  "version": "1.118.0",
+  "version": "1.121.0",
   "description": "A wrapper tool that automates interactions with various AI CLI tools by automatically handling common prompts and responses.",
   "keywords": [
     "ai",
@@ -56,8 +56,11 @@
     "!dist/**/*.map",
     "dist/**/*.js",
     "lab/ui/console-logic.js",
+    "lab/ui/e2e.d.ts",
+    "lab/ui/e2e.js",
     "lab/ui/index.html",
-    "lab/ui/room-client.js"
+    "lab/ui/room-client.js",
+    "lab/ui/blog/**"
   ],
   "type": "module",
   "module": "ts/index.ts",
@@ -72,6 +75,7 @@
   },
   "scripts": {
     "build": "tsdown",
+    "check:e2e": "bun scripts/check-e2e.ts",
     "cf": "bun scripts/cf.ts",
     "build:rs": "cargo install --path rs --features swarm",
     "postbuild": "bun ./ts/postbuild.ts",

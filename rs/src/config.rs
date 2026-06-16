@@ -257,7 +257,8 @@ mod tests {
     fn test_claude_patterns() {
         let config = get_cli_config("claude").unwrap();
         assert!(config.ready[0].is_match("? for shortcuts"));
-        assert!(config.enter[2].is_match("❯ 1. Yes"));
+        // Index-agnostic: the `enter` list grows as new prompts are added.
+        assert!(config.enter.iter().any(|rx| rx.is_match("❯ 1. Yes")));
         assert!(config
             .enter
             .iter()
