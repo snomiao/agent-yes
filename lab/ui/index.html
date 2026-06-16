@@ -2193,9 +2193,33 @@
           cwd: $("nf-cwd").value.trim(),
           prompt: $("nf-prompt").value,
         };
+        const room = $("newform").dataset.room || undefined;
+        // Warn (but allow) when an agent is already running in this cwd on the
+        // target fleet. A 2nd `claude -c` in the same repo fights over the same
+        // session/files and usually exits on startup — which looks like "the new
+        // agent never appears". Let the user pick a different dir or proceed.
+        if (spec.cwd) {
+          await loadList();
+          const norm = (p) => (p || "").replace(/\/+$/, "");
+          const busy = entries.some(
+            (e) =>
+              (room ? e._room === room : true) &&
+              e.exit_code == null &&
+              norm(e.cwd) === norm(spec.cwd),
+          );
+          if (
+            busy &&
+            !confirm(
+              `An agent is already running in:\n${spec.cwd}\n\n` +
+                `Launching another in the same repo can collide (shared session/files) ` +
+                `and the new one may exit immediately. Launch anyway?`,
+            )
+          )
+            return;
+        }
         go.disabled = true;
         go.textContent = "launching…";
-        const ok = await spawnAndSelect(spec, $("newform").dataset.room || undefined);
+        const ok = await spawnAndSelect(spec, room);
         if (ok) {
           $("newform").style.display = "none";
         } else {
