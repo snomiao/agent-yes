@@ -24,6 +24,12 @@ export interface Env {
 
 const SUBPROTO = "ay-signal-1";
 
+// Heartbeat frames (host pings, server pongs). Defined once so the hibernation
+// auto-response pair below matches the host's wire bytes EXACTLY — the runtime
+// only auto-answers an incoming message that is byte-identical to PING.
+const PING = JSON.stringify({ type: "ping" });
+const PONG = JSON.stringify({ type: "pong" });
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
@@ -55,7 +61,16 @@ export default {
 type Attach = { authed: boolean; role?: "host" | "client"; peer?: string };
 
 export class Room {
-  constructor(private state: DurableObjectState) {}
+  constructor(private state: DurableObjectState) {
+    // Answer the host's 20s keepalive ping from the runtime itself, so a ping on
+    // a hibernated socket is pong'd WITHOUT waking the DO. Waking on every ping
+    // would keep the DO out of hibernation and accrue billable duration — the
+    // exact failure mode that drove ~99.9% of the account's DO time on the
+    // codehost wire. setWebSocketAutoResponse persists across hibernation and
+    // applies to all (current + future) accepted sockets. The inline ping
+    // handler in webSocketMessage stays only as a fallback for a non-exact ping.
+    this.state.setWebSocketAutoResponse(new WebSocketRequestResponsePair(PING, PONG));
+  }
 
   async fetch(req: Request): Promise<Response> {
     if (req.headers.get("Upgrade") !== "websocket") {
@@ -115,10 +130,11 @@ export class Room {
       return;
     }
 
-    // Heartbeat: answer pings directly (both roles) so each side can detect a
-    // dead link — a silent half-open TCP drop never fires onclose, so without a
-    // pong the peer would sit "connected" forever. Don't relay pings onward.
-    if (msg.type === "ping") return void ws.send(JSON.stringify({ type: "pong" }));
+    // Heartbeat fallback: exact "{"type":"ping"}" frames are normally answered
+    // by setWebSocketAutoResponse (see constructor) and never reach here, so the
+    // DO stays hibernated. This only runs for a ping that didn't match the pair
+    // byte-for-byte; answer it directly rather than relay it onward.
+    if (msg.type === "ping") return void ws.send(PONG);
 
     if (self.role === "client") {
       msg.from = self.peer; // tag so the host can route the reply back
