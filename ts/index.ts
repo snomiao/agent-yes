@@ -451,6 +451,19 @@ export default async function agentYes({
 
   shell.onExit(async function onExit({ exitCode }) {
     const exitedPid = shell.pid; // Capture PID immediately before any shell reassignment
+    // Reap the exited agent's process group. The PTY child is a session/group
+    // leader, so a `yes | cmd` (or any descendant) it leaked shares its pgid even
+    // after it reparents to PID 1 — kill the group so orphans don't spin at ~100%
+    // CPU forever. Targeting the pgid (not ppid==1) is container-safe and never
+    // touches processes outside this agent's session. Runs on the final exit AND
+    // before each robust restart below.
+    if (process.platform !== "win32") {
+      try {
+        process.kill(-exitedPid, "SIGKILL");
+      } catch {
+        // ESRCH = no surviving group members left to reap; nothing to do.
+      }
+    }
     // Unregister from agent registry
     globalAgentRegistry.unregister(exitedPid);
     ctx.stdinReady.unready(); // start buffer stdin

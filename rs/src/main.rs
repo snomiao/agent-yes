@@ -261,6 +261,13 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             )
             .await?;
 
+        // Reap the agent's process group. claude has exited (or is exiting), but
+        // any descendant it leaked — a `yes | cmd`, a background build, etc. —
+        // would otherwise keep running, orphaned to PID 1 and often pinning a
+        // core. The child's pgid survives that reparenting, so this catches them.
+        // Runs on every loop exit (crash, fatal, normal, restart).
+        ctx.reap_group();
+
         // FIFO cleanup — happens for every loop exit (crash, fatal, normal).
         if let Some(ref p) = fifo_path {
             fifo::cleanup_fifo(p);
