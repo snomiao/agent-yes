@@ -1219,39 +1219,47 @@ export async function cmdServe(rest: string[]): Promise<number> {
       typeof webrtcVal === "string" && webrtcVal.startsWith("webrtc://") ? webrtcVal : undefined;
     try {
       const { startShare, loadOrCreateShareRoom } = await import("./share.ts");
+      const linkFile = path.join(
+        process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes"),
+        ".share-link",
+      );
+      // Announce the link — reused for the initial share and for any auto-rotation
+      // (when the signaling server rejects a stale persisted room).
+      const announce = async (room: string, link: string, rotated: boolean) => {
+        const lead = rotated
+          ? "the room was rejected by signaling (stale generation) — rotated to a fresh link"
+          : "shared over WebRTC — open this link (the token is eaten from the URL on open)";
+        if (process.stdout.isTTY) {
+          const persistNote = explicitUrl
+            ? "\n"
+            : `  (persistent room — same link across restarts; delete ~/.agent-yes/.share-room to rotate)\n\n`;
+          process.stdout.write(`${wantHttp ? "\n" : ""}${lead}:\n  ${link}\n` + persistNote);
+        } else {
+          // Non-TTY (daemon/journal/CI): the link embeds the room secret S, so never
+          // write it to a log stream. Stash it in a 0600 file and point there instead.
+          try {
+            await writeFile(linkFile, link + "\n", { mode: 0o600 });
+          } catch {
+            /* best effort */
+          }
+          process.stdout.write(
+            `${wantHttp ? "\n" : ""}${rotated ? "rotated WebRTC room" : "shared over WebRTC"} · room ${room} — the link carries a secret, so it is NOT logged.\n` +
+              `  read it from ${linkFile} (mode 0600); delete ~/.agent-yes/.share-room to rotate\n\n`,
+          );
+        }
+      };
       // No explicit webrtc:// URL → reuse the persisted room (minted once and
       // saved like the serve token), so the link is stable across restarts.
+      // Only the persisted path may auto-rotate (onRotate set); an explicit URL
+      // is the operator's choice and must not be silently changed.
       const { room, link, close } = await startShare({
         url: explicitUrl ?? (await loadOrCreateShareRoom()),
         localFetch: apiFetch,
         apiToken: token,
+        onRotate: explicitUrl ? undefined : (info) => announce(info.room, info.link, true),
       });
       closeShare = close;
-      const persistNote = explicitUrl
-        ? "\n"
-        : `  (persistent room — same link across restarts; delete ~/.agent-yes/.share-room to rotate)\n\n`;
-      if (process.stdout.isTTY) {
-        process.stdout.write(
-          `${wantHttp ? "\n" : ""}shared over WebRTC — open this link (the token is eaten from the URL on open):\n  ${link}\n` +
-            persistNote,
-        );
-      } else {
-        // Non-TTY (daemon/journal/CI): the link embeds the room secret S, so never
-        // write it to a log stream. Stash it in a 0600 file and point there instead.
-        const linkFile = path.join(
-          process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes"),
-          ".share-link",
-        );
-        try {
-          await writeFile(linkFile, link + "\n", { mode: 0o600 });
-        } catch {
-          /* best effort */
-        }
-        process.stdout.write(
-          `${wantHttp ? "\n" : ""}shared over WebRTC · room ${room} — the link carries a secret, so it is NOT logged.\n` +
-            `  read it from ${linkFile} (mode 0600); delete ~/.agent-yes/.share-room to rotate\n\n`,
-        );
-      }
+      await announce(room, link, false);
     } catch (e) {
       process.stderr.write(`ay serve --webrtc failed: ${(e as Error).message}\n`);
       if (!wantHttp) return 1; // nothing else is running

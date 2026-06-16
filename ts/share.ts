@@ -28,6 +28,15 @@ const SUB = "ay-signal-1";
 // MAX_CHUNK is imported from e2e.js; ICE is replaced by STUN + getIceServers (TURN) below.
 const DEFAULT_SIGHOST = "s.agent-yes.com";
 const HOST_HEARTBEAT_MS = 20000; // keepalive ping to the rendezvous + silent-drop detection
+// Proactively recycle the signaling connection on this interval. The 20s ping is
+// answered at the Cloudflare edge (setWebSocketAutoResponse, see cf/worker.ts) so
+// it can't wake a hibernated DO — but that also means an auto-answered ping only
+// proves the *edge socket* is alive, NOT that the DO still routes peer-joins to
+// us. A DO that hibernated/evicted can leave us a "zombie" host: socket
+// ESTABLISHED, pings auto-ponged, yet new browsers can't reach us and the
+// heartbeat never trips. Re-running the hello on a timer forces the DO to
+// re-register us, self-healing that state. Cheap: one reconnect per few minutes.
+const SIG_REFRESH_MS = 4 * 60_000;
 
 type IceServer = { urls: string | string[]; username?: string; credential?: string };
 const STUN: IceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
@@ -77,6 +86,12 @@ export interface ShareOpts {
   localFetch: (req: Request) => Promise<Response>;
   /** bearer token for the local ay-serve API */
   apiToken: string;
+  /** When set, a persisted/auto-minted room may auto-rotate: if the signaling
+   *  server rejects the room (close 1008 — pinned to a different protocol
+   *  generation/token), startShare mints a fresh room, persists it, and calls
+   *  this so the caller can refresh its stored link. Leave unset for explicit
+   *  webrtc:// URLs, which must NOT be silently rotated. */
+  onRotate?: (info: { room: string; link: string }) => void | Promise<void>;
 }
 
 // The room+token persist like the serve token, so the share link (and any
@@ -202,31 +217,66 @@ export async function startShare(
 ): Promise<{ room: string; link: string; close: () => void }> {
   const minted = !opts.url;
   const sighost = opts.sighost ?? DEFAULT_SIGHOST;
-  const { room, token, host } = opts.url
+  const initial = opts.url
     ? parseShareUrl(opts.url)
     : {
         room: "r" + randomBytes(3).toString("hex"),
         token: `${MARKER}${randomBytes(32).toString("hex")}`,
         host: sighost,
       };
+  const host = initial.host;
+  // Mutable: auto-rotation (below) re-mints room/token/S/authToken/link in place
+  // when the signaling server rejects the room as pinned to another generation.
+  let room = initial.room;
+  let token = initial.token;
 
   // E2E: the URL secret S splits into authToken (the only value the server sees,
   // for room matching) and per-connection AES keys the server never sees. We
   // refuse to host a legacy plaintext room — old rooms are auto-rotated to v2 by
   // loadOrCreateShareRoom (delete ~/.agent-yes/.share-room to force a rotation).
-  const { s: S, v2 } = parseSecret(token);
+  const { s: firstS, v2 } = parseSecret(token);
   if (!v2) {
     throw new Error(
       "refusing to host an unencrypted room — delete ~/.agent-yes/.share-room to rotate to an encrypted link",
     );
   }
-  const authToken = await deriveAuthToken(S, room, host);
+  let S = firstS;
 
-  const RTCPeerConnection = await importRTC();
   const wsScheme = host.startsWith("localhost") || host.startsWith("127.") ? "ws" : "wss";
   const ui = host === "s.agent-yes.com" ? "https://agent-yes.com" : "http://localhost:7778";
   const suffix = host === "s.agent-yes.com" ? "" : "@" + host;
-  const link = `${ui}/#${room}:${MARKER}${S}${suffix}`;
+  const mkLink = () => `${ui}/#${room}:${MARKER}${S}${suffix}`;
+  let authToken = await deriveAuthToken(S, room, host);
+  let link = mkLink();
+
+  const RTCPeerConnection = await importRTC();
+
+  // Auto-rotate a rejected persisted room to a fresh one. A signaling 1008 means
+  // the room is pinned to a different generation/token (e.g. a pre-E2E room), so
+  // re-using it can never succeed; mint+persist a new room and let the caller
+  // refresh its stored link. Gated on opts.onRotate (only the persisted-room
+  // caller sets it) and a small cap so a persistent reject can't spin forever.
+  let rotateCount = 0;
+  const rotate = async (): Promise<boolean> => {
+    if (!opts.onRotate || closed || rotateCount >= 5) return false;
+    rotateCount++;
+    room = "r" + randomBytes(3).toString("hex");
+    token = `${MARKER}${randomBytes(32).toString("hex")}`;
+    S = parseSecret(token).s;
+    authToken = await deriveAuthToken(S, room, host);
+    link = mkLink();
+    // close() may have run during the await above — don't persist/announce or let
+    // the caller reconnect a room for a share that's shutting down.
+    if (closed) return false;
+    try {
+      await mkdir(path.dirname(shareRoomPath()), { recursive: true });
+      await writeFile(shareRoomPath(), `webrtc://${room}:${token}@${host}`, { mode: 0o600 });
+    } catch {
+      /* best effort — in-memory rotation still lets new browsers join */
+    }
+    await opts.onRotate({ room, link });
+    return true;
+  };
 
   type Peer = {
     pc: any;
@@ -257,10 +307,15 @@ export async function startShare(
     let ready = false;
     let lastRecv = Date.now();
     let hb: ReturnType<typeof setInterval> | undefined;
+    let refresh: ReturnType<typeof setTimeout> | undefined;
     const stopHb = () => {
       if (hb) {
         clearInterval(hb);
         hb = undefined;
+      }
+      if (refresh) {
+        clearTimeout(refresh);
+        refresh = undefined;
       }
     };
     ws.onopen = () => {
@@ -284,6 +339,15 @@ export async function startShare(
           ws.send(JSON.stringify({ type: "ping" }));
         } catch {}
       }, HOST_HEARTBEAT_MS);
+      // Proactive re-registration (see SIG_REFRESH_MS): the edge-answered ping
+      // above can't detect a DO that hibernated/evicted our routing while the
+      // socket stays up, so periodically recycle the connection to force a fresh
+      // hello. onclose then reconnects (~1s), re-registering us as host.
+      refresh = setTimeout(() => {
+        try {
+          ws.close();
+        } catch {}
+      }, SIG_REFRESH_MS);
       onReady();
     };
     ws.onmessage = async (ev) => {
@@ -321,14 +385,28 @@ export async function startShare(
     ws.onclose = (ev: any) => {
       stopHb();
       if (closed) return; // shutting down — don't resurrect the rendezvous
-      // The signaling server pins a room to its first host's authToken. A 1008
-      // means a different generation already owns this room — don't hot-loop;
-      // tell the operator to rotate. (Secret-free message.)
+      // The signaling server pins a room to its first host's authToken+protocol.
+      // A 1008 means a different generation already owns this room, so reusing it
+      // can never succeed. For a persisted/auto-minted room, rotate to a fresh one
+      // and reconnect; otherwise (explicit URL) give up with a secret-free hint.
       if (ev?.code === 1008) {
-        closed = true;
-        process.stderr.write(
-          "[share] room rejected by signaling server — delete ~/.agent-yes/.share-room to rotate the room\n",
-        );
+        rotate()
+          .then((rotated) => {
+            if (rotated) {
+              connectSignaling(() => {});
+            } else {
+              closed = true;
+              process.stderr.write(
+                "[share] room rejected by signaling server — delete ~/.agent-yes/.share-room to rotate the room\n",
+              );
+            }
+          })
+          .catch(() => {
+            closed = true;
+            process.stderr.write(
+              "[share] room rejected and rotation failed — delete ~/.agent-yes/.share-room to rotate manually\n",
+            );
+          });
         return;
       }
       // Keep established WebRTC peers; just re-establish the rendezvous so new
