@@ -133,38 +133,67 @@ function ayServeArgv(args: string[]): string[] {
   return [...launcher, "serve", ...args];
 }
 
+// Per-user login auto-start entry on Windows. pm2 core has no Windows startup
+// integration (`pm2 startup` errors "Init system not found"), so we register a
+// HKCU Run value that runs `pm2 resurrect` at login — no admin, removed on
+// uninstall. HKCU (not HKLM) keeps it user-scoped and admin-free.
+const WIN_RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+const WIN_RUN_VALUE = DAEMON_NAME;
+
 // Register the daemon to come up automatically. The *scope* is per-platform by
-// design: Linux → at system boot (before login); Windows → at user login.
+// design: Linux → at system boot (before login); macOS/Windows → at user login.
 //   - Linux (oxmgr): `oxmgr service install` wires a systemd **--user** unit,
 //     which on its own only starts after the user logs in. To make it start at
 //     boot without requiring root (no system-scope unit, no sudo), we also
 //     `loginctl enable-linger`, which keeps the user's systemd instance — and
 //     thus our service — running from boot. Best-effort; linger failing just
 //     downgrades us to login-scope.
-//   - Windows (pm2): `pm2 save` persists the process list so the once-installed
-//     `pm2 startup` logon hook resurrects it at user login.
+//   - Windows (pm2): pm2 core can't install a startup hook here, so we save the
+//     process list and add a HKCU Run entry that runs `pm2 resurrect` at login.
+//   - macOS (pm2): `pm2 startup` wires a launchd agent (best-effort).
 // Idempotent and best-effort: returns false on failure without aborting the
 // install — the process is still crash-managed, just not boot/login-persistent.
 async function ensureBootAutostart(mgr: DaemonManager): Promise<boolean> {
   try {
-    if (mgr.id !== "oxmgr") {
-      // pm2 (Windows): logon-scoped resurrect via the saved process list.
-      return (await spawnExit([mgr.bin, "save"])) === 0;
+    if (mgr.id === "oxmgr") {
+      // Skip `service install` when the service is ALREADY registered: re-running
+      // it re-bootstraps the oxmgr daemon, which restarts every managed process —
+      // it once took down a VS Code serve-web session on each `ay serve install`.
+      // `oxmgr service status` exits 0 only when already installed.
+      // oxmgr's --system defaults to "auto" (launchd/systemd/Task Scheduler); it's
+      // a `service`-level flag, so it goes before the subcommand, not after.
+      const installed =
+        (await spawnExit([mgr.bin, "service", "status"])) === 0 ||
+        (await spawnExit([mgr.bin, "service", "install"])) === 0;
+      if (installed && process.platform === "linux") {
+        // Upgrade login-scope → boot-scope: linger starts the user manager at boot.
+        await spawnExit(["loginctl", "enable-linger", userInfo().username]);
+      }
+      return installed;
     }
-    // Skip `service install` when the service is ALREADY registered: re-running
-    // it re-bootstraps the oxmgr daemon, which restarts every managed process —
-    // it once took down a VS Code serve-web session on each `ay serve install`.
-    // `oxmgr service status` exits 0 only when already installed.
-    // oxmgr's --system defaults to "auto" (launchd/systemd/Task Scheduler); it's
-    // a `service`-level flag, so it goes before the subcommand, not after.
-    const installed =
-      (await spawnExit([mgr.bin, "service", "status"])) === 0 ||
-      (await spawnExit([mgr.bin, "service", "install"])) === 0;
-    if (installed && process.platform === "linux") {
-      // Upgrade login-scope → boot-scope: linger starts the user manager at boot.
-      await spawnExit(["loginctl", "enable-linger", userInfo().username]);
+    // pm2: persist the current process list first — boot/login resurrect reads it.
+    if ((await spawnExit([mgr.bin, "save"])) !== 0) return false;
+    if (process.platform === "win32") {
+      // pm2 has no Windows startup integration — add a HKCU Run entry ourselves.
+      const data = mgr.bin.includes(" ") ? `"${mgr.bin}" resurrect` : `${mgr.bin} resurrect`;
+      return (
+        (await spawnExit([
+          "reg",
+          "add",
+          WIN_RUN_KEY,
+          "/v",
+          WIN_RUN_VALUE,
+          "/t",
+          "REG_SZ",
+          "/d",
+          data,
+          "/f",
+        ])) === 0
+      );
     }
-    return installed;
+    // macOS (and any non-Windows pm2 install): pm2 startup wires the init script
+    // (may need sudo; best-effort).
+    return (await spawnExit([mgr.bin, "startup"])) === 0;
   } catch {
     return false;
   }
@@ -304,11 +333,17 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
             ? `start-on-boot: enabled (systemd --user + linger, starts at boot)\n`
             : `start-on-boot: not registered — needs a user systemd session; run \`oxmgr service install\` to enable\n`,
         );
+      else if (process.platform === "win32")
+        process.stdout.write(
+          onBoot
+            ? `start-on-login: enabled (a HKCU Run entry runs \`pm2 resurrect\`)\n`
+            : `start-on-login: not registered — \`pm2 save\` or the registry write failed\n`,
+        );
       else
         process.stdout.write(
           onBoot
-            ? `start-on-login: enabled (pm2 list saved; run \`pm2 startup\` once if logon resurrect is not yet installed)\n`
-            : `start-on-login: \`pm2 save\` failed — run it manually to persist across logins\n`,
+            ? `start-on-boot: enabled (pm2 startup registered with the system init)\n`
+            : `start-on-boot: not registered — run \`pm2 startup\` (may need sudo) to enable\n`,
         );
       process.stdout.write(`token: ${token}\n\n`);
       if (httpish) {
@@ -333,9 +368,13 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       stdio: ["ignore", "inherit", "inherit"],
     });
     const code = (await proc.exited) ?? 1;
-    // Drop it from the persisted pm2 list too, so `pm2 resurrect` won't revive it.
-    if (mgr.id === "pm2" && code === 0)
-      await Bun.spawn([mgr.bin, "save"], { stdio: ["ignore", "ignore", "ignore"] }).exited;
+    if (mgr.id === "pm2" && code === 0) {
+      // Drop it from the persisted pm2 list too, so `pm2 resurrect` won't revive it.
+      await spawnExit([mgr.bin, "save"]);
+      // Remove the Windows login auto-start entry we added at install time.
+      if (process.platform === "win32")
+        await spawnExit(["reg", "delete", WIN_RUN_KEY, "/v", WIN_RUN_VALUE, "/f"]);
+    }
     return code;
   }
 
