@@ -154,6 +154,7 @@
     "node": ">=22.0.0"
   },
   "trustedDependencies": [
-    "node-datachannel"
+    "node-datachannel",
+    "node-pty"
   ]
 }
