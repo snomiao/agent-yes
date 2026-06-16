@@ -11,6 +11,7 @@ mod logger;
 mod messaging;
 mod pid_store;
 mod pty_spawner;
+mod reaper;
 mod ready_manager;
 mod running_lock;
 mod swarm;
@@ -195,6 +196,11 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     pid_store.prune_old_logs();
     pid_store.clean_stale();
 
+    // Defense-in-depth: sweep the orphan-reaper registry, killing the recorded
+    // process group of any PRIOR agent whose wrapper died without running its own
+    // reap_group (SIGKILL / OOM / force-restart). Cheap and runs on every start.
+    reaper::sweep();
+
     // Crash-restart loop guard: if the agent keeps exiting non-zero almost
     // immediately, restarting is futile (misconfig, broken install, etc.).
     // Track consecutive fast failures and give up after a few rather than
@@ -208,6 +214,12 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
 
         // Spawn the agent process
         let mut ctx = spawn_agent(&args.cli, &cmd_args, &cli_config, cwd, args.verbose).await?;
+
+        // Record (wrapper pid, agent pgid) so a later sweep reaps this agent's
+        // process group if WE die before running reap_group (e.g. SIGKILL).
+        if let Some(child_pid) = ctx.child.process_id() {
+            reaper::register(std::process::id(), child_pid as i32);
+        }
 
         // Create agent context (also initialises log file)
         let (term_cols, term_rows) = crate::pty_spawner::get_terminal_size();

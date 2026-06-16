@@ -968,8 +968,18 @@ export async function cmdServe(rest: string[]): Promise<number> {
       process.stderr.write(
         `→ console spawned:  ay ${cli}${prompt ? ` -- "${prompt.slice(0, 60)}"` : ""}  (cwd: ${cwd})\n`,
       );
+      // Resolve `ay` to an absolute command. The detached daemon (oxmgr/launchd/
+      // pm2) usually has a PATH WITHOUT ~/.bun/bin, so a bare "ay" fails with
+      // "Executable not found in $PATH: ay". Prefer PATH; fall back to re-running
+      // THIS process's own ay entry (process.argv[1]) — always present, since the
+      // daemon is itself an `ay serve`.
+      const ayBin = Bun.which("ay") ?? process.argv[1];
+      const ayCmd =
+        process.platform === "win32" && ayBin.toLowerCase().endsWith(".exe")
+          ? [ayBin]
+          : [process.execPath, ayBin];
       try {
-        const child = Bun.spawn(["ay", cli, ...(prompt ? ["--", prompt] : [])], {
+        const child = Bun.spawn([...ayCmd, cli, ...(prompt ? ["--", prompt] : [])], {
           cwd,
           env: freshAgentEnv(), // don't leak our Claude Code session into the agent
           stdin: "ignore",
