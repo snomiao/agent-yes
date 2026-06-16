@@ -31,6 +31,7 @@ import { createTerminatorStream } from "./core/streamHelpers.ts";
 import { globalAgentRegistry } from "./agentRegistry.ts";
 import { notifyWebhook } from "./webhookNotifier.ts";
 import { readGlobalPids } from "./globalPidIndex.ts";
+import * as reaper from "./reaper.ts";
 
 export { removeControlCharacters };
 export { AgentContext };
@@ -343,6 +344,10 @@ export default async function agentYes({
     }
   }
 
+  // Opportunistic sweep: reap any process group leaked by an agent whose wrapper
+  // died without cleanup, before we start a new one. See ts/reaper.ts.
+  reaper.sweep().catch(() => {});
+
   // Spawn the agent CLI process
   const ptyEnv = { ...(env ?? (process.env as Record<string, string>)) };
   ptyEnv.AGENT_YES_PID = String(process.pid);
@@ -389,6 +394,10 @@ export default async function agentYes({
   } catch (error) {
     logger.warn(`[pidStore] Failed to register process ${shell.pid}:`, error);
   }
+  // Defense-in-depth: record (this wrapper, the agent's process group) so a later
+  // sweep reaps the group if we're killed without running onExit cleanup. The PTY
+  // child is a session leader, so its pgid == shell.pid. See ts/reaper.ts.
+  reaper.register(process.pid, shell.pid).catch(() => {});
   notifyWebhook("RUNNING", prompt ?? "", workingDir).catch(() => null);
 
   // Initialize log paths (independent of registration)
@@ -519,6 +528,10 @@ export default async function agentYes({
       } catch (error) {
         logger.warn(`[pidStore] Failed to register restarted process ${shell.pid}:`, error);
       }
+      // Re-register the NEW process group with the reaper — the restart gave us a
+      // fresh pgid; without this the reaper would track the old (now-dead) group
+      // and the live one would leak if we're SIGKILLed. Mirrors the Rust loop.
+      reaper.register(process.pid, shell.pid).catch(() => {});
       // Update context with new shell
       ctx.shell = shell;
       // Register new agent in registry (non-blocking)
@@ -627,6 +640,9 @@ export default async function agentYes({
       } catch (error) {
         logger.warn(`[pidStore] Failed to register restored process ${shell.pid}:`, error);
       }
+      // Re-register the NEW process group with the reaper (fresh pgid after the
+      // restore) so the reaper tracks the live group, not the dead one. See above.
+      reaper.register(process.pid, shell.pid).catch(() => {});
       // Update context with new shell
       ctx.shell = shell;
       // Register new agent in registry (non-blocking)
