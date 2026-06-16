@@ -13,6 +13,7 @@ const SUB = "ay-signal-1";
 const ICE = [{ urls: "stun:stun.l.google.com:19302" }];
 const MAX_CHUNK = 15_000; // keep DataChannel messages under the SCTP limit
 const DEFAULT_SIGHOST = "s.agent-yes.com";
+const HOST_HEARTBEAT_MS = 20000; // keepalive ping to the rendezvous + silent-drop detection
 
 export interface ShareOpts {
   /** webrtc://room:token@host, or undefined to mint a fresh (unpersisted)
@@ -119,14 +120,42 @@ export async function startShare(
     const ws = new WebSocket(`${wsScheme}://${host}/${room}`, [SUB]);
     currentWs = ws;
     let ready = false;
+    let lastRecv = Date.now();
+    let hb: ReturnType<typeof setInterval> | undefined;
+    const stopHb = () => {
+      if (hb) {
+        clearInterval(hb);
+        hb = undefined;
+      }
+    };
     ws.onopen = () => {
       ws.send(JSON.stringify({ type: "hello", role: "host", token }));
       ready = true;
+      lastRecv = Date.now();
+      // Keepalive + dead-link detection: ping the rendezvous and expect a pong.
+      // A silently dropped ws (idle DO timeout, network flap) never fires
+      // onclose, so if the server goes quiet for ~2 intervals, close+reconnect
+      // ourselves — otherwise new browsers can't join until the process restarts.
+      stopHb();
+      hb = setInterval(() => {
+        if (Date.now() - lastRecv > HOST_HEARTBEAT_MS * 2 + 5000) {
+          stopHb();
+          try {
+            ws.close();
+          } catch {}
+          return;
+        }
+        try {
+          ws.send(JSON.stringify({ type: "ping" }));
+        } catch {}
+      }, HOST_HEARTBEAT_MS);
       onReady();
     };
     ws.onmessage = async (ev) => {
       if (closed) return;
+      lastRecv = Date.now();
       const m = JSON.parse(ev.data as string);
+      if (m.type === "pong") return; // heartbeat ack — liveness already recorded
       if (m.type === "peer-join") startPeer(ws, m.peer);
       else if (m.type === "answer")
         await peers.get(m.from)?.pc.setRemoteDescription({ type: "answer", sdp: m.sdp });
@@ -138,10 +167,11 @@ export async function startShare(
       else if (m.type === "peer-leave") closePeer(m.peer);
     };
     ws.onclose = () => {
+      stopHb();
       if (closed) return; // shutting down — don't resurrect the rendezvous
       // Keep established WebRTC peers; just re-establish the rendezvous so new
       // browsers can still join. Backoff a little to avoid hot-looping.
-      setTimeout(() => connectSignaling(() => {}), ready ? 1500 : 4000);
+      setTimeout(() => connectSignaling(() => {}), ready ? 1000 : 2000);
     };
     ws.onerror = () => {};
     return ws;

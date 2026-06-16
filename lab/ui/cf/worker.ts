@@ -94,6 +94,11 @@ export class Room {
       return;
     }
 
+    // Heartbeat: answer pings directly (both roles) so each side can detect a
+    // dead link — a silent half-open TCP drop never fires onclose, so without a
+    // pong the peer would sit "connected" forever. Don't relay pings onward.
+    if (msg.type === "ping") return void ws.send(JSON.stringify({ type: "pong" }));
+
     if (self.role === "client") {
       msg.from = self.peer; // tag so the host can route the reply back
       this.toHost(msg);
