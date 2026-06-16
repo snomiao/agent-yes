@@ -240,6 +240,11 @@ pub async fn spawn_agent(
     // Set working directory (passed from main to ensure consistency)
     cmd.cwd(cwd);
 
+    // Tag the agent's env with our pid so a nested `ay` launched from inside this
+    // agent inherits it as its parent_pid — this is what builds the agent>subagent
+    // tree in `ay ls` and the console. Mirrors ts/index.ts.
+    cmd.env("AGENT_YES_PID", std::process::id().to_string());
+
     if verbose {
         debug!(
             "Spawning {} with args: {:?} in directory: {}",

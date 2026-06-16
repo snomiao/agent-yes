@@ -55,6 +55,7 @@ export class PidStore {
     prompt,
     cwd,
     wrapperPid,
+    parentPid,
   }: {
     pid: number;
     cli: string;
@@ -62,6 +63,7 @@ export class PidStore {
     prompt?: string;
     cwd: string;
     wrapperPid?: number;
+    parentPid?: number;
   }): Promise<PidRecord> {
     const now = Date.now();
     const argsJson = JSON.stringify(args);
@@ -116,6 +118,7 @@ export class PidStore {
       exit_reason: null,
       started_at: now,
       wrapper_pid: wrapperPid ?? null,
+      parent_pid: parentPid ?? null,
     })
       .then(() => maybeCompactGlobalPids())
       .catch(() => null);

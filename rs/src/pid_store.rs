@@ -24,6 +24,15 @@ pub struct PidRecord {
     pub exit_code: Option<i32>,
     pub exit_reason: Option<String>,
     pub started_at: i64, // unix ms
+    /// The `ay` wrapper pid that owns this agent (our own pid). Mirrors the TS
+    /// `wrapper_pid`; a child `ay send` maps its inherited AGENT_YES_PID here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wrapper_pid: Option<u32>,
+    /// The AGENT_YES_PID we inherited from our env = the parent agent's
+    /// wrapper_pid. None for top-level agents. Builds the agent>subagent tree:
+    /// child.parent_pid == parent.wrapper_pid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_pid: Option<u32>,
 }
 
 pub struct PidStore {
@@ -74,6 +83,12 @@ impl PidStore {
             exit_code: None,
             exit_reason: None,
             started_at: chrono::Utc::now().timestamp_millis(),
+            // We are the wrapper; record our own pid and the parent agent's
+            // wrapper pid we inherited via AGENT_YES_PID (None at the tree root).
+            wrapper_pid: Some(std::process::id()),
+            parent_pid: std::env::var("AGENT_YES_PID")
+                .ok()
+                .and_then(|s| s.parse::<u32>().ok()),
         };
         if let Err(e) = self.append(&record) {
             warn!("PidStore: failed to register: {}", e);
@@ -374,6 +389,8 @@ mod tests {
             exit_code: None,
             exit_reason: None,
             started_at: 0,
+            wrapper_pid: None,
+            parent_pid: None,
         }];
         store.write_all(&records).unwrap();
         let loaded = store.read_all().unwrap();
@@ -407,6 +424,8 @@ mod tests {
                 exit_code: Some(0),
                 exit_reason: Some("completed".into()),
                 started_at: old_started_at,
+                wrapper_pid: None,
+                parent_pid: None,
             }])
             .unwrap();
 

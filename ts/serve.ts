@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, writeFile } from "fs/promises";
+import { mkdir, open, readFile, stat, writeFile } from "fs/promises";
 import { watch } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
@@ -7,6 +7,7 @@ import path from "path";
 import yargs from "yargs";
 import {
   controlCodeFromName,
+  extractTaskCounts,
   listRecords,
   readNotes,
   renderRawLog,
@@ -655,6 +656,31 @@ export async function cmdServe(rest: string[]): Promise<number> {
     }
   };
 
+  // Per-agent task progress ({done,total}) parsed from the agent's rendered TUI
+  // screen (the durable raw log). Cached per (size, mtime) exactly like logTitle:
+  // re-parse only when the log grew, so the 1s tick stays cheap even though each
+  // parse renders a log window through xterm. Works for every CLI — the source is
+  // the drawn todo block, not a CLI-specific session file. See extractTaskCounts.
+  const taskCache = new Map<
+    string,
+    { size: number; mtimeMs: number; tasks: { done: number; total: number } | null }
+  >();
+  const logTasks = async (
+    logFile: string | null | undefined,
+  ): Promise<{ done: number; total: number } | null> => {
+    if (!logFile) return null;
+    try {
+      const { size, mtimeMs } = await stat(logFile);
+      const hit = taskCache.get(logFile);
+      if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.tasks;
+      const tasks = await extractTaskCounts(logFile);
+      taskCache.set(logFile, { size, mtimeMs, tasks });
+      return tasks;
+    } catch {
+      return null;
+    }
+  };
+
   // Per-cwd git snapshot for the list: branch + dirty/changed count + ahead/behind
   // vs upstream, all from a single `git status --porcelain --branch`. Cached per
   // cwd with a short TTL so the 1s subscribe tick (and /api/ls polls) spawn at most
@@ -709,6 +735,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
     ...r,
     title: await logTitle(r.log_file),
     git: r.status === "exited" ? null : await gitStatus(r.cwd),
+    // Task progress from the rendered todo block (null when none detected → no
+    // badge). Skipped for exited agents — their screen is no longer live.
+    tasks: r.status === "exited" ? null : await logTasks(r.log_file),
   });
 
   // The whole API as a plain handler: served over HTTP by Bun.serve (--http)

@@ -19,6 +19,9 @@ import {
   fullIdent,
   hasIdent,
   deviceCount,
+  forestOrder,
+  layeredRows,
+  taskLabel,
 } from "../../lab/ui/console-logic.js";
 
 const agent = (over = {}) => ({
@@ -248,5 +251,131 @@ describe("nextIndex", () => {
     expect(nextIndex(5, 2, -1)).toBe(1);
     expect(nextIndex(5, 4, 1)).toBe(4); // clamp at bottom, no wrap
     expect(nextIndex(5, 0, -1)).toBe(0); // clamp at top, no wrap
+  });
+});
+
+describe("forestOrder (agent>subagent tree)", () => {
+  const a = (pid: number, over = {}) => ({
+    pid,
+    wrapper_pid: pid,
+    parent_pid: null,
+    _host: "h1",
+    ...over,
+  });
+
+  it("leaves a flat fleet untouched (every row a root, empty branch)", () => {
+    const out = forestOrder([a(1), a(2), a(3)]);
+    expect(out.map((e) => e.pid)).toEqual([1, 2, 3]);
+    expect(out.every((e) => e._branch === "" && e._depth === 0)).toBe(true);
+  });
+
+  it("nests children under their parent in DFS order with branch glyphs", () => {
+    // root 1 → children 2,3 ; 2 → grandchild 4
+    const out = forestOrder([
+      a(1),
+      a(2, { parent_pid: 1 }),
+      a(3, { parent_pid: 1 }),
+      a(4, { parent_pid: 2 }),
+    ]);
+    expect(out.map((e) => e.pid)).toEqual([1, 2, 4, 3]); // DFS: 2's subtree before 3
+    const branch = Object.fromEntries(out.map((e) => [e.pid, e._branch]));
+    expect(branch[1]).toBe("");
+    expect(branch[2]).toBe("├ ");
+    expect(branch[4]).toBe("│  └ ");
+    expect(branch[3]).toBe("└ ");
+  });
+
+  it("scopes linking per host so identical pids on two machines don't cross-link", () => {
+    const out = forestOrder([
+      a(1, { _host: "h1" }),
+      a(2, { _host: "h1", parent_pid: 1 }),
+      a(1, { _host: "h2" }), // same pid, different machine
+    ]);
+    // h2's pid-1 has parent_pid null → its own root, not a child of h1's pid 1.
+    const h2root = out.find((e) => e._host === "h2");
+    expect(h2root?._depth).toBe(0);
+    expect(out.filter((e) => e._depth === 0).length).toBe(2);
+  });
+
+  it("does not loop on a parent_pid cycle", () => {
+    const out = forestOrder([a(1, { parent_pid: 2 }), a(2, { parent_pid: 1 })]);
+    expect(out.length).toBe(2);
+  });
+});
+
+describe("taskLabel (progress badge)", () => {
+  it("formats done/total", () => {
+    expect(taskLabel({ tasks: { done: 2, total: 5 } })).toBe("2/5");
+    expect(taskLabel({ tasks: { done: 5, total: 5 } })).toBe("5/5");
+  });
+  it("omits the badge when there is no todo block (never 0/0)", () => {
+    expect(taskLabel({})).toBe("");
+    expect(taskLabel({ tasks: null })).toBe("");
+    expect(taskLabel({ tasks: { done: 0, total: 0 } })).toBe("");
+  });
+});
+
+describe("layeredRows (rooms>peers>agents folding)", () => {
+  const a = (pid: number, over = {}) => ({
+    pid,
+    wrapper_pid: pid,
+    parent_pid: null,
+    _room: "local",
+    _host: "",
+    _key: "local#" + pid,
+    ...over,
+  });
+  const kinds = (rows: any[]) => rows.map((r) => r.kind);
+
+  it("local fleet (1 room, unlabelled host): no headers, just agent rows", () => {
+    const rows = layeredRows([a(1), a(2)]);
+    expect(kinds(rows)).toEqual(["agent", "agent"]);
+    expect(rows.every((r) => r.branch === "")).toBe(true);
+  });
+
+  it("hides the room layer when there is only one room", () => {
+    const rows = layeredRows([a(1, { _host: "h1" }), a(2, { _host: "h1" })]);
+    expect(rows.find((r) => r.kind === "room")).toBeUndefined();
+  });
+
+  it("single room, ≥2 peers: peer headers appear, no room header", () => {
+    const rows = layeredRows([a(1, { _host: "sno@taka" }), a(2, { _host: "sno@mini" })]);
+    expect(rows.filter((r) => r.kind === "room").length).toBe(0);
+    expect(rows.filter((r) => r.kind === "peer").map((r) => r.label)).toEqual([
+      "sno@taka",
+      "sno@mini",
+    ]);
+    // Peer headers are top-level roots (no rail); the agent under each is railed.
+    const peerRows = rows.filter((r) => r.kind === "peer");
+    expect(peerRows.every((r) => r.branch === "")).toBe(true);
+    expect(rows.find((r) => r.kind === "agent" && r.entry.pid === 1)!.branch).toBe("└ ");
+  });
+
+  it("≥2 rooms: room headers appear (top-level roots), agents railed beneath", () => {
+    const rows = layeredRows([
+      a(1, { _room: "roomA", _host: "" }),
+      a(2, { _room: "roomB", _host: "" }),
+    ]);
+    const rooms = rows.filter((r) => r.kind === "room");
+    expect(rooms.map((r) => r.label)).toEqual(["roomA", "roomB"]);
+    expect(rooms.every((r) => r.branch === "")).toBe(true);
+    // each room's single agent nests one rail deeper
+    expect(rows.find((r) => r.kind === "agent" && r.entry.pid === 1)!.branch).toBe("└ ");
+  });
+
+  it("nests subagents under their parent within a peer, below the peer header", () => {
+    // one room, two peers (so peer headers show); peer h1 has a subagent tree
+    const rows = layeredRows([
+      a(1, { _host: "h1" }),
+      a(2, { _host: "h1", parent_pid: 1 }),
+      a(9, { _host: "h2" }),
+    ]);
+    // h1 header, then agent 1, then its child 2 (deeper), then h2 header + agent 9
+    const seq = rows.map((r) => (r.kind === "agent" ? "a" + r.entry.pid : r.kind));
+    expect(seq).toEqual(["peer", "a1", "a2", "peer", "a9"]);
+    const child = rows.find((r) => r.kind === "agent" && r.entry.pid === 2)!;
+    // child is indented one rail deeper than its parent agent
+    const parent = rows.find((r) => r.kind === "agent" && r.entry.pid === 1)!;
+    expect(child.branch.length).toBeGreaterThan(parent.branch.length);
   });
 });
