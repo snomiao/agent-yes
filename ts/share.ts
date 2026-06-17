@@ -37,6 +37,13 @@ const HOST_HEARTBEAT_MS = 20000; // keepalive ping to the rendezvous + silent-dr
 // heartbeat never trips. Re-running the hello on a timer forces the DO to
 // re-register us, self-healing that state. Cheap: one reconnect per few minutes.
 const SIG_REFRESH_MS = 4 * 60_000;
+// If building a peer connection fails this many times in a row, the native
+// WebRTC stack (node-datachannel) is wedged — observed after long daemon uptime:
+// signaling stays connected and peer-joins arrive, but every createOffer fails,
+// so the host silently answers nobody and the room looks "offline". Reconnecting
+// the socket can't clear it; only a fresh process can. Exit so the service
+// manager restarts us with a clean stack (a fresh process provably works).
+const MAX_PEER_SETUP_FAILURES = 3;
 
 type IceServer = { urls: string | string[]; username?: string; credential?: string };
 const STUN: IceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
@@ -299,6 +306,7 @@ export async function startShare(
   const peers = new Map<string, Peer>();
   let closed = false; // set by close(); stops signaling reconnect + new peers
   let currentWs: WebSocket | undefined; // the live rendezvous socket, for close()
+  let peerSetupFailures = 0; // consecutive startPeer() throws — see MAX_PEER_SETUP_FAILURES
 
   const connectSignaling = (onReady: () => void) => {
     if (closed) return; // a reconnect timer queued before close() must not revive it
@@ -355,7 +363,27 @@ export async function startShare(
       lastRecv = Date.now();
       const m = JSON.parse(ev.data as string);
       if (m.type === "pong") return; // heartbeat ack — liveness already recorded
-      if (m.type === "peer-join") startPeer(ws, m.peer).catch(() => {});
+      if (m.type === "peer-join")
+        startPeer(ws, m.peer).then(
+          () => {
+            peerSetupFailures = 0; // a delivered offer proves the WebRTC stack works
+          },
+          (err) => {
+            // Don't swallow this: a failed createOffer is why a long-up host goes
+            // silently "offline". Surface it, and if it keeps failing, self-heal.
+            peerSetupFailures++;
+            process.stderr.write(
+              `[share] peer setup failed (${peerSetupFailures}/${MAX_PEER_SETUP_FAILURES}): ${(err as Error)?.message ?? err}\n`,
+            );
+            closePeer(m.peer);
+            if (peerSetupFailures >= MAX_PEER_SETUP_FAILURES) {
+              process.stderr.write(
+                "[share] WebRTC stack wedged after repeated peer-setup failures — exiting so the service manager restarts with a fresh stack\n",
+              );
+              process.exit(1);
+            }
+          },
+        );
       else if (m.type === "answer") {
         const peer = peers.get(m.from);
         if (!peer) return;
@@ -467,6 +495,14 @@ export async function startShare(
     };
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    // The signaling socket may have been recycled (SIG_REFRESH_MS) while we built
+    // the offer. Sending on a closing socket would throw and be miscounted as a
+    // wedged-stack failure — but it's benign: the browser re-joins on the fresh
+    // socket. Skip cleanly so only real createOffer failures trip the self-heal.
+    if (ws.readyState !== WebSocket.OPEN) {
+      closePeer(peerId);
+      return;
+    }
     // Hand the browser the same ICE servers (incl. the short-lived TURN creds)
     // so it can relay too when there's no direct path.
     ws.send(
