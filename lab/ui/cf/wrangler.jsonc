@@ -12,8 +12,11 @@
   // a generated copy and is gitignored. Runs from this config's directory.
   "build": {
     // Copy index.html + EVERY UI script (room-client.js, console-logic.js,
-    // e2e.js, …) — a fixed list silently breaks when the UI gains a new import.
-    "command": "mkdir -p ./public && cp ../index.html ../*.js ./public/",
+    // e2e.js, …) plus the install scripts the landing page links to
+    // (agent-yes.com/setup.sh | setup.ps1) — a fixed list silently breaks when
+    // the UI gains a new import, and the install scripts 404'd because they were
+    // never synced into ./public.
+    "command": "mkdir -p ./public && cp ../index.html ../*.js ../setup.sh ../setup.ps1 ./public/",
   },
   // Static console UI (served for every non-WebSocket request).
   "assets": { "directory": "./public", "binding": "ASSETS" },
