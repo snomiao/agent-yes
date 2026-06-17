@@ -15,6 +15,14 @@ clis:
     working:
       - esc to interrupt
       - to run in background
+    # needsInput: the agent is blocked on an interactive selection menu it did NOT
+    # auto-resolve — an AskUserQuestion / a permission prompt whose options aren't
+    # the auto-`enter`ed "Yes". The cursor `❯` sits on a numbered option. Surfaced
+    # by `ay ls` / `ay status` as the `needs_input` state (distinct from idle/done)
+    # so an orchestrator can tell "waiting for me to answer" from "finished".
+    needsInput:
+      - pattern: '❯ ?\d+\.'
+        flags: m
     typingRespond:
       "1\n":
         - '│ Do you want to use this API key\?'
@@ -94,6 +102,11 @@ clis:
       # codex shows "• Working (… • esc to interrupt)" while streaming/running.
       # (Approval dialogs say "esc to cancel", so this only marks real work.)
       - esc to interrupt
+    # needsInput: a codex selection menu the agent is blocked on (cursor `›`/`>` on
+    # a numbered option). The bare `› ` idle prompt has no digit so it won't match.
+    needsInput:
+      - pattern: '[›>] ?\d+\.'
+        flags: m
     enter:
       # codex highlights the selected option with "›" (U+203A), NOT ASCII ">".
       # Match the affirmative first option (Yes / Approve / Allow) when it is the
