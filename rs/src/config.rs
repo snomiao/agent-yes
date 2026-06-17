@@ -277,6 +277,19 @@ mod tests {
             .auto_retry
             .iter()
             .any(|rx| rx.is_match("● API Error: Overloaded")));
+        // 5xx API errors (e.g. a 529 rendered as a raw JSON blob, no "Overloaded"
+        // wording) must also auto-retry…
+        assert!(config.auto_retry.iter().any(|rx| rx
+            .is_match(r#"● API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}"#)));
+        assert!(config
+            .auto_retry
+            .iter()
+            .any(|rx| rx.is_match("API Error: 503 Service Unavailable")));
+        // …but a stray status-like number in normal output must NOT.
+        assert!(!config
+            .auto_retry
+            .iter()
+            .any(|rx| rx.is_match("processed 529 files in 500ms")));
         assert!(!config.typing_respond.is_empty());
         assert!(config.typing_respond.contains_key("1\n"));
         assert_eq!(config.restore_args, vec!["--continue"]);

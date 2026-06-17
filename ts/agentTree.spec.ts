@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import type { GlobalPidRecord } from "./globalPidIndex.ts";
 

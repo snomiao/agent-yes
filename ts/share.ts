@@ -44,12 +44,15 @@ const SIG_REFRESH_MS = 4 * 60_000;
 // the socket can't clear it; only a fresh process can. Exit so the service
 // manager restarts us with a clean stack (a fresh process provably works).
 const MAX_PEER_SETUP_FAILURES = 3;
-// Belt-and-suspenders for the same node-datachannel wedge: proactively restart
-// the host once it has been up this long AND has no active peers, so the native
-// stack is refreshed during an idle moment instead of silently rotting until the
-// next visitor trips the reactive self-heal above. Idle-gated, so it never
-// interrupts a live session; relies on the daemon's `--restart always` policy.
-const MAX_IDLE_UPTIME_MS = 90 * 60_000;
+// Proactively recycle the process to PREVENT the node-datachannel freeze rather
+// than just recover from it. The wedge has been observed at ~60-90min uptime, so
+// restarting well before that keeps the native stack fresh and the freeze rare.
+// Two thresholds (relies on the daemon's `--restart always` policy):
+//   - IDLE: when there are no active peers, refresh early during a quiet moment.
+//   - HARD: a ceiling that fires even mid-session (closing peers gracefully so
+//     browsers reconnect in ~1s) — a ~1s blip every ~45min beats a ~90s freeze.
+const IDLE_RESTART_UPTIME_MS = 25 * 60_000;
+const HARD_RESTART_UPTIME_MS = 45 * 60_000;
 const IDLE_RESTART_CHECK_MS = 60_000;
 
 type IceServer = { urls: string | string[]; username?: string; credential?: string };
@@ -648,23 +651,36 @@ export async function startShare(
   await new Promise<void>((resolve) => connectSignaling(resolve));
   void minted; // (informational) caller decides how to surface the link
 
-  // Proactive idle restart (see MAX_IDLE_UPTIME_MS). Refresh the native WebRTC
-  // stack during a quiet moment so it can't silently wedge between visitors.
-  // Daemon-only (non-TTY): a foreground `ay serve` has no restart manager, so
-  // exiting it would just stop sharing — and the user is there to act anyway.
+  // Proactive restart to PREVENT the node-datachannel freeze (~60-90min onset):
+  // refresh the native stack well before it can wedge. Idle path refreshes early
+  // during a quiet moment; the hard ceiling fires even mid-session, closing peers
+  // gracefully first so browsers reconnect in ~1s (a tiny blip beats a ~90s
+  // freeze). Daemon-only (non-TTY): a foreground `ay serve` has no restart
+  // manager, so exiting would just stop sharing — and the user is there to act.
   const startedAt = Date.now();
-  const idleRestart = process.stdout.isTTY
+  const proactiveRestart = process.stdout.isTTY
     ? undefined
     : setInterval(() => {
-        if (closed || peers.size > 0) return; // never interrupt a live session
-        if (Date.now() - startedAt > MAX_IDLE_UPTIME_MS) {
-          process.stderr.write(
-            "[share] idle restart: refreshing the WebRTC stack after max uptime (no active peers)\n",
-          );
+        if (closed) return;
+        const up = Date.now() - startedAt;
+        if (peers.size === 0 && up > IDLE_RESTART_UPTIME_MS) {
+          process.stderr.write("[share] proactive restart (idle): refreshing the WebRTC stack\n");
           process.exit(0); // `--restart always` brings us back with a fresh stack
+        } else if (up > HARD_RESTART_UPTIME_MS) {
+          process.stderr.write(
+            "[share] proactive restart (max uptime): closing peers, refreshing the WebRTC stack\n",
+          );
+          // graceful: DataChannel close → browsers reconnect to the fresh process.
+          // finally-guard the exit so a throw in close() can't leave us dead-but-
+          // not-respawned.
+          try {
+            close();
+          } finally {
+            setTimeout(() => process.exit(0), 250); // let close frames flush first
+          }
         }
       }, IDLE_RESTART_CHECK_MS);
-  idleRestart?.unref?.(); // don't keep the event loop alive on this timer alone
+  proactiveRestart?.unref?.(); // don't keep the event loop alive on this timer alone
 
   // Clean shutdown: stop the rendezvous (so it can't reconnect or accept new
   // peers) and close every peer connection so browsers get an immediate
@@ -672,7 +688,7 @@ export async function startShare(
   // ~15-30s ICE timeout that an abrupt process exit would otherwise force.
   const close = () => {
     closed = true;
-    if (idleRestart) clearInterval(idleRestart);
+    if (proactiveRestart) clearInterval(proactiveRestart);
     try {
       currentWs?.close();
     } catch {

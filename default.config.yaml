@@ -52,6 +52,12 @@ clis:
       - pattern: "API Error.*Overloaded"
         flags: i
       - Overloaded
+      # Any 5xx API error (e.g. "API Error: 529 Overloaded", "API Error: 503 …",
+      # or a 529 rendered as a raw JSON error blob) is server-side + transient —
+      # retry with backoff regardless of the wording. Anchored to "API Error" so
+      # a stray "529"/"500" in normal output can't trigger a spurious retry.
+      - pattern: 'API Error.{0,4}5\d\d'
+        flags: i
       - Claude usage limit reached
       - hit your usage limit
       - pattern: "rate.?limit"
