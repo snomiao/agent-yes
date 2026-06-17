@@ -1,5 +1,5 @@
 import { mkdir, open, readFile, stat, writeFile } from "fs/promises";
-import { watch } from "node:fs";
+import { renameSync, watch, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { homedir, hostname, userInfo } from "os";
@@ -28,6 +28,19 @@ function agentYesHome(): string {
 function tokenPath(): string {
   return path.join(agentYesHome(), ".serve-token");
 }
+
+// Liveness heartbeat for the WebRTC daemon. The native WebRTC stack
+// (node-datachannel) has been observed to freeze the entire JS event loop after
+// long uptime — main thread stuck in a pthread rendezvous — so signaling stays
+// connected but the host answers nobody, and NO in-process timer (self-heal,
+// idle-restart) can recover it because JS has stopped running. The serve loop
+// stamps this file every HEARTBEAT_WRITE_MS; `ay serve healthcheck` reports the
+// daemon unhealthy once it goes stale, and oxmgr's --health-cmd restarts it.
+function heartbeatPath(): string {
+  return path.join(agentYesHome(), ".serve-heartbeat");
+}
+const HEARTBEAT_WRITE_MS = 5_000;
+const HEARTBEAT_STALE_MS = 30_000; // event loop is wedged if no stamp this long
 
 async function loadOrCreateToken(tokenFlag?: string): Promise<string> {
   if (tokenFlag) return tokenFlag;
@@ -321,9 +334,42 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     // args after `--`. Both auto-restart on crash by default (pm2) / via the
     // explicit flag (oxmgr).
     const serveArgv = ayServeArgv(effArgs);
+    // WebRTC daemons get an oxmgr health watchdog: the native WebRTC stack can
+    // freeze the JS event loop (host answers nobody, no in-process timer can
+    // recover it), so an EXTERNAL probe of the serve heartbeat is the only thing
+    // that can detect+restart it. ~3 misses at 20s ≈ 1min to auto-recover.
+    const webrtcDaemon = effArgs.some((a) => a.startsWith("--webrtc") || a.startsWith("--share"));
+    const oxmgrHealth =
+      webrtcDaemon && mgr.id === "oxmgr"
+        ? [
+            "--health-cmd",
+            ayServeArgv(["healthcheck"]).join(" "),
+            "--health-interval",
+            "20",
+            "--health-timeout",
+            "10",
+            "--health-max-failures",
+            "3",
+          ]
+        : [];
     const startArgv =
       mgr.id === "oxmgr"
-        ? [mgr.bin, "start", serveArgv.join(" "), "--name", DAEMON_NAME, "--restart", "always"]
+        ? [
+            mgr.bin,
+            "start",
+            serveArgv.join(" "),
+            "--name",
+            DAEMON_NAME,
+            "--restart",
+            "always",
+            // Persistent daemon: oxmgr's default lifetime cap of 10 restarts would
+            // eventually stop respawning it (updates, reboots, the health-watchdog
+            // recovering a frozen WebRTC stack). Raise it far out of the way; the
+            // crash-restart-limit still guards against a tight crash loop.
+            "--max-restarts",
+            "1000000",
+            ...oxmgrHealth,
+          ]
         : [
             mgr.bin,
             "start",
@@ -529,6 +575,28 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // Daemon subcommands
   const sub = rest[0];
   if (sub === "status") return cmdServeStatus(rest.slice(1));
+  if (sub === "healthcheck") {
+    // oxmgr --health-cmd liveness probe. Exit non-zero only when the heartbeat is
+    // demonstrably stale (event loop wedged), so the manager restarts us. A
+    // missing/just-started/unparseable heartbeat is treated as healthy to avoid
+    // flapping a daemon that simply hasn't stamped yet.
+    try {
+      const raw = (await readFile(heartbeatPath(), "utf-8")).trim();
+      const ts = Number(raw);
+      // Only declare unhealthy on a VALID, genuinely-old stamp. Empty/partial/NaN
+      // (Number("") === 0!) is treated as healthy so a torn read or a not-yet-
+      // written file can't trigger a false restart. (Writes are atomic via
+      // temp+rename, so a torn read shouldn't happen — this is belt-and-braces.)
+      const age = Date.now() - ts;
+      if (raw.length > 0 && Number.isFinite(ts) && ts > 0 && age > HEARTBEAT_STALE_MS) {
+        process.stderr.write(`unhealthy: serve heartbeat stale by ${age}ms\n`);
+        return 1;
+      }
+    } catch {
+      /* no heartbeat yet — treat as healthy */
+    }
+    return 0;
+  }
   if (sub === "install" || sub === "uninstall" || sub === "logs") {
     return cmdServeDaemon(sub, rest.slice(1));
   }
@@ -1295,19 +1363,37 @@ export async function cmdServe(rest: string[]): Promise<number> {
     }
   }
 
+  // Liveness heartbeat (WebRTC daemons only — that's where the native stack can
+  // freeze the loop). If the event loop wedges, this interval stops firing, the
+  // file goes stale, and oxmgr's --health-cmd (ay serve healthcheck) restarts us.
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  if (wantWebrtc) {
+    const stamp = () => {
+      try {
+        // Atomic: write a temp file then rename over the target, so a concurrent
+        // `ay serve healthcheck` reader never sees a truncated/partial timestamp.
+        const tmp = `${heartbeatPath()}.tmp`;
+        writeFileSync(tmp, String(Date.now()));
+        renameSync(tmp, heartbeatPath());
+      } catch {
+        /* best effort */
+      }
+    };
+    stamp();
+    heartbeat = setInterval(stamp, HEARTBEAT_WRITE_MS);
+  }
+
   process.stdout.write(`(Ctrl-C to stop)\n`);
 
+  const shutdown = (resolve: () => void) => {
+    if (heartbeat) clearInterval(heartbeat);
+    closeShare?.();
+    server?.stop();
+    resolve();
+  };
   await new Promise<void>((resolve) => {
-    process.on("SIGINT", () => {
-      closeShare?.();
-      server?.stop();
-      resolve();
-    });
-    process.on("SIGTERM", () => {
-      closeShare?.();
-      server?.stop();
-      resolve();
-    });
+    process.on("SIGINT", () => shutdown(resolve));
+    process.on("SIGTERM", () => shutdown(resolve));
   });
 
   return 0;
