@@ -65,6 +65,7 @@ export type AgentCliConfig = {
   enterExclude?: RegExp[]; // array of regex to exclude from auto-enter (even if enter matches)
   typingRespond?: { [message: string]: RegExp[] }; // type specified message to a specified pattern
   autoRetry?: RegExp[]; // recoverable API errors (overload/rate-limit/usage-limit): type "retry" with exponential backoff (up to 8h) instead of exiting
+  needsInput?: RegExp[]; // agent is blocked on an interactive selection menu it did NOT auto-resolve; surfaced as the `needs_input` state by `ay ls`/`ay status` (query-time only — not consumed by the run loop)
 
   // crash/resuming-session behaviour
   restoreArgs?: string[]; // arguments to continue the session when crashed
