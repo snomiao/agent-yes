@@ -40,6 +40,20 @@ export function buildAgentForest(records: GlobalPidRecord[]): ForestNode[] {
     if (parent && parent !== n) parent.children.push(n);
     else roots.push(n);
   }
+  // Cycle safety: a 2+ node parent_pid cycle (possible only via pid reuse across a
+  // reboot) links every member as someone's child, so none become roots and they'd
+  // vanish from the output entirely. Mark everything reachable from the current
+  // roots, then append any unreached node as its own root; flattenForest's visited
+  // guard then renders each exactly once. Mirrors the console JS recovery pass
+  // (lab/ui/console-logic.js agentForestNodes).
+  const seen = new Set<ForestNode>();
+  const mark = (n: ForestNode) => {
+    if (seen.has(n)) return;
+    seen.add(n);
+    n.children.forEach(mark);
+  };
+  roots.forEach(mark);
+  for (const n of nodes) if (!seen.has(n)) roots.push(n);
   return roots;
 }
 
