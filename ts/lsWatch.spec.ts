@@ -1,4 +1,4 @@
-import { expect, test } from "bun:test";
+import { expect, test } from "vitest";
 import { diffLsStates, type LsAgentState } from "./lsWatch.ts";
 
 const agent = (
