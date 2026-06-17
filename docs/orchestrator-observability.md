@@ -38,6 +38,20 @@ the parent only noticed by manually `ay tail`-ing it. Real incident
    `ay ls --json` already reports — consumers parse one schema. Backward-compat:
    a new flag only; `ay ls` with no `--watch` is byte-for-byte unchanged.
 
+5. **`ay result` — structured completion envelope.** A fan-out parent pulls a
+   sub-agent's outcome (branch, commit SHAs, changed files, status, blockers,
+   summary) as machine-readable JSON instead of grepping `ay tail` — the
+   agent-yes analog of an in-harness Agent tool's `<result>` block. Two verbs:
+   the sub-agent runs `ay result set '<json>'` (or pipes JSON / plain text) to
+   deposit its envelope; the parent runs `ay result <keyword>` to pull it.
+   `--wait` blocks until the envelope lands. Keyed by the wrapper pid the agent
+   already knows via the injected `AGENT_YES_PID`, so depositing needs **no**
+   spawn-time wiring in either runtime. Stored to
+   `$AGENT_YES_HOME/results/<pid>.json` (`ts/resultEnvelope.ts` is the pure,
+   unit-tested core: path math + input normalization). Read-side exit codes let
+   an orchestrator branch without parsing: `0` envelope found, `1` agent stopped
+   without one (done, no result), `2` no envelope yet / `--wait` timed out.
+
 ## Design decisions — what, why, and what was deliberately NOT done
 
 The parent's brief proposed (P1) adding `needs_input` to a persisted STATUS enum
@@ -112,11 +126,33 @@ Each left out with a one-line reason; none is required to fix the reported pain.
   auto-routing menus (e.g. always pick a default, or forward the question to the
   parent over a channel). _Why not now:_ needs a policy model + a safe default;
   observing the block first (shipped) is the prerequisite.
-- **[P4] Structured result envelope + `ay result <pid>`.** Have the agent emit a
-  machine-readable completion record (branch, commit SHA, changed files, summary)
-  instead of the parent grepping `ay tail`. _Why not now:_ requires a convention
-  for agents to emit the envelope (sentinel block or a written file); larger and
-  orthogonal to observability.
+- **[P4] Structured result envelope + `ay result <keyword>`.** ✅ Shipped (branch
+  `feat/state-events`) — see "What shipped next" #5 above. Key design calls:
+  - **Persisted file, NOT a query-time screen scrape.** `needs_input`/activity
+    derive from the live screen because they describe _now_. A completion record
+    is the opposite: it is read AFTER the agent is done — exactly when its screen
+    is gone and its log may be reaped. It must outlive the process, so it is a
+    persisted artifact (`results/<pid>.json`) written once and read verbatim.
+    This is a deliberate inversion of the needs_input philosophy, justified by
+    the different lifetime of the data.
+  - **Explicit deposit (`ay result set`), NOT a sentinel scraped from `ay tail`.**
+    Scraping a fenced JSON block out of the xterm-rendered log is fragile: the
+    PTY reflows long lines at terminal width, so SHAs/paths in a wrapped envelope
+    would corrupt. An explicit write keeps the JSON byte-exact. It also composes:
+    the agent emits structured data the moment it knows it, not whenever a poller
+    next renders the screen.
+  - **Keyed by the existing `AGENT_YES_PID`, so zero spawn-time changes.** Both
+    runtimes already inject it; the agent self-identifies. No Rust change, no new
+    env var, no `pids.jsonl` schema change — purely additive TS subcommand + a
+    new `results/` dir. Fully backward compatible.
+  - **Read-side exit codes encode the three states** (found / stopped-without /
+    pending) so an orchestrator branches on `$?` without parsing JSON; `--wait`
+    turns it into the "await the sub-agent's result" primitive.
+  - _Deliberately NOT done:_ inlining the envelope into `ay ls --watch` events.
+    Keeping the watch stream a lightweight transition log and the envelope a
+    pull-on-demand artifact avoids bloating every event with a (usually absent)
+    result and keeps the watch schema byte-for-byte unchanged. A consumer that
+    sees a `stopped` transition simply pulls `ay result <pid>` for the payload.
 - **[P5] `ay wait --until=<state,...>`.** Generalize `--wait` to arbitrary
   target-state sets and multiple pids at once. _Why not now:_ `--wait` covers the
   common "needs me" case; generalize once real call-sites demand it.
