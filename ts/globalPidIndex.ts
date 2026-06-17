@@ -41,6 +41,12 @@ export interface GlobalPidRecord {
   // known until after spawn), so this maps that env value back to the agent's
   // canonical record — see resolveSender() in subcommands.ts.
   wrapper_pid?: number | null;
+  // The AGENT_YES_PID this wrapper *inherited* from its own environment when it
+  // started — i.e. the wrapper_pid of the PARENT agent that spawned this one (a
+  // nested `ay` launched from inside another agent). Null for top-level agents
+  // started from a human shell. Builds the agent>subagent tree: a child links to
+  // its parent via child.parent_pid === parent.wrapper_pid. See buildAgentForest.
+  parent_pid?: number | null;
 }
 
 /**

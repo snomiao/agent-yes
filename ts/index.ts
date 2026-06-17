@@ -350,6 +350,12 @@ export default async function agentYes({
 
   // Spawn the agent CLI process
   const ptyEnv = { ...(env ?? (process.env as Record<string, string>)) };
+  // Capture the AGENT_YES_PID we INHERITED (the wrapper of the parent agent that
+  // launched this nested `ay`) before we overwrite it with our own pid below.
+  // null when started from a human shell → this agent is a tree root.
+  const inheritedAyPid = Number(ptyEnv.AGENT_YES_PID);
+  const parentPid =
+    Number.isInteger(inheritedAyPid) && inheritedAyPid > 0 ? inheritedAyPid : undefined;
   ptyEnv.AGENT_YES_PID = String(process.pid);
   const ptyOptions = {
     name: "xterm-color",
@@ -390,6 +396,8 @@ export default async function agentYes({
       // We inject our own pid as AGENT_YES_PID into the agent's env above; record
       // it so a child `ay send` can map that env value back to this agent.
       wrapperPid: process.pid,
+      // The parent agent's wrapper pid (inherited AGENT_YES_PID), for the tree.
+      parentPid,
     });
   } catch (error) {
     logger.warn(`[pidStore] Failed to register process ${shell.pid}:`, error);

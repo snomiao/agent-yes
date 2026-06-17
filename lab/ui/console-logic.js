@@ -129,6 +129,15 @@ export function gitLabel(e) {
   return parts.join(" ");
 }
 
+// Task-progress badge ("2/5") from the agent's parsed todo block (e.tasks =
+// { done, total }, computed live in /api/ls). Empty string when no todo block was
+// confidently detected — the badge is omitted entirely, never shown as "0/0".
+export function taskLabel(e) {
+  const t = e.tasks;
+  if (!t || typeof t.total !== "number" || t.total <= 0) return "";
+  return `${t.done}/${t.total}`;
+}
+
 // Human age of an agent ("12s" / "5m" / "3h"). `now` is injectable so tests
 // don't depend on the wall clock; the browser calls age(e) and gets Date.now().
 export function age(e, now = Date.now()) {
@@ -173,6 +182,138 @@ export function matches(e, toks) {
     }
     return hay.toLowerCase().includes(tok);
   });
+}
+
+// Box-drawing rail prefix for a node given the "is-last-child?" flags of each
+// ancestor (root→node). depth 0 → "". Shared by the agent forest and the layered
+// room/peer tree so all rails line up: "│  ", "   " for ancestors, "├ "/"└ " here.
+function railPrefix(ancestorsLast) {
+  const depth = ancestorsLast.length;
+  let s = "";
+  for (let i = 0; i < depth - 1; i++) s += ancestorsLast[i] ? "   " : "│  ";
+  if (depth > 0) s += ancestorsLast[depth - 1] ? "└ " : "├ ";
+  return s;
+}
+
+// Stable ordered grouping: [[key, items[]], ...] in first-seen key order.
+function groupBy(arr, keyFn) {
+  const m = new Map();
+  for (const e of arr) {
+    const k = keyFn(e);
+    if (!m.has(k)) m.set(k, []);
+    m.get(k).push(e);
+  }
+  return [...m.entries()];
+}
+
+// Build the agent>subagent forest for ONE host's entries (pids are only unique
+// per machine, so the caller must pre-scope by host). Links via parent_pid ===
+// wrapper_pid. Returns root nodes { entry, children }, sibling/root order = input
+// order. A parent_pid cycle can't drop nodes: anything not reached from a root is
+// appended as its own root.
+function agentForestNodes(list) {
+  const byWrapper = new Map();
+  for (const e of list) if (e.wrapper_pid != null) byWrapper.set(e.wrapper_pid, e);
+  const nodeOf = new Map(list.map((e) => [e, { entry: e, children: [] }]));
+  const roots = [];
+  for (const e of list) {
+    const parent = e.parent_pid != null ? byWrapper.get(e.parent_pid) : null;
+    if (parent && parent !== e) nodeOf.get(parent).children.push(nodeOf.get(e));
+    else roots.push(nodeOf.get(e));
+  }
+  // Cycle safety: collect nodes reachable from roots; append the rest as roots.
+  const seen = new Set();
+  const mark = (n) => {
+    if (seen.has(n)) return;
+    seen.add(n);
+    n.children.forEach(mark);
+  };
+  roots.forEach(mark);
+  for (const e of list) if (!seen.has(nodeOf.get(e))) roots.push(nodeOf.get(e));
+  return roots;
+}
+
+// Order entries as agent>subagent forests so a nested `ay` (one agent spawning
+// another) renders indented under its parent. SCOPED PER HOST. Returns a NEW
+// array in depth-first order; each entry is shallow-copied with `_branch` (a
+// box-drawing tree prefix like "│  └ ") and `_depth`. A fleet with no nesting
+// renders exactly as before (every row a root, empty `_branch`).
+export function forestOrder(entries) {
+  const out = [];
+  for (const [, list] of groupBy(entries, (e) => e._host || "")) {
+    const seen = new Set();
+    const walk = (node, ancestorsLast) => {
+      if (seen.has(node)) return; // break a pathological parent_pid cycle
+      seen.add(node);
+      out.push(
+        Object.assign({}, node.entry, {
+          _branch: railPrefix(ancestorsLast),
+          _depth: ancestorsLast.length,
+        }),
+      );
+      node.children.forEach((c, i) =>
+        walk(c, ancestorsLast.concat(i === node.children.length - 1)),
+      );
+    };
+    for (const r of agentForestNodes(list)) walk(r, []);
+  }
+  return out;
+}
+
+// Build the full console hierarchy — signalling-server > rooms > peers(hosts) >
+// agents > subagents — and flatten it into ordered render rows, VSCode-explorer
+// style: a container layer (room/peer) with a single node in its scope is HIDDEN
+// (its children float up a level); a layer with ≥2 siblings becomes a tree with
+// ├ └ │ rails. Agents always get their own row, with their subagent forest nested
+// beneath. The server layer is implicit (always one) so it never shows.
+//
+// Returns [{ kind:'room'|'peer'|'agent', label, entry, branch, depth }] in
+// display order. Headers (room/peer) are non-selectable; only 'agent' rows are.
+// A purely local fleet (one room, one unlabelled host) yields only agent rows —
+// identical to forestOrder — so the common case stays a plain agent tree.
+export function layeredRows(entries) {
+  const multiRoom = new Set(entries.map((e) => e._room || "")).size > 1;
+
+  // Container nodes carry a `kind`/`label` for headers; agent nodes carry an
+  // `entry`. A hidden layer simply isn't created — its agents/peers attach to the
+  // parent — which is what makes single-node layers vanish.
+  const roomNodes = [];
+  for (const [rid, re] of groupBy(entries, (e) => e._room || "")) {
+    const peerGroups = groupBy(re, (e) => e._host || "");
+    const multiPeer = peerGroups.length > 1;
+    const underRoom = [];
+    for (const [host, pe] of peerGroups) {
+      const agentNodes = agentForestNodes(pe).map(toAgentNode);
+      if (multiPeer && host) underRoom.push({ kind: "peer", label: host, children: agentNodes });
+      else underRoom.push(...agentNodes); // single/unlabelled peer hidden
+    }
+    if (multiRoom && rid) roomNodes.push({ kind: "room", label: rid, children: underRoom });
+    else roomNodes.push(...underRoom); // single room hidden
+  }
+
+  const rows = [];
+  const seen = new Set();
+  const walk = (node, ancestorsLast) => {
+    if (seen.has(node)) return; // break a pathological parent_pid cycle
+    seen.add(node);
+    rows.push({
+      kind: node.kind,
+      label: node.label,
+      entry: node.entry,
+      branch: railPrefix(ancestorsLast),
+      depth: ancestorsLast.length,
+    });
+    (node.children || []).forEach((c, i) =>
+      walk(c, ancestorsLast.concat(i === node.children.length - 1)),
+    );
+  };
+  for (const r of roomNodes) walk(r, []);
+  return rows;
+}
+
+// Wrap an agent forest node { entry, children } into a layered-tree node.
+function toAgentNode(n) {
+  return { kind: "agent", entry: n.entry, children: n.children.map(toAgentNode) };
 }
 
 // Next selection index when stepping the list by `dir` (+1 down / -1 up).
