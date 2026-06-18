@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>agent-yes — drive any AI coding CLI on autopilot</title>
+    <meta
+      name="description"
+      content="agent-yes wraps Claude, Codex, Gemini and more, auto-answering their prompts so they run unattended — and ay serve streams a live, end-to-end-encrypted console to your browser."
+    />
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%E2%9C%93%3C/text%3E%3C/svg%3E" />
+    <style>
+      :root {
+        --bg: #0d1117;
+        --panel: #161b22;
+        --border: #30363d;
+        --fg: #e6edf3;
+        --muted: #9198a1;
+        --accent: #2f81f7;
+        --green: #3fb950;
+        --code: #1f2530;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #ffffff; --panel: #f6f8fa; --border: #d0d7de; --fg: #1f2328;
+          --muted: #59636e; --accent: #0969da; --green: #1a7f37; --code: #eff2f5;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { margin: 0; }
+      body {
+        background: var(--bg); color: var(--fg);
+        font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      .wrap { max-width: 760px; margin: 0 auto; padding: 0 20px; }
+      header { display: flex; align-items: center; justify-content: space-between; padding: 22px 0; }
+      .brand { font-weight: 700; font-size: 18px; letter-spacing: -0.01em; }
+      .brand .tick { color: var(--green); }
+      nav a { color: var(--muted); margin-left: 18px; font-size: 14px; }
+      .hero { padding: 56px 0 40px; }
+      h1 { font-size: clamp(30px, 6vw, 46px); line-height: 1.1; letter-spacing: -0.02em; margin: 0 0 16px; }
+      .sub { font-size: clamp(16px, 2.4vw, 19px); color: var(--muted); max-width: 60ch; margin: 0 0 28px; }
+      .cta { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+      .btn {
+        display: inline-block; padding: 11px 20px; border-radius: 8px; font-weight: 600; font-size: 15px;
+        background: var(--accent); color: #fff; border: 1px solid transparent;
+      }
+      .btn:hover { text-decoration: none; filter: brightness(1.08); }
+      .btn.ghost { background: transparent; color: var(--fg); border-color: var(--border); }
+      .install { margin: 14px 0 0; }
+      .install code, pre code { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      pre {
+        background: var(--code); border: 1px solid var(--border); border-radius: 8px;
+        padding: 14px 16px; overflow-x: auto; font-size: 13.5px; margin: 8px 0;
+      }
+      .muted { color: var(--muted); }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; margin: 36px 0; }
+      .card { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px 18px; }
+      .card h3 { margin: 0 0 6px; font-size: 15px; }
+      .card p { margin: 0; color: var(--muted); font-size: 14px; }
+      footer { border-top: 1px solid var(--border); margin-top: 48px; padding: 24px 0 40px; color: var(--muted); font-size: 13px; }
+      .clis { color: var(--muted); font-size: 13px; margin-top: 10px; }
+      .clis b { color: var(--fg); font-weight: 600; }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header>
+        <div class="brand"><span class="tick">✓</span> agent-yes</div>
+        <nav>
+          <a href="/w/">Console</a>
+          <a href="/blog/">Blog</a>
+          <a href="https://github.com/snomiao/agent-yes">GitHub</a>
+        </nav>
+      </header>
+
+      <section class="hero">
+        <h1>Drive any AI coding CLI on autopilot.</h1>
+        <p class="sub">
+          agent-yes wraps Claude, Codex, Gemini, Copilot and more — auto-answering
+          their prompts so they keep working unattended. Then <code>ay serve</code>
+          streams a live, end-to-end-encrypted console to your browser so you can
+          watch, steer, and spawn agents from anywhere.
+        </p>
+        <div class="cta">
+          <a class="btn" href="/w/">Open the console →</a>
+          <a class="btn ghost" href="https://github.com/snomiao/agent-yes">Star on GitHub</a>
+        </div>
+        <div class="install">
+          <pre><code># macOS / Linux
+curl -fsSL https://agent-yes.com/setup.sh | sh
+
+# Windows (PowerShell)
+powershell -c "irm https://agent-yes.com/setup.ps1 | iex"</code></pre>
+          <div class="clis">
+            Wrappers: <b>claude-yes</b> · <b>codex-yes</b> · <b>gemini-yes</b> ·
+            <b>copilot-yes</b> · <b>cursor-yes</b> · <b>qwen-yes</b> · <b>grok-yes</b> — or just <b>ay</b>.
+          </div>
+        </div>
+      </section>
+
+      <section class="grid">
+        <div class="card">
+          <h3>Auto-yes the prompts</h3>
+          <p>Trust dialogs, theme pickers, "continue?", overload retries — handled, so the agent never stalls waiting on you.</p>
+        </div>
+        <div class="card">
+          <h3>Live console, anywhere</h3>
+          <p><code>ay serve</code> shares a WebRTC console at <a href="/w/">/w/</a> — list, tail, and steer every agent from your phone or laptop.</p>
+        </div>
+        <div class="card">
+          <h3>End-to-end encrypted</h3>
+          <p>The share link's secret never reaches the signaling server; traffic is AES-GCM between your browser and your machine.</p>
+        </div>
+        <div class="card">
+          <h3>Many CLIs, one wrapper</h3>
+          <p>One tool across Claude, Codex, Gemini, Copilot, Cursor, Qwen, Grok — same flags, same live console.</p>
+        </div>
+      </section>
+
+      <footer class="wrap" style="padding-left:0;padding-right:0">
+        <div>
+          <a href="/w/">Console</a> · <a href="/blog/">Blog</a> ·
+          <a href="https://github.com/snomiao/agent-yes">GitHub</a> ·
+          <a href="https://www.npmjs.com/package/agent-yes">npm</a>
+        </div>
+        <div style="margin-top:8px">MIT · made by <a href="https://github.com/snomiao">snomiao</a></div>
+      </footer>
+    </div>
+  </body>
+</html>

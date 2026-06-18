@@ -11,12 +11,13 @@
   // workflow is how agent-yes.com ended up serving a stale console). public/ is
   // a generated copy and is gitignored. Runs from this config's directory.
   "build": {
-    // Copy index.html + EVERY UI script (room-client.js, console-logic.js,
-    // e2e.js, …) plus the install scripts the landing page links to
-    // (agent-yes.com/setup.sh | setup.ps1) — a fixed list silently breaks when
-    // the UI gains a new import, and the install scripts 404'd because they were
-    // never synced into ./public.
-    "command": "mkdir -p ./public && cp ../index.html ../*.js ../setup.sh ../setup.ps1 ./public/",
+    // The console web-app lives under /w/ (a stable, PWA-scopable base path) so /
+    // is free for the marketing landing page. Copy the app (index.html + EVERY UI
+    // script: room-client.js, console-logic.js, e2e.js, …) into ./public/w/, the
+    // landing page to ./public/index.html (served at /), and the install scripts to
+    // ./public/ (agent-yes.com/setup.sh | setup.ps1, linked from the landing). A
+    // glob (../*.js) avoids silently breaking when the UI gains a new import.
+    "command": "mkdir -p ./public/w && cp ../index.html ../*.js ./public/w/ && cp ../landing.html ./public/index.html && cp ../setup.sh ../setup.ps1 ./public/",
   },
   // Static console UI (served for every non-WebSocket request).
   "assets": { "directory": "./public", "binding": "ASSETS" },

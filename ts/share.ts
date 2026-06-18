@@ -280,7 +280,8 @@ export async function startShare(
   let S = firstS;
 
   const wsScheme = host.startsWith("localhost") || host.startsWith("127.") ? "ws" : "wss";
-  const ui = host === "s.agent-yes.com" ? "https://agent-yes.com" : "http://localhost:7778";
+  // The console web-app is served under /w/ (landing page lives at /).
+  const ui = host === "s.agent-yes.com" ? "https://agent-yes.com/w" : "http://localhost:7778/w";
   const suffix = host === "s.agent-yes.com" ? "" : "@" + host;
   const mkLink = () => `${ui}/#${room}:${MARKER}${S}${suffix}`;
   let authToken = await deriveAuthToken(S, room, host);
