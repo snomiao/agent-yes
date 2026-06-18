@@ -40,7 +40,7 @@ function heartbeatPath(): string {
   return path.join(agentYesHome(), ".serve-heartbeat");
 }
 const HEARTBEAT_WRITE_MS = 5_000;
-const HEARTBEAT_STALE_MS = 30_000; // event loop is wedged if no stamp this long
+const HEARTBEAT_STALE_MS = 15_000; // event loop is wedged if no stamp this long (3 missed)
 
 async function loadOrCreateToken(tokenFlag?: string): Promise<string> {
   if (tokenFlag) return tokenFlag;
@@ -337,7 +337,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     // WebRTC daemons get an oxmgr health watchdog: the native WebRTC stack can
     // freeze the JS event loop (host answers nobody, no in-process timer can
     // recover it), so an EXTERNAL probe of the serve heartbeat is the only thing
-    // that can detect+restart it. ~3 misses at 20s ≈ 1min to auto-recover.
+    // that can detect+restart it. 15s stale + 3 misses at 10s ≈ 45s to auto-recover.
     const webrtcDaemon = effArgs.some((a) => a.startsWith("--webrtc") || a.startsWith("--share"));
     const oxmgrHealth =
       webrtcDaemon && mgr.id === "oxmgr"
@@ -345,9 +345,9 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
             "--health-cmd",
             ayServeArgv(["healthcheck"]).join(" "),
             "--health-interval",
-            "20",
-            "--health-timeout",
             "10",
+            "--health-timeout",
+            "5",
             "--health-max-failures",
             "3",
           ]
