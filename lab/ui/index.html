@@ -4,6 +4,18 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>agent-yes · console</title>
+    <!-- PWA: installable console under /w/ (manifest scope is /w/). The service
+         worker is network-first so it never serves a stale wire protocol — the
+         cache is only an offline-launch fallback. -->
+    <meta name="theme-color" content="#0d1117" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icon.svg" />
+    <link rel="apple-touch-icon" href="./icon.svg" />
+    <script>
+      if ("serviceWorker" in navigator) {
+        addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
+      }
+    </script>
     <style>
       /* Palette borrowed from codehost (GitHub-dark) so the two feel like one system. */
       :root {

@@ -59,7 +59,11 @@
     "lab/ui/e2e.d.ts",
     "lab/ui/e2e.js",
     "lab/ui/index.html",
+    "lab/ui/landing.html",
     "lab/ui/room-client.js",
+    "lab/ui/sw.js",
+    "lab/ui/manifest.webmanifest",
+    "lab/ui/icon.svg",
     "lab/ui/blog/**"
   ],
   "type": "module",

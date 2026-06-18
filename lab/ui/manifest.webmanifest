@@ -1,0 +1,14 @@
+{
+  "name": "agent-yes console",
+  "short_name": "agent-yes",
+  "description": "Live, end-to-end-encrypted console for your agent-yes agents.",
+  "start_url": "/w/",
+  "scope": "/w/",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" },
+    { "src": "./icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable" }
+  ]
+}
