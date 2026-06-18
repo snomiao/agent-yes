@@ -53,11 +53,22 @@ describe("repoBranch", () => {
       owner: "snomiao",
       repo: "agent-yes",
       branch: "main",
+      sub: "",
     });
   });
   it("returns null when the cwd doesn't match the layout", () => {
     expect(repoBranch(agent({ cwd: "/tmp/scratch" }))).toBeNull();
     expect(repoBranch(agent({ cwd: "" }))).toBeNull();
+  });
+  it("surfaces a submodule leaf below the worktree as `sub`", () => {
+    // cwd inside a submodule keeps the superproject's owner/repo/branch (git
+    // resolves it that way) but exposes the submodule dir so it's distinguishable.
+    expect(repoBranch(agent({ cwd: "/x/symval/symval/tree/share/lib/bot" }))).toEqual({
+      owner: "symval",
+      repo: "symval",
+      branch: "share",
+      sub: "bot",
+    });
   });
 });
 
@@ -97,6 +108,7 @@ describe("identFields", () => {
       owner: "snomiao",
       repo: "agent-yes",
       branch: "main",
+      sub: "",
     });
   });
   it("leaves device empty for a local agent and path empty off-layout", () => {
@@ -106,6 +118,7 @@ describe("identFields", () => {
       owner: "",
       repo: "",
       branch: "",
+      sub: "",
     });
   });
 });
@@ -153,6 +166,58 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
     // owner+repo uniform → blanked; user+host+branch differ.
     expect(compactIdent(list[0], ctx)).toBe("a@h1://mai");
     expect(compactIdent(list[1], ctx)).toBe("b@h2://dev");
+  });
+  it("appends a submodule leaf with → when the cwd is nested", () => {
+    const list = [
+      agent({ cwd: "/x/symval/symval/tree/share/lib/bot" }),
+      agent({ cwd: "/x/symval/symval/tree/share/lib/api" }),
+    ];
+    const ctx = identContext(list);
+    // owner/repo/branch uniform → blanked; only the submodule leaf differs.
+    expect(compactIdent(list[0], ctx)).toBe("//→bot");
+    expect(compactIdent(list[1], ctx)).toBe("//→api");
+  });
+});
+
+describe("compactIdent (parent-relative omission in a tree)", () => {
+  it("omits fields a subagent shares with its tree parent, keeping the submodule delta", () => {
+    const parent = agent({ cwd: "/x/symval/symval/tree/share" });
+    const list = [
+      parent,
+      agent({ cwd: "/x/symval/symval/tree/share/lib/bot" }),
+      agent({ cwd: "/x/symval/symval/tree/syn" }),
+    ];
+    const ctx = identContext(list);
+    // Same owner/repo/branch as the parent → blanked; only →bot remains.
+    expect(compactIdent(list[1], ctx, 3, parent)).toBe("//→bot");
+    // owner/repo are uniform across the whole list (so blanked anyway), but the
+    // branch differs from the parent → kept, proving the parent rule is per-field.
+    expect(compactIdent(list[2], ctx, 3, parent)).toBe("//syn");
+  });
+  it("hides the identity entirely for a subagent in the very same checkout", () => {
+    const parent = agent({ cwd: "/x/symval/symval/tree/share" });
+    const child = agent({ cwd: "/x/symval/symval/tree/share" });
+    const ctx = identContext([parent, child, agent()]);
+    const id = compactIdent(child, ctx, 3, parent);
+    expect(id).toBe("//");
+    expect(hasIdent(id)).toBe(false);
+  });
+});
+
+describe("layeredRows parentEntry", () => {
+  it("links a subagent row to its superagent's entry, null for roots/headers", () => {
+    const root = agent({ pid: 1, wrapper_pid: 1, cwd: "/x/symval/symval/tree/share" });
+    const child = agent({
+      pid: 2,
+      wrapper_pid: 2,
+      parent_pid: 1,
+      cwd: "/x/symval/symval/tree/share/lib/bot",
+    });
+    const rows = layeredRows([root, child]);
+    const rootRow = rows.find((r) => r.entry?.pid === 1);
+    const childRow = rows.find((r) => r.entry?.pid === 2);
+    expect(rootRow?.parentEntry).toBeNull();
+    expect(childRow?.parentEntry).toBe(root);
   });
 });
 

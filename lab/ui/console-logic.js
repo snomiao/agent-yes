@@ -14,9 +14,17 @@
 export const cliLabel = (e) => (e.cli && e.cli !== "claude" ? e.cli : "");
 
 // Parse owner/repo/branch from a cwd like .../ws/<owner>/<repo>/tree/<branch>.
+// A cwd inside a git submodule keeps trailing path after the worktree branch
+// (e.g. .../tree/share/lib/bot, where lib/bot is a submodule). The owner/repo/
+// branch still describe the superproject worktree — git itself resolves a
+// submodule cwd's identity to the superproject — so we surface the submodule's
+// leaf dir as `sub` to keep nested repos distinguishable. `sub` is "" when the
+// cwd is the worktree root.
 export function repoBranch(e) {
-  const m = /\/([^/]+)\/([^/]+)\/tree\/([^/]+)/.exec(e.cwd || "");
-  return m ? { owner: m[1], repo: m[2], branch: m[3] } : null;
+  const m = /\/([^/]+)\/([^/]+)\/tree\/([^/]+)(\/.*)?$/.exec(e.cwd || "");
+  if (!m) return null;
+  const sub = (m[4] || "").split("/").filter(Boolean).pop() || "";
+  return { owner: m[1], repo: m[2], branch: m[3], sub };
 }
 
 // Identity string for the left panel. cap=true → repo/branch each clipped to
@@ -25,7 +33,8 @@ export function ident(e, cap) {
   const rb = repoBranch(e);
   if (!rb) return "";
   const c = (s) => (cap && s.length > 3 ? s.slice(0, 3) : s);
-  return `${c(rb.repo)}/${c(rb.branch)}`;
+  const sub = rb.sub ? `→${rb.sub}` : "";
+  return `${c(rb.repo)}/${c(rb.branch)}${sub}`;
 }
 
 // ---- device-aware identity (multi-room) -----------------------------------
@@ -46,11 +55,18 @@ export function deviceParts(host) {
 // The five identity fields, in display order, for one agent.
 export function identFields(e) {
   const d = deviceParts(e._host);
-  const rb = repoBranch(e) || { owner: "", repo: "", branch: "" };
-  return { user: d.user, host: d.host, owner: rb.owner, repo: rb.repo, branch: rb.branch };
+  const rb = repoBranch(e) || { owner: "", repo: "", branch: "", sub: "" };
+  return {
+    user: d.user,
+    host: d.host,
+    owner: rb.owner,
+    repo: rb.repo,
+    branch: rb.branch,
+    sub: rb.sub,
+  };
 }
 
-const IDENT_ORDER = ["user", "host", "owner", "repo", "branch"];
+const IDENT_ORDER = ["user", "host", "owner", "repo", "branch", "sub"];
 
 // Precompute, over the whole shown list: which fields are uniform (identical for
 // every agent — so they can be omitted) and whether any device info exists at
@@ -69,11 +85,22 @@ export function identContext(entries) {
 // machine-parseable: e.g. all on one device → "@:age/mai", a mixed-device list →
 // "sno@tak:age/mai". A purely local list (no devices anywhere) falls back to the
 // legacy "own/rep/bra" with no device prefix.
-export function compactIdent(e, ctx, cap = 3) {
+//
+// `parent` is this row's tree parent entry (a subagent's superagent), when it
+// has one. A field that matches the parent's is ALSO blanked: the nesting
+// already conveys it, so a subagent in the same worktree as its parent shows
+// only what differs — often just the submodule leaf (e.g. "//→bot"), or nothing
+// at all (hidden by hasIdent) when it's the very same checkout.
+export function compactIdent(e, ctx, cap = 3, parent = null) {
   const m = identFields(e);
+  const p = parent ? identFields(parent) : null;
   const clip = (s) => (cap && s.length > cap ? s.slice(0, cap) : s);
-  const v = (f) => (ctx.uniform[f] ? "" : clip(m[f]));
-  const path = `${v("owner")}/${v("repo")}/${v("branch")}`;
+  const blank = (f) => ctx.uniform[f] || (p != null && p[f] === m[f]);
+  const v = (f) => (blank(f) ? "" : clip(m[f]));
+  // Submodule leaf is shown in full (the finest-grain distinguisher) and joined
+  // with → rather than / so it reads as "inside that worktree".
+  const sub = blank("sub") ? "" : m.sub;
+  const path = `${v("owner")}/${v("repo")}/${v("branch")}${sub ? `→${sub}` : ""}`;
   return ctx.anyDevice ? `${v("user")}@${v("host")}:${path}` : path;
 }
 
@@ -81,7 +108,8 @@ export function compactIdent(e, ctx, cap = 3) {
 // prefix only when this agent actually has device info.
 export function fullIdent(e) {
   const m = identFields(e);
-  const path = `${m.owner}/${m.repo}/${m.branch}`;
+  const sub = m.sub ? `→${m.sub}` : "";
+  const path = `${m.owner}/${m.repo}/${m.branch}${sub}`;
   return m.user || m.host ? `${m.user}@${m.host}:${path}` : path;
 }
 
@@ -108,6 +136,7 @@ export function tagsFor(e) {
   const rb = repoBranch(e);
   if (rb) {
     t.push(["repo", `${rb.owner}/${rb.repo}`], ["wt", rb.branch]);
+    if (rb.sub) t.push(["sub", rb.sub]); // submodule leaf, when cwd is nested
   }
   const cli = cliLabel(e);
   if (cli) t.push(["cli", cli]);
@@ -284,7 +313,8 @@ export function layeredRows(entries) {
     const underRoom = [];
     for (const [host, pe] of peerGroups) {
       const agentNodes = agentForestNodes(pe).map(toAgentNode);
-      if (multiPeer && host) underRoom.push({ kind: "peer", label: host, children: agentNodes });
+      if (multiPeer && host)
+        underRoom.push({ kind: "peer", label: host, room: rid, host, children: agentNodes });
       else underRoom.push(...agentNodes); // single/unlabelled peer hidden
     }
     if (multiRoom && rid) roomNodes.push({ kind: "room", label: rid, children: underRoom });
@@ -293,21 +323,28 @@ export function layeredRows(entries) {
 
   const rows = [];
   const seen = new Set();
-  const walk = (node, ancestorsLast) => {
+  // parentAgent carries the nearest ancestor agent's entry down the walk so a
+  // subagent row knows its superagent — used to omit identity fields the tree
+  // nesting already conveys (see compactIdent). Room/peer headers are skipped.
+  const walk = (node, ancestorsLast, parentAgent) => {
     if (seen.has(node)) return; // break a pathological parent_pid cycle
     seen.add(node);
     rows.push({
       kind: node.kind,
       label: node.label,
       entry: node.entry,
+      room: node.room, // peer headers: (room,host) keys the connection-type cache
+      host: node.host,
+      parentEntry: node.kind === "agent" ? parentAgent : null,
       branch: railPrefix(ancestorsLast),
       depth: ancestorsLast.length,
     });
+    const nextParent = node.kind === "agent" ? node.entry : parentAgent;
     (node.children || []).forEach((c, i) =>
-      walk(c, ancestorsLast.concat(i === node.children.length - 1)),
+      walk(c, ancestorsLast.concat(i === node.children.length - 1), nextParent),
     );
   };
-  for (const r of roomNodes) walk(r, []);
+  for (const r of roomNodes) walk(r, [], null);
   return rows;
 }
 

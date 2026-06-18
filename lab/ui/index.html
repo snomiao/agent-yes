@@ -124,6 +124,35 @@
       h1 .tag {
         color: var(--accent);
       }
+      /* Connection-path pill in the header: at a glance, is the terminal you're
+         watching on the fast local/lan path or the slow relayed path? */
+      h1 .ctype {
+        font-size: 10.5px;
+        font-weight: 600;
+        letter-spacing: 0;
+        vertical-align: middle;
+        margin-left: 8px;
+        padding: 1px 7px;
+        border-radius: 999px;
+        border: 1px solid currentColor;
+        text-transform: uppercase;
+        opacity: 0.9;
+      }
+      h1 .ctype[hidden] {
+        display: none;
+      }
+      /* Per-peer connection-type tag on peer-group headers in the tree. */
+      .ghead .ctag {
+        font-size: 9.5px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.02em;
+        margin-left: 6px;
+        padding: 0 5px;
+        border-radius: 999px;
+        border: 1px solid currentColor;
+        opacity: 0.85;
+      }
       .sub {
         color: var(--muted);
         font-size: 12.5px;
@@ -819,7 +848,13 @@
     <div class="app">
       <div class="left">
         <div class="head">
-          <h1><span class="tag">agent-yes</span> · console</h1>
+          <h1>
+            <span class="tag">agent-yes</span> · console<span
+              id="ctype"
+              class="ctype"
+              hidden
+            ></span>
+          </h1>
           <div class="sub">
             Live <code>ay ls</code> + per-agent tail &amp; send. Backed by <code>ay serve</code>.
           </div>
@@ -1474,6 +1509,169 @@
       const srcFor = (e) => (e && sources.get(e._room)) || sources.get(LOCAL) || null;
       const txFor = (e) => srcFor(e)?.tx || localTx;
 
+      // ---- connection-path classification (header [local/lan/p2p/relay] pill) ----
+      // Tells the user, at a glance, whether the terminal they're watching rides the
+      // fast direct path or a relayed one — the difference between snappy and laggy.
+      const isLoopbackIp = (ip) => ip === "::1" || /^127\./.test(ip);
+      const isPrivateIp = (ip) =>
+        /^10\./.test(ip) ||
+        /^192\.168\./.test(ip) ||
+        /^172\.(1[6-9]|2\d|3[01])\./.test(ip) ||
+        /^169\.254\./.test(ip) || // IPv4 link-local
+        /^fe80:/i.test(ip) || // IPv6 link-local
+        /^f[cd][0-9a-f]{2}:/i.test(ip) || // IPv6 ULA (fc00::/7)
+        /\.local$/i.test(ip); // mDNS host candidate (browser-obfuscated LAN IP)
+      // Inspect the selected ICE candidate pair: relay on either end = TURN-proxied
+      // (slow); otherwise the peer's address decides local vs lan vs p2p.
+      async function classifyPath(pc) {
+        if (!pc || typeof pc.getStats !== "function") return null;
+        try {
+          const stats = await pc.getStats();
+          let pairId = null;
+          stats.forEach((s) => {
+            if (s.type === "transport" && s.selectedCandidatePairId)
+              pairId = s.selectedCandidatePairId;
+          });
+          let pair = null;
+          stats.forEach((s) => {
+            if (
+              pairId
+                ? s.id === pairId
+                : s.type === "candidate-pair" && s.state === "succeeded" && s.nominated
+            )
+              pair = s;
+          });
+          if (!pair) return null;
+          let local = null,
+            remote = null;
+          stats.forEach((s) => {
+            if (s.id === pair.localCandidateId) local = s;
+            if (s.id === pair.remoteCandidateId) remote = s;
+          });
+          if (!local || !remote) return null;
+          if (local.candidateType === "relay" || remote.candidateType === "relay") return "relay";
+          if (local.candidateType === "host" && remote.candidateType === "host") {
+            const ip = remote.address || remote.ip || "";
+            if (isLoopbackIp(ip)) return "local";
+            if (isPrivateIp(ip)) return "lan";
+            return "p2p";
+          }
+          // srflx/prflx — reflexive (STUN), direct over the internet.
+          return "p2p";
+        } catch {
+          return null;
+        }
+      }
+      // Resolve the live RTCPeerConnection that carries a SPECIFIC agent. A codehost
+      // room holds one peer per host (room.rtcs keyed by peerId); byPid maps the
+      // agent's pid to its peerId, so each agent resolves to ITS host's connection —
+      // a VPS agent reads p2p while a tak.local agent in the same room reads lan.
+      function pcForAgent(s, e) {
+        if (!s) return null;
+        if (s.kind === "rtc") return s.client?.pc || null; // share room: one host
+        if (s.kind === "ch") {
+          const peerId = s.client?.byPid?.get(String(e?.pid));
+          return (peerId && s.client?.room?.rtcs?.get(peerId)?.pc) || null;
+        }
+        return null; // local ay-serve has no peer connection
+      }
+      // Two cache views, both filled from one classification pass:
+      //  - connKinds keyed by the true PEER (room + peerId) drives the header badge,
+      //    so two machines that happen to share a hostname never collide.
+      //  - hostKinds keyed by (room, host) drives the peer-group header tags, which
+      //    only ever render when hosts are already distinct.
+      const hostKeyOf = (e) => (e?._room || "") + " " + (e?._host || "");
+      function peerKeyOf(s, e) {
+        if (!s || s.id === LOCAL || s.kind == null) return LOCAL;
+        if (s.kind === "ch") {
+          const peerId = s.client?.byPid?.get(String(e?.pid));
+          return s.id + " " + (peerId || e?._host || "");
+        }
+        return s.id; // rtc share: one peer per room
+      }
+      const connKinds = new Map(); // peerKey -> "local" | "lan" | "p2p" | "relay"
+      const hostKinds = new Map(); // hostKey -> same (peer-header tags)
+      let connSig = "";
+      const CTYPE_COLORS = {
+        local: "var(--green)",
+        lan: "var(--green)",
+        p2p: "var(--amber)",
+        relay: "var(--red)",
+      };
+      const CTYPE_TIPS = {
+        local: "this machine (ay serve, local)",
+        lan: "direct over the local network (fast)",
+        p2p: "direct peer-to-peer over the internet (STUN)",
+        relay: "TURN-relayed — proxied through a server (slowest path)",
+      };
+      // A small colored pill for a connection kind — reused by the header badge and
+      // every peer-group header in the tree.
+      function connTagHtml(kind) {
+        if (!kind) return "";
+        return `<span class="ctag" style="color:${CTYPE_COLORS[kind]}" title="${esc(CTYPE_TIPS[kind])}">${kind}</span>`;
+      }
+      // Classify every distinct peer in the fleet, caching by (room,host). Because
+      // each agent reads its own host's path, a mixed room (VPS + laptop) shows both
+      // p2p and lan at once — exactly what tells you a "local" agent is wrongly remote.
+      async function refreshConnKinds() {
+        // Probe each distinct peer once (not once per agent), keyed by peerKey.
+        const reps = new Map(); // peerKey -> a representative entry for that peer
+        for (const e of entries) {
+          const k = peerKeyOf(srcFor(e), e);
+          if (!reps.has(k)) reps.set(k, e);
+        }
+        connKinds.clear();
+        await Promise.all(
+          [...reps].map(async ([key, e]) => {
+            const s = srcFor(e);
+            let kind;
+            if (!s || s.id === LOCAL || s.kind == null) kind = s && s.live ? "local" : null;
+            else kind = await classifyPath(pcForAgent(s, e));
+            if (kind) connKinds.set(key, kind);
+          }),
+        );
+        // Project peer kinds onto (room,host) keys for the tree's peer headers.
+        hostKinds.clear();
+        for (const e of entries) {
+          const kind = connKinds.get(peerKeyOf(srcFor(e), e));
+          if (kind) hostKinds.set(hostKeyOf(e), kind);
+        }
+        paintHeaderBadge();
+        // Repaint the list only when the peer-header tags actually changed — the poll
+        // already re-renders on data deltas, so this avoids churning the DOM every tick.
+        const sig = [...hostKinds]
+          .sort()
+          .map(([k, v]) => k + "=" + v)
+          .join(";");
+        if (sig !== connSig) {
+          connSig = sig;
+          renderList();
+        }
+      }
+      // The header pill mirrors the SELECTED agent's peer (or the local source when
+      // nothing is open). Reads the cache only — kept sync so renders never await.
+      function paintHeaderBadge() {
+        const badge = $("ctype");
+        if (!badge) return;
+        const e = sel ? entries.find((x) => x._key === sel) : null;
+        let kind = e ? connKinds.get(peerKeyOf(srcFor(e), e)) : null;
+        if (!kind && !sel) {
+          const loc = sources.get(LOCAL);
+          if (loc && loc.live) kind = "local";
+        }
+        if (!kind) {
+          badge.hidden = true;
+          return;
+        }
+        badge.hidden = false;
+        badge.textContent = kind;
+        badge.style.color = CTYPE_COLORS[kind] || "var(--muted)";
+        badge.title = CTYPE_TIPS[kind] || "";
+      }
+      // Candidate pairs aren't known the instant a peer connects (ICE keeps probing)
+      // and can change (relay fallback); a light poll keeps every pill honest.
+      setInterval(refreshConnKinds, 2500);
+
       // The local source is only worth polling when this page is actually backed
       // by an ay serve: localhost, or served by `ay serve --http` (which leaves a
       // token), or when there are no rooms to fall back on. On the public origin
@@ -1621,7 +1819,13 @@
       // layeredRows), so a header always disambiguates something real.
       function headerHtml(r) {
         const icon = r.kind === "room" ? "▤" : "▣";
-        return `<div class="ghead g-${r.kind}">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}<span class="gicon">${icon}</span><span class="glabel">${esc(r.label || "")}</span><span class="gkind">${r.kind}</span></div>`;
+        // Peer headers carry their host's connection type (lan/p2p/relay), so a
+        // mixed room shows at a glance which hosts are local vs reached over WAN.
+        const ctag =
+          r.kind === "peer"
+            ? connTagHtml(hostKinds.get((r.room || "") + " " + (r.host || "")))
+            : "";
+        return `<div class="ghead g-${r.kind}">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}<span class="gicon">${icon}</span><span class="glabel">${esc(r.label || "")}</span>${ctag}<span class="gkind">${r.kind}</span></div>`;
       }
 
       function renderList() {
@@ -1645,7 +1849,7 @@
                 if (r.kind !== "agent") return headerHtml(r);
                 const e = r.entry;
                 const t = e.title || e.prompt || "";
-                const id = compactIdent(e, ctx);
+                const id = compactIdent(e, ctx, 3, r.parentEntry);
                 const cli = cliLabel(e);
                 return `<div class="row crow ${e._key === sel ? "sel" : ""}" data-key="${esc(e._key)}">
         ${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}
@@ -1780,6 +1984,7 @@
           return;
         }
         sel = e._key;
+        paintHeaderBadge();
         // Remember the selection so a refresh re-opens this agent (see boot/autoPid).
         try {
           localStorage.setItem("ay.sel", sel);
