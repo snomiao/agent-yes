@@ -3,6 +3,16 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <script>
+      // Backward-compat: share links used to be agent-yes.com/#room:token (the
+      // console lived at /). It now lives at /w/. The # fragment never reaches the
+      // server, so forward old links here, client-side, keeping the exact hash.
+      // No room hash → fall through and show this landing page normally.
+      (function () {
+        var h = location.hash;
+        if (h && /^#[A-Za-z0-9_-]+:.+/.test(h)) location.replace("/w/" + h);
+      })();
+    </script>
     <title>agent-yes — drive any AI coding CLI on autopilot</title>
     <meta
       name="description"
