@@ -129,6 +129,7 @@
       /* Per-peer connection-type pill in the terminal header — describes how this
          viewer reaches the SELECTED agent's host (local/lan/wan/relay). */
       .rhead .ctype {
+        position: relative;
         font-size: 10px;
         font-weight: 600;
         letter-spacing: 0.02em;
@@ -138,9 +139,46 @@
         border: 1px solid currentColor;
         text-transform: uppercase;
         opacity: 0.9;
+        cursor: help;
       }
       .ctype[hidden] {
         display: none;
+      }
+      /* Hover popover with the connection debug readout. */
+      .ctype .ctip {
+        display: none;
+        position: absolute;
+        top: 150%;
+        right: 0;
+        z-index: 30;
+        min-width: 240px;
+        padding: 8px 10px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+        color: var(--fg);
+        font-family: var(--mono);
+        font-size: 10.5px;
+        font-weight: 400;
+        line-height: 1.6;
+        letter-spacing: 0;
+        text-transform: none;
+        text-align: left;
+        white-space: nowrap;
+      }
+      .ctype:hover .ctip {
+        display: block;
+      }
+      .ctip-h {
+        color: var(--muted);
+        margin-bottom: 5px;
+        white-space: normal;
+      }
+      .ctip-k {
+        display: inline-block;
+        width: 56px;
+        color: var(--muted);
       }
       /* ⋯ overflow menu in the terminal header + its dropdown. */
       .rmenu {
@@ -1609,9 +1647,14 @@
         /^fe80:/i.test(ip) || // IPv6 link-local
         /^f[cd][0-9a-f]{2}:/i.test(ip) || // IPv6 ULA (fc00::/7, incl. Tailscale fd7a:…)
         /\.local$/i.test(ip); // mDNS host candidate (browser-obfuscated LAN IP)
-      // Inspect the selected ICE candidate pair: relay on either end = TURN-proxied
-      // (slow); otherwise the peer's address decides local vs lan vs wan.
-      async function classifyPath(pc) {
+      // Inspect the selected ICE candidate pair and return the full picture for the
+      // hover tooltip: kind, RTT, both candidates, a NAT-traversal hint, and the open
+      // data channel. `kind` is classified by how we reach the REMOTE host: relay on
+      // either end = TURN-proxied; otherwise the remote candidate's type/address
+      // decides local/lan/wan. (The LOCAL end is often prflx/srflx even on a fast
+      // private path — e.g. a Tailscale/CGNAT mesh shows local=prflx, remote=host
+      // 100.x at ~1ms — so we key on the remote, not on both ends being `host`.)
+      async function inspectConn(pc) {
         if (!pc || typeof pc.getStats !== "function") return null;
         try {
           const stats = await pc.getStats();
@@ -1637,22 +1680,40 @@
             if (s.id === pair.remoteCandidateId) remote = s;
           });
           if (!local || !remote) return null;
-          // A TURN relay on EITHER end means traffic is proxied — the slow path.
-          if (local.candidateType === "relay" || remote.candidateType === "relay") return "relay";
-          // Classify by how we reach the REMOTE host (the peer). The LOCAL candidate
-          // is often prflx/srflx even on a fast private path (e.g. a Tailscale/CGNAT
-          // mesh shows local=prflx, remote=host 100.x at ~1ms RTT), so requiring both
-          // ends to be `host` wrongly flagged those as wan — key on the remote.
-          if (remote.candidateType === "host") {
-            const ip = remote.address || remote.ip || "";
-            if (isLoopbackIp(ip)) return "local";
-            // private / CGNAT-Tailscale / link-local / ULA / mDNS, or an address-hidden
-            // host candidate (host candidates are direct, effectively local).
-            if (!ip || isPrivateIp(ip)) return "lan";
-            return "wan"; // a directly-reachable PUBLIC host
+          const lt = local.candidateType,
+            rt = remote.candidateType,
+            rip = remote.address || remote.ip || "";
+          let kind, nat;
+          if (lt === "relay" || rt === "relay") {
+            kind = "relay";
+            nat = "TURN-relayed — symmetric NAT or UDP blocked";
+          } else if (rt === "host") {
+            kind = isLoopbackIp(rip) ? "local" : !rip || isPrivateIp(rip) ? "lan" : "wan";
+            nat =
+              lt === "host"
+                ? "direct — both ends on-net"
+                : "direct to host" + (lt === "srflx" || lt === "prflx" ? " (you behind NAT)" : "");
+          } else {
+            kind = "wan";
+            nat = "STUN-reflexive P2P (NAT-traversed)";
           }
-          // srflx / prflx — reached via STUN reflexive, i.e. out over the internet.
-          return "wan";
+          const fmt = (c) => c.candidateType + "/" + (c.protocol || "?");
+          return {
+            kind,
+            nat,
+            rttMs:
+              pair.currentRoundTripTime != null
+                ? Math.round(pair.currentRoundTripTime * 1000)
+                : null,
+            local:
+              fmt(local) + (local.address || local.ip ? " " + (local.address || local.ip) : ""),
+            remote: fmt(remote) + (rip ? " " + rip : ""),
+            dc:
+              [...stats.values()]
+                .filter((v) => v.type === "data-channel" && v.state === "open")
+                .map((v) => v.label)
+                .join(",") || null,
+          };
         } catch {
           return null;
         }
@@ -1686,7 +1747,16 @@
       }
       const connKinds = new Map(); // peerKey -> "local" | "lan" | "wan" | "relay"
       const hostKinds = new Map(); // hostKey -> same (peer-header tags)
+      const connInfo = new Map(); // peerKey -> full detail for the hover tooltip
       let connSig = "";
+      // The signaling server backing a source: codehost rooms use the codehost
+      // signal DO; agent-yes share rooms use their own host; local has none.
+      const signalingOf = (s) =>
+        !s || s.id === LOCAL || s.kind == null
+          ? null
+          : s.kind === "ch"
+            ? "wss://signal.codehost.dev"
+            : "wss://" + (s.host || SIG_DEFAULT);
       const CTYPE_COLORS = {
         local: "var(--green)",
         lan: "var(--green)",
@@ -1716,13 +1786,26 @@
           if (!reps.has(k)) reps.set(k, e);
         }
         connKinds.clear();
+        connInfo.clear();
         await Promise.all(
           [...reps].map(async ([key, e]) => {
             const s = srcFor(e);
-            let kind;
-            if (!s || s.id === LOCAL || s.kind == null) kind = s && s.live ? "local" : null;
-            else kind = await classifyPath(pcForAgent(s, e));
-            if (kind) connKinds.set(key, kind);
+            if (!s || s.id === LOCAL || s.kind == null) {
+              if (s && s.live) {
+                connKinds.set(key, "local");
+                connInfo.set(key, {
+                  kind: "local",
+                  nat: "this machine (ay serve)",
+                  signaling: null,
+                });
+              }
+              return;
+            }
+            const info = await inspectConn(pcForAgent(s, e));
+            if (info) {
+              connKinds.set(key, info.kind);
+              connInfo.set(key, { ...info, signaling: signalingOf(s) });
+            }
           }),
         );
         // Project peer kinds onto (room,host) keys for the tree's peer headers.
@@ -1751,15 +1834,33 @@
         const badge = $("ctype");
         if (!badge) return;
         const e = sel ? entries.find((x) => x._key === sel) : null;
-        const kind = e ? connKinds.get(peerKeyOf(srcFor(e), e)) : null;
+        const key = e ? peerKeyOf(srcFor(e), e) : null;
+        const kind = key ? connKinds.get(key) : null;
         if (!kind) {
           badge.hidden = true;
           return;
         }
         badge.hidden = false;
-        badge.textContent = kind;
         badge.style.color = CTYPE_COLORS[kind] || "var(--muted)";
-        badge.title = CTYPE_TIPS[kind] ? "connection: " + CTYPE_TIPS[kind] : "";
+        badge.removeAttribute("title"); // the hover popover replaces the native title
+        badge.innerHTML = esc(kind) + connTipHtml(kind, connInfo.get(key));
+      }
+      // The on-hover debug popover for the connection pill: latency, both ICE
+      // candidates, NAT-traversal hint, the open data channel, and the signaling
+      // server. Pure detail readout — the same getStats the classifier already ran.
+      function connTipHtml(kind, info) {
+        const rows = [];
+        if (info?.rttMs != null) rows.push(["latency", info.rttMs + " ms RTT"]);
+        if (info?.remote) rows.push(["remote", info.remote]);
+        if (info?.local) rows.push(["local", info.local]);
+        if (info?.nat) rows.push(["nat", info.nat]);
+        if (info?.dc) rows.push(["channel", info.dc]);
+        if (info?.signaling) rows.push(["signal", info.signaling]);
+        const head = `<div class="ctip-h">${esc(CTYPE_TIPS[kind] || kind)}</div>`;
+        const body = rows
+          .map(([k, v]) => `<div><span class="ctip-k">${k}</span>${esc(String(v))}</div>`)
+          .join("");
+        return `<span class="ctip">${head}${body || '<div class="ctip-k">probing…</div>'}</span>`;
       }
       // Candidate pairs aren't known the instant a peer connects (ICE keeps probing)
       // and can change (relay fallback); a light poll keeps every pill honest.
