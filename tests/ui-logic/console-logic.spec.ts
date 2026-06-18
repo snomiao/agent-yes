@@ -366,6 +366,56 @@ describe("forestOrder (agent>subagent tree)", () => {
     const out = forestOrder([a(1, { parent_pid: 2 }), a(2, { parent_pid: 1 })]);
     expect(out.length).toBe(2);
   });
+
+  it("snaps a submodule-cwd agent under its superproject agent (no parent_pid)", () => {
+    const out = forestOrder([
+      a(1, { cwd: "/x/me/repo/tree/main" }),
+      a(2, { cwd: "/x/me/repo/tree/main/lib/bot" }),
+    ]);
+    expect(out.map((e) => e.pid)).toEqual([1, 2]);
+    const depth = Object.fromEntries(out.map((e) => [e.pid, e._depth]));
+    expect(depth[1]).toBe(0);
+    expect(depth[2]).toBe(1);
+  });
+
+  it("nests under the closest containing cwd (deepest ancestor wins)", () => {
+    const out = forestOrder([
+      a(1, { cwd: "/x/me/repo/tree/main" }),
+      a(2, { cwd: "/x/me/repo/tree/main/lib" }),
+      a(3, { cwd: "/x/me/repo/tree/main/lib/bot" }),
+    ]);
+    const depth = Object.fromEntries(out.map((e) => [e.pid, e._depth]));
+    expect(depth[1]).toBe(0);
+    expect(depth[2]).toBe(1);
+    expect(depth[3]).toBe(2); // 3 under 2, not directly under 1
+  });
+
+  it("does not snap across an unrelated shared prefix (non-worktree)", () => {
+    const out = forestOrder([
+      a(1, { cwd: "/x/me" }), // not a .../tree/<branch> worktree → repoBranch null
+      a(2, { cwd: "/x/me/repo/tree/main" }),
+    ]);
+    expect(out.filter((e) => e._depth === 0).length).toBe(2);
+  });
+
+  it("does not snap a different worktree of the same repo", () => {
+    const out = forestOrder([
+      a(1, { cwd: "/x/me/repo/tree/main" }),
+      a(2, { cwd: "/x/me/repo/tree/main-2/lib/bot" }), // different branch dir, not contained
+    ]);
+    expect(out.filter((e) => e._depth === 0).length).toBe(2);
+  });
+
+  it("lets an explicit parent_pid override the cwd-containment fallback", () => {
+    const out = forestOrder([
+      a(1, { cwd: "/x/me/repo/tree/main" }),
+      a(2, { cwd: "/x/me/repo/tree/main/lib" }),
+      a(3, { cwd: "/x/me/repo/tree/main/lib/bot", parent_pid: 1 }), // closest cwd is 2, but spawn parent is 1
+    ]);
+    const byPid = Object.fromEntries(out.map((e) => [e.pid, e]));
+    // 3 sits at depth 1 (directly under 1), not depth 2 (under 2)
+    expect(byPid[3]._depth).toBe(1);
+  });
 });
 
 describe("taskLabel (progress badge)", () => {

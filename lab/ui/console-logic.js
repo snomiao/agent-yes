@@ -236,18 +236,52 @@ function groupBy(arr, keyFn) {
 }
 
 // Build the agent>subagent forest for ONE host's entries (pids are only unique
-// per machine, so the caller must pre-scope by host). Links via parent_pid ===
-// wrapper_pid. Returns root nodes { entry, children }, sibling/root order = input
-// order. A parent_pid cycle can't drop nodes: anything not reached from a root is
-// appended as its own root.
+// per machine, so the caller must pre-scope by host). Primary link is the explicit
+// spawn relationship (parent_pid === wrapper_pid). As a FALLBACK, an agent with no
+// such parent whose cwd sits INSIDE another agent's cwd of the SAME worktree
+// (owner/repo/branch) snaps under it — so a submodule/subdir agent nests under its
+// superproject agent even without a parent_pid link. Returns root nodes
+// { entry, children }; sibling/root order = input order. Cycles can't drop nodes:
+// anything not reached from a root is appended as its own root.
 function agentForestNodes(list) {
   const byWrapper = new Map();
   for (const e of list) if (e.wrapper_pid != null) byWrapper.set(e.wrapper_pid, e);
   const nodeOf = new Map(list.map((e) => [e, { entry: e, children: [] }]));
+
+  const parentOf = new Map();
+  // 1) explicit spawn link.
+  for (const e of list) {
+    const p = e.parent_pid != null ? byWrapper.get(e.parent_pid) : null;
+    if (p && p !== e) parentOf.set(e, p);
+  }
+  // 2) cwd-containment fallback for the still-parentless. The closest ancestor
+  //    (longest containing cwd) wins; same-worktree guard keeps an unrelated
+  //    shared prefix (e.g. /Users/x/ws) from grouping strangers together.
+  for (const e of list) {
+    if (parentOf.has(e) || !e.cwd) continue;
+    const rb = repoBranch(e);
+    if (!rb) continue;
+    let best = null;
+    for (const c of list) {
+      if (c === e || !c.cwd || !e.cwd.startsWith(c.cwd + "/")) continue;
+      const crb = repoBranch(c);
+      if (!crb || crb.owner !== rb.owner || crb.repo !== rb.repo || crb.branch !== rb.branch)
+        continue;
+      if (!best || c.cwd.length > best.cwd.length) best = c;
+    }
+    if (best) parentOf.set(e, best);
+  }
+  // Attach, refusing any edge that would close a cycle (a pre-existing parent_pid
+  // cycle, or a pid/cwd mix) — such nodes stay roots.
+  const wouldCycle = (parent, child) => {
+    for (let cur = parent, i = 0; cur && i < list.length + 1; cur = parentOf.get(cur), i++)
+      if (cur === child) return true;
+    return false;
+  };
   const roots = [];
   for (const e of list) {
-    const parent = e.parent_pid != null ? byWrapper.get(e.parent_pid) : null;
-    if (parent && parent !== e) nodeOf.get(parent).children.push(nodeOf.get(e));
+    const p = parentOf.get(e);
+    if (p && p !== e && !wouldCycle(p, e)) nodeOf.get(p).children.push(nodeOf.get(e));
     else roots.push(nodeOf.get(e));
   }
   // Cycle safety: collect nodes reachable from roots; append the rest as roots.
