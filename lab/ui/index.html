@@ -126,19 +126,20 @@
       }
       /* Connection-path pill in the header: at a glance, is the terminal you're
          watching on the fast local/lan path or the slow relayed path? */
-      h1 .ctype {
-        font-size: 10.5px;
+      /* Per-peer connection-type pill in the terminal header — describes how this
+         viewer reaches the SELECTED agent's host (local/lan/wan/relay). */
+      .rhead .ctype {
+        font-size: 10px;
         font-weight: 600;
-        letter-spacing: 0;
-        vertical-align: middle;
-        margin-left: 8px;
+        letter-spacing: 0.02em;
+        align-self: center;
         padding: 1px 7px;
         border-radius: 999px;
         border: 1px solid currentColor;
         text-transform: uppercase;
         opacity: 0.9;
       }
-      h1 .ctype[hidden] {
+      .ctype[hidden] {
         display: none;
       }
       /* ⋯ overflow menu in the terminal header + its dropdown. */
@@ -925,13 +926,7 @@
     <div class="app">
       <div class="left">
         <div class="head">
-          <h1>
-            <span class="tag">agent-yes</span> · console<span
-              id="ctype"
-              class="ctype"
-              hidden
-            ></span>
-          </h1>
+          <h1><span class="tag">agent-yes</span> · console</h1>
           <div class="sub">
             Live <code>ay ls</code> + per-agent tail &amp; send. Backed by <code>ay serve</code>.
           </div>
@@ -980,6 +975,12 @@
           <span class="live"
             ><span class="dot" id="livedot"></span><span id="livetxt">connecting…</span></span
           >
+          <span
+            id="ctype"
+            class="ctype"
+            title="how your browser reaches this agent's host"
+            hidden
+          ></span>
           <span class="rmenu">
             <button class="rmenubtn" id="rmenubtn" title="more" aria-label="more">⋯</button>
             <div class="rmenupanel" id="rmenupanel" hidden>
@@ -1734,17 +1735,15 @@
           renderList();
         }
       }
-      // The header pill mirrors the SELECTED agent's peer (or the local source when
-      // nothing is open). Reads the cache only — kept sync so renders never await.
+      // The terminal-header pill shows how this viewer reaches the SELECTED agent's
+      // host peer (local/lan/wan/relay) — per-peer, contextual to what's open. Reads
+      // the cache only (kept sync so renders never await); hidden when no agent is
+      // open (the whole rhead is hidden then anyway).
       function paintHeaderBadge() {
         const badge = $("ctype");
         if (!badge) return;
         const e = sel ? entries.find((x) => x._key === sel) : null;
-        let kind = e ? connKinds.get(peerKeyOf(srcFor(e), e)) : null;
-        if (!kind && !sel) {
-          const loc = sources.get(LOCAL);
-          if (loc && loc.live) kind = "local";
-        }
+        const kind = e ? connKinds.get(peerKeyOf(srcFor(e), e)) : null;
         if (!kind) {
           badge.hidden = true;
           return;
@@ -1752,7 +1751,7 @@
         badge.hidden = false;
         badge.textContent = kind;
         badge.style.color = CTYPE_COLORS[kind] || "var(--muted)";
-        badge.title = CTYPE_TIPS[kind] || "";
+        badge.title = CTYPE_TIPS[kind] ? "connection: " + CTYPE_TIPS[kind] : "";
       }
       // Candidate pairs aren't known the instant a peer connects (ICE keeps probing)
       // and can change (relay fallback); a light poll keeps every pill honest.
