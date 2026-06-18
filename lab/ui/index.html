@@ -141,6 +141,82 @@
       h1 .ctype[hidden] {
         display: none;
       }
+      /* ⋯ overflow menu in the terminal header + its dropdown. */
+      .rmenu {
+        position: relative;
+        margin-left: auto;
+      }
+      .rmenubtn {
+        background: none;
+        border: none;
+        color: var(--muted);
+        font-size: 16px;
+        line-height: 1;
+        cursor: pointer;
+        padding: 2px 6px;
+        border-radius: 6px;
+      }
+      .rmenubtn:hover {
+        background: var(--panel);
+        color: var(--fg);
+      }
+      .rmenupanel {
+        position: absolute;
+        top: 26px;
+        right: 0;
+        z-index: 15;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 4px;
+        min-width: 140px;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+      }
+      .rmenupanel[hidden] {
+        display: none;
+      }
+      .rmenuitem {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 5px 8px;
+        font-size: 12.5px;
+        border-radius: 6px;
+        cursor: pointer;
+        user-select: none;
+      }
+      .rmenuitem:hover {
+        background: var(--bg);
+      }
+      .rmenuitem input {
+        margin: 0;
+        cursor: pointer;
+      }
+      /* Live performance HUD — opt-in via the ⋯ menu, hidden by default. */
+      .perfhud {
+        position: absolute;
+        top: 44px;
+        right: 12px;
+        z-index: 14;
+        background: rgba(13, 17, 23, 0.82);
+        color: var(--fg);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 7px 10px;
+        font-family: var(--mono);
+        font-size: 11px;
+        line-height: 1.5;
+        pointer-events: none;
+        white-space: pre;
+        backdrop-filter: blur(3px);
+      }
+      .perfhud[hidden] {
+        display: none;
+      }
+      .perfhud b {
+        color: var(--accent);
+        font-weight: 600;
+      }
       /* Per-peer connection-type tag on peer-group headers in the tree. */
       .ghead .ctag {
         font-size: 9.5px;
@@ -687,6 +763,7 @@
         flex-direction: column;
         min-width: 0;
         min-height: 0;
+        position: relative; /* anchor for the absolutely-positioned perf HUD */
       }
       .rhead {
         padding: 14px 20px;
@@ -903,12 +980,21 @@
           <span class="live"
             ><span class="dot" id="livedot"></span><span id="livetxt">connecting…</span></span
           >
+          <span class="rmenu">
+            <button class="rmenubtn" id="rmenubtn" title="more" aria-label="more">⋯</button>
+            <div class="rmenupanel" id="rmenupanel" hidden>
+              <label class="rmenuitem"
+                ><input type="checkbox" id="perfToggle" /> <span>Perf HUD</span></label
+              >
+            </div>
+          </span>
         </div>
         <div class="log" id="log">
           <div class="placeholder">
             ← pick an agent to tail its log; type directly into the terminal
           </div>
         </div>
+        <div class="perfhud" id="perfhud" hidden></div>
       </div>
     </div>
 
@@ -1672,6 +1758,97 @@
       // and can change (relay fallback); a light poll keeps every pill honest.
       setInterval(refreshConnKinds, 2500);
 
+      // ---- live performance HUD (opt-in via the ⋯ menu, hidden by default) -----
+      // Surfaces the metrics that actually move when the console feels laggy: render
+      // fps, keystroke throughput (xterm onData), agent output rate (term.write),
+      // and main-thread jank (long tasks). Counters accumulate over a 1s window;
+      // the I/O hooks live in select() (perfNote on fwd / term.write).
+      const perf = { frames: 0, inEvents: 0, inBytes: 0, outWrites: 0, outBytes: 0, jankMs: 0 };
+      let perfOn = false;
+      let perfRaf = 0;
+      function perfNote(kind, n) {
+        if (!perfOn) return;
+        if (kind === "in") (perf.inEvents++, (perf.inBytes += n || 0));
+        else if (kind === "out") (perf.outWrites++, (perf.outBytes += n || 0));
+      }
+      function perfReset() {
+        perf.frames =
+          perf.inEvents =
+          perf.inBytes =
+          perf.outWrites =
+          perf.outBytes =
+          perf.jankMs =
+            0;
+      }
+      function perfFrameLoop() {
+        if (!perfOn) {
+          perfRaf = 0;
+          return;
+        }
+        perf.frames++;
+        perfRaf = requestAnimationFrame(perfFrameLoop);
+      }
+      try {
+        // Long tasks fire regardless of the HUD; we only sum them while it's on.
+        new PerformanceObserver((l) => {
+          if (perfOn) for (const e of l.getEntries()) perf.jankMs += e.duration;
+        }).observe({ entryTypes: ["longtask"] });
+      } catch {
+        /* longtask API unavailable (Safari) — jank line just stays 0 */
+      }
+      const fmtBytes = (b) => (b >= 1024 ? (b / 1024).toFixed(1) + " KB" : Math.round(b) + " B");
+      setInterval(() => {
+        const el = $("perfhud");
+        if (!perfOn || !el) {
+          perfReset();
+          return;
+        }
+        const fps = perf.frames; // window is ~1s
+        el.innerHTML =
+          `<b>fps</b>  ${fps}\n` +
+          `<b>keys</b> ${perf.inEvents}/s  ${fmtBytes(perf.inBytes)}/s\n` +
+          `<b>out</b>  ${perf.outWrites}/s  ${fmtBytes(perf.outBytes)}/s\n` +
+          `<b>jank</b> ${Math.round(perf.jankMs)} ms/s`;
+        perfReset();
+      }, 1000);
+      function setPerfHud(on) {
+        perfOn = on;
+        const el = $("perfhud");
+        if (el) el.hidden = !on;
+        const cb = $("perfToggle");
+        if (cb) cb.checked = on;
+        try {
+          localStorage.setItem("ay.perfHud", on ? "1" : "0");
+        } catch {}
+        if (on) {
+          perfReset();
+          if (!perfRaf) perfRaf = requestAnimationFrame(perfFrameLoop);
+          if (el) el.textContent = "measuring…";
+        }
+      }
+      // Wire the ⋯ overflow menu and restore the saved HUD preference.
+      (function perfMenuBoot() {
+        const btn = $("rmenubtn"),
+          panel = $("rmenupanel"),
+          cb = $("perfToggle");
+        if (btn && panel) {
+          btn.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            panel.hidden = !panel.hidden;
+          });
+          document.addEventListener("click", (ev) => {
+            if (!panel.hidden && !panel.contains(ev.target) && ev.target !== btn)
+              panel.hidden = true;
+          });
+        }
+        if (cb) cb.addEventListener("change", () => setPerfHud(cb.checked));
+        let saved = false;
+        try {
+          saved = localStorage.getItem("ay.perfHud") === "1";
+        } catch {}
+        setPerfHud(saved);
+      })();
+
       // The local source is only worth polling when this page is actually backed
       // by an ay serve: localhost, or served by `ay serve --http` (which leaves a
       // token), or when there are no rooms to fall back on. On the public origin
@@ -2091,8 +2268,10 @@
         // keyword with 400 (pid arrives as a number from /api/ls JSON).
         const kw = String(pid);
         const fwd = (d) => {
-          if (sel === e._key)
+          if (sel === e._key) {
+            perfNote("in", typeof d === "string" ? d.length : (d?.byteLength ?? 0));
             tx.post("/api/send", { keyword: kw, msg: d, code: "none" }).catch(() => {});
+          }
         };
         term.onData(fwd);
         term.onBinary(fwd);
@@ -2132,7 +2311,10 @@
         const close = tx.subscribe(
           "/api/tail/" + encodeURIComponent(pid) + "?raw=1",
           (raw) => {
-            if (term) term.write(raw);
+            if (term) {
+              term.write(raw);
+              perfNote("out", raw?.length ?? 0);
+            }
           },
           () => {
             $("livedot").className = "dot active";
