@@ -44,6 +44,18 @@ const SIG_REFRESH_MS = 4 * 60_000;
 // the socket can't clear it; only a fresh process can. Exit so the service
 // manager restarts us with a clean stack (a fresh process provably works).
 const MAX_PEER_SETUP_FAILURES = 3;
+// Serialize peer setup. The recurring live freeze is an upstream libdatachannel
+// 0.24.2 deadlock tripped by a RECONNECT STORM — several browser tabs/devices all
+// reconnecting at once (e.g. right after the daemon restarts) fire many concurrent
+// real-DTLS handshakes, which wedges the native stack. Process peer-joins one at a
+// time with a small gap so a burst is staggered instead of simultaneous.
+const PEER_JOIN_GAP_MS = 300;
+// Abandon a peer setup that doesn't settle in time (a wedged native createOffer
+// would otherwise stall the whole serial queue) — counts as a setup failure so
+// the self-heal can fire. And cap the queue so a pathological storm can't grow it
+// unboundedly; dropped joins simply retry via the browser's reconnect.
+const STARTPEER_TIMEOUT_MS = 10_000;
+const MAX_PEER_JOIN_QUEUE = 50;
 // Proactively recycle the process to PREVENT the node-datachannel freeze rather
 // than just recover from it. The wedge has been observed at ~60-90min uptime, so
 // restarting well before that keeps the native stack fresh and the freeze rare.
@@ -326,6 +338,57 @@ export async function startShare(
   let currentWs: WebSocket | undefined; // the live rendezvous socket, for close()
   let peerSetupFailures = 0; // consecutive startPeer() throws — see MAX_PEER_SETUP_FAILURES
 
+  // Serial peer-join queue (see PEER_JOIN_GAP_MS): drain one at a time so a
+  // reconnect storm can't fire many concurrent DTLS handshakes and wedge the
+  // native stack. startPeer() awaits its async steps, yielding the event loop
+  // between peers, so this staggers setup without blocking the loop / heartbeat.
+  const peerJoinQueue: string[] = [];
+  let drainingPeerJoins = false;
+  const drainPeerJoins = async () => {
+    if (drainingPeerJoins) return;
+    drainingPeerJoins = true;
+    try {
+      while (!closed && peerJoinQueue.length) {
+        const peerId = peerJoinQueue.shift()!;
+        const ws = currentWs; // send offer/candidates on the live socket
+        if (!ws) continue;
+        try {
+          // Bound it: a wedged native createOffer must not stall the queue forever.
+          let timer: ReturnType<typeof setTimeout>;
+          const setup = startPeer(ws, peerId);
+          // If it times out, startPeer keeps running (native calls can't be
+          // cancelled) and may settle later — swallow that so it isn't an
+          // unhandled rejection; startPeer itself no-ops a late offer (peer guard).
+          setup.catch(() => {});
+          await Promise.race([
+            setup,
+            new Promise((_, reject) => {
+              timer = setTimeout(() => reject(new Error("startPeer timeout")), STARTPEER_TIMEOUT_MS);
+            }),
+          ]).finally(() => clearTimeout(timer!));
+          peerSetupFailures = 0; // a delivered offer proves the WebRTC stack works
+        } catch (err) {
+          // Don't swallow this: a failed createOffer is why a long-up host goes
+          // silently "offline". Surface it, and if it keeps failing, self-heal.
+          peerSetupFailures++;
+          process.stderr.write(
+            `[share] peer setup failed (${peerSetupFailures}/${MAX_PEER_SETUP_FAILURES}): ${(err as Error)?.message ?? err}\n`,
+          );
+          closePeer(peerId);
+          if (peerSetupFailures >= MAX_PEER_SETUP_FAILURES) {
+            process.stderr.write(
+              "[share] WebRTC stack wedged after repeated peer-setup failures — exiting so the service manager restarts with a fresh stack\n",
+            );
+            process.exit(1);
+          }
+        }
+        if (peerJoinQueue.length) await new Promise((r) => setTimeout(r, PEER_JOIN_GAP_MS));
+      }
+    } finally {
+      drainingPeerJoins = false;
+    }
+  };
+
   const connectSignaling = (onReady: () => void) => {
     if (closed) return; // a reconnect timer queued before close() must not revive it
     const ws = new WebSocket(`${wsScheme}://${host}/${room}`, [SUB]);
@@ -381,28 +444,20 @@ export async function startShare(
       lastRecv = Date.now();
       const m = JSON.parse(ev.data as string);
       if (m.type === "pong") return; // heartbeat ack — liveness already recorded
-      if (m.type === "peer-join")
-        startPeer(ws, m.peer).then(
-          () => {
-            peerSetupFailures = 0; // a delivered offer proves the WebRTC stack works
-          },
-          (err) => {
-            // Don't swallow this: a failed createOffer is why a long-up host goes
-            // silently "offline". Surface it, and if it keeps failing, self-heal.
-            peerSetupFailures++;
-            process.stderr.write(
-              `[share] peer setup failed (${peerSetupFailures}/${MAX_PEER_SETUP_FAILURES}): ${(err as Error)?.message ?? err}\n`,
-            );
-            closePeer(m.peer);
-            if (peerSetupFailures >= MAX_PEER_SETUP_FAILURES) {
-              process.stderr.write(
-                "[share] WebRTC stack wedged after repeated peer-setup failures — exiting so the service manager restarts with a fresh stack\n",
-              );
-              process.exit(1);
-            }
-          },
-        );
-      else if (m.type === "answer") {
+      if (m.type === "peer-join") {
+        // Serialized in drainPeerJoins() to avoid a storm. Skip dupes (already
+        // queued or already an active peer) and cap the queue so a pathological
+        // burst can't grow it unboundedly — dropped joins retry via the browser.
+        const pid = String(m.peer);
+        if (
+          !peers.has(pid) &&
+          !peerJoinQueue.includes(pid) &&
+          peerJoinQueue.length < MAX_PEER_JOIN_QUEUE
+        ) {
+          peerJoinQueue.push(pid);
+          drainPeerJoins();
+        }
+      } else if (m.type === "answer") {
         const peer = peers.get(m.from);
         if (!peer) return;
         try {
@@ -513,10 +568,18 @@ export async function startShare(
     };
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
-    // The signaling socket may have been recycled (SIG_REFRESH_MS) while we built
-    // the offer. Sending on a closing socket would throw and be miscounted as a
-    // wedged-stack failure — but it's benign: the browser re-joins on the fresh
-    // socket. Skip cleanly so only real createOffer failures trip the self-heal.
+    // The setup may have been abandoned while we built the offer. If THIS peer is
+    // no longer the map entry (serial-queue timeout closed it / a peer-leave
+    // arrived and its createOffer only just now resolved), close only this
+    // orphaned pc — don't closePeer(peerId) by id, which could hit a different
+    // entry. If it's still us but the socket was recycled (SIG_REFRESH_MS), drop
+    // cleanly; the browser re-joins on the fresh socket.
+    if (peers.get(peerId) !== peer) {
+      try {
+        peer.pc.close();
+      } catch {}
+      return;
+    }
     if (ws.readyState !== WebSocket.OPEN) {
       closePeer(peerId);
       return;
