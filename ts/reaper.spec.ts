@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { mkdtempSync, readFileSync } from "fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
-import { register, sweep } from "./reaper.ts";
+import { pgidForWrapper, register, sweep } from "./reaper.ts";
 
 let prevHome: string | undefined;
 
@@ -42,4 +42,28 @@ test("register refuses to persist a pgid <= 1", async () => {
   // Nothing written, so the registry file doesn't exist — sweep is a no-op.
   await sweep();
   expect(() => readFileSync(registryFile(), "utf8")).toThrow();
+});
+
+test("pgidForWrapper returns the newest matching pgid, ignoring junk + bad entries", async () => {
+  writeFileSync(
+    registryFile(),
+    [
+      JSON.stringify({ wpid: 4242, pgid: 100 }),
+      "not-json", // malformed → skipped, not thrown
+      "", // blank → skipped
+      JSON.stringify({ wpid: 9999, pgid: 200 }), // different wrapper → ignored for 4242
+      JSON.stringify({ wpid: 4242, pgid: 1 }), // pgid <= 1 → ignored
+      JSON.stringify({ wpid: 4242, pgid: 300 }), // newest valid for 4242 → wins
+    ].join("\n") + "\n",
+  );
+  expect(await pgidForWrapper(4242)).toBe(300);
+  expect(await pgidForWrapper(9999)).toBe(200);
+  expect(await pgidForWrapper(1234)).toBeNull(); // no entry for this wrapper
+});
+
+test("pgidForWrapper returns null for an invalid wpid or a missing registry", async () => {
+  expect(await pgidForWrapper(0)).toBeNull(); // !wpid
+  expect(await pgidForWrapper(1)).toBeNull(); // wpid <= 1 (never ppid==1)
+  // Fresh home, no registry file written → readFile throws → null (not a crash).
+  expect(await pgidForWrapper(4242)).toBeNull();
 });
