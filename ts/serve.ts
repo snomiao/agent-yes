@@ -16,6 +16,8 @@ import {
   writeToIpc,
   type CommonOpts,
 } from "./subcommands.ts";
+import { updateGlobalPidStatus } from "./globalPidIndex.ts";
+import { pgidForWrapper } from "./reaper.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
 
@@ -1213,6 +1215,59 @@ export async function cmdServe(rest: string[]): Promise<number> {
           await writeToIpc(record.fifo_file, msg + trailing);
         }
         return Response.json({ ok: true, pid: record.pid });
+      } catch (e) {
+        return new Response((e as Error).message, { status: 404 });
+      }
+    }
+
+    // POST /api/kill  body {keyword}  — force-kill a stuck agent. The console can
+    // already send keystrokes (Ctrl+C, /exit) via /api/send; this is the escalation
+    // for an agent too wedged to respond to those: a real SIGKILL of its process
+    // GROUP (wrapper + CLI + children), via the pgid the reaper recorded. The >1
+    // guards are critical — process.kill(-1)/kill(0) would signal far too much.
+    if (req.method === "POST" && p === "/api/kill") {
+      let body: { keyword?: string };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return new Response("invalid JSON body", { status: 400 });
+      }
+      const keyword = body.keyword;
+      if (!keyword || typeof keyword !== "string")
+        return new Response("missing keyword", { status: 400 });
+      if (process.platform === "win32")
+        return new Response("force-kill unsupported on a Windows serve", { status: 501 });
+      try {
+        const record = await resolveOne(keyword, defaultOpts({ all: true }));
+        const killed: string[] = [];
+        const sig = (target: number, label: string) => {
+          if (!target || target <= 1) return;
+          try {
+            process.kill(target, "SIGKILL");
+            killed.push(label);
+          } catch {
+            /* ESRCH: already gone */
+          }
+        };
+        // Whole process group first (kills children too), then the pids directly in
+        // case they aren't group leaders.
+        const pgid = await pgidForWrapper(record.wrapper_pid ?? 0);
+        if (pgid && pgid > 1) {
+          try {
+            process.kill(-pgid, "SIGKILL");
+            killed.push(`group ${pgid}`);
+          } catch {
+            /* group already gone */
+          }
+        }
+        sig(record.pid, `pid ${record.pid}`);
+        if (record.wrapper_pid && record.wrapper_pid !== record.pid)
+          sig(record.wrapper_pid, `wrapper ${record.wrapper_pid}`);
+        await updateGlobalPidStatus(record.pid, {
+          status: "exited",
+          exit_reason: "force-killed via console",
+        }).catch(() => {});
+        return Response.json({ ok: true, pid: record.pid, killed });
       } catch (e) {
         return new Response((e as Error).message, { status: 404 });
       }

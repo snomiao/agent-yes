@@ -231,6 +231,23 @@
         margin: 0;
         cursor: pointer;
       }
+      /* Action items (Stop / Force-kill) reuse the menu-item look as buttons. */
+      .rmenuact {
+        width: 100%;
+        background: none;
+        border: none;
+        text-align: left;
+        font: inherit;
+        color: var(--fg);
+      }
+      .rmenuact.danger {
+        color: var(--red);
+      }
+      .rmenusep {
+        height: 1px;
+        background: var(--line);
+        margin: 4px 2px;
+      }
       /* Live performance HUD — opt-in via the ⋯ menu, hidden by default. */
       .perfhud {
         position: absolute;
@@ -1025,6 +1042,11 @@
               <label class="rmenuitem"
                 ><input type="checkbox" id="perfToggle" /> <span>Perf HUD</span></label
               >
+              <div class="rmenusep"></div>
+              <button class="rmenuitem rmenuact" id="stopAgent" type="button">⏹ Stop agent</button>
+              <button class="rmenuitem rmenuact danger" id="killAgent" type="button">
+                ✕ Force-kill (SIGKILL)
+              </button>
             </div>
           </span>
         </div>
@@ -1958,21 +1980,51 @@
         }
       }
       // Wire the ⋯ overflow menu and restore the saved HUD preference.
+      // Recovery actions for the SELECTED agent, both confirmed first (destructive):
+      //   Stop  — graceful: send the CLI's exit command (claude/codex /exit, gemini
+      //           /quit) + Enter over the existing /api/send stdin wire. (Ctrl+C / Ctrl+C×2
+      //           you can already just type — and some agents rely on that pattern — so
+      //           we don't reinvent it here.)
+      //   Force — escalation a stuck agent can't ignore: a real SIGKILL of its process
+      //           GROUP, server-side via POST /api/kill. Use when /exit does nothing.
+      const GRACEFUL_EXIT = { claude: "/exit", codex: "/exit", gemini: "/quit" };
+      async function stopAgent(force) {
+        const e = sel ? entries.find((x) => x._key === sel) : null;
+        if (!e) return;
+        const who = `pid ${e.pid} ${cliLabel(e) || ident(e) || ""}`.trim();
+        const tx = txFor(e),
+          kw = String(e.pid);
+        if (force) {
+          if (!confirm(`Force-kill (SIGKILL) ${who}?\nThis terminates the process immediately.`))
+            return;
+          tx.post("/api/kill", { keyword: kw }).catch(() => {});
+          return;
+        }
+        const graceful = GRACEFUL_EXIT[e.cli] || "/exit";
+        if (!confirm(`Stop ${who} — send "${graceful}"?`)) return;
+        const send = (msg) =>
+          tx.post("/api/send", { keyword: kw, msg, code: "none" }).catch(() => {});
+        await send(graceful);
+        await new Promise((r) => setTimeout(r, 200));
+        await send("\r");
+      }
       (function perfMenuBoot() {
         const btn = $("rmenubtn"),
           panel = $("rmenupanel"),
           cb = $("perfToggle");
+        const closePanel = () => panel && (panel.hidden = true);
         if (btn && panel) {
           btn.addEventListener("click", (ev) => {
             ev.stopPropagation();
             panel.hidden = !panel.hidden;
           });
           document.addEventListener("click", (ev) => {
-            if (!panel.hidden && !panel.contains(ev.target) && ev.target !== btn)
-              panel.hidden = true;
+            if (!panel.hidden && !panel.contains(ev.target) && ev.target !== btn) closePanel();
           });
         }
         if (cb) cb.addEventListener("change", () => setPerfHud(cb.checked));
+        $("stopAgent")?.addEventListener("click", () => (closePanel(), stopAgent(false)));
+        $("killAgent")?.addEventListener("click", () => (closePanel(), stopAgent(true)));
         let saved = false;
         try {
           saved = localStorage.getItem("ay.perfHud") === "1";

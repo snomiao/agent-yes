@@ -21,6 +21,31 @@ function isAlive(pid: number): boolean {
   }
 }
 
+/** The recorded process-group id for a wrapper pid (newest entry wins), or null
+ *  if unknown. Lets a force-kill target the agent's whole group, not just its
+ *  wrapper pid — same registry the orphan sweep uses. */
+export async function pgidForWrapper(wpid: number): Promise<number | null> {
+  if (!wpid || wpid <= 1) return null;
+  let content: string;
+  try {
+    content = await readFile(registryPath(), "utf8");
+  } catch {
+    return null;
+  }
+  let pgid: number | null = null;
+  for (const line of content.split("\n")) {
+    const t = line.trim();
+    if (!t) continue;
+    try {
+      const e = JSON.parse(t);
+      if (e.wpid === wpid && typeof e.pgid === "number" && e.pgid > 1) pgid = e.pgid;
+    } catch {
+      // skip malformed
+    }
+  }
+  return pgid;
+}
+
 /** Record this wrapper + its agent's process group for later sweeping. */
 export async function register(wrapperPid: number, pgid: number): Promise<void> {
   if (pgid <= 1) return; // never persist a group we'd refuse to signal
