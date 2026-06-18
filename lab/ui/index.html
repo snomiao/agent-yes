@@ -1763,13 +1763,35 @@
       // fps, keystroke throughput (xterm onData), agent output rate (term.write),
       // and main-thread jank (long tasks). Counters accumulate over a 1s window;
       // the I/O hooks live in select() (perfNote on fwd / term.write).
-      const perf = { frames: 0, inEvents: 0, inBytes: 0, outWrites: 0, outBytes: 0, jankMs: 0 };
+      const perf = {
+        frames: 0,
+        inEvents: 0,
+        inBytes: 0,
+        outWrites: 0,
+        outBytes: 0,
+        jankMs: 0,
+        echoMs: null,
+      };
       let perfOn = false;
       let perfRaf = 0;
+      // Keystroke→reflect latency: stamp the first un-echoed keystroke; the next
+      // term.write that lands is its echo (the PTY round-trip). Accurate while
+      // typing into an otherwise-quiet agent — the real UX number for a TUI.
+      let pendingKeyTs = 0;
       function perfNote(kind, n) {
         if (!perfOn) return;
-        if (kind === "in") (perf.inEvents++, (perf.inBytes += n || 0));
-        else if (kind === "out") (perf.outWrites++, (perf.outBytes += n || 0));
+        if (kind === "in") {
+          perf.inEvents++;
+          perf.inBytes += n || 0;
+          if (!pendingKeyTs) pendingKeyTs = performance.now();
+        } else if (kind === "out") {
+          perf.outWrites++;
+          perf.outBytes += n || 0;
+          if (pendingKeyTs) {
+            perf.echoMs = Math.round(performance.now() - pendingKeyTs);
+            pendingKeyTs = 0;
+          }
+        }
       }
       function perfReset() {
         perf.frames =
@@ -1805,11 +1827,12 @@
         }
         const fps = perf.frames; // window is ~1s
         el.innerHTML =
-          `<b>fps</b>  ${fps}\n` +
-          `<b>keys</b> ${perf.inEvents}/s  ${fmtBytes(perf.inBytes)}/s\n` +
-          `<b>out</b>  ${perf.outWrites}/s  ${fmtBytes(perf.outBytes)}/s\n` +
-          `<b>jank</b> ${Math.round(perf.jankMs)} ms/s`;
-        perfReset();
+          `<b>fps</b>   ${fps}\n` +
+          `<b>echo</b>  ${perf.echoMs == null ? "—" : perf.echoMs + " ms"}\n` +
+          `<b>keys</b>  ${perf.inEvents}/s  ${fmtBytes(perf.inBytes)}/s\n` +
+          `<b>out</b>   ${perf.outWrites}/s  ${fmtBytes(perf.outBytes)}/s\n` +
+          `<b>jank</b>  ${Math.round(perf.jankMs)} ms/s`;
+        perfReset(); // note: echoMs is preserved (last keystroke round-trip stays shown)
       }, 1000);
       function setPerfHud(on) {
         perfOn = on;
