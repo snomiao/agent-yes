@@ -1605,8 +1605,9 @@
         /^192\.168\./.test(ip) ||
         /^172\.(1[6-9]|2\d|3[01])\./.test(ip) ||
         /^169\.254\./.test(ip) || // IPv4 link-local
+        /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./.test(ip) || // CGNAT / Tailscale (100.64.0.0/10)
         /^fe80:/i.test(ip) || // IPv6 link-local
-        /^f[cd][0-9a-f]{2}:/i.test(ip) || // IPv6 ULA (fc00::/7)
+        /^f[cd][0-9a-f]{2}:/i.test(ip) || // IPv6 ULA (fc00::/7, incl. Tailscale fd7a:…)
         /\.local$/i.test(ip); // mDNS host candidate (browser-obfuscated LAN IP)
       // Inspect the selected ICE candidate pair: relay on either end = TURN-proxied
       // (slow); otherwise the peer's address decides local vs lan vs wan.
@@ -1636,14 +1637,21 @@
             if (s.id === pair.remoteCandidateId) remote = s;
           });
           if (!local || !remote) return null;
+          // A TURN relay on EITHER end means traffic is proxied — the slow path.
           if (local.candidateType === "relay" || remote.candidateType === "relay") return "relay";
-          if (local.candidateType === "host" && remote.candidateType === "host") {
+          // Classify by how we reach the REMOTE host (the peer). The LOCAL candidate
+          // is often prflx/srflx even on a fast private path (e.g. a Tailscale/CGNAT
+          // mesh shows local=prflx, remote=host 100.x at ~1ms RTT), so requiring both
+          // ends to be `host` wrongly flagged those as wan — key on the remote.
+          if (remote.candidateType === "host") {
             const ip = remote.address || remote.ip || "";
             if (isLoopbackIp(ip)) return "local";
-            if (isPrivateIp(ip)) return "lan";
-            return "wan";
+            // private / CGNAT-Tailscale / link-local / ULA / mDNS, or an address-hidden
+            // host candidate (host candidates are direct, effectively local).
+            if (!ip || isPrivateIp(ip)) return "lan";
+            return "wan"; // a directly-reachable PUBLIC host
           }
-          // srflx/prflx — reflexive (STUN), direct over the internet.
+          // srflx / prflx — reached via STUN reflexive, i.e. out over the internet.
           return "wan";
         } catch {
           return null;
