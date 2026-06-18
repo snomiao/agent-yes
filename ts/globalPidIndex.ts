@@ -66,14 +66,13 @@ export function getGlobalPidIndexPath(): string {
   return resolveGlobalFile();
 }
 
-async function ensureDir() {
-  await mkdir(resolveGlobalDir(), { recursive: true });
-}
-
-async function withLock<R>(fn: () => Promise<R>): Promise<R> {
-  await ensureDir();
-  const file = resolveGlobalFile();
-  const dir = resolveGlobalDir();
+// Locks/operates on the `file` the CALLER resolved (at call time). Resolving the
+// path up front — before any await — keeps fire-and-forget writes from landing in
+// a different ~/.agent-yes if AGENT_YES_HOME changes before the async write runs
+// (notably tests that set+reset it around an un-awaited mirror write).
+async function withLock<R>(file: string, fn: () => Promise<R>): Promise<R> {
+  const dir = path.dirname(file);
+  await mkdir(dir, { recursive: true });
   let release: (() => Promise<void>) | undefined;
   try {
     release = await lock(dir, {
@@ -88,9 +87,10 @@ async function withLock<R>(fn: () => Promise<R>): Promise<R> {
 
 /** Append one full record line. Caller must provide all required fields. */
 export async function appendGlobalPid(record: GlobalPidRecord): Promise<void> {
+  const file = resolveGlobalFile(); // capture at call time (see withLock)
   try {
-    await withLock(async () => {
-      await appendFile(resolveGlobalFile(), JSON.stringify(record) + "\n");
+    await withLock(file, async () => {
+      await appendFile(file, JSON.stringify(record) + "\n");
     });
   } catch (error) {
     logger.debug("[globalPidIndex] append failed:", error);
@@ -102,13 +102,14 @@ export async function updateGlobalPidStatus(
   pid: number,
   patch: Partial<Pick<GlobalPidRecord, "status" | "exit_code" | "exit_reason" | "log_file">>,
 ): Promise<void> {
+  const file = resolveGlobalFile(); // capture at call time (see withLock)
   try {
-    await withLock(async () => {
-      const current = await readGlobalPidsRaw();
+    await withLock(file, async () => {
+      const current = await readGlobalPidsRaw(file);
       const existing = current.find((r) => r.pid === pid);
       if (!existing) return; // unknown pid — nothing to update
       const merged: GlobalPidRecord = { ...existing, ...patch };
-      await appendFile(resolveGlobalFile(), JSON.stringify(merged) + "\n");
+      await appendFile(file, JSON.stringify(merged) + "\n");
     });
   } catch (error) {
     logger.debug("[globalPidIndex] updateStatus failed:", error);
@@ -118,10 +119,10 @@ export async function updateGlobalPidStatus(
 /**
  * Read the file once without merge logic — internal helper for status updates.
  */
-async function readGlobalPidsRaw(): Promise<GlobalPidRecord[]> {
+async function readGlobalPidsRaw(file: string = resolveGlobalFile()): Promise<GlobalPidRecord[]> {
   let raw: string;
   try {
-    raw = await readFile(resolveGlobalFile(), "utf-8");
+    raw = await readFile(file, "utf-8");
   } catch (err: any) {
     if (err.code === "ENOENT") return [];
     throw err;
@@ -175,9 +176,10 @@ const COMPACT_THRESHOLD_LINES = 500; // raw events; one merged record per pid
  * it no-ops when the file is already small enough.
  */
 export async function maybeCompactGlobalPids(): Promise<void> {
+  const file = resolveGlobalFile(); // capture at call time (see withLock)
   let raw: string;
   try {
-    raw = await readFile(resolveGlobalFile(), "utf-8");
+    raw = await readFile(file, "utf-8");
   } catch (err: any) {
     if (err.code === "ENOENT") return;
     return;
@@ -186,15 +188,15 @@ export async function maybeCompactGlobalPids(): Promise<void> {
   if (lineCount < COMPACT_THRESHOLD_LINES) return;
 
   try {
-    await withLock(async () => {
-      const merged = await readGlobalPidsRaw();
+    await withLock(file, async () => {
+      const merged = await readGlobalPidsRaw(file);
       // Drop dead-and-exited entries; keep dead-but-not-yet-exited so a later
       // status-update from elsewhere can still be matched against them.
       const keep = merged.filter((r) => r.status !== "exited" || isProcessAlive(r.pid));
-      const tmpFile = resolveGlobalFile() + ".compact";
+      const tmpFile = file + ".compact";
       const content = keep.map((r) => JSON.stringify(r)).join("\n") + (keep.length ? "\n" : "");
       await writeFile(tmpFile, content);
-      await rename(tmpFile, resolveGlobalFile());
+      await rename(tmpFile, file);
       logger.debug(`[globalPidIndex] compacted ${lineCount} → ${keep.length} lines`);
     });
   } catch (error) {
