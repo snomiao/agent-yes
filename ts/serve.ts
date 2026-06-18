@@ -749,11 +749,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
     }
   };
 
-  // Per-cwd git snapshot for the list: branch + dirty/changed count + ahead/behind
-  // vs upstream, all from a single `git status --porcelain --branch`. Cached per
-  // cwd with a short TTL so the 1s subscribe tick (and /api/ls polls) spawn at most
-  // one git per repo every few seconds — agents sharing a cwd share the result.
-  // Non-git dirs, errors, and timeouts cache as null.
+  // Per-repo git snapshot for the list (branch + dirty/changed + ahead/behind, from
+  // one `git status --porcelain --branch`). WATCHER-INVALIDATED, not polled: a read
+  // returns the cached snapshot instantly and NEVER spawns `git status` on the
+  // request path. A per-repo-root fs watcher recomputes (debounced) only when the
+  // repo actually changes, so an idle fleet costs ~0 git processes. The old design
+  // forked one `git status` per agent every poll tick — with dozens of agents that
+  // concurrent fan-out pinned host load (high load-average, low CPU: fork + I/O,
+  // not compute). Modeled on VSCode's git extension: watch + debounce, no interval
+  // poll (just a slow safety recompute for events a watcher might miss).
   interface GitInfo {
     branch: string | null;
     dirty: boolean;
@@ -761,16 +765,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
     ahead: number;
     behind: number;
   }
-  const GIT_TTL_MS = 5000;
-  const gitCache = new Map<string, { at: number; val: GitInfo | null }>();
-  const gitStatus = async (cwd: string | null | undefined): Promise<GitInfo | null> => {
-    if (!cwd) return null;
-    const now = Date.now();
-    const hit = gitCache.get(cwd);
-    if (hit && now - hit.at < GIT_TTL_MS) return hit.val;
-    let val: GitInfo | null = null;
+  const GIT_DEBOUNCE_MS = 800; // coalesce a burst of edits into one recompute
+  const GIT_SAFETY_MS = 60_000; // backstop recompute for any missed watch event
+  const runGit = async (args: string[], cwd: string): Promise<string | null> => {
     try {
-      const proc = Bun.spawn(["git", "status", "--porcelain", "--branch"], {
+      const proc = Bun.spawn(["git", ...args], {
         cwd,
         stdout: "pipe",
         stderr: "ignore",
@@ -778,23 +777,89 @@ export async function cmdServe(rest: string[]): Promise<number> {
       });
       const out = await new Response(proc.stdout).text();
       await proc.exited;
-      if (proc.exitCode === 0) {
-        const lines = out.split("\n");
-        // Branch header, e.g. "## main...origin/main [ahead 1, behind 2]",
-        // "## main" (no upstream), "## HEAD (no branch)", or "## No commits yet on x".
-        const h = /^## (.+)$/.exec(lines[0] ?? "")?.[1] ?? "";
-        const unborn = /^No commits yet on (.+)$/.exec(h);
-        const branch = unborn ? unborn[1]! : /^(.+?)(?:\.\.\.|\s|$)/.exec(h)?.[1] || null;
-        const ahead = Number(/\bahead (\d+)/.exec(h)?.[1] ?? 0);
-        const behind = Number(/\bbehind (\d+)/.exec(h)?.[1] ?? 0);
-        const changed = lines.slice(1).filter((l) => l.trim().length > 0).length;
-        val = { branch, dirty: changed > 0, changed, ahead, behind };
-      }
+      return proc.exitCode === 0 ? out : null;
     } catch {
-      val = null; // git missing, not a repo, or timed out
+      return null; // git missing, not a repo, or timed out
     }
-    gitCache.set(cwd, { at: now, val });
-    return val;
+  };
+  const parseGitStatus = (out: string): GitInfo => {
+    const lines = out.split("\n");
+    // Branch header, e.g. "## main...origin/main [ahead 1, behind 2]", "## main"
+    // (no upstream), "## HEAD (no branch)", or "## No commits yet on x".
+    const h = /^## (.+)$/.exec(lines[0] ?? "")?.[1] ?? "";
+    const unborn = /^No commits yet on (.+)$/.exec(h);
+    const branch = unborn ? unborn[1]! : /^(.+?)(?:\.\.\.|\s|$)/.exec(h)?.[1] || null;
+    const ahead = Number(/\bahead (\d+)/.exec(h)?.[1] ?? 0);
+    const behind = Number(/\bbehind (\d+)/.exec(h)?.[1] ?? 0);
+    const changed = lines.slice(1).filter((l) => l.trim().length > 0).length;
+    return { branch, dirty: changed > 0, changed, ahead, behind };
+  };
+  // cwd -> repo root ("" = resolved, not a repo). Resolved once per cwd via a cheap
+  // `git rev-parse --show-toplevel` (no tree scan) and cached, so many agents in the
+  // same repo (or its submodules/subdirs) share one watcher + snapshot.
+  const rootOfCwd = new Map<string, string>();
+  const resolveRoot = async (cwd: string): Promise<string> => {
+    const cached = rootOfCwd.get(cwd);
+    if (cached !== undefined) return cached;
+    const root = ((await runGit(["rev-parse", "--show-toplevel"], cwd)) ?? "").trim();
+    rootOfCwd.set(cwd, root);
+    return root;
+  };
+  interface RepoWatch {
+    val: GitInfo | null;
+    busy: boolean;
+    timer: ReturnType<typeof setTimeout> | null;
+  }
+  const repoWatch = new Map<string, RepoWatch>();
+  const recompute = (root: string, rw: RepoWatch) => {
+    if (rw.timer) return; // a recompute is already queued (debounce + throttle)
+    rw.timer = setTimeout(async () => {
+      rw.timer = null;
+      if (rw.busy) return void recompute(root, rw); // re-arm if one is in flight
+      rw.busy = true;
+      try {
+        const out = await runGit(["status", "--porcelain", "--branch"], root);
+        if (out != null) rw.val = parseGitStatus(out);
+      } finally {
+        rw.busy = false;
+      }
+    }, GIT_DEBOUNCE_MS);
+  };
+  const ensureRepoWatch = (root: string): RepoWatch => {
+    const existing = repoWatch.get(root);
+    if (existing) return existing;
+    const rw: RepoWatch = { val: null, busy: false, timer: null };
+    repoWatch.set(root, rw);
+    recompute(root, rw); // initial snapshot
+    // Ignore high-churn paths that never change `git status` output: our own log
+    // dir (.agent-yes, written on every PTY byte — would re-trigger forever),
+    // gitignored deps (node_modules), and git's own lock files.
+    const onChange = (file: string) => {
+      if (file.includes(".agent-yes") || file.includes("node_modules") || /\.lock$/.test(file))
+        return;
+      recompute(root, rw);
+    };
+    try {
+      // macOS/Windows: one recursive watcher (FSEvents/ReadDirectoryChanges) covers
+      // the working tree (dirty) AND .git (branch/ahead-behind) cheaply.
+      watch(root, { recursive: true }, (_e, f) => onChange(String(f ?? "")));
+    } catch {
+      // Recursive watch unsupported (some Linux/Bun builds): watch .git only —
+      // catches commit/branch/stage instantly; dirty count rides the safety tick.
+      try {
+        watch(path.join(root, ".git"), (_e, f) => onChange(".git/" + String(f ?? "")));
+      } catch {
+        /* no watcher available — rely solely on the safety recompute */
+      }
+    }
+    setInterval(() => recompute(root, rw), GIT_SAFETY_MS);
+    return rw;
+  };
+  const gitStatus = async (cwd: string | null | undefined): Promise<GitInfo | null> => {
+    if (!cwd) return null;
+    const root = await resolveRoot(cwd);
+    if (!root) return null; // not a git repo
+    return ensureRepoWatch(root).val; // cached — the request path never spawns `git status`
   };
 
   // One agent record decorated for the console: the latest OSC title + a git
