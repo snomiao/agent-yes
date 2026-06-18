@@ -1595,7 +1595,7 @@
       const srcFor = (e) => (e && sources.get(e._room)) || sources.get(LOCAL) || null;
       const txFor = (e) => srcFor(e)?.tx || localTx;
 
-      // ---- connection-path classification (header [local/lan/p2p/relay] pill) ----
+      // ---- connection-path classification (header [local/lan/wan/relay] pill) ----
       // Tells the user, at a glance, whether the terminal they're watching rides the
       // fast direct path or a relayed one — the difference between snappy and laggy.
       const isLoopbackIp = (ip) => ip === "::1" || /^127\./.test(ip);
@@ -1608,7 +1608,7 @@
         /^f[cd][0-9a-f]{2}:/i.test(ip) || // IPv6 ULA (fc00::/7)
         /\.local$/i.test(ip); // mDNS host candidate (browser-obfuscated LAN IP)
       // Inspect the selected ICE candidate pair: relay on either end = TURN-proxied
-      // (slow); otherwise the peer's address decides local vs lan vs p2p.
+      // (slow); otherwise the peer's address decides local vs lan vs wan.
       async function classifyPath(pc) {
         if (!pc || typeof pc.getStats !== "function") return null;
         try {
@@ -1640,10 +1640,10 @@
             const ip = remote.address || remote.ip || "";
             if (isLoopbackIp(ip)) return "local";
             if (isPrivateIp(ip)) return "lan";
-            return "p2p";
+            return "wan";
           }
           // srflx/prflx — reflexive (STUN), direct over the internet.
-          return "p2p";
+          return "wan";
         } catch {
           return null;
         }
@@ -1651,7 +1651,7 @@
       // Resolve the live RTCPeerConnection that carries a SPECIFIC agent. A codehost
       // room holds one peer per host (room.rtcs keyed by peerId); byPid maps the
       // agent's pid to its peerId, so each agent resolves to ITS host's connection —
-      // a VPS agent reads p2p while a tak.local agent in the same room reads lan.
+      // a VPS agent reads wan while a tak.local agent in the same room reads lan.
       function pcForAgent(s, e) {
         if (!s) return null;
         if (s.kind === "rtc") return s.client?.pc || null; // share room: one host
@@ -1675,19 +1675,19 @@
         }
         return s.id; // rtc share: one peer per room
       }
-      const connKinds = new Map(); // peerKey -> "local" | "lan" | "p2p" | "relay"
+      const connKinds = new Map(); // peerKey -> "local" | "lan" | "wan" | "relay"
       const hostKinds = new Map(); // hostKey -> same (peer-header tags)
       let connSig = "";
       const CTYPE_COLORS = {
         local: "var(--green)",
         lan: "var(--green)",
-        p2p: "var(--amber)",
+        wan: "var(--amber)",
         relay: "var(--red)",
       };
       const CTYPE_TIPS = {
         local: "this machine (ay serve, local)",
         lan: "direct over the local network (fast)",
-        p2p: "direct peer-to-peer over the internet (STUN)",
+        wan: "direct over the internet, peer-to-peer (STUN — RTT-bound)",
         relay: "TURN-relayed — proxied through a server (slowest path)",
       };
       // A small colored pill for a connection kind — reused by the header badge and
@@ -1698,7 +1698,7 @@
       }
       // Classify every distinct peer in the fleet, caching by (room,host). Because
       // each agent reads its own host's path, a mixed room (VPS + laptop) shows both
-      // p2p and lan at once — exactly what tells you a "local" agent is wrongly remote.
+      // wan and lan at once — exactly what tells you a "local" agent is wrongly remote.
       async function refreshConnKinds() {
         // Probe each distinct peer once (not once per agent), keyed by peerKey.
         const reps = new Map(); // peerKey -> a representative entry for that peer
@@ -2019,7 +2019,7 @@
       // layeredRows), so a header always disambiguates something real.
       function headerHtml(r) {
         const icon = r.kind === "room" ? "▤" : "▣";
-        // Peer headers carry their host's connection type (lan/p2p/relay), so a
+        // Peer headers carry their host's connection type (lan/wan/relay), so a
         // mixed room shows at a glance which hosts are local vs reached over WAN.
         const ctag =
           r.kind === "peer"
