@@ -13,7 +13,7 @@
     "dist:dir": "npm run bundle && electron-builder --dir"
   },
   "devDependencies": {
-    "electron": "^33.0.0",
+    "electron": "^42.4.1",
     "electron-builder": "^25.0.0"
   },
   "build": {
