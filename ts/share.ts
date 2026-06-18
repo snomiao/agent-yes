@@ -208,19 +208,44 @@ async function ensureAddon(ndDir: string): Promise<void> {
   }
 }
 
+// Pin libdatachannel's global init alive for the process lifetime. Without this,
+// every time the open-PeerConnection count drops to zero (an idle room between
+// visitors) libdatachannel runs its global CleanupAll() teardown and re-inits on
+// the next peer. That lazy init↔teardown churn deadlocks the native stack after a
+// while — the JS main thread ends up stuck forever in a pthread once-rendezvous
+// (wchan: wait_for_partner), freezing the whole event loop so the host answers no
+// one. Reproduced: rapid create/connect/close froze at ~1400 cycles; holding the
+// global alive sailed past 2x that. node-datachannel's preload() holds a global
+// reference so CleanupAll() never runs on peer churn. (Root cause is in
+// libdatachannel 0.24.2 — fixed upstream post-0.24.2, but node-datachannel 0.32.3
+// is the latest and still bundles 0.24.2. The proactive recycle + health watchdog
+// stay as backstops.)
+async function preloadRTC(): Promise<void> {
+  try {
+    const ndc: any = await import("node-datachannel");
+    (ndc.default?.preload ?? ndc.preload)?.();
+  } catch {
+    /* best-effort hardening — sharing still works without it */
+  }
+}
+
 async function importRTC(): Promise<any> {
   // Ensure the native addon is on disk before the first import — a failed
   // dynamic import is cached by Bun, so post-import healing can't recover it.
   const ndDir = await ndPackageDir();
   if (ndDir) await ensureAddon(ndDir);
   try {
-    return (await import("node-datachannel/polyfill")).RTCPeerConnection;
+    const RTCPeerConnection = (await import("node-datachannel/polyfill")).RTCPeerConnection;
+    await preloadRTC();
+    return RTCPeerConnection;
   } catch (firstErr) {
     // Fallback for linked/global installs: the binary lives in the resolved pkg
     // but Bun's cache copy lacks it — symlink it across, then retry once.
     await linkFromBunCache().catch(() => {});
     try {
-      return (await import("node-datachannel/polyfill")).RTCPeerConnection;
+      const RTCPeerConnection = (await import("node-datachannel/polyfill")).RTCPeerConnection;
+      await preloadRTC();
+      return RTCPeerConnection;
     } catch {
       throw firstErr;
     }
