@@ -3,8 +3,14 @@ import { IdleWaiter } from "./idleWaiter";
 
 describe("IdleWaiter", () => {
   it("should initialize with current time", () => {
+    // Bracket the constructor instead of a magic toBeCloseTo tolerance: the
+    // timestamp must fall within [before, after], which can't flake on a slow CI
+    // runner (a GC pause would just widen the bracket, never break it).
+    const before = Date.now();
     const waiter = new IdleWaiter();
-    expect(waiter.lastActivityTime).toBeCloseTo(Date.now(), -2);
+    const after = Date.now();
+    expect(waiter.lastActivityTime).toBeGreaterThanOrEqual(before);
+    expect(waiter.lastActivityTime).toBeLessThanOrEqual(after);
   });
 
   it("should update lastActivityTime when ping is called", () => {

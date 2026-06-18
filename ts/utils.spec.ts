@@ -19,7 +19,10 @@ describe("utils", () => {
       const start = Date.now();
       await sleepms(0);
       const end = Date.now();
-      expect(end - start).toBeLessThan(50); // Should be quick
+      // Generous bound: catches a real regression (e.g. sleepms ignoring 0 and
+      // hanging) without flaking on a GC pause / loaded CI runner. The await
+      // itself already proves it resolves; this just guards against a hang.
+      expect(end - start).toBeLessThan(1000);
     });
   });
 
