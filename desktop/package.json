@@ -1,0 +1,53 @@
+{
+  "name": "agent-yes-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline desktop shell for the agent-yes console — bundles the UI + the agent-yes CLI; no s.agent-yes.com signaling required.",
+  "license": "MIT",
+  "author": "snomiao <snomiao@gmail.com>",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "bundle": "node bundle-cli.mjs",
+    "dist": "npm run bundle && electron-builder",
+    "dist:dir": "npm run bundle && electron-builder --dir"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.agent-yes.desktop",
+    "productName": "agent-yes",
+    "files": [
+      "main.js",
+      "preload.js"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/ay",
+        "to": "ay"
+      }
+    ],
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.developer-tools"
+    },
+    "win": {
+      "target": [
+        "nsis"
+      ]
+    },
+    "linux": {
+      "target": [
+        "AppImage",
+        "deb"
+      ],
+      "category": "Development"
+    }
+  },
+  "productName": "agent-yes"
+}

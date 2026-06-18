@@ -364,7 +364,10 @@ export async function startShare(
           await Promise.race([
             setup,
             new Promise((_, reject) => {
-              timer = setTimeout(() => reject(new Error("startPeer timeout")), STARTPEER_TIMEOUT_MS);
+              timer = setTimeout(
+                () => reject(new Error("startPeer timeout")),
+                STARTPEER_TIMEOUT_MS,
+              );
             }),
           ]).finally(() => clearTimeout(timer!));
           peerSetupFailures = 0; // a delivered offer proves the WebRTC stack works

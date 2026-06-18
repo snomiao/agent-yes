@@ -837,7 +837,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
     // dir (.agent-yes, written on every PTY byte — would re-trigger forever),
     // gitignored deps (node_modules), and git's own lock files.
     const onChange = (file: string) => {
-      if (file.includes(".agent-yes") || file.includes("node_modules") || /\.lock$/.test(file))
+      if (file.includes(".agent-yes") || file.includes("node_modules") || file.endsWith(".lock"))
         return;
       recompute(root, rw);
     };
