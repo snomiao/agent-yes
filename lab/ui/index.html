@@ -165,9 +165,11 @@
         border-radius: 999px;
         border: 1px solid currentColor;
         text-transform: uppercase;
-        opacity: 0.9;
         cursor: help;
       }
+      /* NB: no opacity on .ctype — CSS opacity applies to the whole subtree, so
+         it would bleed the terminal through the .ctip popover below. Dim the pill
+         via border/text color instead if needed. */
       .ctype[hidden] {
         display: none;
       }
@@ -180,10 +182,13 @@
         z-index: 30;
         min-width: 240px;
         padding: 8px 10px;
-        background: var(--panel);
+        background: var(--panel); /* fallback when color-mix is unsupported */
+        background: color-mix(in srgb, var(--panel) 90%, transparent);
+        backdrop-filter: blur(14px) saturate(1.4);
+        -webkit-backdrop-filter: blur(14px) saturate(1.4);
         border: 1px solid var(--line);
-        border-radius: 8px;
-        box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+        border-radius: 10px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
         color: var(--fg);
         font-family: var(--mono);
         font-size: 10.5px;
@@ -997,6 +1002,10 @@
         border-color: var(--accent);
         color: #fff;
       }
+      /* modifier glyphs (⌃ ⌥ ⇧) read better a touch larger than the text keys */
+      .keybar .kbmod {
+        font-size: 16px;
+      }
       /* Line composer — mobile-only. Carries the bottom safe-area inset so it
          clears the home indicator (completes the terminal pane's inset cover). */
       .composer {
@@ -1239,18 +1248,47 @@
              posts raw sequences to the agent over the same /api/send wire. -->
         <div class="keybar" id="keybar" role="group" aria-label="terminal keys">
           <button class="kb" data-key="esc" title="Escape">Esc</button>
-          <button class="kb kbmod" data-mod="ctrl" title="Ctrl — applies to the next key">
-            Ctrl
+          <button
+            class="kb kbmod"
+            data-mod="ctrl"
+            title="Ctrl — applies to the next key"
+            aria-label="Control"
+          >
+            ⌃
           </button>
-          <button class="kb kbmod" data-mod="alt" title="Alt — applies to the next key">Alt</button>
+          <button
+            class="kb kbmod"
+            data-mod="alt"
+            title="Alt / Option — applies to the next key"
+            aria-label="Alt"
+          >
+            ⌥
+          </button>
+          <button
+            class="kb kbmod"
+            data-mod="shift"
+            title="Shift — applies to the next key"
+            aria-label="Shift"
+          >
+            ⇧
+          </button>
           <button class="kb" data-key="tab" title="Tab">Tab</button>
-          <button class="kb" data-key="stab" title="Shift-Tab (e.g. cycle modes)">⇧Tab</button>
-          <button class="kb" data-key="cc" title="Ctrl-C — interrupt">^C</button>
+          <button
+            class="kb"
+            data-key="stab"
+            title="Shift-Tab (e.g. cycle modes)"
+            aria-label="Shift Tab"
+          >
+            ⇧Tab
+          </button>
+          <button class="kb" data-key="cc" title="Ctrl-C — interrupt" aria-label="Control C">
+            ^C
+          </button>
           <button class="kb" data-arrow="up" title="Up" aria-label="Up">↑</button>
           <button class="kb" data-arrow="down" title="Down" aria-label="Down">↓</button>
           <button class="kb" data-arrow="left" title="Left" aria-label="Left">←</button>
           <button class="kb" data-arrow="right" title="Right" aria-label="Right">→</button>
-          <button class="kb" data-key="enter" title="Enter">⏎</button>
+          <button class="kb" data-key="enter" title="Enter" aria-label="Enter">⏎</button>
         </div>
         <!-- Line composer — the reliable path for typing a prompt on a phone:
              a normal textarea (no IME/autocorrect surprises that plague xterm's
@@ -2251,7 +2289,8 @@
       // sequences straight to the selected agent's stdin, and a sticky Ctrl/Alt
       // rewrites the NEXT character typed on the soft keyboard.
       let modCtrl = false,
-        modAlt = false;
+        modAlt = false,
+        modShift = false;
       // Send raw bytes to the currently-selected agent. Uses the live `sel`, so
       // it always hits the open agent even while an old terminal tears down mid
       // switch — the same /api/send wire the terminal's own input uses.
@@ -2263,20 +2302,25 @@
           .post("/api/send", { keyword: String(e.pid), msg: data, code: "none" })
           .catch(() => {});
       }
-      // Apply a pending sticky Ctrl/Alt to ONE typed character (soft-keyboard
-      // path only). Multi-char input — paste, an IME commit, an escape sequence —
-      // passes through untouched. Ctrl folds @A–Z[\]^_ (case-insensitive) to
-      // 0x00–0x1f; Alt/Meta is an ESC prefix. One-shot: clears after one char.
+      // Apply a pending sticky Ctrl/Alt to a typed character, then disarm. Only a
+      // SINGLE character is transformed: Ctrl folds @A–Z[\]^_ (case-insensitive)
+      // to 0x00–0x1f; Alt/Meta is an ESC prefix; Shift is a no-op (the soft
+      // keyboard already produced the shifted char — Shift only matters for the
+      // key bar's Tab/arrows). Any OTHER input (paste, IME commit, escape/mouse
+      // sequence) passes through unchanged but STILL disarms — a one-shot modifier
+      // must not survive to a later key (e.g. tap ⇧, paste, then an arrow).
       function applyStickyMods(d) {
-        if ((!modCtrl && !modAlt) || typeof d !== "string" || d.length !== 1) return d;
+        if (!modCtrl && !modAlt && !modShift) return d;
         let c = d;
-        if (modCtrl) {
-          const u = d.toUpperCase().charCodeAt(0);
-          if (u >= 64 && u <= 95) c = String.fromCharCode(u - 64);
-          else if (u === 32) c = "\x00"; // Ctrl-Space → NUL
+        if (typeof d === "string" && d.length === 1) {
+          if (modCtrl) {
+            const u = d.toUpperCase().charCodeAt(0);
+            if (u >= 64 && u <= 95) c = String.fromCharCode(u - 64);
+            else if (u === 32) c = "\x00"; // Ctrl-Space → NUL
+          }
+          if (modAlt) c = "\x1b" + c;
         }
-        if (modAlt) c = "\x1b" + c;
-        modCtrl = modAlt = false;
+        modCtrl = modAlt = modShift = false; // one-shot — disarm on any input
         syncModButtons();
         return c;
       }
@@ -2285,6 +2329,7 @@
         if (!kb) return;
         kb.querySelector('[data-mod="ctrl"]')?.classList.toggle("on", modCtrl);
         kb.querySelector('[data-mod="alt"]')?.classList.toggle("on", modAlt);
+        kb.querySelector('[data-mod="shift"]')?.classList.toggle("on", modShift);
       }
       (function keybarBoot() {
         const kb = $("keybar");
@@ -2302,21 +2347,23 @@
           const b = ev.target.closest("button.kb");
           if (!b) return;
           if (b.dataset.mod) {
-            // sticky toggle — armed for the next soft-keyboard character
-            if (b.dataset.mod === "ctrl") modCtrl = !modCtrl;
-            else modAlt = !modAlt;
+            // sticky toggle — armed for the next key (a soft-keyboard char or a bar key)
+            const m = b.dataset.mod;
+            if (m === "ctrl") modCtrl = !modCtrl;
+            else if (m === "alt") modAlt = !modAlt;
+            else if (m === "shift") modShift = !modShift;
             syncModButtons();
             return;
           }
           let seq = null;
           if (b.dataset.arrow) {
             const L = ARROW[b.dataset.arrow];
-            if (modCtrl || modAlt) {
-              // Ctrl/Alt + arrow → CSI modifier form ESC [ 1 ; <m> <L>, where
-              // m = 1 + Alt(2) + Ctrl(4) (e.g. Ctrl-Left = ESC [ 1 ; 5 D for
-              // word-wise motion). Modified cursor keys are always CSI, never
+            if (modCtrl || modAlt || modShift) {
+              // Modifier + arrow → CSI form ESC [ 1 ; <m> <L>, where
+              // m = 1 + Shift(1) + Alt(2) + Ctrl(4) (e.g. Ctrl-Left = ESC [ 1 ; 5 D
+              // for word-wise motion). Modified cursor keys are always CSI, never
               // SS3, so DECCKM doesn't apply when a modifier is held.
-              seq = "\x1b[1;" + (1 + (modAlt ? 2 : 0) + (modCtrl ? 4 : 0)) + L;
+              seq = "\x1b[1;" + (1 + (modShift ? 1 : 0) + (modAlt ? 2 : 0) + (modCtrl ? 4 : 0)) + L;
             } else {
               // Honour application-cursor-key mode (DECCKM): TUIs that enable it
               // expect SS3 (ESC O x) arrows, not CSI (ESC [ x). xterm tracks it.
@@ -2325,13 +2372,16 @@
             }
           } else if (b.dataset.key) {
             seq = SEQ[b.dataset.key];
-            // Alt/Meta on a fixed key = ESC prefix (e.g. Alt+Enter). Ctrl on
-            // Esc/Tab/Enter has no standard sequence, so it's left as the bare key.
+            // Shift+Tab → CBT (ESC [ Z), same as the dedicated ⇧Tab key.
+            if (b.dataset.key === "tab" && modShift) seq = "\x1b[Z";
+            // Alt/Meta on a fixed key = ESC prefix, layered ON TOP of the above so
+            // Alt+Shift+Tab → ESC ESC [ Z (not just ESC [ Z). Ctrl/Shift on
+            // Esc/Enter/^C have no standard sequence, so they stay the bare key.
             if (seq != null && modAlt) seq = "\x1b" + seq;
           }
           if (seq == null) return;
           // the armed modifier (if any) has now been folded into this key — clear it
-          modCtrl = modAlt = false;
+          modCtrl = modAlt = modShift = false;
           syncModButtons();
           sendToSelected(seq);
         });
@@ -2353,13 +2403,8 @@
           let v = ta.value;
           if (!v) return;
           // An armed sticky Ctrl/Alt decorates a single-char line (e.g. Ctrl-D);
-          // longer text can't carry it, but the modifier must still be cleared so
-          // it doesn't silently leak into the next terminal keystroke.
+          // applyStickyMods also disarms for longer text, so it can't leak onward.
           v = applyStickyMods(v);
-          if (modCtrl || modAlt) {
-            modCtrl = modAlt = false;
-            syncModButtons();
-          }
           sendToSelected(v + "\r");
           ta.value = "";
           grow();

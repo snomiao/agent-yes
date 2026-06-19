@@ -261,9 +261,26 @@ describe("console DOM behaviour", () => {
       await page.locator('.keybar [data-arrow="down"]').click();
       await expect.poll(lastMsg).toBe("\x1b[B");
 
-      // Shift-Tab → CBT / back-tab (ESC [ Z)
+      // dedicated ⇧Tab → CBT / back-tab (ESC [ Z)
       await page.locator('.keybar [data-key="stab"]').click();
       await expect.poll(lastMsg).toBe("\x1b[Z");
+
+      // Shift modifier + Tab → the same CBT sequence as the dedicated ⇧Tab
+      await page.locator('.keybar [data-mod="shift"]').click();
+      await page.locator('.keybar [data-key="tab"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[Z");
+
+      // Shift + arrow → CSI modifier 2 (e.g. Shift-Left = ESC [ 1 ; 2 D)
+      await page.locator('.keybar [data-mod="shift"]').click();
+      await page.locator('.keybar [data-arrow="left"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[1;2D");
+
+      // a multi-char input (paste/mouse report) disarms a pending modifier so it
+      // can't leak onto a later key: arm ⇧, "paste", then Left → PLAIN Left
+      await page.locator('.keybar [data-mod="shift"]').click();
+      await page.evaluate(() => (window as any).__onData("pasted text"));
+      await page.locator('.keybar [data-arrow="left"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[D");
 
       // Ctrl + Left → ESC [ 1 ; 5 D, and the armed state clears after one key
       await page.locator('.keybar [data-mod="ctrl"]').click();
@@ -276,6 +293,12 @@ describe("console DOM behaviour", () => {
       await page.locator('.keybar [data-mod="alt"]').click();
       await page.locator('.keybar [data-arrow="right"]').click();
       await expect.poll(lastMsg).toBe("\x1b[1;3C");
+
+      // Alt + Shift + Tab → ESC ESC [ Z (Alt prefix layered on the back-tab)
+      await page.locator('.keybar [data-mod="alt"]').click();
+      await page.locator('.keybar [data-mod="shift"]').click();
+      await page.locator('.keybar [data-key="tab"]').click();
+      await expect.poll(lastMsg).toBe("\x1b\x1b[Z");
 
       // sticky Ctrl then a soft-keyboard char → control code via the xterm path
       await page.locator('.keybar [data-mod="ctrl"]').click();
@@ -368,6 +391,7 @@ describe("console DOM behaviour", () => {
       // the key bar carries the Esc/Ctrl/arrow controls
       expect(await page.locator('.keybar [data-key="esc"]').count()).toBe(1);
       expect(await page.locator('.keybar [data-mod="ctrl"]').count()).toBe(1);
+      expect(await page.locator('.keybar [data-mod="shift"]').count()).toBe(1);
       expect(await page.locator('.keybar [data-arrow="up"]').count()).toBe(1);
     } finally {
       await ctx.close();
