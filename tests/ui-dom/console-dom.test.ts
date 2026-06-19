@@ -29,8 +29,9 @@ async function openConsole(
   browser: Browser,
   url: string,
   viewport: { width: number; height: number } = { width: 1280, height: 800 },
+  extra: Record<string, unknown> = {},
 ): Promise<{ ctx: BrowserContext; page: Page }> {
-  const ctx = await browser.newContext({ viewport });
+  const ctx = await browser.newContext({ viewport, ...extra });
   await ctx.route(/cdn\.jsdelivr\.net/, (route) => {
     const body = route.request().url().includes("addon-fit") ? FITADDON_STUB : TERMINAL_STUB;
     route.fulfill({ status: 200, contentType: "application/javascript", body });
@@ -231,6 +232,68 @@ describe("console DOM behaviour", () => {
     }
   });
 
+  it("key bar + composer apply sticky Ctrl/Alt and never leak the modifier", async () => {
+    const { ctx, page } = await openConsole(
+      browser,
+      url,
+      { width: 390, height: 844 },
+      { hasTouch: true, isMobile: true },
+    );
+    const sends: any[] = [];
+    page.on("request", (r) => {
+      if (r.method() === "POST" && r.url().includes("/api/send")) {
+        try {
+          sends.push(r.postDataJSON());
+        } catch {}
+      }
+    });
+    const lastMsg = () => sends.at(-1)?.msg;
+    const ctrlOn = () =>
+      page
+        .locator('.keybar [data-mod="ctrl"]')
+        .getAttribute("class")
+        .then((c) => !!c?.includes("on"));
+    try {
+      await page.locator('.list .row[data-key="local#102"]').click();
+      await expect.poll(() => page.locator(".keybar").isVisible()).toBe(true);
+
+      // plain arrow → CSI form (no DECCKM in the stub)
+      await page.locator('.keybar [data-arrow="down"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[B");
+
+      // Ctrl + Left → ESC [ 1 ; 5 D, and the armed state clears after one key
+      await page.locator('.keybar [data-mod="ctrl"]').click();
+      await expect.poll(ctrlOn).toBe(true);
+      await page.locator('.keybar [data-arrow="left"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[1;5D");
+      expect(await ctrlOn()).toBe(false);
+
+      // Alt + Right → ESC [ 1 ; 3 C
+      await page.locator('.keybar [data-mod="alt"]').click();
+      await page.locator('.keybar [data-arrow="right"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[1;3C");
+
+      // sticky Ctrl then a soft-keyboard char → control code via the xterm path
+      await page.locator('.keybar [data-mod="ctrl"]').click();
+      await page.evaluate(() => (window as any).__onData("r"));
+      await expect.poll(lastMsg).toBe("\x12");
+
+      // composer: a single-char line carries an armed Ctrl (Ctrl-D + Enter)…
+      await page.locator('.keybar [data-mod="ctrl"]').click();
+      await page.fill("#cmpin", "d");
+      await page.locator("#cmpin").press("Enter");
+      await expect.poll(lastMsg).toBe("\x04\r");
+      // …and a multi-char line can't carry it, but must still clear it (no leak)
+      await page.locator('.keybar [data-mod="ctrl"]').click();
+      await page.fill("#cmpin", "ls");
+      await page.locator("#cmpin").press("Enter");
+      await expect.poll(lastMsg).toBe("ls\r");
+      expect(await ctrlOn()).toBe(false);
+    } finally {
+      await ctx.close();
+    }
+  });
+
   it("the middle splitter is draggable and persists the width", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
@@ -268,12 +331,40 @@ describe("console DOM behaviour", () => {
     }
   });
 
-  it("has no stdin composer (xterm is the input)", async () => {
+  it("desktop has no stdin composer (xterm is the input); touch aids stay hidden", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
+      // the old always-on stdin composer is gone — on desktop you type into xterm
       expect(await page.locator("#msg").count()).toBe(0);
-      expect(await page.locator(".composer").count()).toBe(0);
       expect(await page.locator("#send").count()).toBe(0);
+      // the mobile line composer + key bar exist in the DOM but are
+      // pointer:coarse-only, so they must stay hidden in this fine-pointer viewport
+      expect(await page.locator(".composer").count()).toBe(1);
+      expect(await page.locator(".composer").isVisible()).toBe(false);
+      expect(await page.locator(".keybar").count()).toBe(1);
+      expect(await page.locator(".keybar").isVisible()).toBe(false);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("shows the touch aids (key bar + composer) on a coarse-pointer device", async () => {
+    // emulate a phone: touch + small viewport ⇒ pointer:coarse ⇒ aids visible
+    const { ctx, page } = await openConsole(
+      browser,
+      url,
+      { width: 390, height: 844 },
+      { hasTouch: true, isMobile: true },
+    );
+    try {
+      // open an agent so the detail (terminal) pane becomes the active column
+      await page.locator(".list .row").first().click();
+      await expect.poll(() => page.locator(".keybar").isVisible()).toBe(true);
+      expect(await page.locator(".composer").isVisible()).toBe(true);
+      // the key bar carries the Esc/Ctrl/arrow controls
+      expect(await page.locator('.keybar [data-key="esc"]').count()).toBe(1);
+      expect(await page.locator('.keybar [data-mod="ctrl"]').count()).toBe(1);
+      expect(await page.locator('.keybar [data-arrow="up"]').count()).toBe(1);
     } finally {
       await ctx.close();
     }

@@ -2,7 +2,10 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <title>agent-yes · console</title>
     <!-- PWA: installable console under /w/ (manifest scope is /w/). The service
          worker is network-first so it never serves a stale wire protocol — the
@@ -35,6 +38,17 @@
         --pink: #f778ba;
         --red: #f85149;
         --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+        /* Safe-area insets — non-zero only in a standalone PWA on a notched /
+           gesture-bar device (else 0, so these are harmless on desktop). Consumed
+           via max() so the surface keeps its normal padding when the inset is 0.
+           Needs <meta viewport ... viewport-fit=cover> to be reported at all. */
+        --sat: env(safe-area-inset-top);
+        --sar: env(safe-area-inset-right);
+        --sab: env(safe-area-inset-bottom);
+        --sal: env(safe-area-inset-left);
+        /* height the iOS soft keyboard overlays the viewport with (set from JS
+           via visualViewport; 0 on desktop / Android, which resizes instead). */
+        --kb: 0px;
       }
       /* Light theme — GitHub-light, the daylight counterpart of the dark palette
          above. prefers-color-scheme is re-evaluated by the browser the moment the
@@ -93,7 +107,8 @@
         grid-template-columns: var(--leftw, 42%) 1px 1fr;
         grid-template-rows: minmax(0, 1fr);
         height: 100vh;
-        height: 100dvh;
+        /* subtract the iOS keyboard overlay so the composer stays above it */
+        height: calc(100dvh - var(--kb, 0px));
       }
 
       /* VSCode-style splitter: the visible divider stays 1px, but a ::before
@@ -125,7 +140,7 @@
         min-height: 0;
       }
       .head {
-        padding: 16px 18px 10px;
+        padding: max(16px, var(--sat)) max(18px, var(--sar)) 10px max(18px, var(--sal));
         border-bottom: 1px solid var(--line);
       }
       h1 {
@@ -259,6 +274,40 @@
         height: 1px;
         background: var(--line);
         margin: 4px 2px;
+      }
+      /* Terminal font-size stepper (a static row, not a hover/click target). */
+      .rmenufont {
+        justify-content: space-between;
+        cursor: default;
+      }
+      .rmenufont:hover {
+        background: none;
+      }
+      .fontstep {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+      .fontstep button {
+        width: 26px;
+        height: 26px;
+        background: var(--panel2);
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        color: var(--fg);
+        font-size: 13px;
+        line-height: 1;
+        cursor: pointer;
+      }
+      .fontstep button:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .fontstep #fontVal {
+        min-width: 18px;
+        text-align: center;
+        font-variant-numeric: tabular-nums;
+        color: var(--muted);
       }
       /* Live performance HUD — opt-in via the ⋯ menu, hidden by default. */
       .perfhud {
@@ -627,6 +676,8 @@
         overflow-y: auto;
         flex: 1;
         min-height: 0;
+        /* clear the home-indicator / gesture bar so the last row stays tappable */
+        padding-bottom: var(--sab);
       }
       .row {
         padding: 11px 18px;
@@ -834,7 +885,7 @@
         position: relative; /* anchor for the absolutely-positioned perf HUD */
       }
       .rhead {
-        padding: 14px 20px;
+        padding: max(14px, var(--sat)) max(20px, var(--sar)) 14px max(20px, var(--sal));
         border-bottom: 1px solid var(--line);
         display: flex;
         align-items: center;
@@ -842,6 +893,13 @@
       }
       .rhead .name {
         font-size: 15px;
+        /* shrink + ellipsis so a long agent title can't shove the live/⋯
+           controls off the edge on a narrow phone header */
+        flex: 0 1 auto;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
       /* back-to-list affordance — only surfaces in the single-column mobile view */
       .rback {
@@ -882,7 +940,7 @@
         flex: 1;
         min-height: 0;
         overflow: hidden;
-        padding: 8px 10px;
+        padding: 8px max(10px, var(--sar)) 8px max(10px, var(--sal));
         background: var(--bg);
       }
       .log .xterm {
@@ -898,6 +956,96 @@
         height: 100%;
         color: var(--muted);
         font-size: 14px;
+      }
+      /* On-screen key bar — hidden on desktop, flex on mobile (720px block).
+         Scrolls horizontally so it never wraps or steals height from the log. */
+      .keybar {
+        display: none;
+        flex: none;
+        gap: 6px;
+        align-items: center;
+        padding: 6px max(8px, var(--sar)) 6px max(8px, var(--sal));
+        border-top: 1px solid var(--line);
+        background: var(--panel);
+        overflow-x: auto;
+        -webkit-overflow-scrolling: touch;
+        scrollbar-width: none;
+      }
+      .keybar::-webkit-scrollbar {
+        display: none;
+      }
+      .keybar .kb {
+        flex: none;
+        min-width: 36px;
+        height: 36px;
+        padding: 0 11px;
+        background: var(--panel2);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        color: var(--fg);
+        font: 13px/1 var(--mono);
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+        user-select: none;
+      }
+      .keybar .kb:active {
+        background: var(--line);
+      }
+      /* a sticky Ctrl/Alt that's armed for the next keystroke */
+      .keybar .kb.on {
+        background: var(--accent);
+        border-color: var(--accent);
+        color: #fff;
+      }
+      /* Line composer — mobile-only. Carries the bottom safe-area inset so it
+         clears the home indicator (completes the terminal pane's inset cover). */
+      .composer {
+        display: none;
+        flex: none;
+        gap: 8px;
+        align-items: flex-end;
+        padding: 8px max(10px, var(--sar)) max(8px, var(--sab)) max(10px, var(--sal));
+        border-top: 1px solid var(--line);
+        background: var(--panel);
+      }
+      .composer textarea {
+        flex: 1;
+        min-width: 0;
+        resize: none;
+        max-height: 120px;
+        padding: 9px 11px;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        color: var(--fg);
+        /* ≥16px so iOS Safari doesn't auto-zoom the page when it gains focus */
+        font:
+          16px/1.4 -apple-system,
+          BlinkMacSystemFont,
+          system-ui,
+          sans-serif;
+      }
+      .composer textarea:focus {
+        outline: none;
+        border-color: var(--accent);
+      }
+      .composer .cmpsend {
+        flex: none;
+        height: 38px;
+        padding: 0 14px;
+        background: var(--accent);
+        border: 1px solid var(--accent);
+        border-radius: 10px;
+        color: #fff;
+        font:
+          600 13px/1 -apple-system,
+          system-ui,
+          sans-serif;
+        cursor: pointer;
+        -webkit-tap-highlight-color: transparent;
+      }
+      .composer .cmpsend:active {
+        opacity: 0.85;
       }
 
       /* ---- mobile: collapse the two-pane desktop layout into a single column ----
@@ -937,7 +1085,7 @@
         }
 
         .head {
-          padding: 12px 14px 8px;
+          padding: max(12px, var(--sat)) max(14px, var(--sar)) 8px max(14px, var(--sal));
         }
         h1 {
           font-size: 17px;
@@ -961,7 +1109,8 @@
           padding: 10px 14px;
         }
         .rhead {
-          padding: 12px 14px;
+          padding: max(12px, var(--sat)) max(14px, var(--sar)) 12px max(14px, var(--sal));
+          gap: 8px;
         }
         .list .row,
         .rooms .ritem,
@@ -970,6 +1119,15 @@
         .install code,
         code.copy {
           -webkit-tap-highlight-color: transparent;
+        }
+      }
+      /* Touch input aids (key bar + composer) show on ANY touch device, not just
+         narrow ones — so a tablet in the two-pane layout (typically no hardware
+         keyboard) still gets Esc/Ctrl/arrows and a reliable line composer. */
+      @media (pointer: coarse) {
+        .keybar,
+        .composer {
+          display: flex;
         }
       }
     </style>
@@ -1051,6 +1209,15 @@
           <span class="rmenu">
             <button class="rmenubtn" id="rmenubtn" title="more" aria-label="more">⋯</button>
             <div class="rmenupanel" id="rmenupanel" hidden>
+              <div class="rmenuitem rmenufont">
+                <span>Font size</span>
+                <span class="fontstep">
+                  <button type="button" id="fontDown" aria-label="smaller font">A−</button>
+                  <span id="fontVal">12</span>
+                  <button type="button" id="fontUp" aria-label="larger font">A+</button>
+                </span>
+              </div>
+              <div class="rmenusep"></div>
               <label class="rmenuitem"
                 ><input type="checkbox" id="perfToggle" /> <span>Perf HUD</span></label
               >
@@ -1067,6 +1234,40 @@
             ← pick an agent to tail its log; type directly into the terminal
           </div>
         </div>
+        <!-- On-screen key bar — phones have no Esc/Tab/Ctrl/arrows, so agent TUIs
+             are otherwise undriveable. Mobile-only (shown in the 720px block);
+             posts raw sequences to the agent over the same /api/send wire. -->
+        <div class="keybar" id="keybar" role="group" aria-label="terminal keys">
+          <button class="kb" data-key="esc" title="Escape">Esc</button>
+          <button class="kb kbmod" data-mod="ctrl" title="Ctrl — applies to the next key">
+            Ctrl
+          </button>
+          <button class="kb kbmod" data-mod="alt" title="Alt — applies to the next key">Alt</button>
+          <button class="kb" data-key="tab" title="Tab">Tab</button>
+          <button class="kb" data-key="cc" title="Ctrl-C — interrupt">^C</button>
+          <button class="kb" data-arrow="up" title="Up" aria-label="Up">↑</button>
+          <button class="kb" data-arrow="down" title="Down" aria-label="Down">↓</button>
+          <button class="kb" data-arrow="left" title="Left" aria-label="Left">←</button>
+          <button class="kb" data-arrow="right" title="Right" aria-label="Right">→</button>
+          <button class="kb" data-key="enter" title="Enter">⏎</button>
+        </div>
+        <!-- Line composer — the reliable path for typing a prompt on a phone:
+             a normal textarea (no IME/autocorrect surprises that plague xterm's
+             hidden input). Enter sends, Shift+Enter inserts a newline. -->
+        <form class="composer" id="composer">
+          <textarea
+            id="cmpin"
+            rows="1"
+            placeholder="Message agent…  ↵ to send"
+            enterkeyhint="send"
+            inputmode="text"
+            autocapitalize="off"
+            autocorrect="off"
+            autocomplete="off"
+            spellcheck="false"
+          ></textarea>
+          <button type="submit" class="cmpsend" title="Send to agent">Send</button>
+        </form>
         <div class="perfhud" id="perfhud" hidden></div>
       </div>
     </div>
@@ -1117,6 +1318,28 @@
       let es = null; // live-tail subscription closer
       let term = null; // xterm.js Terminal rendering the raw PTY stream
       let fit = null;
+      // Terminal font size (px) — adjustable from the ⋯ menu, persisted across
+      // reloads, applied live to the open terminal and used by every new one.
+      let termFontSize = 12;
+      try {
+        const n = parseInt(localStorage.getItem("ay.fontSize") || "", 10);
+        if (n >= 8 && n <= 32) termFontSize = n;
+      } catch {}
+      function setTermFontSize(px) {
+        termFontSize = Math.max(8, Math.min(32, px | 0));
+        const v = $("fontVal");
+        if (v) v.textContent = String(termFontSize);
+        try {
+          localStorage.setItem("ay.fontSize", String(termFontSize));
+        } catch {}
+        if (term) {
+          term.options.fontSize = termFontSize;
+          if (fit)
+            try {
+              fit.fit();
+            } catch {}
+        }
+      }
 
       // xterm paints to a <canvas>, so unlike the CSS var() consumers it can't
       // ride prefers-color-scheme on its own — its theme is a JS object. Mirror
@@ -2020,6 +2243,159 @@
         await new Promise((r) => setTimeout(r, 200));
         await send("\r");
       }
+
+      // ---- On-screen key bar (mobile) -------------------------------------
+      // A phone keyboard has no Esc/Tab/Ctrl/arrows, so agent TUIs (claude,
+      // codex, vim…) are otherwise undriveable. The bar posts raw byte
+      // sequences straight to the selected agent's stdin, and a sticky Ctrl/Alt
+      // rewrites the NEXT character typed on the soft keyboard.
+      let modCtrl = false,
+        modAlt = false;
+      // Send raw bytes to the currently-selected agent. Uses the live `sel`, so
+      // it always hits the open agent even while an old terminal tears down mid
+      // switch — the same /api/send wire the terminal's own input uses.
+      function sendToSelected(data) {
+        const e = sel ? entries.find((x) => x._key === sel) : null;
+        if (!e || data == null) return;
+        perfNote("in", typeof data === "string" ? data.length : (data?.byteLength ?? 0));
+        txFor(e)
+          .post("/api/send", { keyword: String(e.pid), msg: data, code: "none" })
+          .catch(() => {});
+      }
+      // Apply a pending sticky Ctrl/Alt to ONE typed character (soft-keyboard
+      // path only). Multi-char input — paste, an IME commit, an escape sequence —
+      // passes through untouched. Ctrl folds @A–Z[\]^_ (case-insensitive) to
+      // 0x00–0x1f; Alt/Meta is an ESC prefix. One-shot: clears after one char.
+      function applyStickyMods(d) {
+        if ((!modCtrl && !modAlt) || typeof d !== "string" || d.length !== 1) return d;
+        let c = d;
+        if (modCtrl) {
+          const u = d.toUpperCase().charCodeAt(0);
+          if (u >= 64 && u <= 95) c = String.fromCharCode(u - 64);
+          else if (u === 32) c = "\x00"; // Ctrl-Space → NUL
+        }
+        if (modAlt) c = "\x1b" + c;
+        modCtrl = modAlt = false;
+        syncModButtons();
+        return c;
+      }
+      function syncModButtons() {
+        const kb = $("keybar");
+        if (!kb) return;
+        kb.querySelector('[data-mod="ctrl"]')?.classList.toggle("on", modCtrl);
+        kb.querySelector('[data-mod="alt"]')?.classList.toggle("on", modAlt);
+      }
+      (function keybarBoot() {
+        const kb = $("keybar");
+        if (!kb) return;
+        const SEQ = { esc: "\x1b", tab: "\t", enter: "\r", cc: "\x03" };
+        const ARROW = { up: "A", down: "B", right: "C", left: "D" };
+        // Don't let a button steal focus — that would drop the soft keyboard and
+        // blur whatever the user is typing into (terminal or composer).
+        kb.addEventListener("pointerdown", (ev) => {
+          if (ev.target.closest("button")) ev.preventDefault();
+        });
+        kb.addEventListener("click", (ev) => {
+          const b = ev.target.closest("button.kb");
+          if (!b) return;
+          if (b.dataset.mod) {
+            // sticky toggle — armed for the next soft-keyboard character
+            if (b.dataset.mod === "ctrl") modCtrl = !modCtrl;
+            else modAlt = !modAlt;
+            syncModButtons();
+            return;
+          }
+          let seq = null;
+          if (b.dataset.arrow) {
+            const L = ARROW[b.dataset.arrow];
+            if (modCtrl || modAlt) {
+              // Ctrl/Alt + arrow → CSI modifier form ESC [ 1 ; <m> <L>, where
+              // m = 1 + Alt(2) + Ctrl(4) (e.g. Ctrl-Left = ESC [ 1 ; 5 D for
+              // word-wise motion). Modified cursor keys are always CSI, never
+              // SS3, so DECCKM doesn't apply when a modifier is held.
+              seq = "\x1b[1;" + (1 + (modAlt ? 2 : 0) + (modCtrl ? 4 : 0)) + L;
+            } else {
+              // Honour application-cursor-key mode (DECCKM): TUIs that enable it
+              // expect SS3 (ESC O x) arrows, not CSI (ESC [ x). xterm tracks it.
+              const app = term && term.modes && term.modes.applicationCursorKeysMode;
+              seq = (app ? "\x1bO" : "\x1b[") + L;
+            }
+          } else if (b.dataset.key) {
+            seq = SEQ[b.dataset.key];
+            // Alt/Meta on a fixed key = ESC prefix (e.g. Alt+Enter). Ctrl on
+            // Esc/Tab/Enter has no standard sequence, so it's left as the bare key.
+            if (seq != null && modAlt) seq = "\x1b" + seq;
+          }
+          if (seq == null) return;
+          // the armed modifier (if any) has now been folded into this key — clear it
+          modCtrl = modAlt = false;
+          syncModButtons();
+          sendToSelected(seq);
+        });
+      })();
+      // ---- Line composer (mobile) ----------------------------------------
+      // The dependable way to type a prompt on a phone: a real textarea, immune
+      // to the IME/autocorrect glitches that dog xterm's hidden input. Enter
+      // sends text + a carriage return in one write (identical to typing then ↵);
+      // Shift+Enter inserts a literal newline.
+      (function composerBoot() {
+        const form = $("composer"),
+          ta = $("cmpin");
+        if (!form || !ta) return;
+        const grow = () => {
+          ta.style.height = "auto";
+          ta.style.height = Math.min(ta.scrollHeight, 120) + "px";
+        };
+        const sendLine = () => {
+          let v = ta.value;
+          if (!v) return;
+          // An armed sticky Ctrl/Alt decorates a single-char line (e.g. Ctrl-D);
+          // longer text can't carry it, but the modifier must still be cleared so
+          // it doesn't silently leak into the next terminal keystroke.
+          v = applyStickyMods(v);
+          if (modCtrl || modAlt) {
+            modCtrl = modAlt = false;
+            syncModButtons();
+          }
+          sendToSelected(v + "\r");
+          ta.value = "";
+          grow();
+          ta.focus(); // keep the soft keyboard up for the next line
+        };
+        ta.addEventListener("input", grow);
+        form.addEventListener("submit", (ev) => {
+          ev.preventDefault();
+          sendLine();
+        });
+        // Enter sends; Shift+Enter inserts a newline; never fire mid-IME-commit
+        // (the confirming Enter reports keyCode 229 / isComposing). `enterSeen`
+        // lets the beforeinput fallback below know keydown already decided this
+        // Enter (so it doesn't double-send, and Shift+Enter still makes a newline).
+        let enterSeen = false;
+        ta.addEventListener("keydown", (ev) => {
+          enterSeen = false;
+          if (ev.key === "Enter" && !ev.isComposing && ev.keyCode !== 229) {
+            enterSeen = true;
+            if (!ev.shiftKey) {
+              ev.preventDefault();
+              sendLine();
+            }
+          }
+        });
+        // Android (Gboard) commonly delivers Enter as keyCode 229 / key
+        // "Unidentified", so the keydown above never matches it. beforeinput's
+        // insertLineBreak fires reliably there; skip it when keydown already
+        // saw the Enter (desktop/iOS, including the Shift+Enter newline case).
+        ta.addEventListener("beforeinput", (ev) => {
+          if (ev.inputType !== "insertLineBreak") return;
+          if (enterSeen) {
+            enterSeen = false;
+            return;
+          }
+          ev.preventDefault();
+          sendLine();
+        });
+      })();
       (function perfMenuBoot() {
         const btn = $("rmenubtn"),
           panel = $("rmenupanel"),
@@ -2037,6 +2413,10 @@
         if (cb) cb.addEventListener("change", () => setPerfHud(cb.checked));
         $("stopAgent")?.addEventListener("click", () => (closePanel(), stopAgent(false)));
         $("killAgent")?.addEventListener("click", () => (closePanel(), stopAgent(true)));
+        // Font stepper — stays open so you can tap repeatedly; persists + refits.
+        $("fontDown")?.addEventListener("click", () => setTermFontSize(termFontSize - 1));
+        $("fontUp")?.addEventListener("click", () => setTermFontSize(termFontSize + 1));
+        setTermFontSize(termFontSize); // sync the label with the restored value
         let saved = false;
         try {
           saved = localStorage.getItem("ay.perfHud") === "1";
@@ -2397,7 +2777,7 @@
           disableStdin: false,
           cursorBlink: true,
           scrollback: 5000,
-          fontSize: 12,
+          fontSize: termFontSize,
           fontFamily: 'ui-monospace, "SF Mono", Menlo, monospace',
           theme: termTheme(),
         });
@@ -2463,10 +2843,11 @@
         // keyword with 400 (pid arrives as a number from /api/ls JSON).
         const kw = String(pid);
         const fwd = (d) => {
-          if (sel === e._key) {
-            perfNote("in", typeof d === "string" ? d.length : (d?.byteLength ?? 0));
-            tx.post("/api/send", { keyword: kw, msg: d, code: "none" }).catch(() => {});
-          }
+          if (sel !== e._key) return; // ignore a stale terminal mid-switch
+          // a soft-keyboard character may be decorated by an armed sticky Ctrl/Alt
+          if (typeof d === "string") d = applyStickyMods(d);
+          perfNote("in", typeof d === "string" ? d.length : (d?.byteLength ?? 0));
+          tx.post("/api/send", { keyword: kw, msg: d, code: "none" }).catch(() => {});
         };
         term.onData(fwd);
         term.onBinary(fwd);
@@ -2527,11 +2908,51 @@
         const row = ev.target.closest(".row");
         if (row) select(row.dataset.key);
       });
-      // Mobile back button: return to the list pane. The tail keeps streaming in the
+      // Mobile back: return to the list pane. The tail keeps streaming in the
       // background (selection unchanged), so reopening the agent is instant.
-      $("rback").addEventListener("click", () => {
-        document.querySelector(".app").classList.remove("show-detail");
-      });
+      const goBack = () => document.querySelector(".app").classList.remove("show-detail");
+      $("rback").addEventListener("click", goBack);
+      // Swipe-right-from-the-left-edge → back, an alternative to the ‹ button.
+      // Passive/read-only so it never fights xterm's own scroll or text
+      // selection; armed only from the left edge, in the single-column view, and
+      // never when a TUI has mouse tracking on (that touch belongs to the agent).
+      (function swipeBackBoot() {
+        const pane = document.querySelector(".right");
+        if (!pane) return;
+        let sx = 0,
+          sy = 0,
+          st = 0,
+          armed = false;
+        pane.addEventListener(
+          "touchstart",
+          (ev) => {
+            armed = false;
+            if (window.innerWidth > 720 || ev.touches.length !== 1) return;
+            const t = ev.touches[0];
+            armed = t.clientX <= 28; // left-edge start only
+            sx = t.clientX;
+            sy = t.clientY;
+            st = ev.timeStamp;
+          },
+          { passive: true },
+        );
+        pane.addEventListener(
+          "touchend",
+          (ev) => {
+            if (!armed) return;
+            armed = false;
+            const mt = term && term.modes && term.modes.mouseTrackingMode;
+            if (mt && mt !== "none") return; // the TUI wants this touch
+            const t = ev.changedTouches[0];
+            if (!t) return;
+            const dx = t.clientX - sx,
+              dy = t.clientY - sy;
+            // a quick, clearly-horizontal rightward flick (not a scroll/tap)
+            if (dx > 45 && Math.abs(dx) > 2 * Math.abs(dy) && ev.timeStamp - st < 500) goBack();
+          },
+          { passive: true },
+        );
+      })();
       $("q").addEventListener("input", () => {
         try {
           localStorage.setItem("ay.filter", $("q").value);
@@ -2549,6 +2970,26 @@
             fit.fit();
           } catch {}
       });
+      // iOS overlays the soft keyboard ON TOP of the layout viewport rather than
+      // shrinking it, so a bottom-anchored composer would hide behind it. Track
+      // the visual viewport and reserve the covered height as --kb (which .app
+      // subtracts from its height), then refit the terminal. Android Chrome
+      // resizes the layout viewport itself (interactive-widget=resizes-content),
+      // so --kb stays ~0 there — this is harmless and idempotent on desktop too.
+      if (window.visualViewport) {
+        const vv = window.visualViewport;
+        const onVV = () => {
+          const kb = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
+          document.documentElement.style.setProperty("--kb", kb + "px");
+          if (fit)
+            try {
+              fit.fit();
+            } catch {}
+        };
+        vv.addEventListener("resize", onVV);
+        vv.addEventListener("scroll", onVV);
+        onVV();
+      }
 
       // Step the selection up/down the (filtered) list — same order the left panel
       // renders. Clamps at the ends, scrolls the row into view.
@@ -3158,7 +3599,15 @@
           // composite key so it picks the right host when pids collide across rooms.
           const [, room, aid] = full;
           autoPid = room + "#" + aid;
-          autoPidExplicit = true;
+          // A #room:agentId hash is BOTH our own persisted selection (select()
+          // writes it so a refresh reopens) AND a shareable deep link — same
+          // format, two intents. Disambiguate by navigation type: a reload is a
+          // restore (on a phone, just re-highlight the row and stay on the list,
+          // per mergeRender), while a fresh navigation is a deliberate "take me
+          // to this agent" that opens even on mobile. (No nav entry → treat as
+          // explicit, preserving the old always-open behaviour.)
+          const nav = performance.getEntriesByType("navigation")[0];
+          autoPidExplicit = nav ? nav.type !== "reload" : true;
           const r = loadRooms()[room];
           if (r) pending = { room, token: r.token, host: r.host };
         } else if (bare && loadRooms()[bare[1]]) {

@@ -7,6 +7,7 @@
  * local transport calls (see Conn in lab/ui/index.html):
  *   GET  /                      → index.html
  *   GET  /console-logic.js      → the real ESM module
+ *   GET  /e2e.js                → the real end-to-end-encryption module
  *   GET  /room-client.js        → the real codehost transport
  *   GET  /api/ls?all=1          → AGENTS fixture (JSON)
  *   GET  /api/size/:pid         → { cols, rows }
@@ -72,6 +73,10 @@ export async function startServer(): Promise<{ url: string; close: () => void }>
       return file(res, join(UI, "index.html"), "text/html; charset=utf-8");
     if (req.method === "GET" && p === "/console-logic.js")
       return file(res, join(UI, "console-logic.js"), "text/javascript; charset=utf-8");
+    // index.html statically imports ./e2e.js too; without it the whole page
+    // module fails to load and nothing renders (the list stays empty).
+    if (req.method === "GET" && p === "/e2e.js")
+      return file(res, join(UI, "e2e.js"), "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/room-client.js")
       return file(res, join(UI, "room-client.js"), "text/javascript; charset=utf-8");
 
