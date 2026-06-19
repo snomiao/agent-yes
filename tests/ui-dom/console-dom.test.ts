@@ -300,6 +300,28 @@ describe("console DOM behaviour", () => {
       await page.locator('.keybar [data-key="tab"]').click();
       await expect.poll(lastMsg).toBe("\x1b\x1b[Z");
 
+      // nav keys: Home/End are DECCKM-aware cursor keys (ESC [ H / F);
+      // PgUp/PgDn/Del are VT220 function keys (CSI N ~)
+      await page.locator('.keybar [data-arrow="home"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[H");
+      await page.locator('.keybar [data-arrow="end"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[F");
+      await page.locator('.keybar [data-tilde="pgup"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[5~");
+      await page.locator('.keybar [data-tilde="pgdn"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[6~");
+      await page.locator('.keybar [data-tilde="del"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[3~");
+      // Home shares the cursor-key path, so it composes with modifiers too:
+      // Ctrl+Home → ESC [ 1 ; 5 H
+      await page.locator('.keybar [data-mod="ctrl"]').click();
+      await page.locator('.keybar [data-arrow="home"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[1;5H");
+      // VT220 keys take CSI modifiers too: Ctrl+Del → ESC [ 3 ; 5 ~ (word-delete)
+      await page.locator('.keybar [data-mod="ctrl"]').click();
+      await page.locator('.keybar [data-tilde="del"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[3;5~");
+
       // sticky Ctrl then a soft-keyboard char → control code via the xterm path
       await page.locator('.keybar [data-mod="ctrl"]').click();
       await page.evaluate(() => (window as any).__onData("r"));

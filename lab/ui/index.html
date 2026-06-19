@@ -1289,6 +1289,17 @@
           <button class="kb" data-arrow="left" title="Left" aria-label="Left">←</button>
           <button class="kb" data-arrow="right" title="Right" aria-label="Right">→</button>
           <button class="kb" data-key="enter" title="Enter" aria-label="Enter">⏎</button>
+          <!-- lower-frequency nav keys, appended after the common keys so they
+               sort to the right (scroll to reach) without bumping the rest -->
+          <button class="kb" data-arrow="home" title="Home">Home</button>
+          <button class="kb" data-arrow="end" title="End">End</button>
+          <button class="kb" data-tilde="pgup" title="Page Up" aria-label="Page Up">PgUp</button>
+          <button class="kb" data-tilde="pgdn" title="Page Down" aria-label="Page Down">
+            PgDn
+          </button>
+          <button class="kb" data-tilde="del" title="Delete (forward)" aria-label="Delete">
+            Del
+          </button>
         </div>
         <!-- Line composer — the reliable path for typing a prompt on a phone:
              a normal textarea (no IME/autocorrect surprises that plague xterm's
@@ -2336,8 +2347,15 @@
         if (!kb) return;
         // stab = Shift-Tab → CBT (ESC [ Z); back-tab / reverse field nav, and
         // what Claude Code's TUI reads to cycle permission modes.
+        // Fixed byte sequences (no CSI-modifier form).
         const SEQ = { esc: "\x1b", tab: "\t", stab: "\x1b[Z", enter: "\r", cc: "\x03" };
-        const ARROW = { up: "A", down: "B", right: "C", left: "D" };
+        // Cursor keys keyed by their CSI/SS3 final byte. Arrows AND Home/End are
+        // DECCKM-aware and take CSI modifiers via the shared cursor path below.
+        const ARROW = { up: "A", down: "B", right: "C", left: "D", home: "H", end: "F" };
+        // VT220 function keys: CSI <N> ~, or CSI <N> ; <m> ~ when modified.
+        const TILDE = { pgup: "5", pgdn: "6", del: "3" };
+        // CSI modifier param shared by cursor + VT220 keys: 1 + Shift + Alt*2 + Ctrl*4.
+        const modNum = () => 1 + (modShift ? 1 : 0) + (modAlt ? 2 : 0) + (modCtrl ? 4 : 0);
         // Don't let a button steal focus — that would drop the soft keyboard and
         // blur whatever the user is typing into (terminal or composer).
         kb.addEventListener("pointerdown", (ev) => {
@@ -2359,17 +2377,24 @@
           if (b.dataset.arrow) {
             const L = ARROW[b.dataset.arrow];
             if (modCtrl || modAlt || modShift) {
-              // Modifier + arrow → CSI form ESC [ 1 ; <m> <L>, where
-              // m = 1 + Shift(1) + Alt(2) + Ctrl(4) (e.g. Ctrl-Left = ESC [ 1 ; 5 D
-              // for word-wise motion). Modified cursor keys are always CSI, never
-              // SS3, so DECCKM doesn't apply when a modifier is held.
-              seq = "\x1b[1;" + (1 + (modShift ? 1 : 0) + (modAlt ? 2 : 0) + (modCtrl ? 4 : 0)) + L;
+              // Modifier + cursor key → CSI form ESC [ 1 ; <m> <L> (e.g. Ctrl-Left
+              // = ESC [ 1 ; 5 D for word-wise motion). Modified cursor keys are
+              // always CSI, never SS3, so DECCKM doesn't apply when held.
+              seq = "\x1b[1;" + modNum() + L;
             } else {
               // Honour application-cursor-key mode (DECCKM): TUIs that enable it
               // expect SS3 (ESC O x) arrows, not CSI (ESC [ x). xterm tracks it.
               const app = term && term.modes && term.modes.applicationCursorKeysMode;
               seq = (app ? "\x1bO" : "\x1b[") + L;
             }
+          } else if (b.dataset.tilde) {
+            // VT220 function key → CSI <N> ~, or CSI <N> ; <m> ~ when a modifier is
+            // held (e.g. Ctrl+Del = ESC [ 3 ; 5 ~ for word-delete).
+            const N = TILDE[b.dataset.tilde];
+            seq =
+              modCtrl || modAlt || modShift
+                ? "\x1b[" + N + ";" + modNum() + "~"
+                : "\x1b[" + N + "~";
           } else if (b.dataset.key) {
             seq = SEQ[b.dataset.key];
             // Shift+Tab → CBT (ESC [ Z), same as the dedicated ⇧Tab key.
