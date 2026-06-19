@@ -276,6 +276,24 @@ function portFromArgs(args: string[]): number {
   return m ? Number(m[1]) : DEFAULT_PORT;
 }
 
+// An explicit webrtc:// URL passed to --webrtc/--share in the daemon's serve args,
+// or undefined for a bare flag (which mints a persisted room instead). Mirrors how
+// cmdServe resolves argv.webrtc/argv.share, but over the raw arg list install holds
+// (oxmgr splits the command on whitespace → `--webrtc url`; pm2/`=` → `--webrtc=url`).
+function explicitWebrtcUrl(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    for (const flag of ["--webrtc", "--share"]) {
+      if (a === flag && args[i + 1]?.startsWith("webrtc://")) return args[i + 1];
+      if (a.startsWith(`${flag}=`)) {
+        const v = a.slice(flag.length + 1);
+        if (v.startsWith("webrtc://")) return v;
+      }
+    }
+  }
+  return undefined;
+}
+
 // Ask the live daemon its version over the local HTTP API. null if it's not
 // listening (webrtc-only) or too old to expose /api/version — both of which we
 // treat as "outdated" so a re-install rolls it forward.
@@ -314,19 +332,68 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     const effArgs = args.length ? args : (priorArgs ?? []);
     const current = getInstalledPackage().version;
 
+    // WebRTC daemon: resolve the share link up front so we can print it on every
+    // install path (fresh install, roll-forward, and the already-up-to-date no-op).
+    // The link is a pure transform of the room URL, so the foreground install
+    // command can show it even though the background daemon is what runs the bridge.
+    // Resolve (and persist, when auto-minting) the room BEFORE spawning, so the
+    // daemon reads the SAME ~/.agent-yes/.share-room and can't race us into minting
+    // a divergent one. We print the link directly — the install receipt already
+    // prints the bearer token, so the operator's terminal is the right trust scope
+    // for a secret-bearing link (unlike the daemon's persisted logs, which omit it).
+    const webrtcDaemon = effArgs.some((a) => a.startsWith("--webrtc") || a.startsWith("--share"));
+    let shareLink: string | null = null;
+    let shareLinkMinted = false; // auto-minted (persisted/rotatable) vs explicit URL
+    if (webrtcDaemon) {
+      try {
+        const { loadOrCreateShareRoom, shareLinkFromRoomUrl } = await import("./share.ts");
+        const explicit = explicitWebrtcUrl(effArgs);
+        shareLink = shareLinkFromRoomUrl(explicit ?? (await loadOrCreateShareRoom()));
+        shareLinkMinted = !explicit;
+      } catch {
+        /* best effort — fall back to the .share-link file hint in emitShareLink */
+      }
+    }
+    const emitShareLink = () => {
+      if (!webrtcDaemon) return;
+      if (shareLink)
+        process.stdout.write(
+          `\nshared over WebRTC — open this link (the token is eaten from the URL on open):\n` +
+            `  ${shareLink}\n` +
+            (shareLinkMinted
+              ? `  (persistent room — same link across restarts; delete ~/.agent-yes/.share-room to rotate)\n`
+              : ``),
+        );
+      else
+        process.stdout.write(
+          `\nthe WebRTC share link carries a secret, so the daemon does NOT log it —\n` +
+            `read it from ~/.agent-yes/.share-link (mode 0600). The room persists in\n` +
+            `~/.agent-yes/.share-room, so the link survives restarts.\n`,
+        );
+    };
+
     if (priorArgs !== null) {
-      // A daemon already exists — only disturb it if it's actually outdated.
+      // A daemon already exists. Treat this as a no-op only when it's BOTH current
+      // AND already running the requested config — otherwise a config change (e.g.
+      // `install --webrtc` over an --http daemon, which the version probe still
+      // reaches on the default port) would be silently ignored, and we'd print a
+      // share link for a WebRTC bridge that isn't actually running. A bare re-run
+      // passes no args, so effArgs === priorArgs and this stays a no-op as before.
+      const sameConfig = JSON.stringify(effArgs) === JSON.stringify(priorArgs);
       const runningVer = await fetchDaemonVersion(portFromArgs(effArgs), token);
-      if (runningVer === current) {
+      if (runningVer === current && sameConfig) {
         await ensureBootAutostart(mgr);
         process.stdout.write(`'${DAEMON_NAME}' already running v${current} (up to date)\n`);
+        emitShareLink();
         return 0;
       }
-      // Outdated (or unreachable/too-old to report) → graceful roll-forward.
-      // `stop` sends SIGTERM, which cmdServe handles cleanly (closing share
-      // peers so browsers reconnect fast), then we re-create with the new binary.
+      // Outdated, unreachable, or reconfigured → graceful roll-forward. `stop` sends
+      // SIGTERM, which cmdServe handles cleanly (closing share peers so browsers
+      // reconnect fast), then we re-create with the new binary/args.
       process.stdout.write(
-        `rolling '${DAEMON_NAME}' ${runningVer ? `v${runningVer}` : "(unknown)"} → v${current}…\n`,
+        runningVer === current
+          ? `reconfiguring '${DAEMON_NAME}' (serve args changed)…\n`
+          : `rolling '${DAEMON_NAME}' ${runningVer ? `v${runningVer}` : "(unknown)"} → v${current}…\n`,
       );
       await spawnExit([mgr.bin, "stop", DAEMON_NAME]);
       await spawnExit([mgr.bin, "delete", DAEMON_NAME]);
@@ -340,7 +407,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     // freeze the JS event loop (host answers nobody, no in-process timer can
     // recover it), so an EXTERNAL probe of the serve heartbeat is the only thing
     // that can detect+restart it. 15s stale + 3 misses at 10s ≈ 45s to auto-recover.
-    const webrtcDaemon = effArgs.some((a) => a.startsWith("--webrtc") || a.startsWith("--share"));
+    // (webrtcDaemon resolved above, where we also derive the share link.)
     const oxmgrHealth =
       webrtcDaemon && mgr.id === "oxmgr"
         ? [
@@ -389,7 +456,6 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       const onBoot = await ensureBootAutostart(mgr);
       const port = portFromArgs(effArgs);
       // Mirror cmdServe's mode resolution: webrtc-only daemons open no HTTP port.
-      const webrtcish = effArgs.some((a) => a.startsWith("--webrtc") || a.startsWith("--share"));
       const httpish =
         effArgs.some((a) => a.startsWith("--http") || a.startsWith("--share")) ||
         !effArgs.some((a) => a.startsWith("--webrtc"));
@@ -421,13 +487,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       }
       process.stdout.write(`  ay serve logs                # view server logs\n`);
       process.stdout.write(`  ay serve uninstall           # remove daemon\n`);
-      if (webrtcish) {
-        process.stdout.write(
-          `\nthe WebRTC share link carries a secret, so the daemon does NOT log it —\n` +
-            `read it from ~/.agent-yes/.share-link (mode 0600). The room persists in\n` +
-            `~/.agent-yes/.share-room, so the link survives restarts.\n`,
-        );
-      }
+      emitShareLink();
     }
     return code ?? 1;
   }
