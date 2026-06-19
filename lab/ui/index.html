@@ -1368,6 +1368,13 @@
       let es = null; // live-tail subscription closer
       let term = null; // xterm.js Terminal rendering the raw PTY stream
       let fit = null;
+      // Re-fit the open terminal and re-assert its size to the agent's PTY. Set per
+      // selection in select(); invoked on open AND whenever the tab is re-activated.
+      // A backgrounded tab can miss window resizes, and another viewer may have
+      // resized the shared PTY while we were away — either leaves our stream
+      // rendering at the wrong width/height until something nudges it. null when no
+      // agent is open.
+      let resyncTerm = null;
       // Terminal font size (px) — adjustable from the ⋯ menu, persisted across
       // reloads, applied live to the open terminal and used by every new one.
       let termFontSize = 12;
@@ -2947,9 +2954,17 @@
           }
           suppressPush = false;
         };
-        tx.fetchJSON("/api/size/" + encodeURIComponent(pid))
-          .then(fitAndSync)
-          .catch(() => fitAndSync(null));
+        // Fit + sync now, and on every later tab re-activation: re-measure our pane
+        // and re-assert our size to the agent so the stream always reflows to OUR
+        // viewport (see the visibilitychange hook in startPolling). Push-if-different
+        // inside fitAndSync keeps an already-matching agent from a redundant SIGWINCH.
+        resyncTerm = () => {
+          if (sel !== selKey || !term) return;
+          tx.fetchJSON("/api/size/" + encodeURIComponent(pid))
+            .then(fitAndSync)
+            .catch(() => fitAndSync(null));
+        };
+        resyncTerm();
 
         // True live tail via ay serve's SSE stream. First event is an xterm-rendered
         // tail snapshot; later events are incremental deltas. We normalise terminal
@@ -3719,6 +3734,11 @@
           if (document.visibilityState === "visible") {
             lastActivity = Date.now();
             loadList();
+            // Re-assert our viewport size to the open agent: while we were away the
+            // window may have resized (a hidden tab can miss it) or another viewer
+            // may have resized the shared PTY, so the stream could be rendering at
+            // the wrong width/height. fit + push-if-different brings it back.
+            resyncTerm?.();
           }
         });
         watchVersion();
