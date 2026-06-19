@@ -60,6 +60,7 @@
     },
   },
   "trustedDependencies": [
+    "node-pty",
     "node-datachannel",
   ],
   "packages": {

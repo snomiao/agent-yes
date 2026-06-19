@@ -5,9 +5,22 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::thread::sleep;
+use std::time::{Duration, SystemTime};
 use tracing::warn;
 
 const DEFAULT_LOG_RETENTION_DAYS: i64 = 7;
+
+// Cross-runtime registry lock, interoperable with the TS side's `proper-lockfile`
+// (see ts/globalPidIndex.ts). proper-lockfile acquires by `mkdir(<file>.lock)`,
+// treats a lock dir whose mtime is older than `stale` (10s) as abandoned and
+// steals it, and releases by `rmdir`. We mirror that exact protocol so a Rust
+// wrapper's write never clobbers a concurrent TS (or Rust) append — the bug that
+// silently dropped live agents from `ay ls` when many were launched at once.
+const LOCK_STALE_MS: u64 = 10_000; // == proper-lockfile default
+const LOCK_RETRIES: u32 = 12;
+const LOCK_RETRY_MIN_MS: u64 = 50;
+const LOCK_RETRY_MAX_MS: u64 = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PidRecord {
@@ -90,6 +103,9 @@ impl PidStore {
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok()),
         };
+        // Hold the cross-runtime lock across the append so a concurrent rewrite
+        // (another wrapper's clean_stale / a status update) can't clobber it.
+        let _lock = acquire_lock(&self.path);
         if let Err(e) = self.append(&record) {
             warn!("PidStore: failed to register: {}", e);
         }
@@ -103,6 +119,9 @@ impl PidStore {
         exit_reason: Option<&str>,
         log_file: Option<&str>,
     ) {
+        // Lock spans the whole read-modify-write so the rewrite is computed from,
+        // and committed against, a snapshot no other writer can race with.
+        let _lock = acquire_lock(&self.path);
         let result = (|| -> Result<()> {
             let mut records = self.read_all()?;
             for r in &mut records {
@@ -125,6 +144,9 @@ impl PidStore {
     }
 
     pub fn clean_stale(&self) {
+        // Lock spans read..write_all: a truncating rewrite must not race an
+        // append, or a freshly registered (still-running) agent gets dropped.
+        let _lock = acquire_lock(&self.path);
         let result = (|| -> Result<()> {
             let records = self.read_all()?;
             let live: Vec<PidRecord> = records
@@ -205,6 +227,10 @@ impl PidStore {
         Ok(records)
     }
 
+    // Callers hold the registry lock across read_all..write_all. Writes go to a
+    // temp file then rename (atomic) so a concurrent reader — notably the TS
+    // `readGlobalPids`, which reads without taking the lock — never observes a
+    // half-written file.
     fn write_all(&self, records: &[PidRecord]) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             let _ = fs::create_dir_all(parent);
@@ -214,9 +240,70 @@ impl PidStore {
             content.push_str(&serde_json::to_string(r)?);
             content.push('\n');
         }
-        fs::write(&self.path, content)?;
+        let tmp = with_suffix(&self.path, ".rs.tmp");
+        fs::write(&tmp, content)?;
+        fs::rename(&tmp, &self.path)?;
         Ok(())
     }
+}
+
+/// RAII guard for the registry lock. Releases (`rmdir`) on drop so every exit
+/// path — including `?` early returns and panics — frees the lock.
+struct RegistryLock {
+    dir: PathBuf,
+}
+
+impl Drop for RegistryLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir(&self.dir);
+    }
+}
+
+fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+fn lock_is_stale(dir: &Path) -> bool {
+    let Ok(meta) = fs::metadata(dir) else {
+        return false; // vanished — let the next mkdir decide
+    };
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    // A future mtime (clock skew) reads as a fresh, held lock — don't steal it.
+    matches!(
+        SystemTime::now().duration_since(mtime),
+        Ok(age) if age > Duration::from_millis(LOCK_STALE_MS)
+    )
+}
+
+/// Acquire the cross-runtime registry lock. Retries with capped backoff and
+/// takes over a lock dir older than `LOCK_STALE_MS` (a crashed holder). Returns
+/// `None` if it can't be acquired in time; callers then proceed best-effort
+/// (matching the pre-lock behavior) rather than dropping the write entirely.
+fn acquire_lock(path: &Path) -> Option<RegistryLock> {
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let dir = with_suffix(path, ".lock");
+    let mut delay = LOCK_RETRY_MIN_MS;
+    for _ in 0..=LOCK_RETRIES {
+        match fs::create_dir(&dir) {
+            Ok(()) => return Some(RegistryLock { dir }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if lock_is_stale(&dir) {
+                    let _ = fs::remove_dir(&dir); // steal the abandoned lock, then retry
+                    continue;
+                }
+                sleep(Duration::from_millis(delay));
+                delay = (delay * 2).min(LOCK_RETRY_MAX_MS);
+            }
+            Err(_) => return None,
+        }
+    }
+    None
 }
 
 fn store_path() -> PathBuf {
@@ -434,5 +521,80 @@ mod tests {
         assert!(!raw.exists());
         assert!(!rendered.exists());
         assert!(!lines.exists());
+    }
+
+    #[test]
+    fn test_lock_acquire_releases_on_drop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pids.jsonl");
+        let lock_dir = with_suffix(&path, ".lock");
+        {
+            let g = acquire_lock(&path);
+            assert!(g.is_some(), "lock should be acquired");
+            assert!(lock_dir.exists(), "lock dir present while held");
+        }
+        assert!(!lock_dir.exists(), "lock dir removed on guard drop");
+        // Re-acquirable after release.
+        assert!(acquire_lock(&path).is_some());
+    }
+
+    #[test]
+    fn test_clean_stale_keeps_live_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        // Our own pid is alive; a bogus one is not. Only the dead one is evicted.
+        store.register(std::process::id(), "claude", None, "/tmp", None);
+        store.register(999999, "claude", None, "/tmp", None);
+        store.clean_stale();
+        let records = store.read_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].pid, std::process::id());
+    }
+
+    #[test]
+    fn test_write_all_leaves_no_tmp() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        store.register(7, "claude", None, "/tmp", None);
+        store.update_status(7, "idle", None, None, None);
+        assert!(
+            !with_suffix(&store.path, ".rs.tmp").exists(),
+            "atomic rename must not leave the temp file behind"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_lock_stale_takeover() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("pids.jsonl");
+        let lock_dir = with_suffix(&path, ".lock");
+        // Simulate a crashed holder: a leftover lock dir backdated past the stale
+        // window. acquire_lock must steal it rather than spin until it gives up.
+        std::fs::create_dir_all(&lock_dir).unwrap();
+        let secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - (LOCK_STALE_MS / 1000 + 5);
+        let tv = libc::timeval {
+            tv_sec: secs as libc::time_t,
+            tv_usec: 0,
+        };
+        let times = [tv, tv];
+        let c = CString::new(lock_dir.as_os_str().as_bytes()).unwrap();
+        unsafe {
+            libc::utimes(c.as_ptr(), times.as_ptr());
+        }
+        assert!(
+            lock_is_stale(&lock_dir),
+            "backdated lock should read as stale"
+        );
+        assert!(
+            acquire_lock(&path).is_some(),
+            "stale lock must be taken over"
+        );
     }
 }
