@@ -1244,6 +1244,7 @@
           </button>
           <button class="kb kbmod" data-mod="alt" title="Alt — applies to the next key">Alt</button>
           <button class="kb" data-key="tab" title="Tab">Tab</button>
+          <button class="kb" data-key="stab" title="Shift-Tab (e.g. cycle modes)">⇧Tab</button>
           <button class="kb" data-key="cc" title="Ctrl-C — interrupt">^C</button>
           <button class="kb" data-arrow="up" title="Up" aria-label="Up">↑</button>
           <button class="kb" data-arrow="down" title="Down" aria-label="Down">↓</button>
@@ -2288,7 +2289,9 @@
       (function keybarBoot() {
         const kb = $("keybar");
         if (!kb) return;
-        const SEQ = { esc: "\x1b", tab: "\t", enter: "\r", cc: "\x03" };
+        // stab = Shift-Tab → CBT (ESC [ Z); back-tab / reverse field nav, and
+        // what Claude Code's TUI reads to cycle permission modes.
+        const SEQ = { esc: "\x1b", tab: "\t", stab: "\x1b[Z", enter: "\r", cc: "\x03" };
         const ARROW = { up: "A", down: "B", right: "C", left: "D" };
         // Don't let a button steal focus — that would drop the soft keyboard and
         // blur whatever the user is typing into (terminal or composer).

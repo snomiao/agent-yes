@@ -261,6 +261,10 @@ describe("console DOM behaviour", () => {
       await page.locator('.keybar [data-arrow="down"]').click();
       await expect.poll(lastMsg).toBe("\x1b[B");
 
+      // Shift-Tab → CBT / back-tab (ESC [ Z)
+      await page.locator('.keybar [data-key="stab"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[Z");
+
       // Ctrl + Left → ESC [ 1 ; 5 D, and the armed state clears after one key
       await page.locator('.keybar [data-mod="ctrl"]').click();
       await expect.poll(ctrlOn).toBe(true);
