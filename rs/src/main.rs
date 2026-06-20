@@ -9,6 +9,7 @@ mod installer;
 mod log_files;
 mod logger;
 mod messaging;
+mod non_tty_renderer;
 mod pid_store;
 mod pty_spawner;
 mod ready_manager;
@@ -191,6 +192,16 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
 
     let pid = std::process::id();
 
+    // Decide TTY vs plain rendering once. When stdout is piped/redirected (or
+    // --no-tty / NO_COLOR / CI), emit plain rendered text instead of the raw
+    // TUI byte stream. See docs/non-tty-output.md.
+    let stdout_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let render_plain =
+        crate::non_tty_renderer::should_render_plain(args.force_tty, args.no_tty, stdout_is_tty);
+    if render_plain {
+        info!("stdout is not a TTY (or --no-tty): emitting plain rendered text on exit");
+    }
+
     // Clean up stale PID records on startup
     let pid_store = PidStore::new();
     pid_store.prune_old_logs();
@@ -233,6 +244,7 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             pid,
             term_rows,
             term_cols,
+            render_plain,
         );
 
         // Create per-pid FIFO for `cy send <keyword> <msg>`. Best-effort —

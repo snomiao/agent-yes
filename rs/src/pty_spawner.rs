@@ -24,13 +24,28 @@ fn ioctl_terminal_size() -> Option<(u16, u16)> {
     }
 }
 
-/// Terminal size from ioctl only — use in SIGWINCH handler where COLUMNS/LINES are stale.
-pub fn get_terminal_size_from_tty() -> (u16, u16) {
+/// Live console size if stdout is a real console/tty, else None. No env var,
+/// no default — callers choose the fallback. Crucial for the resize watchers:
+/// "no console" (piped / MSYS pty) must mean "don't change the size", not
+/// "assume 80x24" (which would clobber an env- or attach-derived size).
+pub fn console_size() -> Option<(u16, u16)> {
     #[cfg(unix)]
-    if let Some(size) = ioctl_terminal_size() {
-        return size;
+    {
+        ioctl_terminal_size()
     }
-    (80, 24)
+    // Windows has no ioctl; read the console screen buffer. Err when stdout
+    // isn't a console (piped/redirected/MSYS pty) -> None.
+    #[cfg(windows)]
+    {
+        match crossterm::terminal::size() {
+            Ok((cols, rows)) if cols > 0 && rows > 0 => Some((cols.max(20), rows)),
+            _ => None,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        None
+    }
 }
 
 /// Max age of an externally-supplied winsize before we ignore it. After this,
@@ -91,18 +106,17 @@ pub fn parse_winsize_line(line: &str) -> Option<(u16, u16)> {
 }
 
 /// Terminal size for initial PTY spawn: COLUMNS/LINES env vars first (useful in
-/// non-TTY/pipe/CI contexts), then ioctl, then (80, 24).
+/// non-TTY/pipe/CI contexts), then the OS console size (ioctl on Unix, the
+/// console screen buffer on Windows), then (80, 24).
 pub fn get_terminal_size() -> (u16, u16) {
     if let (Ok(cols), Ok(rows)) = (std::env::var("COLUMNS"), std::env::var("LINES")) {
         if let (Ok(cols), Ok(rows)) = (cols.parse::<u16>(), rows.parse::<u16>()) {
             return (cols.max(20), rows);
         }
     }
-    #[cfg(unix)]
-    if let Some(size) = ioctl_terminal_size() {
-        return size;
-    }
-    (80, 24)
+    // OS console size (ioctl on Unix, screen buffer on Windows). None when
+    // stdout isn't a console (piped/redirected) -> fall through to 80x24.
+    console_size().unwrap_or((80, 24))
 }
 
 /// PTY process context

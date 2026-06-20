@@ -5,7 +5,7 @@ use crate::config::CliConfig;
 use crate::idle_waiter::IdleWaiter;
 use crate::log_files::LogWriter;
 use crate::messaging::{send_ctrl_c, send_text, MessageContext};
-use crate::pty_spawner::{get_terminal_size, get_terminal_size_from_tty, PtyContext};
+use crate::pty_spawner::{get_terminal_size, PtyContext};
 use crate::ready_manager::ReadyManager;
 use crate::utils::sleep_ms;
 use crate::vterm::VTermProxy;
@@ -113,6 +113,11 @@ pub struct AgentContext {
     // dump_scrollback() reconstructs only the normal buffer, so when this is
     // set the raw log must NOT be replaced by the rendered log on exit.
     used_alt_screen: bool,
+
+    // When false, stdout is not a TTY (or --no-tty was passed): suppress raw
+    // PTY passthrough and emit plain rendered text on exit instead.
+    render_plain: bool,
+    non_tty_renderer: crate::non_tty_renderer::NonTtyRenderer,
 }
 
 impl AgentContext {
@@ -126,6 +131,7 @@ impl AgentContext {
         pid: u32,
         term_rows: u16,
         term_cols: u16,
+        render_plain: bool,
     ) -> Self {
         Self {
             cli,
@@ -156,6 +162,8 @@ impl AgentContext {
             cwd,
             stdin_line_buffer: String::new(),
             codex_session_found: false,
+            render_plain,
+            non_tty_renderer: crate::non_tty_renderer::NonTtyRenderer::new(),
             last_action_screen_hash: None,
             last_checked_screen_hash: None,
             used_alt_screen: false,
@@ -341,8 +349,8 @@ impl AgentContext {
         // first SIGWINCH fires.
         self.vterm.resize(initial_size.1, initial_size.0);
 
-        // Suppress unused-variable warning on non-unix where resize_tx is never moved
-        #[cfg(not(unix))]
+        // Suppress unused-variable warning on platforms with no resize source.
+        #[cfg(not(any(unix, windows)))]
         let _ = &resize_tx;
 
         // Spawn SIGWINCH listener — updates the watch whenever terminal is resized
@@ -369,9 +377,48 @@ impl AgentContext {
                     // back to the local TTY keeps the existing in-terminal
                     // workflow working.
                     let size = crate::pty_spawner::read_external_winsize(my_pid)
-                        .unwrap_or_else(get_terminal_size_from_tty);
+                        .unwrap_or_else(|| crate::pty_spawner::console_size().unwrap_or((80, 24)));
                     if resize_tx.send(size).is_err() {
                         break;
+                    }
+                }
+            })
+        };
+
+        // Windows has no SIGWINCH, so poll instead. Same source priority as the
+        // unix handler: an external winsize file (web console / `ay attach`,
+        // which can't deliver a signal here) first, then the live console size
+        // (a raw cmd-window resize). The resize_rx arm below applies whatever
+        // changes. `last` avoids re-sending an unchanged size every tick.
+        #[cfg(windows)]
+        let _resize_poll_handle = {
+            let my_pid = std::process::id();
+            let mut last = initial_size;
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_millis(250));
+                loop {
+                    tick.tick().await;
+                    // The run loop dropped resize_rx (agent exiting) — stop
+                    // instead of polling forever. The send() below only fires
+                    // on a size change, so without this an idle task would
+                    // never notice closure, and robust restarts would pile up
+                    // orphaned pollers.
+                    if resize_tx.is_closed() {
+                        break;
+                    }
+                    // External winsize file (web console / `ay attach`) first,
+                    // then the live console. None = no reliable source this
+                    // tick (piped/MSYS) -> leave the size untouched.
+                    let Some(size) = crate::pty_spawner::read_external_winsize(my_pid)
+                        .or_else(crate::pty_spawner::console_size)
+                    else {
+                        continue;
+                    };
+                    if size != last {
+                        last = size;
+                        if resize_tx.send(size).is_err() {
+                            break;
+                        }
                     }
                 }
             })
@@ -525,6 +572,20 @@ impl AgentContext {
         drop(stdout_tx);
         let _ = tokio::time::timeout(Duration::from_millis(500), stdout_handle).await;
 
+        // Plain (non-TTY) mode: nothing was forwarded during the run, so emit
+        // the final rendered screen now as clean plain text. Writing here
+        // (after the raw stdout writer has drained) keeps it from interleaving
+        // with anything else.
+        if self.render_plain {
+            let rendered = self.non_tty_renderer.finalize(&self.vterm);
+            if !rendered.is_empty() {
+                use std::io::Write as _;
+                let mut out = std::io::stdout();
+                let _ = out.write_all(rendered.as_bytes());
+                let _ = out.flush();
+            }
+        }
+
         // Print final newline
         if self.is_user_abort {
             eprintln!("\r\nUser aborted: SIGINT\r");
@@ -540,23 +601,30 @@ impl AgentContext {
         msg_ctx: &mut MessageContext,
         stdout_tx: &mpsc::Sender<String>,
     ) -> Result<()> {
+        // Forward raw PTY bytes to stdout only in TTY passthrough mode. In
+        // plain (non-TTY) mode we suppress the raw stream and emit rendered
+        // text on exit instead — see `non_tty_renderer` and the final flush
+        // at the end of `run_with_fifo`.
+        //
         // Send to background stdout writer (never blocks main loop).
         // If the channel is full (~10MB buffered), drop the output —
         // agent operation is more important than display completeness.
-        match stdout_tx.try_send(output.to_string()) {
-            Ok(_) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.stdout_drop_count += 1;
-                // Warn on first drop, then every 100 drops to avoid log spam
-                if self.stdout_drop_count == 1 || self.stdout_drop_count % 100 == 0 {
-                    warn!(
-                        "stdout channel full, dropped output ({} total drops)",
-                        self.stdout_drop_count
-                    );
+        if !self.render_plain {
+            match stdout_tx.try_send(output.to_string()) {
+                Ok(_) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    self.stdout_drop_count += 1;
+                    // Warn on first drop, then every 100 drops to avoid log spam
+                    if self.stdout_drop_count == 1 || self.stdout_drop_count % 100 == 0 {
+                        warn!(
+                            "stdout channel full, dropped output ({} total drops)",
+                            self.stdout_drop_count
+                        );
+                    }
                 }
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                // Channel closed, receiver gone — nothing to do
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    // Channel closed, receiver gone — nothing to do
+                }
             }
         }
 
@@ -571,6 +639,13 @@ impl AgentContext {
         // Latch alt-screen usage so finalize_log knows whether the rendered
         // scrollback can safely stand in for the raw byte log.
         self.used_alt_screen |= self.vterm.alternate_screen();
+
+        // In plain (non-TTY) mode, let the renderer observe the screen so it
+        // can capture alt-screen contents before the agent restores the
+        // normal screen on exit.
+        if self.render_plain {
+            self.non_tty_renderer.observe(&self.vterm);
+        }
 
         // Write back any terminal query responses (DSR, DA) to child process.
         // Lock once and batch all responses to keep them atomic w.r.t. other writers.

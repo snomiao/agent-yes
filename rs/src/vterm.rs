@@ -142,9 +142,12 @@ impl VTermProxy {
         self.parser.screen().cursor_position()
     }
 
-    /// True if the terminal is currently showing the alternate screen buffer.
-    /// Used to detect alt-screen TUIs, whose content is NOT retained in the
-    /// normal-buffer scrollback that `dump_scrollback` reconstructs.
+    /// True if the terminal is currently showing the alternate screen buffer
+    /// (DECSET 1049 / 47 / 1047). Alt-screen TUIs (e.g. Claude) keep their
+    /// entire UI here, so nothing scrolls into the normal-buffer scrollback
+    /// that `dump_scrollback` reconstructs — both the exit-time raw-log guard
+    /// and the non-TTY renderer rely on this to know when to capture the live
+    /// screen.
     pub fn alternate_screen(&self) -> bool {
         self.parser.screen().alternate_screen()
     }
@@ -188,6 +191,11 @@ impl VTermProxy {
             lines.pop();
         }
         lines.join("\n")
+    }
+
+    /// Screen dimensions as (rows, cols).
+    pub fn size(&self) -> (u16, u16) {
+        self.parser.screen().size()
     }
 
     /// Resize the virtual terminal. Dimensions are clamped to at least 1×1
