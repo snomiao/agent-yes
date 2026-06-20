@@ -147,6 +147,23 @@ describe("subcommands.matchKeyword", () => {
     expect(matchKeyword(baseRecord, "9999")).toBe(false);
   });
 
+  it("treats a numeric keyword as an identity selector (pid or agent_id prefix, no cwd/prompt match)", async () => {
+    const { matchKeyword } = await loadModule();
+    // pid mentioned inside another agent's prompt/cwd must NOT match by number.
+    const r = {
+      ...baseRecord,
+      pid: 5678,
+      prompt: "investigating crash in pid 1234",
+      cwd: "/v1/code/proj-1234",
+    };
+    expect(matchKeyword(r, "1234")).toBe(false); // not this agent's pid, despite cwd/prompt mentions
+    expect(matchKeyword(r, "5678")).toBe(true); // its actual pid
+    // an all-digit agent_id prefix still resolves (ids are random hex).
+    const idr = { ...baseRecord, pid: 5678, agent_id: "206812abcdef" };
+    expect(matchKeyword(idr, "206812")).toBe(true); // agent_id prefix
+    expect(matchKeyword(idr, "5678")).toBe(true); // pid still wins too
+  });
+
   it("matches by cwd substring (case-insensitive)", async () => {
     const { matchKeyword } = await loadModule();
     expect(matchKeyword(baseRecord, "agent-yes")).toBe(true);
@@ -185,6 +202,85 @@ describe("subcommands.matchKeyword", () => {
     expect(matchKeyword(r, "A1B2C3")).toBe(true); // case-insensitive
     expect(matchKeyword(r, "b2c3")).toBe(false); // not a prefix (mid-string)
     expect(matchKeyword({ ...baseRecord, agent_id: null }, "a1b2")).toBe(false);
+  });
+});
+
+describe("subcommands.resolveOne exact-identity precedence", () => {
+  const opts = { all: false, active: false, json: true, latest: true, cwdScope: null };
+
+  // Regression for the `/w/#room:206812` deep link rendering a sibling's terminal:
+  // sharing the URL pastes the pid into other agents' prompts, so a bare pid
+  // lookup fuzzily matched them too and the newest-first tiebreak won. Exact pid
+  // must beat prompt-substring collisions.
+  it("returns the agent whose pid IS the keyword over newer prompt-substring matches", async () => {
+    const { resolveOne } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const now = Date.now();
+    const base = {
+      cwd: process.cwd(),
+      log_file: null,
+      status: "active" as const,
+      exit_code: null,
+      exit_reason: null,
+    };
+    // The real target — oldest.
+    await appendGlobalPid({
+      ...base,
+      pid: 206812,
+      cli: "codex",
+      prompt: "do the thing",
+      started_at: now - 60_000,
+    });
+    // Two newer claudes whose prompt embeds the share URL containing "206812".
+    await appendGlobalPid({
+      ...base,
+      pid: 265959,
+      cli: "claude",
+      prompt: "https://agent-yes.com/w/#r2d058f:206812 is codex agent but renders claude",
+      started_at: now - 2_000,
+    });
+    await appendGlobalPid({
+      ...base,
+      pid: 239973,
+      cli: "claude",
+      prompt: "look at https://agent-yes.com/w/#r2d058f:206812",
+      started_at: now - 6_000,
+    });
+
+    const record = await resolveOne("206812", opts);
+    expect(record.pid).toBe(206812);
+    expect(record.cli).toBe("codex");
+  });
+
+  it("returns the agent whose agent_id IS the keyword over prompt-substring matches", async () => {
+    const { resolveOne } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const now = Date.now();
+    const base = {
+      cwd: process.cwd(),
+      log_file: null,
+      status: "active" as const,
+      exit_code: null,
+      exit_reason: null,
+    };
+    await appendGlobalPid({
+      ...base,
+      pid: 111,
+      cli: "codex",
+      prompt: "target",
+      agent_id: "a1b2c3d4e5f6",
+      started_at: now - 60_000,
+    });
+    await appendGlobalPid({
+      ...base,
+      pid: 222,
+      cli: "claude",
+      prompt: "mentions a1b2c3d4e5f6 in passing",
+      started_at: now - 1_000,
+    });
+
+    const record = await resolveOne("a1b2c3d4e5f6", opts);
+    expect(record.pid).toBe(111);
   });
 });
 
