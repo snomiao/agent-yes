@@ -2,6 +2,7 @@
 import { argv } from "process";
 import { spawn } from "child_process";
 import { parseCliArgs } from "./parseCliArgs.ts";
+import { invokedCliName } from "./invokedCli.ts";
 import { logger } from "./logger.ts";
 import { checkAndAutoUpdate, displayVersion, versionString } from "./versionChecker.ts";
 import { getRustBinary } from "./rustBinary.ts";
@@ -21,14 +22,18 @@ import { buildRustArgs } from "./buildRustArgs.ts";
 // pid index instead. Must run before checkAndAutoUpdate / yargs / Rust spawn.
 {
   const rawArg = process.argv[2];
+  // Manager-only subcommands (e.g. `setup`) apply only to the generic
+  // `ay`/`agent-yes` entry, not to a cli-bound alias like `cy` (= claude-yes):
+  // `cy setup …` must run claude with that text, not manage the host.
+  const managerCommands = !invokedCliName(process.argv);
   // Intercept bare -h/--help so we show TS subcommands, not just Rust agent-runner options.
   const isHelpFlag = rawArg === "-h" || rawArg === "--help";
   const { isSubcommand, runSubcommand, cmdHelp } = await import("./subcommands.ts");
   if (isHelpFlag && process.argv.length === 3) {
-    cmdHelp();
+    cmdHelp(managerCommands);
     process.exit(0);
   }
-  if (isSubcommand(rawArg)) {
+  if (isSubcommand(rawArg, managerCommands)) {
     const code = await runSubcommand(process.argv);
     process.exit(code ?? 0);
   }
