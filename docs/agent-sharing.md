@@ -35,26 +35,35 @@
    (or room isolation, see Option X) keeps a scoped viewer off the fleet channel.
 4. **Default to view-only.** Steer is a separate, explicit upgrade.
 
-## Scope key: a stable `agentId` (prerequisite — step 0)
+## Scope key: `agent_id` (per-process — by design)
 
-`pid` is ephemeral (restarts change it); `cwd` is unsafe (a different agent in
-the same directory, or a post-restart process, would be exposed). The right scope
-key is a **minted, stable `agentId`** (the agent slot / conversation binding),
-plus a `sessionId` for the current running process:
+`pid` is too ephemeral to _reference_ (it's reused), and `cwd` is unsafe as the
+**security** scope (two concurrent agents can share a directory, so a cwd grant
+would expose the wrong one). So the grant scopes to an opaque, host-enforced
+**`agent_id`**.
 
-- `agentId` — stable across restarts; the grant scopes to this.
-- `sessionId` — the current process instance.
-- At request time the host resolves `agentId → current pid/session`.
-- `cwd` / name are **display only**, never the security scope.
+**Human label = git repo + host + cwd.** What a person actually recognizes — "the
+agent in repo X on host Y at dir Z" — is the repo/host/cwd tuple, so that is what
+the UI / CLI shows to pick and label a share. It is deliberately a **fuzzy
+label, not an identity**: a single CLI session can `cd` between directories (even
+repos) while it runs, so cwd is not a fixed binding and isn't worth tracking
+precisely. The opaque `agent_id` is the only thing the grant binds to; the
+`repo/host/cwd` label is purely for humans to read.
 
-**Status: foundation landed (step 0).** Both runtimes now mint a 12-hex
-`agent_id` at registration and persist it in `~/.agent-yes/pids.jsonl` (Rust
-`pid_store.rs`, TS `pidStore.ts` → `globalPidIndex.ts`); it surfaces in
-`ay ls --json` / `ay status` and is resolvable as a keyword by full id or prefix
-(`ay tail <id>`). **Still per-process** — a restart mints a fresh id, so
-"share the same agent across a restart" is the remaining piece: cross-restart
-re-binding (e.g. `ay restart` carrying the prior id, or a cwd-slot binding) is a
-follow-up. `cwd`/name stay display-only; the grant scopes to `agent_id`.
+**Cross-restart persistence is explicitly a NON-GOAL.** A restart mints a fresh
+`agent_id`, and that is fine: the durable thing is the **`cwd`** — the CLIs
+(Claude Code, codex, …) resume their own conversation by working directory, not
+by anything agent-yes tracks. agent-yes does not own session continuity, so it
+shouldn't pretend a restarted process is "the same agent." If a shared agent
+restarts, the old grant simply points at a now-dead `agent_id` → **re-share**.
+(If seamless survival is ever wanted, anchor that _one_ grant to `cwd` for
+resume — but it is not the default and not a prerequisite.)
+
+**Status: landed (step 0).** Both runtimes mint a 12-hex `agent_id` at
+registration and persist it in `~/.agent-yes/pids.jsonl` (Rust `pid_store.rs`, TS
+`pidStore.ts` → `globalPidIndex.ts`); it surfaces in `ay ls --json` / `ay status`
+and is resolvable as a keyword by full id or prefix (`ay tail <id>`). That is the
+whole foundation — there is no cross-restart follow-up to build.
 
 ## Architecture: two options
 
@@ -182,9 +191,10 @@ private URLs — so the biggest risk of opening `read`/`tail` to strangers is
 
 ## Staging
 
+0. **`agent_id` foundation** — ✅ done (per-process; see Scope key).
 1. **Design doc** (this file).
-2. **Web-UI single-agent view-only share (Option X):** mint `agentId`; `ay share`
-   → a "Share" action on each agent row → a shares-management panel with revoke.
+2. **Web-UI single-agent view-only share (Option X):** `ay share <agent>` → a
+   "Share" action on each agent row → a shares-management panel with revoke.
 3. **`ay read`/`ay tail <share-url>` (CLI over WebRTC):** the larger lift.
 
 ## Decisions
@@ -199,9 +209,12 @@ private URLs — so the biggest risk of opening `read`/`tail` to strangers is
   under `w`; token prefix is a UX label only, the host grant is authoritative and
   rejects overclaims; spawn / new shell / files / env / config are excluded from a
   per-agent share; treat `rw` as scoped RCE, never "chat-only".
+- **`agent_id` is per-process — cross-restart persistence is a NON-GOAL
+  (decided):** the CLI's session continuity lives in the `cwd`, not in agent-yes;
+  a restart mints a fresh id and the holder re-shares. No cross-restart re-binding
+  to build.
 - **DEFERRED:** Option X (per-agent room) vs Option Y (grants table) at
-  implementation time — start X, escalate to Y on demand; exact `agentId` minting
-  scheme and how it's mirrored across the TS/Rust registry; expiry defaults;
+  implementation time — start X, escalate to Y on demand; expiry defaults;
   whether the CLI client and browser share one room-client module.
 
 ## Related code
