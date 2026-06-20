@@ -447,6 +447,13 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
             DAEMON_NAME,
             "--interpreter",
             "none",
+            // Exponential restart backoff: a persistent crash (e.g. a port held
+            // by a stale instance) must NOT hammer-restart. pm2's default is an
+            // instant respawn, which storms — hundreds of restarts/min, each
+            // briefly grabbing window focus. exp-backoff grows the delay on
+            // repeated quick crashes and resets once the process stays up.
+            "--exp-backoff-restart-delay",
+            "200",
             "--",
             ...serveArgv.slice(1),
           ];
@@ -1453,17 +1460,30 @@ export async function cmdServe(rest: string[]): Promise<number> {
 
   let server: ReturnType<typeof Bun.serve> | null = null;
   if (wantHttp) {
-    try {
-      server = Bun.serve(serverOpts);
-    } catch (e) {
-      if ((e as { code?: string }).code === "EADDRINUSE") {
-        process.stderr.write(
-          `ay serve: port ${port} is already in use — pick another with --port N,\n` +
-            `or run a port-free WebRTC-only share with: ay serve --webrtc\n`,
-        );
-        return 1;
+    // A daemon restart can race the previous instance's port release (TIME_WAIT
+    // / slow shutdown), so a single Bun.serve would EADDRINUSE and the daemon
+    // would exit 1 straight into another restart. Retry with backoff first so a
+    // restart self-heals; only give up (and let the manager back off) if the
+    // port stays held — e.g. by an unrelated/stale process.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        server = Bun.serve(serverOpts);
+        break;
+      } catch (e) {
+        const inUse = (e as { code?: string }).code === "EADDRINUSE";
+        if (inUse && attempt < 5) {
+          await Bun.sleep(Math.min(2000, 250 * 2 ** attempt));
+          continue;
+        }
+        if (inUse) {
+          process.stderr.write(
+            `ay serve: port ${port} is still in use after retries — pick another with --port N,\n` +
+              `or run a port-free WebRTC-only share with: ay serve --webrtc\n`,
+          );
+          return 1;
+        }
+        throw e;
       }
-      throw e;
     }
 
     const uiHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
