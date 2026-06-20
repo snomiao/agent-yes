@@ -2506,12 +2506,17 @@
 
       // The local source is only worth polling when this page is actually backed
       // by an ay serve: localhost, or served by `ay serve --http` (which leaves a
-      // token), or when there are no rooms to fall back on. On the public origin
-      // with rooms, skip it so we don't hammer a 404 every poll.
+      // token), or when there are no rooms to fall back on. The public
+      // agent-yes.com origin serves only static assets + WS rooms (no same-origin
+      // /api), so never probe it — otherwise a bare /w/ visit (e.g. the landing's
+      // "Console" link) 404s on /api/ls + /api/ls/subscribe every poll.
       function ensureLocalSource() {
         const isLocalhost = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
         const hasToken = !!localStorage.getItem("ay.localToken");
-        const enabled = isLocalhost || hasToken || Object.keys(loadRooms()).length === 0;
+        const isPublicOrigin =
+          location.hostname === "agent-yes.com" || location.hostname.endsWith(".agent-yes.com");
+        const enabled =
+          isLocalhost || hasToken || (!isPublicOrigin && Object.keys(loadRooms()).length === 0);
         if (enabled && !sources.has(LOCAL)) {
           const s = {
             id: LOCAL,
