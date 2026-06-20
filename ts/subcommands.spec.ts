@@ -140,6 +140,16 @@ describe("subcommands.matchKeyword", () => {
     const r = { ...baseRecord, prompt: null };
     expect(matchKeyword(r, "parser")).toBe(false);
   });
+
+  it("matches by agent_id prefix", async () => {
+    const { matchKeyword } = await loadModule();
+    const r = { ...baseRecord, agent_id: "a1b2c3d4e5f6" };
+    expect(matchKeyword(r, "a1b2c3d4e5f6")).toBe(true); // full id
+    expect(matchKeyword(r, "a1b2c3")).toBe(true); // prefix
+    expect(matchKeyword(r, "A1B2C3")).toBe(true); // case-insensitive
+    expect(matchKeyword(r, "b2c3")).toBe(false); // not a prefix (mid-string)
+    expect(matchKeyword({ ...baseRecord, agent_id: null }, "a1b2")).toBe(false);
+  });
 });
 
 describe("subcommands.runSubcommand routing", () => {

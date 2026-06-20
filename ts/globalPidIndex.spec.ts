@@ -55,6 +55,29 @@ describe("globalPidIndex", () => {
     });
   });
 
+  it("round-trips agent_id and preserves it through a status update", async () => {
+    const mod = await loadModule();
+    await mod.appendGlobalPid({
+      pid: 31313,
+      cli: "claude",
+      prompt: null,
+      cwd: "/a",
+      log_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: 1,
+      agent_id: "deadbeef0001",
+    });
+    // updateStatus appends a merged record by pid; agent_id must survive since
+    // the patch doesn't include it (last-line-wins merge spreads the prior doc).
+    await mod.updateGlobalPidStatus(31313, { status: "idle" });
+
+    const records = await mod.readGlobalPids();
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({ pid: 31313, status: "idle", agent_id: "deadbeef0001" });
+  });
+
   it("merges multiple appends for the same pid (last write wins)", async () => {
     const mod = await loadModule();
     await mod.appendGlobalPid({
