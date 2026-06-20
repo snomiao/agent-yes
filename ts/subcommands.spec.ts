@@ -1253,3 +1253,74 @@ describe("subcommands.listRecords merges per-cwd TS file with global", () => {
     }
   });
 });
+
+describe("subcommands.resolveReadWindow", () => {
+  const total = 100;
+
+  it("defaults: tail = last 96, head = first 96, cat = all", async () => {
+    const { resolveReadWindow } = await loadModule();
+    expect(resolveReadWindow({ total: 200, mode: "tail" })).toEqual({ start: 104, end: 200 });
+    expect(resolveReadWindow({ total: 200, mode: "head" })).toEqual({ start: 0, end: 96 });
+    expect(resolveReadWindow({ total: 200, mode: "cat" })).toEqual({ start: 0, end: 200 });
+  });
+
+  it("respects -n for tail/head; cat ignores -n (stays whole)", async () => {
+    const { resolveReadWindow } = await loadModule();
+    expect(resolveReadWindow({ total, mode: "tail", n: 10 })).toEqual({ start: 90, end: 100 });
+    expect(resolveReadWindow({ total, mode: "head", n: 10 })).toEqual({ start: 0, end: 10 });
+    expect(resolveReadWindow({ total, mode: "cat", n: 10 })).toEqual({ start: 0, end: 100 });
+  });
+
+  it("--last / --head override the mode", async () => {
+    const { resolveReadWindow } = await loadModule();
+    expect(resolveReadWindow({ total, mode: "cat", last: 5 })).toEqual({ start: 95, end: 100 });
+    expect(resolveReadWindow({ total, mode: "tail", head: 5 })).toEqual({ start: 0, end: 5 });
+  });
+
+  it("--range A:B is 1-indexed inclusive and order-insensitive", async () => {
+    const { resolveReadWindow } = await loadModule();
+    expect(resolveReadWindow({ total, mode: "cat", range: "10:20" })).toEqual({
+      start: 9,
+      end: 20,
+    });
+    expect(resolveReadWindow({ total, mode: "cat", range: "20:10" })).toEqual({
+      start: 9,
+      end: 20,
+    });
+  });
+
+  it("--before-line L shows the page of `limit` lines ending just above L", async () => {
+    const { resolveReadWindow } = await loadModule();
+    // page-up cursor: lines strictly before line 51, limit 10 -> [41..50] (0-idx 40..50)
+    expect(resolveReadWindow({ total, mode: "cat", beforeLine: 51, limit: 10 })).toEqual({
+      start: 40,
+      end: 50,
+    });
+    // round-trip: first-visible of the above is line 41; paging up again from 41
+    expect(resolveReadWindow({ total, mode: "cat", beforeLine: 41, limit: 10 })).toEqual({
+      start: 30,
+      end: 40,
+    });
+  });
+
+  it("clamps out-of-range indices", async () => {
+    const { resolveReadWindow } = await loadModule();
+    expect(resolveReadWindow({ total: 5, mode: "tail", n: 999 })).toEqual({ start: 0, end: 5 });
+    expect(resolveReadWindow({ total: 5, mode: "cat", range: "3:999" })).toEqual({
+      start: 2,
+      end: 5,
+    });
+    expect(resolveReadWindow({ total: 5, mode: "cat", beforeLine: 2, limit: 999 })).toEqual({
+      start: 0,
+      end: 1,
+    });
+  });
+
+  it("ignores a malformed --range and falls through to the mode default", async () => {
+    const { resolveReadWindow } = await loadModule();
+    expect(resolveReadWindow({ total, mode: "head", range: "not-a-range" })).toEqual({
+      start: 0,
+      end: 96,
+    });
+  });
+});
