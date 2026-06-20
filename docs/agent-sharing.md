@@ -47,11 +47,14 @@ plus a `sessionId` for the current running process:
 - At request time the host resolves `agentId → current pid/session`.
 - `cwd` / name are **display only**, never the security scope.
 
-**This does not exist yet.** The registry (`~/.agent-yes/pids.jsonl`, written by
-both the TS and Rust runtimes) currently keys on `pid`. Minting and persisting an
-`agentId` (mirrored across both runtimes) is the **foundation** this whole
-feature sits on — without it, "share the same agent across a restart" cannot
-hold.
+**Status: foundation landed (step 0).** Both runtimes now mint a 12-hex
+`agent_id` at registration and persist it in `~/.agent-yes/pids.jsonl` (Rust
+`pid_store.rs`, TS `pidStore.ts` → `globalPidIndex.ts`); it surfaces in
+`ay ls --json` / `ay status` and is resolvable as a keyword by full id or prefix
+(`ay tail <id>`). **Still per-process** — a restart mints a fresh id, so
+"share the same agent across a restart" is the remaining piece: cross-restart
+re-binding (e.g. `ay restart` carrying the prior id, or a cwd-slot binding) is a
+follow-up. `cwd`/name stay display-only; the grant scopes to `agent_id`.
 
 ## Architecture: two options
 

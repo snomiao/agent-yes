@@ -47,6 +47,11 @@ export interface GlobalPidRecord {
   // started from a human shell. Builds the agent>subagent tree: a child links to
   // its parent via child.parent_pid === parent.wrapper_pid. See buildAgentForest.
   parent_pid?: number | null;
+  // Stable id minted once at registration so a share grant or `ay <cmd> <id>`
+  // can reference this agent without its ephemeral pid. Mirrors Rust's `agent_id`
+  // (snake_case). Currently per-process; cross-restart re-binding is a follow-up
+  // (see docs/agent-sharing.md). Preserved verbatim through merges/compaction.
+  agent_id?: string | null;
 }
 
 /**

@@ -1,4 +1,5 @@
 import { mkdir, writeFile } from "fs/promises";
+import { randomBytes } from "node:crypto";
 import path from "path";
 import { logger } from "./logger.ts";
 import { JsonlStore } from "./JsonlStore.ts";
@@ -23,6 +24,8 @@ export interface PidRecord {
   exitReason: string;
   exitCode?: number;
   startedAt: number;
+  // Stable id minted at registration; mirrored to the global index as `agent_id`.
+  agentId?: string;
 }
 
 export class PidStore {
@@ -73,6 +76,11 @@ export class PidStore {
     const logFile = this.getRawLogPath(pid);
     const fifoFile = this.getFifoPath(pid);
 
+    // Upsert by pid. Reuse an existing record's agent id so re-registration
+    // (e.g. status churn) keeps the id stable; mint a fresh 12-hex id otherwise.
+    const existing = this.store.findOne((doc) => doc.pid === pid);
+    const agentId = existing?.agentId ?? randomBytes(6).toString("hex");
+
     const record: Omit<PidRecord, "_id"> = {
       pid,
       cli,
@@ -84,10 +92,9 @@ export class PidStore {
       status: "active",
       exitReason: "",
       startedAt: now,
+      agentId,
     };
 
-    // Upsert by pid
-    const existing = this.store.findOne((doc) => doc.pid === pid);
     if (existing) {
       await this.store.updateById(existing._id!, record);
     } else {
@@ -119,6 +126,7 @@ export class PidStore {
       started_at: now,
       wrapper_pid: wrapperPid ?? null,
       parent_pid: parentPid ?? null,
+      agent_id: agentId,
     })
       .then(() => maybeCompactGlobalPids())
       .catch(() => null);

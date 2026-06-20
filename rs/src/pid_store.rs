@@ -46,6 +46,18 @@ pub struct PidRecord {
     /// child.parent_pid == parent.wrapper_pid.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_pid: Option<u32>,
+    /// Stable identifier minted once at registration, so a share grant or an
+    /// `ay <cmd> <id>` can reference this agent without depending on its
+    /// ephemeral pid. Currently per-process; cross-restart re-binding is a
+    /// follow-up (see docs/agent-sharing.md). Mirrors the TS `agent_id`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+}
+
+/// Mint a short, low-collision agent id (12 hex chars from a v4 UUID). Short
+/// enough to type/reference; `matchKeyword` allows prefix lookups.
+fn new_agent_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
 }
 
 pub struct PidStore {
@@ -102,6 +114,7 @@ impl PidStore {
             parent_pid: std::env::var("AGENT_YES_PID")
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok()),
+            agent_id: Some(new_agent_id()),
         };
         // Hold the cross-runtime lock across the append so a concurrent rewrite
         // (another wrapper's clean_stale / a status update) can't clobber it.
@@ -393,6 +406,21 @@ mod tests {
     }
 
     #[test]
+    fn test_register_mints_agent_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        store.register(1234, "claude", None, "/tmp", None);
+        store.register(5678, "codex", None, "/tmp", None);
+        let records = store.read_all().unwrap();
+        let id0 = records[0].agent_id.as_deref().unwrap();
+        let id1 = records[1].agent_id.as_deref().unwrap();
+        // 12 hex chars, and distinct per registration.
+        assert_eq!(id0.len(), 12);
+        assert!(id0.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(id0, id1);
+    }
+
+    #[test]
     fn test_register_multiple() {
         let dir = tempfile::tempdir().unwrap();
         let store = PidStore::with_path(dir.path().join("pids.jsonl"));
@@ -478,6 +506,7 @@ mod tests {
             started_at: 0,
             wrapper_pid: None,
             parent_pid: None,
+            agent_id: None,
         }];
         store.write_all(&records).unwrap();
         let loaded = store.read_all().unwrap();
@@ -513,6 +542,7 @@ mod tests {
                 started_at: old_started_at,
                 wrapper_pid: None,
                 parent_pid: None,
+                agent_id: None,
             }])
             .unwrap();
 
