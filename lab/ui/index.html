@@ -2958,38 +2958,46 @@
         // and re-assert our size to the agent so the stream always reflows to OUR
         // viewport (see the visibilitychange hook in startPolling). Push-if-different
         // inside fitAndSync keeps an already-matching agent from a redundant SIGWINCH.
+        // Returns the in-flight sync promise so the initial open can await it
+        // before starting the tail (below); tab-reactivation callers ignore it.
         resyncTerm = () => {
           if (sel !== selKey || !term) return;
-          tx.fetchJSON("/api/size/" + encodeURIComponent(pid))
+          return tx
+            .fetchJSON("/api/size/" + encodeURIComponent(pid))
             .then(fitAndSync)
             .catch(() => fitAndSync(null));
         };
-        resyncTerm();
 
-        // True live tail via ay serve's SSE stream. First event is an xterm-rendered
-        // tail snapshot; later events are incremental deltas. We normalise terminal
-        // carriage returns so the stream reads cleanly as HTML, autoscroll while the
-        // viewer is pinned to the bottom, and cap the buffer so it can't grow forever.
-        $("livedot").className = "dot idle";
-        $("livetxt").textContent = "connecting…";
-        const close = tx.subscribe(
-          "/api/tail/" + encodeURIComponent(pid) + "?raw=1",
-          (raw) => {
-            if (term) {
-              term.write(raw);
-              perfNote("out", raw?.length ?? 0);
-            }
-          },
-          () => {
-            $("livedot").className = "dot active";
-            $("livetxt").textContent = "live";
-          },
-          () => {
-            $("livedot").className = "dot stopped";
-            $("livetxt").textContent = "disconnected";
-          },
-        );
-        es = { close };
+        // Start the raw replay only AFTER the initial size sync (fit + resize
+        // push) settles. /api/tail?raw=1 is absolute-cursor-positioned for the
+        // agent's grid; writing it into xterm before fit.fit()/resize would land
+        // the initial snapshot on a wrong-size grid that no later resize can
+        // repair (garbled, overlapping, dim-bleed output). First event is an
+        // xterm-rendered tail snapshot; later events are incremental deltas.
+        const startTail = () => {
+          if (sel !== selKey || !term) return; // switched away during size sync
+          $("livedot").className = "dot idle";
+          $("livetxt").textContent = "connecting…";
+          const close = tx.subscribe(
+            "/api/tail/" + encodeURIComponent(pid) + "?raw=1",
+            (raw) => {
+              if (term) {
+                term.write(raw);
+                perfNote("out", raw?.length ?? 0);
+              }
+            },
+            () => {
+              $("livedot").className = "dot active";
+              $("livetxt").textContent = "live";
+            },
+            () => {
+              $("livedot").className = "dot stopped";
+              $("livetxt").textContent = "disconnected";
+            },
+          );
+          es = { close };
+        };
+        Promise.resolve(resyncTerm()).finally(startTail);
       }
 
       $("list").addEventListener("click", (ev) => {
