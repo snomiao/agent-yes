@@ -65,6 +65,42 @@ describe("subcommands.isSubcommand", () => {
     expect(isSubcommand("not-a-command")).toBe(false);
     expect(isSubcommand(undefined)).toBe(false);
   });
+
+  it("gates manager-only `setup` on the generic manager, not cli-bound aliases", async () => {
+    const { isSubcommand } = await loadModule();
+    // `ay setup` (managerCommands defaults to true) → a subcommand.
+    expect(isSubcommand("setup")).toBe(true);
+    expect(isSubcommand("setup", true)).toBe(true);
+    // `cy setup` (cli-bound alias) → NOT a subcommand, so it falls through to
+    // running claude with that text.
+    expect(isSubcommand("setup", false)).toBe(false);
+    // Inspection subcommands stay universal — `cy ls` / `cy send` still work.
+    expect(isSubcommand("ls", false)).toBe(true);
+    expect(isSubcommand("send", false)).toBe(true);
+  });
+});
+
+describe("subcommands.cmdHelp", () => {
+  it("hides the manager-only `setup` line for cli-bound aliases", async () => {
+    const { cmdHelp } = await loadModule();
+    const capture = (managerCommands?: boolean) => {
+      let out = "";
+      const spy = vi.spyOn(process.stdout, "write").mockImplementation((s: unknown) => {
+        out += String(s);
+        return true;
+      });
+      try {
+        cmdHelp(managerCommands);
+      } finally {
+        spy.mockRestore();
+      }
+      return out;
+    };
+    expect(capture(true)).toContain("ay setup"); // manager
+    expect(capture()).toContain("ay setup"); // default = manager
+    expect(capture(false)).not.toContain("ay setup"); // cli-bound alias (cy)
+    expect(capture(false)).toContain("ay ls"); // universal commands still shown
+  });
 });
 
 describe("subcommands.stopTipForCli", () => {
