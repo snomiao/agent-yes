@@ -115,6 +115,55 @@ signaling as a non-host peer; tail streaming needs backpressure / reconnect / IC
 handling; the secret fragment reaches the CLI and can linger in shell history /
 process list / logs.
 
+## Permission model
+
+Validated with codex. The scoped capability is a small **ordered ladder**, not
+independent bits:
+
+| level   | token | grants (all scoped to THIS agent)                                    |
+| ------- | ----- | -------------------------------------------------------------------- |
+| observe | `r`   | read live terminal + scrollback; read the result-envelope / state    |
+| steer   | `rw`  | + send keystrokes/input, interrupt/cancel, resize PTY, attach/detach |
+| control | `rwc` | + stop / restart this agent                                          |
+
+Rules:
+
+- **Least-privilege default = `r`.** Higher levels require explicit opt-in.
+- **Implications enforced:** `w ⇒ r`, `c ⇒ w` — no nonsense combos. There is no
+  real use for `w` without `r` when send = keystroke injection (blind steer kills
+  accountability and recovery); if a "submit-only" mode is ever wanted, build a
+  separate constrained action API, not raw PTY input.
+- **`resize` sits under `w`** (it changes the TUI).
+
+**Prefix = label, grant = truth.** The level may be encoded as a human-readable
+**prefix** in the token purely as a self-describing UX hint (CLI/UI shows the
+level and refuses unsupported ops client-side). It is **never** the enforcement
+source: the host resolves the real persisted grant
+(`grantSecret → {agentId, perm, exp, revoked}`) and **rejects any overclaim**. A
+signed `grantId.perm.exp.sig` token is tamper-evident but still needs host state
+for revoke / downgrade / audit / binding — it adds complexity without replacing
+the table. Ship an **opaque random secret + optional UX prefix**.
+
+**Explicitly EXCLUDED** from a per-agent share (a separate, explicit
+machine-admin capability — or never):
+
+- spawn a new agent; open a new shell / PTY outside the agent
+- file upload/download; clipboard; browser / session / cookie access
+- reading env / secrets directly; changing the agent's config / model / tools;
+  installing plugins / connectors
+- port forwarding / network exposure; machine-level process control
+
+### The real boundary
+
+`r/w/c` are **not** the true security boundary — the **agent's own sandbox and
+tool authority** is. Because terminal output leaks secrets, **`r` alone is
+already sensitive** (tokens, command output, private repo data, chat messages).
+And because `send` injects keystrokes, **`rw` is effectively scoped RCE** — it can
+usually drive the agent to run arbitrary commands within whatever authority the
+agent already holds. So a share token must **never grant more power than the agent
+already has**, and the UI must frame `rw` as "can operate this agent," not "can
+only chat."
+
 ## Security must-haves
 
 Terminal output routinely contains API keys, env, file paths, prompts, git diffs,
@@ -142,6 +191,11 @@ private URLs — so the biggest risk of opening `read`/`tail` to strangers is
   viewers kept off the master key; `#room:grantSecret` link shared by browser +
   CLI; view-only default with steer as an explicit upgrade; CLI-over-WebRTC as the
   long-term outsider path with HTTP scoped tokens as a LAN fast path.
+- **Permission model (agreed):** ordered ladder `r` (observe) < `rw` (steer) <
+  `rwc` (control), default `r`, implications `w⇒r` and `c⇒w` enforced; `resize`
+  under `w`; token prefix is a UX label only, the host grant is authoritative and
+  rejects overclaims; spawn / new shell / files / env / config are excluded from a
+  per-agent share; treat `rw` as scoped RCE, never "chat-only".
 - **DEFERRED:** Option X (per-agent room) vs Option Y (grants table) at
   implementation time — start X, escalate to Y on demand; exact `agentId` minting
   scheme and how it's mirrored across the TS/Rust registry; expiry defaults;
