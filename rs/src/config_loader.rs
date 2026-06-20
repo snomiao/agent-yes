@@ -40,6 +40,11 @@ pub struct CliConfigOverride {
     /// Default args
     #[serde(default)]
     pub default_args: Option<Vec<String>>,
+    /// Args appended when `-y` / `--yes` is passed — the per-CLI "yolo" flag
+    /// (claude: `--dangerously-skip-permissions`; codex:
+    /// `--dangerously-bypass-approvals-and-sandbox`).
+    #[serde(default)]
+    pub yes_args: Option<Vec<String>>,
     /// Help URL or hint
     #[serde(default)]
     pub help: Option<String>,
@@ -171,6 +176,7 @@ impl CliConfigOverride {
             version,
             binary,
             default_args,
+            yes_args,
             help,
             bunx,
             system_prompt,
@@ -205,6 +211,9 @@ impl CliConfigOverride {
         }
         if default_args.is_some() {
             self.default_args = default_args;
+        }
+        if yes_args.is_some() {
+            self.yes_args = yes_args;
         }
         if help.is_some() {
             self.help = help;
@@ -616,6 +625,7 @@ logsDir: /custom/logs
                 version: Some("old-version".into()),
                 binary: Some("old-bin".into()),
                 default_args: Some(vec!["old-arg".into()]),
+                yes_args: Some(vec!["--old-yes".into()]),
                 help: Some("old-help".into()),
                 bunx: Some(false),
                 system_prompt: Some("--old-system".into()),
@@ -652,6 +662,7 @@ logsDir: /custom/logs
                 version: Some("new-version".into()),
                 binary: Some("new-bin".into()),
                 default_args: Some(vec!["new-arg".into()]),
+                yes_args: Some(vec!["--new-yes".into()]),
                 help: Some("new-help".into()),
                 bunx: Some(true),
                 system_prompt: Some("--new-system".into()),
@@ -692,6 +703,7 @@ logsDir: /custom/logs
         assert_eq!(t.version, Some("new-version".into()));
         assert_eq!(t.binary, Some("new-bin".into()));
         assert_eq!(t.default_args, Some(vec!["new-arg".into()]));
+        assert_eq!(t.yes_args, Some(vec!["--new-yes".into()]));
         assert_eq!(t.help, Some("new-help".into()));
         assert_eq!(t.bunx, Some(true));
         assert_eq!(t.system_prompt, Some("--new-system".into()));

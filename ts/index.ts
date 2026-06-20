@@ -44,6 +44,7 @@ export type AgentCliConfig = {
   version?: string; // hint user for version command to check if installed
   binary?: string; // actual binary name if different from cli, e.g. cursor -> cursor-agent
   defaultArgs?: string[]; // function to ensure certain args are present
+  yesArgs?: string[]; // appended when `-y`/--yes is passed: the per-CLI "yolo" flag (claude: --dangerously-skip-permissions; codex: --dangerously-bypass-approvals-and-sandbox)
   help?: string; // documentation/help URL for the CLI
   bunx?: boolean; // metadata for bunx-based launches
   systemPrompt?: string; // flag name for system prompt injection
@@ -115,6 +116,7 @@ export const CLIS_CONFIG = config.clis as Record<
 export default async function agentYes({
   cli,
   cliArgs = [],
+  skipPermissions = false,
   prompt,
   robust = true,
   cwd,
@@ -134,6 +136,7 @@ export default async function agentYes({
 }: {
   cli: keyof typeof CLIS_CONFIG;
   cliArgs?: string[];
+  skipPermissions?: boolean; // if true (`-y`/--yes), append the per-CLI yesArgs ("yolo" flag)
   prompt?: string;
   robust?: boolean;
   cwd?: string;
@@ -216,6 +219,14 @@ export default async function agentYes({
   // Apply CLI specific configurations (moved to CLI_CONFIGURES)
   const cliConf = (CLIS_CONFIG as Record<string, AgentCliConfig>)[cli] || {};
   cliArgs = cliConf.defaultArgs ? [...cliConf.defaultArgs, ...cliArgs] : cliArgs;
+
+  // `-y`/--yes appends the per-CLI "yolo" args. Each CLI declares its own:
+  // claude → --dangerously-skip-permissions; codex →
+  // --dangerously-bypass-approvals-and-sandbox (codex rejects the claude flag,
+  // and its bwrap sandbox can't init inside an already-sandboxed container).
+  if (skipPermissions && cliConf.yesArgs?.length) {
+    cliArgs = [...cliArgs, ...cliConf.yesArgs];
+  }
 
   // If enabled, read SKILL.md header and prepend to the prompt for non-Claude agents
   try {
