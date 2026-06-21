@@ -61,6 +61,12 @@ pub struct CliConfig {
     pub exit_command: Vec<String>,
     /// Default args
     pub default_args: Vec<String>,
+    /// Args appended when `-y` / `--yes` is passed — the per-CLI "yolo" flag.
+    /// claude maps `-y` to `--dangerously-skip-permissions`; codex maps it to
+    /// `--dangerously-bypass-approvals-and-sandbox` (codex rejects the claude
+    /// flag, and its bwrap sandbox can't init inside an already-sandboxed/
+    /// containerized environment).
+    pub yes_args: Vec<String>,
     /// Use cursor-based rendering (no newlines)
     pub no_eol: bool,
 }
@@ -148,6 +154,7 @@ fn build_cli_config(raw: CliConfigOverride) -> Result<CliConfig> {
         restore_args: raw.restore_args.unwrap_or_default(),
         exit_command: raw.exit_commands.unwrap_or_default(),
         default_args: raw.default_args.unwrap_or_default(),
+        yes_args: raw.yes_args.unwrap_or_default(),
         no_eol: raw.no_eol.unwrap_or(false),
     })
 }
@@ -245,6 +252,8 @@ mod tests {
         assert_eq!(config.prompt_arg, "last-arg");
         assert!(!config.ready.is_empty());
         assert!(!config.enter.is_empty());
+        // `-y` maps to claude's own permission-skip flag.
+        assert_eq!(config.yes_args, vec!["--dangerously-skip-permissions"]);
     }
 
     #[test]
@@ -364,6 +373,13 @@ mod tests {
         assert!(config.restart_without_continue.is_empty());
         assert!(config.exit_command.is_empty());
         assert_eq!(config.default_args, vec!["--search"]);
+        // `-y` maps to codex's bypass flag — NOT claude's --dangerously-skip-
+        // permissions (codex rejects it) — and it also skips codex's bwrap
+        // sandbox, which can't init inside an already-sandboxed container.
+        assert_eq!(
+            config.yes_args,
+            vec!["--dangerously-bypass-approvals-and-sandbox"]
+        );
         assert!(config.no_eol);
     }
 

@@ -1,9 +1,16 @@
 //! Integration tests for agent-yes Rust implementation
 
 use assert_cmd::cargo::cargo_bin_cmd;
+// The Unix-only imports below back the bash-mock / chmod / SIGWINCH tests. On
+// Windows those tests are #[cfg(unix)]-gated out, so gate the imports too —
+// otherwise they're unused and the `-D warnings` pre-commit gate fails.
+#[cfg(unix)]
 use std::fs::{self, File};
+#[cfg(unix)]
 use std::io::Write;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use tempfile::tempdir;
 
 /// Full SIGWINCH chain test using a shell helper script.
@@ -375,6 +382,7 @@ fn test_unknown_cli() {
 }
 
 /// Create a mock CLI that prints its working directory
+#[cfg(unix)]
 fn create_cwd_printing_cli(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     let script_path = dir.join(name);
     let mut file = File::create(&script_path).unwrap();
@@ -399,6 +407,7 @@ exit 0
     script_path
 }
 
+#[cfg(unix)] // relies on a bash mock CLI (chmod +x, `:` PATH separator)
 #[test]
 fn test_cwd_is_preserved() {
     // Create a temp directory with a unique subdirectory
@@ -449,6 +458,7 @@ fn test_cwd_is_preserved() {
     );
 }
 
+#[cfg(unix)] // relies on a bash mock CLI (chmod +x, `:` PATH separator)
 #[test]
 fn test_cwd_flag_overrides_current_dir() {
     // Verify that --cwd <path> makes the agent run in <path>, even when
@@ -507,6 +517,7 @@ fn test_cwd_flag_overrides_current_dir() {
     );
 }
 
+#[cfg(unix)] // relies on a bash mock CLI (chmod +x, `:` PATH separator)
 #[test]
 fn test_cwd_flag_rejects_missing_directory() {
     // --cwd pointing at a nonexistent path should make agent-yes fail fast.

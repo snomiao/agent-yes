@@ -1,28 +1,15 @@
 import ms from "ms";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
+import { invokedCliName } from "./invokedCli.ts";
 /**
  * Parse CLI arguments the same way cli.ts does
  * This is a test helper that mirrors the parsing logic in cli.ts
  */
 export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) {
-  // Detect cli name from script name (same logic as cli.ts:10-14)
-  const scriptBaseName =
-    argv[1]
-      ?.split(/[/\\]/)
-      .at(-1)
-      ?.replace(/(\.[jt]s)?$/, "") || "";
-
-  const CLI_ALIASES: Record<string, string> = { cy: "claude" };
-
-  const cliName = (() => {
-    const raw =
-      scriptBaseName
-        .replace(/^(cli|agent)(-yes)?$/, "")
-        .replace(/^ay$/, "") // treat standalone "ay" same as "agent-yes"
-        .replace(/-yes$/, "") || undefined;
-    return (raw && CLI_ALIASES[raw]) || raw;
-  })();
+  // The agent CLI implied by the invoked binary name (cy/claude-yes → claude),
+  // or undefined for the generic ay/agent-yes manager entry.
+  const cliName = invokedCliName(argv);
 
   // Parse args with yargs (same logic as cli.ts:16-73)
   const parsedArgv = yargs(hideBin(argv))
@@ -128,7 +115,8 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
     })
     .option("yes", {
       type: "boolean",
-      description: "Pass --dangerously-skip-permissions to the CLI (claude shortcut)",
+      description:
+        "Pass the CLI's 'yolo' flag (claude: --dangerously-skip-permissions; codex: --dangerously-bypass-approvals-and-sandbox)",
       default: false,
       alias: "y",
     })
@@ -305,7 +293,10 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
       (dashIndex !== 0
         ? parsedArgv._[0]?.toString()?.replace?.(/-yes$/, "")
         : undefined)) as string,
-    cliArgs: [...cliArgsForSpawn, ...(parsedArgv.yes ? ["--dangerously-skip-permissions"] : [])],
+    cliArgs: cliArgsForSpawn,
+    // `-y`/--yes: the actual flag is per-CLI (see each CLI's `yesArgs` in
+    // default.config.yaml). agentYes() appends it once the CLI is resolved.
+    skipPermissions: parsedArgv.yes,
     prompt:
       [parsedArgv.prompt, positionalPrompt, dashPrompt].filter(Boolean).join(" ") || undefined,
     install: parsedArgv.install,

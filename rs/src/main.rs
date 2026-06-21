@@ -9,6 +9,7 @@ mod installer;
 mod log_files;
 mod logger;
 mod messaging;
+mod non_tty_renderer;
 mod pid_store;
 mod pty_spawner;
 mod ready_manager;
@@ -159,13 +160,19 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
         }
     }
 
-    // Add --dangerously-skip-permissions if -y was passed
-    if args.skip_permissions {
-        cmd_args.push("--dangerously-skip-permissions".to_string());
-    }
-
     // Add default args
     cmd_args.extend(cli_config.default_args.iter().cloned());
+
+    // Add the per-CLI "yolo" args if -y was passed. Each CLI declares its own
+    // (claude: --dangerously-skip-permissions; codex:
+    // --dangerously-bypass-approvals-and-sandbox). Codex rejects the claude flag
+    // outright, and its bwrap sandbox fails to init inside an already-sandboxed
+    // container ("bwrap: Failed to make / slave: Permission denied"), so its
+    // bypass flag is the correct escape hatch for those environments.
+    // Appended after default_args (matching the TS fallback in ts/index.ts).
+    if args.skip_permissions {
+        cmd_args.extend(cli_config.yes_args.iter().cloned());
+    }
 
     // Codex session resume: look up stored session ID for this cwd
     if args.continue_session && args.cli == "codex" {
@@ -190,6 +197,16 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     };
 
     let pid = std::process::id();
+
+    // Decide TTY vs plain rendering once. When stdout is piped/redirected (or
+    // --no-tty / NO_COLOR / CI), emit plain rendered text instead of the raw
+    // TUI byte stream. See docs/non-tty-output.md.
+    let stdout_is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
+    let render_plain =
+        crate::non_tty_renderer::should_render_plain(args.force_tty, args.no_tty, stdout_is_tty);
+    if render_plain {
+        info!("stdout is not a TTY (or --no-tty): emitting plain rendered text on exit");
+    }
 
     // Clean up stale PID records on startup
     let pid_store = PidStore::new();
@@ -233,6 +250,7 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             pid,
             term_rows,
             term_cols,
+            render_plain,
         );
 
         // Create per-pid FIFO for `cy send <keyword> <msg>`. Best-effort —

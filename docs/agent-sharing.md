@@ -1,0 +1,232 @@
+# Single-Agent Sharing (design draft)
+
+> Status: **design only — not implemented.** Captures a brainstorm (with codex
+> gpt-5.5) on sharing ONE agent to others — from the web UI and via
+> `ay read`/`ay tail` against a shared URL. Open decisions are marked **DEFERRED**.
+
+## Goal
+
+1. Share a **single agent** (not the whole fleet) to someone else, from the web
+   console.
+2. Let other people `ay read` / `ay tail` against a **shared URL** (CLI access to
+   someone else's shared agent), with **view-only vs steer** permission.
+
+## Current state
+
+- **Fleet-wide share** (`ay serve --share`): mints a room + 64-char token →
+  `agent-yes.com/w/#room:token`. Whoever holds the link sees the **whole fleet**
+  in the web console, end-to-end-encrypted (AES-GCM browser↔host over a WebRTC
+  DataChannel; the secret never reaches the signaling Cloudflare Worker). **One
+  token = read + steer for ALL agents** on that machine.
+- **CLI remote read** (`ay read`/`ay tail`): HTTP `/api/read|tail/:keyword` gated
+  by the whole-machine `.serve-token`, reached via `token@host:port:keyword`.
+  Needs **direct HTTP reachability** (LAN / public port) — no NAT traversal.
+- **Scoping today**: only a client-side `cwd` filter. The token is
+  **all-or-nothing per machine**. There is no "share a single agent" capability.
+
+## Principles (agreed)
+
+1. **Host-enforced capability, not client-side hiding.** A scoped share must be
+   enforced by the host on every `/api` call (reject other agents). A client-side
+   filter is UX, not a security boundary.
+2. **Never put the fleet master room token in a scoped link** — it is effectively
+   the master key. A scoped share carries its own `grantSecret`.
+3. **A scoped viewer must not receive the master room AES key.** Per-grant crypto
+   (or room isolation, see Option X) keeps a scoped viewer off the fleet channel.
+4. **Default to view-only.** Steer is a separate, explicit upgrade.
+
+## Scope key: `agent_id` (per-process — by design)
+
+`pid` is too ephemeral to _reference_ (it's reused), and `cwd` is unsafe as the
+**security** scope (two concurrent agents can share a directory, so a cwd grant
+would expose the wrong one). So the grant scopes to an opaque, host-enforced
+**`agent_id`**.
+
+**Human label = git repo + host + cwd.** What a person actually recognizes — "the
+agent in repo X on host Y at dir Z" — is the repo/host/cwd tuple, so that is what
+the UI / CLI shows to pick and label a share. It is deliberately a **fuzzy
+label, not an identity**: a single CLI session can `cd` between directories (even
+repos) while it runs, so cwd is not a fixed binding and isn't worth tracking
+precisely. The opaque `agent_id` is the only thing the grant binds to; the
+`repo/host/cwd` label is purely for humans to read.
+
+**Cross-restart persistence is explicitly a NON-GOAL.** A restart mints a fresh
+`agent_id`, and that is fine: the durable thing is the **`cwd`** — the CLIs
+(Claude Code, codex, …) resume their own conversation by working directory, not
+by anything agent-yes tracks. agent-yes does not own session continuity, so it
+shouldn't pretend a restarted process is "the same agent." If a shared agent
+restarts, the old grant simply points at a now-dead `agent_id` → **re-share**.
+(If seamless survival is ever wanted, anchor that _one_ grant to `cwd` for
+resume — but it is not the default and not a prerequisite.)
+
+**Status: landed (step 0).** Both runtimes mint a 12-hex `agent_id` at
+registration and persist it in `~/.agent-yes/pids.jsonl` (Rust `pid_store.rs`, TS
+`pidStore.ts` → `globalPidIndex.ts`); it surfaces in `ay ls --json` / `ay status`
+and is resolvable as a keyword by full id or prefix (`ay tail <id>`). That is the
+whole foundation — there is no cross-restart follow-up to build.
+
+## Architecture: two options
+
+### Option X — one share = one mini-room (recommended MVP)
+
+`ay share <agent> [--steer]` stands up a room that exposes **only that agent**.
+The host joins the room and filters every `/api` call to the shared `agentId`.
+
+- **Isolation** = the existing e2ee room boundary, reused as-is.
+- **No new crypto** — each room already has its own key/token.
+- **Revoke** = close the room.
+- **List** = the set of active share-rooms.
+- **Permission** = mint the room as view-only or steer.
+- **Cost** = more rooms ⇒ more signaling Durable Object usage (heartbeats /
+  alarms / ICE bill as DO requests — see `docs/` DO cost notes). Fine for a few
+  shares.
+
+### Option Y — shared room + per-peer ACL + grants table (scale-up)
+
+One room; the host authenticates each peer's `grantSecret`, attaches a
+`{ perm, agentId }` capability to that peer, and enforces it per request. Needs a
+persisted grants table (`grantId → { agentId, perm, exp, revoked, label }`) and a
+**per-grant key** in the handshake so a scoped viewer never gets the master room
+key.
+
+- More efficient at many shares (one room), with first-class manage/revoke/audit.
+- More implementation: multi-capability handshake + per-peer ACL.
+
+**Recommendation:** ship **Option X** first (massive reuse, room isolation = the
+security boundary), and escalate to **Option Y** when shares grow enough that
+per-room overhead and fine-grained management matter.
+
+> **Why not stateless signed tokens?** A signed `{agentId,perm,exp}` token needs
+> no table, but revocation, audit, a "what have I shared?" list, and permission
+> changes are all weak. A local single-user host will always want "revoke that
+> link I sent." Prefer **persisted random grants**.
+
+## Link format
+
+`agent-yes.com/w/#room:grantSecret` — the `pid` is **not** in the URL (not even
+the fragment); the scope lives in the grant. The **same URL works for both** the
+browser and the CLI; the web UI shows the agent's name/cwd resolved from the
+grant.
+
+## CLI access for outsiders (`ay read` / `ay tail <share-url>`)
+
+Make the CLI a **headless console client**: `ay tail <share-url>` reuses the
+host's `node-datachannel` WebRTC stack **in reverse** — join the room as a viewer
+peer, derive the channel key from the grant, open the DataChannel, and speak the
+**same `/api/*` request envelope the browser already uses** over it
+(`/api/tail/:agent?raw=1`, etc.). This preserves e2ee and NAT traversal and
+avoids a public HTTP port. Reusing the existing `/api` protocol over the channel
+avoids a second implementation.
+
+Keep the **HTTP scoped-token path as a LAN / direct fast path** — not the public
+route. (Scoped tokens over HTTP alone leave a half-measure: handy on a LAN, but
+"use the web UI" the moment you're behind NAT.)
+
+**Traps:** `node-datachannel` is a heavy native dep under Bun; the CLI must join
+signaling as a non-host peer; tail streaming needs backpressure / reconnect / ICE
+handling; the secret fragment reaches the CLI and can linger in shell history /
+process list / logs.
+
+## Permission model
+
+Validated with codex. The scoped capability is a small **ordered ladder**, not
+independent bits:
+
+| level   | token | grants (all scoped to THIS agent)                                    |
+| ------- | ----- | -------------------------------------------------------------------- |
+| observe | `r`   | read live terminal + scrollback; read the result-envelope / state    |
+| steer   | `rw`  | + send keystrokes/input, interrupt/cancel, resize PTY, attach/detach |
+| control | `rwc` | + stop / restart this agent                                          |
+
+Rules:
+
+- **Least-privilege default = `r`.** Higher levels require explicit opt-in.
+- **Implications enforced:** `w ⇒ r`, `c ⇒ w` — no nonsense combos. There is no
+  real use for `w` without `r` when send = keystroke injection (blind steer kills
+  accountability and recovery); if a "submit-only" mode is ever wanted, build a
+  separate constrained action API, not raw PTY input.
+- **`resize` sits under `w`** (it changes the TUI).
+
+**Prefix = label, grant = truth.** The level may be encoded as a human-readable
+**prefix** in the token purely as a self-describing UX hint (CLI/UI shows the
+level and refuses unsupported ops client-side). It is **never** the enforcement
+source: the host resolves the real persisted grant
+(`grantSecret → {agentId, perm, exp, revoked}`) and **rejects any overclaim**. A
+signed `grantId.perm.exp.sig` token is tamper-evident but still needs host state
+for revoke / downgrade / audit / binding — it adds complexity without replacing
+the table. Ship an **opaque random secret + optional UX prefix**.
+
+**Explicitly EXCLUDED** from a per-agent share (a separate, explicit
+machine-admin capability — or never):
+
+- spawn a new agent; open a new shell / PTY outside the agent
+- file upload/download; clipboard; browser / session / cookie access
+- reading env / secrets directly; changing the agent's config / model / tools;
+  installing plugins / connectors
+- port forwarding / network exposure; machine-level process control
+
+### The real boundary
+
+`r/w/c` are **not** the true security boundary — the **agent's own sandbox and
+tool authority** is. Because terminal output leaks secrets, **`r` alone is
+already sensitive** (tokens, command output, private repo data, chat messages).
+And because `send` injects keystrokes, **`rw` is effectively scoped RCE** — it can
+usually drive the agent to run arbitrary commands within whatever authority the
+agent already holds. So a share token must **never grant more power than the agent
+already has**, and the UI must frame `rw` as "can operate this agent," not "can
+only chat."
+
+## Security must-haves
+
+Terminal output routinely contains API keys, env, file paths, prompts, git diffs,
+private URLs — so the biggest risk of opening `read`/`tail` to strangers is
+**secret leakage**. Minimum bar:
+
+- **view-only by default**; steer is a separate link / explicit upgrade.
+- **short expiration**.
+- a **visible active-shares list** + **one-click revoke**.
+- **per-grant audit**: connected peer count, last read/tail/send.
+- treat `send` (steer) as **command-injection-equivalent**.
+- a redact option is desirable but must not be over-trusted.
+
+## Staging
+
+0. **`agent_id` foundation** — ✅ done (per-process; see Scope key).
+1. **Design doc** (this file).
+2. **Web-UI single-agent view-only share (Option X):** `ay share <agent>` → a
+   "Share" action on each agent row → a shares-management panel with revoke.
+3. **`ay read`/`ay tail <share-url>` (CLI over WebRTC):** the larger lift.
+
+## Decisions
+
+- **Agreed:** host-enforced scoped capability; stable `agentId` as the scope key
+  (not pid/cwd); separate `grantSecret` (never the master room token); scoped
+  viewers kept off the master key; `#room:grantSecret` link shared by browser +
+  CLI; view-only default with steer as an explicit upgrade; CLI-over-WebRTC as the
+  long-term outsider path with HTTP scoped tokens as a LAN fast path.
+- **Permission model (agreed):** ordered ladder `r` (observe) < `rw` (steer) <
+  `rwc` (control), default `r`, implications `w⇒r` and `c⇒w` enforced; `resize`
+  under `w`; token prefix is a UX label only, the host grant is authoritative and
+  rejects overclaims; spawn / new shell / files / env / config are excluded from a
+  per-agent share; treat `rw` as scoped RCE, never "chat-only".
+- **`agent_id` is per-process — cross-restart persistence is a NON-GOAL
+  (decided):** the CLI's session continuity lives in the `cwd`, not in agent-yes;
+  a restart mints a fresh id and the holder re-shares. No cross-restart re-binding
+  to build.
+- **DEFERRED:** Option X (per-agent room) vs Option Y (grants table) at
+  implementation time — start X, escalate to Y on demand; expiry defaults;
+  whether the CLI client and browser share one room-client module.
+
+## Related code
+
+- `ts/share.ts` — host-side WebRTC share (`ay serve --share`); the stack to drive
+  in reverse for a CLI client.
+- `ts/serve.ts` — `/api/*` handlers (`read`/`tail`/`send`/`spawn`) to scope per
+  grant; `.serve-token` auth.
+- `ts/remotes.ts` — `token@host:port:keyword` remote spec / `runRemoteRead` (the
+  CLI remote path to extend toward share URLs).
+- `ts/subcommands.ts` — `cmdRead` / the `ay read|tail` client.
+- `ts/globalPidIndex.ts` / `rs/src/pid_store.rs` — the cross-runtime registry that
+  must mint and persist `agentId`.
+- `lab/ui/index.html` — the console; where the per-agent "Share" action and the
+  shares-management panel live.

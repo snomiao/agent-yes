@@ -1,12 +1,16 @@
 name: UI Test
 
 # The console's pure logic (lab/ui/console-logic.js) is unit-tested in the main
-# Matrix Test suite. THIS workflow runs the heavier xterm.js render test
-# (tests/ui-test) — Playwright screenshots judged by Gemini Vision. It is:
-#   - scoped to lab/ui changes (and manual dispatch) so it doesn't run on every push,
-#   - non-blocking (continue-on-error) because the Gemini judge is non-deterministic
-#     and needs the GEMINI_API_KEY secret (without it the test self-skips).
-# Screenshots are uploaded as artifacts for human inspection regardless.
+# Matrix Test suite. THIS workflow covers the rendered console, triggered by
+# changes to the UI or EITHER UI test suite (lab/ui, tests/ui-dom, tests/ui-test):
+#   - ui-dom: a deterministic, hermetic Playwright DOM test of the real console
+#     (blocking — the deploy job gates on it). tests/ui-dom/** must be in the
+#     trigger paths, else a change to the test or its stub server can silently
+#     rot without ever running (this is exactly how the /e2e.js stub gap slipped in).
+#   - ui-render: the heavier xterm.js render test — Playwright screenshots judged
+#     by Gemini Vision — non-blocking (continue-on-error), since the judge is
+#     non-deterministic and needs GEMINI_API_KEY (without it the test self-skips).
+#     Screenshots are uploaded as artifacts for human inspection regardless.
 
 on:
   workflow_dispatch:
@@ -14,12 +18,14 @@ on:
     branches: [main]
     paths:
       - "lab/ui/**"
+      - "tests/ui-dom/**"
       - "tests/ui-test/**"
       - ".github/workflows/ui-test.yml"
   pull_request:
     branches: [main]
     paths:
       - "lab/ui/**"
+      - "tests/ui-dom/**"
       - "tests/ui-test/**"
 
 jobs:

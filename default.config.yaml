@@ -2,6 +2,9 @@ clis:
   claude:
     promptArg: last-arg
     systemPrompt: --append-system-prompt
+    # yesArgs: appended when `-y` / --yes is passed. The per-CLI "yolo" flag.
+    yesArgs:
+      - --dangerously-skip-permissions
     install:
       powershell: 'powershell -Command "irm https://claude.ai/install.ps1 | iex"'
       bash: "curl -fsSL https://claude.ai/install.sh | bash"
@@ -96,6 +99,18 @@ clis:
 
   codex:
     promptArg: first-arg
+    # yesArgs: `-y` / --yes maps to codex's own "yolo" flag. Codex rejects
+    # claude's --dangerously-skip-permissions outright, and its bwrap sandbox
+    # cannot initialize inside an already-sandboxed/containerized environment
+    # ("bwrap: Failed to make / slave: Permission denied"), blocking command
+    # exec AND apply_patch before they run. --dangerously-bypass-approvals-and
+    # -sandbox skips both the approval prompts and the sandbox wrapper, which is
+    # exactly codex's documented mode for "environments that are externally
+    # sandboxed" (the agent-yes-in-a-container case). Invoke as `ay -y codex
+    # "<task>"` — agent-yes's own `-y` must precede the cli name (everything
+    # after it is forwarded verbatim to codex via trailing_var_arg).
+    yesArgs:
+      - --dangerously-bypass-approvals-and-sandbox
     install:
       npm: "npm install -g @openai/codex@latest"
     updateAvailable:

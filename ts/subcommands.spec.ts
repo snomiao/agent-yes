@@ -65,6 +65,42 @@ describe("subcommands.isSubcommand", () => {
     expect(isSubcommand("not-a-command")).toBe(false);
     expect(isSubcommand(undefined)).toBe(false);
   });
+
+  it("gates manager-only `setup` on the generic manager, not cli-bound aliases", async () => {
+    const { isSubcommand } = await loadModule();
+    // `ay setup` (managerCommands defaults to true) → a subcommand.
+    expect(isSubcommand("setup")).toBe(true);
+    expect(isSubcommand("setup", true)).toBe(true);
+    // `cy setup` (cli-bound alias) → NOT a subcommand, so it falls through to
+    // running claude with that text.
+    expect(isSubcommand("setup", false)).toBe(false);
+    // Inspection subcommands stay universal — `cy ls` / `cy send` still work.
+    expect(isSubcommand("ls", false)).toBe(true);
+    expect(isSubcommand("send", false)).toBe(true);
+  });
+});
+
+describe("subcommands.cmdHelp", () => {
+  it("hides the manager-only `setup` line for cli-bound aliases", async () => {
+    const { cmdHelp } = await loadModule();
+    const capture = (managerCommands?: boolean) => {
+      let out = "";
+      const spy = vi.spyOn(process.stdout, "write").mockImplementation((s: unknown) => {
+        out += String(s);
+        return true;
+      });
+      try {
+        cmdHelp(managerCommands);
+      } finally {
+        spy.mockRestore();
+      }
+      return out;
+    };
+    expect(capture(true)).toContain("ay setup"); // manager
+    expect(capture()).toContain("ay setup"); // default = manager
+    expect(capture(false)).not.toContain("ay setup"); // cli-bound alias (cy)
+    expect(capture(false)).toContain("ay ls"); // universal commands still shown
+  });
 });
 
 describe("subcommands.stopTipForCli", () => {
@@ -111,6 +147,23 @@ describe("subcommands.matchKeyword", () => {
     expect(matchKeyword(baseRecord, "9999")).toBe(false);
   });
 
+  it("treats a numeric keyword as an identity selector (pid or agent_id prefix, no cwd/prompt match)", async () => {
+    const { matchKeyword } = await loadModule();
+    // pid mentioned inside another agent's prompt/cwd must NOT match by number.
+    const r = {
+      ...baseRecord,
+      pid: 5678,
+      prompt: "investigating crash in pid 1234",
+      cwd: "/v1/code/proj-1234",
+    };
+    expect(matchKeyword(r, "1234")).toBe(false); // not this agent's pid, despite cwd/prompt mentions
+    expect(matchKeyword(r, "5678")).toBe(true); // its actual pid
+    // an all-digit agent_id prefix still resolves (ids are random hex).
+    const idr = { ...baseRecord, pid: 5678, agent_id: "206812abcdef" };
+    expect(matchKeyword(idr, "206812")).toBe(true); // agent_id prefix
+    expect(matchKeyword(idr, "5678")).toBe(true); // pid still wins too
+  });
+
   it("matches by cwd substring (case-insensitive)", async () => {
     const { matchKeyword } = await loadModule();
     expect(matchKeyword(baseRecord, "agent-yes")).toBe(true);
@@ -139,6 +192,95 @@ describe("subcommands.matchKeyword", () => {
     const { matchKeyword } = await loadModule();
     const r = { ...baseRecord, prompt: null };
     expect(matchKeyword(r, "parser")).toBe(false);
+  });
+
+  it("matches by agent_id prefix", async () => {
+    const { matchKeyword } = await loadModule();
+    const r = { ...baseRecord, agent_id: "a1b2c3d4e5f6" };
+    expect(matchKeyword(r, "a1b2c3d4e5f6")).toBe(true); // full id
+    expect(matchKeyword(r, "a1b2c3")).toBe(true); // prefix
+    expect(matchKeyword(r, "A1B2C3")).toBe(true); // case-insensitive
+    expect(matchKeyword(r, "b2c3")).toBe(false); // not a prefix (mid-string)
+    expect(matchKeyword({ ...baseRecord, agent_id: null }, "a1b2")).toBe(false);
+  });
+});
+
+describe("subcommands.resolveOne exact-identity precedence", () => {
+  const opts = { all: false, active: false, json: true, latest: true, cwdScope: null };
+
+  // Regression for the `/w/#room:206812` deep link rendering a sibling's terminal:
+  // sharing the URL pastes the pid into other agents' prompts, so a bare pid
+  // lookup fuzzily matched them too and the newest-first tiebreak won. Exact pid
+  // must beat prompt-substring collisions.
+  it("returns the agent whose pid IS the keyword over newer prompt-substring matches", async () => {
+    const { resolveOne } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const now = Date.now();
+    const base = {
+      cwd: process.cwd(),
+      log_file: null,
+      status: "active" as const,
+      exit_code: null,
+      exit_reason: null,
+    };
+    // The real target — oldest.
+    await appendGlobalPid({
+      ...base,
+      pid: 206812,
+      cli: "codex",
+      prompt: "do the thing",
+      started_at: now - 60_000,
+    });
+    // Two newer claudes whose prompt embeds the share URL containing "206812".
+    await appendGlobalPid({
+      ...base,
+      pid: 265959,
+      cli: "claude",
+      prompt: "https://agent-yes.com/w/#r2d058f:206812 is codex agent but renders claude",
+      started_at: now - 2_000,
+    });
+    await appendGlobalPid({
+      ...base,
+      pid: 239973,
+      cli: "claude",
+      prompt: "look at https://agent-yes.com/w/#r2d058f:206812",
+      started_at: now - 6_000,
+    });
+
+    const record = await resolveOne("206812", opts);
+    expect(record.pid).toBe(206812);
+    expect(record.cli).toBe("codex");
+  });
+
+  it("returns the agent whose agent_id IS the keyword over prompt-substring matches", async () => {
+    const { resolveOne } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const now = Date.now();
+    const base = {
+      cwd: process.cwd(),
+      log_file: null,
+      status: "active" as const,
+      exit_code: null,
+      exit_reason: null,
+    };
+    await appendGlobalPid({
+      ...base,
+      pid: 111,
+      cli: "codex",
+      prompt: "target",
+      agent_id: "a1b2c3d4e5f6",
+      started_at: now - 60_000,
+    });
+    await appendGlobalPid({
+      ...base,
+      pid: 222,
+      cli: "claude",
+      prompt: "mentions a1b2c3d4e5f6 in passing",
+      started_at: now - 1_000,
+    });
+
+    const record = await resolveOne("a1b2c3d4e5f6", opts);
+    expect(record.pid).toBe(111);
   });
 });
 
@@ -1251,5 +1393,76 @@ describe("subcommands.listRecords merges per-cwd TS file with global", () => {
     } finally {
       await rm(cwd, { recursive: true, force: true }).catch(() => null);
     }
+  });
+});
+
+describe("subcommands.resolveReadWindow", () => {
+  const total = 100;
+
+  it("defaults: tail = last 96, head = first 96, cat = all", async () => {
+    const { resolveReadWindow } = await loadModule();
+    expect(resolveReadWindow({ total: 200, mode: "tail" })).toEqual({ start: 104, end: 200 });
+    expect(resolveReadWindow({ total: 200, mode: "head" })).toEqual({ start: 0, end: 96 });
+    expect(resolveReadWindow({ total: 200, mode: "cat" })).toEqual({ start: 0, end: 200 });
+  });
+
+  it("respects -n for tail/head; cat ignores -n (stays whole)", async () => {
+    const { resolveReadWindow } = await loadModule();
+    expect(resolveReadWindow({ total, mode: "tail", n: 10 })).toEqual({ start: 90, end: 100 });
+    expect(resolveReadWindow({ total, mode: "head", n: 10 })).toEqual({ start: 0, end: 10 });
+    expect(resolveReadWindow({ total, mode: "cat", n: 10 })).toEqual({ start: 0, end: 100 });
+  });
+
+  it("--last / --head override the mode", async () => {
+    const { resolveReadWindow } = await loadModule();
+    expect(resolveReadWindow({ total, mode: "cat", last: 5 })).toEqual({ start: 95, end: 100 });
+    expect(resolveReadWindow({ total, mode: "tail", head: 5 })).toEqual({ start: 0, end: 5 });
+  });
+
+  it("--range A:B is 1-indexed inclusive and order-insensitive", async () => {
+    const { resolveReadWindow } = await loadModule();
+    expect(resolveReadWindow({ total, mode: "cat", range: "10:20" })).toEqual({
+      start: 9,
+      end: 20,
+    });
+    expect(resolveReadWindow({ total, mode: "cat", range: "20:10" })).toEqual({
+      start: 9,
+      end: 20,
+    });
+  });
+
+  it("--before-line L shows the page of `limit` lines ending just above L", async () => {
+    const { resolveReadWindow } = await loadModule();
+    // page-up cursor: lines strictly before line 51, limit 10 -> [41..50] (0-idx 40..50)
+    expect(resolveReadWindow({ total, mode: "cat", beforeLine: 51, limit: 10 })).toEqual({
+      start: 40,
+      end: 50,
+    });
+    // round-trip: first-visible of the above is line 41; paging up again from 41
+    expect(resolveReadWindow({ total, mode: "cat", beforeLine: 41, limit: 10 })).toEqual({
+      start: 30,
+      end: 40,
+    });
+  });
+
+  it("clamps out-of-range indices", async () => {
+    const { resolveReadWindow } = await loadModule();
+    expect(resolveReadWindow({ total: 5, mode: "tail", n: 999 })).toEqual({ start: 0, end: 5 });
+    expect(resolveReadWindow({ total: 5, mode: "cat", range: "3:999" })).toEqual({
+      start: 2,
+      end: 5,
+    });
+    expect(resolveReadWindow({ total: 5, mode: "cat", beforeLine: 2, limit: 999 })).toEqual({
+      start: 0,
+      end: 1,
+    });
+  });
+
+  it("ignores a malformed --range and falls through to the mode default", async () => {
+    const { resolveReadWindow } = await loadModule();
+    expect(resolveReadWindow({ total, mode: "head", range: "not-a-range" })).toEqual({
+      start: 0,
+      end: 96,
+    });
   });
 });

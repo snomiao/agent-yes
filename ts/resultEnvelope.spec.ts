@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildStoredResult, normalizeEnvelope, resultPath, resultsDir } from "./resultEnvelope.ts";
 
@@ -38,6 +39,8 @@ describe("buildStoredResult", () => {
 
 describe("resultPath", () => {
   it("derives a per-pid path under the results dir", () => {
-    expect(resultPath(777)).toBe(`${resultsDir()}/777.json`);
+    // Use path.join (not a hardcoded "/") so the expectation matches the
+    // platform separator — resultPath itself joins, so on Windows it's "\".
+    expect(resultPath(777)).toBe(path.join(resultsDir(), "777.json"));
   });
 });

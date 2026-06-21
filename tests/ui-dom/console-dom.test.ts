@@ -29,8 +29,9 @@ async function openConsole(
   browser: Browser,
   url: string,
   viewport: { width: number; height: number } = { width: 1280, height: 800 },
+  extra: Record<string, unknown> = {},
 ): Promise<{ ctx: BrowserContext; page: Page }> {
-  const ctx = await browser.newContext({ viewport });
+  const ctx = await browser.newContext({ viewport, ...extra });
   await ctx.route(/cdn\.jsdelivr\.net/, (route) => {
     const body = route.request().url().includes("addon-fit") ? FITADDON_STUB : TERMINAL_STUB;
     route.fulfill({ status: 200, contentType: "application/javascript", body });
@@ -231,6 +232,117 @@ describe("console DOM behaviour", () => {
     }
   });
 
+  it("key bar + composer apply sticky Ctrl/Alt and never leak the modifier", async () => {
+    const { ctx, page } = await openConsole(
+      browser,
+      url,
+      { width: 390, height: 844 },
+      { hasTouch: true, isMobile: true },
+    );
+    const sends: any[] = [];
+    page.on("request", (r) => {
+      if (r.method() === "POST" && r.url().includes("/api/send")) {
+        try {
+          sends.push(r.postDataJSON());
+        } catch {}
+      }
+    });
+    const lastMsg = () => sends.at(-1)?.msg;
+    const ctrlOn = () =>
+      page
+        .locator('.keybar [data-mod="ctrl"]')
+        .getAttribute("class")
+        .then((c) => !!c?.includes("on"));
+    try {
+      await page.locator('.list .row[data-key="local#102"]').click();
+      await expect.poll(() => page.locator(".keybar").isVisible()).toBe(true);
+
+      // plain arrow → CSI form (no DECCKM in the stub)
+      await page.locator('.keybar [data-arrow="down"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[B");
+
+      // dedicated ⇧Tab → CBT / back-tab (ESC [ Z)
+      await page.locator('.keybar [data-key="stab"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[Z");
+
+      // Shift modifier + Tab → the same CBT sequence as the dedicated ⇧Tab
+      await page.locator('.keybar [data-mod="shift"]').click();
+      await page.locator('.keybar [data-key="tab"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[Z");
+
+      // Shift + arrow → CSI modifier 2 (e.g. Shift-Left = ESC [ 1 ; 2 D)
+      await page.locator('.keybar [data-mod="shift"]').click();
+      await page.locator('.keybar [data-arrow="left"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[1;2D");
+
+      // a multi-char input (paste/mouse report) disarms a pending modifier so it
+      // can't leak onto a later key: arm ⇧, "paste", then Left → PLAIN Left
+      await page.locator('.keybar [data-mod="shift"]').click();
+      await page.evaluate(() => (window as any).__onData("pasted text"));
+      await page.locator('.keybar [data-arrow="left"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[D");
+
+      // Ctrl + Left → ESC [ 1 ; 5 D, and the armed state clears after one key
+      await page.locator('.keybar [data-mod="ctrl"]').click();
+      await expect.poll(ctrlOn).toBe(true);
+      await page.locator('.keybar [data-arrow="left"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[1;5D");
+      expect(await ctrlOn()).toBe(false);
+
+      // Alt + Right → ESC [ 1 ; 3 C
+      await page.locator('.keybar [data-mod="alt"]').click();
+      await page.locator('.keybar [data-arrow="right"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[1;3C");
+
+      // Alt + Shift + Tab → ESC ESC [ Z (Alt prefix layered on the back-tab)
+      await page.locator('.keybar [data-mod="alt"]').click();
+      await page.locator('.keybar [data-mod="shift"]').click();
+      await page.locator('.keybar [data-key="tab"]').click();
+      await expect.poll(lastMsg).toBe("\x1b\x1b[Z");
+
+      // nav keys: Home/End are DECCKM-aware cursor keys (ESC [ H / F);
+      // PgUp/PgDn/Del are VT220 function keys (CSI N ~)
+      await page.locator('.keybar [data-arrow="home"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[H");
+      await page.locator('.keybar [data-arrow="end"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[F");
+      await page.locator('.keybar [data-tilde="pgup"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[5~");
+      await page.locator('.keybar [data-tilde="pgdn"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[6~");
+      await page.locator('.keybar [data-tilde="del"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[3~");
+      // Home shares the cursor-key path, so it composes with modifiers too:
+      // Ctrl+Home → ESC [ 1 ; 5 H
+      await page.locator('.keybar [data-mod="ctrl"]').click();
+      await page.locator('.keybar [data-arrow="home"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[1;5H");
+      // VT220 keys take CSI modifiers too: Ctrl+Del → ESC [ 3 ; 5 ~ (word-delete)
+      await page.locator('.keybar [data-mod="ctrl"]').click();
+      await page.locator('.keybar [data-tilde="del"]').click();
+      await expect.poll(lastMsg).toBe("\x1b[3;5~");
+
+      // sticky Ctrl then a soft-keyboard char → control code via the xterm path
+      await page.locator('.keybar [data-mod="ctrl"]').click();
+      await page.evaluate(() => (window as any).__onData("r"));
+      await expect.poll(lastMsg).toBe("\x12");
+
+      // composer: a single-char line carries an armed Ctrl (Ctrl-D + Enter)…
+      await page.locator('.keybar [data-mod="ctrl"]').click();
+      await page.fill("#cmpin", "d");
+      await page.locator("#cmpin").press("Enter");
+      await expect.poll(lastMsg).toBe("\x04\r");
+      // …and a multi-char line can't carry it, but must still clear it (no leak)
+      await page.locator('.keybar [data-mod="ctrl"]').click();
+      await page.fill("#cmpin", "ls");
+      await page.locator("#cmpin").press("Enter");
+      await expect.poll(lastMsg).toBe("ls\r");
+      expect(await ctrlOn()).toBe(false);
+    } finally {
+      await ctx.close();
+    }
+  });
+
   it("the middle splitter is draggable and persists the width", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
@@ -268,12 +380,41 @@ describe("console DOM behaviour", () => {
     }
   });
 
-  it("has no stdin composer (xterm is the input)", async () => {
+  it("desktop has no stdin composer (xterm is the input); touch aids stay hidden", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
+      // the old always-on stdin composer is gone — on desktop you type into xterm
       expect(await page.locator("#msg").count()).toBe(0);
-      expect(await page.locator(".composer").count()).toBe(0);
       expect(await page.locator("#send").count()).toBe(0);
+      // the mobile line composer + key bar exist in the DOM but are
+      // pointer:coarse-only, so they must stay hidden in this fine-pointer viewport
+      expect(await page.locator(".composer").count()).toBe(1);
+      expect(await page.locator(".composer").isVisible()).toBe(false);
+      expect(await page.locator(".keybar").count()).toBe(1);
+      expect(await page.locator(".keybar").isVisible()).toBe(false);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("shows the touch aids (key bar + composer) on a coarse-pointer device", async () => {
+    // emulate a phone: touch + small viewport ⇒ pointer:coarse ⇒ aids visible
+    const { ctx, page } = await openConsole(
+      browser,
+      url,
+      { width: 390, height: 844 },
+      { hasTouch: true, isMobile: true },
+    );
+    try {
+      // open an agent so the detail (terminal) pane becomes the active column
+      await page.locator(".list .row").first().click();
+      await expect.poll(() => page.locator(".keybar").isVisible()).toBe(true);
+      expect(await page.locator(".composer").isVisible()).toBe(true);
+      // the key bar carries the Esc/Ctrl/arrow controls
+      expect(await page.locator('.keybar [data-key="esc"]').count()).toBe(1);
+      expect(await page.locator('.keybar [data-mod="ctrl"]').count()).toBe(1);
+      expect(await page.locator('.keybar [data-mod="shift"]').count()).toBe(1);
+      expect(await page.locator('.keybar [data-arrow="up"]').count()).toBe(1);
     } finally {
       await ctx.close();
     }

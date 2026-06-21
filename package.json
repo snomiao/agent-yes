@@ -1,6 +1,6 @@
 {
   "name": "agent-yes",
-  "version": "1.122.3",
+  "version": "1.132.4",
   "description": "A wrapper tool that automates interactions with various AI CLI tools by automatically handling common prompts and responses.",
   "keywords": [
     "ai",
@@ -81,7 +81,7 @@
     "build": "tsdown",
     "check:e2e": "bun scripts/check-e2e.ts",
     "cf": "bun scripts/cf.ts",
-    "build:rs": "cargo install --path rs --features swarm",
+    "build:rs": "bun ./scripts/build-rs.ts",
     "postbuild": "bun ./ts/postbuild.ts",
     "demo": "bun run build && bun link && claude-yes -- demo",
     "dev": "bun ts/index.ts",

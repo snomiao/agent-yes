@@ -47,3 +47,10 @@ tests/ui-test/screenshots/
 
 # generated: deploy copies lab/ui/index.html here
 lab/ui/cf/public/
+
+# Claude Code local state (per-machine; not shared project config)
+.claude/settings.local.json
+.claude/*.lock
+
+# agent-yes e2e scratch dir (ts/tests/shared-e2e.spec.ts)
+tmp-test-shared-e2e/

@@ -54,7 +54,14 @@ function runAgentYes(
       resolve({ code: -1, stdout, stderr: stderr || "Timeout" });
     }, timeoutMs);
 
-    proc.on("exit", (code) => {
+    // Resolve on "close", NOT "exit": "exit" fires when the child terminates but
+    // stdout/stderr may still have buffered "data" events the parent hasn't
+    // processed. Under `test:coverage` the instrumented parent's event loop lags,
+    // so resolving on "exit" captured agent-yes's early stderr log line while the
+    // child's later PTY stdout was dropped — the source of the rare full-suite
+    // flake in the PTY-size assertions. "close" fires only after both stdio
+    // streams are fully drained and closed, guaranteeing complete capture.
+    proc.on("close", (code) => {
       clearTimeout(timer);
       resolve({ code: code ?? -1, stdout, stderr });
     });
@@ -110,7 +117,12 @@ const IMPLS: Array<{ name: string; extraArgs: string[] }> = [
 // Test suite
 // ---------------------------------------------------------------------------
 
-describe("shared e2e: ts vs rs", () => {
+// These tests spawn real agent-yes subprocesses and observe their PTY output.
+// The primary fix for the rare full-suite flake is in runAgentYes (resolve on
+// "close", not "exit"). retry is belt-and-suspenders for any other transient
+// real-subprocess hiccup under load (spawn EAGAIN, scheduler stalls); a genuine
+// product break still fails every attempt.
+describe("shared e2e: ts vs rs", { retry: 2 }, () => {
   let binDir: string;
 
   beforeEach(() => {

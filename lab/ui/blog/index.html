@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>agent-yes — blog &amp; design notes</title>
+    <meta
+      name="description"
+      content="Design notes and write-ups for agent-yes: the architecture graph, end-to-end-encrypted share links, and more."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%E2%9C%93%3C/text%3E%3C/svg%3E"
+    />
+    <style>
+      :root {
+        --bg: #0d1117;
+        --fg: #e6edf3;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --green: #3fb950;
+        --card: #161b22;
+        --border: #30363d;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #ffffff;
+          --fg: #1f2328;
+          --muted: #59636e;
+          --accent: #0969da;
+          --green: #1a7f37;
+          --card: #f6f8fa;
+          --border: #d0d7de;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          16px/1.65 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          Helvetica,
+          Arial,
+          sans-serif;
+        margin: 0;
+        padding: 0 20px;
+      }
+      main {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 40px 0 96px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 4px 0 28px;
+      }
+      .brand {
+        font-weight: 700;
+        font-size: 18px;
+        letter-spacing: -0.01em;
+      }
+      .brand .tick {
+        color: var(--green);
+      }
+      nav a {
+        color: var(--muted);
+        margin-left: 18px;
+        font-size: 14px;
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      h1 {
+        font-size: 2em;
+        line-height: 1.2;
+        margin: 12px 0 6px;
+      }
+      .sub {
+        color: var(--muted);
+        margin: 0 0 28px;
+      }
+      .post {
+        display: block;
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 18px 20px;
+        margin: 14px 0;
+        color: inherit;
+      }
+      .post:hover {
+        text-decoration: none;
+        border-color: var(--accent);
+      }
+      .post .tag {
+        display: inline-block;
+        font-size: 0.72em;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--accent);
+        background: color-mix(in srgb, var(--accent) 14%, transparent);
+        border-radius: 999px;
+        padding: 2px 9px;
+        margin-bottom: 9px;
+      }
+      .post h2 {
+        font-size: 1.18em;
+        margin: 0 0 6px;
+      }
+      .post p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 0.95em;
+      }
+      footer {
+        color: var(--muted);
+        font-size: 0.9em;
+        margin-top: 40px;
+        border-top: 1px solid var(--border);
+        padding-top: 20px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div class="brand"><span class="tick">✓</span> agent-yes</div>
+        <nav>
+          <a href="/">Home</a>
+          <a href="/w/">Console</a>
+          <a href="/architecture.html">Architecture</a>
+          <a href="https://github.com/snomiao/agent-yes">GitHub</a>
+        </nav>
+      </header>
+
+      <h1>Blog &amp; design notes</h1>
+      <p class="sub">How agent-yes is built, and where it's going.</p>
+
+      <a class="post" href="/architecture.html">
+        <span class="tag">Architecture · living map</span>
+        <h2>The agent-yes graph — today &amp; tomorrow</h2>
+        <p>
+          An interactive map of the whole system: one agent → one local fabric → one API handler →
+          many transports → one URL. What's built, what's experimental, and what's next.
+        </p>
+      </a>
+
+      <a class="post" href="/blog/e2ee-share-links/">
+        <span class="tag">Security</span>
+        <h2>End-to-end encryption for agent-yes share links</h2>
+        <p>
+          How share links stay private even if the signaling relay is compromised: an HKDF key
+          split, AES-256-GCM with per-connection keys, and a fail-closed handshake.
+        </p>
+      </a>
+
+      <footer>
+        <a href="/">← agent-yes.com</a> · <a href="/w/">Console</a> ·
+        <a href="https://github.com/snomiao/agent-yes">GitHub</a>
+      </footer>
+    </main>
+  </body>
+</html>

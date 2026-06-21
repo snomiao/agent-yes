@@ -32,6 +32,10 @@ pub struct CliArgs {
     pub skip_permissions: bool,
     /// Working directory to run the agent in. None = use process current_dir.
     pub cwd: Option<String>,
+    /// Force raw TUI passthrough even when stdout is not a TTY.
+    pub force_tty: bool,
+    /// Force plain rendered text output even when stdout is a TTY.
+    pub no_tty: bool,
     /// Swarm mode: None = disabled, Some(value) = enabled with optional config
     /// Value can be: topic name, room code (XXX-XXX), ay:// URL, or multiaddr
     pub swarm: Option<String>,
@@ -109,6 +113,14 @@ struct Args {
     /// Working directory for the agent (default: current directory)
     #[arg(long)]
     cwd: Option<String>,
+
+    /// Force raw TUI passthrough even when stdout is not a TTY (piped/redirected)
+    #[arg(long = "force-tty", default_value = "false")]
+    force_tty: bool,
+
+    /// Force plain rendered text output even when stdout is a TTY
+    #[arg(long = "no-tty", default_value = "false")]
+    no_tty: bool,
 
     /// Enable swarm mode for multi-agent P2P networking
     ///
@@ -216,6 +228,8 @@ fn resolve_args(args: Args, exe_name: &str) -> Result<CliArgs> {
         use_skills: args.use_skills,
         skip_permissions: args.yes,
         cwd: args.cwd,
+        force_tty: args.force_tty,
+        no_tty: args.no_tty,
         swarm,
         experimental_swarm: args.experimental_swarm,
         swarm_listen: args.swarm_listen,
@@ -505,6 +519,8 @@ mod tests {
             use_skills: false,
             yes: false,
             cwd: None,
+            force_tty: false,
+            no_tty: false,
             swarm: None,
             experimental_swarm: false,
             swarm_listen: None,

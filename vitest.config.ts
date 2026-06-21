@@ -71,6 +71,11 @@ export default defineConfig({
         // Scheduling — the cron/quoting helpers are unit-tested (schedule.spec.ts);
         // the oxmgr registration paths are integration-only.
         "ts/schedule.ts",
+        // oxmgr init-system registration — a thin Bun.spawn(`oxmgr service …`)
+        // wrapper that registers launchd/systemd/Task Scheduler. Platform- and
+        // process-bound (same "oxmgr registration is integration-only" rationale
+        // as schedule.ts); mocking the spawn would only test the mock.
+        "ts/oxmgrService.ts",
       ],
       thresholds: {
         lines: 90,

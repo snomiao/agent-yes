@@ -160,6 +160,33 @@ function parseShareUrl(s: string): { room: string; token: string; host: string }
   return { room: m[1]!, token: m[2]!, host: m[3]! };
 }
 
+// The browser console URL for a room — what the operator opens to reach the host.
+// Pure function of (room, secret S, signaling host): S rides in the URL fragment
+// (never sent to any server) and is eaten by the page on open. Single source of
+// truth for the link format, shared by startShare's live announce and by
+// shareLinkFromRoomUrl (so `ay serve install` prints the exact link the daemon serves).
+function formatShareLink(room: string, S: string, host: string): string {
+  // The console web-app is served under /w/ (landing page lives at /). A non-prod
+  // signaling host targets the local dev UI and carries the host in the fragment.
+  const ui = host === "s.agent-yes.com" ? "https://agent-yes.com/w" : "http://localhost:7778/w";
+  const suffix = host === "s.agent-yes.com" ? "" : "@" + host;
+  return `${ui}/#${room}:${MARKER}${S}${suffix}`;
+}
+
+// Derive the shareable console link from a persisted/explicit webrtc://room:token@host
+// URL WITHOUT starting a bridge, so `ay serve install` can print the same link the
+// background daemon will serve. Throws on a legacy (unencrypted) room, mirroring
+// startShare's refusal to host one.
+export function shareLinkFromRoomUrl(url: string): string {
+  const { room, token, host } = parseShareUrl(url);
+  const { s, v2 } = parseSecret(token);
+  if (!v2)
+    throw new Error(
+      "refusing to derive a link for an unencrypted room — delete ~/.agent-yes/.share-room to rotate to an encrypted link",
+    );
+  return formatShareLink(room, s, host);
+}
+
 // node-datachannel ships a native addon. Under Bun the module sometimes resolves
 // from the global cache where the prebuilt .node isn't linked; this best-effort
 // shim symlinks it in before we import. In a normal npm/bunx install the binary
@@ -280,10 +307,7 @@ export async function startShare(
   let S = firstS;
 
   const wsScheme = host.startsWith("localhost") || host.startsWith("127.") ? "ws" : "wss";
-  // The console web-app is served under /w/ (landing page lives at /).
-  const ui = host === "s.agent-yes.com" ? "https://agent-yes.com/w" : "http://localhost:7778/w";
-  const suffix = host === "s.agent-yes.com" ? "" : "@" + host;
-  const mkLink = () => `${ui}/#${room}:${MARKER}${S}${suffix}`;
+  const mkLink = () => formatShareLink(room, S, host);
   let authToken = await deriveAuthToken(S, room, host);
   let link = mkLink();
 

@@ -1,0 +1,1370 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>agent-yes — the graph: today &amp; tomorrow</title>
+    <meta
+      name="description"
+      content="A re-imagined map of agent-yes: one agent, one local fabric, one API handler, many transports, one URL. What is built today, what is cluttered, and where it is going."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%E2%9C%93%3C/text%3E%3C/svg%3E"
+    />
+    <style>
+      :root {
+        --bg: #0d1117;
+        --panel: #161b22;
+        --panel2: #1c232c;
+        --border: #30363d;
+        --fg: #e6edf3;
+        --muted: #9198a1;
+        --accent: #2f81f7;
+        --green: #3fb950;
+        --amber: #d29922;
+        --purple: #bc8cff;
+        --red: #f85149;
+        --code: #1f2530;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #ffffff;
+          --panel: #f6f8fa;
+          --panel2: #eef1f4;
+          --border: #d0d7de;
+          --fg: #1f2328;
+          --muted: #59636e;
+          --accent: #0969da;
+          --green: #1a7f37;
+          --amber: #9a6700;
+          --purple: #8250df;
+          --red: #cf222e;
+          --code: #eff2f5;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+      }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          15px/1.6 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          Helvetica,
+          Arial,
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      code,
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.9em;
+      }
+      .wrap {
+        max-width: 1040px;
+        margin: 0 auto;
+        padding: 0 20px;
+      }
+      header.top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 20px 0;
+        flex-wrap: wrap;
+        gap: 10px;
+      }
+      .brand {
+        font-weight: 700;
+        font-size: 18px;
+        letter-spacing: -0.01em;
+      }
+      .brand .tick {
+        color: var(--green);
+      }
+      nav a {
+        color: var(--muted);
+        margin-left: 18px;
+        font-size: 14px;
+      }
+      .hero {
+        padding: 30px 0 14px;
+      }
+      .kicker {
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        font-size: 12px;
+        color: var(--accent);
+        font-weight: 600;
+        margin: 0 0 12px;
+      }
+      h1 {
+        font-size: clamp(28px, 5vw, 42px);
+        line-height: 1.1;
+        letter-spacing: -0.02em;
+        margin: 0 0 14px;
+      }
+      .sub {
+        font-size: clamp(15px, 2.2vw, 18px);
+        color: var(--muted);
+        max-width: 70ch;
+        margin: 0;
+      }
+      .thesis {
+        margin: 22px 0 6px;
+        padding: 16px 18px;
+        background: linear-gradient(180deg, var(--panel) 0%, var(--bg) 130%);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--accent);
+        border-radius: 10px;
+        font-size: 16px;
+      }
+      .thesis b {
+        color: var(--fg);
+      }
+      .thesis .ph {
+        color: var(--accent);
+        font-weight: 600;
+      }
+      h2 {
+        font-size: 22px;
+        letter-spacing: -0.01em;
+        margin: 46px 0 6px;
+        padding-top: 22px;
+        border-top: 1px solid var(--border);
+      }
+      h2 .n {
+        color: var(--muted);
+        font-weight: 600;
+        margin-right: 10px;
+      }
+      h3 {
+        font-size: 15px;
+        margin: 22px 0 6px;
+      }
+      p.lead {
+        color: var(--muted);
+        margin: 4px 0 0;
+        max-width: 74ch;
+      }
+      /* ---- diagram ---- */
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        flex-wrap: wrap;
+        margin: 18px 0 12px;
+      }
+      .seg {
+        display: inline-flex;
+        border: 1px solid var(--border);
+        border-radius: 9px;
+        overflow: hidden;
+        background: var(--panel);
+      }
+      .seg button {
+        appearance: none;
+        background: transparent;
+        color: var(--muted);
+        border: 0;
+        padding: 8px 16px;
+        font-size: 14px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .seg button.on {
+        background: var(--accent);
+        color: #fff;
+      }
+      .legend {
+        display: flex;
+        gap: 16px;
+        flex-wrap: wrap;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      .legend i {
+        display: inline-block;
+        width: 11px;
+        height: 11px;
+        border-radius: 3px;
+        margin-right: 6px;
+        vertical-align: -1px;
+      }
+      .diagram {
+        display: grid;
+        grid-template-columns: 1fr 296px;
+        gap: 16px;
+        align-items: start;
+      }
+      @media (max-width: 880px) {
+        .diagram {
+          grid-template-columns: 1fr;
+        }
+      }
+      .stagewrap {
+        position: relative;
+        background:
+          radial-gradient(circle at 1px 1px, var(--border) 1px, transparent 0) 0 0 / 26px 26px,
+          var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 6px;
+        overflow: hidden;
+      }
+      .stage {
+        position: relative;
+        width: 100%;
+        height: 1180px;
+      }
+      @media (max-width: 880px) {
+        .stage {
+          height: 1480px;
+        }
+      }
+      svg.edges {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        pointer-events: none;
+        overflow: visible;
+      }
+      .edge {
+        fill: none;
+        stroke: var(--muted);
+        stroke-width: 1.6;
+        opacity: 0.55;
+      }
+      .edge.strong {
+        stroke: var(--accent);
+        stroke-width: 2.2;
+        opacity: 0.9;
+      }
+      .edge.future {
+        stroke-dasharray: 5 5;
+        opacity: 0.5;
+      }
+      .edge.dim {
+        opacity: 0.08;
+      }
+      .edge.hot {
+        stroke: var(--accent);
+        opacity: 1;
+        stroke-width: 2.6;
+      }
+      .elabel {
+        fill: var(--muted);
+        font-size: 10.5px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      .band {
+        position: absolute;
+        left: 0;
+        right: 0;
+        border-top: 1px dashed var(--border);
+        opacity: 0.5;
+      }
+      .band span {
+        position: absolute;
+        left: 8px;
+        top: -9px;
+        background: var(--panel);
+        padding: 0 8px;
+        font-size: 10.5px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }
+      .node {
+        position: absolute;
+        transform: translate(-50%, -50%);
+        width: 168px;
+        background: var(--panel2);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 9px 11px;
+        cursor: pointer;
+        transition:
+          box-shadow 0.12s,
+          border-color 0.12s,
+          transform 0.06s;
+        z-index: 2;
+      }
+      .node:hover {
+        transform: translate(-50%, -50%) scale(1.03);
+      }
+      .node:active {
+        transform: translate(-50%, -50%) scale(0.99);
+      }
+      .node .nt {
+        font-weight: 650;
+        font-size: 13px;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .node .ns {
+        color: var(--muted);
+        font-size: 11px;
+        margin-top: 2px;
+        line-height: 1.35;
+      }
+      .node .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        flex: none;
+      }
+      .node.hub {
+        width: 210px;
+        border-width: 2px;
+        background: var(--panel);
+      }
+      .node[data-status="done"] {
+        border-color: color-mix(in srgb, var(--green) 45%, var(--border));
+      }
+      .node[data-status="done"] .dot {
+        background: var(--green);
+      }
+      .node[data-status="partial"] {
+        border-color: color-mix(in srgb, var(--amber) 50%, var(--border));
+      }
+      .node[data-status="partial"] .dot {
+        background: var(--amber);
+      }
+      .node[data-status="exp"] {
+        border-color: color-mix(in srgb, var(--purple) 50%, var(--border));
+      }
+      .node[data-status="exp"] .dot {
+        background: var(--purple);
+      }
+      .node[data-status="future"] {
+        border-style: dashed;
+        background: transparent;
+      }
+      .node[data-status="future"] .dot {
+        background: var(--muted);
+      }
+      .node[data-status="future"] .nt {
+        color: var(--muted);
+      }
+      .node.sel {
+        border-color: var(--accent) !important;
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 28%, transparent);
+      }
+      .node.faded {
+        opacity: 0.18;
+      }
+      .node.hidden {
+        display: none;
+      }
+      /* hub transport pills sit inside hub box */
+      .hub .ports {
+        display: flex;
+        gap: 5px;
+        margin-top: 8px;
+        flex-wrap: wrap;
+      }
+      .hub .ports span {
+        font-size: 10px;
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 2px 8px;
+        color: var(--muted);
+      }
+      /* ---- detail panel ---- */
+      .detail {
+        position: sticky;
+        top: 14px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px;
+        min-height: 220px;
+      }
+      @media (max-width: 880px) {
+        .detail {
+          position: static;
+        }
+      }
+      .detail .pill {
+        display: inline-block;
+        font-size: 11px;
+        font-weight: 600;
+        border-radius: 999px;
+        padding: 2px 10px;
+        margin-bottom: 10px;
+      }
+      .pill.done {
+        color: var(--green);
+        background: color-mix(in srgb, var(--green) 16%, transparent);
+      }
+      .pill.partial {
+        color: var(--amber);
+        background: color-mix(in srgb, var(--amber) 16%, transparent);
+      }
+      .pill.exp {
+        color: var(--purple);
+        background: color-mix(in srgb, var(--purple) 16%, transparent);
+      }
+      .pill.future {
+        color: var(--muted);
+        background: color-mix(in srgb, var(--muted) 16%, transparent);
+      }
+      .detail h4 {
+        margin: 0 0 8px;
+        font-size: 17px;
+      }
+      .detail p {
+        font-size: 13.5px;
+        color: var(--fg);
+        margin: 0 0 12px;
+      }
+      .detail .files {
+        font-size: 11.5px;
+        color: var(--muted);
+        border-top: 1px solid var(--border);
+        padding-top: 10px;
+        word-break: break-word;
+      }
+      .detail .files b {
+        color: var(--fg);
+        font-weight: 600;
+      }
+      .detail .files code {
+        display: block;
+        margin-top: 3px;
+        line-height: 1.7;
+      }
+      .detail .hint {
+        color: var(--muted);
+        font-size: 13px;
+      }
+      /* ---- cards / tables ---- */
+      .grid3 {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+        gap: 14px;
+        margin: 18px 0;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 15px 17px;
+      }
+      .card.good {
+        border-left: 3px solid var(--green);
+      }
+      .card.warn {
+        border-left: 3px solid var(--amber);
+      }
+      .card.next {
+        border-left: 3px solid var(--accent);
+      }
+      .card h3 {
+        margin: 0 0 8px;
+        font-size: 14px;
+      }
+      .card ul {
+        margin: 0;
+        padding-left: 18px;
+        color: var(--muted);
+        font-size: 13.5px;
+      }
+      .card li {
+        margin: 5px 0;
+      }
+      .card li b {
+        color: var(--fg);
+        font-weight: 600;
+      }
+      .flow {
+        background: var(--code);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px;
+        overflow-x: auto;
+        font-size: 12.5px;
+        line-height: 1.7;
+        margin: 14px 0;
+      }
+      .flow .c {
+        color: var(--muted);
+      }
+      .flow .k {
+        color: var(--accent);
+      }
+      .flow .g {
+        color: var(--green);
+      }
+      table.parity {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 14px 0;
+        font-size: 13.5px;
+      }
+      table.parity th,
+      table.parity td {
+        text-align: left;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--border);
+      }
+      table.parity th {
+        color: var(--muted);
+        font-weight: 600;
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      table.parity td.s {
+        white-space: nowrap;
+      }
+      .s-done {
+        color: var(--green);
+      }
+      .s-partial {
+        color: var(--amber);
+      }
+      .s-exp {
+        color: var(--purple);
+      }
+      .s-future {
+        color: var(--muted);
+      }
+      footer {
+        border-top: 1px solid var(--border);
+        margin-top: 50px;
+        padding: 22px 0 50px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="top">
+        <div class="brand"><span class="tick">✓</span> agent-yes · lab</div>
+        <nav>
+          <a href="/">Home</a>
+          <a href="/w/">Console</a>
+          <a href="/blog/e2ee-share-links/">Blog</a>
+          <a href="https://github.com/snomiao/agent-yes">GitHub</a>
+        </nav>
+      </header>
+
+      <section class="hero">
+        <p class="kicker">Architecture lab · re-imagining the graph</p>
+        <h1>One agent → one URL.<br />The whole map, today &amp; tomorrow.</h1>
+        <p class="sub">
+          The goal:
+          <b
+            >anyone can expose their own AI agent to the network with a single link, self-contained,
+            end-to-end encrypted</b
+          >. Most of it already exists — but it grew as several overlapping stacks. This page
+          re-draws the system as one clean graph, marks what is built vs. what is next, and names
+          the seam that collapses the clutter.
+        </p>
+        <div class="thesis">
+          The unifying idea →
+          <b>one agent, one local fabric, one API handler, many transports, one URL.</b>
+          Every reach surface (browser, CLI, desktop, peer) speaks the
+          <span class="ph">same API</span>; every transport (HTTP, WebRTC, libp2p) is just a pipe
+          into the <span class="ph">same in-process <code>apiFetch()</code></span
+          >; trust &amp; discovery (signaling, E2E keys, tokens) is a
+          <span class="ph">separable plane</span>, not baked into any one path.
+        </div>
+      </section>
+
+      <h2><span class="n">01</span>The interactive graph</h2>
+      <p class="lead">
+        Tap any node for what it is, where it lives in the tree, and its status. Toggle
+        <b>Future</b> to overlay where the system is heading.
+      </p>
+
+      <div class="toolbar">
+        <div class="seg" id="modeSeg">
+          <button data-mode="today" class="on">Today</button>
+          <button data-mode="future">Today + Future</button>
+        </div>
+        <div class="legend">
+          <span><i style="background: var(--green)"></i>Built</span>
+          <span><i style="background: var(--amber)"></i>Partial</span>
+          <span><i style="background: var(--purple)"></i>Experimental</span>
+          <span
+            ><i style="background: transparent; border: 1px dashed var(--muted)"></i>Future</span
+          >
+        </div>
+      </div>
+
+      <div class="diagram">
+        <div class="stagewrap">
+          <div class="stage" id="stage">
+            <svg class="edges" id="edges" aria-hidden="true">
+              <defs>
+                <marker
+                  id="arrow"
+                  viewBox="0 0 10 10"
+                  refX="8"
+                  refY="5"
+                  markerWidth="6"
+                  markerHeight="6"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--muted)" />
+                </marker>
+                <marker
+                  id="arrowA"
+                  viewBox="0 0 10 10"
+                  refX="8"
+                  refY="5"
+                  markerWidth="6"
+                  markerHeight="6"
+                  orient="auto-start-reverse"
+                >
+                  <path d="M 0 0 L 10 5 L 0 10 z" fill="var(--accent)" />
+                </marker>
+              </defs>
+            </svg>
+            <!-- nodes injected here -->
+          </div>
+        </div>
+        <aside class="detail" id="detail">
+          <span class="hint"
+            >Select a node to inspect it. The graph is the source map — each box points at the files
+            that implement it.</span
+          >
+        </aside>
+      </div>
+
+      <h2><span class="n">02</span>The five planes (read top-down)</h2>
+      <p class="lead">
+        The same boxes from the graph, grouped into the layers that make the model legible. Data
+        flows up from the agent; control flows down from a surface.
+      </p>
+      <div class="grid3">
+        <div class="card">
+          <h3>① Agent core</h3>
+          <ul>
+            <li>
+              <b>Auto-yes wrapper</b> spawns any AI CLI in a PTY and answers ready / enter / fatal
+              prompts so it runs unattended.
+            </li>
+            <li><b>Rust</b> is the primary single binary; <b>TypeScript</b> is the reference.</li>
+            <li>Crash-recovery, idle exit, session resume, TTY-resize propagation.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>② Local fabric</h3>
+          <ul>
+            <li><b>PID registry</b> (<code>pids.jsonl</code>) — every agent, both runtimes.</li>
+            <li><b>FIFO</b> per pid — append prompts to a live agent's stdin.</li>
+            <li><b>Raw PTY logs</b> — the source of truth for tail / render.</li>
+            <li><b>cy</b> is the on-machine control plane over all of it.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>③ Exposure</h3>
+          <ul>
+            <li>
+              <b><code>ay serve</code></b> exposes one transport-agnostic handler
+              <code>apiFetch(req)→Response</code>.
+            </li>
+            <li><b>HTTP</b> (Bun.serve, :7432) and a <b>WebRTC bridge</b> both call it.</li>
+            <li>Daemonized via oxmgr / pm2; health-watchdog keeps the native stack fresh.</li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>④ Trust &amp; discovery</h3>
+          <ul>
+            <li><b>Signaling DO</b> — a rendezvous only; never sees plaintext or the secret.</li>
+            <li>
+              <b>E2E</b> — HKDF key split + per-connection AES-256-GCM; the secret rides the URL
+              fragment and never hits a server.
+            </li>
+            <li><b>Token</b> + persistent <b>room</b> → a stable, secret-bearing link.</li>
+            <li>
+              <b>Next:</b> per-agent capabilities + OAuth-bound shares —
+              <a href="https://github.com/snomiao/agent-yes/blob/main/docs/auth-and-permissions.md"
+                >design draft</a
+              >.
+            </li>
+          </ul>
+        </div>
+        <div class="card">
+          <h3>⑤ Reach surfaces</h3>
+          <ul>
+            <li><b>Browser console</b> <code>/w/</code> — PWA, xterm.js, mobile/touch.</li>
+            <li><b>Remote CLI</b> — <code>ay remote add</code> then drive another box.</li>
+            <li><b>Desktop</b> (Electron) — offline, same UI, no signaling needed.</li>
+            <li><b>Swarm peers</b> — other agents, P2P (experimental).</li>
+          </ul>
+        </div>
+        <div class="card next">
+          <h3>The seam</h3>
+          <ul>
+            <li>
+              <code>apiFetch</code> is already called by <b>both</b> Bun.serve and the WebRTC bridge
+              in-process.
+            </li>
+            <li>
+              So a new transport (libp2p, a tunnel, a relay) is <b>just another caller</b> — no new
+              control plane.
+            </li>
+            <li>That seam is what turns "three stacks" back into "one system."</li>
+          </ul>
+        </div>
+      </div>
+
+      <h2><span class="n">03</span>How a share link actually resolves</h2>
+      <p class="lead">
+        The "simple URL" path end-to-end. The secret <code>S</code> never leaves the two endpoints.
+      </p>
+      <div class="flow mono">
+        <span class="c"># 1. the host mints/persists a room and prints a link</span><br />
+        $ ay serve --share<br />
+        &nbsp;&nbsp;<span class="g"
+          >https://agent-yes.com/w/#<span class="k">r3f9c2</span>:<span class="k"
+            >e1.&lt;secret S&gt;</span
+          ></span
+        >
+        <span class="c"># room + E2E secret in the #fragment</span><br /><br />
+        <span class="c"># 2. browser opens the link — the #fragment never reaches any server</span
+        ><br />
+        &nbsp;&nbsp;S = location.hash &nbsp;→&nbsp; <span class="k">authToken = HKDF(S, room)</span>
+        <span class="c"># only this is shown to signaling</span><br /><br />
+        <span class="c"># 3. rendezvous over s.agent-yes.com (relays SDP/ICE; learns nothing)</span
+        ><br />
+        &nbsp;&nbsp;browser &nbsp;⇄&nbsp; <span class="k">signaling DO</span> &nbsp;⇄&nbsp; ay serve
+        host<br /><br />
+        <span class="c"
+          ># 4. P2P DataChannel opens; keys = HKDF(S, transcript). Server is now cut out.</span
+        ><br />
+        &nbsp;&nbsp;browser &nbsp;<span class="g">⇄ AES-256-GCM ⇄</span>&nbsp; host
+        <span class="k">apiFetch()</span> &nbsp;→&nbsp; ls · tail · send · spawn<br /><br />
+        <span class="c"># offline / LAN / desktop: skip 2–4 entirely</span><br />
+        $ ay serve --http &nbsp;&nbsp;<span class="c"
+          ># browser → http://host:7432/#k=&lt;token&gt;</span
+        >
+      </div>
+
+      <h2><span class="n">04</span>Honest status — built · cluttered · next</h2>
+      <div class="grid3">
+        <div class="card good">
+          <h3>✓ Built &amp; working</h3>
+          <ul>
+            <li>Auto-yes wrapper across 8 CLIs, <b>TS + Rust</b> parity.</li>
+            <li>Local fabric: <b>pidStore + FIFO + logs</b>, driven by <b>cy</b>.</li>
+            <li><code>ay serve</code> with <b>HTTP + WebRTC</b> off one handler.</li>
+            <li>
+              <b>E2E share links</b> (HKDF split, AES-GCM, fail-closed handshake) + signaling DO.
+            </li>
+            <li>Browser console <b>PWA</b> incl. mobile/touch; <b>remote CLI</b>.</li>
+          </ul>
+        </div>
+        <div class="card warn">
+          <h3>⚠ Where the clutter is</h3>
+          <ul>
+            <li>
+              <b>Two runtimes</b> (TS reference, Rust primary) — features drift; a parity table has
+              to be hand-maintained.
+            </li>
+            <li>
+              <b>Three networking stacks</b> that don't share a model: HTTP, WebRTC+signaling,
+              libp2p swarm.
+            </li>
+            <li>
+              Overlapping modes — <code>--http</code> / <code>--webrtc</code> / <code>--share</code>
+              (legacy alias).
+            </li>
+            <li>
+              <b>node-datachannel fragility</b>: native freeze needs watchdogs + proactive restarts.
+            </li>
+            <li>Persistence scattered across several <code>~/.agent-yes/*</code> dotfiles.</li>
+          </ul>
+        </div>
+        <div class="card next">
+          <h3>→ What's next</h3>
+          <ul>
+            <li>
+              <b>Fine-grained auth</b>: replace the single token with per-agent, view/steer/admin
+              capabilities + OAuth-bound shares —
+              <a href="https://github.com/snomiao/agent-yes/blob/main/docs/auth-and-permissions.md"
+                >design draft</a
+              >.
+            </li>
+            <li>
+              <b>Swarm as a transport</b>, not a parallel universe: libp2p calls the same
+              <code>apiFetch</code>; peers become a reach surface.
+            </li>
+            <li>
+              <b>Desktop</b> → self-contained bundle (ship <code>bun</code>; in-UI model picker).
+            </li>
+            <li><b>Native mobile</b> wrapping <code>/w/</code>.</li>
+            <li>Collapse modes to one: <code>ay serve</code> picks transports automatically.</li>
+            <li>One state directory; one liveness story instead of per-stack watchdogs.</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3>TS ↔ Rust ↔ exposure, at a glance</h3>
+      <table class="parity">
+        <thead>
+          <tr>
+            <th>Capability</th>
+            <th>TypeScript</th>
+            <th>Rust</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>PTY wrap + pattern auto-yes</td>
+            <td class="s s-done">✓ built</td>
+            <td class="s s-done">✓ built</td>
+            <td>Primary distribution is the Rust single binary</td>
+          </tr>
+          <tr>
+            <td>Local fabric (pids · FIFO · logs)</td>
+            <td class="s s-done">✓ built</td>
+            <td class="s s-done">✓ built</td>
+            <td>Shared <code>~/.agent-yes</code> registry across both</td>
+          </tr>
+          <tr>
+            <td><code>ay serve</code> HTTP API + console</td>
+            <td class="s s-done">✓ built</td>
+            <td class="s s-future">— via TS</td>
+            <td>Served by the TS runtime; Rust shells out</td>
+          </tr>
+          <tr>
+            <td>WebRTC share + E2E + signaling</td>
+            <td class="s s-done">✓ built</td>
+            <td class="s s-future">—</td>
+            <td>node-datachannel; secret stays client-side</td>
+          </tr>
+          <tr>
+            <td>Desktop (Electron, offline)</td>
+            <td class="s s-partial">◐ scaffold</td>
+            <td class="s s-future">—</td>
+            <td>Spawns <code>ay serve --http</code> on loopback</td>
+          </tr>
+          <tr>
+            <td>libp2p swarm (peer mesh)</td>
+            <td class="s s-future">— stub</td>
+            <td class="s s-exp">⬡ experimental</td>
+            <td>Feature-gated; broadcast-only so far</td>
+          </tr>
+          <tr>
+            <td>Native mobile surface</td>
+            <td class="s s-future">future</td>
+            <td class="s s-future">future</td>
+            <td>Wrap the existing <code>/w/</code> PWA</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <footer>
+        <div>
+          A living map of <a href="https://github.com/snomiao/agent-yes">agent-yes</a>. Open it
+          locally (<code>open lab/ui/architecture.html</code>) or browse the
+          <a href="/blog/e2ee-share-links/">E2E write-up</a> ·
+          <a href="https://github.com/snomiao/agent-yes/blob/main/docs/auth-and-permissions.md"
+            >auth design</a
+          >
+          · <a href="/w/">live console</a>.
+        </div>
+        <div style="margin-top: 8px">
+          MIT · made by <a href="https://github.com/snomiao">snomiao</a> · the source of truth is
+          the code — this page links to it.
+        </div>
+      </footer>
+    </div>
+
+    <script>
+      // ---- graph model -------------------------------------------------------
+      // x,y are percentages of the stage. Node boxes are auto-anchored: edges are
+      // drawn between the real rendered rectangles, so layout stays crisp on any
+      // width and after the Future toggle.
+      const NODES = [
+        // ⑤ reach surfaces (top)
+        {
+          id: "browser",
+          t: "Browser console",
+          s: "/w/ · PWA · xterm.js",
+          x: 20,
+          y: 6,
+          status: "done",
+          plane: "Reach surface",
+          desc: "The end-user surface. An installable PWA that renders a real terminal (xterm.js) for any agent and can list, tail, send keystrokes, resize and spawn. Reaches the host over the encrypted WebRTC channel, or directly over HTTP on a LAN/desktop.",
+          files: ["lab/ui/index.html", "lab/ui/room-client.js", "lab/ui/console-logic.js"],
+        },
+        {
+          id: "remotecli",
+          t: "Remote CLI",
+          s: "ay remote · ay ls <alias>",
+          x: 50,
+          y: 6,
+          status: "done",
+          plane: "Reach surface",
+          desc: "Drive another machine's agents from your own terminal. Save token@host:port under an alias, then use it anywhere a keyword is accepted (ls / tail / send). Talks plain HTTP to the remote ay serve.",
+          files: ["ts/remotes.ts", "~/.agent-yes/remotes.yaml"],
+        },
+        {
+          id: "desktop",
+          t: "Desktop app",
+          s: "Electron · offline",
+          x: 78,
+          y: 6,
+          status: "partial",
+          plane: "Reach surface",
+          desc: "An offline shell: the Electron window and the host are on the SAME machine, so NO WebRTC/signaling is needed. It spawns ay serve --http on 127.0.0.1 with a random token and loads /#k=<token>. Foundation scaffolded; self-contained bundling (ship bun) and an in-UI local-model picker are still TODO.",
+          files: ["desktop/main.js", "desktop/preload.js", "desktop/bundle-cli.mjs"],
+        },
+        {
+          id: "mobile",
+          t: "Native mobile",
+          s: "wrap /w/",
+          x: 85,
+          y: 18,
+          status: "future",
+          plane: "Reach surface",
+          desc: "Future: a thin native shell around the existing /w/ PWA so push, background reconnect and home-screen presence feel first-class on a phone. The console is already responsive and touch-capable, so this is packaging, not a rewrite.",
+          files: ["(future) — wraps lab/ui/"],
+        },
+        // ④ trust & discovery
+        {
+          id: "sharelink",
+          t: "Share link",
+          s: "/w/#room:secret",
+          x: 14,
+          y: 24,
+          status: "done",
+          plane: "Trust & discovery",
+          desc: "The 'simple URL'. A pure function of (room, secret S, signaling host). S rides in the URL fragment, which never reaches any server, and is eaten by the page on open. Persisted room → the same link survives daemon restarts.",
+          files: ["ts/share.ts → formatShareLink()", "~/.agent-yes/.share-room"],
+        },
+        {
+          id: "e2e",
+          t: "E2E crypto",
+          s: "HKDF split · AES-256-GCM",
+          x: 40,
+          y: 24,
+          status: "done",
+          plane: "Trust & discovery",
+          desc: "Confidentiality even against a fully compromised relay. The URL secret S splits via HKDF into an authToken (the only value the server sees, for room matching) and per-connection AES-256-GCM keys the server never sees. Mandatory bidirectional key-confirmation handshake; fail-closed on any mismatch/replay.",
+          files: ["lab/ui/e2e.js", "lab/ui/blog/e2ee-share-links/index.html"],
+        },
+        {
+          id: "signaling",
+          t: "Signaling rendezvous",
+          s: "s.agent-yes.com · Durable Object",
+          x: 68,
+          y: 24,
+          status: "done",
+          plane: "Trust & discovery",
+          desc: "One Durable Object per room relays SDP offers/answers + ICE candidates between the host peer and browser peers. Media/data never flow through it — they go P2P once signaling completes. It only ever sees authToken = HKDF(S), never S; TOFU-pins the room's token + protocol version.",
+          files: ["lab/ui/cf/worker.ts"],
+        },
+        {
+          id: "token",
+          t: "Bearer token",
+          s: ".serve-token (0600)",
+          x: 85,
+          y: 37,
+          status: "done",
+          plane: "Trust & discovery",
+          desc: "The HTTP-side credential. Auto-generated and persisted at mode 0600; checked in constant time (Bearer header or ?token= for EventSource). Authorizes every /api/* call on the HTTP and remote-CLI paths. Today it is all-or-nothing (full admin); the planned successor is per-agent view/steer/admin capabilities + OAuth-bound shares — see docs/auth-and-permissions.md.",
+          files: [
+            "ts/serve.ts → loadOrCreateToken()",
+            "~/.agent-yes/.serve-token",
+            "docs/auth-and-permissions.md (future)",
+          ],
+        },
+        // ③ exposure (hub)
+        {
+          id: "serve",
+          t: "ay serve",
+          s: "one handler: apiFetch(req)→Response",
+          x: 50,
+          y: 45,
+          status: "done",
+          hub: true,
+          ports: ["GET /api/ls·tail·read", "POST /api/send·spawn·kill·resize", "SSE subscribe"],
+          plane: "Exposure",
+          desc: "The hub. A single transport-agnostic request handler that lists, reads, tails (SSE), sends keystrokes to, resizes, spawns and kills agents — by reading the local fabric and writing the FIFO. It is served over HTTP by Bun.serve AND called in-process by the WebRTC bridge. THIS is the seam that unifies the system.",
+          files: ["ts/serve.ts → apiFetch", "ay serve install (oxmgr/pm2 daemon)"],
+        },
+        {
+          id: "http",
+          t: "HTTP transport",
+          s: "Bun.serve · :7432",
+          x: 22,
+          y: 56,
+          status: "done",
+          plane: "Exposure",
+          desc: "The simplest pipe into apiFetch: a TCP listener (default 127.0.0.1:7432, optional TLS, 0.0.0.0 to expose on a trusted network). Also serves the static console assets. Used by the desktop shell, the remote CLI, and LAN browsers.",
+          files: ["ts/serve.ts → Bun.serve(serverOpts)"],
+        },
+        {
+          id: "webrtc",
+          t: "WebRTC bridge",
+          s: "port-free · in-process",
+          x: 50,
+          y: 56,
+          status: "done",
+          plane: "Exposure",
+          desc: "A port-free pipe into the SAME apiFetch. Connects to signaling as the room host and bridges each browser's encrypted DataChannel to apiFetch, called in-process — no HTTP listener, no tunnel, works behind NAT (STUN, optional Cloudflare TURN relay).",
+          files: ["ts/share.ts → startShare()"],
+        },
+        {
+          id: "libp2p",
+          t: "libp2p transport",
+          s: "swarm stack → apiFetch",
+          x: 75,
+          y: 59,
+          status: "future",
+          plane: "Exposure",
+          desc: "Future: make the swarm just another transport into apiFetch instead of a separate control plane. Today the Rust swarm is its own request/response world; folding it behind the same handler is what removes the third stack.",
+          files: ["(future) rs/src/swarm/* → apiFetch bridge"],
+        },
+        // ② local fabric
+        {
+          id: "pidstore",
+          t: "PID registry",
+          s: "pids.jsonl",
+          x: 17,
+          y: 70,
+          status: "done",
+          plane: "Local fabric",
+          desc: "The append-only registry every agent writes itself into — pid, cwd, cli, prompt, log path, status. Both runtimes share it, so cy and ay serve see TS- and Rust-spawned agents alike. Locked writes so live agents aren't dropped.",
+          files: ["ts/pidStore.ts", "rs/src/pid_store.rs", "~/.agent-yes/pids.jsonl"],
+        },
+        {
+          id: "fifo",
+          t: "FIFO stdin",
+          s: "fifo/<pid>.stdin",
+          x: 39,
+          y: 70,
+          status: "done",
+          plane: "Local fabric",
+          desc: "A per-pid named pipe that lets anything append a prompt or keystroke to a live agent's stdin — this is where cy send and POST /api/send land, on both runtimes.",
+          files: ["ts/beta/fifo.ts", "rs/src/fifo.rs"],
+        },
+        {
+          id: "logs",
+          t: "Raw PTY logs",
+          s: "<pid>.raw.log",
+          x: 61,
+          y: 70,
+          status: "done",
+          plane: "Local fabric",
+          desc: "The full PTY byte stream per agent — the single source of truth for tailing and rendering. The console replays the last frames and streams appends; titles and task progress are parsed from it (CLI-agnostic, no per-tool session files).",
+          files: ["ts/core/logging.ts", "rs/src/log_files.rs", ".agent-yes/<pid>.raw.log"],
+        },
+        {
+          id: "cy",
+          t: "cy control",
+          s: "ls · tail · send · attach · stop",
+          x: 84,
+          y: 70,
+          status: "done",
+          plane: "Local fabric",
+          desc: "The on-machine control plane over the fabric: list, render last lines, full read, append a prompt, interactively attach, or gracefully stop any running agent — regardless of which runtime spawned it.",
+          files: ["ts/subcommands.ts", "docs/cy-subcommands.md"],
+        },
+        // ① agent core
+        {
+          id: "wrapper",
+          t: "Auto-yes wrapper",
+          s: "Rust primary · TS ref · PTY",
+          x: 35,
+          y: 87,
+          status: "done",
+          plane: "Agent core",
+          desc: "The primitive. Spawns the chosen AI CLI in a PTY, watches its output and auto-responds to ready / enter / fatal / typing patterns so it never stalls. Handles idle exit, crash recovery, session resume and TTY-resize propagation. Rust is the shipped single binary; TS is the reference impl.",
+          files: [
+            "ts/index.ts",
+            "ts/core/*",
+            "rs/src/{main,context,ready_manager}.rs",
+            "default.config.yaml",
+          ],
+        },
+        {
+          id: "clis",
+          t: "AI CLIs",
+          s: "claude · codex · gemini · …",
+          x: 68,
+          y: 87,
+          status: "done",
+          plane: "Agent core",
+          desc: "The wrapped tools: Claude, Codex, Gemini, Copilot, Cursor, Qwen, Grok, Auggie. Each has a config of ready/enter/fatal patterns and binary mapping; one wrapper, one console, many agents.",
+          files: ["ts/SUPPORTED_CLIS.ts", "agent-yes.config.ts"],
+        },
+        {
+          id: "swarm",
+          t: "Swarm peers",
+          s: "other ay nodes · libp2p mesh",
+          x: 85,
+          y: 52,
+          status: "exp",
+          plane: "Reach surface",
+          desc: "Experimental P2P: agents discover each other (mDNS → Kademlia DHT → bootstrap), elect a coordinator and broadcast tasks over gossipsub, encrypted in-flight with Noise over TCP. Feature-gated (--features swarm); broadcast-only so far, a parallel stack to the WebRTC path — the future folds it behind apiFetch.",
+          files: ["rs/src/swarm/{node,coordinator,behaviour,messages,url}.rs", "docs/swarm.md"],
+        },
+      ];
+
+      // edges: [from, to, {label, strong, future, dir:'both'}]
+      const EDGES = [
+        // agent core
+        ["clis", "wrapper", { label: "PTY", dir: "both" }],
+        ["wrapper", "pidstore", { label: "register" }],
+        ["wrapper", "logs", { label: "write" }],
+        ["fifo", "wrapper", { label: "stdin" }],
+        // fabric ↔ control
+        ["cy", "pidstore", {}],
+        ["cy", "fifo", { label: "send" }],
+        ["cy", "logs", { label: "read" }],
+        // hub ↔ fabric
+        ["serve", "pidstore", {}],
+        ["serve", "logs", { label: "tail" }],
+        ["serve", "fifo", { label: "send" }],
+        ["serve", "wrapper", { label: "spawn" }],
+        // transports → hub
+        ["http", "serve", { label: "apiFetch", strong: true }],
+        ["webrtc", "serve", { label: "apiFetch (in-proc)", strong: true }],
+        ["libp2p", "serve", { label: "apiFetch", future: true }],
+        // trust plane
+        ["token", "http", { label: "Bearer" }],
+        ["sharelink", "browser", { label: "open" }],
+        ["e2e", "webrtc", { label: "AES-GCM" }],
+        // reach → transports
+        ["browser", "signaling", { label: "rendezvous" }],
+        ["signaling", "webrtc", { label: "rendezvous" }],
+        ["browser", "webrtc", { label: "E2E P2P", strong: true }],
+        ["browser", "http", { label: "LAN direct" }],
+        ["remotecli", "http", { label: "token@host" }],
+        ["desktop", "http", { label: "#k=token" }],
+        // future
+        ["mobile", "signaling", { future: true }],
+        ["swarm", "libp2p", { label: "mesh", future: true, dir: "both" }],
+      ];
+
+      const BANDS = [
+        { y: 6, label: "⑤ Reach surfaces" },
+        { y: 24, label: "④ Trust & discovery" },
+        { y: 50, label: "③ Exposure — ay serve" },
+        { y: 70, label: "② Local fabric" },
+        { y: 87, label: "① Agent core" },
+      ];
+
+      const stage = document.getElementById("stage");
+      const svg = document.getElementById("edges");
+      const detail = document.getElementById("detail");
+      const nodeEls = {};
+      let mode = "today";
+      let selected = null;
+
+      // bands
+      for (const b of BANDS) {
+        const d = document.createElement("div");
+        d.className = "band";
+        d.style.top = b.y - 4 + "%";
+        d.innerHTML = `<span>${b.label}</span>`;
+        stage.appendChild(d);
+      }
+
+      // nodes
+      for (const n of NODES) {
+        const el = document.createElement("div");
+        el.className = "node" + (n.hub ? " hub" : "");
+        el.dataset.status = n.status;
+        el.dataset.id = n.id;
+        el.style.left = n.x + "%";
+        el.style.top = n.y + "%";
+        let ports = "";
+        if (n.ports)
+          ports = `<div class="ports">${n.ports.map((p) => `<span>${p}</span>`).join("")}</div>`;
+        el.innerHTML = `<div class="nt"><span class="dot"></span>${n.t}</div><div class="ns">${n.s}</div>${ports}`;
+        el.addEventListener("click", () => select(n.id));
+        stage.appendChild(el);
+        nodeEls[n.id] = el;
+      }
+
+      const byId = Object.fromEntries(NODES.map((n) => [n.id, n]));
+      const isVisible = (n) => mode === "future" || n.status !== "future";
+      const edgeVisible = (e) => {
+        const a = byId[e[0]],
+          b = byId[e[1]];
+        const fut = e[2].future || a.status === "future" || b.status === "future";
+        return mode === "future" || !fut;
+      };
+
+      // rectangle-border anchor: where the center→center line exits a node box
+      function anchor(rect, tx, ty, host) {
+        const cx = rect.left - host.left + rect.width / 2;
+        const cy = rect.top - host.top + rect.height / 2;
+        let dx = tx - cx,
+          dy = ty - cy;
+        if (dx === 0 && dy === 0) return { x: cx, y: cy };
+        const hw = rect.width / 2 + 2,
+          hh = rect.height / 2 + 2;
+        const t = 1 / Math.max(Math.abs(dx) / hw, Math.abs(dy) / hh);
+        return { x: cx + dx * t, y: cy + dy * t };
+      }
+
+      function draw() {
+        // clear existing edge paths/labels (keep <defs>)
+        [...svg.querySelectorAll(".edge,.elabel")].forEach((n) => n.remove());
+        const host = stage.getBoundingClientRect();
+        const NS = "http://www.w3.org/2000/svg";
+
+        for (const e of EDGES) {
+          if (!edgeVisible(e)) continue;
+          const ea = nodeEls[e[0]],
+            eb = nodeEls[e[1]];
+          if (!ea || !eb) continue;
+          const ra = ea.getBoundingClientRect(),
+            rb = eb.getBoundingClientRect();
+          const ca = {
+            x: ra.left - host.left + ra.width / 2,
+            y: ra.top - host.top + ra.height / 2,
+          };
+          const cb = {
+            x: rb.left - host.left + rb.width / 2,
+            y: rb.top - host.top + rb.height / 2,
+          };
+          const p1 = anchor(ra, cb.x, cb.y, host);
+          const p2 = anchor(rb, ca.x, ca.y, host);
+          // gentle vertical-biased S curve
+          const my = (p1.y + p2.y) / 2;
+          const path = document.createElementNS(NS, "path");
+          const o = e[2];
+          path.setAttribute(
+            "d",
+            `M ${p1.x} ${p1.y} C ${p1.x} ${my}, ${p2.x} ${my}, ${p2.x} ${p2.y}`,
+          );
+          let cls = "edge";
+          if (o.strong) cls += " strong";
+          if (o.future || byId[e[0]].status === "future" || byId[e[1]].status === "future")
+            cls += " future";
+          path.setAttribute("class", cls);
+          path.dataset.from = e[0];
+          path.dataset.to = e[1];
+          path.setAttribute("marker-end", `url(#${o.strong ? "arrowA" : "arrow"})`);
+          if (o.dir === "both")
+            path.setAttribute("marker-start", `url(#${o.strong ? "arrowA" : "arrow"})`);
+          svg.appendChild(path);
+
+          if (o.label) {
+            const tx = document.createElementNS(NS, "text");
+            tx.setAttribute("class", "elabel");
+            tx.setAttribute("x", (p1.x + p2.x) / 2);
+            tx.setAttribute("y", my - 3);
+            tx.setAttribute("text-anchor", "middle");
+            tx.dataset.from = e[0];
+            tx.dataset.to = e[1];
+            tx.textContent = o.label;
+            svg.appendChild(tx);
+          }
+        }
+        applyHighlight();
+      }
+
+      function applyVisibility() {
+        for (const n of NODES) nodeEls[n.id].classList.toggle("hidden", !isVisible(n));
+      }
+
+      function applyHighlight() {
+        const paths = svg.querySelectorAll(".edge");
+        const labels = svg.querySelectorAll(".elabel");
+        if (!selected) {
+          paths.forEach((p) => p.classList.remove("dim", "hot"));
+          labels.forEach((l) => (l.style.opacity = ""));
+          Object.values(nodeEls).forEach((el) => el.classList.remove("faded"));
+          return;
+        }
+        const connected = new Set([selected]);
+        EDGES.forEach((e) => {
+          if (e[0] === selected) connected.add(e[1]);
+          if (e[1] === selected) connected.add(e[0]);
+        });
+        Object.entries(nodeEls).forEach(([id, el]) =>
+          el.classList.toggle("faded", !connected.has(id) && isVisible(byId[id])),
+        );
+        paths.forEach((p) => {
+          const on = p.dataset.from === selected || p.dataset.to === selected;
+          p.classList.toggle("hot", on);
+          p.classList.toggle("dim", !on);
+        });
+        labels.forEach((l) => {
+          const on = l.dataset.from === selected || l.dataset.to === selected;
+          l.style.opacity = on ? "1" : "0.12";
+        });
+      }
+
+      function select(id) {
+        selected = selected === id ? null : id;
+        Object.values(nodeEls).forEach((el) =>
+          el.classList.toggle("sel", el.dataset.id === selected),
+        );
+        renderDetail();
+        applyHighlight();
+      }
+
+      const STATUS_LABEL = {
+        done: "Built",
+        partial: "Partial",
+        exp: "Experimental",
+        future: "Future",
+      };
+      function renderDetail() {
+        if (!selected) {
+          detail.innerHTML = `<span class="hint">Select a node to inspect it. The graph is the source map — each box points at the files that implement it.</span>`;
+          return;
+        }
+        const n = byId[selected];
+        const files = n.files
+          .map((f) => (f.startsWith("(") ? `<span>${f}</span>` : `<code>${f}</code>`))
+          .join("");
+        detail.innerHTML =
+          `<span class="pill ${n.status}">${STATUS_LABEL[n.status]} · ${n.plane}</span>` +
+          `<h4>${n.t}</h4>` +
+          `<p>${n.desc}</p>` +
+          `<div class="files"><b>In the tree</b>${files}</div>`;
+      }
+
+      // mode toggle
+      document.getElementById("modeSeg").addEventListener("click", (ev) => {
+        const b = ev.target.closest("button");
+        if (!b) return;
+        mode = b.dataset.mode;
+        document
+          .querySelectorAll("#modeSeg button")
+          .forEach((x) => x.classList.toggle("on", x === b));
+        applyVisibility();
+        draw();
+      });
+
+      applyVisibility();
+      // initial draw after layout settles + on resize
+      requestAnimationFrame(draw);
+      window.addEventListener("load", draw);
+      if (window.ResizeObserver) new ResizeObserver(draw).observe(stage);
+      window.addEventListener("resize", draw);
+    </script>
+  </body>
+</html>
