@@ -966,9 +966,38 @@
         overflow: hidden;
         padding: 8px max(10px, var(--sar)) 8px max(10px, var(--sal));
         background: var(--bg);
+        position: relative; /* anchor for the peer-selection overlay */
       }
       .log .xterm {
         height: 100%;
+      }
+      /* Other viewers' selection ranges, drawn over our grid (slice 2 of
+         multi-peer presence). Approximate — peer coords are mapped proportionally
+         across viewport sizes and don't track scrollback — a "roughly here" hint. */
+      .peer-overlay {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        z-index: 6;
+      }
+      .peer-sel {
+        position: absolute;
+        background: hsla(var(--ph, 200), 80%, 55%, 0.16);
+        border: 1px solid hsla(var(--ph, 200), 80%, 62%, 0.7);
+        border-radius: 2px;
+        box-sizing: border-box;
+      }
+      .peer-tag {
+        position: absolute;
+        top: -13px;
+        left: -1px;
+        font: 9px var(--mono);
+        line-height: 12px;
+        padding: 0 3px;
+        white-space: nowrap;
+        color: hsl(var(--ph, 200), 85%, 75%);
+        background: var(--bg);
+        border-radius: 3px 3px 0 0;
       }
       .log .xterm-viewport {
         background: transparent !important;
@@ -2460,18 +2489,19 @@
       }
       async function pollPresence() {
         const cur = presenceTarget();
-        if (!cur) {
+        if (cur) {
+          try {
+            const all = await cur.tx.fetchJSON("/api/presence");
+            presencePeers = (Array.isArray(all) ? all : []).filter(
+              (v) => String(v.agent) === String(cur.e.pid) && v.viewer !== myViewerId,
+            );
+          } catch {
+            presencePeers = [];
+          }
+        } else {
           presencePeers = [];
-          return;
         }
-        try {
-          const all = await cur.tx.fetchJSON("/api/presence");
-          presencePeers = (Array.isArray(all) ? all : []).filter(
-            (v) => String(v.agent) === String(cur.e.pid) && v.viewer !== myViewerId,
-          );
-        } catch {
-          presencePeers = [];
-        }
+        renderPeerSelections();
       }
       // 3s heartbeat (< the host's 12s TTL): refresh our presence + read others'.
       setInterval(() => {
@@ -2480,6 +2510,66 @@
           pollPresence();
         }
       }, 3000);
+
+      // ---- slice 2: draw each peer's selection range as an overlay in OUR grid.
+      // Peer coords arrive in the peer's own cols×rows; we map them proportionally
+      // to ours and to pixels via the measured cell size. Approximate by design
+      // (doesn't track scrollback / exact reflow) — a "roughly here" presence hint.
+      function hashHue(s) {
+        let h = 0;
+        for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+        return h % 360;
+      }
+      function mapPeerSel(selStr, pc, pr, mc, mr) {
+        const m = /^(\d+),(\d+)-(\d+),(\d+)$/.exec(selStr || "");
+        if (!m) return null;
+        const mapR = (r) => (pr > 0 ? Math.round((r / pr) * mr) : r);
+        const mapC = (c) => (pc > 0 ? Math.round((c / pc) * mc) : c);
+        const r0 = mapR(+m[1]),
+          c0 = mapC(+m[2]),
+          r1 = mapR(+m[3]),
+          c1 = mapC(+m[4]);
+        return { r0: Math.min(r0, r1), c0: Math.min(c0, c1), r1: Math.max(r0, r1), c1: Math.max(c0, c1) };
+      }
+      function renderPeerSelections() {
+        const logEl = $("log");
+        if (!logEl) return;
+        let ov = logEl.querySelector(".peer-overlay");
+        const peers = term ? presencePeers.filter((p) => p && p.sel) : [];
+        const screen = term && term.element && term.element.querySelector(".xterm-screen");
+        if (!peers.length || !screen) {
+          if (ov) ov.innerHTML = "";
+          return;
+        }
+        if (!ov) {
+          ov = document.createElement("div");
+          ov.className = "peer-overlay";
+          logEl.appendChild(ov);
+        }
+        const sr = screen.getBoundingClientRect();
+        const lr = logEl.getBoundingClientRect();
+        if (!sr.width || !term.cols || !term.rows) {
+          ov.innerHTML = "";
+          return;
+        }
+        const ox = sr.left - lr.left,
+          oy = sr.top - lr.top;
+        const cw = sr.width / term.cols,
+          ch = sr.height / term.rows;
+        ov.innerHTML = peers
+          .map((p) => {
+            const r = mapPeerSel(p.sel, p.cols || term.cols, p.rows || term.rows, term.cols, term.rows);
+            if (!r) return "";
+            const top = oy + r.r0 * ch,
+              left = ox + r.c0 * cw;
+            const w = Math.max(cw, (r.c1 - r.c0) * cw),
+              h = (r.r1 - r.r0 + 1) * ch;
+            const hue = hashHue(p.viewer);
+            const tag = esc(String(p.viewer).slice(0, 4)) + " " + (p.cols || "?") + "×" + (p.rows || "?");
+            return `<div class="peer-sel" style="--ph:${hue};top:${top.toFixed(1)}px;left:${left.toFixed(1)}px;width:${w.toFixed(1)}px;height:${h.toFixed(1)}px"><span class="peer-tag">${tag}</span></div>`;
+          })
+          .join("");
+      }
 
       // Wire the ⋯ overflow menu and restore the saved HUD preference.
       // Recovery actions for the SELECTED agent, both confirmed first (destructive):
@@ -3036,6 +3126,7 @@
         trafReset();
         agentSize = null;
         presencePeers = []; // clear other-viewer list until the next poll for this agent
+        renderPeerSelections(); // drop any prior agent's peer-selection overlay now
         sendPresence(); // announce we're now watching this agent (host TTLs the prior one)
         paintHeaderBadge();
         // Remember the selection so a refresh re-opens this agent (see boot/autoPid).
@@ -3287,6 +3378,7 @@
           try {
             fit.fit();
           } catch {}
+        renderPeerSelections(); // cell size changed → reposition peer-selection overlays
       });
       // iOS overlays the soft keyboard ON TOP of the layout viewport rather than
       // shrinking it, so a bottom-anchored composer would hide behind it. Track
