@@ -1,5 +1,13 @@
 # agent-yes
 
+## Scratch / debug / temp scripts → `./tmp/`
+
+Put throwaway debug, probe, capture, and scratch scripts (and their output —
+screenshots, logs) under `./tmp/` at the repo root. It's already gitignored
+(see `.gitignore`). Do **not** scatter them in `scripts/` (that dir ships in the
+npm package), in `$HOME` / `%USERPROFILE%`, or in the system `%TEMP%` / msys
+`/tmp`. Clean them up when the task is done.
+
 ## After making changes, always rebuild and relink
 
 **TypeScript changes:**
