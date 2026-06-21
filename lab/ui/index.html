@@ -215,7 +215,10 @@
       /* ⋯ overflow menu in the terminal header + its dropdown. */
       .rmenu {
         position: relative;
-        margin-left: auto;
+        /* No margin-left:auto here: `.rhead .live` already carries the single
+           auto-margin that pushes the live/ctype/⋯ cluster right. A second
+           auto-margin would split the free space and strand the live+ctype
+           badge in the center of the header. */
       }
       .rmenubtn {
         background: none;
