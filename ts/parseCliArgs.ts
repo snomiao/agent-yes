@@ -115,7 +115,8 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
     })
     .option("yes", {
       type: "boolean",
-      description: "Pass --dangerously-skip-permissions to the CLI (claude shortcut)",
+      description:
+        "Pass the CLI's 'yolo' flag (claude: --dangerously-skip-permissions; codex: --dangerously-bypass-approvals-and-sandbox)",
       default: false,
       alias: "y",
     })
@@ -292,7 +293,10 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
       (dashIndex !== 0
         ? parsedArgv._[0]?.toString()?.replace?.(/-yes$/, "")
         : undefined)) as string,
-    cliArgs: [...cliArgsForSpawn, ...(parsedArgv.yes ? ["--dangerously-skip-permissions"] : [])],
+    cliArgs: cliArgsForSpawn,
+    // `-y`/--yes: the actual flag is per-CLI (see each CLI's `yesArgs` in
+    // default.config.yaml). agentYes() appends it once the CLI is resolved.
+    skipPermissions: parsedArgv.yes,
     prompt:
       [parsedArgv.prompt, positionalPrompt, dashPrompt].filter(Boolean).join(" ") || undefined,
     install: parsedArgv.install,

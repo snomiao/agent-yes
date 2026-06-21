@@ -99,6 +99,11 @@
           "items": { "type": "string" },
           "description": "Default arguments to always pass to the CLI"
         },
+        "yesArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Arguments appended when -y/--yes is passed: the per-CLI 'yolo' flag (claude: --dangerously-skip-permissions; codex: --dangerously-bypass-approvals-and-sandbox)"
+        },
         "ready": {
           "type": "array",
           "items": { "$ref": "#/definitions/RegexSource" },

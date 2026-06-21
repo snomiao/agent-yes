@@ -160,13 +160,19 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
         }
     }
 
-    // Add --dangerously-skip-permissions if -y was passed
-    if args.skip_permissions {
-        cmd_args.push("--dangerously-skip-permissions".to_string());
-    }
-
     // Add default args
     cmd_args.extend(cli_config.default_args.iter().cloned());
+
+    // Add the per-CLI "yolo" args if -y was passed. Each CLI declares its own
+    // (claude: --dangerously-skip-permissions; codex:
+    // --dangerously-bypass-approvals-and-sandbox). Codex rejects the claude flag
+    // outright, and its bwrap sandbox fails to init inside an already-sandboxed
+    // container ("bwrap: Failed to make / slave: Permission denied"), so its
+    // bypass flag is the correct escape hatch for those environments.
+    // Appended after default_args (matching the TS fallback in ts/index.ts).
+    if args.skip_permissions {
+        cmd_args.extend(cli_config.yes_args.iter().cloned());
+    }
 
     // Codex session resume: look up stored session ID for this cwd
     if args.continue_session && args.cli == "codex" {
