@@ -2386,11 +2386,26 @@
         const traffic =
           `<div class="ctip-traf"><span class="ctip-k">i/o</span>${sparkSvg(traf.hist, 96, 22) || "—"}</div>` +
           `<div><span class="ctip-k"></span>↓ ${fmtBytes(last.o)}/s&nbsp;&nbsp;↑ ${fmtBytes(last.i)}/s</div>`;
+        const viewers = presenceHtml();
         return (
           `<div class="ctip-sec">${vp}</div>` +
           `<div class="ctip-sec">${capHtml}</div>` +
-          `<div class="ctip-sec">${traffic}</div>`
+          `<div class="ctip-sec">${traffic}</div>` +
+          (viewers ? `<div class="ctip-sec">${viewers}</div>` : "")
         );
+      }
+      // Other viewers watching THIS agent (we exclude ourselves) + their viewports.
+      function presenceHtml() {
+        const others = presencePeers;
+        if (!others.length) return "";
+        const head = `<div><span class="ctip-k">viewers</span>👁 ${others.length + 1}&nbsp;<span style="color:var(--muted)">(you + ${others.length})</span></div>`;
+        const list = others
+          .map(
+            (v) =>
+              `<div><span class="ctip-k"></span>${esc((v.cols || "?") + "×" + (v.rows || "?"))}${v.sel ? " · sel" : ""}</div>`,
+          )
+          .join("");
+        return head + list;
       }
       // Always-on: sample the I/O ring every second and, while an agent is open,
       // repaint the badge so its hover tooltip (sparkline + caps + sizes) stays live.
@@ -2400,6 +2415,71 @@
         traf.cin = traf.cout = 0;
         if (sel) paintHeaderBadge();
       }, 1000);
+
+      // ---- multi-peer presence: report which agent we're watching + our viewport
+      // to the host, and read back the OTHER viewers, so the badge can show how many
+      // peers look at the same agent and at what size. Cosmetic; the host's
+      // /api/presence blackboard TTLs entries (hosts on an older `ay serve` just 404
+      // → we degrade to no viewers). Keyed by a per-tab viewer id so switching agents
+      // moves our single entry rather than stacking up.
+      const myViewerId = (() => {
+        try {
+          let v = sessionStorage.getItem("ay.viewer");
+          if (!v) {
+            v = Math.random().toString(36).slice(2, 10);
+            sessionStorage.setItem("ay.viewer", v);
+          }
+          return v;
+        } catch {
+          return Math.random().toString(36).slice(2, 10);
+        }
+      })();
+      let presencePeers = []; // others watching the SELECTED agent: [{cols,rows,sel}]
+      function presenceTarget() {
+        const e = sel ? entries.find((x) => x._key === sel) : null;
+        const src = e ? srcFor(e) : null;
+        return e && src && src.tx ? { e, tx: src.tx } : null;
+      }
+      function sendPresence() {
+        const cur = presenceTarget();
+        if (!cur || !term) return;
+        let selR = null;
+        try {
+          const s = term.getSelectionPosition && term.getSelectionPosition();
+          if (s) selR = `${s.startRow},${s.startColumn}-${s.endRow},${s.endColumn}`;
+        } catch {}
+        cur.tx
+          .post("/api/presence", {
+            viewer: myViewerId,
+            agent: cur.e.pid,
+            cols: term.cols,
+            rows: term.rows,
+            sel: selR,
+          })
+          .catch(() => {});
+      }
+      async function pollPresence() {
+        const cur = presenceTarget();
+        if (!cur) {
+          presencePeers = [];
+          return;
+        }
+        try {
+          const all = await cur.tx.fetchJSON("/api/presence");
+          presencePeers = (Array.isArray(all) ? all : []).filter(
+            (v) => String(v.agent) === String(cur.e.pid) && v.viewer !== myViewerId,
+          );
+        } catch {
+          presencePeers = [];
+        }
+      }
+      // 3s heartbeat (< the host's 12s TTL): refresh our presence + read others'.
+      setInterval(() => {
+        if (sel) {
+          sendPresence();
+          pollPresence();
+        }
+      }, 3000);
 
       // Wire the ⋯ overflow menu and restore the saved HUD preference.
       // Recovery actions for the SELECTED agent, both confirmed first (destructive):
@@ -2955,6 +3035,8 @@
         // and the remembered agent winsize so the badge tooltip doesn't show stale data.
         trafReset();
         agentSize = null;
+        presencePeers = []; // clear other-viewer list until the next poll for this agent
+        sendPresence(); // announce we're now watching this agent (host TTLs the prior one)
         paintHeaderBadge();
         // Remember the selection so a refresh re-opens this agent (see boot/autoPid).
         try {

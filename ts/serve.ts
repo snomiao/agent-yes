@@ -942,6 +942,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
     tasks: r.status === "exited" ? null : await logTasks(r.log_file),
   });
 
+  // Multi-peer presence blackboard: viewerId -> what that viewer is watching +
+  // its viewport/selection. Purely cosmetic ("who else is looking at this agent"),
+  // never a security surface — viewers self-report. Pruned by TTL on read.
+  const presence = new Map<
+    string,
+    { viewer: string; agent: string; cols: number; rows: number; sel: string | null; ts: number }
+  >();
+  const PRESENCE_TTL_MS = 12_000;
+
   // The whole API as a plain handler: served over HTTP by Bun.serve (--http)
   // and called in-process by the WebRTC bridge (--webrtc) — the latter needs
   // no TCP port at all.
@@ -1373,6 +1382,46 @@ export async function cmdServe(rest: string[]): Promise<number> {
       } catch (e) {
         return new Response((e as Error).message, { status: 404 });
       }
+    }
+
+    // POST /api/presence  body {viewer, agent, cols, rows, sel?} — a viewer
+    // self-reports which agent it's watching + its viewport (agent=null clears).
+    if (req.method === "POST" && p === "/api/presence") {
+      let b: {
+        viewer?: string;
+        agent?: string | number | null;
+        cols?: number;
+        rows?: number;
+        sel?: string;
+      };
+      try {
+        b = (await req.json()) as typeof b;
+      } catch {
+        return new Response("invalid JSON body", { status: 400 });
+      }
+      const viewer = String(b.viewer ?? "").slice(0, 64);
+      if (!viewer) return new Response("missing viewer", { status: 400 });
+      if (b.agent == null) presence.delete(viewer);
+      else
+        presence.set(viewer, {
+          viewer,
+          agent: String(b.agent),
+          cols: Math.max(0, Math.floor(Number(b.cols) || 0)),
+          rows: Math.max(0, Math.floor(Number(b.rows) || 0)),
+          sel: typeof b.sel === "string" ? b.sel.slice(0, 200) : null,
+          ts: Date.now(),
+        });
+      return new Response(null, { status: 204 });
+    }
+    // GET /api/presence — all live viewers (TTL-pruned), for "who's watching".
+    if (req.method === "GET" && p === "/api/presence") {
+      const now = Date.now();
+      const live: unknown[] = [];
+      for (const [k, v] of presence) {
+        if (now - v.ts > PRESENCE_TTL_MS) presence.delete(k);
+        else live.push(v);
+      }
+      return Response.json(live);
     }
 
     // POST /api/spawn  body {cli, cwd, prompt} — launch a new agent
