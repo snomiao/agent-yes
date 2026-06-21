@@ -212,6 +212,22 @@
         width: 56px;
         color: var(--muted);
       }
+      /* Diagnostics sections appended to the conn pill tooltip (viewport / terminal
+         caps / I/O sparkline). Each section is divided from the one above. */
+      .ctip-sec {
+        margin-top: 6px;
+        padding-top: 6px;
+        border-top: 1px solid var(--line);
+      }
+      .ctip-traf {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .ctip-spark {
+        vertical-align: middle;
+        opacity: 0.95;
+      }
       /* ⋯ overflow menu in the terminal header + its dropdown. */
       .rmenu {
         position: relative;
@@ -2177,7 +2193,7 @@
         const body = rows
           .map(([k, v]) => `<div><span class="ctip-k">${k}</span>${esc(String(v))}</div>`)
           .join("");
-        return `<span class="ctip">${head}${body || '<div class="ctip-k">probing…</div>'}</span>`;
+        return `<span class="ctip">${head}${body || '<div class="ctip-k">probing…</div>'}${diagTipHtml()}</span>`;
       }
       // Candidate pairs aren't known the instant a peer connects (ICE keeps probing)
       // and can change (relay fallback); a light poll keeps every pill honest.
@@ -2204,6 +2220,9 @@
       // typing into an otherwise-quiet agent — the real UX number for a TUI.
       let pendingKeyTs = 0;
       function perfNote(kind, n) {
+        // Always-on header-badge traffic ring (independent of the opt-in HUD below).
+        if (kind === "in") traf.cin += n || 0;
+        else if (kind === "out") traf.cout += n || 0;
         if (!perfOn) return;
         if (kind === "in") {
           perf.inEvents++;
@@ -2274,6 +2293,115 @@
           if (el) el.textContent = "measuring…";
         }
       }
+      // ---- header badge diagnostics: per-second I/O sparkline + terminal caps +
+      // viewport sizes, surfaced in the connection pill's hover tooltip. The traffic
+      // ring is ALWAYS-ON (decoupled from the opt-in perf HUD above): cin/cout
+      // accumulate the current second, the 1s tick samples them (cap TRAF_N), and an
+      // agent switch clears history so one agent's bytes never bleed into another.
+      const TRAF_N = 60;
+      const traf = { cin: 0, cout: 0, hist: [] };
+      function trafReset() {
+        traf.cin = traf.cout = 0;
+        traf.hist = [];
+      }
+      // The last winsize the agent's PTY reported (from /api/size), so the tooltip
+      // can show OUR viewport vs the agent's render size. Reset on agent switch.
+      let agentSize = null;
+
+      function isDarkColor(c) {
+        try {
+          let h = String(c).trim().replace(/^#/, "");
+          if (h.length === 3)
+            h = h
+              .split("")
+              .map((x) => x + x)
+              .join("");
+          const r = parseInt(h.slice(0, 2), 16),
+            g = parseInt(h.slice(2, 4), 16),
+            b = parseInt(h.slice(4, 6), 16);
+          return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
+        } catch {
+          return true;
+        }
+      }
+      // What the live xterm reports about the agent's TUI: mouse-tracking mode
+      // (DECSET), alt-screen, theme (→ light/dark), cursor style, and OUR size.
+      function termCaps() {
+        if (!term) return null;
+        const m = term.modes || {};
+        const mouse =
+          m.mouseTrackingMode && m.mouseTrackingMode !== "none" ? m.mouseTrackingMode : null;
+        let alt = false;
+        try {
+          alt = term.buffer.active.type === "alternate";
+        } catch {}
+        const th = (term.options && term.options.theme) || {};
+        const bg = th.background || null;
+        return {
+          mouse,
+          alt,
+          bg,
+          dark: bg ? isDarkColor(bg) : null,
+          cursor: (term.options && term.options.cursorStyle) || null,
+          cols: term.cols,
+          rows: term.rows,
+        };
+      }
+      // Two overlaid polylines (output green, input accent) normalised to the window
+      // max, so a tiny sparkline shows the I/O shape at a glance.
+      function sparkSvg(hist, w, h) {
+        const n = hist.length;
+        if (!n) return "";
+        const max = Math.max(1, ...hist.map((s) => Math.max(s.i, s.o)));
+        const xs = (i) => (n === 1 ? w - 1 : (i / (n - 1)) * (w - 1));
+        const ys = (v) => h - 1 - (v / max) * (h - 2);
+        const poly = (k, color) =>
+          `<polyline fill="none" stroke="${color}" stroke-width="1" points="${hist
+            .map((s, i) => xs(i).toFixed(1) + "," + ys(s[k]).toFixed(1))
+            .join(" ")}"/>`;
+        return `<svg class="ctip-spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${poly("o", "var(--green)")}${poly("i", "var(--accent)")}</svg>`;
+      }
+      // The diagnostics block appended to the connection-pill hover tooltip: viewport
+      // (deduped when OUR size matches the agent's), terminal caps, and the live I/O
+      // sparkline with current rates (↓ output from the agent, ↑ input to it).
+      function diagTipHtml() {
+        const caps = termCaps();
+        if (!caps) return "";
+        const you = caps.cols + "×" + caps.rows;
+        const ag = agentSize ? agentSize.cols + "×" + agentSize.rows : null;
+        const vp =
+          !ag || ag === you
+            ? `<div><span class="ctip-k">viewport</span>${you}</div>`
+            : `<div><span class="ctip-k">you</span>${you}</div><div><span class="ctip-k">agent</span>${ag}</div>`;
+        const caprows = [
+          ["mouse", caps.mouse ? "on (" + caps.mouse + ")" : "off"],
+          ["screen", caps.alt ? "alt" : "normal"],
+        ];
+        if (caps.dark != null)
+          caprows.push(["theme", (caps.dark ? "dark" : "light") + (caps.bg ? " " + caps.bg : "")]);
+        if (caps.cursor) caprows.push(["cursor", caps.cursor]);
+        const capHtml = caprows
+          .map(([k, v]) => `<div><span class="ctip-k">${k}</span>${esc(String(v))}</div>`)
+          .join("");
+        const last = traf.hist[traf.hist.length - 1] || { i: 0, o: 0 };
+        const traffic =
+          `<div class="ctip-traf"><span class="ctip-k">i/o</span>${sparkSvg(traf.hist, 96, 22) || "—"}</div>` +
+          `<div><span class="ctip-k"></span>↓ ${fmtBytes(last.o)}/s&nbsp;&nbsp;↑ ${fmtBytes(last.i)}/s</div>`;
+        return (
+          `<div class="ctip-sec">${vp}</div>` +
+          `<div class="ctip-sec">${capHtml}</div>` +
+          `<div class="ctip-sec">${traffic}</div>`
+        );
+      }
+      // Always-on: sample the I/O ring every second and, while an agent is open,
+      // repaint the badge so its hover tooltip (sparkline + caps + sizes) stays live.
+      setInterval(() => {
+        traf.hist.push({ i: traf.cin, o: traf.cout });
+        if (traf.hist.length > TRAF_N) traf.hist.shift();
+        traf.cin = traf.cout = 0;
+        if (sel) paintHeaderBadge();
+      }, 1000);
+
       // Wire the ⋯ overflow menu and restore the saved HUD preference.
       // Recovery actions for the SELECTED agent, both confirmed first (destructive):
       //   Stop  — graceful: send the CLI's exit command (claude/codex /exit, gemini
@@ -2824,6 +2952,10 @@
           return;
         }
         sel = e._key;
+        // Fresh diagnostics for the newly-opened agent: clear the I/O sparkline ring
+        // and the remembered agent winsize so the badge tooltip doesn't show stale data.
+        trafReset();
+        agentSize = null;
         paintHeaderBadge();
         // Remember the selection so a refresh re-opens this agent (see boot/autoPid).
         try {
@@ -2951,6 +3083,7 @@
         const selKey = e._key;
         const fitAndSync = (sz) => {
           if (sel !== selKey || !term) return;
+          if (sz && sz.cols && sz.rows) agentSize = sz; // remember for the badge tooltip
           try {
             fit.fit();
           } catch {}
