@@ -28,6 +28,7 @@ import {
   selSegments,
   fitTransform,
   docTitle,
+  statusGlyph,
 } from "../../lab/ui/console-logic.js";
 
 const agent = (over = {}) => ({
@@ -593,15 +594,32 @@ describe("fitTransform", () => {
   });
 });
 
+describe("statusGlyph", () => {
+  it("maps status → glyph", () => {
+    expect(statusGlyph("active")).toBe("●");
+    expect(statusGlyph("idle")).toBe("○");
+    expect(statusGlyph("exited")).toBe("✗");
+  });
+  it("is empty for unknown/missing status", () => {
+    expect(statusGlyph(undefined as any)).toBe("");
+    expect(statusGlyph("whatever" as any)).toBe("");
+  });
+});
+
 describe("docTitle", () => {
-  it("suffixes the selected agent's title", () => {
+  it("suffixes the selected agent's title (no status → no glyph)", () => {
     expect(docTitle("fix the bug")).toBe("fix the bug - agent-yes");
   });
-  it("trims whitespace", () => {
-    expect(docTitle("  build  ")).toBe("build - agent-yes");
+  it("prefixes the status glyph when given", () => {
+    expect(docTitle("fix the bug", "active")).toBe("● fix the bug - agent-yes");
+    expect(docTitle("fix the bug", "idle")).toBe("○ fix the bug - agent-yes");
+    expect(docTitle("fix the bug", "exited")).toBe("✗ fix the bug - agent-yes");
   });
-  it("falls back to the bare console title when empty", () => {
-    expect(docTitle("")).toBe("agent-yes · console");
+  it("trims whitespace", () => {
+    expect(docTitle("  build  ", "active")).toBe("● build - agent-yes");
+  });
+  it("falls back to the bare console title when empty (regardless of status)", () => {
+    expect(docTitle("", "active")).toBe("agent-yes · console");
     expect(docTitle("   ")).toBe("agent-yes · console");
     expect(docTitle(null as any)).toBe("agent-yes · console");
     expect(docTitle(undefined as any)).toBe("agent-yes · console");

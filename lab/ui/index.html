@@ -3161,6 +3161,7 @@
         }
         renderRoomsIfOpen();
         renderList();
+        refreshDocTitle(); // poll may have changed the selected agent's status
         if (autoPid && entries.some((x) => matchSel(x, autoPid))) {
           const tok = autoPid;
           autoPid = null;
@@ -3183,8 +3184,14 @@
       // $("rname") — set on select() and again on the agent's OSC title sequence —
       // so the tab tracks renames in realtime. Reverts to the default when nothing
       // is selected.
-      function setDocTitle(name) {
-        document.title = docTitle(name); // pure formatter in console-logic.js (tested)
+      // Tab title = status glyph + the live header name + " - agent-yes". Reads the
+      // currently-displayed name ($("rname"), kept fresh by select + onTitleChange)
+      // and the selected entry's status (refreshed by the poll via mergeRender), so
+      // both renames AND active→idle→exited transitions show in realtime.
+      function refreshDocTitle() {
+        const e = sel ? entries.find((x) => x._key === sel) : null;
+        const name = e ? $("rname").textContent : "";
+        document.title = docTitle(name, e && e.status); // pure formatter (tested)
       }
 
       function select(keyOrPid) {
@@ -3229,7 +3236,7 @@
         $("rdot").className = "dot " + e.status;
         const rname = e.title || cliLabel(e) || ident(e) || "agent";
         $("rname").textContent = rname;
-        setDocTitle(rname); // tab title follows the selected agent
+        refreshDocTitle(); // tab title follows the selected agent (name + status)
         $("rpid").textContent = "pid " + e.pid;
 
         // Render the agent's native TUI with xterm.js by feeding it the raw PTY
@@ -3278,7 +3285,7 @@
           const title = t && t.trim();
           if (sel !== e._key || !title) return;
           $("rname").textContent = title;
-          setDocTitle(title); // realtime rename → update the browser tab too
+          refreshDocTitle(); // realtime rename → update the browser tab too
           // Keep the left panel in lockstep with the terminal header. The row
           // title otherwise only refreshes on the 3s /api/ls poll, so it visibly
           // lagged the live terminal. Patch the current entry (entries is
