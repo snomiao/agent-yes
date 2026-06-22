@@ -1406,6 +1406,7 @@
         parseSel,
         selSegments,
         fitTransform,
+        docTitle,
       } from "./console-logic.js";
       import {
         MARKER as E2E_MARKER,
@@ -3178,6 +3179,14 @@
         }
       }
 
+      // Reflect the selected agent's title in the browser tab, live. Mirrors
+      // $("rname") — set on select() and again on the agent's OSC title sequence —
+      // so the tab tracks renames in realtime. Reverts to the default when nothing
+      // is selected.
+      function setDocTitle(name) {
+        document.title = docTitle(name); // pure formatter in console-logic.js (tested)
+      }
+
       function select(keyOrPid) {
         const e =
           entries.find((x) => x._key === keyOrPid) ||
@@ -3218,7 +3227,9 @@
         document.querySelector(".app").classList.add("show-detail");
         $("rhead").style.display = "flex";
         $("rdot").className = "dot " + e.status;
-        $("rname").textContent = e.title || cliLabel(e) || ident(e) || "agent";
+        const rname = e.title || cliLabel(e) || ident(e) || "agent";
+        $("rname").textContent = rname;
+        setDocTitle(rname); // tab title follows the selected agent
         $("rpid").textContent = "pid " + e.pid;
 
         // Render the agent's native TUI with xterm.js by feeding it the raw PTY
@@ -3267,6 +3278,7 @@
           const title = t && t.trim();
           if (sel !== e._key || !title) return;
           $("rname").textContent = title;
+          setDocTitle(title); // realtime rename → update the browser tab too
           // Keep the left panel in lockstep with the terminal header. The row
           // title otherwise only refreshes on the 3s /api/ls poll, so it visibly
           // lagged the live terminal. Patch the current entry (entries is

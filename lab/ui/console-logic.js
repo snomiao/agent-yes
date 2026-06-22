@@ -461,3 +461,10 @@ export function fitTransform(gridW, gridH, paneW, paneH) {
   const s = Math.min(paneW / gridW, paneH / gridH);
   return s > 0.985 && s < 1.04 ? "none" : "scale(" + s.toFixed(4) + ")";
 }
+
+// Browser-tab title: "<selected agent title> - agent-yes", or the bare console
+// title when nothing is selected (blank/whitespace name).
+export function docTitle(name) {
+  const n = name && String(name).trim();
+  return n ? n + " - agent-yes" : "agent-yes · console";
+}
