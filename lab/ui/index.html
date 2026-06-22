@@ -2475,11 +2475,16 @@
         let selR = null;
         try {
           // xterm 5.x: getSelectionPosition() returns { start:{x,y}, end:{x,y} }
-          // (x=column, y=buffer row), NOT the old startColumn/startRow shape. We
-          // emit "row,col-row,col" so the receiver's mapPeerSel regex matches.
+          // with y = ABSOLUTE buffer-line index. Viewers connect at different times,
+          // so their buffer-line indices don't line up — but the live-tail CONTENT
+          // is identical, so "lines from the BOTTOM" (length-1 - y) IS a shared
+          // coordinate. We emit fromBottom for rows; the receiver maps it back into
+          // its own buffer + viewport. cols stay as-is.
           const s = term.getSelectionPosition && term.getSelectionPosition();
-          if (s && s.start && s.end)
-            selR = `${s.start.y},${s.start.x}-${s.end.y},${s.end.x}`;
+          if (s && s.start && s.end) {
+            const last = (term.buffer.active.length || 1) - 1;
+            selR = `${last - s.start.y},${s.start.x}-${last - s.end.y},${s.end.x}`;
+          }
         } catch {}
         cur.tx
           .post("/api/presence", {
@@ -2524,30 +2529,33 @@
         for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
         return h % 360;
       }
-      // Parse "bufRow,col-bufRow,col" → ordered endpoints. Rows are ABSOLUTE
-      // buffer-line indices (xterm getSelectionPosition().{start,end}.y); columns
-      // are 0-based. Normalised so (r0,c0) precedes (r1,c1) in reading order.
+      // Parse "fbRow,col-fbRow,col" where the rows are LINES-FROM-THE-BOTTOM of the
+      // peer's buffer (a coordinate shared across viewers — see sendPresence).
       function parseSel(selStr) {
         const m = /^(\d+),(\d+)-(\d+),(\d+)$/.exec(selStr || "");
         if (!m) return null;
-        let r0 = +m[1],
-          c0 = +m[2],
-          r1 = +m[3],
-          c1 = +m[4];
-        if (r1 < r0 || (r1 === r0 && c1 < c0)) [r0, c0, r1, c1] = [r1, c1, r0, c0];
-        return { r0, c0, r1, c1 };
+        return { fa: +m[1], ca: +m[2], fb: +m[3], cb: +m[4] };
       }
-      // A terminal selection is per-row spans: first row c0→right edge, full-width
-      // middle rows, last row 0→c1 (a single row is just c0..c1). Returned in
-      // BUFFER rows + column spans mapped to OUR width — EXACT when widths match,
-      // proportional only as a fallback when the peer renders at a different width.
-      function selSegments(sel, peerCols, myCols) {
+      // Per-row spans for a peer selection, in OUR buffer rows. fromBottom is mapped
+      // against OUR buffer bottom (myLast) so the same live-tail line matches even
+      // though absolute indices differ between viewers; only the rows visible in our
+      // viewport [vy, vy+myRows) are emitted (so a giant selection stays cheap). A
+      // selection is per-row: top row cA→edge, full-width middle, bottom row 0→cB.
+      // Columns are EXACT when widths match, proportional only as a fallback.
+      function selSegments(sel, myLast, vy, myRows, peerCols, myCols) {
         const sameW = (peerCols || myCols) === myCols;
         const mapC = (c) => (sameW ? c : Math.round((c / (peerCols || myCols)) * myCols));
+        let rA = myLast - sel.fa,
+          rB = myLast - sel.fb,
+          cA = sel.ca,
+          cB = sel.cb;
+        if (rA > rB) ([rA, rB] = [rB, rA]), ([cA, cB] = [cB, cA]); // rA = top row
         const segs = [];
-        for (let r = sel.r0; r <= sel.r1; r++) {
-          const a = r === sel.r0 ? sel.c0 : 0;
-          const b = r === sel.r1 ? sel.c1 : myCols;
+        const from = Math.max(rA, vy),
+          to = Math.min(rB, vy + myRows - 1);
+        for (let r = from; r <= to; r++) {
+          const a = r === rA ? cA : 0;
+          const b = r === rB ? cB : myCols;
           segs.push({ row: r, a: Math.min(mapC(a), mapC(b)), b: Math.max(mapC(a), mapC(b)) });
         }
         return segs;
@@ -2577,11 +2585,13 @@
           oy = sr.top - lr.top;
         const cw = sr.width / term.cols,
           ch = sr.height / term.rows;
-        // Buffer line at the top of OUR viewport: a peer's absolute buffer row R
-        // shows at our viewport row (R − viewportY). Re-rendered on term.onScroll so
-        // the box tracks exactly as we move through scrollback, and clips when the
-        // peer's selection scrolls out of our view.
-        const vy = (term.buffer && term.buffer.active && term.buffer.active.viewportY) || 0;
+        // Anchor to OUR buffer: viewportY = top visible buffer line, myLast = bottom
+        // buffer line. A peer's fromBottom row maps to our buffer row (myLast − fb)
+        // then to our viewport row (− viewportY). Re-rendered on term.onScroll so the
+        // box tracks as we move through scrollback, and clips when out of view.
+        const ba = term.buffer && term.buffer.active;
+        const vy = (ba && ba.viewportY) || 0;
+        const myLast = ((ba && ba.length) || 1) - 1;
         const html = [];
         for (const p of peers) {
           const sel = parseSel(p.sel);
@@ -2589,9 +2599,9 @@
           const hue = hashHue(p.viewer);
           const tag = esc(String(p.viewer).slice(0, 4)) + " " + (p.cols || "?") + "×" + (p.rows || "?");
           let tagged = false;
-          for (const seg of selSegments(sel, p.cols || term.cols, term.cols)) {
-            const vr = seg.row - vy; // absolute buffer row → our viewport row
-            if (vr < 0 || vr > term.rows - 1) continue; // scrolled out of view
+          for (const seg of selSegments(sel, myLast, vy, term.rows, p.cols || term.cols, term.cols)) {
+            const vr = seg.row - vy; // our buffer row → our viewport row
+            if (vr < 0 || vr > term.rows - 1) continue; // safety (selSegments already clips)
             const left = ox + seg.a * cw;
             const w = Math.max(cw, (seg.b - seg.a) * cw);
             const top = oy + vr * ch;
