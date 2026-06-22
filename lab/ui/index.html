@@ -2474,8 +2474,12 @@
         if (!cur || !term) return;
         let selR = null;
         try {
+          // xterm 5.x: getSelectionPosition() returns { start:{x,y}, end:{x,y} }
+          // (x=column, y=buffer row), NOT the old startColumn/startRow shape. We
+          // emit "row,col-row,col" so the receiver's mapPeerSel regex matches.
           const s = term.getSelectionPosition && term.getSelectionPosition();
-          if (s) selR = `${s.startRow},${s.startColumn}-${s.endRow},${s.endColumn}`;
+          if (s && s.start && s.end)
+            selR = `${s.start.y},${s.start.x}-${s.end.y},${s.end.x}`;
         } catch {}
         cur.tx
           .post("/api/presence", {
