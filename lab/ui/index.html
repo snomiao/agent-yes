@@ -2529,7 +2529,12 @@
           c0 = mapC(+m[2]),
           r1 = mapR(+m[3]),
           c1 = mapC(+m[4]);
-        return { r0: Math.min(r0, r1), c0: Math.min(c0, c1), r1: Math.max(r0, r1), c1: Math.max(c0, c1) };
+        return {
+          r0: Math.min(r0, r1),
+          c0: Math.min(c0, c1),
+          r1: Math.max(r0, r1),
+          c1: Math.max(c0, c1),
+        };
       }
       function renderPeerSelections() {
         const logEl = $("log");
@@ -2558,14 +2563,21 @@
           ch = sr.height / term.rows;
         ov.innerHTML = peers
           .map((p) => {
-            const r = mapPeerSel(p.sel, p.cols || term.cols, p.rows || term.rows, term.cols, term.rows);
+            const r = mapPeerSel(
+              p.sel,
+              p.cols || term.cols,
+              p.rows || term.rows,
+              term.cols,
+              term.rows,
+            );
             if (!r) return "";
             const top = oy + r.r0 * ch,
               left = ox + r.c0 * cw;
             const w = Math.max(cw, (r.c1 - r.c0) * cw),
               h = (r.r1 - r.r0 + 1) * ch;
             const hue = hashHue(p.viewer);
-            const tag = esc(String(p.viewer).slice(0, 4)) + " " + (p.cols || "?") + "×" + (p.rows || "?");
+            const tag =
+              esc(String(p.viewer).slice(0, 4)) + " " + (p.cols || "?") + "×" + (p.rows || "?");
             return `<div class="peer-sel" style="--ph:${hue};top:${top.toFixed(1)}px;left:${left.toFixed(1)}px;width:${w.toFixed(1)}px;height:${h.toFixed(1)}px"><span class="peer-tag">${tag}</span></div>`;
           })
           .join("");
