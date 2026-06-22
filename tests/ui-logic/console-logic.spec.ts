@@ -27,6 +27,7 @@ import {
   parseSel,
   selSegments,
   fitTransform,
+  docTitle,
 } from "../../lab/ui/console-logic.js";
 
 const agent = (over = {}) => ({
@@ -589,5 +590,20 @@ describe("fitTransform", () => {
   it("guards bad dimensions", () => {
     expect(fitTransform(0, 480, 800, 480)).toBe("none");
     expect(fitTransform(800, 480, 0, 480)).toBe("none");
+  });
+});
+
+describe("docTitle", () => {
+  it("suffixes the selected agent's title", () => {
+    expect(docTitle("fix the bug")).toBe("fix the bug - agent-yes");
+  });
+  it("trims whitespace", () => {
+    expect(docTitle("  build  ")).toBe("build - agent-yes");
+  });
+  it("falls back to the bare console title when empty", () => {
+    expect(docTitle("")).toBe("agent-yes · console");
+    expect(docTitle("   ")).toBe("agent-yes · console");
+    expect(docTitle(null as any)).toBe("agent-yes · console");
+    expect(docTitle(undefined as any)).toBe("agent-yes · console");
   });
 });
