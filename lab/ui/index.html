@@ -970,6 +970,13 @@
       }
       .log .xterm {
         height: 100%;
+        /* Shared-canvas: when we're a WATCHER rendering at another viewer's
+           (the driver's) grid size, scale the whole grid to fit our pane instead
+           of reflowing. transform-origin keeps the scaled grid pinned top-left so
+           the peer-selection overlay (which uses grid coords) still lines up.
+           For the driver / single viewer the grid already fits, so no transform
+           is applied (see applyCanvasScale). */
+        transform-origin: top left;
       }
       /* Other viewers' selection ranges, drawn over our grid (slice 2 of
          multi-peer presence). Approximate — peer coords are mapped proportionally
@@ -2335,6 +2342,10 @@
       // The last winsize the agent's PTY reported (from /api/size), so the tooltip
       // can show OUR viewport vs the agent's render size. Reset on agent switch.
       let agentSize = null;
+      // When WE last drove the grid size (pushed our size to the agent). For a
+      // short lease after that, the heartbeat won't follow/override — so our own
+      // push isn't fought while the agent's /api/size is still catching up.
+      let lastDroveAt = 0;
 
       function isDarkColor(c) {
         try {
@@ -2512,12 +2523,19 @@
         }
         renderPeerSelections();
       }
-      // 3s heartbeat (< the host's 12s TTL): refresh our presence + read others'.
+      // 3s heartbeat (< the host's 12s TTL): refresh our presence + read others',
+      // and follow the canonical grid size (resize+scale, never reflow) so all
+      // viewers stay on one shared canvas and selections line up.
       setInterval(() => {
-        if (sel) {
-          sendPresence();
-          pollPresence();
-        }
+        if (!sel) return;
+        sendPresence();
+        pollPresence();
+        const cur = presenceTarget();
+        if (cur)
+          cur.tx
+            .fetchJSON("/api/size/" + encodeURIComponent(cur.e.pid))
+            .then(followAgentSize)
+            .catch(() => {});
       }, 3000);
 
       // ---- slice 2: draw each peer's selection range as an overlay in OUR grid.
@@ -2612,6 +2630,51 @@
           }
         }
         ov.innerHTML = html.join("");
+      }
+
+      // ---- shared canvas: scale (don't reflow) the grid to fit our pane --------
+      // When we render at the canonical (driver/agent) grid size and it doesn't
+      // match our pane, CSS-scale the whole .xterm to fit — so every viewer shows
+      // identical content and selections/overlays line up. For the driver / single
+      // viewer the grid already fits the pane (scale ≈ 1) → no transform, so the
+      // common path is byte-for-byte unchanged. Best-effort + guarded.
+      function applyCanvasScale() {
+        try {
+          const logEl = $("log");
+          const xt = logEl && logEl.querySelector(".xterm");
+          if (!xt) return;
+          xt.style.transform = "none"; // measure the natural (unscaled) grid
+          const screen = xt.querySelector(".xterm-screen");
+          if (!screen) return;
+          const gw = screen.offsetWidth,
+            gh = screen.offsetHeight;
+          if (!gw || !gh) return;
+          const cs = getComputedStyle(logEl);
+          const pw = logEl.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+          const ph = logEl.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+          if (pw <= 0 || ph <= 0) return;
+          const s = Math.min(pw / gw, ph / gh);
+          // Near-1 (driver / single viewer): keep it crisp, no transform.
+          xt.style.transform = s > 0.985 && s < 1.04 ? "none" : "scale(" + s.toFixed(4) + ")";
+        } catch {}
+      }
+      // Follow the canonical grid: resize our xterm to the agent's size (set by the
+      // active driver / local owner) WITHOUT reflowing to our pane, then scale to
+      // fit. No-op when we already match (we're the driver, or sizes agree).
+      function followAgentSize(sz) {
+        if (!term || !sz || !sz.cols || !sz.rows) return;
+        // While our own recent push is still settling, don't fight it.
+        if (Date.now() - lastDroveAt < 6000) {
+          applyCanvasScale();
+          return;
+        }
+        if (sz.cols !== term.cols || sz.rows !== term.rows) {
+          agentSize = sz;
+          try {
+            term.resize(sz.cols, sz.rows);
+          } catch {}
+        }
+        applyCanvasScale();
       }
 
       // Wire the ⋯ overflow menu and restore the saved HUD preference.
@@ -3262,11 +3325,13 @@
         // one-shot "push only if the agent is out of sync" check.
         let suppressPush = true;
         const pushSize = () => {
-          if (term && sel === e._key && !suppressPush)
+          if (term && sel === e._key && !suppressPush) {
+            lastDroveAt = Date.now(); // we're driving the size now (lease the grid)
             tx.post("/api/resize/" + encodeURIComponent(pid), {
               cols: term.cols,
               rows: term.rows,
             }).catch(() => {});
+          }
         };
         term.onResize(pushSize);
         // Scrolling through OUR scrollback moves the viewport over the buffer, so
@@ -3306,12 +3371,14 @@
             fit.fit();
           } catch {}
           if (!sz || sz.cols !== term.cols || sz.rows !== term.rows) {
+            lastDroveAt = Date.now(); // adopting our size on open = we drive (lease)
             tx.post("/api/resize/" + encodeURIComponent(pid), {
               cols: term.cols,
               rows: term.rows,
             }).catch(() => {});
           }
           suppressPush = false;
+          applyCanvasScale(); // driver: grid == pane → no-op; otherwise letterbox
         };
         // Fit + sync now, and on every later tab re-activation: re-measure our pane
         // and re-assert our size to the agent so the stream always reflows to OUR
@@ -3420,10 +3487,14 @@
         renderList();
       });
       window.addEventListener("resize", () => {
+        // Resizing our window is strong intent → re-fit to our pane (we become the
+        // size driver; the push rides term.onResize). applyCanvasScale then clears
+        // the transform since our grid now matches our pane.
         if (fit)
           try {
             fit.fit();
           } catch {}
+        applyCanvasScale();
         renderPeerSelections(); // cell size changed → reposition peer-selection overlays
       });
       // iOS overlays the soft keyboard ON TOP of the layout viewport rather than
