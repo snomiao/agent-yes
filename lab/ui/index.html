@@ -2524,16 +2524,33 @@
         for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
         return h % 360;
       }
-      function mapPeerSel(selStr, pc, pr, mc, mr) {
+      // Parse "bufRow,col-bufRow,col" → ordered endpoints. Rows are ABSOLUTE
+      // buffer-line indices (xterm getSelectionPosition().{start,end}.y); columns
+      // are 0-based. Normalised so (r0,c0) precedes (r1,c1) in reading order.
+      function parseSel(selStr) {
         const m = /^(\d+),(\d+)-(\d+),(\d+)$/.exec(selStr || "");
         if (!m) return null;
-        const mapR = (r) => (pr > 0 ? Math.round((r / pr) * mr) : r);
-        const mapC = (c) => (pc > 0 ? Math.round((c / pc) * mc) : c);
-        const r0 = mapR(+m[1]),
-          c0 = mapC(+m[2]),
-          r1 = mapR(+m[3]),
-          c1 = mapC(+m[4]);
-        return { r0: Math.min(r0, r1), c0: Math.min(c0, c1), r1: Math.max(r0, r1), c1: Math.max(c0, c1) };
+        let r0 = +m[1],
+          c0 = +m[2],
+          r1 = +m[3],
+          c1 = +m[4];
+        if (r1 < r0 || (r1 === r0 && c1 < c0)) [r0, c0, r1, c1] = [r1, c1, r0, c0];
+        return { r0, c0, r1, c1 };
+      }
+      // A terminal selection is per-row spans: first row c0→right edge, full-width
+      // middle rows, last row 0→c1 (a single row is just c0..c1). Returned in
+      // BUFFER rows + column spans mapped to OUR width — EXACT when widths match,
+      // proportional only as a fallback when the peer renders at a different width.
+      function selSegments(sel, peerCols, myCols) {
+        const sameW = (peerCols || myCols) === myCols;
+        const mapC = (c) => (sameW ? c : Math.round((c / (peerCols || myCols)) * myCols));
+        const segs = [];
+        for (let r = sel.r0; r <= sel.r1; r++) {
+          const a = r === sel.r0 ? sel.c0 : 0;
+          const b = r === sel.r1 ? sel.c1 : myCols;
+          segs.push({ row: r, a: Math.min(mapC(a), mapC(b)), b: Math.max(mapC(a), mapC(b)) });
+        }
+        return segs;
       }
       function renderPeerSelections() {
         const logEl = $("log");
@@ -2560,19 +2577,31 @@
           oy = sr.top - lr.top;
         const cw = sr.width / term.cols,
           ch = sr.height / term.rows;
-        ov.innerHTML = peers
-          .map((p) => {
-            const r = mapPeerSel(p.sel, p.cols || term.cols, p.rows || term.rows, term.cols, term.rows);
-            if (!r) return "";
-            const top = oy + r.r0 * ch,
-              left = ox + r.c0 * cw;
-            const w = Math.max(cw, (r.c1 - r.c0) * cw),
-              h = (r.r1 - r.r0 + 1) * ch;
-            const hue = hashHue(p.viewer);
-            const tag = esc(String(p.viewer).slice(0, 4)) + " " + (p.cols || "?") + "×" + (p.rows || "?");
-            return `<div class="peer-sel" style="--ph:${hue};top:${top.toFixed(1)}px;left:${left.toFixed(1)}px;width:${w.toFixed(1)}px;height:${h.toFixed(1)}px"><span class="peer-tag">${tag}</span></div>`;
-          })
-          .join("");
+        // Buffer line at the top of OUR viewport: a peer's absolute buffer row R
+        // shows at our viewport row (R − viewportY). Re-rendered on term.onScroll so
+        // the box tracks exactly as we move through scrollback, and clips when the
+        // peer's selection scrolls out of our view.
+        const vy = (term.buffer && term.buffer.active && term.buffer.active.viewportY) || 0;
+        const html = [];
+        for (const p of peers) {
+          const sel = parseSel(p.sel);
+          if (!sel) continue;
+          const hue = hashHue(p.viewer);
+          const tag = esc(String(p.viewer).slice(0, 4)) + " " + (p.cols || "?") + "×" + (p.rows || "?");
+          let tagged = false;
+          for (const seg of selSegments(sel, p.cols || term.cols, term.cols)) {
+            const vr = seg.row - vy; // absolute buffer row → our viewport row
+            if (vr < 0 || vr > term.rows - 1) continue; // scrolled out of view
+            const left = ox + seg.a * cw;
+            const w = Math.max(cw, (seg.b - seg.a) * cw);
+            const top = oy + vr * ch;
+            const tagEl = tagged ? "" : ((tagged = true), `<span class="peer-tag">${tag}</span>`);
+            html.push(
+              `<div class="peer-sel" style="--ph:${hue};top:${top.toFixed(1)}px;left:${left.toFixed(1)}px;width:${w.toFixed(1)}px;height:${ch.toFixed(1)}px">${tagEl}</div>`,
+            );
+          }
+        }
+        ov.innerHTML = html.join("");
       }
 
       // Wire the ⋯ overflow menu and restore the saved HUD preference.
@@ -3230,6 +3259,9 @@
             }).catch(() => {});
         };
         term.onResize(pushSize);
+        // Scrolling through OUR scrollback moves the viewport over the buffer, so
+        // re-place peer-selection overlays (they're anchored to absolute buffer rows).
+        term.onScroll(() => renderPeerSelections());
         // Forward everything the terminal emits to the agent stdin (raw, no
         // trailing Enter): keystrokes, paste, and — when a TUI enables mouse
         // tracking — click / drag-motion / wheel as SGR mouse reports. onBinary
