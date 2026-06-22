@@ -395,3 +395,69 @@ export function nextIndex(len, i, dir) {
   if (i < 0) return dir > 0 ? 0 : len - 1;
   return Math.max(0, Math.min(len - 1, i + dir));
 }
+
+// ---------------------------------------------------------------------------
+// multi-viewer presence + shared-canvas geometry
+// index.html keeps the DOM glue (measuring elements, applying transforms); the
+// coordinate math lives here so it's unit-testable without a browser.
+// ---------------------------------------------------------------------------
+
+// Stable per-viewer hue (0..359) for colour-coding peers' selections.
+export function hashHue(s) {
+  let h = 0;
+  for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+  return h % 360;
+}
+
+// Encode an xterm selection (getSelectionPosition() → {start:{x,y}, end:{x,y}},
+// y = ABSOLUTE buffer line) as "fromBottomRow,col-fromBottomRow,col". Viewers
+// connect at different times so absolute rows don't align, but the live-tail
+// content does — distance from the bottom is a shared coordinate. `bufferLen` is
+// the buffer's line count. Returns null when there's no selection.
+export function selFromBottom(s, bufferLen) {
+  if (!s || !s.start || !s.end) return null;
+  const last = (bufferLen || 1) - 1;
+  return `${last - s.start.y},${s.start.x}-${last - s.end.y},${s.end.x}`;
+}
+
+// Parse "fbRow,col-fbRow,col" (rows = lines-from-bottom). null if malformed.
+export function parseSel(selStr) {
+  const m = /^(\d+),(\d+)-(\d+),(\d+)$/.exec(selStr || "");
+  if (!m) return null;
+  return { fa: +m[1], ca: +m[2], fb: +m[3], cb: +m[4] };
+}
+
+// Per-row spans for a peer selection, in OUR buffer rows, clipped to the visible
+// viewport [vy, vy+myRows). fromBottom is mapped against OUR buffer bottom
+// (myLast) so the same tail line matches across viewers of different scrollback
+// depth. A selection is per-row: top row cA→edge, full-width middle, bottom row
+// 0→cB. Columns are EXACT when widths match, proportional only as a fallback.
+export function selSegments(sel, myLast, vy, myRows, peerCols, myCols) {
+  if (!sel) return [];
+  const sameW = (peerCols || myCols) === myCols;
+  const mapC = (c) => (sameW ? c : Math.round((c / (peerCols || myCols)) * myCols));
+  let rA = myLast - sel.fa,
+    rB = myLast - sel.fb,
+    cA = sel.ca,
+    cB = sel.cb;
+  if (rA > rB) ([rA, rB] = [rB, rA]), ([cA, cB] = [cB, cA]); // rA = top row
+  const segs = [];
+  const from = Math.max(rA, vy),
+    to = Math.min(rB, vy + myRows - 1);
+  for (let r = from; r <= to; r++) {
+    const a = r === rA ? cA : 0;
+    const b = r === rB ? cB : myCols;
+    segs.push({ row: r, a: Math.min(mapC(a), mapC(b)), b: Math.max(mapC(a), mapC(b)) });
+  }
+  return segs;
+}
+
+// Shared-canvas fit: the CSS transform that fits a grid (gridW×gridH px) into a
+// pane (paneW×paneH px). Near-1 → "none" so the driver / single viewer (whose
+// grid already fits) stays crisp and unchanged; otherwise "scale(s)". The
+// 0.985–1.04 band absorbs FitAddon's whole-cell rounding slack.
+export function fitTransform(gridW, gridH, paneW, paneH) {
+  if (!gridW || !gridH || paneW <= 0 || paneH <= 0) return "none";
+  const s = Math.min(paneW / gridW, paneH / gridH);
+  return s > 0.985 && s < 1.04 ? "none" : "scale(" + s.toFixed(4) + ")";
+}

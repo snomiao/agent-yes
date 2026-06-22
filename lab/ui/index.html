@@ -1401,6 +1401,11 @@
         deviceCount,
         layeredRows,
         taskLabel,
+        hashHue,
+        selFromBottom,
+        parseSel,
+        selSegments,
+        fitTransform,
       } from "./console-logic.js";
       import {
         MARKER as E2E_MARKER,
@@ -2485,17 +2490,11 @@
         if (!cur || !term) return;
         let selR = null;
         try {
-          // xterm 5.x: getSelectionPosition() returns { start:{x,y}, end:{x,y} }
-          // with y = ABSOLUTE buffer-line index. Viewers connect at different times,
-          // so their buffer-line indices don't line up — but the live-tail CONTENT
-          // is identical, so "lines from the BOTTOM" (length-1 - y) IS a shared
-          // coordinate. We emit fromBottom for rows; the receiver maps it back into
-          // its own buffer + viewport. cols stay as-is.
+          // selFromBottom (console-logic.js) encodes the selection as
+          // lines-from-bottom — a coordinate shared across differently-sized
+          // viewers (see its doc); the receiver maps it back into its own buffer.
           const s = term.getSelectionPosition && term.getSelectionPosition();
-          if (s && s.start && s.end) {
-            const last = (term.buffer.active.length || 1) - 1;
-            selR = `${last - s.start.y},${s.start.x}-${last - s.end.y},${s.end.x}`;
-          }
+          selR = selFromBottom(s, term.buffer.active.length);
         } catch {}
         cur.tx
           .post("/api/presence", {
@@ -2538,46 +2537,9 @@
             .catch(() => {});
       }, 3000);
 
-      // ---- slice 2: draw each peer's selection range as an overlay in OUR grid.
-      // Peer coords arrive in the peer's own cols×rows; we map them proportionally
-      // to ours and to pixels via the measured cell size. Approximate by design
-      // (doesn't track scrollback / exact reflow) — a "roughly here" presence hint.
-      function hashHue(s) {
-        let h = 0;
-        for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-        return h % 360;
-      }
-      // Parse "fbRow,col-fbRow,col" where the rows are LINES-FROM-THE-BOTTOM of the
-      // peer's buffer (a coordinate shared across viewers — see sendPresence).
-      function parseSel(selStr) {
-        const m = /^(\d+),(\d+)-(\d+),(\d+)$/.exec(selStr || "");
-        if (!m) return null;
-        return { fa: +m[1], ca: +m[2], fb: +m[3], cb: +m[4] };
-      }
-      // Per-row spans for a peer selection, in OUR buffer rows. fromBottom is mapped
-      // against OUR buffer bottom (myLast) so the same live-tail line matches even
-      // though absolute indices differ between viewers; only the rows visible in our
-      // viewport [vy, vy+myRows) are emitted (so a giant selection stays cheap). A
-      // selection is per-row: top row cA→edge, full-width middle, bottom row 0→cB.
-      // Columns are EXACT when widths match, proportional only as a fallback.
-      function selSegments(sel, myLast, vy, myRows, peerCols, myCols) {
-        const sameW = (peerCols || myCols) === myCols;
-        const mapC = (c) => (sameW ? c : Math.round((c / (peerCols || myCols)) * myCols));
-        let rA = myLast - sel.fa,
-          rB = myLast - sel.fb,
-          cA = sel.ca,
-          cB = sel.cb;
-        if (rA > rB) ([rA, rB] = [rB, rA]), ([cA, cB] = [cB, cA]); // rA = top row
-        const segs = [];
-        const from = Math.max(rA, vy),
-          to = Math.min(rB, vy + myRows - 1);
-        for (let r = from; r <= to; r++) {
-          const a = r === rA ? cA : 0;
-          const b = r === rB ? cB : myCols;
-          segs.push({ row: r, a: Math.min(mapC(a), mapC(b)), b: Math.max(mapC(a), mapC(b)) });
-        }
-        return segs;
-      }
+      // Peer-selection overlay. The coordinate math (parseSel / selSegments /
+      // hashHue) lives in console-logic.js (unit-tested); here we just measure the
+      // DOM and place the boxes. Drawn in OUR buffer rows, clipped to the viewport.
       function renderPeerSelections() {
         const logEl = $("log");
         if (!logEl) return;
@@ -2652,10 +2614,8 @@
           const cs = getComputedStyle(logEl);
           const pw = logEl.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
           const ph = logEl.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
-          if (pw <= 0 || ph <= 0) return;
-          const s = Math.min(pw / gw, ph / gh);
-          // Near-1 (driver / single viewer): keep it crisp, no transform.
-          xt.style.transform = s > 0.985 && s < 1.04 ? "none" : "scale(" + s.toFixed(4) + ")";
+          // fitTransform (console-logic.js) decides none-vs-scale (unit-tested).
+          xt.style.transform = fitTransform(gw, gh, pw, ph);
         } catch {}
       }
       // Follow the canonical grid: resize our xterm to the agent's size (set by the
