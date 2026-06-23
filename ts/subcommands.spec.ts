@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
 
@@ -1464,5 +1464,62 @@ describe("subcommands.resolveReadWindow", () => {
       start: 0,
       end: 96,
     });
+  });
+});
+
+describe("subcommands.deriveLiveStatus", () => {
+  const rec = (over: any) => ({
+    pid: process.pid,
+    cli: "claude",
+    prompt: null,
+    cwd: "/tmp",
+    log_file: null,
+    fifo_file: null,
+    status: "active",
+    exit_code: null,
+    exit_reason: null,
+    started_at: 0,
+    ...over,
+  });
+
+  it("returns 'exited' for a dead pid", async () => {
+    const mod = await loadModule();
+    expect(await mod.deriveLiveStatus(rec({ pid: 2147483646 }))).toBe("exited");
+  });
+
+  it("returns 'exited' when the record is already exited", async () => {
+    const mod = await loadModule();
+    expect(await mod.deriveLiveStatus(rec({ status: "exited" }))).toBe("exited");
+  });
+
+  it("returns 'active' for an alive pid with no log file", async () => {
+    const mod = await loadModule();
+    expect(await mod.deriveLiveStatus(rec({ log_file: null }))).toBe("active");
+  });
+
+  it("returns 'active' for an alive pid with a freshly-written log", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-dls-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "hi");
+      const mod = await loadModule();
+      expect(await mod.deriveLiveStatus(rec({ log_file: log }))).toBe("active");
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("returns 'idle' when the log has been quiet past the threshold", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-dls-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "hi");
+      const old = new Date(Date.now() - 5 * 60 * 1000); // 5 min ago > 60s threshold
+      await utimes(log, old, old);
+      const mod = await loadModule();
+      expect(await mod.deriveLiveStatus(rec({ log_file: log }))).toBe("idle");
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
   });
 });
