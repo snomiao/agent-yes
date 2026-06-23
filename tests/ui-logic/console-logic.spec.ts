@@ -29,6 +29,7 @@ import {
   fitTransform,
   docTitle,
   statusGlyph,
+  omniScore,
 } from "../../lab/ui/console-logic.js";
 
 const agent = (over = {}) => ({
@@ -623,5 +624,30 @@ describe("docTitle", () => {
     expect(docTitle("   ")).toBe("agent-yes · console");
     expect(docTitle(null as any)).toBe("agent-yes · console");
     expect(docTitle(undefined as any)).toBe("agent-yes · console");
+  });
+});
+
+describe("omniScore", () => {
+  const e = (over: any) => ({ title: "", cwd: "", prompt: "", ...over });
+  it("ranks title hits above cwd/prompt hits", () => {
+    expect(omniScore(e({ title: "fix login" }), "fix")).toBeGreaterThan(
+      omniScore(e({ cwd: "/x/fix" }), "fix"),
+    );
+    expect(omniScore(e({ cwd: "/x/fix" }), "fix")).toBeGreaterThan(
+      omniScore(e({ prompt: "fix it" }), "fix"),
+    );
+  });
+  it("exact > startsWith > includes for titles", () => {
+    expect(omniScore(e({ title: "deploy" }), "deploy")).toBe(100);
+    expect(omniScore(e({ title: "deploy the app" }), "deploy")).toBe(80);
+    expect(omniScore(e({ title: "please deploy" }), "deploy")).toBe(60);
+  });
+  it("is case-insensitive and trims the query", () => {
+    expect(omniScore(e({ title: "Deploy" }), "  DEPLOY  ")).toBe(100);
+  });
+  it("returns 0 for no hit or empty query", () => {
+    expect(omniScore(e({ title: "abc" }), "xyz")).toBe(0);
+    expect(omniScore(e({ title: "abc" }), "")).toBe(0);
+    expect(omniScore(e({ title: "abc" }), "   ")).toBe(0);
   });
 });
