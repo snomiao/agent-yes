@@ -475,3 +475,21 @@ export function docTitle(name, status) {
   const g = statusGlyph(status);
   return (g ? g + " " : "") + n + " - agent-yes";
 }
+
+// Relevance score for the Cmd+K omnibox — higher ranks first. Title hits beat
+// cwd/prompt hits so the "quick title match" surfaces at the top; 0 means no
+// title/cwd/prompt hit (such an agent only appears via a tail-content match,
+// which the caller scores separately and ranks below these).
+export function omniScore(e, query) {
+  const q = String(query || "")
+    .trim()
+    .toLowerCase();
+  if (!q) return 0;
+  const title = (e.title || "").toLowerCase();
+  if (title === q) return 100;
+  if (title.startsWith(q)) return 80;
+  if (title.includes(q)) return 60;
+  if ((e.cwd || "").toLowerCase().includes(q)) return 40;
+  if ((e.prompt || "").toLowerCase().includes(q)) return 20;
+  return 0;
+}
