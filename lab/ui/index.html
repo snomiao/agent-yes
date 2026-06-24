@@ -3674,13 +3674,15 @@
         $("omni").style.display = "none";
       }
 
-      // The agent the spawn action is anchored to: the highlighted agent row, else
-      // the first agent result, else whatever's open in the console.
+      // The agent the spawn action is anchored to. PINNED to the agent currently
+      // open in the console (its cwd/cli), so the spawn target stays put as you
+      // arrow through search results. Falls back to the top result when nothing is
+      // selected yet.
       function omniAnchor() {
-        const hi = omniRows[omniIdx];
-        if (hi && hi.kind === "agent") return hi.entry;
+        const cur = sel ? entries.find((x) => x._key === sel) : null;
+        if (cur) return cur;
         const first = omniRows.find((r) => r.kind === "agent");
-        return first ? first.entry : entries.find((x) => x._key === sel) || null;
+        return first ? first.entry : null;
       }
 
       function renderOmni() {
