@@ -717,6 +717,82 @@ describe("subcommands.cmdSend writes bytes to FIFO", () => {
     const { controlCodeFromName } = await loadModule();
     expect(controlCodeFromName("none")).toBe("");
   });
+
+  it.skipIf(!itUnix)(
+    "routes a bare 'exit' to the graceful /exit, not the literal word",
+    async () => {
+      const { runSubcommand } = await loadModule();
+      const { appendGlobalPid } = await import("./globalPidIndex.ts");
+      const { spawnSync } = await import("child_process");
+      const tmp = await mkdtemp(path.join(tmpdir(), "ay-fifo-"));
+      try {
+        const fifo = path.join(tmp, "exit.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        const fs = await import("fs");
+        const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR);
+        await appendGlobalPid({
+          pid: process.pid,
+          cli: "claude",
+          prompt: null,
+          cwd: process.cwd(),
+          log_file: null,
+          fifo_file: fifo,
+          status: "active",
+          exit_code: null,
+          exit_reason: null,
+          started_at: Date.now(),
+        });
+        const stdout: string[] = [];
+        const orig = process.stdout.write.bind(process.stdout);
+        (process.stdout as any).write = (s: any) => (stdout.push(String(s)), true);
+        const savedAyPid = process.env.AGENT_YES_PID;
+        delete process.env.AGENT_YES_PID;
+        try {
+          const code = await runSubcommand([
+            "bun",
+            "cli.js",
+            "send",
+            String(process.pid),
+            "exit",
+            "--force",
+          ]);
+          expect(code).toBe(0);
+          expect(stdout.join("")).toMatch(/exit requested/);
+        } finally {
+          process.stdout.write = orig;
+          if (savedAyPid !== undefined) process.env.AGENT_YES_PID = savedAyPid;
+        }
+        const buf = Buffer.alloc(4096);
+        const n = fs.readSync(rdwrFd, buf, 0, buf.length, null);
+        // The real `/exit` command + Enter — NOT the literal "exit\r" that claude ignores.
+        expect(buf.subarray(0, n).toString()).toBe("/exit\r");
+        fs.closeSync(rdwrFd);
+      } finally {
+        await rm(tmp, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+});
+
+describe("subcommands.isExitRequest", () => {
+  it("matches the bare exit word and the literal /exit (any case, trimmed)", async () => {
+    const { isExitRequest } = await loadModule();
+    for (const s of ["exit", "/exit", "  exit ", "EXIT", "/Exit", "\nexit\n"]) {
+      expect(isExitRequest(s)).toBe(true);
+    }
+  });
+  it("does NOT match a sentence that merely contains 'exit'", async () => {
+    const { isExitRequest } = await loadModule();
+    for (const s of [
+      "please exit now",
+      "exit the loop after step 3",
+      "do not exit",
+      "exiting",
+      "",
+    ]) {
+      expect(isExitRequest(s)).toBe(false);
+    }
+  });
 });
 
 describe("subcommands.writeToIpc reliable delivery", () => {
