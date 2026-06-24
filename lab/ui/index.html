@@ -1489,7 +1489,10 @@
         />
         <div class="omni-results" id="omni-results"></div>
         <div class="omni-foot">
-          <span><b>↑↓</b> move &nbsp; <b>⏎</b> open &nbsp; <b>⌘⏎</b> spawn here &nbsp; <b>esc</b> close</span>
+          <span
+            ><b>↑↓</b> move &nbsp; <b>⏎</b> open &nbsp; <b>⌘⏎</b> spawn here &nbsp;
+            <b>esc</b> close</span
+          >
         </div>
       </div>
     </div>
@@ -2699,9 +2702,17 @@
           const sel = parseSel(p.sel);
           if (!sel) continue;
           const hue = hashHue(p.viewer);
-          const tag = esc(String(p.viewer).slice(0, 4)) + " " + (p.cols || "?") + "×" + (p.rows || "?");
+          const tag =
+            esc(String(p.viewer).slice(0, 4)) + " " + (p.cols || "?") + "×" + (p.rows || "?");
           let tagged = false;
-          for (const seg of selSegments(sel, myLast, vy, term.rows, p.cols || term.cols, term.cols)) {
+          for (const seg of selSegments(
+            sel,
+            myLast,
+            vy,
+            term.rows,
+            p.cols || term.cols,
+            term.cols,
+          )) {
             const vr = seg.row - vy; // our buffer row → our viewport row
             if (vr < 0 || vr > term.rows - 1) continue; // safety (selSegments already clips)
             const left = ox + seg.a * cw;
@@ -3740,7 +3751,9 @@
         const seq = ++omniTailSeq;
         const have = new Set(omniRows.filter((r) => r.kind === "agent").map((r) => r.entry._key));
         const ql = q.toLowerCase();
-        const cands = entries.filter((e) => !have.has(e._key) && e.status !== "exited").slice(0, 20);
+        const cands = entries
+          .filter((e) => !have.has(e._key) && e.status !== "exited")
+          .slice(0, 20);
         await Promise.all(
           cands.map(async (e) => {
             const src = srcFor(e);
