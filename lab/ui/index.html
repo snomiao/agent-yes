@@ -4453,7 +4453,7 @@
         <button class="lfleet" id="nf-go">▷ Launch</button>
         <button class="lcancel" id="nf-cancel">cancel</button>
       </div>
-      <div class="lhint">POST /api/spawn on this fleet. ⌘/Ctrl+Enter to launch.</div></div>`;
+      <div class="lhint">POST /api/spawn on this fleet. ${IS_MAC ? "⌘" : "Ctrl"}+Enter to launch.</div></div>`;
         $("newform").style.display = "flex";
         setTimeout(() => $("nf-prompt")?.focus(), 0);
       }
