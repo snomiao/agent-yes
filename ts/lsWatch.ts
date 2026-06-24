@@ -10,7 +10,7 @@
  * `needsInput.ts`.
  */
 
-export type LiveState = "active" | "idle" | "stopped" | "needs_input";
+export type LiveState = "active" | "idle" | "stopped" | "needs_input" | "stuck";
 
 /** The observable state of one agent at a single tick. */
 export interface LsAgentState {

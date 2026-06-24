@@ -66,3 +66,17 @@ export function classifyNeedsInput(
     .filter((l) => l && !isChromeLine(l));
   return { question: block.join(" • ").slice(0, 400) };
 }
+
+/**
+ * True when the rendered screen still shows a "busy" marker (config `working`,
+ * e.g. claude's `esc to interrupt`). Paired with a long-quiet log this is the
+ * `stuck` signal: a live spinner writes to the log every frame, so a busy marker
+ * on screen WITHOUT recent output means the agent wedged mid-stream (a silent
+ * API stream stall) rather than finishing. Pure + synchronous like the rest of
+ * this module so it's trivially unit-testable.
+ */
+export function isWorkingScreen(lines: string[], working?: RegExp[]): boolean {
+  if (!working?.length) return false;
+  const text = lines.join("\n");
+  return working.some((re) => reTest(re, text));
+}

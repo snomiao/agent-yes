@@ -1571,3 +1571,74 @@ describe("subcommands.deriveLiveStatus", () => {
     }
   });
 });
+
+describe("subcommands.isAgentStuck / stuck state", () => {
+  const rec = (over: any) => ({
+    pid: process.pid,
+    cli: "claude",
+    prompt: null,
+    cwd: "/tmp",
+    log_file: null,
+    fifo_file: null,
+    status: "active",
+    exit_code: null,
+    exit_reason: null,
+    started_at: 0,
+    ...over,
+  });
+  // A log whose rendered tail shows claude's shipped `working` busy marker.
+  const BUSY = "⏺ Cogitating…\r\nesc to interrupt · ← for agents\r\n";
+  const tenMinAgo = () => new Date(Date.now() - 10 * 60 * 1000);
+
+  it("isAgentStuck: true when a busy marker is on screen and the log is long-silent", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, BUSY);
+      await utimes(log, tenMinAgo(), tenMinAgo());
+      const mod = await loadModule();
+      expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("isAgentStuck: false when the busy log was written recently (still working)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, BUSY); // fresh mtime — under the stuck threshold
+      const mod = await loadModule();
+      expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("isAgentStuck: false when long-silent but no busy marker on screen (genuinely idle)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "⏺ Done — all green.\r\n❯\r\n");
+      await utimes(log, tenMinAgo(), tenMinAgo());
+      const mod = await loadModule();
+      expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("snapshotStatus: reports 'stuck' for a long-silent busy agent (not 'idle')", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, BUSY);
+      await utimes(log, tenMinAgo(), tenMinAgo());
+      const mod = await loadModule();
+      const snap = await mod.snapshotStatus(rec({ log_file: log }));
+      expect(snap.state).toBe("stuck");
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+});
