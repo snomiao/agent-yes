@@ -5,8 +5,23 @@ use clap::{ArgAction, Parser};
 use std::env;
 
 /// Supported CLI tools
+// MUST mirror the `clis:` keys in default.config.yaml — this list gates CLI
+// validation and binary-name detection (`glm-yes` → "glm"). A new CLI added to
+// the YAML won't be runnable via the Rust runtime until it's listed here too.
 pub const SUPPORTED_CLIS: &[&str] = &[
-    "claude", "gemini", "codex", "copilot", "cursor", "grok", "qwen", "auggie", "amp", "opencode",
+    "claude",
+    "glm",
+    "openrouter",
+    "pi",
+    "gemini",
+    "codex",
+    "copilot",
+    "cursor",
+    "grok",
+    "qwen",
+    "auggie",
+    "amp",
+    "opencode",
 ];
 
 // Most fields here are read elsewhere in the binary; the ones that aren't
@@ -499,7 +514,20 @@ mod tests {
 
     #[test]
     fn test_supported_clis_count() {
-        assert_eq!(SUPPORTED_CLIS.len(), 10);
+        assert_eq!(SUPPORTED_CLIS.len(), 13);
+        // The claude-compatible providers (run the `claude` binary via env) must
+        // be present, else their `*-yes` bins fail validation in the Rust runtime.
+        for cli in ["glm", "openrouter", "pi"] {
+            assert!(SUPPORTED_CLIS.contains(&cli), "missing {cli}");
+        }
+        // Each listed CLI must resolve to a real config (catches a name in this
+        // list that isn't actually defined in default.config.yaml).
+        for cli in SUPPORTED_CLIS {
+            assert!(
+                crate::config::get_cli_config(cli).is_ok(),
+                "SUPPORTED_CLIS entry '{cli}' has no config in default.config.yaml"
+            );
+        }
     }
 
     fn default_args() -> Args {
