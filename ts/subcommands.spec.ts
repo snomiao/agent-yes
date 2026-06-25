@@ -719,6 +719,54 @@ describe("subcommands.cmdSend writes bytes to FIFO", () => {
   });
 });
 
+describe("subcommands.writeToIpc reliable delivery", () => {
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
+
+  it.skipIf(!itUnix)(
+    "delivers a payload larger than the FIFO buffer to a slow reader",
+    async () => {
+      const { writeToIpc } = await loadModule();
+      const { spawnSync } = await import("child_process");
+      const fs = await import("fs");
+      const tmp = await mkdtemp(path.join(tmpdir(), "ay-ipc-"));
+      try {
+        const fifo = path.join(tmp, "big.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        // Reader present (so open() doesn't ENXIO) but draining slowly, in small
+        // chunks on a timer — this backs the ~8KB kernel buffer up and makes the
+        // old single non-blocking writeFileSync EAGAIN/truncate.
+        const rfd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+        const chunks: Buffer[] = [];
+        const drain = setInterval(() => {
+          const b = Buffer.alloc(1000);
+          try {
+            const n = fs.readSync(rfd, b, 0, b.length, null);
+            if (n > 0) chunks.push(Buffer.from(b.subarray(0, n)));
+          } catch {
+            /* EAGAIN when momentarily empty */
+          }
+        }, 5);
+        try {
+          // 50KB >> the FIFO buffer: forces many partial writes + EAGAIN retries.
+          const payload = "abcdefghij".repeat(5000);
+          await writeToIpc(fifo, payload);
+          // Let the drainer flush whatever is still buffered.
+          const deadline = Date.now() + 3000;
+          while (Buffer.concat(chunks).length < payload.length && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 10));
+          }
+          expect(Buffer.concat(chunks).toString("utf8")).toBe(payload);
+        } finally {
+          clearInterval(drain);
+          fs.closeSync(rfd);
+        }
+      } finally {
+        await rm(tmp, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+});
+
 describe("subcommands.cmdSend safety guards", () => {
   it("maps AGENT_YES_PID→wrapper_pid and blocks an agent from sending to itself", async () => {
     const { runSubcommand } = await loadModule();

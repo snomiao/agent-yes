@@ -440,7 +440,7 @@ export function selSegments(sel, myLast, vy, myRows, peerCols, myCols) {
     rB = myLast - sel.fb,
     cA = sel.ca,
     cB = sel.cb;
-  if (rA > rB) ([rA, rB] = [rB, rA]), ([cA, cB] = [cB, cA]); // rA = top row
+  if (rA > rB) (([rA, rB] = [rB, rA]), ([cA, cB] = [cB, cA])); // rA = top row
   const segs = [];
   const from = Math.max(rA, vy),
     to = Math.min(rB, vy + myRows - 1);
