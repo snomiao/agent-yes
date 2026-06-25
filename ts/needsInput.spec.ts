@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { classifyNeedsInput } from "./needsInput.ts";
+import { classifyNeedsInput, isWorkingScreen } from "./needsInput.ts";
 import { loadSharedCliDefaults } from "./configShared.ts";
 
 // Use the REAL shipped claude/codex patterns so the test guards the actual config.
@@ -9,6 +9,25 @@ const codex = { needsInput: defaults.codex?.needsInput, working: defaults.codex?
 
 test("claude config actually ships a needsInput pattern", () => {
   expect(claude.needsInput?.length).toBeGreaterThan(0);
+});
+
+test("claude config ships a working busy marker (the stuck detector keys off it)", () => {
+  expect(claude.working?.length).toBeGreaterThan(0);
+});
+
+test("isWorkingScreen: true when the shipped claude busy marker is on screen", () => {
+  const screen = ["⏺ Running the test suite…", "", "esc to interrupt · ← for agents"];
+  expect(isWorkingScreen(screen, claude.working)).toBe(true);
+});
+
+test("isWorkingScreen: false at a finished/idle prompt (no busy marker)", () => {
+  const screen = ["⏺ Done — all tests pass.", "", "❯", "", "? for shortcuts"];
+  expect(isWorkingScreen(screen, claude.working)).toBe(false);
+});
+
+test("isWorkingScreen: false when no working patterns are configured", () => {
+  expect(isWorkingScreen(["esc to interrupt"], undefined)).toBe(false);
+  expect(isWorkingScreen(["esc to interrupt"], [])).toBe(false);
 });
 
 test("detects a claude AskUserQuestion selection menu", () => {
