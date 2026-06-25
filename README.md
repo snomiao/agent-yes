@@ -141,6 +141,11 @@ auggie-yes -- analyze code patterns
 # (https://z.ai/manage-apikey/apikey-list).
 ZAI_API_KEY=... glm-yes -- help me with this code
 
+# Use OpenRouter directly — runs Claude Code against OpenRouter's
+# Anthropic-compatible endpoint. Set OPENROUTER_API_KEY first
+# (https://openrouter.ai/keys).
+OPENROUTER_API_KEY=... openrouter-yes -- help me with this code
+
 # Use Pi directly — minimal multi-provider coding agent
 # (https://github.com/earendil-works/pi)
 pi-yes -- refactor this module

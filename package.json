@@ -43,7 +43,8 @@
     "grok-yes": "./dist/grok-yes.js",
     "opencode-yes": "./dist/opencode-yes.js",
     "qwen-yes": "./dist/qwen-yes.js",
-    "pi-yes": "./dist/pi-yes.js"
+    "pi-yes": "./dist/pi-yes.js",
+    "openrouter-yes": "./dist/openrouter-yes.js"
   },
   "directories": {
     "doc": "docs"
