@@ -12,6 +12,8 @@ use tracing::{debug, info};
 /// Expand `${VAR}` references in `raw` against the current process environment.
 /// Sets `*unresolved = true` if any referenced variable is unset or empty, so
 /// callers can choose to skip the assignment rather than emit a blank value.
+/// `${VAR:-default}` falls back to `default` when VAR is unset/empty (and never
+/// marks the entry unresolved) — used for overridable defaults like the model.
 fn expand_env_vars(raw: &str, unresolved: &mut bool) -> String {
     let mut out = String::with_capacity(raw.len());
     let mut rest = raw;
@@ -19,10 +21,17 @@ fn expand_env_vars(raw: &str, unresolved: &mut bool) -> String {
         out.push_str(&rest[..start]);
         let after = &rest[start + 2..];
         if let Some(end) = after.find('}') {
-            let name = &after[..end];
+            let expr = &after[..end];
+            let (name, fallback) = match expr.split_once(":-") {
+                Some((n, d)) => (n, Some(d)),
+                None => (expr, None),
+            };
             match std::env::var(name) {
                 Ok(v) if !v.is_empty() => out.push_str(&v),
-                _ => *unresolved = true,
+                _ => match fallback {
+                    Some(d) => out.push_str(d),
+                    None => *unresolved = true,
+                },
             }
             rest = &after[end + 1..];
         } else {
@@ -446,6 +455,20 @@ mod tests {
         // Unterminated ${ is emitted literally and doesn't flag unresolved.
         let mut unresolved = false;
         assert_eq!(expand_env_vars("${oops", &mut unresolved), "${oops");
+        assert!(!unresolved);
+
+        // ${VAR:-default}: set var wins, unset var falls back, never unresolved.
+        let mut unresolved = false;
+        assert_eq!(
+            expand_env_vars("${AY_TEST_KEY:-fallback}", &mut unresolved),
+            "secret"
+        );
+        assert!(!unresolved);
+        let mut unresolved = false;
+        assert_eq!(
+            expand_env_vars("${AY_TEST_MISSING:-z-ai/glm-5.2}", &mut unresolved),
+            "z-ai/glm-5.2"
+        );
         assert!(!unresolved);
 
         std::env::remove_var("AY_TEST_KEY");

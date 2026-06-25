@@ -11,7 +11,8 @@
  */
 
 // Short aliases → target CLI. Must match the alias wrappers postbuild.ts emits.
-export const CLI_ALIASES: Record<string, string> = { cy: "claude" };
+// orcy = "openrouter-claude-yes" (claude binary routed through OpenRouter).
+export const CLI_ALIASES: Record<string, string> = { cy: "claude", orcy: "openrouter" };
 
 /**
  * The agent CLI implied by argv[1] (cy / claude-yes → "claude", codex-yes →
