@@ -22,6 +22,14 @@ import {
   forestOrder,
   layeredRows,
   taskLabel,
+  hashHue,
+  selFromBottom,
+  parseSel,
+  selSegments,
+  fitTransform,
+  docTitle,
+  statusGlyph,
+  omniScore,
 } from "../../lab/ui/console-logic.js";
 
 const agent = (over = {}) => ({
@@ -492,5 +500,154 @@ describe("layeredRows (rooms>peers>agents folding)", () => {
     // child is indented one rail deeper than its parent agent
     const parent = rows.find((r) => r.kind === "agent" && r.entry.pid === 1)!;
     expect(child.branch.length).toBeGreaterThan(parent.branch.length);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// multi-viewer presence + shared-canvas geometry
+// ---------------------------------------------------------------------------
+
+describe("hashHue", () => {
+  it("is stable and in [0,360)", () => {
+    expect(hashHue("ab12")).toBe(hashHue("ab12"));
+    const h = hashHue("ab12");
+    expect(h).toBeGreaterThanOrEqual(0);
+    expect(h).toBeLessThan(360);
+  });
+});
+
+describe("selFromBottom", () => {
+  it("encodes a selection as lines-from-bottom (length-1 - y)", () => {
+    // buffer length 60 (last line index 59); selection rows 5..7
+    const s = { start: { x: 2, y: 5 }, end: { x: 10, y: 7 } };
+    expect(selFromBottom(s, 60)).toBe("54,2-52,10");
+  });
+  it("returns null when there is no selection", () => {
+    expect(selFromBottom(undefined, 60)).toBeNull();
+    expect(selFromBottom(null, 60)).toBeNull();
+    expect(selFromBottom({ start: { x: 0, y: 0 } } as any, 60)).toBeNull();
+  });
+});
+
+describe("parseSel", () => {
+  it("parses fromBottom endpoints", () => {
+    expect(parseSel("54,2-52,10")).toEqual({ fa: 54, ca: 2, fb: 52, cb: 10 });
+  });
+  it("rejects malformed input", () => {
+    expect(parseSel("undefined,x-y,z")).toBeNull();
+    expect(parseSel("")).toBeNull();
+    expect(parseSel(null as any)).toBeNull();
+  });
+});
+
+describe("selSegments", () => {
+  // round-trip: a selection at buffer rows 5..7 (cols 2..10) of a length-60 buffer
+  const sel = parseSel(selFromBottom({ start: { x: 2, y: 5 }, end: { x: 10, y: 7 } }, 60)!)!;
+
+  it("maps to the SAME viewport rows across different buffer lengths (the core fix)", () => {
+    // viewer A: buffer 60, top of viewport at line 6
+    const a = selSegments(sel, 59, 6, 54, 80, 80).map((s) => ({ vr: s.row - 6, a: s.a, b: s.b }));
+    // viewer B: buffer 100, scrolled to bottom (viewportY 46)
+    const b = selSegments(sel, 99, 46, 54, 80, 80).map((s) => ({ vr: s.row - 46, a: s.a, b: s.b }));
+    expect(a).toEqual(b);
+  });
+
+  it("emits proper per-row spans when fully visible", () => {
+    // unscrolled: rows 5,6,7 visible at viewport rows 5,6,7
+    const segs = selSegments(sel, 59, 0, 54, 80, 80).map((s) => ({ row: s.row, a: s.a, b: s.b }));
+    expect(segs).toEqual([
+      { row: 5, a: 2, b: 80 }, // top: c0 → edge
+      { row: 6, a: 0, b: 80 }, // middle: full width
+      { row: 7, a: 0, b: 10 }, // bottom: 0 → c1
+    ]);
+  });
+
+  it("clips rows scrolled out of the viewport", () => {
+    // viewport [vy=10 .. 10+5) shows nothing of a selection at buffer rows 5..7
+    expect(selSegments(sel, 59, 10, 5, 80, 80)).toEqual([]);
+  });
+
+  it("falls back to proportional columns when the peer width differs", () => {
+    const s1 = parseSel("0,10-0,20")!; // single bottom line, cols 10..20 in an 80-wide peer
+    const seg = selSegments(s1, 0, 0, 24, 80, 160)[0]; // we are 160 wide
+    expect(seg).toEqual({ row: 0, a: 20, b: 40 }); // 10/80*160=20, 20/80*160=40
+  });
+
+  it("returns [] for null", () => {
+    expect(selSegments(null, 59, 0, 54, 80, 80)).toEqual([]);
+  });
+});
+
+describe("fitTransform", () => {
+  it("is 'none' near 1 (driver / single viewer — absorbs fit rounding)", () => {
+    expect(fitTransform(800, 480, 800, 480)).toBe("none");
+    expect(fitTransform(800, 480, 810, 490)).toBe("none"); // slack within band
+  });
+  it("scales down a larger grid to fit (letterbox watcher)", () => {
+    expect(fitTransform(1600, 480, 800, 480)).toBe("scale(0.5000)");
+  });
+  it("scales up a smaller grid", () => {
+    expect(fitTransform(400, 240, 800, 480)).toBe("scale(2.0000)");
+  });
+  it("guards bad dimensions", () => {
+    expect(fitTransform(0, 480, 800, 480)).toBe("none");
+    expect(fitTransform(800, 480, 0, 480)).toBe("none");
+  });
+});
+
+describe("statusGlyph", () => {
+  it("maps status → glyph", () => {
+    expect(statusGlyph("active")).toBe("●");
+    expect(statusGlyph("idle")).toBe("○");
+    expect(statusGlyph("exited")).toBe("✗");
+  });
+  it("is empty for unknown/missing status", () => {
+    expect(statusGlyph(undefined as any)).toBe("");
+    expect(statusGlyph("whatever" as any)).toBe("");
+  });
+});
+
+describe("docTitle", () => {
+  it("suffixes the selected agent's title (no status → no glyph)", () => {
+    expect(docTitle("fix the bug")).toBe("fix the bug - agent-yes");
+  });
+  it("prefixes the status glyph when given", () => {
+    expect(docTitle("fix the bug", "active")).toBe("● fix the bug - agent-yes");
+    expect(docTitle("fix the bug", "idle")).toBe("○ fix the bug - agent-yes");
+    expect(docTitle("fix the bug", "exited")).toBe("✗ fix the bug - agent-yes");
+  });
+  it("trims whitespace", () => {
+    expect(docTitle("  build  ", "active")).toBe("● build - agent-yes");
+  });
+  it("falls back to the bare console title when empty (regardless of status)", () => {
+    expect(docTitle("", "active")).toBe("agent-yes · console");
+    expect(docTitle("   ")).toBe("agent-yes · console");
+    expect(docTitle(null as any)).toBe("agent-yes · console");
+    expect(docTitle(undefined as any)).toBe("agent-yes · console");
+  });
+});
+
+describe("omniScore", () => {
+  const e = (over: any) => ({ title: "", cwd: "", prompt: "", ...over });
+  it("ranks title hits above cwd/prompt hits", () => {
+    expect(omniScore(e({ title: "fix login" }), "fix")).toBeGreaterThan(
+      omniScore(e({ cwd: "/x/fix" }), "fix"),
+    );
+    expect(omniScore(e({ cwd: "/x/fix" }), "fix")).toBeGreaterThan(
+      omniScore(e({ prompt: "fix it" }), "fix"),
+    );
+  });
+  it("exact > startsWith > includes for titles", () => {
+    expect(omniScore(e({ title: "deploy" }), "deploy")).toBe(100);
+    expect(omniScore(e({ title: "deploy the app" }), "deploy")).toBe(80);
+    expect(omniScore(e({ title: "please deploy" }), "deploy")).toBe(60);
+  });
+  it("is case-insensitive and trims the query", () => {
+    expect(omniScore(e({ title: "Deploy" }), "  DEPLOY  ")).toBe(100);
+  });
+  it("returns 0 for no hit or empty query", () => {
+    expect(omniScore(e({ title: "abc" }), "xyz")).toBe(0);
+    expect(omniScore(e({ title: "abc" }), "")).toBe(0);
+    expect(omniScore(e({ title: "abc" }), "   ")).toBe(0);
   });
 });

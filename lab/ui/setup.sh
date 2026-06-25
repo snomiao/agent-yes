@@ -32,7 +32,7 @@ else
 fi
 
 # --- install ----------------------------------------------------------------
-say "Installing agent-yes with $RT…"
+say "Installing agent-yes with ${RT}…"
 # shellcheck disable=SC2086
 $PM agent-yes
 

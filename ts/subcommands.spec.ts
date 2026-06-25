@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
 
@@ -717,6 +717,130 @@ describe("subcommands.cmdSend writes bytes to FIFO", () => {
     const { controlCodeFromName } = await loadModule();
     expect(controlCodeFromName("none")).toBe("");
   });
+
+  it.skipIf(!itUnix)(
+    "routes a bare 'exit' to the graceful /exit, not the literal word",
+    async () => {
+      const { runSubcommand } = await loadModule();
+      const { appendGlobalPid } = await import("./globalPidIndex.ts");
+      const { spawnSync } = await import("child_process");
+      const tmp = await mkdtemp(path.join(tmpdir(), "ay-fifo-"));
+      try {
+        const fifo = path.join(tmp, "exit.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        const fs = await import("fs");
+        const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR);
+        await appendGlobalPid({
+          pid: process.pid,
+          cli: "claude",
+          prompt: null,
+          cwd: process.cwd(),
+          log_file: null,
+          fifo_file: fifo,
+          status: "active",
+          exit_code: null,
+          exit_reason: null,
+          started_at: Date.now(),
+        });
+        const stdout: string[] = [];
+        const orig = process.stdout.write.bind(process.stdout);
+        (process.stdout as any).write = (s: any) => (stdout.push(String(s)), true);
+        const savedAyPid = process.env.AGENT_YES_PID;
+        delete process.env.AGENT_YES_PID;
+        try {
+          const code = await runSubcommand([
+            "bun",
+            "cli.js",
+            "send",
+            String(process.pid),
+            "exit",
+            "--force",
+          ]);
+          expect(code).toBe(0);
+          expect(stdout.join("")).toMatch(/exit requested/);
+        } finally {
+          process.stdout.write = orig;
+          if (savedAyPid !== undefined) process.env.AGENT_YES_PID = savedAyPid;
+        }
+        const buf = Buffer.alloc(4096);
+        const n = fs.readSync(rdwrFd, buf, 0, buf.length, null);
+        // The real `/exit` command + Enter — NOT the literal "exit\r" that claude ignores.
+        expect(buf.subarray(0, n).toString()).toBe("/exit\r");
+        fs.closeSync(rdwrFd);
+      } finally {
+        await rm(tmp, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+});
+
+describe("subcommands.isExitRequest", () => {
+  it("matches the bare exit word and the literal /exit (any case, trimmed)", async () => {
+    const { isExitRequest } = await loadModule();
+    for (const s of ["exit", "/exit", "  exit ", "EXIT", "/Exit", "\nexit\n"]) {
+      expect(isExitRequest(s)).toBe(true);
+    }
+  });
+  it("does NOT match a sentence that merely contains 'exit'", async () => {
+    const { isExitRequest } = await loadModule();
+    for (const s of [
+      "please exit now",
+      "exit the loop after step 3",
+      "do not exit",
+      "exiting",
+      "",
+    ]) {
+      expect(isExitRequest(s)).toBe(false);
+    }
+  });
+});
+
+describe("subcommands.writeToIpc reliable delivery", () => {
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
+
+  it.skipIf(!itUnix)(
+    "delivers a payload larger than the FIFO buffer to a slow reader",
+    async () => {
+      const { writeToIpc } = await loadModule();
+      const { spawnSync } = await import("child_process");
+      const fs = await import("fs");
+      const tmp = await mkdtemp(path.join(tmpdir(), "ay-ipc-"));
+      try {
+        const fifo = path.join(tmp, "big.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        // Reader present (so open() doesn't ENXIO) but draining slowly, in small
+        // chunks on a timer — this backs the ~8KB kernel buffer up and makes the
+        // old single non-blocking writeFileSync EAGAIN/truncate.
+        const rfd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+        const chunks: Buffer[] = [];
+        const drain = setInterval(() => {
+          const b = Buffer.alloc(1000);
+          try {
+            const n = fs.readSync(rfd, b, 0, b.length, null);
+            if (n > 0) chunks.push(Buffer.from(b.subarray(0, n)));
+          } catch {
+            /* EAGAIN when momentarily empty */
+          }
+        }, 5);
+        try {
+          // 50KB >> the FIFO buffer: forces many partial writes + EAGAIN retries.
+          const payload = "abcdefghij".repeat(5000);
+          await writeToIpc(fifo, payload);
+          // Let the drainer flush whatever is still buffered.
+          const deadline = Date.now() + 3000;
+          while (Buffer.concat(chunks).length < payload.length && Date.now() < deadline) {
+            await new Promise((r) => setTimeout(r, 10));
+          }
+          expect(Buffer.concat(chunks).toString("utf8")).toBe(payload);
+        } finally {
+          clearInterval(drain);
+          fs.closeSync(rfd);
+        }
+      } finally {
+        await rm(tmp, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
 });
 
 describe("subcommands.cmdSend safety guards", () => {
@@ -1464,5 +1588,133 @@ describe("subcommands.resolveReadWindow", () => {
       start: 0,
       end: 96,
     });
+  });
+});
+
+describe("subcommands.deriveLiveStatus", () => {
+  const rec = (over: any) => ({
+    pid: process.pid,
+    cli: "claude",
+    prompt: null,
+    cwd: "/tmp",
+    log_file: null,
+    fifo_file: null,
+    status: "active",
+    exit_code: null,
+    exit_reason: null,
+    started_at: 0,
+    ...over,
+  });
+
+  it("returns 'exited' for a dead pid", async () => {
+    const mod = await loadModule();
+    expect(await mod.deriveLiveStatus(rec({ pid: 2147483646 }))).toBe("exited");
+  });
+
+  it("returns 'exited' when the record is already exited", async () => {
+    const mod = await loadModule();
+    expect(await mod.deriveLiveStatus(rec({ status: "exited" }))).toBe("exited");
+  });
+
+  it("returns 'active' for an alive pid with no log file", async () => {
+    const mod = await loadModule();
+    expect(await mod.deriveLiveStatus(rec({ log_file: null }))).toBe("active");
+  });
+
+  it("returns 'active' for an alive pid with a freshly-written log", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-dls-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "hi");
+      const mod = await loadModule();
+      expect(await mod.deriveLiveStatus(rec({ log_file: log }))).toBe("active");
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("returns 'idle' when the log has been quiet past the threshold", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-dls-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "hi");
+      const old = new Date(Date.now() - 5 * 60 * 1000); // 5 min ago > 60s threshold
+      await utimes(log, old, old);
+      const mod = await loadModule();
+      expect(await mod.deriveLiveStatus(rec({ log_file: log }))).toBe("idle");
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+});
+
+describe("subcommands.isAgentStuck / stuck state", () => {
+  const rec = (over: any) => ({
+    pid: process.pid,
+    cli: "claude",
+    prompt: null,
+    cwd: "/tmp",
+    log_file: null,
+    fifo_file: null,
+    status: "active",
+    exit_code: null,
+    exit_reason: null,
+    started_at: 0,
+    ...over,
+  });
+  // A log whose rendered tail shows claude's shipped `working` busy marker.
+  const BUSY = "⏺ Cogitating…\r\nesc to interrupt · ← for agents\r\n";
+  const tenMinAgo = () => new Date(Date.now() - 10 * 60 * 1000);
+
+  it("isAgentStuck: true when a busy marker is on screen and the log is long-silent", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, BUSY);
+      await utimes(log, tenMinAgo(), tenMinAgo());
+      const mod = await loadModule();
+      expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("isAgentStuck: false when the busy log was written recently (still working)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, BUSY); // fresh mtime — under the stuck threshold
+      const mod = await loadModule();
+      expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("isAgentStuck: false when long-silent but no busy marker on screen (genuinely idle)", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "⏺ Done — all green.\r\n❯\r\n");
+      await utimes(log, tenMinAgo(), tenMinAgo());
+      const mod = await loadModule();
+      expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("snapshotStatus: reports 'stuck' for a long-silent busy agent (not 'idle')", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, BUSY);
+      await utimes(log, tenMinAgo(), tenMinAgo());
+      const mod = await loadModule();
+      const snap = await mod.snapshotStatus(rec({ log_file: log }));
+      expect(snap.state).toBe("stuck");
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
   });
 });

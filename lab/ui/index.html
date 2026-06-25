@@ -545,6 +545,102 @@
         align-items: center;
         justify-content: center;
       }
+      /* Cmd/Ctrl+K omnibox */
+      .omni {
+        position: fixed;
+        inset: 0;
+        z-index: 30;
+        background: rgba(2, 6, 12, 0.6);
+        display: flex;
+        align-items: flex-start;
+        justify-content: center;
+        padding-top: 12vh;
+      }
+      .omnibox {
+        width: min(680px, 92vw);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+        overflow: hidden;
+        font-family: var(--mono);
+      }
+      #omni-input {
+        width: 100%;
+        box-sizing: border-box;
+        padding: 14px 16px;
+        border: 0;
+        border-bottom: 1px solid var(--line);
+        background: transparent;
+        color: var(--fg);
+        font: 15px var(--mono);
+        outline: none;
+      }
+      .omni-results {
+        max-height: 52vh;
+        overflow-y: auto;
+      }
+      .omni-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 8px 14px;
+        cursor: pointer;
+        border-left: 2px solid transparent;
+      }
+      .omni-row.sel {
+        background: color-mix(in srgb, var(--accent) 16%, transparent);
+        border-left-color: var(--accent);
+      }
+      .omni-main {
+        flex: 1;
+        min-width: 0;
+      }
+      .omni-title {
+        color: var(--fg);
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .omni-sub {
+        color: var(--muted);
+        font-size: 11px;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .omni-snip {
+        color: var(--muted);
+        font-size: 11px;
+        opacity: 0.85;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .omni-snip b {
+        color: var(--amber);
+        font-weight: 600;
+      }
+      .omni-spawn {
+        border-top: 1px solid var(--line);
+      }
+      .omni-spawn .omni-title {
+        color: var(--green);
+      }
+      .omni-empty {
+        padding: 14px;
+        color: var(--muted);
+      }
+      .omni-foot {
+        padding: 8px 14px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 11px;
+      }
+      .omni-foot b {
+        color: var(--fg);
+        font-weight: 600;
+      }
       .lcard {
         background: var(--panel);
         border: 1px solid var(--line);
@@ -970,6 +1066,13 @@
       }
       .log .xterm {
         height: 100%;
+        /* Shared-canvas: when we're a WATCHER rendering at another viewer's
+           (the driver's) grid size, scale the whole grid to fit our pane instead
+           of reflowing. transform-origin keeps the scaled grid pinned top-left so
+           the peer-selection overlay (which uses grid coords) still lines up.
+           For the driver / single viewer the grid already fits, so no transform
+           is applied (see applyCanvasScale). */
+        transform-origin: top left;
       }
       /* Other viewers' selection ranges, drawn over our grid (slice 2 of
          multi-peer presence). Approximate — peer coords are mapped proportionally
@@ -1373,6 +1476,27 @@
     <div class="launchoverlay" id="launch" style="display: none"></div>
     <div class="launchoverlay" id="newform" style="display: none"></div>
 
+    <!-- Cmd/Ctrl+K omnibox: search agents by title (instant) then output (tail),
+         or spawn a new agent in the highlighted agent's cwd with the typed prompt. -->
+    <div class="omni" id="omni" style="display: none">
+      <div class="omnibox">
+        <input
+          id="omni-input"
+          placeholder="Search agents by title, then output…"
+          spellcheck="false"
+          autocapitalize="off"
+          autocomplete="off"
+        />
+        <div class="omni-results" id="omni-results"></div>
+        <div class="omni-foot">
+          <span
+            ><b>↑↓</b> move &nbsp; <b>⏎</b> open &nbsp; <b>⌘⏎</b> spawn here &nbsp;
+            <b>esc</b> close</span
+          >
+        </div>
+      </div>
+    </div>
+
     <script type="module">
       // Pure list/identity/filter helpers live in a sibling module so they can be
       // unit-tested (tests/ui-logic/console-logic.spec.ts) without a DOM. This
@@ -1394,6 +1518,13 @@
         deviceCount,
         layeredRows,
         taskLabel,
+        hashHue,
+        selFromBottom,
+        parseSel,
+        selSegments,
+        fitTransform,
+        docTitle,
+        omniScore,
       } from "./console-logic.js";
       import {
         MARKER as E2E_MARKER,
@@ -1940,6 +2071,9 @@
         async fetchJSON(path) {
           return (await fetch(withTok(path))).json();
         },
+        async fetchText(path) {
+          return (await fetch(withTok(path))).text();
+        },
         async post(path, bodyObj) {
           const r = await fetch(withTok(path), {
             method: "POST",
@@ -1960,6 +2094,9 @@
         return {
           async fetchJSON(path) {
             return JSON.parse((await rtc.req("GET", path)).text);
+          },
+          async fetchText(path) {
+            return (await rtc.req("GET", path)).text;
           },
           async post(path, bodyObj) {
             const r = await rtc.req("POST", path, JSON.stringify(bodyObj));
@@ -2335,6 +2472,10 @@
       // The last winsize the agent's PTY reported (from /api/size), so the tooltip
       // can show OUR viewport vs the agent's render size. Reset on agent switch.
       let agentSize = null;
+      // When WE last drove the grid size (pushed our size to the agent). For a
+      // short lease after that, the heartbeat won't follow/override — so our own
+      // push isn't fought while the agent's /api/size is still catching up.
+      let lastDroveAt = 0;
 
       function isDarkColor(c) {
         try {
@@ -2474,8 +2615,11 @@
         if (!cur || !term) return;
         let selR = null;
         try {
+          // selFromBottom (console-logic.js) encodes the selection as
+          // lines-from-bottom — a coordinate shared across differently-sized
+          // viewers (see its doc); the receiver maps it back into its own buffer.
           const s = term.getSelectionPosition && term.getSelectionPosition();
-          if (s) selR = `${s.startRow},${s.startColumn}-${s.endRow},${s.endColumn}`;
+          selR = selFromBottom(s, term.buffer.active.length);
         } catch {}
         cur.tx
           .post("/api/presence", {
@@ -2503,39 +2647,24 @@
         }
         renderPeerSelections();
       }
-      // 3s heartbeat (< the host's 12s TTL): refresh our presence + read others'.
+      // 3s heartbeat (< the host's 12s TTL): refresh our presence + read others',
+      // and follow the canonical grid size (resize+scale, never reflow) so all
+      // viewers stay on one shared canvas and selections line up.
       setInterval(() => {
-        if (sel) {
-          sendPresence();
-          pollPresence();
-        }
+        if (!sel) return;
+        sendPresence();
+        pollPresence();
+        const cur = presenceTarget();
+        if (cur)
+          cur.tx
+            .fetchJSON("/api/size/" + encodeURIComponent(cur.e.pid))
+            .then(followAgentSize)
+            .catch(() => {});
       }, 3000);
 
-      // ---- slice 2: draw each peer's selection range as an overlay in OUR grid.
-      // Peer coords arrive in the peer's own cols×rows; we map them proportionally
-      // to ours and to pixels via the measured cell size. Approximate by design
-      // (doesn't track scrollback / exact reflow) — a "roughly here" presence hint.
-      function hashHue(s) {
-        let h = 0;
-        for (const ch of String(s)) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-        return h % 360;
-      }
-      function mapPeerSel(selStr, pc, pr, mc, mr) {
-        const m = /^(\d+),(\d+)-(\d+),(\d+)$/.exec(selStr || "");
-        if (!m) return null;
-        const mapR = (r) => (pr > 0 ? Math.round((r / pr) * mr) : r);
-        const mapC = (c) => (pc > 0 ? Math.round((c / pc) * mc) : c);
-        const r0 = mapR(+m[1]),
-          c0 = mapC(+m[2]),
-          r1 = mapR(+m[3]),
-          c1 = mapC(+m[4]);
-        return {
-          r0: Math.min(r0, r1),
-          c0: Math.min(c0, c1),
-          r1: Math.max(r0, r1),
-          c1: Math.max(c0, c1),
-        };
-      }
+      // Peer-selection overlay. The coordinate math (parseSel / selSegments /
+      // hashHue) lives in console-logic.js (unit-tested); here we just measure the
+      // DOM and place the boxes. Drawn in OUR buffer rows, clipped to the viewport.
       function renderPeerSelections() {
         const logEl = $("log");
         if (!logEl) return;
@@ -2561,26 +2690,84 @@
           oy = sr.top - lr.top;
         const cw = sr.width / term.cols,
           ch = sr.height / term.rows;
-        ov.innerHTML = peers
-          .map((p) => {
-            const r = mapPeerSel(
-              p.sel,
-              p.cols || term.cols,
-              p.rows || term.rows,
-              term.cols,
-              term.rows,
+        // Anchor to OUR buffer: viewportY = top visible buffer line, myLast = bottom
+        // buffer line. A peer's fromBottom row maps to our buffer row (myLast − fb)
+        // then to our viewport row (− viewportY). Re-rendered on term.onScroll so the
+        // box tracks as we move through scrollback, and clips when out of view.
+        const ba = term.buffer && term.buffer.active;
+        const vy = (ba && ba.viewportY) || 0;
+        const myLast = ((ba && ba.length) || 1) - 1;
+        const html = [];
+        for (const p of peers) {
+          const sel = parseSel(p.sel);
+          if (!sel) continue;
+          const hue = hashHue(p.viewer);
+          const tag =
+            esc(String(p.viewer).slice(0, 4)) + " " + (p.cols || "?") + "×" + (p.rows || "?");
+          let tagged = false;
+          for (const seg of selSegments(
+            sel,
+            myLast,
+            vy,
+            term.rows,
+            p.cols || term.cols,
+            term.cols,
+          )) {
+            const vr = seg.row - vy; // our buffer row → our viewport row
+            if (vr < 0 || vr > term.rows - 1) continue; // safety (selSegments already clips)
+            const left = ox + seg.a * cw;
+            const w = Math.max(cw, (seg.b - seg.a) * cw);
+            const top = oy + vr * ch;
+            const tagEl = tagged ? "" : ((tagged = true), `<span class="peer-tag">${tag}</span>`);
+            html.push(
+              `<div class="peer-sel" style="--ph:${hue};top:${top.toFixed(1)}px;left:${left.toFixed(1)}px;width:${w.toFixed(1)}px;height:${ch.toFixed(1)}px">${tagEl}</div>`,
             );
-            if (!r) return "";
-            const top = oy + r.r0 * ch,
-              left = ox + r.c0 * cw;
-            const w = Math.max(cw, (r.c1 - r.c0) * cw),
-              h = (r.r1 - r.r0 + 1) * ch;
-            const hue = hashHue(p.viewer);
-            const tag =
-              esc(String(p.viewer).slice(0, 4)) + " " + (p.cols || "?") + "×" + (p.rows || "?");
-            return `<div class="peer-sel" style="--ph:${hue};top:${top.toFixed(1)}px;left:${left.toFixed(1)}px;width:${w.toFixed(1)}px;height:${h.toFixed(1)}px"><span class="peer-tag">${tag}</span></div>`;
-          })
-          .join("");
+          }
+        }
+        ov.innerHTML = html.join("");
+      }
+
+      // ---- shared canvas: scale (don't reflow) the grid to fit our pane --------
+      // When we render at the canonical (driver/agent) grid size and it doesn't
+      // match our pane, CSS-scale the whole .xterm to fit — so every viewer shows
+      // identical content and selections/overlays line up. For the driver / single
+      // viewer the grid already fits the pane (scale ≈ 1) → no transform, so the
+      // common path is byte-for-byte unchanged. Best-effort + guarded.
+      function applyCanvasScale() {
+        try {
+          const logEl = $("log");
+          const xt = logEl && logEl.querySelector(".xterm");
+          if (!xt) return;
+          xt.style.transform = "none"; // measure the natural (unscaled) grid
+          const screen = xt.querySelector(".xterm-screen");
+          if (!screen) return;
+          const gw = screen.offsetWidth,
+            gh = screen.offsetHeight;
+          if (!gw || !gh) return;
+          const cs = getComputedStyle(logEl);
+          const pw = logEl.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+          const ph = logEl.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
+          // fitTransform (console-logic.js) decides none-vs-scale (unit-tested).
+          xt.style.transform = fitTransform(gw, gh, pw, ph);
+        } catch {}
+      }
+      // Follow the canonical grid: resize our xterm to the agent's size (set by the
+      // active driver / local owner) WITHOUT reflowing to our pane, then scale to
+      // fit. No-op when we already match (we're the driver, or sizes agree).
+      function followAgentSize(sz) {
+        if (!term || !sz || !sz.cols || !sz.rows) return;
+        // While our own recent push is still settling, don't fight it.
+        if (Date.now() - lastDroveAt < 6000) {
+          applyCanvasScale();
+          return;
+        }
+        if (sz.cols !== term.cols || sz.rows !== term.rows) {
+          agentSize = sz;
+          try {
+            term.resize(sz.cols, sz.rows);
+          } catch {}
+        }
+        applyCanvasScale();
       }
 
       // Wire the ⋯ overflow menu and restore the saved HUD preference.
@@ -3106,6 +3293,7 @@
         }
         renderRoomsIfOpen();
         renderList();
+        refreshDocTitle(); // poll may have changed the selected agent's status
         if (autoPid && entries.some((x) => matchSel(x, autoPid))) {
           const tok = autoPid;
           autoPid = null;
@@ -3122,6 +3310,20 @@
             renderList();
           }
         }
+      }
+
+      // Reflect the selected agent's title in the browser tab, live. Mirrors
+      // $("rname") — set on select() and again on the agent's OSC title sequence —
+      // so the tab tracks renames in realtime. Reverts to the default when nothing
+      // is selected.
+      // Tab title = status glyph + the live header name + " - agent-yes". Reads the
+      // currently-displayed name ($("rname"), kept fresh by select + onTitleChange)
+      // and the selected entry's status (refreshed by the poll via mergeRender), so
+      // both renames AND active→idle→exited transitions show in realtime.
+      function refreshDocTitle() {
+        const e = sel ? entries.find((x) => x._key === sel) : null;
+        const name = e ? $("rname").textContent : "";
+        document.title = docTitle(name, e && e.status); // pure formatter (tested)
       }
 
       function select(keyOrPid) {
@@ -3164,7 +3366,9 @@
         document.querySelector(".app").classList.add("show-detail");
         $("rhead").style.display = "flex";
         $("rdot").className = "dot " + e.status;
-        $("rname").textContent = e.title || cliLabel(e) || ident(e) || "agent";
+        const rname = e.title || cliLabel(e) || ident(e) || "agent";
+        $("rname").textContent = rname;
+        refreshDocTitle(); // tab title follows the selected agent (name + status)
         $("rpid").textContent = "pid " + e.pid;
 
         // Render the agent's native TUI with xterm.js by feeding it the raw PTY
@@ -3213,6 +3417,7 @@
           const title = t && t.trim();
           if (sel !== e._key || !title) return;
           $("rname").textContent = title;
+          refreshDocTitle(); // realtime rename → update the browser tab too
           // Keep the left panel in lockstep with the terminal header. The row
           // title otherwise only refreshes on the 3s /api/ls poll, so it visibly
           // lagged the live terminal. Patch the current entry (entries is
@@ -3231,13 +3436,18 @@
         // one-shot "push only if the agent is out of sync" check.
         let suppressPush = true;
         const pushSize = () => {
-          if (term && sel === e._key && !suppressPush)
+          if (term && sel === e._key && !suppressPush) {
+            lastDroveAt = Date.now(); // we're driving the size now (lease the grid)
             tx.post("/api/resize/" + encodeURIComponent(pid), {
               cols: term.cols,
               rows: term.rows,
             }).catch(() => {});
+          }
         };
         term.onResize(pushSize);
+        // Scrolling through OUR scrollback moves the viewport over the buffer, so
+        // re-place peer-selection overlays (they're anchored to absolute buffer rows).
+        term.onScroll(() => renderPeerSelections());
         // Forward everything the terminal emits to the agent stdin (raw, no
         // trailing Enter): keystrokes, paste, and — when a TUI enables mouse
         // tracking — click / drag-motion / wheel as SGR mouse reports. onBinary
@@ -3272,12 +3482,14 @@
             fit.fit();
           } catch {}
           if (!sz || sz.cols !== term.cols || sz.rows !== term.rows) {
+            lastDroveAt = Date.now(); // adopting our size on open = we drive (lease)
             tx.post("/api/resize/" + encodeURIComponent(pid), {
               cols: term.cols,
               rows: term.rows,
             }).catch(() => {});
           }
           suppressPush = false;
+          applyCanvasScale(); // driver: grid == pane → no-op; otherwise letterbox
         };
         // Fit + sync now, and on every later tab re-activation: re-measure our pane
         // and re-assert our size to the agent so the stream always reflows to OUR
@@ -3386,10 +3598,14 @@
         renderList();
       });
       window.addEventListener("resize", () => {
+        // Resizing our window is strong intent → re-fit to our pane (we become the
+        // size driver; the push rides term.onResize). applyCanvasScale then clears
+        // the transform since our grid now matches our pane.
         if (fit)
           try {
             fit.fit();
           } catch {}
+        applyCanvasScale();
         renderPeerSelections(); // cell size changed → reposition peer-selection overlays
       });
       // iOS overlays the soft keyboard ON TOP of the layout viewport rather than
@@ -3439,11 +3655,200 @@
       window.addEventListener(
         "keydown",
         (e) => {
+          if (omniOpen()) return; // omnibox owns the keyboard while open
           const mod = IS_MAC ? e.metaKey : e.altKey;
           if (!mod || (e.key !== "ArrowDown" && e.key !== "ArrowUp")) return;
           e.preventDefault();
           e.stopPropagation();
           stepSelection(e.key === "ArrowDown" ? 1 : -1);
+        },
+        true,
+      );
+
+      // ---- Cmd/Ctrl+K omnibox: search agents (title → output) or spawn here ----
+      let omniRows = []; // [{kind:'agent', entry, snippet?} | {kind:'spawn'}]
+      let omniIdx = 0;
+      let omniTailTimer = null;
+      let omniTailSeq = 0;
+      const omniOpen = () => $("omni").style.display !== "none";
+
+      function openOmni() {
+        $("omni").style.display = "flex";
+        const inp = $("omni-input");
+        inp.value = "";
+        inp.focus();
+        runOmni();
+      }
+      function closeOmni() {
+        if (omniTailTimer) clearTimeout(omniTailTimer);
+        omniTailSeq++; // cancel any in-flight tail search
+        $("omni").style.display = "none";
+      }
+
+      // The agent the spawn action is anchored to. PINNED to the agent currently
+      // open in the console (its cwd/cli), so the spawn target stays put as you
+      // arrow through search results. Falls back to the top result when nothing is
+      // selected yet.
+      function omniAnchor() {
+        const cur = sel ? entries.find((x) => x._key === sel) : null;
+        if (cur) return cur;
+        const first = omniRows.find((r) => r.kind === "agent");
+        return first ? first.entry : null;
+      }
+
+      function renderOmni() {
+        const q = $("omni-input").value.trim();
+        if (omniIdx >= omniRows.length) omniIdx = Math.max(0, omniRows.length - 1);
+        const anchor = omniAnchor();
+        const html = omniRows
+          .map((r, i) => {
+            const sc = i === omniIdx ? " sel" : "";
+            if (r.kind === "spawn") {
+              return `<div class="omni-row omni-spawn${sc}" data-i="${i}">
+                <span class="dot active"></span>
+                <div class="omni-main">
+                  <div class="omni-title">✦ Spawn new ${esc(anchor?.cli || "claude")} agent here</div>
+                  <div class="omni-sub">${esc(anchor?.cwd || "(host default)")} &nbsp;·&nbsp; prompt: ${esc(q || "(empty)")}</div>
+                </div></div>`;
+            }
+            const e = r.entry;
+            const snip = r.snippet ? `<div class="omni-snip">…${r.snippet}…</div>` : "";
+            return `<div class="omni-row${sc}" data-i="${i}">
+              <span class="dot ${esc(e.status)}"></span>
+              <div class="omni-main">
+                <div class="omni-title">${esc(e.title || cliLabel(e) || ident(e) || "agent")}</div>
+                <div class="omni-sub">${esc((e.cli || "") + " · " + (e.cwd || ""))}</div>
+                ${snip}
+              </div></div>`;
+          })
+          .join("");
+        $("omni-results").innerHTML = html || `<div class="omni-empty">no matches</div>`;
+        const selrow = $("omni-results").querySelector(".omni-row.sel");
+        if (selrow) selrow.scrollIntoView({ block: "nearest" });
+      }
+
+      function runOmni() {
+        const q = $("omni-input").value.trim();
+        const toks = q.split(/\s+/).filter(Boolean);
+        // Tier 1 — instant title/identity match, ranked title-first then by recency.
+        const hits = entries
+          .filter((e) => (toks.length ? matches(e, toks) : true))
+          .sort(
+            (a, b) =>
+              omniScore(b, q) - omniScore(a, q) || (b.started_at || 0) - (a.started_at || 0),
+          )
+          .slice(0, 30);
+        omniRows = hits.map((entry) => ({ kind: "agent", entry }));
+        if (q) omniRows.push({ kind: "spawn" });
+        omniIdx = 0;
+        renderOmni();
+        // Tier 2 — debounced output (tail) search for alive agents not already shown.
+        if (omniTailTimer) clearTimeout(omniTailTimer);
+        if (q.length >= 2) omniTailTimer = setTimeout(() => omniTailSearch(q), 320);
+      }
+
+      async function omniTailSearch(q) {
+        const seq = ++omniTailSeq;
+        const have = new Set(omniRows.filter((r) => r.kind === "agent").map((r) => r.entry._key));
+        const ql = q.toLowerCase();
+        const cands = entries
+          .filter((e) => !have.has(e._key) && e.status !== "exited")
+          .slice(0, 20);
+        await Promise.all(
+          cands.map(async (e) => {
+            const src = srcFor(e);
+            if (!src?.tx?.fetchText) return;
+            let text = "";
+            try {
+              text = await src.tx.fetchText(
+                "/api/read/" + encodeURIComponent(e.pid) + "?mode=tail&n=120",
+              );
+            } catch {
+              return;
+            }
+            if (seq !== omniTailSeq) return; // superseded or closed
+            const idx = text.toLowerCase().indexOf(ql);
+            if (idx < 0) return;
+            const raw = text
+              .slice(Math.max(0, idx - 24), idx + q.length + 24)
+              .replace(/\s+/g, " ")
+              .trim();
+            const li = raw.toLowerCase().indexOf(ql);
+            const snippet =
+              li >= 0
+                ? esc(raw.slice(0, li)) +
+                  "<b>" +
+                  esc(raw.slice(li, li + q.length)) +
+                  "</b>" +
+                  esc(raw.slice(li + q.length))
+                : esc(raw);
+            const at = omniRows.findIndex((r) => r.kind === "spawn");
+            const row = { kind: "agent", entry: e, snippet };
+            if (at >= 0) omniRows.splice(at, 0, row);
+            else omniRows.push(row);
+          }),
+        );
+        if (seq === omniTailSeq) renderOmni();
+      }
+
+      function omniMove(d) {
+        if (!omniRows.length) return;
+        omniIdx = (omniIdx + d + omniRows.length) % omniRows.length;
+        renderOmni();
+      }
+      async function omniActivate(forceSpawn) {
+        const q = $("omni-input").value.trim();
+        const row = omniRows[omniIdx];
+        if (forceSpawn || (row && row.kind === "spawn")) {
+          const anchor = omniAnchor();
+          closeOmni();
+          await spawnAndSelect(
+            { cli: anchor?.cli || "claude", cwd: anchor?.cwd || undefined, prompt: q || undefined },
+            anchor?._room,
+          );
+          return;
+        }
+        if (row && row.kind === "agent") {
+          closeOmni();
+          select(row.entry._key);
+        }
+      }
+
+      $("omni-input").addEventListener("input", runOmni);
+      $("omni-results").addEventListener("click", (ev) => {
+        const r = ev.target.closest(".omni-row");
+        if (!r) return;
+        omniIdx = +r.dataset.i;
+        omniActivate(false);
+      });
+      $("omni").addEventListener("mousedown", (ev) => {
+        if (ev.target === $("omni")) closeOmni(); // backdrop click closes
+      });
+      $("omni-input").addEventListener("keydown", (ev) => {
+        if (ev.key === "Escape") {
+          ev.preventDefault();
+          closeOmni();
+        } else if (ev.key === "ArrowDown") {
+          ev.preventDefault();
+          omniMove(1);
+        } else if (ev.key === "ArrowUp") {
+          ev.preventDefault();
+          omniMove(-1);
+        } else if (ev.key === "Enter") {
+          ev.preventDefault();
+          omniActivate(ev.metaKey || ev.ctrlKey);
+        }
+      });
+      // Cmd+K (Mac) / Ctrl+K (others) toggles the omnibox. Capture phase so it beats
+      // xterm's textarea handler and isn't forwarded to the agent as a keystroke.
+      window.addEventListener(
+        "keydown",
+        (e) => {
+          if ((e.metaKey || e.ctrlKey) && (e.key === "k" || e.key === "K")) {
+            e.preventDefault();
+            e.stopPropagation();
+            omniOpen() ? closeOmni() : openOmni();
+          }
         },
         true,
       );

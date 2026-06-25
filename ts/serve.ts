@@ -7,6 +7,7 @@ import path from "path";
 import yargs from "yargs";
 import {
   controlCodeFromName,
+  deriveLiveStatus,
   extractTaskCounts,
   listRecords,
   readNotes,
@@ -948,14 +949,22 @@ export async function cmdServe(rest: string[]): Promise<number> {
 
   // One agent record decorated for the console: the latest OSC title + a git
   // snapshot (skipped for exited agents — their repo state is no longer live).
-  const withMeta = async (r: Awaited<ReturnType<typeof listRecords>>[number]) => ({
-    ...r,
-    title: await logTitle(r.log_file),
-    git: r.status === "exited" ? null : await gitStatus(r.cwd),
-    // Task progress from the rendered todo block (null when none detected → no
-    // badge). Skipped for exited agents — their screen is no longer live.
-    tasks: r.status === "exited" ? null : await logTasks(r.log_file),
-  });
+  const withMeta = async (r: Awaited<ReturnType<typeof listRecords>>[number]) => {
+    // The stored `status` field lags (the wrapper's idle mirror is fire-and-forget),
+    // so the console showed agents as "active" long after they went quiet. Derive
+    // the LIVE status here — same liveness+log-mtime basis as `ay ls` — so the
+    // console's dot (and the browser tab glyph) flips to idle in step with `ay ls`.
+    const status = await deriveLiveStatus(r);
+    return {
+      ...r,
+      status,
+      title: await logTitle(r.log_file),
+      git: status === "exited" ? null : await gitStatus(r.cwd),
+      // Task progress from the rendered todo block (null when none detected → no
+      // badge). Skipped for exited agents — their screen is no longer live.
+      tasks: status === "exited" ? null : await logTasks(r.log_file),
+    };
+  };
 
   // Multi-peer presence blackboard: viewerId -> what that viewer is watching +
   // its viewport/selection. Purely cosmetic ("who else is looking at this agent"),
