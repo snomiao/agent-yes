@@ -141,6 +141,10 @@ auggie-yes -- analyze code patterns
 # (https://z.ai/manage-apikey/apikey-list).
 ZAI_API_KEY=... glm-yes -- help me with this code
 
+# Use Pi directly — minimal multi-provider coding agent
+# (https://github.com/earendil-works/pi)
+pi-yes -- refactor this module
+
 claude-yes "help me with this code"
 claude-yes "optimize performance"
 ```

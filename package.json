@@ -42,7 +42,8 @@
     "glm-yes": "./dist/glm-yes.js",
     "grok-yes": "./dist/grok-yes.js",
     "opencode-yes": "./dist/opencode-yes.js",
-    "qwen-yes": "./dist/qwen-yes.js"
+    "qwen-yes": "./dist/qwen-yes.js",
+    "pi-yes": "./dist/pi-yes.js"
   },
   "directories": {
     "doc": "docs"

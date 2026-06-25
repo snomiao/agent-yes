@@ -5,6 +5,7 @@ import { buildRustArgs } from "./buildRustArgs";
 const SUPPORTED_CLIS = [
   "claude",
   "glm",
+  "pi",
   "gemini",
   "codex",
   "copilot",

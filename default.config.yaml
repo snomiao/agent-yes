@@ -155,6 +155,35 @@ clis:
     bunx: true
     defaultArgs: []
 
+  # Pi — minimal multi-provider coding agent (https://github.com/earendil-works/pi).
+  # Interactive TUI: a bordered input box with a footer status line showing the
+  # context-usage gauge (e.g. "0.0%/272k") + model. Pi has NO tool-permission
+  # popups by design (run it in a container), so there's no "yolo" flag to map
+  # `-y` to — yesArgs is intentionally omitted. Pass the provider/model via
+  # PI_* env vars or --provider/--model; default provider is google.
+  pi:
+    binary: pi
+    promptArg: last-arg
+    systemPrompt: --append-system-prompt
+    help: https://github.com/earendil-works/pi
+    install:
+      npm: "npm install -g --ignore-scripts @earendil-works/pi-coding-agent"
+    # The footer context-usage gauge is re-rendered every time pi returns to the
+    # prompt, so it doubles as the "ready for input" marker. Idle detection also
+    # requires output quiescence, so a streaming response (gauge still updating)
+    # is not mis-read as idle.
+    ready:
+      - '%/\d+k'
+      - clear/exit
+      - "──────────+"
+    fatal:
+      - "^error: unknown option"
+    restoreArgs:
+      - --continue
+    exitCommands:
+      - /quit
+    defaultArgs: []
+
   gemini:
     install:
       npm: "npm install -g @google/gemini-cli@latest"
