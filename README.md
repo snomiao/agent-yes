@@ -143,8 +143,10 @@ ZAI_API_KEY=... glm-yes -- help me with this code
 
 # Use OpenRouter directly — runs Claude Code against OpenRouter's
 # Anthropic-compatible endpoint. Set OPENROUTER_API_KEY first
-# (https://openrouter.ai/keys).
-OPENROUTER_API_KEY=... openrouter-yes -- help me with this code
+# (https://openrouter.ai/keys). `orcy` is the short alias
+# (openrouter-claude-yes) and defaults to the z-ai/glm-5.2 model
+# (override via ANTHROPIC_DEFAULT_*_MODEL or ~/.claude/settings.json).
+OPENROUTER_API_KEY=... orcy -- help me with this code
 
 # Use Pi directly — minimal multi-provider coding agent
 # (https://github.com/earendil-works/pi)

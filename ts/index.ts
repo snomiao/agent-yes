@@ -376,14 +376,21 @@ export default async function agentYes({
   // Inject per-CLI env (e.g. glm → Z.AI endpoint). Expand ${VAR} against the
   // launching env; skip entries whose vars are unset so we never blank out an
   // inherited value (e.g. ANTHROPIC_AUTH_TOKEN when ZAI_API_KEY isn't exported).
+  // `${VAR:-default}` falls back to `default` when VAR is unset/empty — used for
+  // overridable defaults like the model (openrouter → z-ai/glm-5.2).
   if (cliConf?.env) {
     for (const [key, raw] of Object.entries(cliConf.env)) {
       let unresolved = false;
-      const value = raw.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name) => {
-        const v = ptyEnv[name];
-        if (v === undefined || v === "") unresolved = true;
-        return v ?? "";
-      });
+      const value = raw.replace(
+        /\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}/g,
+        (_, name, fallback) => {
+          const v = ptyEnv[name];
+          if (v !== undefined && v !== "") return v;
+          if (fallback !== undefined) return fallback;
+          unresolved = true;
+          return "";
+        },
+      );
       if (unresolved) continue;
       ptyEnv[key] = value;
     }

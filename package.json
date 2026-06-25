@@ -44,7 +44,8 @@
     "opencode-yes": "./dist/opencode-yes.js",
     "qwen-yes": "./dist/qwen-yes.js",
     "pi-yes": "./dist/pi-yes.js",
-    "openrouter-yes": "./dist/openrouter-yes.js"
+    "openrouter-yes": "./dist/openrouter-yes.js",
+    "orcy": "./dist/orcy.js"
   },
   "directories": {
     "doc": "docs"
