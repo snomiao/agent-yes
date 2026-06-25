@@ -169,6 +169,13 @@ clis:
       ANTHROPIC_BASE_URL: https://openrouter.ai/api
       ANTHROPIC_AUTH_TOKEN: ${OPENROUTER_API_KEY}
       ANTHROPIC_API_KEY: ""
+      # Default to GLM 5.2 (verified to work through OpenRouter's Anthropic skin).
+      # `${VAR:-default}` keeps it overridable: export ANTHROPIC_DEFAULT_*_MODEL or
+      # ANTHROPIC_MODEL (or set them in ~/.claude/settings.json) to use another
+      # OpenRouter slug. Reachable as `orcy` (openrouter-claude-yes).
+      ANTHROPIC_DEFAULT_SONNET_MODEL: ${ANTHROPIC_DEFAULT_SONNET_MODEL:-z-ai/glm-5.2}
+      ANTHROPIC_DEFAULT_OPUS_MODEL: ${ANTHROPIC_DEFAULT_OPUS_MODEL:-z-ai/glm-5.2}
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: ${ANTHROPIC_DEFAULT_HAIKU_MODEL:-z-ai/glm-5.2}
     promptArg: last-arg
     systemPrompt: --append-system-prompt
     yesArgs:

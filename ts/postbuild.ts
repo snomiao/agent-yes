@@ -13,7 +13,7 @@ const cliNames = [...Object.keys(CLIS_CONFIG), "agent"];
 const suffixes = ["-yes"];
 
 // Short aliases: maps alias name → target CLI name (alias resolves in parseCliArgs.ts)
-const shortAliases: Record<string, string> = { cy: "claude" };
+const shortAliases: Record<string, string> = { cy: "claude", orcy: "openrouter" };
 
 // Under Bun (dev via `bun link`), run TypeScript source directly — no build needed.
 // Under Node (published install or CI), use the compiled dist/cli.js.
