@@ -113,7 +113,7 @@ Built defensively so the common single-viewer path is unchanged:
   not the basis.
 - **DEFERRED:** the full lease/"take control" UX + a visible driver indicator;
   `follow-cursor` and `100%+pan` modes (MVP ships `fit`); mouse-coordinate
-  correction for an interacting *watcher* under scale (drivers are scale ≈ 1, so
+  correction for an interacting _watcher_ under scale (drivers are scale ≈ 1, so
   unaffected); how the agent advertises size changes (poll now, push over the
   stream later).
 
