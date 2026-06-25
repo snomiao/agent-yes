@@ -43,6 +43,10 @@ export type AgentCliConfig = {
     | { powershell?: string; bash?: string; npm?: string; unix?: string; windows?: string }; // hint user for install command if not installed
   version?: string; // hint user for version command to check if installed
   binary?: string; // actual binary name if different from cli, e.g. cursor -> cursor-agent
+  // Env vars injected into the spawned agent (e.g. glm points `claude` at Z.AI).
+  // Values support ${VAR} expansion against the launching env; an entry whose
+  // variable is unset is skipped so it can't blank out an inherited value.
+  env?: Record<string, string>;
   defaultArgs?: string[]; // function to ensure certain args are present
   yesArgs?: string[]; // appended when `-y`/--yes is passed: the per-CLI "yolo" flag (claude: --dangerously-skip-permissions; codex: --dangerously-bypass-approvals-and-sandbox)
   help?: string; // documentation/help URL for the CLI
@@ -369,6 +373,21 @@ export default async function agentYes({
   const parentPid =
     Number.isInteger(inheritedAyPid) && inheritedAyPid > 0 ? inheritedAyPid : undefined;
   ptyEnv.AGENT_YES_PID = String(process.pid);
+  // Inject per-CLI env (e.g. glm → Z.AI endpoint). Expand ${VAR} against the
+  // launching env; skip entries whose vars are unset so we never blank out an
+  // inherited value (e.g. ANTHROPIC_AUTH_TOKEN when ZAI_API_KEY isn't exported).
+  if (cliConf?.env) {
+    for (const [key, raw] of Object.entries(cliConf.env)) {
+      let unresolved = false;
+      const value = raw.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (_, name) => {
+        const v = ptyEnv[name];
+        if (v === undefined || v === "") unresolved = true;
+        return v ?? "";
+      });
+      if (unresolved) continue;
+      ptyEnv[key] = value;
+    }
+  }
   const ptyOptions = {
     name: "xterm-color",
     ...getTerminalDimensions(),

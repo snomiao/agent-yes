@@ -136,6 +136,11 @@ gemini-yes -- debug this code
 # Use Auggie directly
 auggie-yes -- analyze code patterns
 
+# Use GLM (Z.AI) directly — runs Claude Code against Z.AI's
+# Anthropic-compatible endpoint. Set ZAI_API_KEY first
+# (https://z.ai/manage-apikey/apikey-list).
+ZAI_API_KEY=... glm-yes -- help me with this code
+
 claude-yes "help me with this code"
 claude-yes "optimize performance"
 ```

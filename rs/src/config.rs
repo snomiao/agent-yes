@@ -24,6 +24,9 @@ pub struct CliConfig {
     pub prompt_arg: String,
     /// Binary name (if different from CLI name)
     pub binary: Option<String>,
+    /// Env vars injected into the spawned agent (e.g. glm → Z.AI). Values
+    /// support ${VAR} expansion against the launching env at spawn time.
+    pub env: HashMap<String, String>,
     /// Install command
     pub install: InstallConfig,
     /// Version command
@@ -136,6 +139,7 @@ fn build_cli_config(raw: CliConfigOverride) -> Result<CliConfig> {
     Ok(CliConfig {
         prompt_arg: raw.prompt_arg.unwrap_or_else(|| "last-arg".to_string()),
         binary: raw.binary,
+        env: raw.env.unwrap_or_default(),
         install: compile_install_config(raw.install),
         version: raw.version,
         help: raw.help,

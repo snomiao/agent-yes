@@ -37,6 +37,10 @@ pub struct CliConfigOverride {
     /// Binary name (if different from CLI name)
     #[serde(default)]
     pub binary: Option<String>,
+    /// Env vars injected into the spawned agent (e.g. glm points `claude` at
+    /// Z.AI). Values support ${VAR} expansion against the launching env.
+    #[serde(default)]
+    pub env: Option<HashMap<String, String>>,
     /// Default args
     #[serde(default)]
     pub default_args: Option<Vec<String>>,
@@ -175,6 +179,7 @@ impl CliConfigOverride {
             install,
             version,
             binary,
+            env,
             default_args,
             yes_args,
             help,
@@ -208,6 +213,15 @@ impl CliConfigOverride {
         }
         if binary.is_some() {
             self.binary = binary;
+        }
+        if let Some(env) = env {
+            if let Some(existing_env) = self.env.as_mut() {
+                for (k, v) in env {
+                    existing_env.insert(k, v);
+                }
+            } else {
+                self.env = Some(env);
+            }
         }
         if default_args.is_some() {
             self.default_args = default_args;
@@ -624,6 +638,7 @@ logsDir: /custom/logs
                 }),
                 version: Some("old-version".into()),
                 binary: Some("old-bin".into()),
+                env: Some(HashMap::from([("OLD_VAR".into(), "old".into())])),
                 default_args: Some(vec!["old-arg".into()]),
                 yes_args: Some(vec!["--old-yes".into()]),
                 help: Some("old-help".into()),
@@ -661,6 +676,7 @@ logsDir: /custom/logs
                 }),
                 version: Some("new-version".into()),
                 binary: Some("new-bin".into()),
+                env: Some(HashMap::from([("NEW_VAR".into(), "new".into())])),
                 default_args: Some(vec!["new-arg".into()]),
                 yes_args: Some(vec!["--new-yes".into()]),
                 help: Some("new-help".into()),
@@ -702,6 +718,14 @@ logsDir: /custom/logs
         );
         assert_eq!(t.version, Some("new-version".into()));
         assert_eq!(t.binary, Some("new-bin".into()));
+        // env merges key-by-key: old key retained, new key added/overridden.
+        assert_eq!(
+            t.env,
+            Some(HashMap::from([
+                ("OLD_VAR".into(), "old".into()),
+                ("NEW_VAR".into(), "new".into()),
+            ]))
+        );
         assert_eq!(t.default_args, Some(vec!["new-arg".into()]));
         assert_eq!(t.yes_args, Some(vec!["--new-yes".into()]));
         assert_eq!(t.help, Some("new-help".into()));
