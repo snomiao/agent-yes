@@ -39,9 +39,12 @@
     "cursor-yes": "./dist/cursor-yes.js",
     "cy": "./dist/cy.js",
     "gemini-yes": "./dist/gemini-yes.js",
+    "glm-yes": "./dist/glm-yes.js",
     "grok-yes": "./dist/grok-yes.js",
     "opencode-yes": "./dist/opencode-yes.js",
-    "qwen-yes": "./dist/qwen-yes.js"
+    "qwen-yes": "./dist/qwen-yes.js",
+    "pi-yes": "./dist/pi-yes.js",
+    "openrouter-yes": "./dist/openrouter-yes.js"
   },
   "directories": {
     "doc": "docs"

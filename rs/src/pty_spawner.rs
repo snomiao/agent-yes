@@ -9,6 +9,32 @@ use std::thread;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
+/// Expand `${VAR}` references in `raw` against the current process environment.
+/// Sets `*unresolved = true` if any referenced variable is unset or empty, so
+/// callers can choose to skip the assignment rather than emit a blank value.
+fn expand_env_vars(raw: &str, unresolved: &mut bool) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find("${") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        if let Some(end) = after.find('}') {
+            let name = &after[..end];
+            match std::env::var(name) {
+                Ok(v) if !v.is_empty() => out.push_str(&v),
+                _ => *unresolved = true,
+            }
+            rest = &after[end + 1..];
+        } else {
+            // No closing brace — emit the literal "${" and continue past it.
+            out.push_str("${");
+            rest = after;
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Read terminal size via ioctl(TIOCGWINSZ). Returns None if stdout is not a TTY.
 #[cfg(unix)]
 fn ioctl_terminal_size() -> Option<(u16, u16)> {
@@ -259,6 +285,19 @@ pub async fn spawn_agent(
     // tree in `ay ls` and the console. Mirrors ts/index.ts.
     cmd.env("AGENT_YES_PID", std::process::id().to_string());
 
+    // Inject per-CLI env (e.g. glm → Z.AI endpoint). Expand ${VAR} against the
+    // launching env; skip entries whose vars are unset/empty so we never blank
+    // out an inherited value (e.g. ANTHROPIC_AUTH_TOKEN when ZAI_API_KEY isn't
+    // exported). Mirrors ts/index.ts.
+    for (key, raw) in &config.env {
+        let mut unresolved = false;
+        let value = expand_env_vars(raw, &mut unresolved);
+        if unresolved {
+            continue;
+        }
+        cmd.env(key, value);
+    }
+
     if verbose {
         debug!(
             "Spawning {} with args: {:?} in directory: {}",
@@ -376,6 +415,41 @@ mod tests {
 
     // Serialize tests that mutate env vars — std::env::set_var is not thread-safe
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn test_expand_env_vars() {
+        let _guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("AY_TEST_KEY", "secret");
+        std::env::remove_var("AY_TEST_MISSING");
+
+        // Static text passes through, no expansion needed.
+        let mut unresolved = false;
+        assert_eq!(
+            expand_env_vars("https://api.z.ai/api/anthropic", &mut unresolved),
+            "https://api.z.ai/api/anthropic"
+        );
+        assert!(!unresolved);
+
+        // ${VAR} expands against the environment.
+        let mut unresolved = false;
+        assert_eq!(
+            expand_env_vars("Bearer ${AY_TEST_KEY}", &mut unresolved),
+            "Bearer secret"
+        );
+        assert!(!unresolved);
+
+        // Unset var flags unresolved so the caller can skip the assignment.
+        let mut unresolved = false;
+        let _ = expand_env_vars("${AY_TEST_MISSING}", &mut unresolved);
+        assert!(unresolved);
+
+        // Unterminated ${ is emitted literally and doesn't flag unresolved.
+        let mut unresolved = false;
+        assert_eq!(expand_env_vars("${oops", &mut unresolved), "${oops");
+        assert!(!unresolved);
+
+        std::env::remove_var("AY_TEST_KEY");
+    }
 
     #[test]
     fn test_is_command_not_found() {

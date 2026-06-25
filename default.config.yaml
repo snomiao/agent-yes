@@ -76,6 +76,191 @@ clis:
     bunx: true
     defaultArgs: []
 
+  # GLM (Z.AI) — runs the `claude` binary against Z.AI's Anthropic-compatible
+  # endpoint, so it inherits every claude marker (ready/working/enter/autoRetry…)
+  # while talking to GLM models. Set ZAI_API_KEY (from
+  # https://z.ai/manage-apikey/apikey-list) before launching. Override the model
+  # via ~/.claude/settings.json (ANTHROPIC_DEFAULT_*_MODEL) or by exporting the
+  # same env vars; unset → Z.AI's default (GLM-4.7). See
+  # https://docs.z.ai/devpack/tool/claude
+  glm:
+    binary: claude
+    # ${VAR} entries expand against the launching environment at spawn time; an
+    # entry whose variable is unset is skipped (so it can't blank out an
+    # inherited value). Static values are passed through verbatim.
+    env:
+      ANTHROPIC_BASE_URL: https://api.z.ai/api/anthropic
+      ANTHROPIC_AUTH_TOKEN: ${ZAI_API_KEY}
+      API_TIMEOUT_MS: "3000000"
+    promptArg: last-arg
+    systemPrompt: --append-system-prompt
+    yesArgs:
+      - --dangerously-skip-permissions
+    install:
+      powershell: 'powershell -Command "irm https://claude.ai/install.ps1 | iex"'
+      bash: "curl -fsSL https://claude.ai/install.sh | bash"
+      npm: "npm i -g @anthropic-ai/claude-code@latest"
+    ready:
+      - '\? for shortcuts'
+      - ' Try "'
+      - '^\? for shortcuts'
+      - "^>[  ]"
+      - "──────────+"
+    working:
+      - esc to interrupt
+      - to run in background
+    needsInput:
+      - pattern: '❯ ?\d+\.'
+        flags: m
+    typingRespond:
+      "1\n":
+        - '│ Do you want to use this API key\?'
+    enter:
+      - pattern: ' > 1\. Yes, I trust this folder'
+        flags: m
+      - pattern: '❯ ?1\. ?Dark mode ?✔'
+        flags: m
+      - pattern: '❯ ?1\. ?Auto \(match terminal\)'
+        flags: m
+      - pattern: '❯ ?1\. ?Yes'
+        flags: m
+      - pattern: '^.{0,4} ?1\. ?Dark mode ?✔'
+        flags: m
+      - pattern: '^.{0,4} ?1\. ?Auto \(match terminal\)'
+        flags: m
+      - pattern: '^.{0,4} ?1\. ?Yes'
+        flags: m
+      - pattern: Press Enter to continue
+        flags: m
+    fatal:
+      - "^error: unknown option"
+    autoRetry:
+      - pattern: "API Error.*Overloaded"
+        flags: i
+      - Overloaded
+      - pattern: 'API Error.{0,4}5\d\d'
+        flags: i
+      - Claude usage limit reached
+      - hit your usage limit
+      - pattern: "rate.?limit"
+        flags: i
+      - pattern: "session limit"
+        flags: i
+    restoreArgs:
+      - --continue
+    restartWithoutContinueArg:
+      - No conversation found to continue
+    exitCommands:
+      - /exit
+    bunx: true
+    defaultArgs: []
+
+  # OpenRouter — runs the `claude` binary against OpenRouter's Anthropic-compatible
+  # endpoint, inheriting every claude marker while routing to OpenRouter models.
+  # Set OPENROUTER_API_KEY (from https://openrouter.ai/keys). ANTHROPIC_API_KEY is
+  # pinned to "" so Claude Code doesn't fall back to a first-party Anthropic
+  # account. The native skin targets Anthropic models by default; pick another via
+  # ~/.claude/settings.json (ANTHROPIC_DEFAULT_*_MODEL = an OpenRouter slug like
+  # "anthropic/claude-sonnet-4"). See
+  # https://openrouter.ai/docs/cookbook/coding-agents/claude-code-integration
+  openrouter:
+    binary: claude
+    env:
+      ANTHROPIC_BASE_URL: https://openrouter.ai/api
+      ANTHROPIC_AUTH_TOKEN: ${OPENROUTER_API_KEY}
+      ANTHROPIC_API_KEY: ""
+    promptArg: last-arg
+    systemPrompt: --append-system-prompt
+    yesArgs:
+      - --dangerously-skip-permissions
+    install:
+      powershell: 'powershell -Command "irm https://claude.ai/install.ps1 | iex"'
+      bash: "curl -fsSL https://claude.ai/install.sh | bash"
+      npm: "npm i -g @anthropic-ai/claude-code@latest"
+    ready:
+      - '\? for shortcuts'
+      - ' Try "'
+      - '^\? for shortcuts'
+      - "^>[  ]"
+      - "──────────+"
+    working:
+      - esc to interrupt
+      - to run in background
+    needsInput:
+      - pattern: '❯ ?\d+\.'
+        flags: m
+    typingRespond:
+      "1\n":
+        - '│ Do you want to use this API key\?'
+    enter:
+      - pattern: ' > 1\. Yes, I trust this folder'
+        flags: m
+      - pattern: '❯ ?1\. ?Dark mode ?✔'
+        flags: m
+      - pattern: '❯ ?1\. ?Auto \(match terminal\)'
+        flags: m
+      - pattern: '❯ ?1\. ?Yes'
+        flags: m
+      - pattern: '^.{0,4} ?1\. ?Dark mode ?✔'
+        flags: m
+      - pattern: '^.{0,4} ?1\. ?Auto \(match terminal\)'
+        flags: m
+      - pattern: '^.{0,4} ?1\. ?Yes'
+        flags: m
+      - pattern: Press Enter to continue
+        flags: m
+    fatal:
+      - "^error: unknown option"
+    autoRetry:
+      - pattern: "API Error.*Overloaded"
+        flags: i
+      - Overloaded
+      - pattern: 'API Error.{0,4}5\d\d'
+        flags: i
+      - Claude usage limit reached
+      - hit your usage limit
+      - pattern: "rate.?limit"
+        flags: i
+      - pattern: "session limit"
+        flags: i
+    restoreArgs:
+      - --continue
+    restartWithoutContinueArg:
+      - No conversation found to continue
+    exitCommands:
+      - /exit
+    bunx: true
+    defaultArgs: []
+
+  # Pi — minimal multi-provider coding agent (https://github.com/earendil-works/pi).
+  # Interactive TUI: a bordered input box with a footer status line showing the
+  # context-usage gauge (e.g. "0.0%/272k") + model. Pi has NO tool-permission
+  # popups by design (run it in a container), so there's no "yolo" flag to map
+  # `-y` to — yesArgs is intentionally omitted. Pass the provider/model via
+  # PI_* env vars or --provider/--model; default provider is google.
+  pi:
+    binary: pi
+    promptArg: last-arg
+    systemPrompt: --append-system-prompt
+    help: https://github.com/earendil-works/pi
+    install:
+      npm: "npm install -g --ignore-scripts @earendil-works/pi-coding-agent"
+    # The footer context-usage gauge is re-rendered every time pi returns to the
+    # prompt, so it doubles as the "ready for input" marker. Idle detection also
+    # requires output quiescence, so a streaming response (gauge still updating)
+    # is not mis-read as idle.
+    ready:
+      - '%/\d+k'
+      - clear/exit
+      - "──────────+"
+    fatal:
+      - "^error: unknown option"
+    restoreArgs:
+      - --continue
+    exitCommands:
+      - /quit
+    defaultArgs: []
+
   gemini:
     install:
       npm: "npm install -g @google/gemini-cli@latest"

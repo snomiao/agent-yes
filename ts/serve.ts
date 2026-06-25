@@ -111,6 +111,13 @@ const SESSION_PIN_ENV = new Set([
   "CLAUDE_CODE_SESSION_ID",
   "CLAUDE_CODE_CHILD_SESSION",
   "CLAUDE_CODE_ENTRYPOINT",
+  // The agent-yes wrapper pid of the agent that launched `ay serve`. A daemon
+  // started from inside an agent's shell carries that agent's AGENT_YES_PID for
+  // its whole lifetime; without stripping it, every console-spawned agent would
+  // inherit it and be recorded with parent_pid = that stale agent, mis-rooting
+  // the whole subagent tree under an unrelated agent. Dropping it makes console
+  // spawns clean top-level agents (parent_pid = None).
+  "AGENT_YES_PID",
 ]);
 
 // Env for a console-spawned agent, minus only the session-pinning vars above. If
@@ -730,6 +737,14 @@ export async function cmdServe(rest: string[]): Promise<number> {
       `ay serve: ignoring unknown argument${stray.length > 1 ? "s" : ""}: ${stray.join(" ")}${hint}\n`,
     );
   }
+
+  // Drop the AGENT_YES_PID we may have inherited from the shell/agent that
+  // launched us. A serve daemon outlives that agent, but the env var sticks for
+  // our whole lifetime; if left in place, freshAgentEnv() aside, any descendant
+  // we spawn would be recorded with parent_pid = that long-dead agent, mis-rooting
+  // the subagent tree. Clearing it once at startup makes console spawns clean
+  // top-level agents regardless of the spawn path.
+  delete process.env.AGENT_YES_PID;
 
   const port = (argv.port as number) ?? DEFAULT_PORT;
   const host = (argv.host as string) ?? "127.0.0.1";

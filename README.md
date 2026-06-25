@@ -136,6 +136,20 @@ gemini-yes -- debug this code
 # Use Auggie directly
 auggie-yes -- analyze code patterns
 
+# Use GLM (Z.AI) directly — runs Claude Code against Z.AI's
+# Anthropic-compatible endpoint. Set ZAI_API_KEY first
+# (https://z.ai/manage-apikey/apikey-list).
+ZAI_API_KEY=... glm-yes -- help me with this code
+
+# Use OpenRouter directly — runs Claude Code against OpenRouter's
+# Anthropic-compatible endpoint. Set OPENROUTER_API_KEY first
+# (https://openrouter.ai/keys).
+OPENROUTER_API_KEY=... openrouter-yes -- help me with this code
+
+# Use Pi directly — minimal multi-provider coding agent
+# (https://github.com/earendil-works/pi)
+pi-yes -- refactor this module
+
 claude-yes "help me with this code"
 claude-yes "optimize performance"
 ```

@@ -94,6 +94,11 @@
           "type": "string",
           "description": "Actual binary name if different from CLI name (e.g., 'cursor-agent' for cursor)"
         },
+        "env": {
+          "type": "object",
+          "additionalProperties": { "type": "string" },
+          "description": "Environment variables injected into the spawned agent process (e.g. GLM points the `claude` binary at Z.AI). Values support ${VAR} expansion against the launching environment; an entry whose variable is unset is skipped so it can't blank out an inherited value."
+        },
         "defaultArgs": {
           "type": "array",
           "items": { "type": "string" },
