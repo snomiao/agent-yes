@@ -865,15 +865,27 @@ async function fetchRemoteRecordsRaw(
   if (opts.all) params.set("all", "1");
   if (opts.active) params.set("active", "1");
   if (opts.keyword) params.set("keyword", opts.keyword);
+  // WebRTC remotes have no http port — bridge them, then fetch the loopback URL.
+  let bridge: { baseUrl: string; token: string; close: () => void } | null = null;
   try {
-    const res = await fetch(`${url}/api/ls?${params}`, {
-      headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(5000),
+    const { isWebrtcSpec, startWebrtcBridge } = await import("./webrtcRemote.ts");
+    let base = url;
+    let bearer = token;
+    if (isWebrtcSpec(url)) {
+      bridge = await startWebrtcBridge(url);
+      base = bridge.baseUrl;
+      bearer = bridge.token;
+    }
+    const res = await fetch(`${base}/api/ls?${params}`, {
+      headers: { Authorization: `Bearer ${bearer}` },
+      signal: AbortSignal.timeout(8000),
     });
     if (!res.ok) return [];
     return (await res.json()) as any[];
   } catch {
     return [];
+  } finally {
+    bridge?.close();
   }
 }
 
