@@ -16,13 +16,21 @@ import { describe, it, beforeAll, afterAll, expect } from "vitest";
 import { startServer } from "./server.ts";
 
 // Stub the two xterm CDN scripts so creating a Terminal never touches the
-// network. Only the methods the console calls are implemented.
+// network. EVERY method the console calls on a Terminal must exist here, or the
+// select() flow throws partway through and later wiring (e.g. onData) never runs
+// — which silently times out the keystroke tests. Keep this in lockstep with the
+// `term.*` calls in lab/ui/index.html.
 // onData captures the keystroke handler on window so a test can drive it (xterm
 // would normally call it from real key events, which the stub can't synthesize).
+// open(el) records the container as `element` so the right-click-to-copy
+// contextmenu listener (term.element?.addEventListener) has something to bind to;
+// the selection getters report "no selection" so that handler is a harmless no-op.
 const TERMINAL_STUB =
-  "window.Terminal=class{constructor(){this.cols=80;this.rows=24;}" +
-  "loadAddon(){}open(){}focus(){}onTitleChange(){}onResize(){}onData(f){window.__onData=f;}" +
-  "onBinary(){}write(){}resize(c,r){this.cols=c;this.rows=r;}dispose(){}};";
+  "window.Terminal=class{constructor(){this.cols=80;this.rows=24;this.element=null;}" +
+  "loadAddon(){}open(el){this.element=el;}focus(){}onTitleChange(){}onResize(){}onScroll(){}" +
+  "onData(f){window.__onData=f;}onBinary(){}write(){}resize(c,r){this.cols=c;this.rows=r;}" +
+  "hasSelection(){return false;}getSelection(){return '';}getSelectionPosition(){return null;}" +
+  "clearSelection(){}dispose(){}};";
 const FITADDON_STUB = "window.FitAddon={FitAddon:class{activate(){}dispose(){}fit(){}}};";
 
 async function openConsole(
