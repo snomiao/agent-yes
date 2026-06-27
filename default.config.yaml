@@ -44,6 +44,15 @@ clis:
         flags: m
       - pattern: '^.{0,4} ?1\. ?Yes'
         flags: m
+      # Large-session resume menu on `claude --continue` ("Resume from summary
+      # (recommended) / Resume full session / Don't ask again"). The default ❯
+      # sits on option 1 (summary); auto-accept it so an unattended restart —
+      # including the no-output watchdog's kill+--continue recovery — doesn't
+      # re-wedge waiting on this prompt.
+      - pattern: '❯ ?1\. ?Resume'
+        flags: m
+      - pattern: '^.{0,4} ?1\. ?Resume'
+        flags: m
       - pattern: Press Enter to continue
         flags: m
     fatal:
@@ -130,6 +139,15 @@ clis:
         flags: m
       - pattern: '^.{0,4} ?1\. ?Yes'
         flags: m
+      # Large-session resume menu on `claude --continue` ("Resume from summary
+      # (recommended) / Resume full session / Don't ask again"). The default ❯
+      # sits on option 1 (summary); auto-accept it so an unattended restart —
+      # including the no-output watchdog's kill+--continue recovery — doesn't
+      # re-wedge waiting on this prompt.
+      - pattern: '❯ ?1\. ?Resume'
+        flags: m
+      - pattern: '^.{0,4} ?1\. ?Resume'
+        flags: m
       - pattern: Press Enter to continue
         flags: m
     fatal:
@@ -213,6 +231,15 @@ clis:
       - pattern: '^.{0,4} ?1\. ?Auto \(match terminal\)'
         flags: m
       - pattern: '^.{0,4} ?1\. ?Yes'
+        flags: m
+      # Large-session resume menu on `claude --continue` ("Resume from summary
+      # (recommended) / Resume full session / Don't ask again"). The default ❯
+      # sits on option 1 (summary); auto-accept it so an unattended restart —
+      # including the no-output watchdog's kill+--continue recovery — doesn't
+      # re-wedge waiting on this prompt.
+      - pattern: '❯ ?1\. ?Resume'
+        flags: m
+      - pattern: '^.{0,4} ?1\. ?Resume'
         flags: m
       - pattern: Press Enter to continue
         flags: m

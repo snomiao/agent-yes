@@ -27,8 +27,48 @@ const IDLE_SCAN_INTERVAL_MS: u64 = 60000; // Re-scan rendered screen every 60s o
 // Auto-retry on recoverable API errors (overload / rate-limit / usage-limit):
 // type "retry" with exponential backoff instead of giving up.
 const RETRY_BASE_SECS: u64 = 8; // first backoff; doubles each consecutive failure
+
+/// After the no-output watchdog sends Esc, how long to wait for the stream to
+/// recover before escalating to a forced restart. A working Esc repaints the
+/// screen (output → idle resets → stall clears) well within this window.
+const STALL_ESC_GRACE_SECS: u64 = 30;
 const RETRY_MAX_DELAY_SECS: u64 = 256; // cap per-retry backoff: 8,16,32,…,256 then hold
 const RETRY_GIVE_UP_SECS: u64 = 8 * 3600; // stop after 8h (claude's usage window is ~5h)
+
+/// What the no-output watchdog should do this tick. Pure decision so it can be
+/// unit-tested without a live PTY/vterm.
+#[derive(Debug, PartialEq, Eq)]
+enum StallAction {
+    /// Not stalled (or watchdog disabled): clear any arming.
+    Clear,
+    /// Stalled and not yet acted on: send Esc to cancel the in-flight request.
+    SendEsc,
+    /// Esc already sent and the grace window elapsed with no recovery: restart.
+    ForceRestart,
+    /// Stalled, Esc sent, still inside the grace window: wait.
+    Wait,
+}
+
+/// Decide the watchdog action from observable state. A live CLI repaints its
+/// spinner timer every second (visible output → `idle_secs` stays low), so a
+/// `working` screen with `idle_secs >= timeout_secs` means the stream stalled.
+/// `esc_sent_elapsed_secs` is `Some(elapsed)` once Esc has been sent this stall.
+fn decide_stall_action(
+    timeout_secs: u64,
+    working: bool,
+    idle_secs: u64,
+    esc_sent_elapsed_secs: Option<u64>,
+    esc_grace_secs: u64,
+) -> StallAction {
+    if timeout_secs == 0 || !working || idle_secs < timeout_secs {
+        return StallAction::Clear;
+    }
+    match esc_sent_elapsed_secs {
+        None => StallAction::SendEsc,
+        Some(elapsed) if elapsed >= esc_grace_secs => StallAction::ForceRestart,
+        Some(_) => StallAction::Wait,
+    }
+}
 
 /// Exponential backoff (seconds) for the Nth consecutive auto-retry, capped.
 fn retry_backoff_secs(streak: u32) -> u64 {
@@ -118,6 +158,13 @@ pub struct AgentContext {
     // PTY passthrough and emit plain rendered text on exit instead.
     render_plain: bool,
     non_tty_renderer: crate::non_tty_renderer::NonTtyRenderer,
+
+    // No-output watchdog (silent-stream-stall recovery). `stall_esc_sent_at` is
+    // set when we Esc-cancel a suspected stall and cleared the moment output
+    // resumes; `stall_force_restart` is raised when Esc fails to unstick it, so
+    // the run exits non-zero and a `--robust` parent resumes with --continue.
+    stall_esc_sent_at: Option<Instant>,
+    pub stall_force_restart: bool,
 }
 
 impl AgentContext {
@@ -156,6 +203,8 @@ impl AgentContext {
             auto_retry_streak: 0,
             auto_retry_started_at: None,
             auto_retry_next_at: None,
+            stall_esc_sent_at: None,
+            stall_force_restart: false,
             last_idle_scan_at: None,
             stdout_drop_count: 0,
             log_writer: LogWriter::new(pid, &cwd),
@@ -430,6 +479,15 @@ impl AgentContext {
                 _ = heartbeat.tick() => {
                     self.heartbeat_check(&mut msg_ctx).await?;
 
+                    // No-output watchdog escalated: Esc didn't unstick a stalled
+                    // stream. Exit non-zero (not fatal/abort) so a --robust parent
+                    // restarts the CLI with its --continue restore args.
+                    if self.stall_force_restart {
+                        warn!("Stall watchdog: exiting run to trigger restart");
+                        exit_code = 75; // EX_TEMPFAIL
+                        break;
+                    }
+
                     // Force ready after timeout
                     if !force_ready_sent && self.start_time.elapsed().as_millis() > FORCE_READY_TIMEOUT_MS as u128 {
                         if !self.stdin_ready.is_ready().await {
@@ -697,9 +755,70 @@ impl AgentContext {
     }
 
     /// Heartbeat pattern check (for cursor-based rendering)
+    /// No-output watchdog: recover a silently-stalled API stream.
+    ///
+    /// A live CLI keeps repainting its spinner timer (visible output, so
+    /// `idle_waiter` pings ~every second) while it works. If a `working` spinner
+    /// is on screen yet no visible output has arrived for `stall_timeout_secs`,
+    /// the stream `await` never resolved — the classic silent stall that prints
+    /// no error, so the printed-error auto-retry never fires. Recovery escalates:
+    ///   1. send Esc to cancel the in-flight request (armed once per stall);
+    ///   2. if output still hasn't resumed `STALL_ESC_GRACE_SECS` later, raise
+    ///      `stall_force_restart` so the run exits non-zero and a `--robust`
+    ///      parent restarts the CLI with its `--continue` restore args.
+    /// Clears its arming the instant real output resumes (idle drops below the
+    /// threshold) or the spinner leaves the screen.
+    async fn stall_watchdog_check(&mut self, msg_ctx: &mut MessageContext) -> Result<()> {
+        let timeout = self.cli_config.stall_timeout_secs;
+        let screen = self.vterm.contents();
+        let working = self.cli_config.working.iter().any(|p| p.is_match(&screen));
+        let idle_secs = self.idle_waiter.idle_time_ms() / 1000;
+        let esc_elapsed = self.stall_esc_sent_at.map(|t| t.elapsed().as_secs());
+        match decide_stall_action(timeout, working, idle_secs, esc_elapsed, STALL_ESC_GRACE_SECS) {
+            StallAction::Clear => {
+                // Healthy, idle-at-prompt, or recovered after an Esc: disarm.
+                self.stall_esc_sent_at = None;
+            }
+            StallAction::SendEsc => {
+                warn!(
+                    "No-output watchdog: spinner up with no visible output for {}s (>= {}s) — \
+                     stream looks stalled, sending Esc to cancel",
+                    idle_secs, timeout
+                );
+                crate::webhook::notify(
+                    "STUCK",
+                    &format!("no output for {}s while working — sending Esc", idle_secs),
+                    &self.cwd,
+                );
+                // Esc cancels claude's in-flight request; harmless to other CLIs.
+                send_text(msg_ctx, "\x1b").await?;
+                self.stall_esc_sent_at = Some(Instant::now());
+            }
+            StallAction::Wait => {}
+            StallAction::ForceRestart => {
+                warn!(
+                    "No-output watchdog: Esc did not recover the stream after {}s — forcing \
+                     restart (a --robust run resumes with --continue)",
+                    STALL_ESC_GRACE_SECS
+                );
+                crate::webhook::notify(
+                    "STUCK",
+                    "Esc ineffective after grace — forcing restart for --continue",
+                    &self.cwd,
+                );
+                self.stall_force_restart = true;
+            }
+        }
+        Ok(())
+    }
+
     async fn heartbeat_check(&mut self, msg_ctx: &mut MessageContext) -> Result<()> {
         // Terminal query responses (DSR, DA) are now handled automatically
         // by VTermProxy in handle_output() via vt100 callbacks.
+
+        // No-output watchdog: catch a silently-stalled stream the printed-error
+        // auto-retry below can never see (a stall prints nothing).
+        self.stall_watchdog_check(msg_ctx).await?;
 
         // Drive the auto-retry backoff timer. Runs every heartbeat (independent of
         // screen changes) so the delayed "retry" still fires while the agent sits
@@ -1059,6 +1178,70 @@ mod tests {
         // capped at RETRY_MAX_DELAY_SECS, and no shift overflow for large streaks
         assert_eq!(retry_backoff_secs(6), 256);
         assert_eq!(retry_backoff_secs(50), 256);
+    }
+
+    #[test]
+    fn test_stall_disabled_when_timeout_zero() {
+        // timeout 0 always clears, even if it otherwise looks stalled.
+        assert_eq!(
+            decide_stall_action(0, true, 9999, None, 30),
+            StallAction::Clear
+        );
+    }
+
+    #[test]
+    fn test_stall_not_working_clears() {
+        // No spinner on screen → never a stall, regardless of idle time.
+        assert_eq!(
+            decide_stall_action(300, false, 9999, None, 30),
+            StallAction::Clear
+        );
+    }
+
+    #[test]
+    fn test_stall_working_but_recent_output_clears() {
+        // Spinner up but output flowed within the window → healthy.
+        assert_eq!(
+            decide_stall_action(300, true, 299, None, 30),
+            StallAction::Clear
+        );
+    }
+
+    #[test]
+    fn test_stall_trips_to_esc_at_threshold() {
+        // Spinner up, no output for >= timeout, Esc not yet sent → send Esc.
+        assert_eq!(
+            decide_stall_action(300, true, 300, None, 30),
+            StallAction::SendEsc
+        );
+    }
+
+    #[test]
+    fn test_stall_waits_during_esc_grace() {
+        // Esc sent 10s ago, grace 30s → keep waiting for recovery.
+        assert_eq!(
+            decide_stall_action(300, true, 360, Some(10), 30),
+            StallAction::Wait
+        );
+    }
+
+    #[test]
+    fn test_stall_escalates_after_grace() {
+        // Esc sent, grace elapsed, still stalled → force restart.
+        assert_eq!(
+            decide_stall_action(300, true, 400, Some(30), 30),
+            StallAction::ForceRestart
+        );
+    }
+
+    #[test]
+    fn test_stall_recovers_after_esc_clears_arming() {
+        // Esc worked: output resumed (idle dropped below timeout) → Clear, which
+        // disarms stall_esc_sent_at so a later stall re-sends Esc fresh.
+        assert_eq!(
+            decide_stall_action(300, true, 5, Some(10), 30),
+            StallAction::Clear
+        );
     }
 
     #[test]

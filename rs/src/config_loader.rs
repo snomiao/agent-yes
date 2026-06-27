@@ -100,6 +100,12 @@ pub struct CliConfigOverride {
     /// Auto-retry patterns (type "retry" with backoff instead of exiting)
     #[serde(default)]
     pub auto_retry: Option<Vec<RegexSource>>,
+
+    /// No-output watchdog timeout (seconds). When a `working` spinner is on
+    /// screen but no visible output has arrived for this long, the API stream is
+    /// treated as silently stalled. 0 disables. Omitted → built-in default.
+    #[serde(default)]
+    pub stall_timeout_secs: Option<u64>,
 }
 
 /// Install configuration override
@@ -199,6 +205,7 @@ impl CliConfigOverride {
             restore_args,
             restart_without_continue_arg,
             auto_retry,
+            stall_timeout_secs,
         } = other;
 
         if let Some(install) = install {
@@ -285,6 +292,9 @@ impl CliConfigOverride {
         }
         if auto_retry.is_some() {
             self.auto_retry = auto_retry;
+        }
+        if stall_timeout_secs.is_some() {
+            self.stall_timeout_secs = stall_timeout_secs;
         }
     }
 }
@@ -658,6 +668,7 @@ logsDir: /custom/logs
                 restore_args: Some(vec!["old-restore".into()]),
                 restart_without_continue_arg: Some(vec![pattern("old-restart")]),
                 auto_retry: Some(vec![pattern("old-auto-retry")]),
+                stall_timeout_secs: Some(111),
             },
         );
 
@@ -696,6 +707,7 @@ logsDir: /custom/logs
                 typing_respond: Some(tr),
                 restart_without_continue_arg: Some(vec![pattern("new-restart")]),
                 auto_retry: Some(vec![pattern("new-auto-retry")]),
+                stall_timeout_secs: Some(222),
             },
         );
 
@@ -747,6 +759,7 @@ logsDir: /custom/logs
             Some(vec![pattern("new-restart")])
         );
         assert_eq!(t.auto_retry, Some(vec![pattern("new-auto-retry")]));
+        assert_eq!(t.stall_timeout_secs, Some(222));
         assert!(t.typing_respond.as_ref().unwrap().contains_key("y"));
         assert!(t.typing_respond.as_ref().unwrap().contains_key("1"));
     }
