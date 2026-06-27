@@ -21,8 +21,32 @@ import { updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { pgidForWrapper } from "./reaper.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
+import { getProvisionRoot, isProvisionAllowed, resolveSpawnCwd } from "./workspaceConfig.ts";
 
 const DEFAULT_PORT = 7432;
+
+/**
+ * Normalize a user-supplied GitHub-ish source into the standard
+ * `<owner>/<repo>/tree/<branch>` path that codehost/provision's `parseSpec`
+ * understands. Interim fallback used only when the linked codehost build
+ * predates `parseSource` (the canonical normalizer in the standard):
+ *   https://github.com/o/r/tree/b · github.com/o/r/tree/b · o/r/tree/b
+ *   o/r@branch · o/r (→ default branch main)
+ */
+function normalizeGithubSource(s: string): string {
+  let v = s
+    .trim()
+    .replace(/^https?:\/\//, "")
+    .replace(/^github\.com\//, "");
+  v = v
+    .replace(/[?#].*$/, "")
+    .replace(/\.git$/, "")
+    .replace(/^\/+|\/+$/g, "");
+  const at = v.match(/^([^/]+)\/([^/@]+)@(.+)$/);
+  if (at) return `${at[1]}/${at[2]}/tree/${at[3]}`;
+  if (/^[^/]+\/[^/]+$/.test(v)) return `${v}/tree/main`;
+  return v;
+}
 
 function agentYesHome(): string {
   return process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
@@ -1448,9 +1472,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return Response.json(live);
     }
 
-    // POST /api/spawn  body {cli, cwd, prompt} — launch a new agent
+    // POST /api/spawn  body {cli, cwd?, from?, prompt?} — launch a new agent.
+    // `from` (a GitHub URL / owner/repo@branch / owner/repo/tree/branch) is
+    // resolved to a ready worktree via codehost/provision (the shared workspace
+    // standard); otherwise `cwd` is resolved against the workspace root and
+    // created if missing (Layer-0 plain-dir provisioning — no more ENOENT 500).
     if (req.method === "POST" && p === "/api/spawn") {
-      let body: { cli?: string; cwd?: string; prompt?: string };
+      let body: { cli?: string; cwd?: string; from?: string; prompt?: string };
       try {
         body = (await req.json()) as typeof body;
       } catch {
@@ -1459,10 +1487,73 @@ export async function cmdServe(rest: string[]): Promise<number> {
       const cli = String(body.cli ?? "claude");
       if (!SUPPORTED_CLIS.includes(cli as never))
         return new Response(`unsupported cli: ${cli}`, { status: 400 });
-      const cwd = typeof body.cwd === "string" && body.cwd ? body.cwd : process.cwd();
       const prompt = String(body.prompt ?? "");
+
+      // Resolve the working directory. A `from` source is provisioned (clone /
+      // worktree) through codehost/provision; a plain `cwd` is resolved to the
+      // workspace root and mkdir-p'd so a missing dir no longer ENOENTs.
+      let cwd: string;
+      let provisioned: { action: string; folder: string } | null = null;
+      const from = typeof body.from === "string" ? body.from.trim() : "";
+      if (from) {
+        type Spec = { owner: string; repo: string; branch: string };
+        let prov: {
+          parseSource?: (s: string) => Spec | null;
+          parseSpec: (s: string) => Spec | null;
+          provision: (
+            spec: Spec,
+            opts?: { wsRoot?: string },
+          ) => Promise<{ ok: boolean; folder: string; action: string; error?: string }>;
+        };
+        try {
+          prov = (await import("codehost/provision")) as typeof prov;
+        } catch (e) {
+          return new Response(
+            `spawn-from needs the 'codehost' package (codehost/provision) — install it ` +
+              `(npm i -g codehost) or 'bun link' it for local dev: ${(e as Error).message}`,
+            { status: 501 },
+          );
+        }
+        // Malformed input (e.g. bad %-encoding) must surface as 400, not a 500.
+        let spec: Spec | null;
+        try {
+          spec =
+            typeof prov.parseSource === "function"
+              ? prov.parseSource(from)
+              : prov.parseSpec(normalizeGithubSource(from));
+        } catch {
+          spec = null;
+        }
+        if (!spec) return new Response(`unrecognized spawn source: ${from}`, { status: 400 });
+        // Provisioning clones the repo and runs its setup script (dependency
+        // installs + package lifecycle hooks = code execution on the host), so
+        // gate it behind an owner/repo allowlist — empty allowlist = deny all.
+        if (!isProvisionAllowed(spec.owner, spec.repo))
+          return new Response(
+            `provisioning '${spec.owner}/${spec.repo}' is not allowed — add the owner to ` +
+              `provisionAllowlist in ~/.agent-yes/config.json (or "*" to allow all)`,
+            { status: 403 },
+          );
+        let result: { ok: boolean; folder: string; action: string; error?: string };
+        try {
+          const wsRoot = getProvisionRoot();
+          result = await prov.provision(spec, wsRoot ? { wsRoot } : undefined);
+        } catch (e) {
+          return new Response(`provision failed: ${(e as Error).message}`, { status: 502 });
+        }
+        if (!result?.ok) return new Response(result?.error ?? "provision failed", { status: 502 });
+        cwd = result.folder;
+        provisioned = { action: result.action, folder: result.folder };
+      } else {
+        cwd = resolveSpawnCwd(body.cwd);
+        try {
+          await mkdir(cwd, { recursive: true });
+        } catch (e) {
+          return new Response(`cannot create cwd ${cwd}: ${(e as Error).message}`, { status: 500 });
+        }
+      }
       process.stderr.write(
-        `→ console spawned:  ay ${cli}${prompt ? ` -- "${prompt.slice(0, 60)}"` : ""}  (cwd: ${cwd})\n`,
+        `→ console spawned:  ay ${cli}${prompt ? ` -- "${prompt.slice(0, 60)}"` : ""}  (cwd: ${cwd}${provisioned ? `, ${provisioned.action} from ${from}` : ""})\n`,
       );
       // Resolve `ay` to an absolute command. The detached daemon (oxmgr/launchd/
       // pm2) usually has a PATH WITHOUT ~/.bun/bin, so a bare "ay" fails with
@@ -1483,7 +1574,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
           stderr: "ignore",
         });
         child.unref();
-        return Response.json({ ok: true, pid: child.pid, cli, cwd });
+        return Response.json({
+          ok: true,
+          pid: child.pid,
+          cli,
+          cwd,
+          ...(provisioned ? { provisioned } : {}),
+        });
       } catch (e) {
         return new Response((e as Error).message, { status: 500 });
       }

@@ -4245,6 +4245,7 @@
         const before = new Set(entries.filter((e) => e._room === target.id).map((e) => e.pid));
         const res = await target.tx.post("/api/spawn", {
           cli: spec.cli || "claude",
+          from: spec.from || undefined,
           cwd: spec.cwd || undefined,
           prompt: spec.prompt || undefined,
         });
@@ -4296,7 +4297,8 @@
         $("newform").innerHTML = `<div class="lcard">
       <div class="ltitle">New agent · ${esc(where)}</div>
       <div class="nfield"><label>CLI</label><input id="nf-cli" value="claude" spellcheck="false" autocapitalize="off" /></div>
-      <div class="nfield"><label>Working dir</label><input id="nf-cwd" value="${esc(cwd)}" placeholder="(host default)" spellcheck="false" autocapitalize="off" /></div>
+      <div class="nfield"><label>Spawn from — optional</label><input id="nf-from" placeholder="github URL / owner/repo@branch — provisions a worktree" spellcheck="false" autocapitalize="off" /></div>
+      <div class="nfield"><label>Working dir</label><input id="nf-cwd" value="${esc(cwd)}" placeholder="(host default — ignored when Spawn from is set)" spellcheck="false" autocapitalize="off" /></div>
       <div class="nfield"><label>Prompt — optional</label><textarea id="nf-prompt" rows="3" placeholder="initial message to send the agent…"></textarea></div>
       <div class="lrow">
         <button class="lfleet" id="nf-go">▷ Launch</button>
@@ -4312,6 +4314,7 @@
         if (!go || go.disabled) return;
         const spec = {
           cli: ($("nf-cli").value || "claude").trim(),
+          from: $("nf-from")?.value.trim() || "",
           cwd: $("nf-cwd").value.trim(),
           prompt: $("nf-prompt").value,
         };
@@ -4320,7 +4323,7 @@
         // target fleet. A 2nd `claude -c` in the same repo fights over the same
         // session/files and usually exits on startup — which looks like "the new
         // agent never appears". Let the user pick a different dir or proceed.
-        if (spec.cwd) {
+        if (spec.cwd && !spec.from) {
           await loadList();
           const norm = (p) => (p || "").replace(/\/+$/, "");
           const busy = entries.some(
