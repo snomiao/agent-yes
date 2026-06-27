@@ -3405,6 +3405,25 @@
           /* addon CDN blocked — terminal still works, just without auto-links */
         }
         term.open(logEl);
+        // Right-click to copy the current selection (terminal convention): when
+        // text is selected, a context-menu click copies it to the clipboard and
+        // suppresses the browser menu, then clears the selection so the highlight
+        // doesn't linger. With nothing selected we leave the default menu alone
+        // (and a mouse-tracking TUI still gets its own right-click via xterm).
+        // The Clipboard API is undefined over plain HTTP and can reject on a
+        // permission denial — only suppress the menu when we can actually copy,
+        // clear the selection once the write resolves, and swallow a failure
+        // quietly (the highlight stays so the user can retry).
+        term.element?.addEventListener("contextmenu", (ev) => {
+          if (!term || !term.hasSelection()) return;
+          const text = term.getSelection();
+          if (!text || !navigator.clipboard) return;
+          ev.preventDefault();
+          navigator.clipboard.writeText(text).then(
+            () => term.clearSelection(),
+            () => {},
+          );
+        });
         // On a phone, auto-focusing yanks up the soft keyboard the moment you open
         // an agent — even when you only meant to read the tail. Skip it there; a tap
         // on the terminal still focuses to type. Desktop keeps instant keyboard input.
