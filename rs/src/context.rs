@@ -4,7 +4,7 @@ use crate::codex_sessions;
 use crate::config::CliConfig;
 use crate::idle_waiter::IdleWaiter;
 use crate::log_files::LogWriter;
-use crate::messaging::{send_ctrl_c, send_text, MessageContext};
+use crate::messaging::{send_ctrl_c, send_esc, send_text, MessageContext};
 use crate::pty_spawner::{get_terminal_size, PtyContext};
 use crate::ready_manager::ReadyManager;
 use crate::utils::sleep_ms;
@@ -791,7 +791,10 @@ impl AgentContext {
                     &self.cwd,
                 );
                 // Esc cancels claude's in-flight request; harmless to other CLIs.
-                send_text(msg_ctx, "\x1b").await?;
+                // Use send_esc (NOT send_text) so we don't ping the idle timer —
+                // the watchdog needs idle to keep growing to escalate if Esc
+                // fails to recover the stream.
+                send_esc(&msg_ctx.writer)?;
                 self.stall_esc_sent_at = Some(Instant::now());
             }
             StallAction::Wait => {}
