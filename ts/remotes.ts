@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
 import yaml from "yaml";
+import { isWebrtcSpec } from "./webrtcLink.ts";
 
 function remotesPath(): string {
   const dir = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
@@ -79,6 +80,10 @@ export function parseDirectRemoteSpec(
  * Returns null if the spec doesn't match any remote.
  */
 export async function resolveRemoteSpec(spec: string): Promise<ResolvedRemote | null> {
+  // Inline WebRTC share link: `ay ls webrtc://…` or `ay ls https://…/w/#room:token`.
+  // These carry their own secret and have no keyword (use an alias to add one).
+  if (isWebrtcSpec(spec)) return resolveWebrtc(spec, undefined);
+
   const direct = parseDirectRemoteSpec(spec);
   if (direct) {
     return { url: direct.baseUrl, token: direct.token, keyword: direct.keyword };
@@ -92,7 +97,20 @@ export async function resolveRemoteSpec(spec: string): Promise<ResolvedRemote | 
   const remotes = await readRemotes();
   const cfg = remotes.get(alias);
   if (!cfg) return null;
+  // A saved alias may point at a WebRTC link; bridge it just like an inline one.
+  if (isWebrtcSpec(cfg.url)) return resolveWebrtc(cfg.url, keyword);
   return { url: cfg.url, token: cfg.token, keyword };
+}
+
+/**
+ * Start a local HTTP↔WebRTC bridge for a share link and present it as an
+ * ordinary http remote, so every fetch-based remote command works unchanged.
+ * The bridge lives for the rest of the process (torn down on `process.exit`).
+ */
+async function resolveWebrtc(link: string, keyword?: string): Promise<ResolvedRemote> {
+  const { startWebrtcBridge } = await import("./webrtcRemote.ts");
+  const bridge = await startWebrtcBridge(link);
+  return { url: bridge.baseUrl, token: bridge.token, keyword };
 }
 
 // ---------------------------------------------------------------------------
@@ -108,7 +126,9 @@ export async function cmdRemote(rest: string[]): Promise<number> {
         `Manage saved remote server aliases.\n\n` +
         `Subcommands:\n` +
         `  ay remote ls                                           list configured remotes\n` +
-        `  ay remote add <alias> http://<token>@<host>:<port>    add a remote\n` +
+        `  ay remote add <alias> http://<token>@<host>:<port>    add an http remote\n` +
+        `  ay remote add <alias> webrtc://<room>:<token>@<host>  add a WebRTC share remote\n` +
+        `  ay remote add <alias> https://agent-yes.com/w/#<room>:<token>   (share link form)\n` +
         `  ay remote rm <alias>                                   remove a remote\n\n` +
         `Once added, use the alias anywhere a keyword is accepted:\n` +
         `  ay ls   <alias>\n` +
@@ -144,6 +164,13 @@ export async function cmdRemote(rest: string[]): Promise<number> {
         "  example: ay remote add work-mac http://mytoken123@192.168.1.5:7432\n",
       );
       return 1;
+    }
+    // WebRTC share links carry their own secret — store verbatim (token in the link).
+    if (isWebrtcSpec(rawUrl)) {
+      await writeRemoteAlias(alias, { url: rawUrl, token: "" });
+      process.stdout.write(`remote '${alias}' added → ${rawUrl} (webrtc)\n`);
+      process.stderr.write(`\n  ay ls ${alias}            # list agents on ${alias}\n`);
+      return 0;
     }
     let url: string, token: string;
     try {

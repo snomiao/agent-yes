@@ -64,6 +64,11 @@ export default defineConfig({
         // WebRTC share bridge — needs a peer + signaling server; proven e2e, not
         // unit-testable.
         "ts/share.ts",
+        // WebRTC remote client/bridge — the inverse of share.ts; needs a live
+        // peer + signaling server + DataChannel. Pure helpers (parseWebrtcLink /
+        // isWebrtcSpec) are unit-tested in webrtcRemote.spec.ts; the connection
+        // and HTTP bridge are integration-only (same rationale as share.ts).
+        "ts/webrtcRemote.ts",
         // Guided onboarding — the workspace-setting path is unit-tested
         // (setup.spec.ts); the TTY prompt and the daemon install it delegates to
         // are integration-only.
