@@ -32,6 +32,7 @@ import { invokedCliName } from "./invokedCli.ts";
 import type { AgentCliConfig } from "./index.ts";
 import yargs from "yargs";
 import { type ResolvedRemote, readRemotes, resolveRemoteSpec } from "./remotes.ts";
+import { isWebrtcSpec } from "./webrtcLink.ts";
 
 // ---------------------------------------------------------------------------
 // notes store  (~/.agent-yes/notes.jsonl)
@@ -868,10 +869,10 @@ async function fetchRemoteRecordsRaw(
   // WebRTC remotes have no http port — bridge them, then fetch the loopback URL.
   let bridge: { baseUrl: string; token: string; close: () => void } | null = null;
   try {
-    const { isWebrtcSpec, startWebrtcBridge } = await import("./webrtcRemote.ts");
     let base = url;
     let bearer = token;
     if (isWebrtcSpec(url)) {
+      const { startWebrtcBridge } = await import("./webrtcRemote.ts");
       bridge = await startWebrtcBridge(url);
       base = bridge.baseUrl;
       bearer = bridge.token;

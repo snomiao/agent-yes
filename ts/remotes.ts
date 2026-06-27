@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
 import yaml from "yaml";
+import { isWebrtcSpec } from "./webrtcLink.ts";
 
 function remotesPath(): string {
   const dir = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
@@ -81,7 +82,6 @@ export function parseDirectRemoteSpec(
 export async function resolveRemoteSpec(spec: string): Promise<ResolvedRemote | null> {
   // Inline WebRTC share link: `ay ls webrtc://…` or `ay ls https://…/w/#room:token`.
   // These carry their own secret and have no keyword (use an alias to add one).
-  const { isWebrtcSpec } = await import("./webrtcRemote.ts");
   if (isWebrtcSpec(spec)) return resolveWebrtc(spec, undefined);
 
   const direct = parseDirectRemoteSpec(spec);
@@ -166,7 +166,6 @@ export async function cmdRemote(rest: string[]): Promise<number> {
       return 1;
     }
     // WebRTC share links carry their own secret — store verbatim (token in the link).
-    const { isWebrtcSpec } = await import("./webrtcRemote.ts");
     if (isWebrtcSpec(rawUrl)) {
       await writeRemoteAlias(alias, { url: rawUrl, token: "" });
       process.stdout.write(`remote '${alias}' added → ${rawUrl} (webrtc)\n`);
