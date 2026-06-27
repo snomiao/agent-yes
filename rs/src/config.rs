@@ -72,7 +72,19 @@ pub struct CliConfig {
     pub yes_args: Vec<String>,
     /// Use cursor-based rendering (no newlines)
     pub no_eol: bool,
+    /// No-output watchdog timeout (seconds). While a `working` spinner is on
+    /// screen, a live CLI repaints its timer ~every second, so zero visible
+    /// output for this long means the API stream silently stalled (the stream
+    /// `await` never resolved). On trip: send Esc to cancel; if still stalled,
+    /// exit non-zero so a `--robust` run restarts with `--continue`. 0 disables.
+    pub stall_timeout_secs: u64,
 }
+
+/// Built-in no-output watchdog timeout when a CLI doesn't override it. Generous
+/// on purpose: real work keeps the spinner's timer ticking (counts as output),
+/// so only a frozen render loop reaches this. Override per-CLI via
+/// `stallTimeoutSecs` in default.config.yaml or a user config.
+pub const DEFAULT_STALL_TIMEOUT_SECS: u64 = 300;
 
 /// Install command catalogue per-platform. Currently consumed only by the TS
 /// side; mirrored here so the YAML schema round-trips cleanly through Rust.
@@ -160,6 +172,9 @@ fn build_cli_config(raw: CliConfigOverride) -> Result<CliConfig> {
         default_args: raw.default_args.unwrap_or_default(),
         yes_args: raw.yes_args.unwrap_or_default(),
         no_eol: raw.no_eol.unwrap_or(false),
+        stall_timeout_secs: raw
+            .stall_timeout_secs
+            .unwrap_or(DEFAULT_STALL_TIMEOUT_SECS),
     })
 }
 

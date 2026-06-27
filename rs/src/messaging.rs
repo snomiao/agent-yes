@@ -114,6 +114,21 @@ pub async fn send_text(ctx: &MessageContext, text: &str) -> Result<()> {
     Ok(())
 }
 
+/// Send Esc (cancel in-flight request) WITHOUT pinging the idle timer.
+///
+/// The no-output watchdog uses this: it must NOT reset idle, because it relies
+/// on idle continuing to grow to escalate (Esc → 30s grace → force restart) if
+/// Esc doesn't recover a stalled stream. Routing through `send_text` instead
+/// would ping idle on every Esc and the watchdog could never reach escalation.
+pub fn send_esc(writer: &Arc<Mutex<Box<dyn Write + Send>>>) -> Result<()> {
+    let mut writer = writer
+        .lock()
+        .map_err(|e| anyhow::anyhow!("Lock error: {}", e))?;
+    writer.write_all(&[0x1b])?; // Esc
+    writer.flush()?;
+    Ok(())
+}
+
 /// Send Ctrl+C (SIGINT)
 pub fn send_ctrl_c(writer: &Arc<Mutex<Box<dyn Write + Send>>>) -> Result<()> {
     let mut writer = writer
@@ -149,6 +164,18 @@ mod tests {
             Arc::new(Mutex::new(Box::new(BufWriter(buf.clone()))));
         send_ctrl_c(&writer).unwrap();
         assert_eq!(*buf.lock().unwrap(), vec![0x03]);
+    }
+
+    #[test]
+    fn test_send_esc() {
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(Box::new(BufWriter(buf.clone()))));
+        send_esc(&writer).unwrap();
+        assert_eq!(*buf.lock().unwrap(), vec![0x1b]);
+        // send_esc takes only a writer (no IdleWaiter), so by construction it
+        // cannot ping the idle timer — the no-output watchdog depends on that so
+        // idle keeps growing toward escalation when Esc fails to recover.
     }
 
     #[test]
