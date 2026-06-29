@@ -174,10 +174,20 @@ pub struct AgentContext {
     // high-signal poke (user/FIFO input, auto-Enter, auto-retry, typing
     // response, idle action); `last_output_at` advances on every PTY chunk.
     // If a poke is followed by no output for `cli_config.unresponsive_timeout_ms`,
-    // the agent is flagged `unresponsive` (edge-triggered — see
-    // check_responsiveness). Disabled when the timeout is 0.
+    // the poke-based detector trips (see check_responsiveness). Disabled when
+    // that timeout is 0.
     last_stdin_at: Option<Instant>,
     last_output_at: Instant,
+    // Unified "stuck" liveness. `unresponsive` is the single flag published to
+    // the pid_store + webhook; it is the OR of the two detectors' sub-states,
+    // edge-triggered in update_unresponsive():
+    //   - `poke_unresponsive`: no PTY bytes after a stdin poke (responsiveness).
+    //   - `watchdog_stalled`:  the no-output stall watchdog sees a frozen
+    //     "working" spinner (stall_watchdog_check) — the same condition that
+    //     drives Esc/force-restart recovery, now surfaced on the flag too so a
+    //     CLI being actively rescued also reads as stuck in `ay ls`.
+    poke_unresponsive: bool,
+    watchdog_stalled: bool,
     unresponsive: bool,
 }
 
@@ -233,6 +243,8 @@ impl AgentContext {
             pid,
             last_stdin_at: None,
             last_output_at: Instant::now(),
+            poke_unresponsive: false,
+            watchdog_stalled: false,
             unresponsive: false,
         }
     }
@@ -812,13 +824,19 @@ impl AgentContext {
         let working = self.cli_config.working.iter().any(|p| p.is_match(&screen));
         let idle_secs = self.idle_waiter.idle_time_ms() / 1000;
         let esc_elapsed = self.stall_esc_sent_at.map(|t| t.elapsed().as_secs());
-        match decide_stall_action(
+        let action = decide_stall_action(
             timeout,
             working,
             idle_secs,
             esc_elapsed,
             STALL_ESC_GRACE_SECS,
-        ) {
+        );
+        // Any non-Clear action means the "working" spinner is frozen → feed the
+        // unified stuck flag. The stuck/recovered webhook is now emitted centrally
+        // by update_unresponsive() (this used to fire its own "STUCK" notify); the
+        // match below is purely the recovery escalation (Esc → force-restart).
+        self.watchdog_stalled = action != StallAction::Clear;
+        match action {
             StallAction::Clear => {
                 // Healthy, idle-at-prompt, or recovered after an Esc: disarm.
                 self.stall_esc_sent_at = None;
@@ -828,11 +846,6 @@ impl AgentContext {
                     "No-output watchdog: spinner up with no visible output for {}s (>= {}s) — \
                      stream looks stalled, sending Esc to cancel",
                     idle_secs, timeout
-                );
-                crate::webhook::notify(
-                    "STUCK",
-                    &format!("no output for {}s while working — sending Esc", idle_secs),
-                    &self.cwd,
                 );
                 // Esc cancels claude's in-flight request; harmless to other CLIs.
                 // Use send_esc (NOT send_text) so we don't ping the idle timer —
@@ -848,14 +861,10 @@ impl AgentContext {
                      restart (a --robust run resumes with --continue)",
                     STALL_ESC_GRACE_SECS
                 );
-                crate::webhook::notify(
-                    "STUCK",
-                    "Esc ineffective after grace — forcing restart for --continue",
-                    &self.cwd,
-                );
                 self.stall_force_restart = true;
             }
         }
+        self.update_unresponsive();
         Ok(())
     }
 
@@ -1047,34 +1056,43 @@ impl AgentContext {
         self.last_stdin_at = Some(Instant::now());
     }
 
-    /// Edge-triggered liveness check. The agent is `unresponsive` when we sent a
-    /// poke (`last_stdin_at`) that no PTY output has answered
+    /// Poke-based liveness detector: the agent looks stuck when we sent a poke
+    /// (`last_stdin_at`) that no PTY output has answered
     /// (`last_output_at < last_stdin_at`) for at least the configured window.
-    /// Fires the pid_store flag + webhook only on a state change, so a stuck
-    /// agent notifies once and recovery notifies once. No-op when the timeout is
-    /// 0 (check disabled for this CLI).
+    /// Updates this detector's sub-state and republishes the unified flag. No-op
+    /// when the timeout is 0 (this detector disabled for the CLI) — the other
+    /// detector can still publish.
     fn check_responsiveness(&mut self) {
         let timeout_ms = self.cli_config.unresponsive_timeout_ms;
         if timeout_ms == 0 {
             return;
         }
-        let stalled = is_stalled(
+        self.poke_unresponsive = is_stalled(
             self.last_stdin_at,
             self.last_output_at,
             Instant::now(),
             Duration::from_millis(timeout_ms),
         );
-        if stalled == self.unresponsive {
+        self.update_unresponsive();
+    }
+
+    /// Publish the unified `unresponsive` liveness flag — the agent is stuck when
+    /// EITHER detector trips: the post-stdin responsiveness check
+    /// (`poke_unresponsive`) or the no-output stall watchdog (`watchdog_stalled`,
+    /// the same frozen-spinner condition that drives Esc/force-restart recovery).
+    /// Edge-triggered: writes the pid_store flag + fires the webhook only on a
+    /// true change, so a stuck agent notifies once and recovery notifies once,
+    /// regardless of which detector caused the transition.
+    fn update_unresponsive(&mut self) {
+        let stuck = is_stuck(self.poke_unresponsive, self.watchdog_stalled);
+        if stuck == self.unresponsive {
             return;
         }
-        self.unresponsive = stalled;
-        crate::pid_store::PidStore::new().set_unresponsive(self.pid, stalled);
-        if stalled {
-            warn!(
-                "Agent unresponsive: no PTY output for {}ms after stdin",
-                timeout_ms
-            );
-            crate::webhook::notify("UNRESPONSIVE", "no output after stdin", &self.cwd);
+        self.unresponsive = stuck;
+        crate::pid_store::PidStore::new().set_unresponsive(self.pid, stuck);
+        if stuck {
+            warn!("Agent unresponsive: no PTY output while expecting it");
+            crate::webhook::notify("UNRESPONSIVE", "no output — agent looks stuck", &self.cwd);
         } else {
             info!("Agent responsive again after a stall");
             crate::webhook::notify("RUNNING", "responsive again", &self.cwd);
@@ -1253,6 +1271,14 @@ fn is_stalled(
     }
 }
 
+/// The unified "stuck" liveness state: the agent is unresponsive when EITHER
+/// detector trips — the post-stdin responsiveness check (`poke_unresponsive`) or
+/// the no-output stall watchdog's frozen spinner (`watchdog_stalled`). A free fn
+/// so the combine rule is unit-testable; see update_unresponsive.
+fn is_stuck(poke_unresponsive: bool, watchdog_stalled: bool) -> bool {
+    poke_unresponsive || watchdog_stalled
+}
+
 /// Hash a string with the default hasher — used to detect screen state changes.
 fn hash_str(s: &str) -> u64 {
     use std::hash::{Hash, Hasher};
@@ -1403,6 +1429,43 @@ mod tests {
             now,
             Duration::from_secs(3)
         ));
+    }
+
+    #[test]
+    fn test_unified_stuck_is_or_of_detectors() {
+        // update_unresponsive publishes is_stuck(poke, watchdog): either detector
+        // alone trips the unified flag; only when neither holds is it clear.
+        assert!(!is_stuck(false, false));
+        assert!(is_stuck(true, false)); // poke-based responsiveness check tripped
+        assert!(is_stuck(false, true)); // no-output stall watchdog tripped
+        assert!(is_stuck(true, true));
+    }
+
+    #[test]
+    fn test_watchdog_stalled_maps_every_non_clear_action() {
+        // stall_watchdog_check feeds the unified flag via
+        // `watchdog_stalled = action != StallAction::Clear`: a frozen spinner reads
+        // as stuck whether we're about to Esc, waiting out the grace, or forcing a
+        // restart; only Clear (healthy / recovered / idle-at-prompt) is not stuck.
+        let grace = 30;
+        // Clear cases → not stuck.
+        assert_eq!(
+            decide_stall_action(300, false, 999, None, grace),
+            StallAction::Clear
+        );
+        assert_eq!(
+            decide_stall_action(300, true, 5, Some(10), grace),
+            StallAction::Clear
+        );
+        // Every recovery state → stuck (non-Clear).
+        for action in [
+            decide_stall_action(300, true, 300, None, grace), // SendEsc
+            decide_stall_action(300, true, 360, Some(10), grace), // Wait
+            decide_stall_action(300, true, 400, Some(30), grace), // ForceRestart
+        ] {
+            assert_ne!(action, StallAction::Clear);
+            assert!(is_stuck(false, action != StallAction::Clear));
+        }
     }
 
     #[test]
