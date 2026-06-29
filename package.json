@@ -85,7 +85,7 @@
     "build": "tsdown",
     "check:e2e": "bun scripts/check-e2e.ts",
     "cf": "bun scripts/cf.ts",
-    "build:rs": "bun ./scripts/build-rs.ts",
+    "build:rs": "cargo build --release --features swarm --manifest-path rs/Cargo.toml",
     "postbuild": "bun ./ts/postbuild.ts",
     "demo": "bun run build && bun link && claude-yes -- demo",
     "dev": "bun ts/index.ts",
