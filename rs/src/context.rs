@@ -165,6 +165,20 @@ pub struct AgentContext {
     // the run exits non-zero and a `--robust` parent resumes with --continue.
     stall_esc_sent_at: Option<Instant>,
     pub stall_force_restart: bool,
+
+    // Our own pid — needed to update this agent's pid_store record (the
+    // unresponsive flag) from inside the loop.
+    pid: u32,
+
+    // Liveness tracking. `last_stdin_at` is stamped whenever we send a
+    // high-signal poke (user/FIFO input, auto-Enter, auto-retry, typing
+    // response, idle action); `last_output_at` advances on every PTY chunk.
+    // If a poke is followed by no output for `cli_config.unresponsive_timeout_ms`,
+    // the agent is flagged `unresponsive` (edge-triggered — see
+    // check_responsiveness). Disabled when the timeout is 0.
+    last_stdin_at: Option<Instant>,
+    last_output_at: Instant,
+    unresponsive: bool,
 }
 
 impl AgentContext {
@@ -216,6 +230,10 @@ impl AgentContext {
             last_action_screen_hash: None,
             last_checked_screen_hash: None,
             used_alt_screen: false,
+            pid,
+            last_stdin_at: None,
+            last_output_at: Instant::now(),
+            unresponsive: false,
         }
     }
 
@@ -522,8 +540,10 @@ impl AgentContext {
                             exit_code = 130;
                             break;
                         } else {
-                            // Forward Ctrl+C to agent
+                            // Forward Ctrl+C to agent — a live TUI redraws (e.g.
+                            // an interrupt prompt), so treat it as a liveness poke.
                             send_ctrl_c(&writer)?;
+                            self.mark_stdin_sent();
                         }
                     }
                     // Check for Ctrl+Y (toggle auto-yes)
@@ -550,10 +570,13 @@ impl AgentContext {
 
                         // Forward to PTY if ready
                         if self.stdin_ready.is_ready().await || !self.auto_yes_enabled {
-                            let mut w = writer.lock().map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
-                            w.write_all(&data)?;
-                            w.flush()?;
+                            {
+                                let mut w = writer.lock().map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
+                                w.write_all(&data)?;
+                                w.flush()?;
+                            }
                             self.idle_waiter.ping();
+                            self.mark_stdin_sent();
                         }
                     }
                 }
@@ -576,6 +599,11 @@ impl AgentContext {
                         break;
                     }
 
+                    // Liveness check runs here — after the PTY drain above (so a
+                    // just-arrived byte clears the stall) and after the exit
+                    // check (so a clean exit never flashes "unresponsive").
+                    self.check_responsiveness();
+
                     // Check for idle timeout
                     if let Some(timeout) = timeout_ms {
                         let idle = self.idle_waiter.idle_time_ms();
@@ -597,6 +625,7 @@ impl AgentContext {
                                     send_text(&msg_ctx, action).await?;
                                     send_text(&msg_ctx, "\n").await?;
                                     self.idle_waiter.ping();
+                                    self.mark_stdin_sent();
                                 } else {
                                     info!("Idle timeout reached ({}ms > {}ms), exiting", idle, timeout);
                                     for cmd in &self.cli_config.exit_command {
@@ -659,6 +688,15 @@ impl AgentContext {
         msg_ctx: &mut MessageContext,
         stdout_tx: &mpsc::Sender<String>,
     ) -> Result<()> {
+        // Liveness: any PTY byte (even pure ANSI/cursor) proves the agent is
+        // alive, so stamp the output time first. This is drain time, not arrival
+        // time — output queued just before a stdin poke gets stamped as "after"
+        // it on the next drain, masking that poke. That, and equal-Instant ties
+        // in is_stalled, both bias toward "alive" (under-detect rather than cry
+        // wolf), which is the intended conservative behaviour. See
+        // check_responsiveness.
+        self.last_output_at = Instant::now();
+
         // Forward raw PTY bytes to stdout only in TTY passthrough mode. In
         // plain (non-TTY) mode we suppress the raw stream and emit rendered
         // text on exit instead — see `non_tty_renderer` and the final flush
@@ -774,7 +812,13 @@ impl AgentContext {
         let working = self.cli_config.working.iter().any(|p| p.is_match(&screen));
         let idle_secs = self.idle_waiter.idle_time_ms() / 1000;
         let esc_elapsed = self.stall_esc_sent_at.map(|t| t.elapsed().as_secs());
-        match decide_stall_action(timeout, working, idle_secs, esc_elapsed, STALL_ESC_GRACE_SECS) {
+        match decide_stall_action(
+            timeout,
+            working,
+            idle_secs,
+            esc_elapsed,
+            STALL_ESC_GRACE_SECS,
+        ) {
             StallAction::Clear => {
                 // Healthy, idle-at-prompt, or recovered after an Esc: disarm.
                 self.stall_esc_sent_at = None;
@@ -966,28 +1010,75 @@ impl AgentContext {
     }
 
     /// Actually send the Enter key
-    fn do_send_enter(&self, msg_ctx: &MessageContext) -> Result<()> {
-        let mut writer = msg_ctx
-            .writer
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
-        writer.write_all(b"\r")?;
-        writer.flush()?;
+    fn do_send_enter(&mut self, msg_ctx: &MessageContext) -> Result<()> {
+        {
+            let mut writer = msg_ctx
+                .writer
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
+            writer.write_all(b"\r")?;
+            writer.flush()?;
+        }
         self.idle_waiter.ping();
+        self.mark_stdin_sent();
         Ok(())
     }
 
     /// Type "retry" + Enter — the auto-retry response to a recoverable API error.
-    fn do_send_retry(&self, msg_ctx: &MessageContext) -> Result<()> {
-        let mut writer = msg_ctx
-            .writer
-            .lock()
-            .map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
-        writer.write_all(b"retry")?;
-        writer.write_all(b"\r")?;
-        writer.flush()?;
+    fn do_send_retry(&mut self, msg_ctx: &MessageContext) -> Result<()> {
+        {
+            let mut writer = msg_ctx
+                .writer
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
+            writer.write_all(b"retry")?;
+            writer.write_all(b"\r")?;
+            writer.flush()?;
+        }
         self.idle_waiter.ping();
+        self.mark_stdin_sent();
         Ok(())
+    }
+
+    /// Stamp the last-stdin time — marks a "poke" whose response (any PTY
+    /// output) the liveness check waits for. Reset by output advancing
+    /// `last_output_at` past this instant. See check_responsiveness.
+    fn mark_stdin_sent(&mut self) {
+        self.last_stdin_at = Some(Instant::now());
+    }
+
+    /// Edge-triggered liveness check. The agent is `unresponsive` when we sent a
+    /// poke (`last_stdin_at`) that no PTY output has answered
+    /// (`last_output_at < last_stdin_at`) for at least the configured window.
+    /// Fires the pid_store flag + webhook only on a state change, so a stuck
+    /// agent notifies once and recovery notifies once. No-op when the timeout is
+    /// 0 (check disabled for this CLI).
+    fn check_responsiveness(&mut self) {
+        let timeout_ms = self.cli_config.unresponsive_timeout_ms;
+        if timeout_ms == 0 {
+            return;
+        }
+        let stalled = is_stalled(
+            self.last_stdin_at,
+            self.last_output_at,
+            Instant::now(),
+            Duration::from_millis(timeout_ms),
+        );
+        if stalled == self.unresponsive {
+            return;
+        }
+        self.unresponsive = stalled;
+        crate::pid_store::PidStore::new().set_unresponsive(self.pid, stalled);
+        if stalled {
+            warn!(
+                "Agent unresponsive: no PTY output for {}ms after stdin",
+                timeout_ms
+            );
+            crate::webhook::notify("UNRESPONSIVE", "no output after stdin", &self.cwd);
+        } else {
+            info!("Agent responsive again after a stall");
+            crate::webhook::notify("RUNNING", "responsive again", &self.cwd);
+        }
     }
 
     async fn toggle_auto_yes(&mut self) {
@@ -1109,6 +1200,7 @@ impl AgentContext {
                 if pattern.is_match(&buffer) {
                     debug!("Typing response pattern matched, sending: {:?}", response);
                     send_text(msg_ctx, response).await?;
+                    self.mark_stdin_sent();
                     self.output_buffer.clear();
                     self.last_action_screen_hash = Some(buffer_hash);
                     return Ok(());
@@ -1142,6 +1234,22 @@ impl AgentContext {
         }
 
         Ok(())
+    }
+}
+
+/// Pure liveness decision: the agent is stalled when we sent a poke
+/// (`last_stdin_at`) that no PTY output has answered (`last_output_at` predates
+/// the poke) for at least `timeout`. Extracted from `check_responsiveness` so
+/// the time arithmetic can be unit-tested without a real PTY.
+fn is_stalled(
+    last_stdin_at: Option<Instant>,
+    last_output_at: Instant,
+    now: Instant,
+    timeout: Duration,
+) -> bool {
+    match last_stdin_at {
+        Some(sent) => last_output_at < sent && now.saturating_duration_since(sent) >= timeout,
+        None => false,
     }
 }
 
@@ -1245,6 +1353,56 @@ mod tests {
             decide_stall_action(300, true, 5, Some(10), 30),
             StallAction::Clear
         );
+    }
+
+    #[test]
+    fn test_is_stalled_no_poke() {
+        // Never sent stdin → never stalled, regardless of output age.
+        let now = Instant::now();
+        let old = now.checked_sub(Duration::from_secs(60)).unwrap();
+        assert!(!is_stalled(None, old, now, Duration::from_secs(3)));
+    }
+
+    #[test]
+    fn test_is_stalled_poke_then_output() {
+        // Output arrived AFTER the poke → responsive (twitched back).
+        let now = Instant::now();
+        let sent = now.checked_sub(Duration::from_secs(10)).unwrap();
+        let output_after = now.checked_sub(Duration::from_secs(5)).unwrap();
+        assert!(!is_stalled(
+            Some(sent),
+            output_after,
+            now,
+            Duration::from_secs(3)
+        ));
+    }
+
+    #[test]
+    fn test_is_stalled_poke_then_silence() {
+        // Poked 10s ago, last output predates the poke, timeout 3s → stalled.
+        let now = Instant::now();
+        let sent = now.checked_sub(Duration::from_secs(10)).unwrap();
+        let output_before = now.checked_sub(Duration::from_secs(12)).unwrap();
+        assert!(is_stalled(
+            Some(sent),
+            output_before,
+            now,
+            Duration::from_secs(3)
+        ));
+    }
+
+    #[test]
+    fn test_is_stalled_within_window() {
+        // Poked 1s ago with no output yet, but 3s window hasn't elapsed → not yet.
+        let now = Instant::now();
+        let sent = now.checked_sub(Duration::from_secs(1)).unwrap();
+        let output_before = now.checked_sub(Duration::from_secs(2)).unwrap();
+        assert!(!is_stalled(
+            Some(sent),
+            output_before,
+            now,
+            Duration::from_secs(3)
+        ));
     }
 
     #[test]

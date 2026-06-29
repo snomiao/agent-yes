@@ -34,6 +34,11 @@ pub struct PidRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fifo_file: Option<String>,
     pub status: String, // "active" | "idle" | "exited"
+    /// True when the agent was sent stdin but produced no PTY output within
+    /// its configured liveness window — i.e. it looks stuck. Orthogonal to
+    /// `status` (which stays "active"); cleared on recovery and on exit.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub unresponsive: bool,
     pub exit_code: Option<i32>,
     pub exit_reason: Option<String>,
     pub started_at: i64, // unix ms
@@ -58,6 +63,12 @@ pub struct PidRecord {
 /// enough to type/reference; `matchKeyword` allows prefix lookups.
 fn new_agent_id() -> String {
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
+}
+
+/// serde `skip_serializing_if` predicate — keeps `unresponsive: false` (the
+/// common case) out of the JSON so records stay compact and diff-friendly.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 pub struct PidStore {
@@ -105,6 +116,7 @@ impl PidStore {
             log_file: log_file.map(|s| s.to_string()),
             fifo_file: fifo_file.map(|s| s.to_string()),
             status: "active".to_string(),
+            unresponsive: false,
             exit_code: None,
             exit_reason: None,
             started_at: chrono::Utc::now().timestamp_millis(),
@@ -142,6 +154,11 @@ impl PidStore {
                     r.status = status.to_string();
                     r.exit_code = exit_code;
                     r.exit_reason = exit_reason.map(|s| s.to_string());
+                    // A terminal status makes liveness moot — never leave a dead
+                    // record flagged unresponsive.
+                    if status == "exited" {
+                        r.unresponsive = false;
+                    }
                     // Only repoint the log when given one (raw -> rendered on
                     // clean exit); otherwise keep the raw path recorded at start.
                     if let Some(lf) = log_file {
@@ -153,6 +170,31 @@ impl PidStore {
         })();
         if let Err(e) = result {
             warn!("PidStore: failed to update status: {}", e);
+        }
+    }
+
+    /// Set (or clear) the `unresponsive` flag for an agent. Edge-triggered by
+    /// the supervisor — only called on a true transition — and it rewrites the
+    /// registry only when the value actually changes, so the steady state costs
+    /// no disk writes. Leaves `status` untouched.
+    pub fn set_unresponsive(&self, pid: u32, unresponsive: bool) {
+        let _lock = acquire_lock(&self.path);
+        let result = (|| -> Result<()> {
+            let mut records = self.read_all()?;
+            let mut changed = false;
+            for r in &mut records {
+                if r.pid == pid && r.unresponsive != unresponsive {
+                    r.unresponsive = unresponsive;
+                    changed = true;
+                }
+            }
+            if changed {
+                self.write_all(&records)?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            warn!("PidStore: failed to set unresponsive: {}", e);
         }
     }
 
@@ -501,6 +543,7 @@ mod tests {
             log_file: None,
             fifo_file: None,
             status: "active".into(),
+            unresponsive: false,
             exit_code: None,
             exit_reason: None,
             started_at: 0,
@@ -537,6 +580,7 @@ mod tests {
                 log_file: Some(raw.to_string_lossy().to_string()),
                 fifo_file: None,
                 status: "exited".into(),
+                unresponsive: false,
                 exit_code: Some(0),
                 exit_reason: Some("completed".into()),
                 started_at: old_started_at,
