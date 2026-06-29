@@ -1,5 +1,6 @@
 import { mkdir, open, readFile, stat, writeFile } from "fs/promises";
 import { renameSync, watch, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import { homedir, hostname, userInfo } from "os";
@@ -1118,9 +1119,24 @@ export async function cmdServe(rest: string[]): Promise<number> {
     if (req.method === "GET" && p === "/api/whoami") {
       let user = "";
       try {
-        user = userInfo().username;
+        // Bun's userInfo() doesn't always throw on a uid with no /etc/passwd
+        // entry (arbitrary-uid / minimal containers) — it can return the literal
+        // "unknown". Treat that (and "") as a miss so the fallbacks run; without
+        // this a root container surfaced as `unknown@host`, not `root@host`.
+        const u = userInfo().username;
+        if (u && u !== "unknown") user = u;
       } catch {
-        /* userInfo throws if there's no passwd entry (some containers) */
+        /* userInfo can still throw outright on some platforms */
+      }
+      user ||= process.env.USER || process.env.LOGNAME || process.env.USERNAME || "";
+      // Last resort on Unix: resolve the uid against the passwd db directly,
+      // which returns `root` for uid 0 even when the env carries no USER.
+      if (!user && process.platform !== "win32") {
+        try {
+          user = execFileSync("id", ["-un"], { encoding: "utf8" }).trim();
+        } catch {
+          /* no `id` on PATH — leave user blank, host-only label */
+        }
       }
       const host = hostname();
       return Response.json({ host: user ? `${user}@${host}` : host });
