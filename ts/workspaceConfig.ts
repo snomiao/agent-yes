@@ -15,6 +15,10 @@ import { agentYesHome } from "./agentYesHome.ts";
 
 interface Config {
   workspace?: string;
+  /** Root for `from`-provisioned worktrees (`<root>/<owner>/<repo>/tree/<branch>`). */
+  provisionRoot?: string;
+  /** Owners/repos permitted for `from`-provisioning; empty = deny all. */
+  provisionAllowlist?: string[];
 }
 
 function configPath(): string {
@@ -41,6 +45,45 @@ export function expandTilde(p: string): string {
 export function getWorkspaceRoot(): string {
   const w = readConfig().workspace;
   return w && w.trim() ? w : homedir();
+}
+
+/**
+ * Root for `from`-provisioned worktrees, handed to codehost/provision so they
+ * land in `<root>/<owner>/<repo>/tree/<branch>`. Resolution order: env
+ * `CODEHOST_WS_ROOT` wins (ops override), then the configured `provisionRoot`,
+ * else undefined — letting codehost/provision fall back to its own `~/ws`
+ * default. Kept separate from `workspace` (the plain-cwd default), which may be a
+ * specific project dir rather than a root.
+ */
+export function getProvisionRoot(): string | undefined {
+  const env = process.env.CODEHOST_WS_ROOT?.trim();
+  if (env) return path.resolve(expandTilde(env));
+  const r = readConfig().provisionRoot;
+  return r && r.trim() ? path.resolve(expandTilde(r)) : undefined;
+}
+
+/**
+ * Owner/repo allowlist for `from`-provisioning. Provisioning clones a repo and
+ * runs its setup script (dependency installs + package lifecycle hooks = code
+ * execution on the host), so an **empty allowlist means DENY ALL** — a secure
+ * default the host opts out of by listing owners it trusts. Entries match
+ * `<owner>` (any repo of that owner), `<owner>/<repo>` (exact), or `*` (allow
+ * all — an explicit opt-in to the wide-open behavior). Env
+ * `CODEHOST_PROVISION_ALLOWLIST` (comma-separated) overrides the config.
+ */
+export function getProvisionAllowlist(): string[] {
+  const env = process.env.CODEHOST_PROVISION_ALLOWLIST?.trim();
+  const raw = env ? env.split(",") : (readConfig().provisionAllowlist ?? []);
+  return raw.map((s) => s.trim().toLowerCase()).filter(Boolean);
+}
+
+/** Whether `<owner>/<repo>` may be `from`-provisioned, per {@link getProvisionAllowlist}. */
+export function isProvisionAllowed(owner: string, repo: string): boolean {
+  const list = getProvisionAllowlist();
+  if (list.includes("*")) return true;
+  const o = owner.toLowerCase();
+  const full = `${owner}/${repo}`.toLowerCase();
+  return list.some((e) => e.replace(/\/\*$/, "") === o || e === full);
 }
 
 /** Persist the workspace root, tilde-expanded and resolved to an absolute path. */
