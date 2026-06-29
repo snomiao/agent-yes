@@ -1718,3 +1718,80 @@ describe("subcommands.isAgentStuck / stuck state", () => {
     }
   });
 });
+
+// A CLI like Claude Code repaints by moving the cursor UP over the previous
+// frame and rewriting it. The up-count is the frame's height AT THE AGENT'S REAL
+// WIDTH. Replayed narrower, the body line wraps to an extra row, the up-count
+// undershoots, and every old frame strands below as a duplicate — the `ay tail`
+// stutter. `bodyLen` chars stay one row at the real width but wrap below it.
+function buildRedrawLog(frames: number, bodyLen: number): Buffer {
+  const body = "BODY-" + "z".repeat(Math.max(0, bodyLen - 5));
+  const frame = (i: number) => `HEADER-${i}\r\n${body}`;
+  let bytes = frame(0) + "\r\n";
+  for (let i = 1; i < frames; i++) bytes += `\x1b[2A\r` + frame(i) + "\r\n"; // up 2 = header+body at real width
+  return Buffer.from(bytes);
+}
+const countHeaders = (s: string) => (s.match(/^HEADER-\d+/gm) ?? []).length;
+
+describe("renderRawLog honors the agent's recorded PTY geometry", () => {
+  it("collapses redraw frames at the recorded width but duplicates at a mismatched width", async () => {
+    const { renderRawLog } = await loadModule();
+    const buf = buildRedrawLog(6, 220); // one row at >=220 cols, two rows below that
+
+    // Replayed at the real width, each repaint lands on the prior frame: one header.
+    const correct = await renderRawLog(buf, { mode: "cat", n: 0, cols: 240, rows: 50 });
+    expect(countHeaders(correct)).toBe(1);
+
+    // Replayed narrower (the body wraps), repaints undershoot and pile up.
+    const wrong = await renderRawLog(buf, { mode: "cat", n: 0, cols: 120, rows: 50 });
+    expect(countHeaders(wrong)).toBeGreaterThan(1);
+  });
+});
+
+describe("subcommands.cmdRead replays at the ptysize sidecar geometry", () => {
+  it("renders at the recorded geometry, not the 200-col fallback", async () => {
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const tmp = await mkdtemp(path.join(tmpdir(), "ay-raw-log-"));
+    try {
+      const logPath = path.join(tmp, "wide.raw.log");
+      // Authored for a 240-col terminal; at the 200-col fallback the body wraps
+      // and the redraw duplicates (see buildRedrawLog / renderRawLogLines).
+      await writeFile(logPath, buildRedrawLog(6, 220));
+
+      // ptysize sidecar lives under the (mocked) home: ~/.agent-yes/ptysize/<pid>.
+      const ptDir = path.join(testHome, ".agent-yes", "ptysize");
+      await mkdir(ptDir, { recursive: true });
+      await writeFile(path.join(ptDir, String(process.pid)), "240 50\n");
+
+      await appendGlobalPid({
+        pid: process.pid,
+        cli: "claude",
+        prompt: null,
+        cwd: process.cwd(),
+        log_file: logPath,
+        status: "active" as const,
+        exit_code: null,
+        exit_reason: null,
+        started_at: Date.now(),
+      });
+
+      const stdout: string[] = [];
+      const orig = process.stdout.write.bind(process.stdout);
+      (process.stdout as any).write = (s: any) => {
+        stdout.push(String(s));
+        return true;
+      };
+      try {
+        const code = await runSubcommand(["bun", "cli.js", "cat", String(process.pid)]);
+        expect(code).toBe(0);
+      } finally {
+        process.stdout.write = orig;
+      }
+      // With the sidecar honored, the six repaints collapse to a single frame.
+      expect(countHeaders(stdout.join(""))).toBe(1);
+    } finally {
+      await rm(tmp, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+});
