@@ -1472,7 +1472,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
     // standard); otherwise `cwd` is resolved against the workspace root and
     // created if missing (Layer-0 plain-dir provisioning — no more ENOENT 500).
     if (req.method === "POST" && p === "/api/spawn") {
-      let body: { cli?: string; cwd?: string; from?: string; prompt?: string };
+      let body: {
+        cli?: string;
+        cwd?: string;
+        from?: string;
+        prompt?: string;
+        fork?: { fromCwd?: string; branch?: string };
+      };
       try {
         body = (await req.json()) as typeof body;
       } catch {
@@ -1488,8 +1494,61 @@ export async function cmdServe(rest: string[]): Promise<number> {
       // workspace root and mkdir-p'd so a missing dir no longer ENOENTs.
       let cwd: string;
       let provisioned: { action: string; folder: string } | null = null;
+      const fork =
+        body.fork && typeof body.fork.fromCwd === "string" && typeof body.fork.branch === "string"
+          ? { fromCwd: body.fork.fromCwd, branch: body.fork.branch }
+          : null;
       const from = typeof body.from === "string" ? body.from.trim() : "";
-      if (from) {
+      if (fork) {
+        // Fork the anchor agent's branch (carrying its WIP) into a new sibling
+        // worktree via codehost/provision (git worktree off HEAD, no clone), then
+        // spawn the agent there.
+        let prov: {
+          forkWorktree: (o: { fromCwd: string; branch: string; wsRoot?: string }) => Promise<{
+            ok: boolean;
+            folder: string;
+            action: string;
+            error?: string;
+            spec?: { owner: string; repo: string };
+          }>;
+        };
+        try {
+          prov = (await import("codehost/provision")) as typeof prov;
+        } catch (e) {
+          return new Response(
+            `fork needs the 'codehost' package (codehost/provision) — install it ` +
+              `(npm i -g codehost) or 'bun link' it for local dev: ${(e as Error).message}`,
+            { status: 501 },
+          );
+        }
+        let result: {
+          ok: boolean;
+          folder: string;
+          action: string;
+          error?: string;
+          spec?: { owner: string; repo: string };
+        };
+        try {
+          const wsRoot = getProvisionRoot();
+          result = await prov.forkWorktree({
+            fromCwd: fork.fromCwd,
+            branch: fork.branch,
+            ...(wsRoot ? { wsRoot } : {}),
+          });
+        } catch (e) {
+          return new Response(`fork failed: ${(e as Error).message}`, { status: 502 });
+        }
+        if (!result?.ok) return new Response(result?.error ?? "fork failed", { status: 502 });
+        // Same allowlist gate as `from` — the fork runs setup-repo.sh (code exec).
+        if (result.spec && !isProvisionAllowed(result.spec.owner, result.spec.repo))
+          return new Response(
+            `forking '${result.spec.owner}/${result.spec.repo}' is not allowed — add the owner ` +
+              `to provisionAllowlist in ~/.agent-yes/config.json (or "*" to allow all)`,
+            { status: 403 },
+          );
+        cwd = result.folder;
+        provisioned = { action: result.action, folder: result.folder };
+      } else if (from) {
         type Spec = { owner: string; repo: string; branch: string };
         let prov: {
           parseSource?: (s: string) => Spec | null;
@@ -1547,7 +1606,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         }
       }
       process.stderr.write(
-        `→ console spawned:  ay ${cli}${prompt ? ` -- "${prompt.slice(0, 60)}"` : ""}  (cwd: ${cwd}${provisioned ? `, ${provisioned.action} from ${from}` : ""})\n`,
+        `→ console spawned:  ay ${cli}${prompt ? ` -- "${prompt.slice(0, 60)}"` : ""}  (cwd: ${cwd}${provisioned ? `, ${provisioned.action}` : ""})\n`,
       );
       // Resolve `ay` to an absolute command. The detached daemon (oxmgr/launchd/
       // pm2) usually has a PATH WITHOUT ~/.bun/bin, so a bare "ay" fails with
