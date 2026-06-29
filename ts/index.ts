@@ -395,8 +395,17 @@ export default async function agentYes({
       ptyEnv[key] = value;
     }
   }
+  // The agent runs in a PTY (a real terminal), so advertise terminal
+  // capabilities. A console/daemon-spawned agent inherits an env with no TERM/
+  // COLORTERM: neither the daemon (no controlling terminal) nor the recovered
+  // login-shell env (captured without a tty) carries them — those vars are set
+  // by the terminal emulator, not by the shell. Without them the wrapped CLI
+  // renders colorless in the web console. Fill only when absent so a
+  // terminal-launched agent keeps its real values (e.g. xterm-256color, tmux).
+  if (!ptyEnv.TERM) ptyEnv.TERM = "xterm-256color";
+  if (!ptyEnv.COLORTERM) ptyEnv.COLORTERM = "truecolor";
   const ptyOptions = {
-    name: "xterm-color",
+    name: ptyEnv.TERM,
     ...getTerminalDimensions(),
     cwd: cwd ?? process.cwd(),
     env: ptyEnv,
@@ -561,7 +570,7 @@ export default async function agentYes({
       logger.info(`Restarting ${cli} ${JSON.stringify([bin, ...args])}`);
 
       const restartPtyOptions = {
-        name: "xterm-color",
+        name: ptyEnv.TERM,
         ...getTerminalDimensions(),
         cwd: cwd ?? process.cwd(),
         env: ptyEnv,
@@ -667,7 +676,7 @@ export default async function agentYes({
       }
 
       const restorePtyOptions = {
-        name: "xterm-color",
+        name: ptyEnv.TERM,
         ...getTerminalDimensions(),
         cwd: cwd ?? process.cwd(),
         env: ptyEnv,
