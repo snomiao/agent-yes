@@ -264,15 +264,10 @@ function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
       stdio: "inherit",
       timeout: 300_000, // 5 min max
     });
-    // Also update ~/.cargo/bin so the system-wide binary stays current
-    try {
-      execFileSync("cargo", ["install", "--path", rsDir], {
-        stdio: "inherit",
-        timeout: 60_000,
-      });
-    } catch {
-      // non-fatal: the target/ binary is already updated
-    }
+    // Only the target/ binary is rebuilt — we deliberately do NOT `cargo install`
+    // a system-wide `agent-yes`. The launcher is the single global command (it's
+    // what's linked onto PATH) and it spawns this binary from target/release via
+    // findRustBinary(); a cargo-installed `agent-yes` would shadow that launcher.
     process.stderr.write(`\x1b[32m[rust] Rebuild complete\x1b[0m\n`);
     return true;
   } catch {
