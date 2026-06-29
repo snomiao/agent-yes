@@ -1052,11 +1052,18 @@ async function cmdLs(rest: string[]): Promise<number> {
     .option("all-remotes", {
       type: "boolean",
       default: false,
-      description: "Include agents from all configured remotes (remotes.yaml)",
+      description:
+        "Include agents from all configured remotes (now the default — kept for explicitness)",
+    })
+    .option("local", {
+      type: "boolean",
+      default: false,
+      description:
+        "Only this machine's agents — skip configured remotes (the pre-default behaviour)",
     })
     .option("help", { alias: "h", type: "boolean", default: false, description: "Show this help" })
-    .example("ay ls", "list running agents")
-    .example("ay ls --all-remotes", "include all configured remote machines")
+    .example("ay ls", "list local + all configured remotes")
+    .example("ay ls --local", "only this machine's agents")
     .example("ay ls --all", "include exited agents")
     .example("ay ls --json", "machine-readable output")
     .example("ay ls --watch", "stream state transitions for a whole fan-out as NDJSON")
@@ -1072,15 +1079,9 @@ async function cmdLs(rest: string[]): Promise<number> {
     return 0;
   }
 
-  if (argv["all-remotes"]) {
-    return runAllRemotesLs({
-      all: argv.all,
-      active: argv.active,
-      keyword: argv._[0] !== undefined ? String(argv._[0]) : undefined,
-    });
-  }
-
   const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+  // A keyword naming a specific remote (alias or token@host:port) → just that
+  // remote, regardless of the local/all-remotes default below.
   if (keyword) {
     const remote = await resolveRemoteSpec(keyword);
     if (remote) return runRemoteLs(remote, { all: argv.all, active: argv.active });
@@ -1126,6 +1127,20 @@ async function cmdLs(rest: string[]): Promise<number> {
       });
     });
     return 0;
+  }
+
+  // The human table now spans local + every configured remote by DEFAULT (one
+  // fleet view across machines). `--local` opts back to this machine only, and
+  // a single-machine box (no remotes configured) keeps the richer local-only
+  // table automatically. The programmatic paths above (--watch) and the --json
+  // path below stay LOCAL-only on purpose: orchestrators parse them and expect
+  // this box's pids, and the aggregated view is a flat human table without the
+  // forest/notes/badges those consumers don't need.
+  if (!argv.local && !opts.json && !argv.latest) {
+    const remotes = await readRemotes();
+    if (argv["all-remotes"] || remotes.size > 0) {
+      return runAllRemotesLs({ all: argv.all, active: argv.active, keyword });
+    }
   }
 
   const records = await listRecords(keyword, opts);
