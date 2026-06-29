@@ -13,6 +13,14 @@
 // common case stays uncluttered and the identity (repo/branch) leads instead.
 export const cliLabel = (e) => (e.cli && e.cli !== "claude" ? e.cli : "");
 
+// Windows daemons report cwds with backslashes (C:\Users\…\tree\main); every
+// cwd parser/comparator below assumes forward slashes, so normalize once here.
+// Without this a Windows host's agents parse no owner/repo/branch and render as
+// a bare "user@host://" with no path identity.
+export function normCwd(cwd) {
+  return (cwd || "").replace(/\\/g, "/");
+}
+
 // Parse owner/repo/branch from a cwd like .../ws/<owner>/<repo>/tree/<branch>.
 // A cwd inside a git submodule keeps trailing path after the worktree branch
 // (e.g. .../tree/share/lib/bot, where lib/bot is a submodule). The owner/repo/
@@ -21,7 +29,7 @@ export const cliLabel = (e) => (e.cli && e.cli !== "claude" ? e.cli : "");
 // leaf dir as `sub` to keep nested repos distinguishable. `sub` is "" when the
 // cwd is the worktree root.
 export function repoBranch(e) {
-  const m = /\/([^/]+)\/([^/]+)\/tree\/([^/]+)(\/.*)?$/.exec(e.cwd || "");
+  const m = /\/([^/]+)\/([^/]+)\/tree\/([^/]+)(\/.*)?$/.exec(normCwd(e.cwd));
   if (!m) return null;
   const sub = (m[4] || "").split("/").filter(Boolean).pop() || "";
   return { owner: m[1], repo: m[2], branch: m[3], sub };
@@ -261,13 +269,14 @@ function agentForestNodes(list) {
     if (parentOf.has(e) || !e.cwd) continue;
     const rb = repoBranch(e);
     if (!rb) continue;
+    const ecwd = normCwd(e.cwd);
     let best = null;
     for (const c of list) {
-      if (c === e || !c.cwd || !e.cwd.startsWith(c.cwd + "/")) continue;
+      if (c === e || !c.cwd || !ecwd.startsWith(normCwd(c.cwd) + "/")) continue;
       const crb = repoBranch(c);
       if (!crb || crb.owner !== rb.owner || crb.repo !== rb.repo || crb.branch !== rb.branch)
         continue;
-      if (!best || c.cwd.length > best.cwd.length) best = c;
+      if (!best || normCwd(c.cwd).length > normCwd(best.cwd).length) best = c;
     }
     if (best) parentOf.set(e, best);
   }
