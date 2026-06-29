@@ -3794,6 +3794,18 @@
         }, 120);
       }
 
+      // Auto-derive a branch name from the typed prompt for the Cmd+K fork action
+      // (editable at launch). e.g. "fix the auth bug" → "fork/fix-the-auth-bug".
+      function forkSlug(q) {
+        const s = q
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .slice(0, 40)
+          .replace(/-+$/, "");
+        return "fork/" + (s || "wip");
+      }
+
       function renderOmni() {
         const q = $("omni-input").value.trim();
         if (omniIdx >= omniRows.length) omniIdx = Math.max(0, omniRows.length - 1);
@@ -3807,6 +3819,22 @@
                 <div class="omni-main">
                   <div class="omni-title">✦ Spawn new ${esc(anchor?.cli || "claude")} agent here</div>
                   <div class="omni-sub">${esc(anchor?.cwd || "(host default)")} &nbsp;·&nbsp; prompt: ${esc(q || "(empty)")}</div>
+                </div></div>`;
+            }
+            if (r.kind === "fork") {
+              return `<div class="omni-row omni-spawn${sc}" data-i="${i}">
+                <span class="dot active"></span>
+                <div class="omni-main">
+                  <div class="omni-title">⑂ Fork current branch &amp; run <span style="opacity:.55">(carries uncommitted work)</span></div>
+                  <div class="omni-sub">${esc(anchor?.cwd || "?")} &nbsp;→&nbsp; new branch <b>${esc(r.branch)}</b> &nbsp;·&nbsp; ⏎ to edit &amp; launch</div>
+                </div></div>`;
+            }
+            if (r.kind === "spawncwd") {
+              return `<div class="omni-row omni-spawn${sc}" data-i="${i}">
+                <span class="dot active"></span>
+                <div class="omni-main">
+                  <div class="omni-title">⊕ Spawn new ${esc(anchor?.cli || "claude")} agent in a directory…</div>
+                  <div class="omni-sub">⏎ to choose a working dir &nbsp;·&nbsp; prompt: ${esc(q || "(empty)")}</div>
                 </div></div>`;
             }
             const e = r.entry;
@@ -3837,7 +3865,12 @@
           )
           .slice(0, 30);
         omniRows = hits.map((entry) => ({ kind: "agent", entry }));
-        if (q) omniRows.push({ kind: "spawn" });
+        if (q) {
+          omniRows.push({ kind: "spawn" });
+          const anchor = omniAnchor();
+          if (anchor?.cwd) omniRows.push({ kind: "fork", branch: forkSlug(q) });
+          omniRows.push({ kind: "spawncwd" });
+        }
         omniIdx = 0;
         renderOmni();
         // Tier 2 — debounced output (tail) search for alive agents not already shown.
@@ -3902,11 +3935,37 @@
       async function omniActivate(forceSpawn) {
         const q = $("omni-input").value.trim();
         const row = omniRows[omniIdx];
+        const anchor = omniAnchor();
+        // ⌘⏎ always = spawn-here (the fast default), regardless of the selected row.
         if (forceSpawn || (row && row.kind === "spawn")) {
-          const anchor = omniAnchor();
           closeOmni(false); // committing — keep the bg as-is, spawnAndSelect takes over
           await spawnAndSelect(
             { cli: anchor?.cli || "claude", cwd: anchor?.cwd || undefined, prompt: q || undefined },
+            anchor?._room,
+          );
+          return;
+        }
+        if (row && row.kind === "fork") {
+          // Editable at launch (auto-slug is the default); carries the anchor's WIP.
+          const branch = prompt("Fork to a new branch (carries your uncommitted work):", row.branch);
+          if (!branch || !branch.trim()) return; // cancelled — leave the omnibox open
+          closeOmni(false);
+          await spawnAndSelect(
+            {
+              cli: anchor?.cli || "claude",
+              prompt: q || undefined,
+              fork: { fromCwd: anchor?.cwd, branch: branch.trim() },
+            },
+            anchor?._room,
+          );
+          return;
+        }
+        if (row && row.kind === "spawncwd") {
+          const cwd = prompt("Spawn in which working directory?", anchor?.cwd || "");
+          if (cwd == null) return; // cancelled
+          closeOmni(false);
+          await spawnAndSelect(
+            { cli: anchor?.cli || "claude", cwd: cwd.trim() || undefined, prompt: q || undefined },
             anchor?._room,
           );
           return;
@@ -4335,6 +4394,7 @@
         const res = await target.tx.post("/api/spawn", {
           cli: spec.cli || "claude",
           from: spec.from || undefined,
+          fork: spec.fork || undefined,
           cwd: spec.cwd || undefined,
           prompt: spec.prompt || undefined,
         });
