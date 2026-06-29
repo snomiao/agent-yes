@@ -78,6 +78,9 @@ pub struct CliConfig {
     /// `await` never resolved). On trip: send Esc to cancel; if still stalled,
     /// exit non-zero so a `--robust` run restarts with `--continue`. 0 disables.
     pub stall_timeout_secs: u64,
+    /// Liveness window in ms: if we send stdin and the agent produces no PTY
+    /// output within this window, mark it `unresponsive`. 0 = disabled.
+    pub unresponsive_timeout_ms: u64,
 }
 
 /// Built-in no-output watchdog timeout when a CLI doesn't override it. Generous
@@ -172,9 +175,8 @@ fn build_cli_config(raw: CliConfigOverride) -> Result<CliConfig> {
         default_args: raw.default_args.unwrap_or_default(),
         yes_args: raw.yes_args.unwrap_or_default(),
         no_eol: raw.no_eol.unwrap_or(false),
-        stall_timeout_secs: raw
-            .stall_timeout_secs
-            .unwrap_or(DEFAULT_STALL_TIMEOUT_SECS),
+        stall_timeout_secs: raw.stall_timeout_secs.unwrap_or(DEFAULT_STALL_TIMEOUT_SECS),
+        unresponsive_timeout_ms: raw.unresponsive_timeout_ms.unwrap_or(0),
     })
 }
 

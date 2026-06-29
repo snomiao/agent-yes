@@ -106,6 +106,11 @@ pub struct CliConfigOverride {
     /// treated as silently stalled. 0 disables. Omitted → built-in default.
     #[serde(default)]
     pub stall_timeout_secs: Option<u64>,
+    /// Liveness window: if we send stdin to the agent and it produces no PTY
+    /// output within this many ms, mark it `unresponsive`. 0 (or absent)
+    /// disables the check — appropriate for CLIs that don't animate a spinner.
+    #[serde(default)]
+    pub unresponsive_timeout_ms: Option<u64>,
 }
 
 /// Install configuration override
@@ -206,6 +211,7 @@ impl CliConfigOverride {
             restart_without_continue_arg,
             auto_retry,
             stall_timeout_secs,
+            unresponsive_timeout_ms,
         } = other;
 
         if let Some(install) = install {
@@ -295,6 +301,9 @@ impl CliConfigOverride {
         }
         if stall_timeout_secs.is_some() {
             self.stall_timeout_secs = stall_timeout_secs;
+        }
+        if unresponsive_timeout_ms.is_some() {
+            self.unresponsive_timeout_ms = unresponsive_timeout_ms;
         }
     }
 }
@@ -669,6 +678,7 @@ logsDir: /custom/logs
                 restart_without_continue_arg: Some(vec![pattern("old-restart")]),
                 auto_retry: Some(vec![pattern("old-auto-retry")]),
                 stall_timeout_secs: Some(111),
+                unresponsive_timeout_ms: Some(1000),
             },
         );
 
@@ -708,6 +718,7 @@ logsDir: /custom/logs
                 restart_without_continue_arg: Some(vec![pattern("new-restart")]),
                 auto_retry: Some(vec![pattern("new-auto-retry")]),
                 stall_timeout_secs: Some(222),
+                unresponsive_timeout_ms: Some(2000),
             },
         );
 
@@ -760,6 +771,7 @@ logsDir: /custom/logs
         );
         assert_eq!(t.auto_retry, Some(vec![pattern("new-auto-retry")]));
         assert_eq!(t.stall_timeout_secs, Some(222));
+        assert_eq!(t.unresponsive_timeout_ms, Some(2000));
         assert!(t.typing_respond.as_ref().unwrap().contains_key("y"));
         assert!(t.typing_respond.as_ref().unwrap().contains_key("1"));
     }
