@@ -2911,7 +2911,9 @@ async function cmdStatus(rest: string[]): Promise<number> {
   const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
 
   if (!keyword)
-    throw new Error("usage: ay status <keyword> [--watch | --wait | --wait-idle] [--timeout=Ns]");
+    throw new Error(
+      "usage: ay status <keyword> [--watch | --wait | --wait-idle] [--timeout=Ns] [--cwd=DIR] [--latest]",
+    );
 
   {
     const remote = await resolveRemoteSpec(keyword);
