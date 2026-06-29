@@ -1406,6 +1406,7 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
   }
 
   const buf = await readFile(logPath);
+  const size = await readPtysize(record.pid);
   const notes = await readNotes();
   const noteLabel = notes.get(record.pid);
   const header = noteLabel
@@ -1414,7 +1415,7 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
 
   if (follow) {
     // Follow mode ignores pagination: print the initial context, then stream deltas.
-    const rendered = await renderRawLog(buf, { mode, n });
+    const rendered = await renderRawLog(buf, { mode, n, cols: size?.cols, rows: size?.rows });
     process.stderr.write(header + "\n");
     process.stdout.write(rendered);
     if (!rendered.endsWith("\n")) process.stdout.write("\n");
@@ -1427,7 +1428,7 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
 
   // Static read: render the full log once, then window into the rendered lines
   // so line numbers (and the pagination cursor in the footer) are exact.
-  const allLines = await renderRawLogLines(buf);
+  const allLines = await renderRawLogLines(buf, { cols: size?.cols, rows: size?.rows });
   const total = allLines.length;
   const win = resolveReadWindow({
     total,
@@ -1664,14 +1665,41 @@ async function followPlainLocal(logPath: string, buf: Uint8Array): Promise<numbe
 }
 
 /**
+ * The agent's real PTY geometry (from readPtysize), passed to the renderers so
+ * the raw log replays at the size it was authored for. Omitted → a wide 200x50
+ * default; if the agent ran wider/taller than that its cursor-addressed redraw
+ * frames undershoot on replay and strand into scrollback as duplicates (the
+ * `ay tail` stutter this guards).
+ */
+type RenderGeom = { cols?: number; rows?: number };
+
+/**
+ * Read an agent's last-known PTY geometry from `~/.agent-yes/ptysize/<pid>`
+ * (written by both runtimes — ts/index.ts and rs/src/pty_spawner.rs — as
+ * "<cols> <rows>\n"). Returns null when there's no sidecar (older agent, or not
+ * yet written).
+ */
+export async function readPtysize(pid: number): Promise<{ cols: number; rows: number } | null> {
+  const dir = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
+  try {
+    const txt = await readFile(path.join(dir, "ptysize", String(pid)), "utf-8");
+    const [c = 0, r = 0] = txt.trim().split(/\s+/).map(Number);
+    if (c > 0 && r > 0) return { cols: c, rows: r };
+  } catch {
+    /* no ptysize sidecar */
+  }
+  return null;
+}
+
+/**
  * Feed the raw PTY bytes through @xterm/headless and emit plain text.
  * Same approach as koho's renderTerminalBuffer + agent-yes's XtermProxy.
  */
 export async function renderRawLog(
   buf: Uint8Array,
-  { mode, n }: { mode: "cat" | "tail" | "head"; n: number },
+  { mode, n, cols, rows }: { mode: "cat" | "tail" | "head"; n: number } & RenderGeom,
 ): Promise<string> {
-  const lines = await renderRawLogLines(buf);
+  const lines = await renderRawLogLines(buf, { cols, rows });
   if (mode === "cat") return lines.join("\n");
   if (mode === "tail") return lines.slice(Math.max(0, lines.length - n)).join("\n");
   return lines.slice(0, n).join("\n");
@@ -1685,11 +1713,13 @@ export async function renderRawLog(
  * cursor moves / clears / wraps), so we always render the whole buffer once and
  * window the resulting lines.
  */
-export async function renderRawLogLines(buf: Uint8Array): Promise<string[]> {
-  // Default screen geometry — we don't know what the agent used, but
-  // 200x50 is a reasonable upper bound that won't truncate normal output.
-  const cols = 200;
-  const rows = 50;
+export async function renderRawLogLines(buf: Uint8Array, geom?: RenderGeom): Promise<string[]> {
+  // Replay at the agent's real geometry when known (see RenderGeom / readPtysize);
+  // otherwise fall back to a wide 200x50 — a reasonable upper bound that won't
+  // truncate normal output, though an agent wider/taller than it can still
+  // duplicate on replay (which is why callers pass the recorded size).
+  const cols = geom?.cols && geom.cols > 0 ? geom.cols : 200;
+  const rows = geom?.rows && geom.rows > 0 ? geom.rows : 50;
   // Scrollback caps how far back pagination can reach; older lines are evicted.
   const scrollback = 50000;
 

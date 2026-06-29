@@ -11,6 +11,7 @@ import {
   extractTaskCounts,
   listRecords,
   readNotes,
+  readPtysize,
   renderRawLog,
   resolveOne,
   snapshotStatus,
@@ -1163,7 +1164,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
         if (!record.log_file)
           return new Response(`pid ${record.pid}: no log_file`, { status: 404 });
         const buf = await readFile(record.log_file);
-        const text = await renderRawLog(buf, { mode, n });
+        const size = await readPtysize(record.pid);
+        const text = await renderRawLog(buf, { mode, n, cols: size?.cols, rows: size?.rows });
         return new Response(text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });
       } catch (e) {
         return new Response((e as Error).message, { status: 404 });
@@ -1177,20 +1179,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
       const keyword = decodeURIComponent(sizeM[1]!);
       try {
         const record = await resolveOne(keyword, defaultOpts());
-        const ayHome = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
-        let cols: number | null = null;
-        let rows: number | null = null;
-        try {
-          const txt = await readFile(path.join(ayHome, "ptysize", String(record.pid)), "utf-8");
-          const [c = 0, r = 0] = txt.trim().split(/\s+/).map(Number);
-          if (c > 0 && r > 0) {
-            cols = c;
-            rows = r;
-          }
-        } catch {
-          /* no ptysize sidecar (older agent or not yet written) */
-        }
-        return Response.json({ pid: record.pid, cols, rows });
+        const size = await readPtysize(record.pid);
+        return Response.json({
+          pid: record.pid,
+          cols: size?.cols ?? null,
+          rows: size?.rows ?? null,
+        });
       } catch (e) {
         return new Response((e as Error).message, { status: 404 });
       }
