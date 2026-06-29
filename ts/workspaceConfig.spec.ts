@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync } from "fs";
+import { mkdtempSync, rmSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import path from "path";
 import {
   expandTilde,
+  getProvisionAllowlist,
+  getProvisionRoot,
   getWorkspaceRoot,
+  isProvisionAllowed,
   resolveSpawnCwd,
   setWorkspaceRoot,
 } from "./workspaceConfig.ts";
@@ -20,6 +23,8 @@ describe("workspaceConfig", () => {
   afterEach(() => {
     if (original === undefined) delete process.env.AGENT_YES_HOME;
     else process.env.AGENT_YES_HOME = original;
+    delete process.env.CODEHOST_WS_ROOT;
+    delete process.env.CODEHOST_PROVISION_ALLOWLIST;
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -69,6 +74,72 @@ describe("workspaceConfig", () => {
 
     it("a relative path with a separator is resolved, not joined to the workspace", () => {
       expect(resolveSpawnCwd("a/b")).toBe(path.resolve("a/b"));
+    });
+  });
+
+  const writeConfig = (c: Record<string, unknown>) =>
+    writeFileSync(path.join(tmp, "config.json"), JSON.stringify(c));
+
+  describe("getProvisionRoot", () => {
+    it("is undefined when neither env nor config is set", () => {
+      expect(getProvisionRoot()).toBeUndefined();
+    });
+
+    it("returns the configured provisionRoot, resolved", () => {
+      writeConfig({ provisionRoot: "/code" });
+      expect(getProvisionRoot()).toBe(path.resolve("/code"));
+    });
+
+    it("env CODEHOST_WS_ROOT overrides the config and expands ~", () => {
+      writeConfig({ provisionRoot: "/code" });
+      process.env.CODEHOST_WS_ROOT = "~/ws";
+      expect(getProvisionRoot()).toBe(path.join(homedir(), "ws"));
+    });
+
+    it("ignores a blank configured value", () => {
+      writeConfig({ provisionRoot: "   " });
+      expect(getProvisionRoot()).toBeUndefined();
+    });
+  });
+
+  describe("getProvisionAllowlist", () => {
+    it("is empty when unset", () => {
+      expect(getProvisionAllowlist()).toEqual([]);
+    });
+
+    it("reads and normalizes the configured list (trim/lowercase/drop empties)", () => {
+      writeConfig({ provisionAllowlist: [" Snomiao ", "Acme/Repo", ""] });
+      expect(getProvisionAllowlist()).toEqual(["snomiao", "acme/repo"]);
+    });
+
+    it("env CODEHOST_PROVISION_ALLOWLIST (comma-separated) overrides config", () => {
+      writeConfig({ provisionAllowlist: ["snomiao"] });
+      process.env.CODEHOST_PROVISION_ALLOWLIST = "Foo, bar/baz ,";
+      expect(getProvisionAllowlist()).toEqual(["foo", "bar/baz"]);
+    });
+  });
+
+  describe("isProvisionAllowed", () => {
+    it("denies everything when the allowlist is empty (secure default)", () => {
+      expect(isProvisionAllowed("snomiao", "agent-yes")).toBe(false);
+    });
+
+    it("'*' allows any owner/repo", () => {
+      writeConfig({ provisionAllowlist: ["*"] });
+      expect(isProvisionAllowed("anyone", "anything")).toBe(true);
+    });
+
+    it("matches by owner case-insensitively and rejects others", () => {
+      writeConfig({ provisionAllowlist: ["snomiao"] });
+      expect(isProvisionAllowed("SNOMIAO", "x")).toBe(true);
+      expect(isProvisionAllowed("evil", "x")).toBe(false);
+    });
+
+    it("matches an exact owner/repo and an owner/* glob", () => {
+      writeConfig({ provisionAllowlist: ["acme/widget", "org/*"] });
+      expect(isProvisionAllowed("acme", "widget")).toBe(true);
+      expect(isProvisionAllowed("acme", "other")).toBe(false);
+      expect(isProvisionAllowed("org", "anything")).toBe(true);
     });
   });
 });
