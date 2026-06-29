@@ -78,6 +78,13 @@ describe("repoBranch", () => {
       sub: "bot",
     });
   });
+  it("parses a Windows backslash cwd (the daemon reports C:\\…\\tree\\branch)", () => {
+    // Without normalization the regex never matches a Windows host's cwd, so its
+    // agents render as a bare "user@host://" with no repo/branch identity.
+    expect(
+      repoBranch(agent({ cwd: "C:\\Users\\snomi\\ws\\snomiao\\agent-yes\\tree\\main" })),
+    ).toEqual({ owner: "snomiao", repo: "agent-yes", branch: "main", sub: "" });
+  });
 });
 
 describe("ident", () => {
