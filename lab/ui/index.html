@@ -550,7 +550,10 @@
         position: fixed;
         inset: 0;
         z-index: 30;
-        background: rgba(2, 6, 12, 0.6);
+        /* Light scrim only: the omnibox live-previews the highlighted agent in the
+           terminal behind it, so the backdrop must stay see-through. The omnibox's
+           own panel bg + shadow keep it legible against the brighter terminal. */
+        background: rgba(2, 6, 12, 0.32);
         display: flex;
         align-items: flex-start;
         justify-content: center;
@@ -1490,8 +1493,8 @@
         <div class="omni-results" id="omni-results"></div>
         <div class="omni-foot">
           <span
-            ><b>↑↓</b> move &nbsp; <b>⏎</b> open &nbsp; <b>⌘⏎</b> spawn here &nbsp;
-            <b>esc</b> close</span
+            ><b>↑↓</b> preview &nbsp; <b>⏎</b> open &nbsp; <b>⌘⏎</b> spawn here &nbsp;
+            <b>esc</b> cancel</span
           >
         </div>
       </div>
@@ -3326,7 +3329,12 @@
         document.title = docTitle(name, e && e.status); // pure formatter (tested)
       }
 
-      function select(keyOrPid) {
+      // opts.preview — a transient "peek" used by the Cmd+K omnibox to swap the
+      // background terminal to the highlighted candidate WITHOUT committing: it
+      // renders + live-tails the agent exactly like a real open, but skips the
+      // persistence (localStorage/URL hash) and skips stealing keyboard focus from
+      // the omnibox input. Esc later restores the original via a full select().
+      function select(keyOrPid, opts = {}) {
         const e =
           entries.find((x) => x._key === keyOrPid) ||
           entries.find((x) => String(x.pid) === String(keyOrPid));
@@ -3343,19 +3351,22 @@
         renderPeerSelections(); // drop any prior agent's peer-selection overlay now
         sendPresence(); // announce we're now watching this agent (host TTLs the prior one)
         paintHeaderBadge();
-        // Remember the selection so a refresh re-opens this agent (see boot/autoPid).
-        try {
-          localStorage.setItem("ay.sel", sel);
-        } catch {}
-        // Reflect it in the URL hash as #room:pid. The fragment is never sent in
-        // any request, so — unlike the old ?pid= query that landed in the server's
-        // access logs — the agent id stays client-side, while still surviving a
-        // refresh and being copy-pasteable as a deep link.
-        try {
-          const want = "#" + e._room + ":" + e.pid;
-          if (location.hash !== want)
-            history.replaceState(null, document.title, location.pathname + want);
-        } catch {}
+        // Persist the selection (refresh re-opens this agent) and reflect it in the
+        // URL hash as #room:pid — but ONLY for a real open. A preview is transient,
+        // so it must not clobber the remembered selection or the deep-link hash;
+        // those still point at the agent we'll restore to on Esc. The fragment is
+        // never sent in any request, so the agent id stays client-side while
+        // surviving a refresh and being copy-pasteable as a deep link.
+        if (!opts.preview) {
+          try {
+            localStorage.setItem("ay.sel", sel);
+          } catch {}
+          try {
+            const want = "#" + e._room + ":" + e.pid;
+            if (location.hash !== want)
+              history.replaceState(null, document.title, location.pathname + want);
+          } catch {}
+        }
         // pid + tx are how we talk to the agent's own host; sel (composite) is
         // only for UI identity/highlight, since pids can collide across rooms.
         const pid = e.pid;
@@ -3427,7 +3438,9 @@
         // On a phone, auto-focusing yanks up the soft keyboard the moment you open
         // an agent — even when you only meant to read the tail. Skip it there; a tap
         // on the terminal still focuses to type. Desktop keeps instant keyboard input.
-        if (window.innerWidth > 720) term.focus();
+        // During a preview the omnibox input owns the keyboard (so ↑↓ keep moving the
+        // selection), so never pull focus into the terminal.
+        if (!opts.preview && window.innerWidth > 720) term.focus();
         // An agent can rename itself by emitting an OSC 0/2 title sequence
         // (\x1b]2;my-name\x07); xterm parses it out of the raw PTY stream we already
         // feed it, so we just surface the latest title as the header name. Falls
@@ -3537,7 +3550,12 @@
           const close = tx.subscribe(
             "/api/tail/" + encodeURIComponent(pid) + "?raw=1",
             (raw) => {
-              if (term) {
+              // Guard on selKey: a late event from a just-closed subscription (the
+              // close is async, so one buffered message can still arrive) must NOT
+              // be written into the NEW terminal — otherwise the previous agent's
+              // raw bleeds into the one we just switched to. Preview makes switches
+              // frequent, so this race is no longer theoretical.
+              if (term && sel === selKey) {
                 term.write(raw);
                 perfNote("out", raw?.length ?? 0);
               }
@@ -3689,30 +3707,91 @@
       let omniIdx = 0;
       let omniTailTimer = null;
       let omniTailSeq = 0;
+      // Live-preview state. While the omnibox is open it swaps the BACKGROUND
+      // terminal to whatever candidate is highlighted, so you can read it through
+      // the (lightened) backdrop. omniReturnSel is the agent that was open when the
+      // omnibox launched — Esc/cancel restores it, commit (Enter/click) keeps the
+      // previewed one. omniWasDetail remembers the mobile list/detail pane so a
+      // cancel lands back where you were. omniPreviewKey dedupes redundant swaps;
+      // omniPreviewTimer debounces them (rebuilding xterm + the tail SSE on every
+      // arrow keypress would thrash the host).
+      let omniReturnSel = null;
+      let omniWasDetail = false;
+      let omniPreviewing = false;
+      let omniPreviewKey = null;
+      let omniPreviewTimer = null;
       const omniOpen = () => $("omni").style.display !== "none";
 
       function openOmni() {
+        omniReturnSel = sel;
+        omniWasDetail = document.querySelector(".app").classList.contains("show-detail");
+        omniPreviewing = false;
+        omniPreviewKey = sel; // start deduped against the already-open agent
         $("omni").style.display = "flex";
         const inp = $("omni-input");
         inp.value = "";
         inp.focus();
-        runOmni();
+        runOmni(); // no preview yet — the bg stays on the original until you move/type
       }
-      function closeOmni() {
+      // restore=true (default — Esc / backdrop click / Cmd+K toggle) reverts the
+      // terminal to the agent that was open before the omnibox, via a full select()
+      // so the original is re-persisted, and undoes any mobile pane flip the preview
+      // caused. restore=false (commit) leaves the previewed agent in place for the
+      // caller (omniActivate) to finalize with its own select().
+      function closeOmni(restore = true) {
         if (omniTailTimer) clearTimeout(omniTailTimer);
+        if (omniPreviewTimer) clearTimeout(omniPreviewTimer);
+        omniPreviewTimer = null;
         omniTailSeq++; // cancel any in-flight tail search
         $("omni").style.display = "none";
+        if (restore && omniPreviewing) {
+          // Re-open + re-persist the original (only if we actually moved away from
+          // it — when previewing the original itself, sel already matches and the
+          // saved selection was never clobbered, so a rebuild would just flicker).
+          if (omniReturnSel && sel !== omniReturnSel) select(omniReturnSel);
+          // Either way restore the mobile list/detail state the preview flipped.
+          document.querySelector(".app").classList.toggle("show-detail", omniWasDetail);
+        }
+        omniPreviewing = false;
       }
 
-      // The agent the spawn action is anchored to. PINNED to the agent currently
-      // open in the console (its cwd/cli), so the spawn target stays put as you
-      // arrow through search results. Falls back to the top result when nothing is
-      // selected yet.
+      // The agent the spawn action is anchored to. PINNED to the agent that was open
+      // when the omnibox launched (omniReturnSel) — NOT the live `sel`, which now
+      // moves as you arrow-preview candidates — so the spawn cwd/cli stays put as you
+      // browse. Falls back to the top result when nothing was open.
       function omniAnchor() {
-        const cur = sel ? entries.find((x) => x._key === sel) : null;
+        const cur = omniReturnSel ? entries.find((x) => x._key === omniReturnSel) : null;
         if (cur) return cur;
         const first = omniRows.find((r) => r.kind === "agent");
         return first ? first.entry : null;
+      }
+
+      // Which agent the highlighted candidate should preview in the background: an
+      // agent row → that agent; the spawn row / an empty list → the launch-time
+      // agent (so the backdrop shows the spawn target's cwd).
+      function omniPreviewTarget() {
+        const row = omniRows[omniIdx];
+        if (row && row.kind === "agent") return row.entry._key;
+        return omniReturnSel;
+      }
+      // Swap the background terminal to the highlighted candidate. Debounced so a
+      // held arrow key doesn't rebuild xterm + reconnect the tail on every repeat,
+      // and deduped by key so re-renders (filtering, tail-search inserts) don't
+      // re-peek the agent already shown. Called only on explicit user moves (arrow /
+      // type), never on open, so the bg stays on the original until you act.
+      function omniPreview() {
+        const key = omniPreviewTarget();
+        if (key === omniPreviewKey) return; // already targeting this agent
+        omniPreviewKey = key;
+        if (omniPreviewTimer) clearTimeout(omniPreviewTimer);
+        omniPreviewTimer = setTimeout(() => {
+          omniPreviewTimer = null;
+          if (!omniOpen()) return; // closed during the debounce window
+          if (!key || key === sel) return; // nothing to peek / already showing it
+          omniPreviewing = true;
+          select(key, { preview: true });
+          $("omni-input").focus(); // select() must not steal the keyboard
+        }, 120);
       }
 
       function renderOmni() {
@@ -3803,8 +3882,12 @@
                 : esc(raw);
             const at = omniRows.findIndex((r) => r.kind === "spawn");
             const row = { kind: "agent", entry: e, snippet };
-            if (at >= 0) omniRows.splice(at, 0, row);
-            else omniRows.push(row);
+            if (at >= 0) {
+              omniRows.splice(at, 0, row);
+              // Keep the highlight (and thus the preview) anchored to the SAME row:
+              // an insert at/above omniIdx shifts our row down one, so follow it.
+              if (at <= omniIdx) omniIdx++;
+            } else omniRows.push(row);
           }),
         );
         if (seq === omniTailSeq) renderOmni();
@@ -3814,13 +3897,14 @@
         if (!omniRows.length) return;
         omniIdx = (omniIdx + d + omniRows.length) % omniRows.length;
         renderOmni();
+        omniPreview();
       }
       async function omniActivate(forceSpawn) {
         const q = $("omni-input").value.trim();
         const row = omniRows[omniIdx];
         if (forceSpawn || (row && row.kind === "spawn")) {
           const anchor = omniAnchor();
-          closeOmni();
+          closeOmni(false); // committing — keep the bg as-is, spawnAndSelect takes over
           await spawnAndSelect(
             { cli: anchor?.cli || "claude", cwd: anchor?.cwd || undefined, prompt: q || undefined },
             anchor?._room,
@@ -3828,12 +3912,17 @@
           return;
         }
         if (row && row.kind === "agent") {
-          closeOmni();
+          closeOmni(false); // committing the previewed agent — don't restore the original
           select(row.entry._key);
         }
       }
 
-      $("omni-input").addEventListener("input", runOmni);
+      // Typing re-filters AND re-previews the new top match (user-initiated, so a
+      // bg swap here is expected); the open's own runOmni() call is silent.
+      $("omni-input").addEventListener("input", () => {
+        runOmni();
+        omniPreview();
+      });
       $("omni-results").addEventListener("click", (ev) => {
         const r = ev.target.closest(".omni-row");
         if (!r) return;
