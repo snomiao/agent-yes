@@ -3794,16 +3794,31 @@
         }, 120);
       }
 
-      // Auto-derive a branch name from the typed prompt for the Cmd+K fork action
-      // (editable at launch). e.g. "fix the auth bug" → "fork/fix-the-auth-bug".
-      function forkSlug(q) {
-        const s = q
+      // git-safe branch slug: lowercase, non-alnum → "-", trimmed, capped.
+      function branchSlug(s) {
+        return (s || "")
           .toLowerCase()
           .replace(/[^a-z0-9]+/g, "-")
           .replace(/^-+|-+$/g, "")
           .slice(0, 40)
           .replace(/-+$/, "");
-        return "fork/" + (s || "wip");
+      }
+
+      // Auto-derive a branch name from the typed prompt for the Cmd+K fork action
+      // (editable at launch). Forks off a default branch get the flat `fork/`
+      // namespace, e.g. main + "fix the auth bug" → "fork/fix-the-auth-bug".
+      // Forks off any other branch dash-prefix the source to show lineage, so
+      // "def" forked from "feat-abc" reads as a stacked branch "feat-abc-def".
+      // We dash-join (not slash-nest "feat-abc/def") on purpose: git stores refs
+      // as files, so `feat-abc/def` can't be created while `feat-abc` still
+      // exists (D/F conflict) — and the source branch is normally still live when
+      // we fork from it. Any slashes in the source (e.g. a prior "fork/x") are
+      // flattened to dashes so the new ref stays a single node.
+      function forkSlug(q, srcBranch) {
+        const topic = branchSlug(q) || "wip";
+        const base = branchSlug(srcBranch);
+        if (!base || /^(main|master)$/.test((srcBranch || "").trim())) return "fork/" + topic;
+        return base + "-" + topic;
       }
 
       function renderOmni() {
@@ -3868,7 +3883,8 @@
         if (q) {
           omniRows.push({ kind: "spawn" });
           const anchor = omniAnchor();
-          if (anchor?.cwd) omniRows.push({ kind: "fork", branch: forkSlug(q) });
+          if (anchor?.cwd)
+            omniRows.push({ kind: "fork", branch: forkSlug(q, anchor?.git?.branch) });
           omniRows.push({ kind: "spawncwd" });
         }
         omniIdx = 0;
@@ -3947,7 +3963,10 @@
         }
         if (row && row.kind === "fork") {
           // Editable at launch (auto-slug is the default); carries the anchor's WIP.
-          const branch = prompt("Fork to a new branch (carries your uncommitted work):", row.branch);
+          const branch = prompt(
+            "Fork to a new branch (carries your uncommitted work):",
+            row.branch,
+          );
           if (!branch || !branch.trim()) return; // cancelled — leave the omnibox open
           closeOmni(false);
           await spawnAndSelect(

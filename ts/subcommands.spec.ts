@@ -521,6 +521,34 @@ describe("subcommands.cmdLs human table", () => {
       await rm(otherCwd, { recursive: true, force: true }).catch(() => null);
     }
   });
+
+  it("--local forces the rich local-only table (AGE column, no HOST column)", async () => {
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: "local only please",
+      cwd: process.cwd(),
+      log_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now() - 5000,
+    });
+    const cap = captureStdout();
+    try {
+      const code = await runSubcommand(["bun", "cli.js", "ls", "--local"]);
+      expect(code).toBe(0);
+    } finally {
+      cap.restore();
+    }
+    // The local table has an AGE column under NOTE/PROMPT; the aggregated remote
+    // table has a HOST column and no AGE. --local must pick the former.
+    expect(cap.text).toMatch(/PID\s+CLI\s+STATUS\s+AGE\s+CWD\s+NOTE\/PROMPT/);
+    expect(cap.text).not.toMatch(/^HOST\s/m);
+    expect(cap.text).toMatch(new RegExp(`${process.pid}\\s`));
+  });
 });
 
 describe("subcommands.cmdRead renders raw log via xterm-headless", () => {
