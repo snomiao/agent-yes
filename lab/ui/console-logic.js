@@ -305,6 +305,54 @@ function agentForestNodes(list) {
   return roots;
 }
 
+// ---- display sort order -----------------------------------------------------
+// The console cycles a button through these; the chosen comparator runs over the
+// flat entry list BEFORE layeredRows builds the room/peer/agent tree (which keeps
+// the given order for siblings and first-seen order for room/peer groups). So
+// sorting reorders roots and siblings without breaking the nesting.
+export const SORT_MODES = ["state", "created", "identity"];
+
+// Attention-first state ranking: someone scanning the fleet wants the agents that
+// need them (needs_input) up top, then the wedged ones (stuck), then live work,
+// then quiet/idle, then finished. Unknown states sort last.
+const STATE_RANK = {
+  needs_input: 0,
+  stuck: 1,
+  active: 2,
+  running: 2,
+  idle: 3,
+  stopped: 4,
+  exited: 4,
+};
+function stateRank(e) {
+  const r = STATE_RANK[e.status];
+  return r === undefined ? 5 : r;
+}
+
+// Git "busyness" for the state mode's secondary key: a dirty / ahead / behind
+// repo outranks a clean one, and more outstanding changes rank higher. The +0.5
+// for `dirty` breaks a 0-count tie toward the dirty tree.
+function gitWeight(e) {
+  const g = e.git || {};
+  return (g.changed || 0) + (g.ahead || 0) + (g.behind || 0) + (g.dirty ? 0.5 : 0);
+}
+
+// Return a NEW array sorted for display per `mode` (default "state"):
+//   - "state":    attention-first state, then git busyness, then newest.
+//   - "created":  newest first (started_at desc).
+//   - "identity": user@host:owner/repo/branch (alphabetical).
+// Every comparator falls back to newest-first so order is total & deterministic.
+export function sortEntries(entries, mode = "state") {
+  const byNewest = (a, b) => (b.started_at || 0) - (a.started_at || 0);
+  const cmp =
+    mode === "created"
+      ? byNewest
+      : mode === "identity"
+        ? (a, b) => fullIdent(a).localeCompare(fullIdent(b)) || byNewest(a, b)
+        : (a, b) => stateRank(a) - stateRank(b) || gitWeight(b) - gitWeight(a) || byNewest(a, b);
+  return entries.slice().sort(cmp);
+}
+
 // Order entries as agent>subagent forests so a nested `ay` (one agent spawning
 // another) renders indented under its parent. SCOPED PER HOST. Returns a NEW
 // array in depth-first order; each entry is shallow-copied with `_branch` (a

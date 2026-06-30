@@ -1351,6 +1351,7 @@
           <div class="meta">
             <span id="count"></span>
             <span class="metaright">
+              <button id="sortbtn" class="viewbtn" title="cycle sort order">⇅ state</button>
               <button id="viewbtn" class="viewbtn" title="toggle compact list">☰</button>
               <button id="newbtn" class="newbtn" title="spawn a new agent on this fleet">
                 + New agent
@@ -1534,6 +1535,8 @@
         hasIdent,
         deviceCount,
         layeredRows,
+        sortEntries,
+        SORT_MODES,
         taskLabel,
         hashHue,
         selFromBottom,
@@ -3160,6 +3163,22 @@
       // Compact list: one line per agent (dot + cli + title), persisted per device.
       let compactList = localStorage.getItem("ay.compactList") === "1";
 
+      // Display sort order, cycled by the sort button and persisted per device.
+      // Default "state" (attention-first state, then git busyness). Guard against
+      // a stale/garbage stored value so we never start in an unknown mode.
+      let sortMode = localStorage.getItem("ay.sortMode") || "state";
+      if (!SORT_MODES.includes(sortMode)) sortMode = "state";
+
+      // The filtered + sorted entry list, in the SAME order the left panel renders
+      // and the keyboard nav steps. Sorting runs before layeredRows builds the
+      // room/peer/agent tree, so it reorders roots/siblings without breaking nesting.
+      function orderedEntries(toks) {
+        return sortEntries(
+          entries.filter((e) => matches(e, toks)),
+          sortMode,
+        );
+      }
+
       // A small git chip (±changed ↑ahead ↓behind) for a row, amber when the tree
       // is dirty. Empty for clean/in-sync repos and non-git cwds — no noise.
       function gitChipHtml(e) {
@@ -3200,10 +3219,14 @@
         const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
         // Build the full signalling-server > rooms > peers > agents > subagents
         // tree. Single-node room/peer layers fold away; ≥2 become ├ └ │ branches.
-        const rows = layeredRows(entries.filter((e) => matches(e, toks)));
+        const rows = layeredRows(orderedEntries(toks));
         const agentRows = rows.filter((r) => r.kind === "agent");
         $("count").textContent = `${agentRows.length} / ${entries.length} agents`;
         $("viewbtn").classList.toggle("on", compactList);
+        // Show the active sort mode on the button so it's self-documenting; the
+        // default ("state") is also highlighted to hint it's the implicit order.
+        $("sortbtn").textContent = `⇅ ${sortMode}`;
+        $("sortbtn").classList.toggle("on", sortMode !== "state");
         // identContext blanks any field uniform across the shown list (so a
         // single-device fleet shows no device); multiDevice gates the detailed
         // host tag so it only appears when machines are actually mixed.
@@ -3663,6 +3686,12 @@
         localStorage.setItem("ay.compactList", compactList ? "1" : "0");
         renderList();
       });
+      // Cycle the sort order: state → created → identity → state.
+      $("sortbtn").addEventListener("click", () => {
+        sortMode = SORT_MODES[(SORT_MODES.indexOf(sortMode) + 1) % SORT_MODES.length];
+        localStorage.setItem("ay.sortMode", sortMode);
+        renderList();
+      });
       window.addEventListener("resize", () => {
         // Resizing our window is strong intent → re-fit to our pane (we become the
         // size driver; the push rides term.onResize). applyCanvasScale then clears
@@ -3700,7 +3729,7 @@
       function stepSelection(dir) {
         const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
         // Must match renderList's order; step only over agent rows (skip headers).
-        const shown = layeredRows(entries.filter((e) => matches(e, toks)))
+        const shown = layeredRows(orderedEntries(toks))
           .filter((r) => r.kind === "agent")
           .map((r) => r.entry);
         if (!shown.length) return;
