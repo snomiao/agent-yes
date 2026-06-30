@@ -1019,6 +1019,33 @@ describe("subcommands.cmdLs --all / --active / keyword filter / aliases", () => 
     expect(parsed.some((r: any) => r.prompt === "exited agent")).toBe(true);
   });
 
+  it("--json surfaces the Rust unresponsive flag as state 'stuck'", async () => {
+    const mod = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid, // alive → not "stopped"
+      cli: "claude",
+      prompt: "wedged-agent-probe",
+      cwd: process.cwd(),
+      log_file: null,
+      status: "active",
+      unresponsive: true,
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+    });
+    const cap = captureOutput();
+    let code: number | null;
+    try {
+      code = await mod.runSubcommand(["bun", "cli.js", "ls", "--json"]);
+    } finally {
+      cap.restore();
+    }
+    expect(code).toBe(0);
+    const row = JSON.parse(cap.stdout).find((r: any) => r.prompt === "wedged-agent-probe");
+    expect(row?.state).toBe("stuck");
+  });
+
   it("keyword filter restricts results to matching agents", async () => {
     const mod = await loadModule();
     const { appendGlobalPid } = await import("./globalPidIndex.ts");
@@ -1741,6 +1768,29 @@ describe("subcommands.isAgentStuck / stuck state", () => {
       const mod = await loadModule();
       const snap = await mod.snapshotStatus(rec({ log_file: log }));
       expect(snap.state).toBe("stuck");
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("snapshotStatus: reports 'stuck' when the Rust unresponsive flag is set (no log needed)", async () => {
+    const mod = await loadModule();
+    const snap = await mod.snapshotStatus(rec({ unresponsive: true, log_file: null }));
+    expect(snap.state).toBe("stuck");
+  });
+
+  it("snapshotStatus: the unresponsive flag overrides a quiet (would-be idle) log", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+    try {
+      const log = path.join(dir, "a.log");
+      // Long-silent, no busy marker → would read as `idle`; the flag forces `stuck`.
+      await writeFile(log, "⏺ Done — all green.\r\n❯\r\n");
+      await utimes(log, tenMinAgo(), tenMinAgo());
+      const mod = await loadModule();
+      expect((await mod.snapshotStatus(rec({ log_file: log }))).state).toBe("idle");
+      expect((await mod.snapshotStatus(rec({ log_file: log, unresponsive: true }))).state).toBe(
+        "stuck",
+      );
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => null);
     }

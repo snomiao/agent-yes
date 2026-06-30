@@ -999,6 +999,10 @@ async function deriveLiveState(
 ): Promise<{ state: LiveState; question: string | null }> {
   const base = await deriveLiveStatus(r);
   if (base === "exited") return { state: "stopped", question: null };
+  // The Rust supervisor flagged this agent unresponsive (no PTY output after a
+  // poke / a frozen "working" spinner) — an authoritative wedge signal, so it
+  // wins over the log-tail heuristics (needs_input / stuck) below.
+  if (r.unresponsive) return { state: "stuck", question: null };
   // A blocked menu overrides active/idle (alive + quiet, but waiting for an answer).
   if (r.log_file) {
     const ni = await extractNeedsInput(r.log_file, r.cli);
@@ -2891,6 +2895,10 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
       state = "stuck";
     }
   }
+  // The Rust supervisor's unresponsive flag is an authoritative wedge signal —
+  // it overrides the log-tail heuristics above (but never a dead agent, which
+  // Rust clears the flag on anyway).
+  if (alive && record.unresponsive) state = "stuck";
   const notes = await readNotes();
   const note = notes.get(record.pid) ?? null;
   return {
