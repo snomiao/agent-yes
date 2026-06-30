@@ -1,6 +1,14 @@
 #!/usr/bin/env sh
 set -e
 
+# Full test + coverage gate. Moved here from pre-commit (see .husky/pre-commit)
+# so commits stay fast — but you still can't push red: the same suite CI
+# enforces runs locally before the push leaves your machine. Use
+# `git push --no-verify` only as a deliberate escape hatch (e.g. a host too
+# CPU-oversubscribed to finish the suite) — CI is still authoritative.
+echo "[pre-push] running full test + coverage gate"
+bun run test:coverage
+
 # Guard the console's OS light/dark adaptation before it can ship. Only when the
 # UI source actually changed since upstream, so unrelated pushes stay fast. The
 # CI deploy job (ui-test.yml) ships lab/ui to agent-yes.com on merge, so this is
