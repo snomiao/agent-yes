@@ -1386,6 +1386,9 @@
               >
               <div class="rmenusep"></div>
               <button class="rmenuitem rmenuact" id="stopAgent" type="button">⏹ Stop agent</button>
+              <button class="rmenuitem rmenuact" id="restartAgent" type="button">
+                ↻ Restart (resume)
+              </button>
               <button class="rmenuitem rmenuact danger" id="killAgent" type="button">
                 ✕ Force-kill (SIGKILL)
               </button>
@@ -2803,6 +2806,20 @@
         await send("\r");
       }
 
+      // Restart — stop (if live) + relaunch resuming the session, server-side via
+      // POST /api/restart (the `ay restart` flow). The server runs it detached, so
+      // it's decoupled from this agent's lifecycle — no prompt typed into the agent.
+      async function restartAgent() {
+        const e = sel ? entries.find((x) => x._key === sel) : null;
+        if (!e) return;
+        const who = `pid ${e.pid} ${cliLabel(e) || ident(e) || ""}`.trim();
+        if (!confirm(`Restart ${who}?\nStops it (if live) and relaunches resuming the session.`))
+          return;
+        txFor(e)
+          .post("/api/restart", { keyword: String(e.pid) })
+          .catch(() => {});
+      }
+
       // ---- On-screen key bar (mobile) -------------------------------------
       // A phone keyboard has no Esc/Tab/Ctrl/arrows, so agent TUIs (claude,
       // codex, vim…) are otherwise undriveable. The bar posts raw byte
@@ -2994,6 +3011,7 @@
         }
         if (cb) cb.addEventListener("change", () => setPerfHud(cb.checked));
         $("stopAgent")?.addEventListener("click", () => (closePanel(), stopAgent(false)));
+        $("restartAgent")?.addEventListener("click", () => (closePanel(), restartAgent()));
         $("killAgent")?.addEventListener("click", () => (closePanel(), stopAgent(true)));
         // Font stepper — stays open so you can tap repeatedly; persists + refits.
         $("fontDown")?.addEventListener("click", () => setTermFontSize(termFontSize - 1));
@@ -3766,6 +3784,18 @@
         return first ? first.entry : null;
       }
 
+      // The fork SOURCE — strictly the agent that was open when the omnibox
+      // launched, never the top-result fallback that omniAnchor() uses. "Fork
+      // current branch" is meaningless without a concrete current branch: forking
+      // whatever happens to rank first silently forks an unrelated agent (often the
+      // console's own repo), landing the worktree in the wrong tree. So a fork is
+      // offered ONLY when a real agent is selected AND it has live git info
+      // (forkWorktree needs a worktree with a branch/origin).
+      function omniForkSource() {
+        const cur = omniReturnSel ? entries.find((x) => x._key === omniReturnSel) : null;
+        return cur && cur.cwd && cur.git && cur.git.branch ? cur : null;
+      }
+
       // Which agent the highlighted candidate should preview in the background: an
       // agent row → that agent; the spawn row / an empty list → the launch-time
       // agent (so the backdrop shows the spawn target's cwd).
@@ -3840,8 +3870,8 @@
               return `<div class="omni-row omni-spawn${sc}" data-i="${i}">
                 <span class="dot active"></span>
                 <div class="omni-main">
-                  <div class="omni-title">⑂ Fork current branch &amp; run <span style="opacity:.55">(carries uncommitted work)</span></div>
-                  <div class="omni-sub">${esc(anchor?.cwd || "?")} &nbsp;→&nbsp; new branch <b>${esc(r.branch)}</b> &nbsp;·&nbsp; ⏎ to edit &amp; launch</div>
+                  <div class="omni-title">⑂ Fork <b>${esc(r.srcBranch)}</b> &amp; run <span style="opacity:.55">(carries uncommitted work)</span></div>
+                  <div class="omni-sub">${esc(r.fromCwd)} &nbsp;→&nbsp; new branch <b>${esc(r.branch)}</b> &nbsp;·&nbsp; ⏎ to edit &amp; launch</div>
                 </div></div>`;
             }
             if (r.kind === "spawncwd") {
@@ -3882,9 +3912,19 @@
         omniRows = hits.map((entry) => ({ kind: "agent", entry }));
         if (q) {
           omniRows.push({ kind: "spawn" });
-          const anchor = omniAnchor();
-          if (anchor?.cwd)
-            omniRows.push({ kind: "fork", branch: forkSlug(q, anchor?.git?.branch) });
+          // Fork is pinned to the open agent (omniForkSource), and the row carries
+          // the exact source it will fork — cwd, branch, cli, room — so the launch
+          // can't drift to a different anchor between render and activate.
+          const forkSrc = omniForkSource();
+          if (forkSrc)
+            omniRows.push({
+              kind: "fork",
+              branch: forkSlug(q, forkSrc.git.branch),
+              srcBranch: forkSrc.git.branch,
+              fromCwd: forkSrc.cwd,
+              cli: forkSrc.cli,
+              room: forkSrc._room,
+            });
           omniRows.push({ kind: "spawncwd" });
         }
         omniIdx = 0;
@@ -3962,7 +4002,10 @@
           return;
         }
         if (row && row.kind === "fork") {
-          // Editable at launch (auto-slug is the default); carries the anchor's WIP.
+          // Editable at launch (auto-slug is the default); carries the source's WIP.
+          // Fork from the source PINNED on the row (row.fromCwd), not a freshly
+          // re-resolved anchor — the anchor can drift as the list refreshes, but the
+          // branch we fork from must be the one the row was built for.
           const branch = prompt(
             "Fork to a new branch (carries your uncommitted work):",
             row.branch,
@@ -3971,11 +4014,11 @@
           closeOmni(false);
           await spawnAndSelect(
             {
-              cli: anchor?.cli || "claude",
+              cli: row.cli || "claude",
               prompt: q || undefined,
-              fork: { fromCwd: anchor?.cwd, branch: branch.trim() },
+              fork: { fromCwd: row.fromCwd, branch: branch.trim() },
             },
-            anchor?._room,
+            row.room,
           );
           return;
         }

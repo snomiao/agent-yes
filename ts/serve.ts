@@ -1414,6 +1414,39 @@ export async function cmdServe(rest: string[]): Promise<number> {
       }
     }
 
+    // POST /api/restart  body {keyword, fresh?} — the console-native `ay restart`:
+    // stop the agent (if live) then relaunch it RESUMING its session. Restart is a
+    // multi-second flow (graceful /exit → wait for exit → relaunch) that must
+    // OUTLIVE this request and must NOT be a child of the agent it restarts — so we
+    // kick it off as a detached `agent-yes restart` and return immediately; the
+    // console sees the old→new pid swap over /api/ls/subscribe. This is why restart
+    // is a real server action and not a prompt typed into the agent.
+    if (req.method === "POST" && p === "/api/restart") {
+      let body: { keyword?: string; fresh?: boolean };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return new Response("invalid JSON body", { status: 400 });
+      }
+      const keyword = body.keyword;
+      if (!keyword || typeof keyword !== "string")
+        return new Response("missing keyword", { status: 400 });
+      try {
+        const record = await resolveOne(keyword, defaultOpts({ all: true }));
+        const args = ["restart", String(record.pid)];
+        if (body.fresh) args.push("--fresh");
+        const child = Bun.spawn(["agent-yes", ...args], {
+          cwd: record.cwd,
+          detached: true,
+          stdio: ["ignore", "ignore", "ignore"],
+        });
+        child.unref();
+        return Response.json({ ok: true, pid: record.pid });
+      } catch (e) {
+        return new Response((e as Error).message, { status: 404 });
+      }
+    }
+
     // POST /api/resize/:keyword  body {cols, rows} — drive the agent's PTY size.
     // Mirrors `ay attach`: write ~/.agent-yes/winsize/<pid> then SIGWINCH; the
     // agent's resize listener picks it up and reflows its TUI to that width.
@@ -1518,9 +1551,20 @@ export async function cmdServe(rest: string[]): Promise<number> {
       let cwd: string;
       let provisioned: { action: string; folder: string } | null = null;
       const fork =
-        body.fork && typeof body.fork.fromCwd === "string" && typeof body.fork.branch === "string"
-          ? { fromCwd: body.fork.fromCwd, branch: body.fork.branch }
+        body.fork &&
+        typeof body.fork.fromCwd === "string" &&
+        body.fork.fromCwd.trim() &&
+        typeof body.fork.branch === "string" &&
+        body.fork.branch.trim()
+          ? { fromCwd: body.fork.fromCwd.trim(), branch: body.fork.branch.trim() }
           : null;
+      // A fork request that didn't resolve to a valid source must fail LOUDLY, not
+      // silently fall through to the plain-`cwd` branch below — that would spawn
+      // the agent in the workspace root (≈ where `ay serve` runs) instead of a
+      // worktree off the intended branch, which looks like the agent "ignoring"
+      // the fork. An empty/garbled fork object is a client bug; surface it as 400.
+      if (body.fork != null && !fork)
+        return new Response("fork requires a non-empty fromCwd and branch", { status: 400 });
       const from = typeof body.from === "string" ? body.from.trim() : "";
       if (fork) {
         // Fork the anchor agent's branch (carrying its WIP) into a new sibling
