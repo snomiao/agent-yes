@@ -4746,6 +4746,33 @@
         connectAllRooms();
       }
 
+      // Deep-link navigation in an ALREADY-OPEN console. boot() only processes the
+      // hash on a full load, so pasting / navigating to #room:pid in an open tab
+      // did nothing — you kept staring at the previously-selected agent. Re-resolve
+      // on hashchange and jump to that agent. select() writes the hash via
+      // history.replaceState (which does NOT fire hashchange), so this never loops.
+      window.addEventListener("hashchange", () => {
+        const h = decodeURIComponent(location.hash.replace(/^#/, ""));
+        // Only the #room:pid agent-deep-link form (pid = digits, ≤7 — same bound
+        // boot() uses to tell a pid from a numeric token). Other forms (#room,
+        // #room:token, #k=…) are connection/auth concerns handled only on load.
+        const m = /^([A-Za-z0-9_-]+):(\d{1,7})$/.exec(h);
+        if (!m) return;
+        const [, room, pid] = m;
+        const key = room + "#" + pid;
+        const e = entries.find((x) => x._key === key);
+        if (e) {
+          if (sel !== e._key) select(e._key);
+          return;
+        }
+        // Not loaded yet: arm the deep-link (mergeRender selects it once it streams
+        // in) and connect the room from its cached token if we're not already on it.
+        autoPid = key;
+        autoPidExplicit = true;
+        const r = loadRooms()[room];
+        if (r && !sources.get(room)) connectRoom(room, r.token, r.host);
+      });
+
       // ---- activity-gated polling + auto-reload on new deploy ----------------
       // Poll the agent list while the page is actually in use; pause when the tab
       // is hidden or the user has been idle for IDLE_MS, so an unattended console
