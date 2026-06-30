@@ -152,6 +152,52 @@ const SESSION_PIN_ENV = new Set([
   "AGENT_YES_PID",
 ]);
 
+// The login-shell environment, captured once and cached for the daemon's
+// lifetime. `ay serve` is daemonized by oxmgr/launchd/pm2, which start it with a
+// minimal PATH that never sourced the user's ~/.zshrc / ~/.zprofile — so it lacks
+// ~/.bun/bin, ~/.cargo/bin, Homebrew, nvm shims, etc. A console-spawned agent
+// that inherits that env can't find `bun`/`bunx`/etc. (the user reported "bunx:
+// command not found" when spawning a new agent from the web UI). We recover the
+// real environment by running the user's interactive login shell and dumping its
+// env, exactly as a fresh terminal would have it. Returns null on Windows (no
+// rc-file model — the process env is already the right one) or on any failure, so
+// callers fall back to process.env.
+let loginShellEnvCache: Record<string, string> | null | undefined;
+function loginShellEnv(): Record<string, string> | null {
+  if (loginShellEnvCache !== undefined) return loginShellEnvCache;
+  loginShellEnvCache = null;
+  if (process.platform === "win32") return loginShellEnvCache;
+  try {
+    const shell = process.env.SHELL || "/bin/sh";
+    // Delimiters fence off the env dump from any banner/prompt noise the rc files
+    // print to stdout; `env -0` is NUL-separated so values with newlines survive.
+    const delim = "_AY_SHELL_ENV_DELIM_";
+    const res = Bun.spawnSync([shell, "-ilc", `printf %s "${delim}"; env -0; printf %s "${delim}"`], {
+      stdin: "ignore",
+      stderr: "ignore",
+      timeout: 5_000,
+      env: process.env as Record<string, string>,
+    });
+    const out = res.stdout?.toString() ?? "";
+    const start = out.indexOf(delim);
+    const end = out.lastIndexOf(delim);
+    if (start === -1 || end <= start) return loginShellEnvCache;
+    const dump = out.slice(start + delim.length, end);
+    const env: Record<string, string> = {};
+    for (const pair of dump.split("\0")) {
+      if (!pair) continue;
+      const eq = pair.indexOf("=");
+      if (eq <= 0) continue;
+      env[pair.slice(0, eq)] = pair.slice(eq + 1);
+    }
+    // Require a usable result — a PATH carrying ~/.bun/bin is the whole point.
+    if (env.PATH) loginShellEnvCache = env;
+  } catch {
+    // best-effort; fall back to process.env
+  }
+  return loginShellEnvCache;
+}
+
 // Env for a console-spawned agent, minus only the session-pinning vars above. If
 // `ay serve` was launched from inside Claude Code (or any shell carrying these),
 // it would otherwise leak the parent's SSE port / session id into every spawned
@@ -159,11 +205,25 @@ const SESSION_PIN_ENV = new Set([
 // stale port, surfacing as "fail to connect". Dropping them makes each agent a
 // clean top-level session; all config/provider env (CLAUDE_EFFORT, CLAUDE_CODE_*
 // settings) is preserved.
+//
+// The base is the login-shell env (see loginShellEnv) so the agent behaves like
+// one launched from a fresh terminal — PATH and anything ~/.zshrc exports are
+// present. Daemon-only vars that the login shell doesn't define (e.g. provider
+// keys exported when `ay serve` was launched) are layered back on so nothing the
+// daemon was deliberately given is lost; for keys in both, the login shell wins.
 function freshAgentEnv(): Record<string, string> {
+  const login = loginShellEnv();
   const env: Record<string, string> = {};
-  for (const [k, v] of Object.entries(process.env)) {
+  const base = login ?? (process.env as Record<string, string>);
+  for (const [k, v] of Object.entries(base)) {
     if (v === undefined || SESSION_PIN_ENV.has(k)) continue;
     env[k] = v;
+  }
+  if (login) {
+    for (const [k, v] of Object.entries(process.env)) {
+      if (v === undefined || SESSION_PIN_ENV.has(k) || k in env) continue;
+      env[k] = v;
+    }
   }
   return env;
 }
