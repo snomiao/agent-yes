@@ -1520,6 +1520,23 @@ describe("subcommands.cmdRestart", () => {
     // (signal 0 throws only if the pid is gone / not signalable.)
     expect(() => process.kill(process.pid, 0)).not.toThrow();
   });
+
+  // The post-restart hint must NOT print a pid (the resumed agent's pid races and
+  // resolves to "no agent matched" — the reported "restart not working"). It must
+  // instead key `ay tail` on the cwd, which is the one stable handle at this point.
+  it("restartHintLines keys the watch hint on cwd, never a pid", async () => {
+    const mod = await loadModule();
+    const cwd = "/Users/x/ws/proj/tree/docs";
+    const { out, err } = mod.restartHintLines("claude", cwd, "restoreArgs (--continue)");
+    expect(out).toMatch(/restarted claude in/);
+    expect(out).not.toMatch(/new pid/); // the old, broken phrasing
+    // `ay tail -f <cwd>` — a substring of the agent's absolute cwd, so it resolves
+    // regardless of which pid the resume settles on.
+    expect(err).toMatch(/ay tail -f \/Users\/x\/ws\/proj\/tree\/docs/);
+    expect(err).toMatch(/ay ls/);
+    // No bare numeric pid anywhere in the hint.
+    expect(`${out}${err}`).not.toMatch(/\bpid \d+/);
+  });
 });
 
 // ---------------------------------------------------------------------------
