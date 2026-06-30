@@ -2815,6 +2815,29 @@ async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
   return !isPidAlive(pid);
 }
 
+// Post-restart hint. The resumed agent's pid is NOT knowable synchronously here:
+// `proc.pid` is the `agent-yes` launcher we just spawned (a wrapper/bin shim
+// whose pid differs from the registered agent), and the resume itself bootstraps
+// through a throwaway pid that dies before the real TUI re-registers under yet
+// another pid seconds later — with a window where nothing is registered at all.
+// So any pid we print here would race and usually resolve to "no agent matched"
+// (the reported "restart not working"). The cwd is the one stable handle, and
+// `ay tail`/`ay ls` already accept a cwd substring, so we key the hint on cwd.
+export function restartHintLines(
+  cli: string,
+  cwd: string,
+  strategy: string,
+): { out: string; err: string } {
+  return {
+    out: `restarted ${cli} in ${shortenPath(cwd)} via ${strategy}\n`,
+    err:
+      `\n` +
+      `the resumed agent re-registers under a new pid a moment later — reach it by cwd:\n` +
+      `  ay tail -f ${cwd}   # follow the resumed agent\n` +
+      `  ay ls                 # list all agents\n`,
+  };
+}
+
 async function cmdRestart(rest: string[]): Promise<number> {
   const y = yargs(rest)
     .usage("Usage: ay restart <keyword> [--fresh]")
@@ -2875,20 +2898,17 @@ async function cmdRestart(rest: string[]): Promise<number> {
     prompt: record.prompt,
   });
 
-  const proc = Bun.spawn(["agent-yes", "--cli=" + record.cli, ...resumeArgs], {
+  // Detached launcher; we deliberately don't track its pid — see restartHintLines
+  // for why the resumed agent's pid isn't reportable synchronously.
+  Bun.spawn(["agent-yes", "--cli=" + record.cli, ...resumeArgs], {
     cwd: record.cwd,
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],
   });
 
-  process.stdout.write(
-    `restarted ${record.cli} in ${shortenPath(record.cwd)} via ${strategy} (new pid: ${proc.pid})\n`,
-  );
-  process.stderr.write(
-    `\n` +
-      `  ay tail ${proc.pid}   # watch output\n` +
-      `  ay ls                 # list all agents\n`,
-  );
+  const { out, err } = restartHintLines(record.cli, record.cwd, strategy);
+  process.stdout.write(out);
+  process.stderr.write(err);
   return 0;
 }
 
