@@ -838,6 +838,11 @@
       .dot.stuck {
         background: var(--red);
       }
+      /* Waiting on you: alive and quiet, but parked on an unanswered prompt/menu.
+         The UI accent (blue) reads as "your turn" — distinct from idle-amber. */
+      .dot.needs_input {
+        background: var(--accent);
+      }
       .dot.stopped,
       .dot.exited {
         background: var(--muted);
