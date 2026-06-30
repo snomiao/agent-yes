@@ -54,9 +54,7 @@ export async function offerOpenInBrowser(
   if (!resolveOpener(url)) return false;
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try {
-    const answer = (
-      await new Promise<string>((resolve) => rl.question(prompt, resolve))
-    )
+    const answer = (await new Promise<string>((resolve) => rl.question(prompt, resolve)))
       .trim()
       .toLowerCase();
     if (answer !== "" && answer !== "y" && answer !== "yes") return false;

@@ -1703,6 +1703,14 @@ export async function cmdServe(rest: string[]): Promise<number> {
       const agentArgv = [...ayCmd, cli, ...(prompt ? ["--", prompt] : [])];
       // don't leak our Claude Code session into the agent
       const agentEnv = freshAgentEnv();
+      // Detach the agent into its OWN session (setsid). When `ay serve` runs WITH a
+      // controlling terminal (started in a shell rather than as a headless daemon),
+      // an undetached child inherits the daemon's session + controlling tty and lands
+      // in a *background* process group. The first terminal op it makes then raises
+      // SIGTTOU/SIGTTIN → the child is STOPPED before emitting any output (console
+      // renders nothing), and the stop hits the whole group — freezing `ay serve`
+      // itself. `detached: true` (setsid) gives the agent a fresh session with no
+      // controlling terminal, immune to both. Matches the restart/openBrowser paths.
       try {
         const hook = getSpawnHook();
         if (hook) {
@@ -1723,6 +1731,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
           // after exec would), and bounds our read to the first few KB.
           const child = Bun.spawn([shell, "-c", script, "ay-spawn", ...agentArgv], {
             cwd,
+            detached: true,
             env: { ...agentEnv, AGENT_YES_CWD: cwd, AGENT_YES_CLI: cli },
             stdin: "ignore",
             stdout: "ignore",
@@ -1768,6 +1777,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         }
         const child = Bun.spawn(agentArgv, {
           cwd,
+          detached: true,
           env: agentEnv,
           stdin: "ignore",
           stdout: "ignore",
