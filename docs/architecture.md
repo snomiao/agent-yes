@@ -4,6 +4,20 @@
 
 Agent-yes is a robust CLI automation wrapper for AI agent tools (Claude, Codex, Gemini). The codebase has been refactored for maintainability, with core logic extracted into focused modules.
 
+## Process Model & IPC
+
+Agent-yes has **no central daemon that owns agents**. Each `ay <cli>` invocation is a **standalone wrapper process** that spawns and owns exactly one agent CLI in its own PTY, inside its own session / process-group (`setsid`). Independent runs never share a parent, so one of them crashing — **including `ay serve` itself** — cannot take down the others. Coordination happens through **files**, not a supervising parent:
+
+- **Global PID index — `$AGENT_YES_HOME/pids.jsonl`** (default `~/.agent-yes/pids.jsonl`). Every wrapper appends a record (`pid`, `cli`, `cwd`, `wrapper_pid`, `parent_pid`, `agent_id`, fifo/log paths, status). Rust (`rs/src/pid_store.rs`) and TS (`ts/globalPidIndex.ts`) read/write the _same_ file under a shared `proper-lockfile` mkdir-lock; readers merge by pid (last record wins). `ay ls` / `ay status` / the web UI discover agents purely by reading this index — they need no relationship to the agent processes. Nested agents are linked via the `AGENT_YES_PID` env var the wrapper injects (`rs/src/pty_spawner.rs`), recorded as `parent_pid` to build the agent forest (`ts/globalPidIndex.ts`).
+
+- **Stdin injection — FIFO at `$AGENT_YES_HOME/fifo/<pid>.stdin`** (Windows: `\\.\pipe\agent-yes-<pid>`). `ay send <kw> <msg>`, `ay stop`, and `ay exit` write to this named pipe; the wrapper's reader thread (opened `O_RDWR` so an external writer never triggers EOF) forwards the bytes into the agent's stdin. This is how one process drives an agent it does **not** own, without touching the user's terminal. See `rs/src/fifo.rs`, `ts/pidStore.ts:getFifoPath`.
+
+- **Stdout sharing — `<cwd>/.agent-yes/<pid>.raw.log`** (project-local, so logs follow the work; auto-gitignored). The wrapper appends raw PTY bytes as they stream. Any other process tails/parses this log to render the screen and classify state (`active` / `idle` / `needs_input` / `stuck` / `stopped`) — that's how `ay ls --watch` reports liveness with no connection to the agent. On exit the wrapper renders a clean transcript to `<pid>.log` and repoints the index. See `rs/src/log_files.rs`, `rs/src/non_tty_renderer.rs`, `ts/lsWatch.ts`.
+
+- **Crash isolation / orphan reaping — `~/.agent-yes/reaper.jsonl`.** Each wrapper records `(wrapper_pid, agent_pgid)` before running and sweeps the registry at every startup (and on `ay reap`): for any wrapper that has since died, it `SIGKILL`s the recorded process group, so a SIGKILL'd / OOM'd wrapper can't strand its agent. Because this is file-based and runs on the _next_ agent's startup, it works even if `ay serve` was the thing that died. See `rs/src/reaper.rs`, `rs/src/pty_spawner.rs`.
+
+**Consequence:** `ay serve` is a stateless **observer** — it reads `pids.jsonl`, tails `.raw.log`s, and writes FIFOs. Killing or restarting it never disturbs a running agent. The only parent→child termination that matters is a wrapper and its own single agent: restarting a wrapper ends _that_ wrapper's agent (e.g. restarting the wrapper of the session you are typing in will end that session — relaunch from outside it).
+
 ## Module Structure
 
 ```

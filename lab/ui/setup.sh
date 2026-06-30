@@ -56,8 +56,23 @@ cat <<'EOF'
   agent-yes is ready. Quick start:
 
     ay claude            # run Claude with auto-yes
-    ay serve share       # start the web console + a shareable link
+    ay serve --share     # start the web console + a shareable link
     ay ls                # list running agents
 
   Console & docs: https://agent-yes.com
 EOF
+
+# --- offer to start sharing right away --------------------------------------
+# curl | sh leaves this script's stdin as the pipe, so read the answer from the
+# controlling terminal (/dev/tty). No tty (CI / fully non-interactive) → skip
+# silently and let the user run `ay serve --share` themselves. We redirect the
+# spawned server's stdin from /dev/tty too, so its own "open the console in your
+# browser?" prompt has a terminal to read from.
+if command -v ay >/dev/null 2>&1 && [ -r /dev/tty ]; then
+  printf '\n\033[36m▸\033[0m Start sharing now and get a console link? [Y/n] ' > /dev/tty
+  read -r ans < /dev/tty || ans=""
+  case "$ans" in
+    [Nn]*) say "Skipped — run 'ay serve --share' when you're ready." ;;
+    *)     exec ay serve --share < /dev/tty ;;
+  esac
+fi

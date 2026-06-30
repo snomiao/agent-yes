@@ -388,9 +388,9 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
         /* best effort — fall back to the .share-link file hint in emitShareLink */
       }
     }
-    const emitShareLink = () => {
+    const emitShareLink = async () => {
       if (!webrtcDaemon) return;
-      if (shareLink)
+      if (shareLink) {
         process.stdout.write(
           `\nshared over WebRTC — open this link (the token is eaten from the URL on open):\n` +
             `  ${shareLink}\n` +
@@ -398,7 +398,11 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
               ? `  (persistent room — same link across restarts; delete ~/.agent-yes/.share-room to rotate)\n`
               : ``),
         );
-      else
+        // Offer to jump straight into the console (default yes); no-ops on a
+        // non-TTY or headless box, leaving the link printed above.
+        const { offerOpenInBrowser } = await import("./openBrowser.ts");
+        await offerOpenInBrowser(shareLink);
+      } else
         process.stdout.write(
           `\nthe WebRTC share link carries a secret, so the daemon does NOT log it —\n` +
             `read it from ~/.agent-yes/.share-link (mode 0600). The room persists in\n` +
@@ -418,7 +422,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       if (runningVer === current && sameConfig) {
         await ensureBootAutostart(mgr);
         process.stdout.write(`'${DAEMON_NAME}' already running v${current} (up to date)\n`);
-        emitShareLink();
+        await emitShareLink();
         return 0;
       }
       // Outdated, unreachable, or reconfigured → graceful roll-forward. `stop` sends
@@ -528,7 +532,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       }
       process.stdout.write(`  ay serve logs                # view server logs\n`);
       process.stdout.write(`  ay serve uninstall           # remove daemon\n`);
-      emitShareLink();
+      await emitShareLink();
     }
     return code ?? 1;
   }
@@ -1770,6 +1774,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
             ? "\n"
             : `  (persistent room — same link across restarts; delete ~/.agent-yes/.share-room to rotate)\n\n`;
           process.stdout.write(`${wantHttp ? "\n" : ""}${lead}:\n  ${link}\n` + persistNote);
+          // Offer to open the console (default yes) on the FIRST share only —
+          // an auto-rotation shouldn't pop a fresh tab from under the operator.
+          if (!rotated) {
+            const { offerOpenInBrowser } = await import("./openBrowser.ts");
+            await offerOpenInBrowser(link);
+          }
         } else {
           // Non-TTY (daemon/journal/CI): the link embeds the room secret S, so never
           // write it to a log stream. Stash it in a 0600 file and point there instead.
