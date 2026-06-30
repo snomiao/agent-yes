@@ -14,10 +14,18 @@ export default defineConfig({
       "ts/tests/rust-cwd.spec.ts",
       "node_modules/**/*",
     ],
-    fileParallelism: false,
+    // Run test FILES in parallel across multiple forked processes. Forks (not
+    // threads) are deliberate: subcommands.spec uses process.chdir() — which
+    // throws in worker threads — and forks give each file its own process.env +
+    // cwd, so per-file env/cwd mutations can't leak across files. Cross-file
+    // filesystem collisions are avoided because every spec's temp dir is keyed by
+    // process.pid or mkdtemp() (unique per fork), and tests WITHIN a file stay
+    // sequential (sequence.concurrent: false). This replaces the old fully-serial
+    // singleFork config, which made the suite ~Ncores× slower and — on a
+    // CPU-oversubscribed host — wedged on fork spawn/terminate timeouts.
+    fileParallelism: true,
     pool: "forks",
     forks: {
-      singleFork: true,
       isolate: true,
     },
     sequence: {
