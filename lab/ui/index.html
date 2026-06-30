@@ -2829,9 +2829,17 @@
         const who = `pid ${e.pid} ${cliLabel(e) || ident(e) || ""}`.trim();
         if (!confirm(`Restart ${who}?\nStops it (if live) and relaunches resuming the session.`))
           return;
-        txFor(e)
+        // Surface the outcome. This used to be fire-and-forget (`.catch(()=>{})`,
+        // and the resolved value — including a non-2xx {ok:false} — was ignored),
+        // so a failed restart (agent gone, host/transport error) looked identical
+        // to a no-op: "I clicked restart and nothing happened." /api/restart
+        // returns once the detached restart is kicked off; the old→new pid swap
+        // then arrives over /api/ls/subscribe.
+        const res = await txFor(e)
           .post("/api/restart", { keyword: String(e.pid) })
-          .catch(() => {});
+          .catch((err) => ({ ok: false, text: String(err?.message || err) }));
+        if (!res || !res.ok)
+          alert(`Restart failed for ${who}:\n${(res && res.text) || "request failed"}`);
       }
 
       // ---- On-screen key bar (mobile) -------------------------------------
