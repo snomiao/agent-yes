@@ -74,6 +74,16 @@ clis:
       # gap across a line-wrap; `\s+`/`\s*` tolerate wraps inside the phrase.
       - pattern: 'API Error:[\s\S]{0,40}Response\s+stalled\s+mid-\s*stream'
         flags: i
+      # "API Error: Connection closed mid-response. The response above may be
+      # incomplete." — the HTTP/SSE connection dropped before the response
+      # finished. Same class as the stalled-mid-stream case (transient, the
+      # partial answer is already on screen), so retry with backoff instead of
+      # wedging. Same "API Error:" chrome anchor keeps an agent merely
+      # *discussing* a dropped connection from self-triggering a retry;
+      # `[\s\S]{0,40}` spans the prefix→phrase gap across a line-wrap and
+      # `\s+`/`\s*` tolerate wraps inside the phrase.
+      - pattern: 'API Error:[\s\S]{0,40}Connection\s+closed\s+mid-\s*response'
+        flags: i
       # Any 5xx API error (e.g. "API Error: 529 Overloaded", "API Error: 503 …",
       # or a 529 rendered as a raw JSON error blob) is server-side + transient —
       # retry with backoff regardless of the wording. Anchored to "API Error" so

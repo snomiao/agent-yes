@@ -335,6 +335,25 @@ mod tests {
             .auto_retry
             .iter()
             .any(|rx| rx.is_match("the download stalled mid-stream so I retried it")));
+        // A dropped connection mid-response is the same transient class — it must
+        // auto-retry too…
+        assert!(config.auto_retry.iter().any(|rx| rx.is_match(
+            "API Error: Connection closed mid-response. The response above may be incomplete."
+        )));
+        // …including when the terminal wraps "mid-response" across rows…
+        assert!(config
+            .auto_retry
+            .iter()
+            .any(|rx| rx.is_match("API Error: Connection closed mid-\nresponse.")));
+        // …but an agent merely *discussing* a closed connection (prose, commit
+        // messages) must NOT self-trigger a retry — the "API Error:" anchor is
+        // what separates the real banner from narration.
+        assert!(!config.auto_retry.iter().any(|rx| rx
+            .is_match("the connection closed mid-response so claude lost the tail of the answer")));
+        assert!(!config
+            .auto_retry
+            .iter()
+            .any(|rx| rx.is_match("added a Connection closed mid-response auto-retry pattern")));
         // …but a stray status-like number in normal output must NOT.
         assert!(!config
             .auto_retry
