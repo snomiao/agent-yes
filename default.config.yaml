@@ -88,6 +88,15 @@ clis:
         flags: i
     restoreArgs:
       - --continue
+    # resumeCommand (optional): a regex scraped from the agent's log by
+    # `ay restart` to resume the exact session when a CLI prints a resume command.
+    # Capture group 1 is the argument string (whitespace-split) appended to the
+    # relaunched `agent-yes --cli=<cli> …`. The claude family has no printed resume
+    # command — it resumes via restoreArgs (--continue) above — so it's left unset.
+    # Example for a CLI that prints one:
+    #   resumeCommand:
+    #     pattern: 'To resume, run:.*?(--resume \S+)'
+    #     flags: i
     restartWithoutContinueArg:
       - No conversation found to continue
     exitCommands:
@@ -176,6 +185,15 @@ clis:
         flags: i
     restoreArgs:
       - --continue
+    # resumeCommand (optional): a regex scraped from the agent's log by
+    # `ay restart` to resume the exact session when a CLI prints a resume command.
+    # Capture group 1 is the argument string (whitespace-split) appended to the
+    # relaunched `agent-yes --cli=<cli> …`. The claude family has no printed resume
+    # command — it resumes via restoreArgs (--continue) above — so it's left unset.
+    # Example for a CLI that prints one:
+    #   resumeCommand:
+    #     pattern: 'To resume, run:.*?(--resume \S+)'
+    #     flags: i
     restartWithoutContinueArg:
       - No conversation found to continue
     exitCommands:
@@ -269,6 +287,15 @@ clis:
         flags: i
     restoreArgs:
       - --continue
+    # resumeCommand (optional): a regex scraped from the agent's log by
+    # `ay restart` to resume the exact session when a CLI prints a resume command.
+    # Capture group 1 is the argument string (whitespace-split) appended to the
+    # relaunched `agent-yes --cli=<cli> …`. The claude family has no printed resume
+    # command — it resumes via restoreArgs (--continue) above — so it's left unset.
+    # Example for a CLI that prints one:
+    #   resumeCommand:
+    #     pattern: 'To resume, run:.*?(--resume \S+)'
+    #     flags: i
     restartWithoutContinueArg:
       - No conversation found to continue
     exitCommands:
