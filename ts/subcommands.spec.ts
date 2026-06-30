@@ -1458,7 +1458,10 @@ describe("subcommands.cmdStatus", () => {
 // ---------------------------------------------------------------------------
 
 describe("subcommands.cmdRestart", () => {
-  it("returns 1 and warns when the agent is still alive", async () => {
+  // A live agent is now stopped-then-resumed. With no fifo_file the graceful
+  // stop can't be sent, so it errors out *before* any kill — which also proves
+  // the live test process (used as the fake pid) is never signalled.
+  it("returns 1 when a live agent can't be gracefully stopped (no fifo_file)", async () => {
     const mod = await loadModule();
     const { appendGlobalPid } = await import("./globalPidIndex.ts");
     await appendGlobalPid({
@@ -1482,10 +1485,13 @@ describe("subcommands.cmdRestart", () => {
     try {
       const code = await mod.runSubcommand(["bun", "cli.js", "restart", String(process.pid)]);
       expect(code).toBe(1);
-      expect(stderr.join("")).toMatch(/still running/);
+      expect(stderr.join("")).toMatch(/no fifo_file/);
     } finally {
       process.stderr.write = origErr;
     }
+    // The live process must still be alive — restart must not have killed it.
+    // (signal 0 throws only if the pid is gone / not signalable.)
+    expect(() => process.kill(process.pid, 0)).not.toThrow();
   });
 });
 
@@ -1821,5 +1827,66 @@ describe("subcommands.cmdRead replays at the ptysize sidecar geometry", () => {
     } finally {
       await rm(tmp, { recursive: true, force: true }).catch(() => null);
     }
+  });
+});
+
+describe("subcommands.resolveResumeArgs", () => {
+  it("replays the original prompt when --fresh", async () => {
+    const { resolveResumeArgs } = await loadModule();
+    expect(
+      resolveResumeArgs({ restoreArgs: ["--continue"] }, "irrelevant log", {
+        fresh: true,
+        prompt: "do the thing",
+      }),
+    ).toEqual({ args: ["do the thing"], strategy: "fresh (replay original prompt)" });
+  });
+
+  it("--fresh with no prompt yields no args", async () => {
+    const { resolveResumeArgs } = await loadModule();
+    expect(resolveResumeArgs(undefined, "", { fresh: true })).toEqual({
+      args: [],
+      strategy: "fresh (no prompt)",
+    });
+  });
+
+  it("scrapes a printed resume command (capture group 1, whitespace-split)", async () => {
+    const { resolveResumeArgs } = await loadModule();
+    const conf = { resumeCommand: /To resume run: agent (.+)/ };
+    const log = "...\nTo resume run: agent --resume abc-123\n> ";
+    expect(resolveResumeArgs(conf, log, { fresh: false })).toEqual({
+      args: ["--resume", "abc-123"],
+      strategy: "printed resume command: --resume abc-123",
+    });
+  });
+
+  it("ignores a stray global flag on resumeCommand and still captures", async () => {
+    const { resolveResumeArgs } = await loadModule();
+    const conf = { resumeCommand: /resume=(\S+)/g };
+    expect(resolveResumeArgs(conf, "session resume=zzz here", { fresh: false }).args).toEqual([
+      "zzz",
+    ]);
+  });
+
+  it("falls back to restoreArgs when resumeCommand is absent or unmatched", async () => {
+    const { resolveResumeArgs } = await loadModule();
+    expect(
+      resolveResumeArgs({ restoreArgs: ["--continue"] }, "no resume hint here", { fresh: false }),
+    ).toEqual({ args: ["--continue"], strategy: "restoreArgs (--continue)" });
+    // resumeCommand present but no match in the log → still falls back.
+    expect(
+      resolveResumeArgs(
+        { resumeCommand: /resume (\S+)/, restoreArgs: ["resume", "--last"] },
+        "nothing matches",
+        { fresh: false },
+      ).args,
+    ).toEqual(["resume", "--last"]);
+  });
+
+  it("falls back to --continue when neither resumeCommand nor restoreArgs exist", async () => {
+    const { resolveResumeArgs } = await loadModule();
+    expect(resolveResumeArgs(undefined, "", { fresh: false })).toEqual({
+      args: ["--continue"],
+      strategy: "--continue (fallback)",
+    });
   });
 });

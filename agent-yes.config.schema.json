@@ -171,6 +171,10 @@
           "items": { "$ref": "#/definitions/RegexSource" },
           "description": "Regex patterns for errors that require restart WITHOUT continue args"
         },
+        "resumeCommand": {
+          "$ref": "#/definitions/RegexSource",
+          "description": "Optional regex scraped from the agent's log on `ay restart`. Capture group 1 is the argument string (whitespace-split) to relaunch with — i.e. a resume command the CLI printed, like '--resume <id>'. When absent or unmatched, restart falls back to restoreArgs (e.g. --continue)."
+        },
         "bunx": {
           "type": "boolean",
           "description": "Use bunx instead of npx to run the CLI (faster startup)"

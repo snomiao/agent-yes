@@ -392,6 +392,7 @@ export function cmdHelp(managerCommands = true): number {
       `  ay attach <keyword>                 interactive attach (detach: Ctrl-\\)\n` +
       `  ay stop <keyword>                   graceful shutdown (/exit for claude/codex)\n` +
       `  ay exit <keyword> [reason]          graceful shutdown, recording who/why (= 'ay send <kw> exit')\n` +
+      `  ay restart <keyword> [--fresh]      stop (if live) + relaunch resuming the session; --fresh replays the prompt\n` +
       `  ay status <keyword>                 agent status snapshot\n` +
       `  ay result <keyword> [--wait]        pull an agent's structured result envelope\n` +
       `  ay result set '<json>'              (inside an agent) deposit your result envelope\n` +
@@ -2754,11 +2755,72 @@ async function cmdAttach(rest: string[]): Promise<number> {
 // ay restart
 // ---------------------------------------------------------------------------
 
+/**
+ * Decide how to relaunch an agent on `ay restart`. Pure (no I/O) so it's unit
+ * testable. Precedence:
+ *  - `fresh`: replay the original prompt (the old behaviour), no resume.
+ *  - else if the CLI printed a resume command its `resumeCommand` regex matches
+ *    in the captured log (capture group 1 = the arg string), relaunch with those
+ *    whitespace-split args.
+ *  - else fall back to `restoreArgs` (e.g. `--continue`) so the wrapper's own
+ *    resume plumbing (claude --continue, codex stored-session) kicks in.
+ */
+export function resolveResumeArgs(
+  conf: AgentCliConfig | undefined,
+  logText: string,
+  opts: { fresh: boolean; prompt?: string },
+): { args: string[]; strategy: string } {
+  if (opts.fresh) {
+    return opts.prompt
+      ? { args: [opts.prompt], strategy: "fresh (replay original prompt)" }
+      : { args: [], strategy: "fresh (no prompt)" };
+  }
+  const re = conf?.resumeCommand;
+  if (re) {
+    // Strip a stray `g` flag so .exec returns capture groups deterministically.
+    const probe = re.global ? new RegExp(re.source, re.flags.replace(/g/g, "")) : re;
+    const m = probe.exec(logText);
+    const captured = m?.[1]?.trim();
+    if (captured) {
+      const parts = captured.split(/\s+/).filter(Boolean);
+      if (parts.length) return { args: parts, strategy: `printed resume command: ${captured}` };
+    }
+  }
+  const restore = conf?.restoreArgs;
+  if (restore && restore.length) {
+    return { args: [...restore], strategy: `restoreArgs (${restore.join(" ")})` };
+  }
+  return { args: ["--continue"], strategy: "--continue (fallback)" };
+}
+
+/**
+ * Wait for a pid to exit. No cross-process exit event exists (the agent is owned
+ * by its own wrapper), so poll `isPidAlive` — checked once immediately, then with
+ * golden-ratio backoff (1.0, 1.6, 2.6…s, capped) up to `timeoutMs`. Returns true
+ * once the pid is gone.
+ */
+async function waitForExit(pid: number, timeoutMs: number): Promise<boolean> {
+  if (!isPidAlive(pid)) return true;
+  const start = Date.now();
+  let delay = 1000;
+  while (Date.now() - start < timeoutMs) {
+    await new Promise((r) => setTimeout(r, delay));
+    if (!isPidAlive(pid)) return true;
+    delay = Math.min(Math.round(delay * 1.618), 8000);
+  }
+  return !isPidAlive(pid);
+}
+
 async function cmdRestart(rest: string[]): Promise<number> {
   const y = yargs(rest)
-    .usage("Usage: ay restart <keyword>")
+    .usage("Usage: ay restart <keyword> [--fresh]")
     .option("latest", { type: "boolean", default: false, description: "Use most recent match" })
     .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
+    .option("fresh", {
+      type: "boolean",
+      default: false,
+      description: "Replay the original prompt instead of resuming the session",
+    })
     .help(false)
     .version(false)
     .exitProcess(false);
@@ -2773,23 +2835,50 @@ async function cmdRestart(rest: string[]): Promise<number> {
   };
   const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
   const record = await resolveOne(keyword, opts);
+  const fresh = Boolean(argv.fresh);
 
+  // Live agent: gracefully stop it (claude /exit / double-Ctrl+C via FIFO), then
+  // wait for it to actually exit before relaunching.
   if (isPidAlive(record.pid)) {
-    process.stderr.write(`pid ${record.pid} is still running — stop it first or use ay send\n`);
-    return 1;
+    await gracefulExitAgent(record, "restart");
+    process.stdout.write(`stopping pid ${record.pid} (${record.cli}) before restart…\n`);
+    let exited = await waitForExit(record.pid, 30_000);
+    if (!exited) {
+      // Wouldn't go gracefully — SIGKILL the pid (the reaper sweeps its pgid).
+      try {
+        process.kill(record.pid, "SIGKILL");
+      } catch {
+        /* already gone / not permitted */
+      }
+      exited = await waitForExit(record.pid, 5_000);
+    }
+    if (!exited) {
+      process.stderr.write(
+        `pid ${record.pid} did not exit — aborting restart ` +
+          `(try: ay stop ${record.pid} --method=double-ctrl-c)\n`,
+      );
+      return 1;
+    }
   }
 
-  const args = ["--cli=" + record.cli];
-  if (record.prompt) args.push(record.prompt);
+  // Resolve how to relaunch: a printed resume command (config `resumeCommand`),
+  // else restoreArgs/--continue, else replay the prompt when --fresh.
+  const conf = (await cliDefaults())[record.cli];
+  const logText =
+    !fresh && record.log_file ? await readFile(record.log_file, "utf8").catch(() => "") : "";
+  const { args: resumeArgs, strategy } = resolveResumeArgs(conf, logText, {
+    fresh,
+    prompt: record.prompt,
+  });
 
-  const proc = Bun.spawn(["agent-yes", ...args], {
+  const proc = Bun.spawn(["agent-yes", "--cli=" + record.cli, ...resumeArgs], {
     cwd: record.cwd,
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],
   });
 
   process.stdout.write(
-    `restarted ${record.cli} in ${shortenPath(record.cwd)} (new pid: ${proc.pid})\n`,
+    `restarted ${record.cli} in ${shortenPath(record.cwd)} via ${strategy} (new pid: ${proc.pid})\n`,
   );
   process.stderr.write(
     `\n` +

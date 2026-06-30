@@ -75,6 +75,7 @@ export type AgentCliConfig = {
   // crash/resuming-session behaviour
   restoreArgs?: string[]; // arguments to continue the session when crashed
   restartWithoutContinueArg?: RegExp[]; // array of regex to match for errors that require restart without continue args
+  resumeCommand?: RegExp; // optional: scraped from the agent's log on `ay restart`. Capture group 1 is the argument string (whitespace-split) to relaunch with — i.e. a resume command the CLI printed, like "--resume <id>". When absent or unmatched, restart falls back to restoreArgs (e.g. --continue).
 };
 export type AgentYesConfig = {
   configDir?: string; // directory to store agent-yes config files, e.g. session store
