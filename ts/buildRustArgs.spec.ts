@@ -167,7 +167,11 @@ describe("buildRustArgs", () => {
     });
 
     it("does not treat a supported-CLI word after -- as the CLI selector", () => {
-      const result = buildRustArgs(argv("--cwd", "/tmp/x", "--", "ask", "claude"), "claude", SUPPORTED_CLIS);
+      const result = buildRustArgs(
+        argv("--cwd", "/tmp/x", "--", "ask", "claude"),
+        "claude",
+        SUPPORTED_CLIS,
+      );
       expect(result).toEqual(["--cli=claude", "--cwd", "/tmp/x", "--", "ask", "claude"]);
     });
   });
