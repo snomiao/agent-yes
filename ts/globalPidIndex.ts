@@ -33,6 +33,11 @@ export interface GlobalPidRecord {
   log_file: string | null;
   fifo_file?: string | null;
   status: "active" | "idle" | "exited";
+  // Set by the Rust supervisor when the agent produced no PTY output after a
+  // high-signal poke / while a "working" spinner is frozen — i.e. it looks
+  // wedged. Orthogonal to `status` (which stays "active"); cleared on recovery
+  // and on exit. The ls/status live-state derivation surfaces it as `stuck`.
+  unresponsive?: boolean;
   exit_code: number | null;
   exit_reason: string | null;
   started_at: number;

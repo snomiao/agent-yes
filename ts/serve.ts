@@ -987,7 +987,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
     const status = await deriveLiveStatus(r);
     return {
       ...r,
-      status,
+      // The Rust supervisor's unresponsive flag is an authoritative wedge signal —
+      // surface it as `stuck` so the console's dot matches `ay ls`. (A dead agent
+      // is never unresponsive — Rust clears the flag on exit.)
+      status: status !== "exited" && r.unresponsive ? "stuck" : status,
       title: await logTitle(r.log_file),
       git: status === "exited" ? null : await gitStatus(r.cwd),
       // Task progress from the rendered todo block (null when none detected → no
