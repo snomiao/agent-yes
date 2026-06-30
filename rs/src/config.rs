@@ -325,7 +325,12 @@ mod tests {
             .auto_retry
             .iter()
             .any(|rx| rx.is_match("API Error: Response stalled mid-\nstream.")));
-        // …but a casual mention of the phrase in normal output must NOT.
+        // …but the agent merely *discussing* a stalled mid-stream (docs, commit
+        // messages, this feature's own PR) must NOT self-trigger a retry — the
+        // "API Error:" chrome anchor is what separates the real banner from prose.
+        assert!(!config.auto_retry.iter().any(
+            |rx| rx.is_match("shipped the Response stalled mid-stream auto-retry in v1.153.0")
+        ));
         assert!(!config
             .auto_retry
             .iter()

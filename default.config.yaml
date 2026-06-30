@@ -67,13 +67,12 @@ clis:
       # "API Error: Response stalled mid-stream. The response above may be
       # incomplete." — the streamed response wedged and the client aborted
       # mid-token. Transient + server-side like Overloaded, so retry with
-      # backoff instead of dying. Matches the full error wording ("Response …
-      # stalled … mid-stream") rather than the "API Error" prefix, so a
-      # narrow-terminal line-wrap can't hide it AND a casual mention of just
-      # "stalled mid-stream" in normal agent output can't trigger a spurious
-      # retry. `\s+` between words tolerates the wrap; `\s*` after the hyphen
-      # tolerates a wrap inside "mid-stream".
-      - pattern: 'Response\s+stalled\s+mid-\s*stream'
+      # backoff instead of dying. Anchored on the literal "API Error:" chrome
+      # the CLI emits, so an agent merely *discussing* a stalled mid-stream
+      # (docs, commits, this very feature's PR) can't self-trigger a retry —
+      # only the real error banner does. `[\s\S]{0,40}` spans the prefix→phrase
+      # gap across a line-wrap; `\s+`/`\s*` tolerate wraps inside the phrase.
+      - pattern: 'API Error:[\s\S]{0,40}Response\s+stalled\s+mid-\s*stream'
         flags: i
       # Any 5xx API error (e.g. "API Error: 529 Overloaded", "API Error: 503 …",
       # or a 529 rendered as a raw JSON error blob) is server-side + transient —
