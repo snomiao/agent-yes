@@ -832,6 +832,12 @@
       .dot.idle {
         background: var(--amber);
       }
+      /* Wedged: the Rust supervisor flagged the agent unresponsive (no PTY output
+         after a poke / frozen spinner) — surfaced as `stuck` by /api/ls. Red so a
+         stuck agent stands out from a healthy green / quiet-amber one. */
+      .dot.stuck {
+        background: var(--red);
+      }
       .dot.stopped,
       .dot.exited {
         background: var(--muted);
