@@ -35,6 +35,7 @@ Then: `ay claude` (run an agent with auto-yes) · `ay serve --share` (web consol
 - **Crash Recovery**: Automatically restarts crashed processes (where supported)
 - **Idle Detection**: Optional auto-exit when the AI becomes idle
 - **Named Pipe Input (Linux)**: On Linux systems, automatically creates a FIFO (named pipe) at `/tmp/agent-yes-YYYYMMDDHHMMSSXXX.stdin` for additional input streams
+- **Isolated Processes**: Each `ay <cli>` is an independent wrapper — no central daemon owns the agents. They coordinate through files (`pids.jsonl` index, per-pid FIFO for stdin, per-cwd `.raw.log` for output), so one process crashing (even `ay serve`) never takes down the others. See [docs/architecture.md](docs/architecture.md#process-model--ipc).
 
 ## Agent Clis
 
