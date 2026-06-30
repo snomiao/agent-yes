@@ -110,9 +110,9 @@ describe("buildRustArgs", () => {
   // ─── CLI name detection in args ────────────────────────────────────
 
   describe("does not duplicate CLI name if already in args", () => {
-    it("skips --cli= when CLI name is already a positional arg", () => {
+    it("hoists a positional CLI name into a leading --cli= flag", () => {
       const result = buildRustArgs(argv("--timeout", "30s", "claude"), "claude", SUPPORTED_CLIS);
-      expect(result).toEqual(["--timeout", "30s", "claude"]);
+      expect(result).toEqual(["--cli=claude", "--timeout", "30s"]);
       expect(result.filter((a) => a.includes("claude"))).toHaveLength(1);
     });
 
@@ -140,8 +140,35 @@ describe("buildRustArgs", () => {
       for (const cli of ["gemini", "codex", "copilot", "cursor", "grok"]) {
         const result = buildRustArgs(argv("--timeout", "1m", cli), "claude", SUPPORTED_CLIS);
         expect(result).not.toContain("--cli=claude");
-        expect(result).toContain(cli);
+        expect(result[0]).toBe(`--cli=${cli}`);
+        expect(result).toContain("--timeout");
       }
+    });
+  });
+
+  // ─── Regression: agent-yes flags AFTER a positional CLI name ───────
+  // `ay <cli> --cwd <dir>` is the documented form. The CLI name must be hoisted
+  // to a leading --cli= flag, otherwise clap's trailing_var_arg swallows --cwd
+  // and forwards it to the target CLI (which errors on the unknown option).
+
+  describe("regression: flags after a positional CLI name are not swallowed", () => {
+    it("hoists CLI name so --cwd is parsed by agent-yes, not forwarded", () => {
+      const result = buildRustArgs(
+        argv("claude", "--cwd", "../qa1", "--", "do", "the", "thing"),
+        "claude",
+        SUPPORTED_CLIS,
+      );
+      expect(result).toEqual(["--cli=claude", "--cwd", "../qa1", "--", "do", "the", "thing"]);
+    });
+
+    it("works for the ay generic entry (cliFromScript undefined)", () => {
+      const result = buildRustArgs(argv("codex", "--cwd", "/tmp/x"), undefined, SUPPORTED_CLIS);
+      expect(result).toEqual(["--cli=codex", "--cwd", "/tmp/x"]);
+    });
+
+    it("does not treat a supported-CLI word after -- as the CLI selector", () => {
+      const result = buildRustArgs(argv("--cwd", "/tmp/x", "--", "ask", "claude"), "claude", SUPPORTED_CLIS);
+      expect(result).toEqual(["--cli=claude", "--cwd", "/tmp/x", "--", "ask", "claude"]);
     });
   });
 
@@ -272,8 +299,9 @@ describe("buildRustArgs", () => {
         undefined,
         SUPPORTED_CLIS,
       );
-      // cliFromScript is undefined (agent-yes), CLI already in args
-      expect(result).toEqual(["claude", "--timeout", "1h"]);
+      // cliFromScript is undefined (agent-yes); the positional CLI name is hoisted
+      // to --cli= so --timeout isn't swallowed by clap's trailing_var_arg.
+      expect(result).toEqual(["--cli=claude", "--timeout", "1h"]);
     });
 
     it("agent-yes --rust --swarm my-project --timeout 1h", () => {
