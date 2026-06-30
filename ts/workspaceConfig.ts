@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, writeFileSync } from "fs";
+import { lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import path from "path";
 import { agentYesHome } from "./agentYesHome.ts";
@@ -19,6 +19,12 @@ interface Config {
   provisionRoot?: string;
   /** Owners/repos permitted for `from`-provisioning; empty = deny all. */
   provisionAllowlist?: string[];
+  /**
+   * A trusted, HOST-LOCAL shell hook run before each console/CLI spawn. See
+   * {@link getSpawnHook}. Intentionally NOT settable over the network — it is
+   * arbitrary local code that runs on every spawn.
+   */
+  spawnHook?: string;
 }
 
 function configPath(): string {
@@ -84,6 +90,45 @@ export function isProvisionAllowed(owner: string, repo: string): boolean {
   const o = owner.toLowerCase();
   const full = `${owner}/${repo}`.toLowerCase();
   return list.some((e) => e.replace(/\/\*$/, "") === o || e === full);
+}
+
+/**
+ * A trusted, HOST-LOCAL shell hook run before each agent spawn. It is a POSIX
+ * `sh -c` script that prepares the environment (provisioning, env, cd) and that
+ * agent-yes runs as `sh -c "set -e\n<hook>\nexec \"$@\"" ay-spawn <agent argv…>`
+ * — so the real agent argv is passed as positional params and the prompt is
+ * never shell-parsed. `set -e` aborts the spawn if any hook step fails.
+ *
+ * This is arbitrary local code that runs on EVERY spawn, so it is deliberately
+ * NOT writable over the network. Set it on the machine by editing
+ * `~/.agent-yes/config.json` (`"spawnHook"`), or via env `AGENT_YES_SPAWN_HOOK`.
+ *
+ * Tampering guard (POSIX): a file-backed hook is ignored when the config file is
+ * a symlink, is not owned by us, or is group/world-writable — we refuse to run a
+ * hook from a file other users can swap or rewrite. The env override is trusted
+ * (it comes from the daemon's own environment). Returns null when unset/guarded.
+ */
+export function getSpawnHook(): string | null {
+  const env = process.env.AGENT_YES_SPAWN_HOOK;
+  if (env && env.trim()) return env;
+  const h = readConfig().spawnHook;
+  if (!h || !h.trim()) return null;
+  if (process.platform !== "win32") {
+    try {
+      if (lstatSync(configPath()).isSymbolicLink()) return null;
+      const st = statSync(configPath());
+      if ((st.mode & 0o022) !== 0) return null; // group/world-writable
+      if (typeof process.getuid === "function" && st.uid !== process.getuid()) return null;
+    } catch {
+      return null;
+    }
+  }
+  return h;
+}
+
+/** Whether a usable {@link getSpawnHook} is configured (for read-only disclosure). */
+export function hasSpawnHook(): boolean {
+  return getSpawnHook() !== null;
 }
 
 /** Persist the workspace root, tilde-expanded and resolved to an absolute path. */
