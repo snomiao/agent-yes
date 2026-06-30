@@ -651,11 +651,13 @@ async function remotePost(
   remote: ResolvedRemote,
   pathname: string,
   body: unknown,
+  signal?: AbortSignal,
 ): Promise<Response> {
   return fetch(`${remote.url}${pathname}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${remote.token}`, "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
   });
 }
 
@@ -842,42 +844,51 @@ async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string):
   return 0;
 }
 
-/** GET the remote's agent list (all states), or [] on any error. */
-async function remoteLsRecords(remote: ResolvedRemote): Promise<any[]> {
-  try {
-    const res = await remoteGet(remote, "/api/ls?all=1");
-    if (!res.ok) return [];
-    return (await res.json()) as any[];
-  } catch {
-    return [];
-  }
-}
-
 /**
  * Spawn an agent on a remote host by POSTing its existing `/api/spawn`. The
  * remote applies ITS OWN spawn hook + provision allowlist server-side (the hook
  * never crosses the wire). `hint` is the user-typed target (alias or
  * token@host:port) so the printed follow-ups are copy-pasteable.
  *
- * No client fetch timeout and NO retry: a hooked `/api/spawn` can legitimately
- * block up to the remote's handshake window, and a POST that already spawned
- * must never be retried (it would double-spawn). The server always responds.
+ * NO retry: a POST that already spawned must never be re-sent (double-spawn). A
+ * generous timeout still bounds a half-open/stalled connection — on timeout the
+ * result is UNKNOWN, so we say so and point at `ay ls` rather than retrying.
  */
 async function runRemoteSpawn(
   remote: ResolvedRemote,
   hint: string,
   spec: { cli: string; cwd?: string; from?: string; prompt?: string },
 ): Promise<number> {
-  // Snapshot existing agents: `/api/spawn` returns the `ay` WRAPPER pid, but the
-  // agent registers under its own pid — so we reconcile by watching for a freshly
-  // registered agent in the target cwd (mirrors the web console's spawn flow).
-  const before = new Set((await remoteLsRecords(remote)).map((r) => r.pid));
-  const res = await remotePost(remote, "/api/spawn", {
-    cli: spec.cli,
-    cwd: spec.cwd || undefined,
-    from: spec.from || undefined,
-    prompt: spec.prompt || undefined,
-  });
+  // A hooked `/api/spawn` (#126) can legitimately block up to the remote's
+  // handshake window, so the timeout is generous; it only guards a dead/half-open
+  // connection that would otherwise hang the CLI forever.
+  const SPAWN_TIMEOUT_MS = Number(process.env.AGENT_YES_REMOTE_SPAWN_TIMEOUT_MS) || 120_000;
+  let res: Response;
+  try {
+    res = await remotePost(
+      remote,
+      "/api/spawn",
+      {
+        cli: spec.cli,
+        cwd: spec.cwd || undefined,
+        from: spec.from || undefined,
+        prompt: spec.prompt || undefined,
+      },
+      AbortSignal.timeout(SPAWN_TIMEOUT_MS),
+    );
+  } catch (e) {
+    const name = (e as Error)?.name;
+    if (name === "TimeoutError" || name === "AbortError") {
+      // The request may or may not have spawned — do NOT retry. Let the operator check.
+      process.stderr.write(
+        `remote spawn: no response from ${remote.url} within ${Math.round(SPAWN_TIMEOUT_MS / 1000)}s — ` +
+          `result UNKNOWN (not retried).\n  ay ls ${hint}    # check whether it started\n`,
+      );
+      return 2;
+    }
+    process.stderr.write(`remote spawn failed: ${(e as Error).message}\n`);
+    return 1;
+  }
   if (!res.ok) {
     process.stderr.write(`remote spawn failed ${res.status}: ${await res.text()}\n`);
     return 1;
@@ -894,26 +905,15 @@ async function runRemoteSpawn(
       `${r.hook ? " (via spawn hook)" : ""}` +
       `${r.provisioned ? ` (${r.provisioned.action})` : ""}\n`,
   );
-  // Match the newest agent that wasn't already running — NOT by cwd: the server
-  // may report a different path than the agent records (e.g. /tmp vs /private/tmp
-  // symlink resolution on macOS). Mirrors the web console's spawnAndSelect.
-  let agentPid: number | undefined;
-  for (let i = 0; i < 12 && agentPid === undefined; i++) {
-    await new Promise((done) => setTimeout(done, 700));
-    const fresh = (await remoteLsRecords(remote))
-      .filter((x) => !before.has(x.pid))
-      .sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
-    if (fresh.length) agentPid = fresh[0].pid;
-  }
-  if (agentPid !== undefined) {
-    process.stderr.write(
-      `\n  ay tail ${hint}:${agentPid}            # watch its output\n` +
-        `  ay status ${hint}:${agentPid} --wait   # block until it needs you\n`,
-    );
-  } else {
-    // The wrapper pid isn't a usable agent keyword; point at the list instead.
-    process.stderr.write(`\n  ay ls ${hint}    # the agent is registering — find it here\n`);
-  }
+  // We deliberately do NOT print the agent's own pid. `/api/spawn` returns the
+  // `ay` LAUNCHER pid, which is not the agent's registered pid (the record's
+  // pid/wrapper_pid are the runtime process, not the launcher) — and picking the
+  // freshly-registered agent by "newest" would, under a concurrent spawn,
+  // surface a sibling's (or another user's) pid. Point at the remote's list,
+  // where the new agent reliably appears, instead of guessing.
+  // (A one-step `ay tail <remote>:<pid>` would need /api/spawn to return a
+  // correlatable agent id — a server change left for a follow-up.)
+  process.stderr.write(`\n  ay ls ${hint}    # the new ${r.cli} agent appears here\n`);
   return 0;
 }
 
