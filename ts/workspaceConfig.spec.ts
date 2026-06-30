@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync } from "fs";
+import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import path from "path";
 import {
   expandTilde,
   getProvisionAllowlist,
   getProvisionRoot,
+  getSpawnHook,
   getWorkspaceRoot,
+  hasSpawnHook,
   isProvisionAllowed,
   resolveSpawnCwd,
   setWorkspaceRoot,
@@ -25,6 +27,7 @@ describe("workspaceConfig", () => {
     else process.env.AGENT_YES_HOME = original;
     delete process.env.CODEHOST_WS_ROOT;
     delete process.env.CODEHOST_PROVISION_ALLOWLIST;
+    delete process.env.AGENT_YES_SPAWN_HOOK;
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -141,5 +144,43 @@ describe("workspaceConfig", () => {
       expect(isProvisionAllowed("acme", "other")).toBe(false);
       expect(isProvisionAllowed("org", "anything")).toBe(true);
     });
+  });
+
+  describe("getSpawnHook / hasSpawnHook", () => {
+    const isPosix = process.platform !== "win32";
+
+    it("is null/false when unset", () => {
+      expect(getSpawnHook()).toBeNull();
+      expect(hasSpawnHook()).toBe(false);
+    });
+
+    it("returns the configured hook from a private (0600) config", () => {
+      writeConfig({ spawnHook: 'echo hi >&2\nexec "$@"' });
+      if (isPosix) chmodSync(path.join(tmp, "config.json"), 0o600);
+      expect(getSpawnHook()).toBe('echo hi >&2\nexec "$@"');
+      expect(hasSpawnHook()).toBe(true);
+    });
+
+    it("ignores a blank hook", () => {
+      writeConfig({ spawnHook: "   " });
+      expect(getSpawnHook()).toBeNull();
+    });
+
+    it("env AGENT_YES_SPAWN_HOOK overrides the config", () => {
+      writeConfig({ spawnHook: "from-file" });
+      process.env.AGENT_YES_SPAWN_HOOK = "from-env";
+      expect(getSpawnHook()).toBe("from-env");
+    });
+
+    it.skipIf(!isPosix)(
+      "refuses a file-backed hook when the config is group/world-writable (tampering guard)",
+      () => {
+        writeConfig({ spawnHook: "echo pwned" });
+        chmodSync(path.join(tmp, "config.json"), 0o666);
+        expect(getSpawnHook()).toBeNull();
+        chmodSync(path.join(tmp, "config.json"), 0o600);
+        expect(getSpawnHook()).toBe("echo pwned");
+      },
+    );
   });
 });

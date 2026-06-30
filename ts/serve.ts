@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, stat, writeFile } from "fs/promises";
+import { mkdir, open, readFile, stat, unlink, writeFile } from "fs/promises";
 import { renameSync, watch, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -23,7 +23,13 @@ import { updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { pgidForWrapper } from "./reaper.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
-import { getProvisionRoot, isProvisionAllowed, resolveSpawnCwd } from "./workspaceConfig.ts";
+import {
+  getProvisionRoot,
+  getSpawnHook,
+  hasSpawnHook,
+  isProvisionAllowed,
+  resolveSpawnCwd,
+} from "./workspaceConfig.ts";
 
 const DEFAULT_PORT = 7432;
 
@@ -1157,6 +1163,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return Response.json({ version: getInstalledPackage().version });
     }
 
+    // GET /api/spawn-config — read-only disclosure of WHETHER a host-local spawn
+    // hook is configured. Deliberately returns only a boolean, never the hook
+    // body: the hook is arbitrary local code and console/room clients holding the
+    // share token are not necessarily host admins. Setting it stays host-local
+    // (edit ~/.agent-yes/config.json) — there is no PUT.
+    if (req.method === "GET" && p === "/api/spawn-config") {
+      return Response.json({ hasSpawnHook: hasSpawnHook() });
+    }
+
     // GET /api/notes
     if (req.method === "GET" && p === "/api/notes") {
       const notes = await readNotes();
@@ -1685,10 +1700,75 @@ export async function cmdServe(rest: string[]): Promise<number> {
         process.platform === "win32" && ayBin.toLowerCase().endsWith(".exe")
           ? [ayBin]
           : [process.execPath, ayBin];
+      const agentArgv = [...ayCmd, cli, ...(prompt ? ["--", prompt] : [])];
+      // don't leak our Claude Code session into the agent
+      const agentEnv = freshAgentEnv();
       try {
-        const child = Bun.spawn([...ayCmd, cli, ...(prompt ? ["--", prompt] : [])], {
+        const hook = getSpawnHook();
+        if (hook) {
+          // Host-local spawn hook (trusted local code, never network-writable). We
+          // run it via POSIX `sh -c` then `exec "$@"` the real agent — the agent
+          // argv is passed as positional params ($1…), so the prompt is NEVER
+          // shell-parsed (no quoting/injection surface). `set -e` aborts the spawn
+          // if any hook step fails. No `-l`: we don't re-source rc files here (the
+          // env is already the recovered login-shell env via freshAgentEnv). cwd
+          // and cli are exposed as env for the hook to consume.
+          const shell = process.env.AGENT_YES_SPAWN_SHELL?.trim() || "/bin/sh";
+          const script = `set -e\n${hook}\nexec "$@"`;
+          const errPath = path.join(
+            agentYesHome(),
+            `spawn-hook-${process.pid}-${performance.now().toString(36).replace(".", "")}.err`,
+          );
+          // File-backed stderr never blocks the child (a pipe we stop draining
+          // after exec would), and bounds our read to the first few KB.
+          const child = Bun.spawn([shell, "-c", script, "ay-spawn", ...agentArgv], {
+            cwd,
+            env: { ...agentEnv, AGENT_YES_CWD: cwd, AGENT_YES_CLI: cli },
+            stdin: "ignore",
+            stdout: "ignore",
+            stderr: Bun.file(errPath),
+          });
+          // Handshake: surface an EARLY hook/provision failure synchronously. If
+          // the child exits non-zero within the window, the hook failed before the
+          // agent settled — return the captured stderr. If it's still alive after
+          // the window, `exec` succeeded (or the agent is running) → detach and
+          // report success. We can't always attribute a failure to the hook vs the
+          // agent, so we just surface the captured output.
+          const windowMs = Number(process.env.AGENT_YES_SPAWN_HOOK_TIMEOUT_MS) || 5000;
+          const exitCode = await Promise.race([
+            child.exited,
+            new Promise<null>((r) => setTimeout(() => r(null), windowMs)),
+          ]);
+          if (exitCode !== null && exitCode !== 0) {
+            let detail = "";
+            try {
+              detail = (await Bun.file(errPath).text()).slice(0, 4096);
+            } catch {
+              /* no stderr captured */
+            }
+            await unlink(errPath).catch(() => {});
+            return new Response(
+              `spawn hook failed (exit ${exitCode})${detail ? `:\n${detail.trimEnd()}` : ""}`,
+              { status: 502 },
+            );
+          }
+          child.unref();
+          // Clean up the stderr sidecar. On POSIX the running agent may still hold
+          // the fd; unlinking an open file is harmless (the inode lives until
+          // close), so a brief delay is enough to keep early-failure reads valid.
+          setTimeout(() => void unlink(errPath).catch(() => {}), 60_000).unref?.();
+          return Response.json({
+            ok: true,
+            pid: child.pid,
+            cli,
+            cwd,
+            hook: true,
+            ...(provisioned ? { provisioned } : {}),
+          });
+        }
+        const child = Bun.spawn(agentArgv, {
           cwd,
-          env: freshAgentEnv(), // don't leak our Claude Code session into the agent
+          env: agentEnv,
           stdin: "ignore",
           stdout: "ignore",
           stderr: "ignore",
