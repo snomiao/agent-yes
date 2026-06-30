@@ -251,6 +251,7 @@ const SUBCOMMANDS = new Set([
   "tail",
   "head",
   "send",
+  "spawn",
   "attach",
   "stop",
   "exit",
@@ -325,6 +326,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdRead(rest, { mode: "head" });
       case "send":
         return await cmdSend(rest);
+      case "spawn":
+        return await cmdSpawn(rest);
       case "attach":
         return await cmdAttach(rest);
       case "stop":
@@ -648,11 +651,13 @@ async function remotePost(
   remote: ResolvedRemote,
   pathname: string,
   body: unknown,
+  signal?: AbortSignal,
 ): Promise<Response> {
   return fetch(`${remote.url}${pathname}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${remote.token}`, "Content-Type": "application/json" },
     body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
   });
 }
 
@@ -836,6 +841,79 @@ async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string):
   }
   const data = (await res.json()) as any;
   process.stdout.write(`sent to remote pid ${data.pid} (${remote.url}  ${keyword})\n`);
+  return 0;
+}
+
+/**
+ * Spawn an agent on a remote host by POSTing its existing `/api/spawn`. The
+ * remote applies ITS OWN spawn hook + provision allowlist server-side (the hook
+ * never crosses the wire). `hint` is the user-typed target (alias or
+ * token@host:port) so the printed follow-ups are copy-pasteable.
+ *
+ * NO retry: a POST that already spawned must never be re-sent (double-spawn). A
+ * generous timeout still bounds a half-open/stalled connection — on timeout the
+ * result is UNKNOWN, so we say so and point at `ay ls` rather than retrying.
+ */
+async function runRemoteSpawn(
+  remote: ResolvedRemote,
+  hint: string,
+  spec: { cli: string; cwd?: string; from?: string; prompt?: string },
+): Promise<number> {
+  // A hooked `/api/spawn` (#126) can legitimately block up to the remote's
+  // handshake window, so the timeout is generous; it only guards a dead/half-open
+  // connection that would otherwise hang the CLI forever.
+  const SPAWN_TIMEOUT_MS = Number(process.env.AGENT_YES_REMOTE_SPAWN_TIMEOUT_MS) || 120_000;
+  let res: Response;
+  try {
+    res = await remotePost(
+      remote,
+      "/api/spawn",
+      {
+        cli: spec.cli,
+        cwd: spec.cwd || undefined,
+        from: spec.from || undefined,
+        prompt: spec.prompt || undefined,
+      },
+      AbortSignal.timeout(SPAWN_TIMEOUT_MS),
+    );
+  } catch (e) {
+    const name = (e as Error)?.name;
+    if (name === "TimeoutError" || name === "AbortError") {
+      // The request may or may not have spawned — do NOT retry. Let the operator check.
+      process.stderr.write(
+        `remote spawn: no response from ${remote.url} within ${Math.round(SPAWN_TIMEOUT_MS / 1000)}s — ` +
+          `result UNKNOWN (not retried).\n  ay ls ${hint}    # check whether it started\n`,
+      );
+      return 2;
+    }
+    process.stderr.write(`remote spawn failed: ${(e as Error).message}\n`);
+    return 1;
+  }
+  if (!res.ok) {
+    process.stderr.write(`remote spawn failed ${res.status}: ${await res.text()}\n`);
+    return 1;
+  }
+  const r = (await res.json()) as {
+    pid: number;
+    cli: string;
+    cwd: string;
+    hook?: boolean;
+    provisioned?: { action: string };
+  };
+  process.stdout.write(
+    `spawned ${r.cli} on ${remote.url} in ${r.cwd}` +
+      `${r.hook ? " (via spawn hook)" : ""}` +
+      `${r.provisioned ? ` (${r.provisioned.action})` : ""}\n`,
+  );
+  // We deliberately do NOT print the agent's own pid. `/api/spawn` returns the
+  // `ay` LAUNCHER pid, which is not the agent's registered pid (the record's
+  // pid/wrapper_pid are the runtime process, not the launcher) — and picking the
+  // freshly-registered agent by "newest" would, under a concurrent spawn,
+  // surface a sibling's (or another user's) pid. Point at the remote's list,
+  // where the new agent reliably appears, instead of guessing.
+  // (A one-step `ay tail <remote>:<pid>` would need /api/spawn to return a
+  // correlatable agent id — a server change left for a follow-up.)
+  process.stderr.write(`\n  ay ls ${hint}    # the new ${r.cli} agent appears here\n`);
   return 0;
 }
 
@@ -2070,6 +2148,65 @@ function extractActivityFromLines(lines: string[]): string | null {
   }
 
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// ay spawn — launch an agent on a REMOTE host (POSTs the remote's /api/spawn)
+// ---------------------------------------------------------------------------
+
+async function cmdSpawn(rest: string[]): Promise<number> {
+  const y = yargs(rest)
+    .usage("Usage: ay spawn <remote> [--cli claude] [--cwd <dir>] [--from <src>] -- <prompt>")
+    .option("cli", {
+      type: "string",
+      default: "claude",
+      description: "CLI to wrap (claude|codex|gemini|…)",
+    })
+    .option("cwd", {
+      type: "string",
+      description: "Working dir ON THE REMOTE (resolved against the remote's workspace root)",
+    })
+    .option("from", {
+      type: "string",
+      description: "Provision a worktree from a GitHub source (owner/repo@branch) on the remote",
+    })
+    .option("prompt", { type: "string", description: "Initial prompt (or pass it after `--`)" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+
+  const argv = await y.parseAsync();
+  const target = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+  if (!target)
+    throw new Error("usage: ay spawn <remote> [--cli X] [--cwd D] [--from S] -- <prompt>");
+  const prompt = String(argv.prompt ?? argv._.slice(1).map(String).join(" "));
+
+  // v1 is remote-only: local spawning is just running the agent directly. A
+  // target that doesn't resolve as a remote is almost certainly a mistake (e.g.
+  // passing a cli name), so fail loudly with the local equivalent.
+  const remote = await resolveRemoteSpec(target);
+  if (!remote) {
+    process.stderr.write(
+      `ay spawn: '${target}' is not a known remote (token@host:port or a saved alias).\n` +
+        `  to spawn locally:  ay ${argv.cli}${prompt ? ` -- "${prompt}"` : ""}\n` +
+        `  to add a remote:   ay remote add <alias> http://<token>@<host>:<port>\n`,
+    );
+    return 1;
+  }
+  if (remote.keyword) {
+    process.stderr.write(
+      `ay spawn: target '${target}' carries a ':${remote.keyword}' keyword — spawn takes a remote, ` +
+        `not an existing agent. Drop the ':${remote.keyword}'.\n`,
+    );
+    return 1;
+  }
+
+  return runRemoteSpawn(remote, target, {
+    cli: String(argv.cli || "claude"),
+    cwd: argv.cwd ? String(argv.cwd) : undefined,
+    from: argv.from ? String(argv.from) : undefined,
+    prompt: prompt || undefined,
+  });
 }
 
 // ---------------------------------------------------------------------------
