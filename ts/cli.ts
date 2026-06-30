@@ -62,6 +62,27 @@ if (config.tray) {
   ensureTray(); // fire-and-forget, don't await
 }
 
+// Spawn admission control — applies to a REAL agent launch only (subcommands,
+// --version, --tray already handled/exited above; --append-prompt / --version
+// below are not launches). Sits BEFORE the --rust dispatch so it gates BOTH the
+// Rust and the TypeScript runtimes. Blocks with φ-backoff until there's capacity
+// (or fails open after a timeout) so a burst of recursive `ay <cli>` spawns gets
+// spaced out instead of storming the host into the OOM-killer. No-op (instant)
+// unless maxAgents/minFreeMb is configured — see ts/spawnGate.ts.
+if (!config.showVersion && !config.appendPrompt && !config.tray) {
+  const { waitForSpawnCapacity } = await import("./spawnGate.ts");
+  await waitForSpawnCapacity({
+    onWait: (reason, waitedMs) => {
+      if (config.verbose || waitedMs === 0)
+        console.error(`[agent-yes] spawn gate: ${reason} — waiting…`);
+    },
+    onProceedAnyway: (reason, waitedMs) =>
+      console.error(
+        `[agent-yes] spawn gate: ${reason} — waited ${Math.round(waitedMs / 1000)}s, proceeding anyway`,
+      ),
+  });
+}
+
 // Handle --rust: spawn the Rust binary instead, fall back to TypeScript if unavailable
 if (config.useRust) {
   let rustBinary: string | undefined;

@@ -25,6 +25,24 @@ interface Config {
    * arbitrary local code that runs on every spawn.
    */
   spawnHook?: string;
+  /**
+   * Max number of concurrently-live agents the daemon will admit via
+   * `/api/spawn`. `0`/unset = unlimited (current behavior). See {@link getMaxAgents}.
+   */
+  maxAgents?: number;
+  /**
+   * Refuse a new spawn when system MemAvailable is below this many MB — a memory
+   * floor so a burst of spawns can't drive the host into the OOM-killer. `0`/unset
+   * = no floor. See {@link getMinFreeMb}.
+   */
+  minFreeMb?: number;
+  /**
+   * How long (ms) a CLI spawn will block-and-wait for capacity (φ-backoff) before
+   * failing open and proceeding anyway. Prevents a burst of recursive `ay <cli>`
+   * spawns from storming the host while never permanently deadlocking a workflow.
+   * Unset = default 10 min. See {@link getSpawnWaitMs}.
+   */
+  spawnWaitMs?: number;
 }
 
 function configPath(): string {
@@ -129,6 +147,52 @@ export function getSpawnHook(): string | null {
 /** Whether a usable {@link getSpawnHook} is configured (for read-only disclosure). */
 export function hasSpawnHook(): boolean {
   return getSpawnHook() !== null;
+}
+
+/**
+ * Cap on concurrently-live agents admitted via `/api/spawn`. Env
+ * `AGENT_YES_MAX_AGENTS` overrides the config `maxAgents`. A non-positive,
+ * missing, or unparseable value means **unlimited** (returns undefined), which
+ * preserves the historical no-cap behavior. Exists to stop an unbounded fan-out
+ * of agents from exhausting host RAM and tripping the OOM-killer.
+ */
+export function getMaxAgents(): number | undefined {
+  const raw = process.env.AGENT_YES_MAX_AGENTS?.trim();
+  const n = raw !== undefined && raw !== "" ? Number(raw) : readConfig().maxAgents;
+  // Floor BEFORE the >0 check: a fractional 0<n<1 would otherwise floor to 0 and
+  // turn "invalid/unlimited" into "reject every spawn" (live >= 0 always true).
+  const v = typeof n === "number" && Number.isFinite(n) ? Math.floor(n) : NaN;
+  return v > 0 ? v : undefined;
+}
+
+/**
+ * Minimum system MemAvailable (MB) required to admit a new spawn. Env
+ * `AGENT_YES_MIN_FREE_MB` overrides config `minFreeMb`. Non-positive/unset =
+ * no floor (undefined). Complements {@link getMaxAgents}: a count cap alone
+ * can't stop OOM when individual agents are large, so we also refuse to spawn
+ * when free memory is already low.
+ */
+export function getMinFreeMb(): number | undefined {
+  const raw = process.env.AGENT_YES_MIN_FREE_MB?.trim();
+  const n = raw !== undefined && raw !== "" ? Number(raw) : readConfig().minFreeMb;
+  // Floor before the >0 check (see getMaxAgents) so a fractional value can't
+  // collapse to a meaningless 0 floor.
+  const v = typeof n === "number" && Number.isFinite(n) ? Math.floor(n) : NaN;
+  return v > 0 ? v : undefined;
+}
+
+/**
+ * Max time (ms) a CLI spawn blocks waiting for capacity before failing open.
+ * Env `AGENT_YES_SPAWN_WAIT_MS` overrides config `spawnWaitMs`. A non-negative
+ * finite value is used as-is (0 = don't wait, check once then proceed); anything
+ * missing/garbage falls back to the 10-minute default. Bounded fail-open is
+ * deliberate: recursive spawns must never deadlock permanently on each other.
+ */
+export function getSpawnWaitMs(): number {
+  const DEFAULT = 600_000;
+  const raw = process.env.AGENT_YES_SPAWN_WAIT_MS?.trim();
+  const n = raw !== undefined && raw !== "" ? Number(raw) : readConfig().spawnWaitMs;
+  return typeof n === "number" && Number.isFinite(n) && n >= 0 ? Math.floor(n) : DEFAULT;
 }
 
 /** Persist the workspace root, tilde-expanded and resolved to an absolute path. */
