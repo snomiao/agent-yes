@@ -77,9 +77,15 @@ export class PidStore {
     const fifoFile = this.getFifoPath(pid);
 
     // Upsert by pid. Reuse an existing record's agent id so re-registration
-    // (e.g. status churn) keeps the id stable; mint a fresh 12-hex id otherwise.
+    // (e.g. status churn) keeps the id stable; else adopt a caller-injected
+    // AGENT_YES_AGENT_ID (so `ay serve`'s /api/spawn can hand back an id that
+    // addresses this exact agent — index.ts strips it from the wrapped CLI's env
+    // so subagents don't inherit it); else mint a fresh 12-hex id.
+    const injected = process.env.AGENT_YES_AGENT_ID;
     const existing = this.store.findOne((doc) => doc.pid === pid);
-    const agentId = existing?.agentId ?? randomBytes(6).toString("hex");
+    const agentId =
+      existing?.agentId ??
+      (injected && /^[0-9a-f]{6,32}$/i.test(injected) ? injected : randomBytes(6).toString("hex"));
 
     const record: Omit<PidRecord, "_id"> = {
       pid,

@@ -1763,6 +1763,14 @@ export async function cmdServe(rest: string[]): Promise<number> {
       const agentArgv = [...ayCmd, cli, ...(prompt ? ["--", prompt] : [])];
       // don't leak our Claude Code session into the agent
       const agentEnv = freshAgentEnv();
+      // Correlation id: the spawn response returns the `ay` LAUNCHER pid, which is
+      // NOT the agent's registered pid — so the caller can't find the agent it just
+      // spawned. Mint a 12-hex id (the agent_id format), inject it as
+      // AGENT_YES_AGENT_ID, and return it. Both runtimes adopt it as their agent_id
+      // (instead of minting a random one) and strip it from the wrapped CLI's env so
+      // subagents don't inherit and collide. The caller can then address the agent
+      // immediately: `ay <verb> <remote>:<agentId>`.
+      const agentId = randomBytes(6).toString("hex");
       // Detach the agent into its OWN session (setsid). When `ay serve` runs WITH a
       // controlling terminal (started in a shell rather than as a headless daemon),
       // an undetached child inherits the daemon's session + controlling tty and lands
@@ -1792,7 +1800,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
           const child = Bun.spawn([shell, "-c", script, "ay-spawn", ...agentArgv], {
             cwd,
             detached: true,
-            env: { ...agentEnv, AGENT_YES_CWD: cwd, AGENT_YES_CLI: cli },
+            env: { ...agentEnv, AGENT_YES_CWD: cwd, AGENT_YES_CLI: cli, AGENT_YES_AGENT_ID: agentId },
             stdin: "ignore",
             stdout: "ignore",
             stderr: Bun.file(errPath),
@@ -1829,6 +1837,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
           return Response.json({
             ok: true,
             pid: child.pid,
+            agentId,
             cli,
             cwd,
             hook: true,
@@ -1838,7 +1847,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         const child = Bun.spawn(agentArgv, {
           cwd,
           detached: true,
-          env: agentEnv,
+          env: { ...agentEnv, AGENT_YES_AGENT_ID: agentId },
           stdin: "ignore",
           stdout: "ignore",
           stderr: "ignore",
@@ -1847,6 +1856,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         return Response.json({
           ok: true,
           pid: child.pid,
+          agentId,
           cli,
           cwd,
           ...(provisioned ? { provisioned } : {}),

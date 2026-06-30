@@ -294,6 +294,13 @@ pub async fn spawn_agent(
     // tree in `ay ls` and the console. Mirrors ts/index.ts.
     cmd.env("AGENT_YES_PID", std::process::id().to_string());
 
+    // A caller-injected AGENT_YES_AGENT_ID (from `ay serve`'s /api/spawn) is for
+    // THIS agent's record only (pid_store::new_agent_id reads it from our env).
+    // Strip it from the wrapped CLI's env so the agent's subagents (a nested `ay`)
+    // don't inherit it and register under the same id — which would make that id
+    // ambiguous. Our own process env still carries it for new_agent_id().
+    cmd.env_remove("AGENT_YES_AGENT_ID");
+
     // The agent runs in a PTY (a real terminal), so advertise terminal
     // capabilities. A console/daemon-spawned agent inherits an env with no TERM/
     // COLORTERM: neither the daemon (no controlling terminal) nor the recovered

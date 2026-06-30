@@ -374,6 +374,12 @@ export default async function agentYes({
   const parentPid =
     Number.isInteger(inheritedAyPid) && inheritedAyPid > 0 ? inheritedAyPid : undefined;
   ptyEnv.AGENT_YES_PID = String(process.pid);
+  // A caller-injected AGENT_YES_AGENT_ID (from `ay serve`'s /api/spawn) is meant
+  // for THIS agent's record only — pidStore.registerProcess reads it from our own
+  // env. Strip it from the wrapped CLI's env so the agent's subagents (a nested
+  // `ay`) don't inherit it and register under the same id (which would make that
+  // id ambiguous). The wrapper's own process.env still carries it for pidStore.
+  delete ptyEnv.AGENT_YES_AGENT_ID;
   // Inject per-CLI env (e.g. glm → Z.AI endpoint). Expand ${VAR} against the
   // launching env; skip entries whose vars are unset so we never blank out an
   // inherited value (e.g. ANTHROPIC_AUTH_TOKEN when ZAI_API_KEY isn't exported).
