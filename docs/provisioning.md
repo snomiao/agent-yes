@@ -10,11 +10,11 @@
 `POST /api/spawn` prepares a working directory, then spawns the agent in it.
 Three ways to produce the `cwd`, in precedence order:
 
-| Request body                  | What happens                                                                                          | Backed by                              |
-| ----------------------------- | ---------------------------------------------------------------------------------------------------- | -------------------------------------- |
-| `fork: { fromCwd, branch }`   | Fork an existing worktree to a **new branch carrying its uncommitted work**, then spawn there        | `codehost/provision` `forkWorktree`    |
-| `from: "<source>"`            | Provision a GitHub source (clone / worktree / ff-pull) into `<root>/<owner>/<repo>/tree/<branch>`     | `codehost/provision` `provision`       |
-| `cwd: "<dir>"` (or omitted)   | Resolve against the workspace root and `mkdir -p` (a missing dir no longer ENOENTs into a 500)        | `ts/workspaceConfig.ts` `resolveSpawnCwd` |
+| Request body                | What happens                                                                                      | Backed by                                 |
+| --------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------- |
+| `fork: { fromCwd, branch }` | Fork an existing worktree to a **new branch carrying its uncommitted work**, then spawn there     | `codehost/provision` `forkWorktree`       |
+| `from: "<source>"`          | Provision a GitHub source (clone / worktree / ff-pull) into `<root>/<owner>/<repo>/tree/<branch>` | `codehost/provision` `provision`          |
+| `cwd: "<dir>"` (or omitted) | Resolve against the workspace root and `mkdir -p` (a missing dir no longer ENOENTs into a 500)    | `ts/workspaceConfig.ts` `resolveSpawnCwd` |
 
 `from` accepts a GitHub URL, `owner/repo@branch`, or `owner/repo/tree/branch`.
 For `fork`, `fromCwd` is the anchor agent's worktree and `branch` is the new
@@ -66,7 +66,7 @@ so config lives per host, never synced between peers.
 ```jsonc
 {
   "provisionRoot": "/code",
-  "provisionAllowlist": ["snomiao"]
+  "provisionAllowlist": ["snomiao"],
 }
 ```
 
@@ -76,7 +76,7 @@ so config lives per host, never synced between peers.
   (dependency installs + package lifecycle hooks = **code execution** on the
   host), so a non-allowlisted owner/repo → **403**, and an empty allowlist denies
   everything. The `/api/spawn` token is still the trust boundary (it already
-  grants agent-RCE); the allowlist narrows the *new* "clone an arbitrary repo and
+  grants agent-RCE); the allowlist narrows the _new_ "clone an arbitrary repo and
   run its setup" surface.
 - **No injection.** The clone URL is hard-pinned to `https://github.com/<o>/<r>`,
   git runs via `execFile` (no shell), and every path segment is validated
@@ -111,4 +111,4 @@ implementation originated before being promoted into codehost).
 - `lab/ui/index.html` — the "Spawn from" field + the Cmd+K fork / spawn-in-dir rows.
 - codehost `src/provision/` + its `docs/provisioning.md` — the standard.
 - [`docs/auth-and-permissions.md`](./auth-and-permissions.md) — the `agent:spawn`
-  capability whose `cwdRoots` scoping must re-validate the *resolved* cwd.
+  capability whose `cwdRoots` scoping must re-validate the _resolved_ cwd.
