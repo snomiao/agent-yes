@@ -897,6 +897,7 @@ async function runRemoteSpawn(
     pid: number;
     cli: string;
     cwd: string;
+    agentId?: string;
     hook?: boolean;
     provisioned?: { action: string };
   };
@@ -905,15 +906,19 @@ async function runRemoteSpawn(
       `${r.hook ? " (via spawn hook)" : ""}` +
       `${r.provisioned ? ` (${r.provisioned.action})` : ""}\n`,
   );
-  // We deliberately do NOT print the agent's own pid. `/api/spawn` returns the
-  // `ay` LAUNCHER pid, which is not the agent's registered pid (the record's
-  // pid/wrapper_pid are the runtime process, not the launcher) — and picking the
-  // freshly-registered agent by "newest" would, under a concurrent spawn,
-  // surface a sibling's (or another user's) pid. Point at the remote's list,
-  // where the new agent reliably appears, instead of guessing.
-  // (A one-step `ay tail <remote>:<pid>` would need /api/spawn to return a
-  // correlatable agent id — a server change left for a follow-up.)
-  process.stderr.write(`\n  ay ls ${hint}    # the new ${r.cli} agent appears here\n`);
+  // `/api/spawn` returns a correlation `agentId` that the agent adopts as its
+  // agent_id — so we address the EXACT agent by it (no pid guessing, no race). A
+  // webrtc:// / share-link target isn't `:keyword`-addressable, so the keyword
+  // hint is only for an alias / token@host:port. Older remotes omit agentId →
+  // fall back to pointing at `ay ls`.
+  if (r.agentId && !hint.includes("://")) {
+    process.stderr.write(
+      `\n  ay tail ${hint}:${r.agentId}            # watch its output\n` +
+        `  ay status ${hint}:${r.agentId} --wait   # block until it needs you\n`,
+    );
+  } else {
+    process.stderr.write(`\n  ay ls ${hint}    # the new ${r.cli} agent appears here\n`);
+  }
   return 0;
 }
 

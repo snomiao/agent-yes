@@ -59,9 +59,18 @@ pub struct PidRecord {
     pub agent_id: Option<String>,
 }
 
-/// Mint a short, low-collision agent id (12 hex chars from a v4 UUID). Short
-/// enough to type/reference; `matchKeyword` allows prefix lookups.
+/// The agent id for this process: adopt a caller-injected `AGENT_YES_AGENT_ID`
+/// (so `ay serve`'s /api/spawn can hand back an id that addresses this exact
+/// agent; pty_spawner strips it from the wrapped CLI's env so subagents don't
+/// inherit and collide), else mint a short low-collision id (12 hex from a v4
+/// UUID). Short enough to type/reference; `matchKeyword` allows prefix lookups.
 fn new_agent_id() -> String {
+    if let Ok(id) = std::env::var("AGENT_YES_AGENT_ID") {
+        let id = id.trim();
+        if (6..=32).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return id.to_ascii_lowercase();
+        }
+    }
     uuid::Uuid::new_v4().simple().to_string()[..12].to_string()
 }
 
@@ -432,6 +441,23 @@ pub fn is_process_alive(pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_new_agent_id_adopts_injected_env() {
+        // A valid AGENT_YES_AGENT_ID (6..=32 hex) is adopted verbatim (lowercased);
+        // anything else falls back to a freshly-minted 12-hex id. Env is process-
+        // global, so set/clear tightly around the calls.
+        std::env::set_var("AGENT_YES_AGENT_ID", "DEADBEEF0001");
+        assert_eq!(new_agent_id(), "deadbeef0001");
+        std::env::set_var("AGENT_YES_AGENT_ID", "not-hex!!");
+        let minted = new_agent_id();
+        assert_eq!(minted.len(), 12);
+        assert!(minted.bytes().all(|b| b.is_ascii_hexdigit()));
+        std::env::remove_var("AGENT_YES_AGENT_ID");
+        let fresh = new_agent_id();
+        assert_eq!(fresh.len(), 12);
+        assert!(fresh.bytes().all(|b| b.is_ascii_hexdigit()));
+    }
 
     #[test]
     fn test_register_and_read_all() {
