@@ -4,7 +4,13 @@ bun run fmt
 git add -u
 bunx lint-staged
 bun run build
-bun run test:coverage
+# NOTE: the full `bun run test:coverage` gate runs in pre-push, NOT here. It's
+# the heaviest thing in the toolchain (full suite + v8 coverage in a serial
+# fork pool), so running it on EVERY commit made commits take minutes — and
+# hang for ~hours when the host is CPU-oversubscribed (shared dev box, many
+# agents). Keeping commits fast (fmt + lint + build) and gating the full suite
+# at push time means you still can't push red, but you can commit freely. CI
+# remains the authoritative coverage gate either way.
 
 # Rust validation (only when rs/ files are staged) — gives local feedback
 # before CI does. cargo check is fast (~5-15s incremental, type/borrow only,
