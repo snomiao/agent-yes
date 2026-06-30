@@ -2258,7 +2258,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   const fifoPath = record.fifo_file;
   if (!fifoPath) {
     throw new Error(
-      `pid ${record.pid}: no fifo_file recorded — agent was not started with --stdpush (or was spawned by Rust which doesn't yet support FIFO IPC; see ROADMAP item 10)`,
+      `pid ${record.pid}: no fifo_file recorded — this agent didn't register a stdin FIFO (an older agent, or one not started with --stdpush). Restarting it (ay restart ${record.pid}) re-registers one.`,
     );
   }
 
