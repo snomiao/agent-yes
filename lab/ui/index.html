@@ -4555,9 +4555,25 @@
         <button class="lfleet" id="nf-go">▷ Launch</button>
         <button class="lcancel" id="nf-cancel">cancel</button>
       </div>
+      <div id="nf-hook" class="lhint" style="display:none"></div>
       <div class="lhint">POST /api/spawn on this fleet. ${IS_MAC ? "⌘" : "Ctrl"}+Enter to launch.</div></div>`;
         $("newform").style.display = "flex";
         setTimeout(() => $("nf-prompt")?.focus(), 0);
+        // Surface whether this host runs a spawn hook (a trusted local command run
+        // before every launch — provisions env/cwd; see ~/.agent-yes/config.json).
+        // Read-only: /api/spawn-config discloses only the boolean, never the body.
+        if (target?.tx?.fetchJSON) {
+          target.tx
+            .fetchJSON("/api/spawn-config")
+            .then((c) => {
+              const el = $("nf-hook");
+              if (el && c && c.hasSpawnHook) {
+                el.textContent = "⚙ this host runs a spawn hook before launch";
+                el.style.display = "";
+              }
+            })
+            .catch(() => {});
+        }
       }
 
       async function submitNew() {
