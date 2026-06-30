@@ -21,6 +21,8 @@ import {
   deviceCount,
   forestOrder,
   layeredRows,
+  sortEntries,
+  SORT_MODES,
   taskLabel,
   hashHue,
   selFromBottom,
@@ -656,5 +658,69 @@ describe("omniScore", () => {
     expect(omniScore(e({ title: "abc" }), "xyz")).toBe(0);
     expect(omniScore(e({ title: "abc" }), "")).toBe(0);
     expect(omniScore(e({ title: "abc" }), "   ")).toBe(0);
+  });
+});
+
+describe("sortEntries", () => {
+  const a = (over = {}) => agent({ started_at: 1000, ...over });
+  const keys = (arr, k = "_k") => arr.map((e) => e[k]);
+
+  it("SORT_MODES is the documented cycle", () => {
+    expect(SORT_MODES).toEqual(["state", "created", "identity"]);
+  });
+
+  it("returns a new array and does not mutate the input", () => {
+    const input = [a({ _k: "x" }), a({ _k: "y" })];
+    const out = sortEntries(input, "created");
+    expect(out).not.toBe(input);
+    expect(keys(input)).toEqual(["x", "y"]); // original order untouched
+  });
+
+  it("state mode: attention-first state order (needs_input < stuck < active < idle < stopped)", () => {
+    const list = [
+      a({ _k: "idle", status: "idle" }),
+      a({ _k: "stopped", status: "stopped" }),
+      a({ _k: "needs", status: "needs_input" }),
+      a({ _k: "active", status: "active" }),
+      a({ _k: "stuck", status: "stuck" }),
+    ];
+    expect(keys(sortEntries(list, "state"))).toEqual([
+      "needs",
+      "stuck",
+      "active",
+      "idle",
+      "stopped",
+    ]);
+  });
+
+  it("state mode: within the same state, a busier git tree ranks higher", () => {
+    const list = [
+      a({ _k: "clean", status: "active", git: { changed: 0 } }),
+      a({ _k: "dirty", status: "active", git: { changed: 3, dirty: true } }),
+      a({ _k: "ahead", status: "active", git: { ahead: 1 } }),
+    ];
+    expect(keys(sortEntries(list, "state"))).toEqual(["dirty", "ahead", "clean"]);
+  });
+
+  it("state is the default mode", () => {
+    const list = [a({ _k: "idle", status: "idle" }), a({ _k: "needs", status: "needs_input" })];
+    expect(keys(sortEntries(list))).toEqual(["needs", "idle"]);
+  });
+
+  it("created mode: newest started_at first", () => {
+    const list = [
+      a({ _k: "old", started_at: 100 }),
+      a({ _k: "new", started_at: 900 }),
+      a({ _k: "mid", started_at: 500 }),
+    ];
+    expect(keys(sortEntries(list, "created"))).toEqual(["new", "mid", "old"]);
+  });
+
+  it("identity mode: alphabetical by full identity (user@host:owner/repo/branch)", () => {
+    const list = [
+      a({ _k: "zed", cwd: "/x/zoe/repo/tree/main" }),
+      a({ _k: "amy", cwd: "/x/amy/repo/tree/main" }),
+    ];
+    expect(keys(sortEntries(list, "identity"))).toEqual(["amy", "zed"]);
   });
 });
