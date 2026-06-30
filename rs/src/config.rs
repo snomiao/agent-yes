@@ -315,6 +315,21 @@ mod tests {
             .auto_retry
             .iter()
             .any(|rx| rx.is_match("API Error: 503 Service Unavailable")));
+        // A stalled/aborted SSE stream prints no status code but is just as
+        // transient — it must auto-retry too…
+        assert!(config.auto_retry.iter().any(|rx| rx.is_match(
+            "API Error: Response stalled mid-stream. The response above may be incomplete."
+        )));
+        // …including when the terminal wraps "mid-stream" across rows…
+        assert!(config
+            .auto_retry
+            .iter()
+            .any(|rx| rx.is_match("API Error: Response stalled mid-\nstream.")));
+        // …but a casual mention of the phrase in normal output must NOT.
+        assert!(!config
+            .auto_retry
+            .iter()
+            .any(|rx| rx.is_match("the download stalled mid-stream so I retried it")));
         // …but a stray status-like number in normal output must NOT.
         assert!(!config
             .auto_retry
