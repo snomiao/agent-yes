@@ -1642,9 +1642,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
         return new Response("fork requires a non-empty fromCwd and branch", { status: 400 });
       const from = typeof body.from === "string" ? body.from.trim() : "";
       if (fork) {
-        // Fork the anchor agent's branch (carrying its WIP) into a new sibling
-        // worktree via codehost/provision (git worktree off HEAD, no clone), then
-        // spawn the agent there.
+        // Fork the anchor agent's branch into a new sibling worktree via
+        // codehost/provision (git worktree off HEAD, no clone), then spawn the
+        // agent there. The fork is clean — committed work only; the source's
+        // uncommitted changes stay put (codehost forkWorktree defaults wip:false,
+        // and we don't opt in).
         let prov: {
           forkWorktree: (o: { fromCwd: string; branch: string; wsRoot?: string }) => Promise<{
             ok: boolean;
