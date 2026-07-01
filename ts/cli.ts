@@ -106,6 +106,52 @@ if (config.useRust) {
       console.log(`[rust] Args: ${rustArgs.join(" ")}`);
     }
 
+    // Nested + non-tty (e.g. an agent ran this via its Bash tool): detach the
+    // agent so we don't block the parent's tool call for the whole session, then
+    // print how to drive it and exit. `--attach`/AGENT_YES_ATTACH=1 opts out.
+    const attach = config.attach || process.env.AGENT_YES_ATTACH === "1";
+    const { shouldForkNested, buildSpawnTutorial, waitForFifo } = await import("./forkNested.ts");
+    if (
+      shouldForkNested({
+        isTTY: Boolean(process.stdout.isTTY),
+        ayPid: process.env.AGENT_YES_PID,
+        attach,
+      })
+    ) {
+      const forked = spawn(rustBinary, rustArgs, {
+        detached: true,
+        stdio: "ignore",
+        env: process.env,
+        cwd: process.cwd(),
+      });
+      const forkedPid = forked.pid;
+      if (!forkedPid) {
+        console.error("Failed to spawn agent: no pid.");
+        process.exit(1);
+      }
+      // Race a fast startup failure against FIFO registration so we never print a
+      // success tutorial for a dead pid. The wrapper keeps its own per-pid log, so
+      // real output stays reachable via `ay tail` even with stdio ignored. Store a
+      // pre-formatted message (not a union) — the callbacks run async, so control-flow
+      // analysis can't narrow a union here anyway.
+      let deathMsg: string | null = null;
+      forked.on("error", (err) => {
+        deathMsg ??= `Failed to spawn agent: ${err.message}`;
+      });
+      forked.on("exit", (code, signal) => {
+        deathMsg ??= `Agent exited immediately (${signal ?? `code ${code}`}). See: ay tail ${forkedPid}`;
+      });
+      const registered = await waitForFifo(forkedPid, 2000, () => deathMsg !== null);
+      if (deathMsg) {
+        console.error(deathMsg);
+        process.exit(1);
+      }
+      forked.unref();
+      console.log(buildSpawnTutorial(config.cli || "agent", forkedPid));
+      if (!registered) console.log(`(note: still registering — give ay send/tail a moment)`);
+      process.exit(0);
+    }
+
     const child = spawn(rustBinary, rustArgs, {
       stdio: "inherit",
       env: process.env,

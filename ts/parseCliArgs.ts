@@ -30,6 +30,13 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
       description: "re-spawn Claude with --continue if it crashes, only works for claude yet",
       alias: "r",
     })
+    .option("attach", {
+      type: "boolean",
+      default: false,
+      description:
+        "Run the agent in the foreground even when nested inside another agent (disables fork-by-default; also AGENT_YES_ATTACH=1).",
+      alias: "foreground",
+    })
     .option("logFile", {
       type: "string",
       description: "Rendered log file to write to.",
@@ -307,6 +314,7 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
     ),
     queue: parsedArgv.queue,
     robust: parsedArgv.robust,
+    attach: parsedArgv.attach,
     logFile: parsedArgv.logFile,
     verbose: parsedArgv.verbose,
     resume: parsedArgv.continue, // Note: intentional use resume here to avoid preserved keyword (continue)
