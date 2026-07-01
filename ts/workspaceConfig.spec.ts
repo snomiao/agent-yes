@@ -4,6 +4,9 @@ import { homedir, tmpdir } from "os";
 import path from "path";
 import {
   expandTilde,
+  getMaxAgents,
+  getMinFreeMb,
+  getSpawnWaitMs,
   getProvisionAllowlist,
   getProvisionRoot,
   getSpawnHook,
@@ -28,6 +31,9 @@ describe("workspaceConfig", () => {
     delete process.env.CODEHOST_WS_ROOT;
     delete process.env.CODEHOST_PROVISION_ALLOWLIST;
     delete process.env.AGENT_YES_SPAWN_HOOK;
+    delete process.env.AGENT_YES_MAX_AGENTS;
+    delete process.env.AGENT_YES_MIN_FREE_MB;
+    delete process.env.AGENT_YES_SPAWN_WAIT_MS;
     rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -143,6 +149,85 @@ describe("workspaceConfig", () => {
       expect(isProvisionAllowed("acme", "widget")).toBe(true);
       expect(isProvisionAllowed("acme", "other")).toBe(false);
       expect(isProvisionAllowed("org", "anything")).toBe(true);
+    });
+  });
+
+  describe("getMaxAgents", () => {
+    it("is undefined (unlimited) when neither env nor config is set", () => {
+      expect(getMaxAgents()).toBeUndefined();
+    });
+
+    it("reads a positive integer from config", () => {
+      writeConfig({ maxAgents: 8 });
+      expect(getMaxAgents()).toBe(8);
+    });
+
+    it("env AGENT_YES_MAX_AGENTS overrides config", () => {
+      writeConfig({ maxAgents: 8 });
+      process.env.AGENT_YES_MAX_AGENTS = "3";
+      expect(getMaxAgents()).toBe(3);
+    });
+
+    it("floors a fractional value", () => {
+      process.env.AGENT_YES_MAX_AGENTS = "4.9";
+      expect(getMaxAgents()).toBe(4);
+    });
+
+    it("treats 0, negative, and garbage as unlimited (undefined)", () => {
+      writeConfig({ maxAgents: 0 });
+      expect(getMaxAgents()).toBeUndefined();
+      process.env.AGENT_YES_MAX_AGENTS = "-5";
+      expect(getMaxAgents()).toBeUndefined();
+      process.env.AGENT_YES_MAX_AGENTS = "lots";
+      expect(getMaxAgents()).toBeUndefined();
+    });
+
+    it("treats a fractional value < 1 as unlimited, not a 0 hard-cap", () => {
+      // Regression: 0.5 must NOT floor to 0 (which would reject every spawn).
+      process.env.AGENT_YES_MAX_AGENTS = "0.5";
+      expect(getMaxAgents()).toBeUndefined();
+    });
+  });
+
+  describe("getMinFreeMb", () => {
+    it("is undefined (no floor) when unset", () => {
+      expect(getMinFreeMb()).toBeUndefined();
+    });
+
+    it("reads config and lets env override", () => {
+      writeConfig({ minFreeMb: 1024 });
+      expect(getMinFreeMb()).toBe(1024);
+      process.env.AGENT_YES_MIN_FREE_MB = "2048";
+      expect(getMinFreeMb()).toBe(2048);
+    });
+
+    it("treats non-positive/garbage/sub-1 as no floor", () => {
+      process.env.AGENT_YES_MIN_FREE_MB = "0";
+      expect(getMinFreeMb()).toBeUndefined();
+      process.env.AGENT_YES_MIN_FREE_MB = "nope";
+      expect(getMinFreeMb()).toBeUndefined();
+      process.env.AGENT_YES_MIN_FREE_MB = "0.5";
+      expect(getMinFreeMb()).toBeUndefined();
+    });
+  });
+
+  describe("getSpawnWaitMs", () => {
+    it("defaults to 10 minutes when unset", () => {
+      expect(getSpawnWaitMs()).toBe(600_000);
+    });
+
+    it("reads config and lets env override; allows 0 (don't wait)", () => {
+      writeConfig({ spawnWaitMs: 5000 });
+      expect(getSpawnWaitMs()).toBe(5000);
+      process.env.AGENT_YES_SPAWN_WAIT_MS = "0";
+      expect(getSpawnWaitMs()).toBe(0);
+    });
+
+    it("falls back to the default on negative/garbage", () => {
+      process.env.AGENT_YES_SPAWN_WAIT_MS = "-1";
+      expect(getSpawnWaitMs()).toBe(600_000);
+      process.env.AGENT_YES_SPAWN_WAIT_MS = "soon";
+      expect(getSpawnWaitMs()).toBe(600_000);
     });
   });
 

@@ -21,6 +21,7 @@ import {
   type CommonOpts,
 } from "./subcommands.ts";
 import { updateGlobalPidStatus } from "./globalPidIndex.ts";
+import { spawnRejectionReason } from "./spawnGate.ts";
 import { pgidForWrapper } from "./reaper.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
@@ -1704,6 +1705,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
       if (!SUPPORTED_CLIS.includes(cli as never))
         return new Response(`unsupported cli: ${cli}`, { status: 400 });
       const prompt = String(body.prompt ?? "");
+
+      // Admission control BEFORE any provisioning (clone/worktree) so a capped
+      // request fails fast without doing expensive work. Enforces the optional
+      // concurrency cap + memory floor that keep a fan-out of agents from
+      // driving the host into the OOM-killer. 429 = back-pressure, retry later.
+      const reject = await spawnRejectionReason();
+      if (reject) return new Response(reject, { status: 429 });
 
       // Resolve the working directory. A `from` source is provisioned (clone /
       // worktree) through codehost/provision; a plain `cwd` is resolved to the
