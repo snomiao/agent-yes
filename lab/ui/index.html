@@ -3918,7 +3918,7 @@
               return `<div class="omni-row omni-spawn${sc}" data-i="${i}">
                 <span class="dot active"></span>
                 <div class="omni-main">
-                  <div class="omni-title">⑂ Fork <b>${esc(r.srcBranch)}</b> &amp; run <span style="opacity:.55">(carries uncommitted work)</span></div>
+                  <div class="omni-title">⑂ Fork <b>${esc(r.srcBranch)}</b> &amp; run <span style="opacity:.55">(clean — committed work only)</span></div>
                   <div class="omni-sub">${esc(r.fromCwd)} &nbsp;→&nbsp; new branch <b>${esc(r.branch)}</b> &nbsp;·&nbsp; ⏎ to edit &amp; launch</div>
                 </div></div>`;
             }
@@ -4050,12 +4050,13 @@
           return;
         }
         if (row && row.kind === "fork") {
-          // Editable at launch (auto-slug is the default); carries the source's WIP.
+          // Editable at launch (auto-slug is the default). The fork is clean —
+          // committed work only, the source's uncommitted changes stay put.
           // Fork from the source PINNED on the row (row.fromCwd), not a freshly
           // re-resolved anchor — the anchor can drift as the list refreshes, but the
           // branch we fork from must be the one the row was built for.
           const branch = prompt(
-            "Fork to a new branch (carries your uncommitted work):",
+            "Fork to a new branch (clean — committed work only):",
             row.branch,
           );
           if (!branch || !branch.trim()) return; // cancelled — leave the omnibox open
