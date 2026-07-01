@@ -931,7 +931,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
   };
 
   // Per-repo git snapshot for the list (branch + dirty/changed + ahead/behind, from
-  // one `git status --porcelain --branch`). WATCHER-INVALIDATED, not polled: a read
+  // one `git status --porcelain=v2 --branch`). v2 (not v1) so the submodule field
+  // lets us split real file changes from submodule pin-drift, which would otherwise
+  // inflate `changed` — in a superproject with many submodules the constant gitlink
+  // drift buries the real edits. WATCHER-INVALIDATED, not polled: a read
   // returns the cached snapshot instantly and NEVER spawns `git status` on the
   // request path. A per-repo-root fs watcher recomputes (debounced) only when the
   // repo actually changes, so an idle fleet costs ~0 git processes. The old design
@@ -942,7 +945,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
   interface GitInfo {
     branch: string | null;
     dirty: boolean;
-    changed: number;
+    changed: number; // real file changes (excludes submodule pin-bumps & internal dirt)
+    pins: number; // submodule gitlinks pointing at new commit(s) — pin-bump/drift
+    subDirty: number; // submodule has internal changes but its recorded pin is unchanged
     ahead: number;
     behind: number;
   }
@@ -964,16 +969,55 @@ export async function cmdServe(rest: string[]): Promise<number> {
     }
   };
   const parseGitStatus = (out: string): GitInfo => {
-    const lines = out.split("\n");
-    // Branch header, e.g. "## main...origin/main [ahead 1, behind 2]", "## main"
-    // (no upstream), "## HEAD (no branch)", or "## No commits yet on x".
-    const h = /^## (.+)$/.exec(lines[0] ?? "")?.[1] ?? "";
-    const unborn = /^No commits yet on (.+)$/.exec(h);
-    const branch = unborn ? unborn[1]! : /^(.+?)(?:\.\.\.|\s|$)/.exec(h)?.[1] || null;
-    const ahead = Number(/\bahead (\d+)/.exec(h)?.[1] ?? 0);
-    const behind = Number(/\bbehind (\d+)/.exec(h)?.[1] ?? 0);
-    const changed = lines.slice(1).filter((l) => l.trim().length > 0).length;
-    return { branch, dirty: changed > 0, changed, ahead, behind };
+    // porcelain=v2 --branch: "# branch.*" headers then one line per changed entry.
+    let branch: string | null = null;
+    let ahead = 0;
+    let behind = 0;
+    let changed = 0; // real file changes
+    let pins = 0; // submodule pin-bumps (gitlink → new commit)
+    let subDirty = 0; // submodule internal dirt, recorded pin unchanged
+    for (const line of out.split("\n")) {
+      if (line.length === 0) continue;
+      if (line[0] === "#") {
+        // "# branch.head <name|(detached)>" and "# branch.ab +A -B" (ab absent
+        // when there's no upstream). branch.head carries the name even on an
+        // unborn branch, so no special-casing needed.
+        const head = /^# branch\.head (.+)$/.exec(line);
+        if (head) {
+          branch = head[1] === "(detached)" ? null : head[1]!;
+          continue;
+        }
+        const ab = /^# branch\.ab \+(\d+) -(\d+)/.exec(line);
+        if (ab) {
+          ahead = Number(ab[1]);
+          behind = Number(ab[2]);
+        }
+        continue;
+      }
+      // Changed-entry lines. Untracked ("?") and unmerged ("u") are always real
+      // work; ignored ("!") never appears (we don't pass --ignored). For ordinary
+      // ("1") / renamed ("2") entries the 3rd space-delimited token is the
+      // submodule field <sub>: "N..." for a normal path, or "S<c><m><u>" for a
+      // submodule where c=C means its gitlink moved to new commit(s) (pin-bump),
+      // and m/u flag internal dirty/untracked with the recorded pin unchanged.
+      // Paths (which may contain spaces) come after token 2, so counting by token
+      // index is robust without -z.
+      const type = line[0];
+      if (type === "?") {
+        changed++;
+      } else if (type === "u") {
+        changed++;
+      } else if (type === "1" || type === "2") {
+        const sub = line.split(" ")[2] ?? "N...";
+        if (sub[0] === "S") {
+          if (sub[1] === "C") pins++;
+          else subDirty++;
+        } else {
+          changed++;
+        }
+      }
+    }
+    return { branch, dirty: changed > 0, changed, pins, subDirty, ahead, behind };
   };
   // cwd -> repo root ("" = resolved, not a repo). Resolved once per cwd via a cheap
   // `git rev-parse --show-toplevel` (no tree scan) and cached, so many agents in the
@@ -999,7 +1043,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       if (rw.busy) return void recompute(root, rw); // re-arm if one is in flight
       rw.busy = true;
       try {
-        const out = await runGit(["status", "--porcelain", "--branch"], root);
+        const out = await runGit(["status", "--porcelain=v2", "--branch"], root);
         if (out != null) rw.val = parseGitStatus(out);
       } finally {
         rw.busy = false;
