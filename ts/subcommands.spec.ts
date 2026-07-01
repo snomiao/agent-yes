@@ -855,6 +855,28 @@ describe("subcommands.isExitRequest", () => {
   });
 });
 
+describe("subcommands.isSlashCommand", () => {
+  it("matches a body that starts with a slash command (so it is sent unprefixed)", async () => {
+    const { isSlashCommand } = await loadModule();
+    for (const s of ["/compact", "/clear", "/model sonnet", "/resume\nmore text"]) {
+      expect(isSlashCommand(s)).toBe(true);
+    }
+  });
+  it("does NOT match plain prose, or a slash not at column 0", async () => {
+    const { isSlashCommand } = await loadModule();
+    for (const s of [
+      "please run /compact",
+      " /compact", // leading space — the CLI won't parse it as a command either
+      "//two slashes... wait, no letter after first slash",
+      "/ ",
+      "hello",
+      "",
+    ]) {
+      expect(isSlashCommand(s)).toBe(false);
+    }
+  });
+});
+
 describe("subcommands.writeToIpc reliable delivery", () => {
   const itUnix = process.platform === "linux" || process.platform === "darwin";
 
