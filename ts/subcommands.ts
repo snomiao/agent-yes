@@ -18,7 +18,13 @@ import path from "path";
 import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
-import { classifyNeedsInput, isWorkingScreen, type NeedsInput } from "./needsInput.ts";
+import {
+  classifyNeedsInput,
+  isWorkingScreen,
+  parseMenu,
+  type MenuState,
+  type NeedsInput,
+} from "./needsInput.ts";
 import { diffLsStates, type LiveState, type LsAgentState } from "./lsWatch.ts";
 import {
   buildStoredResult,
@@ -251,6 +257,8 @@ const SUBCOMMANDS = new Set([
   "tail",
   "head",
   "send",
+  "key",
+  "select",
   "spawn",
   "attach",
   "stop",
@@ -326,6 +334,10 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdRead(rest, { mode: "head" });
       case "send":
         return await cmdSend(rest);
+      case "key":
+        return await cmdKey(rest);
+      case "select":
+        return await cmdSelect(rest);
       case "spawn":
         return await cmdSpawn(rest);
       case "attach":
@@ -392,6 +404,8 @@ export function cmdHelp(managerCommands = true): number {
       `  ay cat <keyword>                    full log\n` +
       `  ay head <keyword>                   first N lines\n` +
       `  ay send <keyword> <msg>             send a message\n` +
+      `  ay key <keyword> <key...>           send raw keystrokes (down/up/enter/esc/…) — drives menus\n` +
+      `  ay select <keyword> <N>             pick option N of a needs_input selection menu\n` +
       `  ay attach <keyword>                 interactive attach (detach: Ctrl-\\)\n` +
       `  ay stop <keyword>                   graceful shutdown (/exit for claude/codex)\n` +
       `  ay exit <keyword> [reason]          graceful shutdown, recording who/why (= 'ay send <kw> exit')\n` +
@@ -2215,8 +2229,111 @@ async function cmdSpawn(rest: string[]): Promise<number> {
 }
 
 // ---------------------------------------------------------------------------
-// ay send
+// ay send / ay key / ay select — inject input into a live agent
 // ---------------------------------------------------------------------------
+
+/**
+ * Shared safety gate for every command that writes to a live agent's stdin
+ * (`send`, `key`, `select`): refuse a self-targeting loop, and require that THIS
+ * sender actually looked at THIS target recently — an agent is blocked, an
+ * interactive human is only warned — unless `force`. Returns the sender context
+ * so a caller can reuse it (e.g. `send`'s `[from …]` prefix). Extracted from
+ * cmdSend so the action commands enforce the identical guard.
+ */
+async function enforceSendGuards(
+  record: GlobalPidRecord,
+  force: boolean,
+): Promise<{ key: string; agent: GlobalPidRecord | null }> {
+  const sender = await senderContext();
+
+  // Self-send guard: an agent firing at its own pid is almost always a loop.
+  if (sender.agent && sender.agent.pid === record.pid && !force) {
+    throw new Error(
+      `refusing to send to yourself (pid ${record.pid}) — pass --force if you really mean it.`,
+    );
+  }
+
+  // Recency guard: require that THIS sender tailed THIS resolved target within
+  // the window. Catches a fuzzy keyword resolving to an agent you never looked
+  // at. Agents are blocked (override with --force / AGENT_YES_FORCE_SEND=1);
+  // an interactive human shell is only warned.
+  const last = await lastReadAt(sender.key, record.pid);
+  const fresh = last !== null && Date.now() - last <= READ_WINDOW_MS;
+  if (!fresh && !force) {
+    const ago =
+      last === null ? "never read" : `last read ${Math.round((Date.now() - last) / 1000)}s ago`;
+    const what = `pid ${record.pid} (${record.cli}, ${shortenPath(record.cwd)}) — ${ago}, not within ${READ_WINDOW_MS / 1000}s`;
+    if (sender.agent) {
+      throw new Error(
+        `${what}.\n  Confirm it's the right agent first:  ay tail ${record.pid}\n  then resend, or pass --force to override.`,
+      );
+    }
+    process.stderr.write(
+      `warning: ${what} — make sure this is the agent you meant (ay tail ${record.pid}).\n`,
+    );
+  }
+  return sender;
+}
+
+// Inter-keystroke pace (ms) for `ay key` / `ay select`. Fast enough to feel
+// instant, slow enough that the CLI's input loop registers each key as a
+// discrete event instead of coalescing the burst into a bracketed paste — claude
+// treats a fast multi-byte blob as pasted text (see the run loop's paste guard),
+// which would drop arrow keys into the composer instead of moving the menu.
+const KEY_PACE_MS = 40;
+
+/**
+ * The named-key sequence that moves a menu cursor from `cursor` to option
+ * `target` and confirms: |Δ| Downs (target below) or Ups (target above), then
+ * Enter. Pure so the arrow arithmetic is unit-tested independent of any live PTY.
+ */
+export function menuSelectKeys(cursor: number, target: number): string[] {
+  const delta = target - cursor;
+  const nav = Array(Math.abs(delta)).fill(delta > 0 ? "down" : "up");
+  return [...nav, "enter"];
+}
+
+/** Write each already-encoded key sequence to the FIFO with a pace gap between
+ * them (no gap after the last). Raw bytes, no `[from]` framing, no auto-Enter. */
+export async function writeKeysPaced(
+  fifoPath: string,
+  byteSeqs: string[],
+  paceMs: number,
+): Promise<void> {
+  for (let i = 0; i < byteSeqs.length; i++) {
+    if (byteSeqs[i] === "") continue; // `none`/empty — nothing to send
+    await writeToIpc(fifoPath, byteSeqs[i]!);
+    if (i < byteSeqs.length - 1 && paceMs > 0) {
+      await new Promise((r) => setTimeout(r, paceMs));
+    }
+  }
+}
+
+/**
+ * The selection menu a needs_input agent is parked on, or null when it isn't on
+ * one. Mirrors extractNeedsInput (same 32 KB tail render + config patterns) but
+ * returns the cursor position + option numbers so `ay select` can compute the
+ * cursor delta.
+ */
+export async function extractMenu(logPath: string, cli: string): Promise<MenuState | null> {
+  const cfg = (await cliDefaults())[cli];
+  if (!cfg?.needsInput?.length) return null;
+  const lines = await renderLogTailLines(logPath, 40);
+  if (!lines) return null;
+  return parseMenu(lines, { needsInput: cfg.needsInput, working: cfg.working });
+}
+
+/** Poll until the agent is no longer parked on a menu (selection accepted → it
+ * resumed / moved on) or the deadline passes. Returns true if it cleared. */
+async function waitForNeedsInputClear(record: GlobalPidRecord, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 250));
+    const snap = await snapshotStatus(record);
+    if (snap.state !== "needs_input") return true;
+  }
+  return false;
+}
 
 async function cmdSend(rest: string[]): Promise<number> {
   const y = yargs(rest)
@@ -2277,35 +2394,8 @@ async function cmdSend(rest: string[]): Promise<number> {
   }
 
   // Who's sending, and have they actually looked at this target recently?
-  const sender = await senderContext();
   const force = Boolean(argv.force) || process.env.AGENT_YES_FORCE_SEND === "1";
-
-  // Self-send guard: an agent firing at its own pid is almost always a loop.
-  if (sender.agent && sender.agent.pid === record.pid && !force) {
-    throw new Error(
-      `refusing to send to yourself (pid ${record.pid}) — pass --force if you really mean it.`,
-    );
-  }
-
-  // Recency guard: require that THIS sender tailed THIS resolved target within
-  // the window. Catches a fuzzy keyword resolving to an agent you never looked
-  // at. Agents are blocked (override with --force / AGENT_YES_FORCE_SEND=1);
-  // an interactive human shell is only warned.
-  const last = await lastReadAt(sender.key, record.pid);
-  const fresh = last !== null && Date.now() - last <= READ_WINDOW_MS;
-  if (!fresh && !force) {
-    const ago =
-      last === null ? "never read" : `last read ${Math.round((Date.now() - last) / 1000)}s ago`;
-    const what = `pid ${record.pid} (${record.cli}, ${shortenPath(record.cwd)}) — ${ago}, not within ${READ_WINDOW_MS / 1000}s`;
-    if (sender.agent) {
-      throw new Error(
-        `${what}.\n  Confirm it's the right agent first:  ay tail ${record.pid}\n  then resend, or pass --force to override.`,
-      );
-    }
-    process.stderr.write(
-      `warning: ${what} — make sure this is the agent you meant (ay tail ${record.pid}).\n`,
-    );
-  }
+  const sender = await enforceSendGuards(record, force);
 
   // A bare "exit" / "/exit" isn't a prompt to type — claude only honours the
   // literal `/exit` command, so `ay send <pid> exit` lands as plain text and the
@@ -2351,6 +2441,163 @@ async function cmdSend(rest: string[]): Promise<number> {
   if (codeName === "ctrl-c" || codeName === "ctrlc") {
     const tip = stopTipForCli(record.cli, record.pid);
     if (tip) process.stderr.write(tip);
+  }
+  return 0;
+}
+
+// Resolve a keyword to one agent and return it with a writable FIFO, or throw
+// with the same guidance cmdSend gives. Shared by `ay key` / `ay select`.
+async function resolveWritableAgent(keyword: string, opts: CommonOpts): Promise<GlobalPidRecord> {
+  const record = await resolveOne(keyword, opts);
+  if (!record.fifo_file) {
+    throw new Error(
+      `pid ${record.pid}: no fifo_file recorded — this agent didn't register a stdin FIFO (an older agent, or one not started with --stdpush). Restarting it (ay restart ${record.pid}) re-registers one.`,
+    );
+  }
+  return record;
+}
+
+async function cmdKey(rest: string[]): Promise<number> {
+  const y = yargs(rest)
+    .usage(
+      "Usage: ay key <keyword> <key...> [options]\n\n" +
+        "Send raw named keystrokes to a live agent's TUI — no message framing, no\n" +
+        "auto-Enter. Drives selection menus and other interactive prompts that a\n" +
+        "plain `ay send` (text + Enter) can't. Keys are paced so the CLI registers\n" +
+        "each as a discrete event, not a paste.\n\n" +
+        "Keys: up down left right enter esc tab space backspace delete home end\n" +
+        "      pageup pagedown ctrl-c ctrl-d ctrl-y  raw:0xNN\n\n" +
+        "Examples:\n" +
+        "  ay key 1234 down down enter    # move the menu cursor down twice, confirm\n" +
+        "  ay key 1234 esc                # dismiss a menu\n" +
+        "  ay key 1234 raw:0x1b           # a literal ESC byte",
+    )
+    .option("pace", { type: "number", default: KEY_PACE_MS, description: "ms between keystrokes" })
+    .option("all", { type: "boolean", default: false, description: "Include exited agents" })
+    .option("latest", { type: "boolean", default: false, description: "Use most recent match" })
+    .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
+    .option("force", {
+      type: "boolean",
+      default: false,
+      description: "Skip the recency/self-send guard (also: AGENT_YES_FORCE_SEND=1)",
+    })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+
+  const argv = await y.parseAsync();
+  const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+  const keyNames = argv._.slice(1).map(String);
+  if (!keyword || keyNames.length === 0) {
+    throw new Error("usage: ay key <keyword> <key...>   (e.g. ay key 1234 down down enter)");
+  }
+  // Map every key up front so an unknown name fails before we send anything
+  // (a half-sent sequence could leave a menu in a surprising state).
+  const byteSeqs = keyNames.map((n) => controlCodeFromName(n.toLowerCase()));
+
+  const opts: CommonOpts = {
+    all: argv.all,
+    active: false,
+    json: false,
+    latest: argv.latest,
+    cwdScope: typeof argv.cwd === "string" ? path.resolve(argv.cwd) : null,
+  };
+  const record = await resolveWritableAgent(keyword, opts);
+  const force = Boolean(argv.force) || process.env.AGENT_YES_FORCE_SEND === "1";
+  await enforceSendGuards(record, force);
+
+  await writeKeysPaced(record.fifo_file!, byteSeqs, Math.max(0, argv.pace));
+  process.stdout.write(`sent to pid ${record.pid} (${record.cli}): ${keyNames.join(" ")}\n`);
+  return 0;
+}
+
+async function cmdSelect(rest: string[]): Promise<number> {
+  const y = yargs(rest)
+    .usage(
+      "Usage: ay select <keyword> <N> [options]\n\n" +
+        "Pick option N of the selection menu a needs_input agent is parked on.\n" +
+        "Re-parses the live menu (the same ❯-cursor detection `ay ls` uses), computes\n" +
+        "how far the cursor must move, and sends that many Down/Up keys + Enter — so\n" +
+        "it's robust to a pre-highlighted default (never assumes the cursor starts at 1)\n" +
+        "and doesn't rely on numeric hotkeys (arrow-driven menus ignore them).\n\n" +
+        "Examples:\n" +
+        "  ay select 1234 2           # choose option 2\n" +
+        "  ay select 1234 2 --wait    # …and block until the menu clears",
+    )
+    .option("pace", { type: "number", default: KEY_PACE_MS, description: "ms between keystrokes" })
+    .option("wait", {
+      type: "boolean",
+      default: false,
+      description: "Block until the agent leaves needs_input (or --timeout)",
+    })
+    .option("timeout", { type: "number", default: 10, description: "Seconds to wait with --wait" })
+    .option("all", { type: "boolean", default: false, description: "Include exited agents" })
+    .option("latest", { type: "boolean", default: false, description: "Use most recent match" })
+    .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
+    .option("force", {
+      type: "boolean",
+      default: false,
+      description: "Skip the recency/self-send guard (also: AGENT_YES_FORCE_SEND=1)",
+    })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+
+  const argv = await y.parseAsync();
+  const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+  const n = Number(argv._[1]);
+  if (!keyword || !Number.isInteger(n) || n < 1) {
+    throw new Error(
+      "usage: ay select <keyword> <N>   (N = the 1-based option number to choose)",
+    );
+  }
+
+  const opts: CommonOpts = {
+    all: argv.all,
+    active: false,
+    json: false,
+    latest: argv.latest,
+    cwdScope: typeof argv.cwd === "string" ? path.resolve(argv.cwd) : null,
+  };
+  const record = await resolveWritableAgent(keyword, opts);
+  if (!record.log_file) {
+    throw new Error(`pid ${record.pid}: no log_file recorded — can't read the menu to select from.`);
+  }
+  const force = Boolean(argv.force) || process.env.AGENT_YES_FORCE_SEND === "1";
+  await enforceSendGuards(record, force);
+
+  const menu = await extractMenu(record.log_file, record.cli);
+  if (!menu) {
+    throw new Error(
+      `pid ${record.pid} (${record.cli}) is not parked on a selection menu (not needs_input).\n  Check with:  ay status ${record.pid}`,
+    );
+  }
+  if (menu.options.length > 0 && !menu.options.includes(n)) {
+    throw new Error(
+      `option ${n} is out of range — this menu offers ${menu.options.join(", ")}.`,
+    );
+  }
+
+  // Move the cursor from where it sits to option N, then confirm. Delta from the
+  // PARSED cursor position (not a blind "N-1 downs") so a non-first default works.
+  const keyNames = menuSelectKeys(menu.cursor, n);
+  const byteSeqs = keyNames.map((k) => controlCodeFromName(k));
+  await writeKeysPaced(record.fifo_file!, byteSeqs, Math.max(0, argv.pace));
+
+  const delta = n - menu.cursor;
+  const moved = delta === 0 ? "cursor already there" : `${Math.abs(delta)}× ${delta > 0 ? "down" : "up"}`;
+  process.stdout.write(
+    `pid ${record.pid} (${record.cli}): selected option ${n} (${moved} + enter)\n`,
+  );
+
+  if (argv.wait) {
+    const ok = await waitForNeedsInputClear(record, Math.max(1, argv.timeout) * 1000);
+    process.stdout.write(
+      ok
+        ? `  menu cleared — selection accepted.\n`
+        : `  still needs_input after ${argv.timeout}s — re-check with 'ay status ${record.pid}'.\n`,
+    );
+    return ok ? 0 : 1;
   }
   return 0;
 }
@@ -2406,6 +2653,36 @@ export function controlCodeFromName(name: string): string {
       return "\x1c";
     case "tab":
       return "\t";
+    // Navigation / editing keys — the ANSI/xterm sequences a TUI reads as cursor
+    // moves. Added for `ay key` / `ay select` so a menu can be driven from a
+    // parent agent (up/down + enter picks an option) the same way a human's
+    // arrow keys do in the web terminal.
+    case "up":
+      return "\x1b[A";
+    case "down":
+      return "\x1b[B";
+    case "right":
+      return "\x1b[C";
+    case "left":
+      return "\x1b[D";
+    case "home":
+      return "\x1b[H";
+    case "end":
+      return "\x1b[F";
+    case "pageup":
+    case "pgup":
+      return "\x1b[5~";
+    case "pagedown":
+    case "pgdn":
+      return "\x1b[6~";
+    case "space":
+      return " ";
+    case "backspace":
+    case "bs":
+      return "\x7f";
+    case "delete":
+    case "del":
+      return "\x1b[3~";
     case "none":
     case "":
       return "";
@@ -2413,7 +2690,7 @@ export function controlCodeFromName(name: string): string {
       // raw:0xNN form
       const m = /^raw:0x([0-9a-f]+)$/i.exec(name);
       if (m) return String.fromCharCode(parseInt(m[1]!, 16));
-      throw new Error(`unknown --code=${name}`);
+      throw new Error(`unknown key/code: ${name}`);
   }
 }
 

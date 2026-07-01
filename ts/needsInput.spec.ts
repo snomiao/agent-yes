@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { classifyNeedsInput, isWorkingScreen } from "./needsInput.ts";
+import { classifyNeedsInput, isWorkingScreen, parseMenu } from "./needsInput.ts";
 import { loadSharedCliDefaults } from "./configShared.ts";
 
 // Use the REAL shipped claude/codex patterns so the test guards the actual config.
@@ -71,4 +71,45 @@ test("detects a codex selection menu (› cursor)", () => {
 
 test("no patterns configured → always null", () => {
   expect(classifyNeedsInput(["❯ 1. anything"], { needsInput: [], working: [] })).toBeNull();
+});
+
+test("parseMenu: cursor on option 1, all options collected (for ay select)", () => {
+  const screen = [
+    "Which auth method should we use?",
+    "",
+    "❯ 1. Session tokens",
+    "  2. JWT",
+    "  3. OAuth",
+    "",
+    "? for shortcuts",
+  ];
+  const menu = parseMenu(screen, claude);
+  expect(menu).not.toBeNull();
+  expect(menu!.cursor).toBe(1);
+  expect(menu!.options).toEqual([1, 2, 3]);
+});
+
+test("parseMenu: reads a pre-highlighted non-first default (cursor delta, not blind N-1)", () => {
+  const screen = ["Proceed?", "  1. Yes", "❯ 2. No, ask again", "  3. Cancel"];
+  const menu = parseMenu(screen, claude);
+  expect(menu!.cursor).toBe(2);
+  expect(menu!.options).toEqual([1, 2, 3]);
+});
+
+test("parseMenu: codex › cursor", () => {
+  const menu = parseMenu(["Pick a branch", "  1. main", "› 2. develop"], codex);
+  expect(menu!.cursor).toBe(2);
+  expect(menu!.options).toEqual([1, 2]);
+});
+
+test("parseMenu: null when not on a menu (idle prompt / working)", () => {
+  expect(parseMenu(['❯ Try "fix the bug"', "? for shortcuts"], claude)).toBeNull();
+  expect(parseMenu(["❯ 1. Session tokens", "✻ Working… (esc to interrupt)"], claude)).toBeNull();
+});
+
+test("parseMenu: a 'N.M' version in an option label isn't mistaken for another option", () => {
+  const screen = ["Cleanup?", "❯ 1. Delete 3.5GB of cache", "  2. Keep"];
+  const menu = parseMenu(screen, claude);
+  expect(menu!.cursor).toBe(1);
+  expect(menu!.options).toEqual([1, 2]);
 });

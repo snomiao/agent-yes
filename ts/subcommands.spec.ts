@@ -43,6 +43,18 @@ describe("subcommands.controlCodeFromName", () => {
     expect(controlCodeFromName("")).toBe("");
   });
 
+  it("maps navigation keys to their ANSI sequences (for ay key / ay select)", async () => {
+    const { controlCodeFromName } = await loadModule();
+    expect(controlCodeFromName("up")).toBe("\x1b[A");
+    expect(controlCodeFromName("down")).toBe("\x1b[B");
+    expect(controlCodeFromName("right")).toBe("\x1b[C");
+    expect(controlCodeFromName("left")).toBe("\x1b[D");
+    expect(controlCodeFromName("space")).toBe(" ");
+    expect(controlCodeFromName("backspace")).toBe("\x7f");
+    expect(controlCodeFromName("pageup")).toBe("\x1b[5~");
+    expect(controlCodeFromName("pagedown")).toBe("\x1b[6~");
+  });
+
   it("supports raw:0xNN escape", async () => {
     const { controlCodeFromName } = await loadModule();
     expect(controlCodeFromName("raw:0x03")).toBe("\x03");
@@ -51,7 +63,27 @@ describe("subcommands.controlCodeFromName", () => {
 
   it("throws on unknown code names", async () => {
     const { controlCodeFromName } = await loadModule();
-    expect(() => controlCodeFromName("nope")).toThrow(/unknown --code/);
+    expect(() => controlCodeFromName("nope")).toThrow(/unknown key\/code/);
+  });
+});
+
+describe("subcommands.menuSelectKeys (ay select cursor arithmetic)", () => {
+  it("sends Downs + Enter to reach an option below the cursor", async () => {
+    const { menuSelectKeys } = await loadModule();
+    expect(menuSelectKeys(1, 3)).toEqual(["down", "down", "enter"]);
+  });
+  it("sends Ups + Enter to reach an option above the cursor", async () => {
+    const { menuSelectKeys } = await loadModule();
+    expect(menuSelectKeys(3, 1)).toEqual(["up", "up", "enter"]);
+  });
+  it("sends only Enter when the cursor already sits on the target", async () => {
+    const { menuSelectKeys } = await loadModule();
+    expect(menuSelectKeys(2, 2)).toEqual(["enter"]);
+  });
+  it("encodes to the exact ANSI byte stream via controlCodeFromName", async () => {
+    const { menuSelectKeys, controlCodeFromName } = await loadModule();
+    const bytes = menuSelectKeys(2, 4).map((k) => controlCodeFromName(k));
+    expect(bytes.join("")).toBe("\x1b[B\x1b[B\r"); // down, down, enter
   });
 });
 
