@@ -67,6 +67,60 @@ export function classifyNeedsInput(
   return { question: block.join(" • ").slice(0, 400) };
 }
 
+export interface MenuState {
+  /** The 1-based option number the menu cursor (❯/›/>) currently sits on. */
+  cursor: number;
+  /** Every visible option number, ascending — for range-checking a requested N. */
+  options: number[];
+  /** Same compact menu rendering as {@link classifyNeedsInput}. */
+  question: string;
+}
+
+// An option row: an optional cursor glyph / bullet, then "N. " (the trailing
+// space rejects version-like "3.5GB" that isn't a menu option).
+const OPTION_LINE = /^[\s❯›>▶◉○●·*\-]*?(\d+)\.\s/;
+
+/**
+ * Parse the selection menu a `needs_input` agent is parked on into a cursor
+ * position + the available option numbers, so a caller can compute how far the
+ * cursor must move (Down/Up) to reach a target option. Returns null when the
+ * screen isn't a menu (delegates that judgement to {@link classifyNeedsInput},
+ * so `working` still wins) or no numbered cursor line is found. Pure — the
+ * `ay select` action reuses the exact detection `ay ls` renders with.
+ */
+export function parseMenu(
+  lines: string[],
+  cfg: { needsInput?: RegExp[]; working?: RegExp[] },
+): MenuState | null {
+  const ni = classifyNeedsInput(lines, cfg);
+  if (!ni) return null;
+  const patterns = cfg.needsInput ?? [];
+  // The cursor line is the last one carrying a needsInput match (matches how
+  // classifyNeedsInput anchors its question window).
+  let cursorLine = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (patterns.some((re) => reTest(re, lines[i]!))) cursorLine = i;
+  }
+  if (cursorLine < 0) return null;
+  const cm = /(\d+)\./.exec(lines[cursorLine]!);
+  if (!cm) return null;
+  const cursor = parseInt(cm[1]!, 10);
+  // Gather option numbers from the rows around the cursor (a menu is contiguous).
+  const start = Math.max(0, cursorLine - 12);
+  const end = Math.min(lines.length, cursorLine + 12);
+  const options: number[] = [];
+  for (let i = start; i < end; i++) {
+    const m = OPTION_LINE.exec(lines[i]!);
+    if (m) {
+      const v = parseInt(m[1]!, 10);
+      if (!options.includes(v)) options.push(v);
+    }
+  }
+  if (!options.includes(cursor)) options.push(cursor);
+  options.sort((a, b) => a - b);
+  return { cursor, options, question: ni.question };
+}
+
 /**
  * True when the rendered screen still shows a "busy" marker (config `working`,
  * e.g. claude's `esc to interrupt`). Paired with a long-quiet log this is the
