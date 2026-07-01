@@ -526,10 +526,21 @@ export function fitTransform(gridW, gridH, paneW, paneH) {
 
 // Browser-tab title: "<glyph> <selected agent title> - agent-yes", or the bare
 // console title when nothing is selected (blank/whitespace name). The leading
-// glyph mirrors the agent's status dot — ● active, ○ idle, ✗ exited — so the tab
-// shows liveness at a glance; an unknown status adds no glyph.
+// glyph mirrors the agent's status dot — ⌨ needs_input ("your turn"), ⚠ stuck,
+// ● active, ○ idle, ✗ exited — so the tab shows liveness at a glance even in a
+// background tab; an unknown status adds no glyph.
 export function statusGlyph(status) {
-  return status === "active" ? "●" : status === "idle" ? "○" : status === "exited" ? "✗" : "";
+  return status === "needs_input"
+    ? "⌨"
+    : status === "stuck"
+      ? "⚠"
+      : status === "active"
+        ? "●"
+        : status === "idle"
+          ? "○"
+          : status === "exited"
+            ? "✗"
+            : "";
 }
 export function docTitle(name, status) {
   const n = name && String(name).trim();

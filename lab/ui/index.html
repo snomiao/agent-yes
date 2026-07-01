@@ -891,6 +891,11 @@
         color: var(--green);
         border-color: #2a3a2a;
       }
+      /* The pending question when an agent needs_input — blue accent to match the
+         needs_input dot, reading as "your turn / here's what it's asking". */
+      .detail.ask {
+        color: var(--accent);
+      }
       .detail {
         color: var(--muted);
         font-size: 12.5px;
@@ -3291,7 +3296,13 @@
           ${gitChipHtml(e)}
           <span class="age">${age(e)}</span></div>
         ${e.title ? `<div class="rowtitle" title="${esc(e.title)}">${esc(e.title)}</div>` : ""}
-        ${e.prompt ? `<div class="detail" title="${esc(e.prompt)}">${esc(e.prompt)}</div>` : ""}
+        ${
+          e.status === "needs_input" && e.question
+            ? `<div class="detail ask" title="${esc(e.question)}">⌨ ${esc(e.question)}</div>`
+            : e.prompt
+              ? `<div class="detail" title="${esc(e.prompt)}">${esc(e.prompt)}</div>`
+              : ""
+        }
         <div class="rowtags">${tags}</div>
       </div>`;
             })
@@ -4061,10 +4072,7 @@
           // Fork from the source PINNED on the row (row.fromCwd), not a freshly
           // re-resolved anchor — the anchor can drift as the list refreshes, but the
           // branch we fork from must be the one the row was built for.
-          const branch = prompt(
-            "Fork to a new branch (clean — committed work only):",
-            row.branch,
-          );
+          const branch = prompt("Fork to a new branch (clean — committed work only):", row.branch);
           if (!branch || !branch.trim()) return; // cancelled — leave the omnibox open
           closeOmni(false);
           await spawnAndSelect(

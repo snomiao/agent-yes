@@ -9,6 +9,7 @@ import yargs from "yargs";
 import {
   controlCodeFromName,
   deriveLiveStatus,
+  extractNeedsInput,
   extractTaskCounts,
   listRecords,
   readNotes,
@@ -172,12 +173,15 @@ function loginShellEnv(): Record<string, string> | null {
     // Delimiters fence off the env dump from any banner/prompt noise the rc files
     // print to stdout; `env -0` is NUL-separated so values with newlines survive.
     const delim = "_AY_SHELL_ENV_DELIM_";
-    const res = Bun.spawnSync([shell, "-ilc", `printf %s "${delim}"; env -0; printf %s "${delim}"`], {
-      stdin: "ignore",
-      stderr: "ignore",
-      timeout: 5_000,
-      env: process.env as Record<string, string>,
-    });
+    const res = Bun.spawnSync(
+      [shell, "-ilc", `printf %s "${delim}"; env -0; printf %s "${delim}"`],
+      {
+        stdin: "ignore",
+        stderr: "ignore",
+        timeout: 5_000,
+        env: process.env as Record<string, string>,
+      },
+    );
     const out = res.stdout?.toString() ?? "";
     const start = out.indexOf(delim);
     const end = out.lastIndexOf(delim);
@@ -930,6 +934,32 @@ export async function cmdServe(rest: string[]): Promise<number> {
     }
   };
 
+  // Per-agent "waiting on you" detection: the agent is parked on an interactive
+  // menu it did NOT auto-resolve (config `needsInput` patterns). Same source and
+  // classifier as `ay ls` / `ay status`, so the console's dot matches the CLI's
+  // needs_input. Cached per (size, mtime) exactly like logTitle/logTasks — each
+  // miss renders a log window through xterm, so the 1s list tick stays cheap on
+  // an idle fleet. Returns the pending question text (surfaced in the UI), or
+  // null when the agent isn't blocked.
+  const niCache = new Map<string, { size: number; mtimeMs: number; question: string | null }>();
+  const logNeedsInput = async (
+    logFile: string | null | undefined,
+    cli: string,
+  ): Promise<string | null> => {
+    if (!logFile) return null;
+    try {
+      const { size, mtimeMs } = await stat(logFile);
+      const hit = niCache.get(logFile);
+      if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.question;
+      const ni = await extractNeedsInput(logFile, cli);
+      const question = ni?.question ?? null;
+      niCache.set(logFile, { size, mtimeMs, question });
+      return question;
+    } catch {
+      return null;
+    }
+  };
+
   // Per-repo git snapshot for the list (branch + dirty/changed + ahead/behind, from
   // one `git status --porcelain=v2 --branch`). v2 (not v1) so the submodule field
   // lets us split real file changes from submodule pin-drift, which would otherwise
@@ -1095,12 +1125,23 @@ export async function cmdServe(rest: string[]): Promise<number> {
     // the LIVE status here — same liveness+log-mtime basis as `ay ls` — so the
     // console's dot (and the browser tab glyph) flips to idle in step with `ay ls`.
     const status = await deriveLiveStatus(r);
+    // "Waiting on you": alive, quiet, but parked on an unanswered menu. Checked
+    // only for live agents, and skipped when unresponsive (the Rust wedge signal
+    // wins) — mirroring deriveLiveState's precedence in `ay ls` so the console's
+    // dot and the CLI agree.
+    const question =
+      status !== "exited" && !r.unresponsive ? await logNeedsInput(r.log_file, r.cli) : null;
     return {
       ...r,
-      // The Rust supervisor's unresponsive flag is an authoritative wedge signal —
-      // surface it as `stuck` so the console's dot matches `ay ls`. (A dead agent
-      // is never unresponsive — Rust clears the flag on exit.)
-      status: status !== "exited" && r.unresponsive ? "stuck" : status,
+      // Precedence: exited stays exited; the Rust supervisor's unresponsive flag is
+      // an authoritative wedge signal (`stuck`); then a blocked menu (`needs_input`);
+      // else the base live status — so the console's dot matches `ay ls`. (A dead
+      // agent is never unresponsive — Rust clears the flag on exit.)
+      status:
+        status === "exited" ? status : r.unresponsive ? "stuck" : question ? "needs_input" : status,
+      // The pending menu/question text when needs_input, for the console to show
+      // WHAT the agent is waiting on. Null otherwise.
+      question,
       title: await logTitle(r.log_file),
       git: status === "exited" ? null : await gitStatus(r.cwd),
       // Task progress from the rendered todo block (null when none detected → no
@@ -1846,7 +1887,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
           const child = Bun.spawn([shell, "-c", script, "ay-spawn", ...agentArgv], {
             cwd,
             detached: true,
-            env: { ...agentEnv, AGENT_YES_CWD: cwd, AGENT_YES_CLI: cli, AGENT_YES_AGENT_ID: agentId },
+            env: {
+              ...agentEnv,
+              AGENT_YES_CWD: cwd,
+              AGENT_YES_CLI: cli,
+              AGENT_YES_AGENT_ID: agentId,
+            },
             stdin: "ignore",
             stdout: "ignore",
             stderr: Bun.file(errPath),
