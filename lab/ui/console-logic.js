@@ -153,14 +153,19 @@ export function tagsFor(e) {
 }
 
 // Compact git indicator from the record's `git` snapshot (server-side
-// `git status --porcelain --branch`): "±3" changed files, "↑1" ahead, "↓2"
-// behind. Returns "" when there's no git info or the tree is clean and in sync,
-// so a tidy repo adds no noise. Branch itself is shown via the path identity.
+// `git status --porcelain=v2 --branch`): "±3" real changed files, "⑂2"
+// submodule pin-bumps, "⊙1" submodule internal dirt, "↑1" ahead, "↓2" behind.
+// Pins/sub-dirt are split out of "±" so submodule drift (constant in a repo with
+// many submodules) never buries the real file edits. Returns "" when there's no
+// git info or the tree is clean and in sync, so a tidy repo adds no noise. Branch
+// itself is shown via the path identity.
 export function gitLabel(e) {
   const g = e.git;
   if (!g) return "";
   const parts = [];
   if (g.changed > 0) parts.push("±" + g.changed);
+  if (g.pins > 0) parts.push("⑂" + g.pins);
+  if (g.subDirty > 0) parts.push("⊙" + g.subDirty);
   if (g.ahead > 0) parts.push("↑" + g.ahead);
   if (g.behind > 0) parts.push("↓" + g.behind);
   return parts.join(" ");

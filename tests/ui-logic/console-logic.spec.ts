@@ -282,6 +282,18 @@ describe("gitLabel", () => {
     );
     expect(gitLabel(agent({ git: { dirty: false, changed: 0, ahead: 5, behind: 0 } }))).toBe("↑5");
   });
+  it("splits submodule pin-bumps (⑂) and internal dirt (⊙) out of ±", () => {
+    // pin-drift only: no ± (real files) — drift can't masquerade as file changes
+    expect(
+      gitLabel(agent({ git: { dirty: false, changed: 0, pins: 3, subDirty: 0, ahead: 0, behind: 0 } })),
+    ).toBe("⑂3");
+    // real files + pins + sub-dirt, in order
+    expect(
+      gitLabel(agent({ git: { dirty: true, changed: 2, pins: 1, subDirty: 4, ahead: 0, behind: 0 } })),
+    ).toBe("±2 ⑂1 ⊙4");
+    // zero pins/subDirty (or absent) add nothing
+    expect(gitLabel(agent({ git: { dirty: true, changed: 1, pins: 0, subDirty: 0 } }))).toBe("±1");
+  });
 });
 
 describe("age", () => {

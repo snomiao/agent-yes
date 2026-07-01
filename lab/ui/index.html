@@ -3187,13 +3187,19 @@
         );
       }
 
-      // A small git chip (±changed ↑ahead ↓behind) for a row, amber when the tree
-      // is dirty. Empty for clean/in-sync repos and non-git cwds — no noise.
+      // A small git chip (±changed ⑂pins ⊙sub-dirty ↑ahead ↓behind) for a row,
+      // amber when the tree has real file changes. Submodule pin-drift shows as a
+      // muted "⑂" that never turns the chip amber, so it can't bury real edits.
+      // Empty for clean/in-sync repos and non-git cwds — no noise.
       function gitChipHtml(e) {
         const label = gitLabel(e);
         if (!label) return "";
         const g = e.git || {};
-        const tip = `git: ${g.changed || 0} changed · ${g.ahead || 0} ahead · ${g.behind || 0} behind`;
+        const tip =
+          `git: ${g.changed || 0} changed file${(g.changed || 0) === 1 ? "" : "s"}` +
+          (g.pins ? ` · ${g.pins} submodule pin-bump${g.pins === 1 ? "" : "s"}` : "") +
+          (g.subDirty ? ` · ${g.subDirty} submodule dirty` : "") +
+          ` · ${g.ahead || 0} ahead · ${g.behind || 0} behind`;
         return `<span class="git${g.dirty ? " dirty" : ""}" title="${esc(tip)}">${esc(label)}</span>`;
       }
 
