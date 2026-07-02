@@ -113,25 +113,134 @@ describe("subcommands.isSubcommand", () => {
 });
 
 describe("subcommands.cmdHelp", () => {
-  it("hides the manager-only `setup` line for cli-bound aliases", async () => {
+  const capture = async (managerCommands?: boolean) => {
     const { cmdHelp } = await loadModule();
-    const capture = (managerCommands?: boolean) => {
-      let out = "";
-      const spy = vi.spyOn(process.stdout, "write").mockImplementation((s: unknown) => {
-        out += String(s);
-        return true;
-      });
-      try {
-        cmdHelp(managerCommands);
-      } finally {
-        spy.mockRestore();
-      }
-      return out;
-    };
-    expect(capture(true)).toContain("ay setup"); // manager
-    expect(capture()).toContain("ay setup"); // default = manager
-    expect(capture(false)).not.toContain("ay setup"); // cli-bound alias (cy)
-    expect(capture(false)).toContain("ay ls"); // universal commands still shown
+    let out = "";
+    const spy = vi.spyOn(process.stdout, "write").mockImplementation((s: unknown) => {
+      out += String(s);
+      return true;
+    });
+    try {
+      await cmdHelp(managerCommands);
+    } finally {
+      spy.mockRestore();
+    }
+    return out;
+  };
+
+  it("hides the manager-only `setup` line for cli-bound aliases", async () => {
+    expect(await capture(true)).toContain("ay setup"); // manager
+    expect(await capture()).toContain("ay setup"); // default = manager
+    expect(await capture(false)).not.toContain("ay setup"); // cli-bound alias (cy)
+    expect(await capture(false)).toContain("ay ls"); // universal commands still shown
+  });
+
+  it("stays plain for a human shell (no AGENT_YES_PID)", async () => {
+    const out = await capture();
+    expect(out).not.toContain("You are running inside an agent");
+  });
+
+  it("prints self + parent identity and sub-agent guidance when nested in an agent", async () => {
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const parentWrapperPid = 555001;
+    const selfWrapperPid = 555002;
+    await appendGlobalPid({
+      pid: 900001,
+      cli: "codex",
+      prompt: "orchestrate the migration",
+      cwd: "/work/parent",
+      log_file: null,
+      fifo_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: parentWrapperPid,
+    });
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: "fix the failing test",
+      cwd: "/work/parent/child",
+      log_file: null,
+      fifo_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: selfWrapperPid,
+      parent_pid: parentWrapperPid,
+    });
+    const saved = process.env.AGENT_YES_PID;
+    process.env.AGENT_YES_PID = String(selfWrapperPid);
+    try {
+      const out = await capture();
+      expect(out).toContain("You are running inside an agent");
+      expect(out).toContain(`You are agent pid ${process.pid} (claude)`);
+      expect(out).toContain(`Spawned by agent pid 900001 (codex)`);
+      expect(out).toContain("Spawn a sub-agent");
+      expect(out).toContain(`ay ls --cwd /work/parent/child`);
+      expect(out).toContain(`ay ls --watch --cwd /work/parent/child`);
+    } finally {
+      if (saved === undefined) delete process.env.AGENT_YES_PID;
+      else process.env.AGENT_YES_PID = saved;
+    }
+  });
+
+  it("reports a nested-but-unresolved parent distinctly from top-level", async () => {
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const selfWrapperPid = 555004;
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: null,
+      cwd: process.cwd(),
+      log_file: null,
+      fifo_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: selfWrapperPid,
+      parent_pid: 999999999, // no record ever registered for this wrapper pid
+    });
+    const saved = process.env.AGENT_YES_PID;
+    process.env.AGENT_YES_PID = String(selfWrapperPid);
+    try {
+      const out = await capture();
+      expect(out).not.toContain("Top-level agent");
+      expect(out).toContain("Nested under a parent (wrapper pid 999999999)");
+    } finally {
+      if (saved === undefined) delete process.env.AGENT_YES_PID;
+      else process.env.AGENT_YES_PID = saved;
+    }
+  });
+
+  it("reports top-level (no parent) when parent_pid is absent", async () => {
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const selfWrapperPid = 555003;
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: null,
+      cwd: process.cwd(),
+      log_file: null,
+      fifo_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: selfWrapperPid,
+    });
+    const saved = process.env.AGENT_YES_PID;
+    process.env.AGENT_YES_PID = String(selfWrapperPid);
+    try {
+      const out = await capture();
+      expect(out).toContain("Top-level agent");
+    } finally {
+      if (saved === undefined) delete process.env.AGENT_YES_PID;
+      else process.env.AGENT_YES_PID = saved;
+    }
   });
 });
 

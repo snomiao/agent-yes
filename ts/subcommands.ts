@@ -387,14 +387,77 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
 // ay help
 // ---------------------------------------------------------------------------
 
-export function cmdHelp(managerCommands = true): number {
+/**
+ * The banner shown by `ay help` / `ay -h` when this process is itself running
+ * inside an agent (`AGENT_YES_PID` set — see resolveSender). Answers the three
+ * things a nested agent actually needs: who am I, who spawned me, and how do I
+ * drive sub-agents of my own — so it doesn't have to rediscover the fan-out
+ * primitives (spawn / ay ls forest / ay ls --watch) from scratch every session.
+ */
+async function buildAgentContextSection(self: GlobalPidRecord): Promise<string> {
+  const hasParentPid = typeof self.parent_pid === "number" && self.parent_pid > 0;
+  const parent = hasParentPid
+    ? (
+        await listRecords(undefined, {
+          all: true,
+          active: false,
+          json: false,
+          latest: false,
+          cwdScope: null,
+        })
+      ).find((r) => r.wrapper_pid === self.parent_pid)
+    : undefined;
+
+  const whoAmI = `You are agent pid ${self.pid} (${self.cli}) in ${shortenPath(self.cwd)}.`;
+  // Three distinct states: no parent at all (top-level); a parent_pid whose
+  // record we can resolve; or a parent_pid we can't resolve (its record aged
+  // out / lives on a remote) — that last case is still nested, just unknown,
+  // so it must not collapse into the "top-level" line.
+  const parentLine = !hasParentPid
+    ? `Top-level agent — no parent (started from a human shell or scheduler).`
+    : parent
+      ? `Spawned by agent pid ${parent.pid} (${parent.cli}) in ${shortenPath(parent.cwd)}.`
+      : `Nested under a parent (wrapper pid ${self.parent_pid}) whose record isn't in the local registry.`;
+
+  return (
+    `You are running inside an agent:\n` +
+    `  ${whoAmI}\n` +
+    `  ${parentLine}\n` +
+    `\n` +
+    `As an agent, you can:\n` +
+    `  Spawn a sub-agent:\n` +
+    `    ay <cli> -- "<prompt>"                                  auto-links as your child\n` +
+    `    ay claude --model sonnet --advisor opus -- "<prompt>"   routine task\n` +
+    `    ay claude --model opus --advisor fable -- "<prompt>"    complex task\n` +
+    `    (pick --model by task complexity so easy tasks don't cost like hard ones;\n` +
+    `     --advisor is a claude-cli flag — only takes effect for claude/cy)\n` +
+    `  List agents (your children nest under your own pid in the tree):\n` +
+    `    ay ls --cwd ${shortenPath(self.cwd)}\n` +
+    `  Watch agent state changes, scoped to your workspace:\n` +
+    `    ay ls --watch --cwd ${shortenPath(self.cwd)}\n` +
+    `    (NDJSON stream of state changes across every matched agent — one watcher\n` +
+    `     for the whole fan-out instead of N \`ay status --watch\`es)\n` +
+    `  Read one sub-agent's output:\n` +
+    `    ay tail -f <pid>                        follow live output (no single command tails\n` +
+    `                                              many agents' content at once yet — loop\n` +
+    `                                              \`ay ls --json\` pids into per-pid \`ay tail\`)\n` +
+    `\n`
+  );
+}
+
+export async function cmdHelp(managerCommands = true): Promise<number> {
   // `setup` is manager-only — hide it when invoked through a cli-bound alias
   // (cy/claude-yes/…), where `cy setup` runs the agent instead of managing the host.
   const setupLine = managerCommands
     ? `  ay setup                            guided setup: pick a workspace, share to agent-yes.com\n`
     : ``;
+  // Only agents carry AGENT_YES_PID — a human shell never sets it — so this
+  // section is skipped entirely (no async work at all) for interactive use.
+  const self = process.env.AGENT_YES_PID ? await resolveSender() : null;
+  const agentSection = self ? await buildAgentContextSection(self) : "";
   process.stdout.write(
-    `ay - agent-yes CLI\n` +
+    agentSection +
+      `ay - agent-yes CLI\n` +
       `\n` +
       `Management:\n` +
       `  ay ls [keyword]                     list running agents\n` +
