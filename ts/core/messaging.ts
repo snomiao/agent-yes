@@ -32,7 +32,10 @@ export async function sendEnter(context: MessageContext, waitms = 1000) {
       context.nextStdout.wait(),
       new Promise<void>((resolve) =>
         setTimeout(() => {
-          if (!context.nextStdout.isReady) context.shell.write("\r");
+          if (!context.nextStdout.isReady) {
+            context.shell.write("\r");
+            context.idleWaiter.ping();
+          }
           resolve();
         }, ms),
       ),

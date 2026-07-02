@@ -76,4 +76,9 @@ describe("removeControlCharacters", () => {
     const expected = "BeforeAfter";
     expect(removeControlCharacters(input)).toBe(expected);
   });
+
+  it("does NOT strip trailing text when an OSC sequence is unterminated (no BEL)", () => {
+    const input = "Before\u001b]0;titleAfter";
+    expect(removeControlCharacters(input)).toBe(input);
+  });
 });

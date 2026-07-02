@@ -7,7 +7,10 @@ const BEL = String.fromCharCode(0x07);
 // covered by the CSI pattern below — without this, e.g. a periodic title
 // update would count as "visible" content to callers that gate activity on
 // non-empty output.
-const OSC_PATTERN = new RegExp(ESC + "][^" + BEL + "]*" + BEL + "?", "g");
+// BEL is required, not optional: an unterminated ESC]... (BEL never arrives,
+// e.g. a truncated chunk boundary) must NOT strip through to end-of-string —
+// that would eat real trailing text as if it were part of the title sequence.
+const OSC_PATTERN = new RegExp(ESC + "][^" + BEL + "]*" + BEL, "g");
 
 // Matches control characters in the C0 and C1 ranges, including Delete (U+007F)
 const CSI_PATTERN = new RegExp(

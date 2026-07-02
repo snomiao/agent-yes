@@ -570,6 +570,7 @@ impl AgentContext {
                             // Forward Ctrl+C to agent — a live TUI redraws (e.g.
                             // an interrupt prompt), so treat it as a liveness poke.
                             send_ctrl_c(&writer)?;
+                            self.idle_waiter.ping();
                             self.mark_stdin_sent();
                         }
                     }
