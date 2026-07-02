@@ -896,7 +896,12 @@ export default async function agentYes({
       // Silently ignore heartbeat errors to avoid disrupting main flow
       logger.debug(`heartbeat|error: ${error}`);
     }
-  }, 800); // Run every 800ms
+  }, 100); // Run every 100ms — cheap when unchanged (see the rendered === lastHeartbeatRendered
+  // guard above): most ticks bail after one xtermProxy.tail(12) + string compare. A short
+  // interval matters for two things this heartbeat drives: no-EOL ready/fatal detection
+  // (CSI-redrawn output never fires the newline-driven consoleResponder path) and auto-retry
+  // backoff timing precision (AUTO_RETRY_MIN_IDLE_MS gating). Previously 800ms; still coarser
+  // than Rust's HEARTBEAT_INTERVAL_MS=50 (rs/src/context.rs) since Rust's per-tick cost is lower.
 
   // Clear heartbeat on exit
   const cleanupHeartbeat = () => clearInterval(heartbeatInterval);
@@ -1312,14 +1317,18 @@ export default async function agentYes({
     await Promise.race([
       pendingExitCode.promise.then(() => (exited = true)), // resolve when shell exits
 
-      // if shell doesn't exit in 5 seconds, kill it
+      // if shell doesn't exit in 2 seconds, kill it. Rust's equivalent (rs/src/context.rs)
+      // doesn't wait for the child's own exit at all — it sends the exit command(s) and tears
+      // down immediately. 2s keeps a real grace window for a CLI to actually process `/exit`
+      // (flush session state, close connections) while still bounding the worst case — down
+      // from a previous 5s that mostly just delayed force-killing CLIs that never respond.
       new Promise<void>((resolve) =>
         setTimeout(() => {
           if (exited) return; // if shell already exited, do nothing
           shell.kill(); // kill the shell process if it doesn't exit in time
           resolve();
-        }, 5000),
-      ), // 5 seconds timeout
+        }, 2000),
+      ), // 2 seconds timeout
     ]);
   }
 
