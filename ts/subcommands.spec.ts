@@ -179,8 +179,37 @@ describe("subcommands.cmdHelp", () => {
       expect(out).toContain(`You are agent pid ${process.pid} (claude)`);
       expect(out).toContain(`Spawned by agent pid 900001 (codex)`);
       expect(out).toContain("Spawn a sub-agent");
-      expect(out).toContain("List your sub-agents");
-      expect(out).toContain("ay ls --watch");
+      expect(out).toContain(`ay ls --cwd /work/parent/child`);
+      expect(out).toContain(`ay ls --watch --cwd /work/parent/child`);
+    } finally {
+      if (saved === undefined) delete process.env.AGENT_YES_PID;
+      else process.env.AGENT_YES_PID = saved;
+    }
+  });
+
+  it("reports a nested-but-unresolved parent distinctly from top-level", async () => {
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const selfWrapperPid = 555004;
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: null,
+      cwd: process.cwd(),
+      log_file: null,
+      fifo_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: selfWrapperPid,
+      parent_pid: 999999999, // no record ever registered for this wrapper pid
+    });
+    const saved = process.env.AGENT_YES_PID;
+    process.env.AGENT_YES_PID = String(selfWrapperPid);
+    try {
+      const out = await capture();
+      expect(out).not.toContain("Top-level agent");
+      expect(out).toContain("Nested under a parent (wrapper pid 999999999)");
     } finally {
       if (saved === undefined) delete process.env.AGENT_YES_PID;
       else process.env.AGENT_YES_PID = saved;
