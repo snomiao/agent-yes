@@ -1114,8 +1114,13 @@ export default async function agentYes({
       readable: xtermProxy.readable,
     })
 
-    .forEach(() => {
-      ctx.idleWaiter.ping();
+    .forEach((chunk) => {
+      // Only ping activity if there's visible content (not just ANSI/cursor
+      // control sequences) — mirrors the Rust runtime's handle_output gate.
+      // Without this, periodic control-only chatter (e.g. cursor position
+      // queries) would keep resetting the auto-retry idle clock and the
+      // scheduled retry could defer indefinitely without ever firing.
+      if (removeControlCharacters(chunk).trim()) ctx.idleWaiter.ping();
       pidStore.updateStatus(shell.pid, "active").catch(() => null);
       ctx.nextStdout.ready();
     })
