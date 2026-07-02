@@ -30,7 +30,7 @@ import { buildRustArgs } from "./buildRustArgs.ts";
   const isHelpFlag = rawArg === "-h" || rawArg === "--help";
   const { isSubcommand, runSubcommand, cmdHelp } = await import("./subcommands.ts");
   if (isHelpFlag && process.argv.length === 3) {
-    cmdHelp(managerCommands);
+    await cmdHelp(managerCommands);
     process.exit(0);
   }
   if (isSubcommand(rawArg, managerCommands)) {
