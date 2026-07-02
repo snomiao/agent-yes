@@ -2400,7 +2400,10 @@ export async function extractMenu(logPath: string, cli: string): Promise<MenuSta
 
 /** Poll until the agent is no longer parked on a menu (selection accepted → it
  * resumed / moved on) or the deadline passes. Returns true if it cleared. */
-async function waitForNeedsInputClear(record: GlobalPidRecord, timeoutMs: number): Promise<boolean> {
+async function waitForNeedsInputClear(
+  record: GlobalPidRecord,
+  timeoutMs: number,
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 250));
@@ -2627,9 +2630,7 @@ async function cmdSelect(rest: string[]): Promise<number> {
   const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
   const n = Number(argv._[1]);
   if (!keyword || !Number.isInteger(n) || n < 1) {
-    throw new Error(
-      "usage: ay select <keyword> <N>   (N = the 1-based option number to choose)",
-    );
+    throw new Error("usage: ay select <keyword> <N>   (N = the 1-based option number to choose)");
   }
 
   const opts: CommonOpts = {
@@ -2641,7 +2642,9 @@ async function cmdSelect(rest: string[]): Promise<number> {
   };
   const record = await resolveWritableAgent(keyword, opts);
   if (!record.log_file) {
-    throw new Error(`pid ${record.pid}: no log_file recorded — can't read the menu to select from.`);
+    throw new Error(
+      `pid ${record.pid}: no log_file recorded — can't read the menu to select from.`,
+    );
   }
   const force = Boolean(argv.force) || process.env.AGENT_YES_FORCE_SEND === "1";
   await enforceSendGuards(record, force);
@@ -2653,9 +2656,7 @@ async function cmdSelect(rest: string[]): Promise<number> {
     );
   }
   if (menu.options.length > 0 && !menu.options.includes(n)) {
-    throw new Error(
-      `option ${n} is out of range — this menu offers ${menu.options.join(", ")}.`,
-    );
+    throw new Error(`option ${n} is out of range — this menu offers ${menu.options.join(", ")}.`);
   }
 
   // Move the cursor from where it sits to option N, then confirm. Delta from the
@@ -2665,7 +2666,8 @@ async function cmdSelect(rest: string[]): Promise<number> {
   await writeKeysPaced(record.fifo_file!, byteSeqs, Math.max(0, argv.pace));
 
   const delta = n - menu.cursor;
-  const moved = delta === 0 ? "cursor already there" : `${Math.abs(delta)}× ${delta > 0 ? "down" : "up"}`;
+  const moved =
+    delta === 0 ? "cursor already there" : `${Math.abs(delta)}× ${delta > 0 ? "down" : "up"}`;
   process.stdout.write(
     `pid ${record.pid} (${record.cli}): selected option ${n} (${moved} + enter)\n`,
   );

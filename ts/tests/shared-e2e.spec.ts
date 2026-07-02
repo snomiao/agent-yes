@@ -38,8 +38,14 @@ function runAgentYes(
   const { cwd = ROOT, env, timeoutMs = 15_000 } = opts;
   const args = ["bun", AGENT_YES_CLI, ...implArgs, ...cliAndArgs];
   // Force the isolated home onto whatever env the caller passed, so no run ever
-  // touches the shared global ~/.agent-yes.
+  // touches the shared global ~/.agent-yes. Also strip AGENT_YES_PID: when this
+  // suite itself runs inside a nested agent-yes session (e.g. an agent developing
+  // agent-yes), that var leaks in via process.env and makes the spawned agent
+  // think IT is nested too — triggering fork-by-default (shouldForkNested in
+  // forkNested.ts) instead of running synchronously, which breaks every
+  // assertion that expects runAgentYes to block until the child exits.
   const runEnv: NodeJS.ProcessEnv = { ...process.env, ...env, AGENT_YES_HOME: E2E_HOME };
+  delete runEnv.AGENT_YES_PID;
 
   return new Promise((resolve) => {
     const proc = spawn(args[0]!, args.slice(1), { cwd, env: runEnv });

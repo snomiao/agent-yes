@@ -171,6 +171,7 @@ async function checkLock(cwd: string, _prompt: string): Promise<LockCheckResult>
 
   // Find running tasks for this location
   const blockingTasks = lockFile.tasks.filter((task) => {
+    if (task.pid === process.pid) return false; // Never self-block on our own prior entry
     if (!isProcessRunning(task.pid)) return false; // Skip stale locks
     if (task.status !== "running") return false; // Only check running tasks
 
