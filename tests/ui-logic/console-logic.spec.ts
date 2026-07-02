@@ -24,6 +24,7 @@ import {
   sortEntries,
   SORT_MODES,
   taskLabel,
+  badgesFor,
   hashHue,
   selFromBottom,
   parseSel,
@@ -460,6 +461,32 @@ describe("taskLabel (progress badge)", () => {
     expect(taskLabel({})).toBe("");
     expect(taskLabel({ tasks: null })).toBe("");
     expect(taskLabel({ tasks: { done: 0, total: 0 } })).toBe("");
+  });
+});
+
+describe("badgesFor (status flag chips)", () => {
+  it("returns [] when e.badges is missing or empty", () => {
+    expect(badgesFor({})).toEqual([]);
+    expect(badgesFor({ badges: [] })).toEqual([]);
+  });
+
+  it("resolves a known id to its label + title", () => {
+    expect(badgesFor({ badges: ["goal-active"] })).toEqual([
+      { id: "goal-active", label: "goal", title: "A /goal Stop-hook loop is active on this agent" },
+    ]);
+  });
+
+  it("falls back to the raw id for an unknown badge (never silently dropped)", () => {
+    expect(badgesFor({ badges: ["some-future-flag"] })).toEqual([
+      { id: "some-future-flag", label: "some-future-flag", title: "some-future-flag" },
+    ]);
+  });
+
+  it("preserves order and handles multiple badges", () => {
+    expect(badgesFor({ badges: ["goal-active", "some-future-flag"] }).map((b) => b.id)).toEqual([
+      "goal-active",
+      "some-future-flag",
+    ]);
   });
 });
 
