@@ -1,8 +1,20 @@
+const ESC = String.fromCharCode(0x1b);
+const C1 = String.fromCharCode(0x9b);
+const BEL = String.fromCharCode(0x07);
+
+// OSC sequences (window/tab title updates, hyperlinks, etc.): ESC ] ... BEL.
+// Terminated by BEL (the common case for real-world terminal apps); not
+// covered by the CSI pattern below — without this, e.g. a periodic title
+// update would count as "visible" content to callers that gate activity on
+// non-empty output.
+const OSC_PATTERN = new RegExp(ESC + "][^" + BEL + "]*" + BEL + "?", "g");
+
+// Matches control characters in the C0 and C1 ranges, including Delete (U+007F)
+const CSI_PATTERN = new RegExp(
+  "[" + ESC + C1 + "][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]",
+  "g",
+);
+
 export function removeControlCharacters(str: string): string {
-  // Matches control characters in the C0 and C1 ranges, including Delete (U+007F)
-  return str.replace(
-    // eslint-disable-next-line no-control-regex This is a control regex
-    /[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g,
-    "",
-  );
+  return str.replace(OSC_PATTERN, "").replace(CSI_PATTERN, "");
 }

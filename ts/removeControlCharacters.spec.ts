@@ -70,4 +70,10 @@ describe("removeControlCharacters", () => {
     const expected = "TextClearLine";
     expect(removeControlCharacters(input)).toBe(expected);
   });
+
+  it("should remove OSC sequences (e.g. window title updates)", () => {
+    const input = "Before\u001b]0;window title\u0007After";
+    const expected = "BeforeAfter";
+    expect(removeControlCharacters(input)).toBe(expected);
+  });
 });
