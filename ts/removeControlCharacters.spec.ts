@@ -81,4 +81,14 @@ describe("removeControlCharacters", () => {
     const input = "Before\u001b]0;titleAfter";
     expect(removeControlCharacters(input)).toBe(input);
   });
+
+  it("should remove OSC sequences terminated by ST (ESC backslash), not just BEL", () => {
+    const input = "Before\u001b]8;;https://example.com\u001b\\After";
+    expect(removeControlCharacters(input)).toBe("BeforeAfter");
+  });
+
+  it("does not let an ST-terminated OSC run on and eat real text before a later BEL", () => {
+    const input = "Before\u001b]0;t\u001b\\visible\u0007After";
+    expect(removeControlCharacters(input)).toBe("Beforevisible\u0007After");
+  });
 });
