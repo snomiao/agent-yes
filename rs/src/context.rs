@@ -33,6 +33,14 @@ const RETRY_BASE_SECS: u64 = 8; // first backoff; doubles each consecutive failu
 /// screen (output → idle resets → stall clears) well within this window.
 const STALL_ESC_GRACE_SECS: u64 = 30;
 const RETRY_MAX_DELAY_SECS: u64 = 256; // cap per-retry backoff: 8,16,32,…,256 then hold
+
+/// Minimum quiet time (no PTY output, no forwarded stdin — see idle_waiter.ping()
+/// call sites) required before a scheduled auto-retry may actually fire, on top
+/// of the backoff delay above. The backoff schedule alone can elapse while the
+/// user is mid-typing into the prompt; typing "retry" + Enter over that would
+/// submit a mangled line. Deliberately short — this only debounces against
+/// active typing, not a real excuse to delay recovery.
+const RETRY_MIN_IDLE_MS: u64 = 5_000;
 const RETRY_GIVE_UP_SECS: u64 = 8 * 3600; // stop after 8h (claude's usage window is ~5h)
 
 /// What the no-output watchdog should do this tick. Pure decision so it can be
@@ -76,6 +84,13 @@ fn retry_backoff_secs(streak: u32) -> u64 {
     RETRY_BASE_SECS
         .saturating_mul(1u64 << shift)
         .min(RETRY_MAX_DELAY_SECS)
+}
+
+/// Whether a scheduled auto-retry may actually fire: the agent must be sitting
+/// idle at a ready prompt (not mid-work) AND the terminal must have been quiet
+/// for at least `min_idle_ms` — see RETRY_MIN_IDLE_MS.
+fn should_fire_retry(working: bool, ready: bool, idle_ms: u64, min_idle_ms: u64) -> bool {
+    !working && ready && idle_ms >= min_idle_ms
 }
 
 /// Agent context - centralized session state
@@ -896,11 +911,15 @@ impl AgentContext {
                 self.auto_retry_streak = 0;
             } else if now >= next_at {
                 // Re-render the screen to confirm the agent is idle at a prompt —
-                // never type "retry" while it's busy (e.g. the CLI's own retry).
+                // never type "retry" while it's busy (e.g. the CLI's own retry) —
+                // and require a few quiet seconds on top of the backoff delay, so
+                // a scheduled retry doesn't collide with a line the user is
+                // actively typing (see RETRY_MIN_IDLE_MS).
                 let screen = self.vterm.contents();
                 let working = self.cli_config.working.iter().any(|p| p.is_match(&screen));
                 let ready = self.cli_config.ready.iter().any(|p| p.is_match(&screen));
-                if working || !ready {
+                let idle_ms = self.idle_waiter.idle_time_ms();
+                if !should_fire_retry(working, ready, idle_ms, RETRY_MIN_IDLE_MS) {
                     self.auto_retry_next_at = Some(now + Duration::from_millis(500));
                 } else {
                     self.auto_retry_streak = self.auto_retry_streak.saturating_add(1);
@@ -1315,6 +1334,20 @@ mod tests {
         // capped at RETRY_MAX_DELAY_SECS, and no shift overflow for large streaks
         assert_eq!(retry_backoff_secs(6), 256);
         assert_eq!(retry_backoff_secs(50), 256);
+    }
+
+    #[test]
+    fn test_should_fire_retry_requires_ready_not_working_and_quiet() {
+        // Busy — never fire even if otherwise ready and quiet.
+        assert!(!should_fire_retry(true, true, 10_000, 5_000));
+        // Not at a recognized ready prompt — don't fire.
+        assert!(!should_fire_retry(false, false, 10_000, 5_000));
+        // Ready and idle, but the quiet window hasn't elapsed yet (user may
+        // still be mid-typing) — defer.
+        assert!(!should_fire_retry(false, true, 4_999, 5_000));
+        // Ready, idle, and past the quiet window — fire.
+        assert!(should_fire_retry(false, true, 5_000, 5_000));
+        assert!(should_fire_retry(false, true, 10_000, 5_000));
     }
 
     #[test]

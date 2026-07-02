@@ -18,7 +18,12 @@ import { logger } from "./logger.ts";
 import { createFifoStream } from "./beta/fifo.ts";
 import { PidStore } from "./pidStore.ts";
 import { sendEnter, sendMessage } from "./core/messaging.ts";
-import { AUTO_RETRY_GIVE_UP_MS, autoRetryBackoffMs } from "./autoRetry.ts";
+import {
+  AUTO_RETRY_GIVE_UP_MS,
+  AUTO_RETRY_MIN_IDLE_MS,
+  autoRetryBackoffMs,
+  shouldFireRetry,
+} from "./autoRetry.ts";
 import {
   initializeLogPaths,
   setupDebugLogging,
@@ -805,8 +810,12 @@ export default async function agentYes({
         } else if (now >= retryNextAt) {
           const working = conf.working?.some((rx: RegExp) => rx.test(autoRetryScreen)) ?? false;
           const readyNow = conf.ready?.some((rx: RegExp) => rx.test(autoRetryScreen)) ?? false;
-          if (working || !readyNow) {
-            retryNextAt = now + 500; // busy / not at prompt — re-check shortly
+          // Also require a few quiet seconds on top of the backoff delay, so a
+          // scheduled retry doesn't collide with a line the user is actively
+          // typing into the prompt (see AUTO_RETRY_MIN_IDLE_MS).
+          const idleMs = ctx.idleWaiter.idleTimeMs();
+          if (!shouldFireRetry(working, readyNow, idleMs, AUTO_RETRY_MIN_IDLE_MS)) {
+            retryNextAt = now + 500; // busy / not at prompt / still active — re-check shortly
           } else {
             retryStreak += 1;
             logger.warn(`[${cli}-yes] auto-retry: typing 'retry' (attempt ${retryStreak})`);
@@ -1096,6 +1105,10 @@ export default async function agentYes({
         write: async (data) => {
           await ctx.stdinReady.wait();
           shell.write(data);
+          // Forwarded user input counts as activity too (mirrors the Rust
+          // runtime's ping on stdin forward) — the auto-retry idle gate below
+          // must not fire while the user is actively typing.
+          ctx.idleWaiter.ping();
         },
       }),
       readable: xtermProxy.readable,
