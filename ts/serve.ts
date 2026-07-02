@@ -9,6 +9,7 @@ import yargs from "yargs";
 import {
   controlCodeFromName,
   deriveLiveStatus,
+  extractBadges,
   extractNeedsInput,
   extractTaskCounts,
   listRecords,
@@ -935,6 +936,26 @@ export async function cmdServe(rest: string[]): Promise<number> {
     }
   };
 
+  // Per-agent status badges/flags (see badges.ts) matched against the agent's
+  // rendered screen — e.g. an active /goal Stop-hook loop. Cached per
+  // (size, mtime) exactly like logTasks. Extend BADGE_DEFS in badges.ts to
+  // surface more patterns (error banners, other flags); no server changes
+  // needed beyond that.
+  const badgeCache = new Map<string, { size: number; mtimeMs: number; badges: string[] }>();
+  const logBadges = async (logFile: string | null | undefined): Promise<string[]> => {
+    if (!logFile) return [];
+    try {
+      const { size, mtimeMs } = await stat(logFile);
+      const hit = badgeCache.get(logFile);
+      if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.badges;
+      const badges = await extractBadges(logFile);
+      badgeCache.set(logFile, { size, mtimeMs, badges });
+      return badges;
+    } catch {
+      return [];
+    }
+  };
+
   // Per-agent "waiting on you" detection: the agent is parked on an interactive
   // menu it did NOT auto-resolve (config `needsInput` patterns). Same source and
   // classifier as `ay ls` / `ay status`, so the console's dot matches the CLI's
@@ -1148,6 +1169,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
       // Task progress from the rendered todo block (null when none detected → no
       // badge). Skipped for exited agents — their screen is no longer live.
       tasks: status === "exited" ? null : await logTasks(r.log_file),
+      // Status flags matched against the rendered screen (see badges.ts) — e.g.
+      // an active /goal loop. [] when none matched or for exited agents.
+      badges: status === "exited" ? [] : await logBadges(r.log_file),
     };
   };
 

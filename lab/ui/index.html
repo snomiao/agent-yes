@@ -891,6 +891,20 @@
         color: var(--green);
         border-color: #2a3a2a;
       }
+      /* Status-flag chip ("badge") matched server-side against the agent's
+         screen — e.g. an active /goal loop (ts/badges.ts). Same pill shape as
+         .tasks but accent-colored so a matched flag stands out as a distinct
+         signal, not just a counter. */
+      .flag {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--accent);
+        white-space: nowrap;
+        flex: none;
+        padding: 0 5px;
+        border: 1px solid var(--accent);
+        border-radius: 8px;
+      }
       /* The pending question when an agent needs_input — blue accent to match the
          needs_input dot, reading as "your turn / here's what it's asking". */
       .detail.ask {
@@ -1543,6 +1557,7 @@
         sortEntries,
         SORT_MODES,
         taskLabel,
+        badgesFor,
         hashHue,
         selFromBottom,
         parseSel,
@@ -3219,6 +3234,17 @@
         return `<span class="tasks${allDone ? " done" : ""}" title="${esc(tip)}">${esc(label)}</span>`;
       }
 
+      // Status-flag chips ("badges") matched server-side against the agent's
+      // screen (ts/badges.ts) — e.g. an active /goal loop. One small pill per
+      // matched flag; "" when none matched. CSS class is "flag" (not "badge")
+      // to avoid colliding with the existing pid pill's .badge class. See
+      // BADGE_META in console-logic.js for the id → label/title mapping.
+      function badgeChipsHtml(e) {
+        return badgesFor(e)
+          .map((b) => `<span class="flag" title="${esc(b.title)}">${esc(b.label)}</span>`)
+          .join("");
+      }
+
       // A room/peer group header row. Non-selectable; carries the same tree rails
       // as agent rows so the hierarchy reads as one tree. The room/peer layers
       // only appear here when there are ≥2 of them (single ones fold away in
@@ -3268,6 +3294,7 @@
         ${cli ? `<span class="cname">${esc(cli)}</span>` : ""}
         <span class="ctitle ${e.title ? "" : "dim"}" title="${esc(t)}">${esc(t)}</span>
         ${taskChipHtml(e)}
+        ${badgeChipsHtml(e)}
         ${gitChipHtml(e)}
         <span class="age">${age(e)}</span></div>`;
               })
@@ -3293,6 +3320,7 @@
           <span class="name">${esc(cliLabel(e) || ident(e) || "agent")}</span>
           <span class="badge">pid ${e.pid}</span>
           ${taskChipHtml(e)}
+          ${badgeChipsHtml(e)}
           ${gitChipHtml(e)}
           <span class="age">${age(e)}</span></div>
         ${e.title ? `<div class="rowtitle" title="${esc(e.title)}">${esc(e.title)}</div>` : ""}

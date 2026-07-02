@@ -18,6 +18,7 @@ import path from "path";
 import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
+import { matchBadges } from "./badges.ts";
 import {
   classifyNeedsInput,
   isWorkingScreen,
@@ -2126,6 +2127,17 @@ export async function extractNeedsInput(logPath: string, cli: string): Promise<N
   const lines = await renderLogTailLines(logPath, 40);
   if (!lines) return null;
   return classifyNeedsInput(lines, { needsInput: cfg.needsInput, working: cfg.working });
+}
+
+/**
+ * Which badges (see badges.ts) match an agent's current screen — the same 32 KB
+ * tail window `ay tail` renders, no CLI-specific config needed. Returns [] on
+ * any read/render error or an empty log, same failure shape as extractNeedsInput.
+ */
+export async function extractBadges(logPath: string): Promise<string[]> {
+  const lines = await renderLogTailLines(logPath, 40);
+  if (!lines) return [];
+  return matchBadges(lines);
 }
 
 /**
