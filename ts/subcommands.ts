@@ -2476,10 +2476,15 @@ async function cmdSend(rest: string[]): Promise<number> {
   }
 
   // When an agent sends, prefix one line so the recipient knows who pinged it
-  // and exactly how to reply (to a resolvable pid — the sender's own).
-  const prefix = sender.agent
-    ? `[from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${sender.agent.pid} "..."]\n`
-    : "";
+  // and exactly how to reply (to a resolvable pid — the sender's own). BUT a
+  // slash command is only recognized when `/` is the very first character of the
+  // submitted message; the prefix would bump it to line 2 and the CLI would type
+  // the command as plain text. So skip the prefix for a command body and send it
+  // verbatim — attribution is dropped for the command, but it actually runs.
+  const prefix =
+    sender.agent && !isSlashCommand(body)
+      ? `[from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${sender.agent.pid} "..."]\n`
+      : "";
 
   const fullBody = prefix + body;
   if (fullBody && trailing) {
@@ -2915,6 +2920,14 @@ async function cmdStop(rest: string[]): Promise<number> {
 export function isExitRequest(body: string): boolean {
   const t = body.trim().toLowerCase();
   return t === "exit" || t === "/exit";
+}
+
+/** A body that the CLI will parse as a slash command — `/` as the very first
+ * character (claude requires column 0, no leading whitespace, then a letter).
+ * Such a body must be sent verbatim: any prefix line bumps the `/` off column 0
+ * and the CLI types the command as plain text instead of running it. */
+export function isSlashCommand(body: string): boolean {
+  return /^\/[A-Za-z]/.test(body);
 }
 
 /**
