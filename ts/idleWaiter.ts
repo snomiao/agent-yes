@@ -24,6 +24,11 @@ export class IdleWaiter {
     return this;
   }
 
+  /** Milliseconds since the last ping. */
+  idleTimeMs() {
+    return Date.now() - this.lastActivityTime;
+  }
+
   async wait(ms: number) {
     while (this.lastActivityTime >= Date.now() - ms)
       await new Promise((resolve) => setTimeout(resolve, this.checkInterval));
