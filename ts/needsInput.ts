@@ -78,7 +78,7 @@ export interface MenuState {
 
 // An option row: an optional cursor glyph / bullet, then "N. " (the trailing
 // space rejects version-like "3.5GB" that isn't a menu option).
-const OPTION_LINE = /^[\s❯›>▶◉○●·*\-]*?(\d+)\.\s/;
+const OPTION_LINE = /^[\s❯›>▶◉○●·*-]*?(\d+)\.\s/;
 
 /**
  * Parse the selection menu a `needs_input` agent is parked on into a cursor
