@@ -240,6 +240,8 @@ function mergeRecords(...buckets: GlobalPidRecord[][]): GlobalPidRecord[] {
 
 // Subcommands EVERY *-yes binary accepts — inspection/messaging over the shared
 // agent registry (`cy ls`, `cy send`, `cy tail`, …).
+// MIRRORED in rs/src/cli.rs `SUBCOMMANDS` — the Rust runner delegates these to
+// this JS layer; keep the two lists in sync.
 const SUBCOMMANDS = new Set([
   "ls",
   "list",

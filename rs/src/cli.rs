@@ -4,6 +4,144 @@ use anyhow::{anyhow, Result};
 use clap::{ArgAction, Parser};
 use std::env;
 
+// ---------------------------------------------------------------------------
+// Subcommand delegation to the TypeScript launcher
+// ---------------------------------------------------------------------------
+//
+// This Rust binary is ONLY the agent runner. The management subcommands
+// (`ay ls`, `ay send`, `ay restart`, `ay stop`, `ay serve`, …) are implemented
+// solely in the TypeScript layer (ts/subcommands.ts). When this binary is
+// invoked with a leading subcommand word — e.g. a cargo-installed `agent-yes`
+// that shadows the JS launcher on PATH runs `agent-yes restart 1234` — clap's
+// `trailing_var_arg` would parse `restart 1234` as PROMPT text and launch an
+// agent instead. Detect that case up front and re-exec the JS launcher, which
+// owns the subcommand dispatch.
+
+/// Management subcommands handled by the TypeScript CLI, not this runner.
+/// MUST mirror `SUBCOMMANDS` in ts/subcommands.ts — keep the two in sync.
+pub const SUBCOMMANDS: &[&str] = &[
+    "ls", "list", "ps", "status", "result", "read", "cat", "tail", "head", "send", "spawn",
+    "attach", "stop", "exit", "restart", "note", "serve", "schedule", "remote", "reap", "help",
+];
+
+/// Subcommands reserved for the generic manager entry (`ay`/`agent-yes`), not a
+/// cli-bound alias like `cy`. Mirrors `MANAGER_SUBCOMMANDS` in ts/subcommands.ts.
+pub const MANAGER_SUBCOMMANDS: &[&str] = &["setup"];
+
+/// Whether `name` is a management subcommand. `manager_commands` (true for the
+/// generic `ay`/`agent-yes` entry) additionally admits manager-only commands
+/// like `setup`; false for a cli-bound alias (cy/claude-yes/…) so those names
+/// fall through to running the agent. Mirrors `isSubcommand` in ts/subcommands.ts.
+pub fn is_subcommand(name: &str, manager_commands: bool) -> bool {
+    SUBCOMMANDS.contains(&name) || (manager_commands && MANAGER_SUBCOMMANDS.contains(&name))
+}
+
+/// Mirror of ts/invokedCli.ts `invokedCliName`: the agent CLI implied by the
+/// binary name (cy/claude-yes → "claude", codex-yes → "codex", …), or None for
+/// the generic `ay`/`agent-yes`/`cli` manager entry. Used to tell a cli-bound
+/// alias apart from the manager so manager-only subcommands (setup) don't hijack
+/// an alias's prompt.
+fn invoked_cli_name(exe_base: &str) -> Option<String> {
+    let base = exe_base
+        .strip_suffix(".js")
+        .or_else(|| exe_base.strip_suffix(".ts"))
+        .unwrap_or(exe_base);
+    // Generic manager entries resolve to None.
+    if matches!(base, "agent-yes" | "agent" | "cli" | "cli-yes" | "ay") {
+        return None;
+    }
+    let raw = base.strip_suffix("-yes").unwrap_or(base);
+    if raw.is_empty() {
+        return None;
+    }
+    // Short aliases (must match CLI_ALIASES in ts/invokedCli.ts).
+    match raw {
+        "cy" => Some("claude".to_string()),
+        "orcy" => Some("openrouter".to_string()),
+        other => Some(other.to_string()),
+    }
+}
+
+/// Pure decision: should an invocation named `exe_base` with leading user arg
+/// `first_arg` delegate to the JS launcher? Split out from
+/// [`maybe_delegate_subcommand`] (which reads process globals) so it's testable.
+fn should_delegate(first_arg: &str, exe_base: &str) -> bool {
+    let manager_commands = invoked_cli_name(exe_base).is_none();
+    is_subcommand(first_arg, manager_commands)
+}
+
+/// If this binary was invoked with a leading management subcommand, re-exec the
+/// JS launcher and return `Some(exit_code)` for the caller to exit with;
+/// otherwise return `None` so the normal agent-run proceeds.
+///
+/// Only the FIRST user arg is inspected — mirrors the TS dispatch, which keys
+/// off `process.argv[2]` alone (a subcommand buried after flags is not one).
+pub fn maybe_delegate_subcommand() -> Option<i32> {
+    let raw: Vec<String> = env::args().collect();
+    let first = raw.get(1)?; // raw[0] is the binary itself
+    let exe_base = env::current_exe()
+        .ok()
+        .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
+        .unwrap_or_default();
+    if !should_delegate(first, &exe_base) {
+        return None;
+    }
+    Some(delegate_to_js(&raw[1..]))
+}
+
+/// Re-exec the JS launcher with `forward_args`, inheriting stdio and propagating
+/// the exit code. Target is `ay` by default (never this Rust binary — cargo
+/// installs only `agent-yes` — so delegation can't recurse); `AGENT_YES_JS_CLI`
+/// overrides with a path or command name for non-standard installs.
+fn delegate_to_js(forward_args: &[String]) -> i32 {
+    let launcher = env::var("AGENT_YES_JS_CLI")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "ay".to_string());
+    let sub = forward_args.first().map(String::as_str).unwrap_or("");
+
+    let not_found_msg = || {
+        eprintln!(
+            "agent-yes: '{sub}' is a management subcommand handled by the JS CLI, but the \
+             launcher '{launcher}' was not found on PATH.\nRun it via `ay {sub} …`, or set \
+             AGENT_YES_JS_CLI to the launcher path."
+        );
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // exec replaces this process, so signals/exit propagate perfectly; it
+        // returns only if the launcher couldn't be started.
+        let err = std::process::Command::new(&launcher)
+            .args(forward_args)
+            .exec();
+        if err.kind() == std::io::ErrorKind::NotFound {
+            not_found_msg();
+        } else {
+            eprintln!("agent-yes: failed to delegate '{sub}' to '{launcher}': {err}");
+        }
+        127
+    }
+    #[cfg(not(unix))]
+    {
+        match std::process::Command::new(&launcher)
+            .args(forward_args)
+            .status()
+        {
+            Ok(status) => status.code().unwrap_or(1),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                not_found_msg();
+                127
+            }
+            Err(err) => {
+                eprintln!("agent-yes: failed to delegate '{sub}' to '{launcher}': {err}");
+                127
+            }
+        }
+    }
+}
+
 /// Supported CLI tools
 // MUST mirror the `clis:` keys in default.config.yaml — this list gates CLI
 // validation and binary-name detection (`glm-yes` → "glm"). A new CLI added to
@@ -352,6 +490,54 @@ fn extract_prompt_from_args(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_subcommand() {
+        // Management subcommands are recognised for both manager and alias.
+        for sub in ["restart", "ls", "send", "stop", "serve", "tail", "reap"] {
+            assert!(is_subcommand(sub, true), "{sub} should be a subcommand");
+            assert!(is_subcommand(sub, false), "{sub} should be a subcommand");
+        }
+        // Non-subcommands (cli names, flags, arbitrary prompt words) are not.
+        for other in ["claude", "codex", "-p", "--cli=claude", "restartx", "hello"] {
+            assert!(!is_subcommand(other, true), "{other} is not a subcommand");
+        }
+        // `setup` is manager-only: a subcommand for `ay`/`agent-yes`, not for a
+        // cli-bound alias like `cy` (there it's a prompt word).
+        assert!(is_subcommand("setup", true));
+        assert!(!is_subcommand("setup", false));
+    }
+
+    #[test]
+    fn test_invoked_cli_name() {
+        // Generic manager entries → None.
+        for name in ["agent-yes", "agent", "cli", "cli-yes", "ay", "ay.js"] {
+            assert_eq!(invoked_cli_name(name), None, "{name} is the manager entry");
+        }
+        // Cli-bound names and aliases → their target CLI.
+        assert_eq!(invoked_cli_name("claude-yes"), Some("claude".into()));
+        assert_eq!(invoked_cli_name("codex-yes"), Some("codex".into()));
+        assert_eq!(invoked_cli_name("cy"), Some("claude".into()));
+        assert_eq!(invoked_cli_name("orcy"), Some("openrouter".into()));
+        assert_eq!(invoked_cli_name("gemini-yes.js"), Some("gemini".into()));
+    }
+
+    #[test]
+    fn test_should_delegate() {
+        // Generic manager: any subcommand (including setup) delegates.
+        assert!(should_delegate("restart", "agent-yes"));
+        assert!(should_delegate("ls", "ay"));
+        assert!(should_delegate("setup", "agent-yes"));
+        // Cli-bound alias: management subcommands still delegate, but `setup`
+        // does not (it's a prompt word for that alias).
+        assert!(should_delegate("restart", "claude-yes"));
+        assert!(should_delegate("send", "cy"));
+        assert!(!should_delegate("setup", "claude-yes"));
+        // Prompts / cli names / flags never delegate.
+        assert!(!should_delegate("claude", "agent-yes"));
+        assert!(!should_delegate("-p", "agent-yes"));
+        assert!(!should_delegate("fix", "agent-yes"));
+    }
 
     #[test]
     fn test_detect_cli_from_name_all() {
