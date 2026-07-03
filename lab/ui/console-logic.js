@@ -187,6 +187,10 @@ export function taskLabel(e) {
 // id), so a newly-added server-side badge is never silently dropped.
 export const BADGE_META = {
   "goal-active": { label: "goal", title: "A /goal Stop-hook loop is active on this agent" },
+  "session-limit": {
+    label: "limit",
+    title: "Usage session limit hit — waiting for the reset time shown on screen",
+  },
 };
 
 // Status-flag chips ("badges") matched against the agent's screen — e.g. an
