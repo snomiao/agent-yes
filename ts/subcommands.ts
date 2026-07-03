@@ -2464,11 +2464,20 @@ export async function submitAndConfirm(
       (await stat(logFile)
         .then((s) => s.size)
         .catch(() => null)) ?? 0;
+    // A working marker already on screen BEFORE this attempt (e.g. a busy agent
+    // that queues typed input) proves nothing about whether THIS Enter landed —
+    // it could just be leftover from whatever the agent was already doing. Only
+    // a working marker that WASN'T there before, or actual log growth, counts.
+    const wasAlreadyWorking = isWorkingScreen(
+      (await renderLogTailLines(logFile, 40)) ?? [],
+      cfg?.working,
+    );
     await writeToIpc(fifoPath, trailing);
     const sizeAfter = await waitForLogQuiet(logFile, SEND_CONFIRM_QUIET_MS, SEND_CONFIRM_MAX_MS);
     screen = (await renderLogTailLines(logFile, 40)) ?? [];
     const grew = sizeAfter !== null && sizeAfter >= sizeBefore + SEND_CONFIRM_MIN_GROWTH_BYTES;
-    if (isWorkingScreen(screen, cfg?.working) || grew) return { confirmed: true, screen };
+    const nowWorking = isWorkingScreen(screen, cfg?.working);
+    if ((nowWorking && !wasAlreadyWorking) || grew) return { confirmed: true, screen };
   }
   return { confirmed: false, screen };
 }
@@ -2585,10 +2594,12 @@ async function cmdSend(rest: string[]): Promise<number> {
 
   const fullBody = prefix + body;
   const noWait = Boolean(argv.noWait) || process.env.AGENT_YES_SEND_NO_WAIT === "1";
-  // Submit-confirm only applies to an actual submit (Enter) with a body and a log
-  // to watch — other trailing codes (esc/ctrl-c/tab/none) don't have a "did it
-  // land" signal in the same sense, and retrying e.g. ctrl-c could double-interrupt.
-  const canConfirm = codeName === "enter" && Boolean(fullBody) && !noWait;
+  // Submit-confirm only applies to an actual submit (Enter/CR) with a body and a
+  // log to watch — other trailing codes (esc/ctrl-c/tab/none) don't have a "did
+  // it land" signal in the same sense, and retrying e.g. ctrl-c could
+  // double-interrupt. Checked against the resolved byte, not the code NAME, so
+  // every alias that resolves to Enter (--code=enter or --code=cr) is covered.
+  const canConfirm = trailing === "\r" && Boolean(fullBody) && !noWait;
   let confirmed = true;
   let lastScreen: string[] = [];
   if (fullBody && trailing) {

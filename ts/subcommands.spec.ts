@@ -1069,14 +1069,17 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
   }
 
   it.skipIf(!itUnix)(
-    "confirms on the first attempt when a working busy marker is already on screen",
+    "confirms on the first attempt when the busy marker newly appears after sending",
     async () => {
       const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
       try {
         const log = path.join(dir, "a.log");
-        await writeFile(log, BUSY); // static — settles immediately, no growth needed
+        await writeFile(log, "❯ \r\n"); // idle — no busy marker yet
         const { submitAndConfirm } = await loadModule();
         await withFifo(async (fifo) => {
+          // The Enter kicks off work: the busy marker appears shortly after,
+          // well within the confirm window — a genuine idle→busy transition.
+          setTimeout(() => appendFileSync(log, BUSY), 100);
           const { confirmed, screen } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
           expect(confirmed).toBe(true);
           expect(screen.join("\n")).toContain("esc to interrupt");
@@ -1085,6 +1088,29 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
         await rm(dir, { recursive: true, force: true }).catch(() => null);
       }
     },
+  );
+
+  it.skipIf(!itUnix)(
+    "does NOT confirm from a busy marker that was already on screen before sending (false-positive guard)",
+    async () => {
+      // A screen already showing "esc to interrupt" (busy from whatever the agent
+      // was already doing) proves nothing about whether THIS Enter landed — e.g.
+      // it could be sitting queued, unsubmitted, behind an unrelated in-flight
+      // turn. Static and unchanging (no growth either), so this must NOT confirm.
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, BUSY);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo) => {
+          const { confirmed } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          expect(confirmed).toBe(false);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
   );
 
   it.skipIf(!itUnix)("confirms via log growth even without a recognized busy marker", async () => {
@@ -1226,6 +1252,28 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
         await writeFile(log, "❯ \r\n"); // stays this way — nothing ever confirms
         await withDrainedFifo(async (fifo) => {
           const { code, stdout } = await send(fifo, log, "hello");
+          expect(code).toBe(1);
+          expect(stdout).toMatch(/NOT confirmed/);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)(
+    "applies submit-confirm for --code=cr too, not just the default --code=enter",
+    async () => {
+      // canConfirm gates on the resolved trailing byte, not the code NAME, so
+      // every alias that resolves to Enter must go through the same confirm
+      // path — regression test for that alias-vs-byte gap.
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, "❯ \r\n"); // never confirms — nothing ever changes
+        await withDrainedFifo(async (fifo) => {
+          const { code, stdout } = await send(fifo, log, "hello", ["--code=cr"]);
           expect(code).toBe(1);
           expect(stdout).toMatch(/NOT confirmed/);
         });
