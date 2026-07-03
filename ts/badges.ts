@@ -26,6 +26,12 @@ export const BADGE_DEFS: BadgeDef[] = [
     title: "A /goal Stop-hook loop is active on this agent",
     pattern: /\/goal active/i,
   },
+  {
+    id: "session-limit",
+    label: "limit",
+    title: "Usage session limit hit — waiting for the reset time shown on screen",
+    pattern: /you['’]?ve hit your session limit/i,
+  },
 ];
 
 /**

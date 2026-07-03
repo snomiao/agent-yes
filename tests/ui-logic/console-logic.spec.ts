@@ -476,6 +476,16 @@ describe("badgesFor (status flag chips)", () => {
     ]);
   });
 
+  it("resolves session-limit to its label + title", () => {
+    expect(badgesFor({ badges: ["session-limit"] })).toEqual([
+      {
+        id: "session-limit",
+        label: "limit",
+        title: "Usage session limit hit — waiting for the reset time shown on screen",
+      },
+    ]);
+  });
+
   it("falls back to the raw id for an unknown badge (never silently dropped)", () => {
     expect(badgesFor({ badges: ["some-future-flag"] })).toEqual([
       { id: "some-future-flag", label: "some-future-flag", title: "some-future-flag" },

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "fs/promises";
+import { appendFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
@@ -982,6 +983,321 @@ describe("subcommands.isSlashCommand", () => {
       "",
     ]) {
       expect(isSlashCommand(s)).toBe(false);
+    }
+  });
+});
+
+describe("subcommands.waitForLogQuiet", () => {
+  it("resolves once writes to the file stop for quietMs, with the final size", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-quiet-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "hello");
+      const { waitForLogQuiet } = await loadModule();
+      const size = await waitForLogQuiet(log, 50, 500);
+      expect(size).toBe(5);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("returns the last observed size when maxWaitMs elapses without ever going quiet", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-quiet-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "x");
+      const timer = setInterval(() => {
+        appendFileSync(log, "x");
+      }, 20);
+      try {
+        const { waitForLogQuiet } = await loadModule();
+        const start = Date.now();
+        const size = await waitForLogQuiet(log, 50, 200);
+        expect(Date.now() - start).toBeGreaterThanOrEqual(190); // hit the cap, not the quiet window
+        expect(size).toBeGreaterThan(0);
+      } finally {
+        clearInterval(timer);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("returns null when the file can't be stat'd", async () => {
+    const { waitForLogQuiet } = await loadModule();
+    expect(await waitForLogQuiet("/no/such/file/here", 50, 200)).toBeNull();
+  });
+});
+
+describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
+  // claude's shipped `working` busy marker — matches cliDefaults()["claude"].working.
+  const BUSY = "⏺ Cogitating…\r\nesc to interrupt · ← for agents\r\n";
+  const IDLE = "❯ some leftover unsent text\r\n"; // no busy marker, never changes
+
+  const rec = (over: any) => ({
+    pid: process.pid,
+    cli: "claude",
+    prompt: null,
+    cwd: "/tmp",
+    log_file: null,
+    fifo_file: null,
+    status: "active",
+    exit_code: null,
+    exit_reason: null,
+    started_at: 0,
+    ...over,
+  });
+
+  async function withFifo(fn: (fifo: string) => Promise<void>) {
+    const { spawnSync } = await import("child_process");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-"));
+    const fifo = path.join(dir, "test.fifo");
+    try {
+      const r = spawnSync("mkfifo", [fifo]);
+      if (r.status !== 0) return; // mkfifo unavailable — skip
+      const fs = await import("fs");
+      const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR); // keeps writes from blocking
+      try {
+        await fn(fifo);
+      } finally {
+        fs.closeSync(rdwrFd);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  }
+
+  it.skipIf(!itUnix)(
+    "confirms on the first attempt when the busy marker newly appears after sending",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, "❯ \r\n"); // idle — no busy marker yet
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo) => {
+          // The Enter kicks off work: the busy marker appears shortly after,
+          // well within the confirm window — a genuine idle→busy transition.
+          setTimeout(() => appendFileSync(log, BUSY), 100);
+          const { confirmed, screen } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          expect(confirmed).toBe(true);
+          expect(screen.join("\n")).toContain("esc to interrupt");
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "does NOT confirm from a busy marker that was already on screen before sending (false-positive guard)",
+    async () => {
+      // A screen already showing "esc to interrupt" (busy from whatever the agent
+      // was already doing) proves nothing about whether THIS Enter landed — e.g.
+      // it could be sitting queued, unsubmitted, behind an unrelated in-flight
+      // turn. Static and unchanging (no growth either), so this must NOT confirm.
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, BUSY);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo) => {
+          const { confirmed } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          expect(confirmed).toBe(false);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)("confirms via log growth even without a recognized busy marker", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "❯ \r\n");
+      const { submitAndConfirm } = await loadModule();
+      await withFifo(async (fifo) => {
+        // Simulate the CLI starting to respond shortly after Enter lands — well
+        // within the first attempt's confirm window.
+        setTimeout(() => appendFileSync(log, "some real response text appears here\r\n"), 100);
+        const { confirmed } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+        expect(confirmed).toBe(true);
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it.skipIf(!itUnix)(
+    "gives up after exhausting retries when the Enter is swallowed (screen never changes)",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, IDLE); // never touched again — nothing to confirm
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo) => {
+          const { confirmed, screen } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          expect(confirmed).toBe(false);
+          expect(screen.join("\n")).toContain("leftover unsent text");
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+});
+
+describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
+  const BUSY = "⏺ Cogitating…\r\nesc to interrupt · ← for agents\r\n";
+
+  // A background drain so cmdSend's writes to the FIFO never block, mirroring
+  // the "delivers a message to a real FIFO" setup above.
+  async function withDrainedFifo(fn: (fifo: string) => Promise<void>) {
+    const { spawnSync } = await import("child_process");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-"));
+    const fifo = path.join(dir, "test.fifo");
+    try {
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return; // mkfifo unavailable — skip
+      const fs = await import("fs");
+      const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR);
+      const drain = setInterval(() => {
+        try {
+          fs.readSync(rdwrFd, Buffer.alloc(4096), 0, 4096, null);
+        } catch {
+          /* EAGAIN or similar — nothing pending, ignore */
+        }
+      }, 20);
+      try {
+        await fn(fifo);
+      } finally {
+        clearInterval(drain);
+        fs.closeSync(rdwrFd);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  }
+
+  async function send(fifo: string, log: string, body: string, extraArgs: string[] = []) {
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: null,
+      cwd: process.cwd(),
+      log_file: log,
+      fifo_file: fifo,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+    });
+    const stdout: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (s: any) => {
+      stdout.push(String(s));
+      return true;
+    };
+    const savedAyPid = process.env.AGENT_YES_PID;
+    delete process.env.AGENT_YES_PID; // isolate from the send-safety guard, as above
+    try {
+      const code = await runSubcommand([
+        "bun",
+        "cli.js",
+        "send",
+        String(process.pid),
+        body,
+        "--force",
+        ...extraArgs,
+      ]);
+      return { code, stdout: stdout.join("") };
+    } finally {
+      process.stdout.write = orig;
+      if (savedAyPid !== undefined) process.env.AGENT_YES_PID = savedAyPid;
+    }
+  }
+
+  it.skipIf(!itUnix)(
+    "exits 0 and reports 'sent' when the busy marker confirms submission",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, BUSY); // already showing "working" — settles + confirms immediately
+        await withDrainedFifo(async (fifo) => {
+          const { code, stdout } = await send(fifo, log, "hello");
+          expect(code).toBe(0);
+          expect(stdout).toMatch(/^sent to pid/);
+          expect(stdout).not.toMatch(/NOT confirmed/);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "exits non-zero and reports the leftover screen when submission can't be confirmed",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, "❯ \r\n"); // stays this way — nothing ever confirms
+        await withDrainedFifo(async (fifo) => {
+          const { code, stdout } = await send(fifo, log, "hello");
+          expect(code).toBe(1);
+          expect(stdout).toMatch(/NOT confirmed/);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)(
+    "applies submit-confirm for --code=cr too, not just the default --code=enter",
+    async () => {
+      // canConfirm gates on the resolved trailing byte, not the code NAME, so
+      // every alias that resolves to Enter must go through the same confirm
+      // path — regression test for that alias-vs-byte gap.
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, "❯ \r\n"); // never confirms — nothing ever changes
+        await withDrainedFifo(async (fifo) => {
+          const { code, stdout } = await send(fifo, log, "hello", ["--code=cr"]);
+          expect(code).toBe(1);
+          expect(stdout).toMatch(/NOT confirmed/);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)("--no-wait skips confirmation entirely and always exits 0", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-log-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "❯ \r\n"); // would fail to confirm if checked — but we opt out
+      await withDrainedFifo(async (fifo) => {
+        const start = Date.now();
+        const { code, stdout } = await send(fifo, log, "hello", ["--no-wait"]);
+        expect(code).toBe(0);
+        expect(stdout).not.toMatch(/NOT confirmed/);
+        expect(Date.now() - start).toBeLessThan(1000); // fast — no settle/confirm polling
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
     }
   });
 });

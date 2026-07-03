@@ -41,6 +41,21 @@ describe("matchBadges", () => {
     ];
     expect(matchBadges(["alpha and beta both here"], defs)).toEqual(["a", "b"]);
   });
+
+  it("matches session-limit when claude's usage-limit banner is on screen", () => {
+    expect(matchBadges(["You've hit your session limit · resets 9:50pm (Asia/Tokyo)"])).toEqual([
+      "session-limit",
+    ]);
+  });
+
+  it("matches with or without the apostrophe (straight ', curly ’, or none)", () => {
+    expect(matchBadges(["You've hit your session limit"])).toEqual(["session-limit"]);
+    expect(matchBadges(["Youve hit your session limit"])).toEqual(["session-limit"]);
+  });
+
+  it("does not match an unrelated 'limit' mention", () => {
+    expect(matchBadges(["rate limit exceeded, please slow down"])).toEqual([]);
+  });
 });
 
 describe("badgeDef", () => {

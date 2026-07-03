@@ -291,6 +291,19 @@ const STUCK_THRESHOLD_MS = (() => {
   return Number.isFinite(n) && n > 0 ? n : 5 * 60 * 1000;
 })();
 
+// `ay send` submit-confirm tuning. A long/multi-line body pasted via bracketed
+// paste can take longer than any fixed delay to finish rendering — sending the
+// trailing Enter before that settles gets swallowed by the CLI's paste handling
+// (it lands mid-paste instead of submitting). So instead of a blind fixed sleep,
+// we poll the log for actual quiet, then confirm the Enter landed by watching for
+// either a `working` busy marker or a meaningful size bump, retrying if not.
+const SEND_SETTLE_QUIET_MS = 150; // no log growth for this long → paste finished rendering
+const SEND_SETTLE_MAX_MS = 1500; // cap: don't wait forever on a screen that's busy for other reasons
+const SEND_CONFIRM_QUIET_MS = 400; // after Enter, no growth for this long → response has settled
+const SEND_CONFIRM_MAX_MS = 1200; // cap per confirm attempt
+const SEND_CONFIRM_MIN_GROWTH_BYTES = 8; // filters out pure cursor-blink/frame noise
+const SEND_SUBMIT_MAX_RETRIES = 2; // total attempts = 1 + this
+
 /**
  * Whether `name` is a subcommand. `managerCommands` (default true, for the
  * generic `ay`/`agent-yes` entry) additionally admits manager-only commands
@@ -2398,6 +2411,77 @@ export async function extractMenu(logPath: string, cli: string): Promise<MenuSta
   return parseMenu(lines, { needsInput: cfg.needsInput, working: cfg.working });
 }
 
+/**
+ * Poll `logFile`'s size until it goes `quietMs` without changing, or `maxWaitMs`
+ * total elapses (whichever first). Returns the final observed size, or null if
+ * the file can't be stat'd. Used by `ay send` both to wait out a paste's render
+ * (before submitting) and to detect whether a submit actually produced output
+ * (after submitting).
+ */
+export async function waitForLogQuiet(
+  logFile: string,
+  quietMs: number,
+  maxWaitMs: number,
+): Promise<number | null> {
+  const pollMs = 50;
+  let lastSize: number | null = null;
+  let lastChangeAt = Date.now();
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    const size = await stat(logFile)
+      .then((s) => s.size)
+      .catch(() => null);
+    if (size === null) return null;
+    if (size !== lastSize) {
+      lastSize = size;
+      lastChangeAt = Date.now();
+    } else if (Date.now() - lastChangeAt >= quietMs) {
+      return lastSize;
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  return lastSize;
+}
+
+/**
+ * Send the trailing submit code and confirm the CLI actually acted on it —
+ * either a `working` busy marker appears, or the log grows meaningfully. Retries
+ * (re-sending just the trailing code) up to SEND_SUBMIT_MAX_RETRIES times when
+ * neither shows, since a swallowed Enter looks identical to a slow one until we
+ * check. Returns whether submission was confirmed, plus the final rendered tail
+ * (for a caller to show the user when it wasn't).
+ */
+export async function submitAndConfirm(
+  record: GlobalPidRecord,
+  fifoPath: string,
+  trailing: string,
+): Promise<{ confirmed: boolean; screen: string[] }> {
+  const logFile = record.log_file!;
+  const cfg = (await cliDefaults())[record.cli];
+  let screen: string[] = [];
+  for (let attempt = 0; attempt <= SEND_SUBMIT_MAX_RETRIES; attempt++) {
+    const sizeBefore =
+      (await stat(logFile)
+        .then((s) => s.size)
+        .catch(() => null)) ?? 0;
+    // A working marker already on screen BEFORE this attempt (e.g. a busy agent
+    // that queues typed input) proves nothing about whether THIS Enter landed —
+    // it could just be leftover from whatever the agent was already doing. Only
+    // a working marker that WASN'T there before, or actual log growth, counts.
+    const wasAlreadyWorking = isWorkingScreen(
+      (await renderLogTailLines(logFile, 40)) ?? [],
+      cfg?.working,
+    );
+    await writeToIpc(fifoPath, trailing);
+    const sizeAfter = await waitForLogQuiet(logFile, SEND_CONFIRM_QUIET_MS, SEND_CONFIRM_MAX_MS);
+    screen = (await renderLogTailLines(logFile, 40)) ?? [];
+    const grew = sizeAfter !== null && sizeAfter >= sizeBefore + SEND_CONFIRM_MIN_GROWTH_BYTES;
+    const nowWorking = isWorkingScreen(screen, cfg?.working);
+    if ((nowWorking && !wasAlreadyWorking) || grew) return { confirmed: true, screen };
+  }
+  return { confirmed: false, screen };
+}
+
 /** Poll until the agent is no longer parked on a menu (selection accepted → it
  * resumed / moved on) or the deadline passes. Returns true if it cleared. */
 async function waitForNeedsInputClear(
@@ -2428,6 +2512,13 @@ async function cmdSend(rest: string[]): Promise<number> {
       type: "boolean",
       default: false,
       description: "Skip the 'tailed recently' safety check (also: AGENT_YES_FORCE_SEND=1)",
+    })
+    .option("no-wait", {
+      type: "boolean",
+      default: false,
+      alias: "async",
+      description:
+        "Fire-and-forget: skip the paste-settle wait and submit confirmation, don't retry a swallowed Enter (also: AGENT_YES_SEND_NO_WAIT=1)",
     })
     .help(false)
     .version(false)
@@ -2502,15 +2593,46 @@ async function cmdSend(rest: string[]): Promise<number> {
       : "";
 
   const fullBody = prefix + body;
+  const noWait = Boolean(argv.noWait) || process.env.AGENT_YES_SEND_NO_WAIT === "1";
+  // Submit-confirm only applies to an actual submit (Enter/CR) with a body and a
+  // log to watch — other trailing codes (esc/ctrl-c/tab/none) don't have a "did
+  // it land" signal in the same sense, and retrying e.g. ctrl-c could
+  // double-interrupt. Checked against the resolved byte, not the code NAME, so
+  // every alias that resolves to Enter (--code=enter or --code=cr) is covered.
+  const canConfirm = trailing === "\r" && Boolean(fullBody) && !noWait;
+  let confirmed = true;
+  let lastScreen: string[] = [];
   if (fullBody && trailing) {
     await writeToIpc(fifoPath, fullBody);
-    await new Promise((r) => setTimeout(r, 200));
-    await writeToIpc(fifoPath, trailing);
+    if (canConfirm && record.log_file) {
+      // Wait for the paste to actually finish rendering — a long/multi-line body
+      // can take longer than any fixed guess, and sending Enter mid-paste gets
+      // swallowed by the CLI's bracketed-paste handling instead of submitting.
+      await waitForLogQuiet(record.log_file, SEND_SETTLE_QUIET_MS, SEND_SETTLE_MAX_MS);
+      ({ confirmed, screen: lastScreen } = await submitAndConfirm(record, fifoPath, trailing));
+    } else {
+      await new Promise((r) => setTimeout(r, 200));
+      await writeToIpc(fifoPath, trailing);
+    }
   } else {
     await writeToIpc(fifoPath, fullBody + trailing);
   }
   const payload = body + trailing;
-  process.stdout.write(`sent to pid ${record.pid} (${record.cli}): ${truncate(payload, 80)}\n`);
+  const status = confirmed ? "sent" : "sent but NOT confirmed submitted";
+  process.stdout.write(
+    `${status} to pid ${record.pid} (${record.cli}): ${truncate(payload, 80)}\n`,
+  );
+  if (!confirmed) {
+    process.stderr.write(
+      `\nwarning: couldn't confirm the CLI acted on it after ${SEND_SUBMIT_MAX_RETRIES + 1} attempt(s) — ` +
+        `it may still be sitting unsubmitted in the prompt. Last screen:\n` +
+        lastScreen
+          .slice(-8)
+          .map((l) => `  ${l}`)
+          .join("\n") +
+        "\n",
+    );
+  }
 
   const replyHint = sender.agent
     ? `  ay send ${sender.agent.pid} "..."              # reply to sender\n`
@@ -2525,7 +2647,7 @@ async function cmdSend(rest: string[]): Promise<number> {
     const tip = stopTipForCli(record.cli, record.pid);
     if (tip) process.stderr.write(tip);
   }
-  return 0;
+  return confirmed ? 0 : 1;
 }
 
 // Resolve a keyword to one agent and return it with a writable FIFO, or throw
