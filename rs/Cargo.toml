@@ -11,6 +11,14 @@ readme = "README.md"
 name = "agent-yes"
 path = "src/main.rs"
 
+# Windows-only GUI-subsystem launcher that runs a child process with no console
+# window (CREATE_NO_WINDOW) under a kill-on-close Job Object, so a process manager
+# (oxmgr) can spawn console programs without flashing a window onto the desktop.
+# On non-Windows it's a no-op stub. See src/bin/ay-spawn-hidden.rs.
+[[bin]]
+name = "ay-spawn-hidden"
+path = "src/bin/ay-spawn-hidden.rs"
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full", "signal"] }
@@ -91,7 +99,14 @@ libc = "0.2"
 # so the stale-cleanup path correctly evicts dead pids on Windows. Without
 # this, the Unix fallback hard-coded `true` and three tests asserting against
 # `is_process_alive(<dead-pid>)` hung or failed.
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = [
+  "Win32_Foundation",
+  "Win32_System_Threading",
+  # ay-spawn-hidden launcher: job objects (kill-on-close) + std handle inheritance
+  "Win32_System_JobObjects",
+  "Win32_System_Console",
+  "Win32_Security",
+] }
 
 [features]
 default = []

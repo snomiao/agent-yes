@@ -18,11 +18,15 @@ import path from "path";
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const cargoHome = process.env.CARGO_HOME || path.join(os.homedir(), ".cargo");
 
-// Both binaries cargo touches: the build output and the installed copy.
-const targets = [
-  path.join(repoRoot, "rs", "target", "release", "agent-yes.exe"),
-  path.join(cargoHome, "bin", "agent-yes.exe"),
-];
+// Every binary cargo touches: the build output and the installed copy, for
+// each [[bin]] in the package. Any of these can be locked by a live process,
+// and cargo install refuses to overwrite an existing installed binary (even
+// with --force it can't delete a locked one), so each must be moved aside.
+const exeNames = ["agent-yes.exe", "ay-spawn-hidden.exe"];
+const targets = exeNames.flatMap((exe) => [
+  path.join(repoRoot, "rs", "target", "release", exe),
+  path.join(cargoHome, "bin", exe),
+]);
 
 function moveLockedBinariesAside(): Array<{ original: string; aside: string }> {
   const moved: Array<{ original: string; aside: string }> = [];
