@@ -191,6 +191,10 @@ export const BADGE_META = {
     label: "limit",
     title: "Usage session limit hit — waiting for the reset time shown on screen",
   },
+  retrying: {
+    label: "retry",
+    title: "Waiting for the API — the CLI is auto-retrying on its own backoff (no action needed)",
+  },
 };
 
 // Status-flag chips ("badges") matched against the agent's screen — e.g. an
@@ -338,18 +342,16 @@ function agentForestNodes(list) {
 export const SORT_MODES = ["state", "created", "identity"];
 
 // Attention-first state ranking: someone scanning the fleet wants the agents that
-// need them (needs_input) up top, then the wedged ones (stuck), then the ones
-// waiting on the API (retrying — self-healing but worth watching), then live work,
+// need them (needs_input) up top, then the wedged ones (stuck), then live work,
 // then quiet/idle, then finished. Unknown states sort last.
 const STATE_RANK = {
   needs_input: 0,
   stuck: 1,
-  retrying: 2,
-  active: 3,
-  running: 3,
-  idle: 4,
-  stopped: 5,
-  exited: 5,
+  active: 2,
+  running: 2,
+  idle: 3,
+  stopped: 4,
+  exited: 4,
 };
 function stateRank(e) {
   const r = STATE_RANK[e.status];
@@ -549,23 +551,20 @@ export function fitTransform(gridW, gridH, paneW, paneH) {
 // Browser-tab title: "<glyph> <selected agent title> - agent-yes", or the bare
 // console title when nothing is selected (blank/whitespace name). The leading
 // glyph mirrors the agent's status dot — ⌨ needs_input ("your turn"), ⚠ stuck,
-// ↻ retrying (waiting on the API, self-healing), ● active, ○ idle, ✗ exited — so
-// the tab shows liveness at a glance even in a background tab; an unknown status
-// adds no glyph.
+// ● active, ○ idle, ✗ exited — so the tab shows liveness at a glance even in a
+// background tab; an unknown status adds no glyph.
 export function statusGlyph(status) {
   return status === "needs_input"
     ? "⌨"
     : status === "stuck"
       ? "⚠"
-      : status === "retrying"
-        ? "↻"
-        : status === "active"
-          ? "●"
-          : status === "idle"
-            ? "○"
-            : status === "exited"
-              ? "✗"
-              : "";
+      : status === "active"
+        ? "●"
+        : status === "idle"
+          ? "○"
+          : status === "exited"
+            ? "✗"
+            : "";
 }
 export function docTitle(name, status) {
   const n = name && String(name).trim();

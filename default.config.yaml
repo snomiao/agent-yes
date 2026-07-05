@@ -96,19 +96,6 @@ clis:
         flags: i
       - pattern: "session limit"
         flags: i
-    # selfRetry: the CLI is auto-retrying an API call on its OWN backoff — claude
-    # prints "✻ Waiting for API response · will retry in 2m 17s · check your
-    # network" and recovers by itself. Distinct from `autoRetry` above (which makes
-    # agent-yes TYPE "retry"): here agent-yes injects NOTHING, it only surfaces the
-    # `retrying` state so the console shows "waiting on the API", not a green busy
-    # dot or a false `stuck`. Anchored on the FULL "Waiting for API response …
-    # will retry in <n>" banner (not a bare "will retry in") so an agent merely
-    # *discussing* retries — docs, this very feature's PR — can't self-trigger the
-    # badge. `[\s\S]{0,40}` spans the "· " separator and any line-wrap between the
-    # two phrases, mirroring the autoRetry patterns above.
-    selfRetry:
-      - pattern: 'Waiting for API response[\s\S]{0,40}will retry in \d'
-        flags: i
     restoreArgs:
       - --continue
     # resumeCommand (optional): a regex scraped from the agent's log by
@@ -205,19 +192,6 @@ clis:
       - pattern: "rate.?limit"
         flags: i
       - pattern: "session limit"
-        flags: i
-    # selfRetry: the CLI is auto-retrying an API call on its OWN backoff — claude
-    # prints "✻ Waiting for API response · will retry in 2m 17s · check your
-    # network" and recovers by itself. Distinct from `autoRetry` above (which makes
-    # agent-yes TYPE "retry"): here agent-yes injects NOTHING, it only surfaces the
-    # `retrying` state so the console shows "waiting on the API", not a green busy
-    # dot or a false `stuck`. Anchored on the FULL "Waiting for API response …
-    # will retry in <n>" banner (not a bare "will retry in") so an agent merely
-    # *discussing* retries — docs, this very feature's PR — can't self-trigger the
-    # badge. `[\s\S]{0,40}` spans the "· " separator and any line-wrap between the
-    # two phrases, mirroring the autoRetry patterns above.
-    selfRetry:
-      - pattern: 'Waiting for API response[\s\S]{0,40}will retry in \d'
         flags: i
     restoreArgs:
       - --continue
@@ -320,19 +294,6 @@ clis:
       - pattern: "rate.?limit"
         flags: i
       - pattern: "session limit"
-        flags: i
-    # selfRetry: the CLI is auto-retrying an API call on its OWN backoff — claude
-    # prints "✻ Waiting for API response · will retry in 2m 17s · check your
-    # network" and recovers by itself. Distinct from `autoRetry` above (which makes
-    # agent-yes TYPE "retry"): here agent-yes injects NOTHING, it only surfaces the
-    # `retrying` state so the console shows "waiting on the API", not a green busy
-    # dot or a false `stuck`. Anchored on the FULL "Waiting for API response …
-    # will retry in <n>" banner (not a bare "will retry in") so an agent merely
-    # *discussing* retries — docs, this very feature's PR — can't self-trigger the
-    # badge. `[\s\S]{0,40}` spans the "· " separator and any line-wrap between the
-    # two phrases, mirroring the autoRetry patterns above.
-    selfRetry:
-      - pattern: 'Waiting for API response[\s\S]{0,40}will retry in \d'
         flags: i
     restoreArgs:
       - --continue

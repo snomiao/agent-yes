@@ -76,7 +76,6 @@ export type AgentCliConfig = {
   typingRespond?: { [message: string]: RegExp[] }; // type specified message to a specified pattern
   autoRetry?: RegExp[]; // recoverable API errors (overload/rate-limit/usage-limit): type "retry" with exponential backoff (up to 8h) instead of exiting
   needsInput?: RegExp[]; // agent is blocked on an interactive selection menu it did NOT auto-resolve; surfaced as the `needs_input` state by `ay ls`/`ay status` (query-time only — not consumed by the run loop)
-  selfRetry?: RegExp[]; // the CLI is auto-retrying an API call on its OWN backoff ("Waiting for API response · will retry in …"); surfaced as the `retrying` state by `ay ls`/`ay status` so the console shows "waiting on the API, not wedged". Query-time only — unlike `autoRetry`, agent-yes injects NOTHING (the CLI recovers itself).
 
   // crash/resuming-session behaviour
   restoreArgs?: string[]; // arguments to continue the session when crashed

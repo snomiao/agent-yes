@@ -21,7 +21,6 @@ import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
 import { matchBadges } from "./badges.ts";
 import {
   classifyNeedsInput,
-  classifySelfRetry,
   isWorkingScreen,
   parseMenu,
   type MenuState,
@@ -1183,12 +1182,6 @@ async function deriveLiveState(
   if (r.log_file) {
     const ni = await extractNeedsInput(r.log_file, r.cli);
     if (ni) return { state: "needs_input", question: ni.question };
-    // The CLI is auto-retrying an API call on its own backoff ("will retry in …").
-    // Checked BEFORE the stuck heuristic: a backoff wait draws a busy marker while
-    // the log briefly goes quiet between countdown ticks, which would otherwise
-    // read as `stuck`. It recovers itself, so surface `retrying`, not `stuck`.
-    const retry = await extractSelfRetry(r.log_file, r.cli);
-    if (retry) return { state: "retrying", question: retry };
     // Quiet long enough to read "idle", but the screen still shows a busy marker
     // => wedged mid-stream, not finished. Surface as `stuck`, not `idle`.
     if (base === "idle" && (await isAgentStuck(r))) return { state: "stuck", question: null };
@@ -1220,7 +1213,7 @@ async function cmdLs(rest: string[]): Promise<number> {
       type: "boolean",
       default: false,
       description:
-        "Stream agent state transitions (needs_input | retrying | idle | active | stuck | stopped) as NDJSON " +
+        "Stream agent state transitions (needs_input | idle | active | stuck | stopped) as NDJSON " +
         "across all matched agents — one event stream for a whole fan-out, instead of N " +
         "per-pid `ay status --watch`es. Runs until Ctrl-C.",
     })
@@ -2147,21 +2140,6 @@ export async function extractNeedsInput(logPath: string, cli: string): Promise<N
   const lines = await renderLogTailLines(logPath, 40);
   if (!lines) return null;
   return classifyNeedsInput(lines, { needsInput: cfg.needsInput, working: cfg.working });
-}
-
-/**
- * Detect whether the CLI is auto-retrying an API call on its own backoff (state
- * `retrying`, e.g. claude "Waiting for API response · will retry in …"). Reads
- * the same rendered tail as {@link extractNeedsInput} and returns the banner text
- * for the UI detail, or null when no self-retry marker is on screen (or the CLI
- * defines none).
- */
-export async function extractSelfRetry(logPath: string, cli: string): Promise<string | null> {
-  const cfg = (await cliDefaults())[cli];
-  if (!cfg?.selfRetry?.length) return null;
-  const lines = await renderLogTailLines(logPath, 40);
-  if (!lines) return null;
-  return classifySelfRetry(lines, { selfRetry: cfg.selfRetry })?.note ?? null;
 }
 
 /**
@@ -3649,16 +3627,9 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
   let question: string | null = null;
   if (state !== "stopped" && record.log_file) {
     const ni = await extractNeedsInput(record.log_file, record.cli);
-    const retry = ni ? null : await extractSelfRetry(record.log_file, record.cli);
     if (ni) {
       state = "needs_input";
       question = ni.question;
-    } else if (retry) {
-      // The CLI is auto-retrying an API call on its own backoff — it recovers
-      // itself, so surface `retrying` (before the stuck heuristic, since a backoff
-      // wait draws a busy marker while the log briefly goes quiet between ticks).
-      state = "retrying";
-      question = retry;
     } else if (state === "idle" && (await isAgentStuck(record, logMtimeMs))) {
       // Quiet long enough to read "idle", but still showing a busy marker: wedged.
       state = "stuck";

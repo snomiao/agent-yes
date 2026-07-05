@@ -56,6 +56,26 @@ describe("matchBadges", () => {
   it("does not match an unrelated 'limit' mention", () => {
     expect(matchBadges(["rate limit exceeded, please slow down"])).toEqual([]);
   });
+
+  it("matches retrying on claude's self-retry backoff banner", () => {
+    expect(
+      matchBadges(["✻ Waiting for API response · will retry in 2m 17s · check your network"]),
+    ).toEqual(["retrying"]);
+  });
+
+  it("matches retrying across a line-wrapped banner (joined text)", () => {
+    expect(
+      matchBadges(["✻ Waiting for API response ·", "will retry in 45s · check your network"]),
+    ).toEqual(["retrying"]);
+  });
+
+  it("does not light retrying for a normal in-flight wait (no 'will retry')", () => {
+    expect(matchBadges(["✻ Waiting for API response… (esc to interrupt)"])).toEqual([]);
+  });
+
+  it("does not light retrying for an agent merely discussing retries (anchored to the banner)", () => {
+    expect(matchBadges(["the client will retry in 5 seconds with backoff"])).toEqual([]);
+  });
 });
 
 describe("badgeDef", () => {
