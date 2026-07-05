@@ -47,6 +47,14 @@ fn detect_install_method() -> &'static str {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Delegate management subcommands (ls/send/restart/stop/serve/…) to the JS
+    // launcher. This binary is only the agent runner; without this, a leading
+    // subcommand word would be parsed by clap as prompt text and spawn an agent.
+    // Must run before parse_args(). See cli::maybe_delegate_subcommand.
+    if let Some(code) = cli::maybe_delegate_subcommand() {
+        std::process::exit(code);
+    }
+
     // Parse CLI arguments
     let args = cli::parse_args()?;
 
