@@ -180,6 +180,26 @@ export function taskLabel(e) {
   return `${t.done}/${t.total}`;
 }
 
+// Display metadata for status flags matched server-side against an agent's
+// screen (ts/badges.ts BADGE_DEFS — matching runs server-side; the API sends
+// just the matched ids in e.badges). Keep the label/title text here in sync
+// with ts/badges.ts. An id with no entry still renders (falls back to the raw
+// id), so a newly-added server-side badge is never silently dropped.
+export const BADGE_META = {
+  "goal-active": { label: "goal", title: "A /goal Stop-hook loop is active on this agent" },
+  "session-limit": {
+    label: "limit",
+    title: "Usage session limit hit — waiting for the reset time shown on screen",
+  },
+};
+
+// Status-flag chips ("badges") matched against the agent's screen — e.g. an
+// active /goal loop. [] when e.badges is missing/empty. Returns
+// { id, label, title } objects ready for the caller to render as chips.
+export function badgesFor(e) {
+  return (e.badges || []).map((id) => ({ id, ...(BADGE_META[id] || { label: id, title: id }) }));
+}
+
 // Human age of an agent ("12s" / "5m" / "3h"). `now` is injectable so tests
 // don't depend on the wall clock; the browser calls age(e) and gets Date.now().
 export function age(e, now = Date.now()) {

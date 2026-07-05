@@ -18,6 +18,7 @@ import path from "path";
 import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
+import { matchBadges } from "./badges.ts";
 import {
   classifyNeedsInput,
   classifySelfRetry,
@@ -291,6 +292,19 @@ const STUCK_THRESHOLD_MS = (() => {
   return Number.isFinite(n) && n > 0 ? n : 5 * 60 * 1000;
 })();
 
+// `ay send` submit-confirm tuning. A long/multi-line body pasted via bracketed
+// paste can take longer than any fixed delay to finish rendering — sending the
+// trailing Enter before that settles gets swallowed by the CLI's paste handling
+// (it lands mid-paste instead of submitting). So instead of a blind fixed sleep,
+// we poll the log for actual quiet, then confirm the Enter landed by watching for
+// either a `working` busy marker or a meaningful size bump, retrying if not.
+const SEND_SETTLE_QUIET_MS = 150; // no log growth for this long → paste finished rendering
+const SEND_SETTLE_MAX_MS = 1500; // cap: don't wait forever on a screen that's busy for other reasons
+const SEND_CONFIRM_QUIET_MS = 400; // after Enter, no growth for this long → response has settled
+const SEND_CONFIRM_MAX_MS = 1200; // cap per confirm attempt
+const SEND_CONFIRM_MIN_GROWTH_BYTES = 8; // filters out pure cursor-blink/frame noise
+const SEND_SUBMIT_MAX_RETRIES = 2; // total attempts = 1 + this
+
 /**
  * Whether `name` is a subcommand. `managerCommands` (default true, for the
  * generic `ay`/`agent-yes` entry) additionally admits manager-only commands
@@ -388,14 +402,77 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
 // ay help
 // ---------------------------------------------------------------------------
 
-export function cmdHelp(managerCommands = true): number {
+/**
+ * The banner shown by `ay help` / `ay -h` when this process is itself running
+ * inside an agent (`AGENT_YES_PID` set — see resolveSender). Answers the three
+ * things a nested agent actually needs: who am I, who spawned me, and how do I
+ * drive sub-agents of my own — so it doesn't have to rediscover the fan-out
+ * primitives (spawn / ay ls forest / ay ls --watch) from scratch every session.
+ */
+async function buildAgentContextSection(self: GlobalPidRecord): Promise<string> {
+  const hasParentPid = typeof self.parent_pid === "number" && self.parent_pid > 0;
+  const parent = hasParentPid
+    ? (
+        await listRecords(undefined, {
+          all: true,
+          active: false,
+          json: false,
+          latest: false,
+          cwdScope: null,
+        })
+      ).find((r) => r.wrapper_pid === self.parent_pid)
+    : undefined;
+
+  const whoAmI = `You are agent pid ${self.pid} (${self.cli}) in ${shortenPath(self.cwd)}.`;
+  // Three distinct states: no parent at all (top-level); a parent_pid whose
+  // record we can resolve; or a parent_pid we can't resolve (its record aged
+  // out / lives on a remote) — that last case is still nested, just unknown,
+  // so it must not collapse into the "top-level" line.
+  const parentLine = !hasParentPid
+    ? `Top-level agent — no parent (started from a human shell or scheduler).`
+    : parent
+      ? `Spawned by agent pid ${parent.pid} (${parent.cli}) in ${shortenPath(parent.cwd)}.`
+      : `Nested under a parent (wrapper pid ${self.parent_pid}) whose record isn't in the local registry.`;
+
+  return (
+    `You are running inside an agent:\n` +
+    `  ${whoAmI}\n` +
+    `  ${parentLine}\n` +
+    `\n` +
+    `As an agent, you can:\n` +
+    `  Spawn a sub-agent:\n` +
+    `    ay <cli> -- "<prompt>"                                  auto-links as your child\n` +
+    `    ay claude --model sonnet --advisor opus -- "<prompt>"   routine task\n` +
+    `    ay claude --model opus --advisor fable -- "<prompt>"    complex task\n` +
+    `    (pick --model by task complexity so easy tasks don't cost like hard ones;\n` +
+    `     --advisor is a claude-cli flag — only takes effect for claude/cy)\n` +
+    `  List agents (your children nest under your own pid in the tree):\n` +
+    `    ay ls --cwd ${shortenPath(self.cwd)}\n` +
+    `  Watch agent state changes, scoped to your workspace:\n` +
+    `    ay ls --watch --cwd ${shortenPath(self.cwd)}\n` +
+    `    (NDJSON stream of state changes across every matched agent — one watcher\n` +
+    `     for the whole fan-out instead of N \`ay status --watch\`es)\n` +
+    `  Read one sub-agent's output:\n` +
+    `    ay tail -f <pid>                        follow live output (no single command tails\n` +
+    `                                              many agents' content at once yet — loop\n` +
+    `                                              \`ay ls --json\` pids into per-pid \`ay tail\`)\n` +
+    `\n`
+  );
+}
+
+export async function cmdHelp(managerCommands = true): Promise<number> {
   // `setup` is manager-only — hide it when invoked through a cli-bound alias
   // (cy/claude-yes/…), where `cy setup` runs the agent instead of managing the host.
   const setupLine = managerCommands
     ? `  ay setup                            guided setup: pick a workspace, share to agent-yes.com\n`
     : ``;
+  // Only agents carry AGENT_YES_PID — a human shell never sets it — so this
+  // section is skipped entirely (no async work at all) for interactive use.
+  const self = process.env.AGENT_YES_PID ? await resolveSender() : null;
+  const agentSection = self ? await buildAgentContextSection(self) : "";
   process.stdout.write(
-    `ay - agent-yes CLI\n` +
+    agentSection +
+      `ay - agent-yes CLI\n` +
       `\n` +
       `Management:\n` +
       `  ay ls [keyword]                     list running agents\n` +
@@ -2088,6 +2165,17 @@ export async function extractSelfRetry(logPath: string, cli: string): Promise<st
 }
 
 /**
+ * Which badges (see badges.ts) match an agent's current screen — the same 32 KB
+ * tail window `ay tail` renders, no CLI-specific config needed. Returns [] on
+ * any read/render error or an empty log, same failure shape as extractNeedsInput.
+ */
+export async function extractBadges(logPath: string): Promise<string[]> {
+  const lines = await renderLogTailLines(logPath, 40);
+  if (!lines) return [];
+  return matchBadges(lines);
+}
+
+/**
  * Whether an alive agent is wedged: its log has been silent for at least
  * STUCK_THRESHOLD_MS yet its screen still shows a `working` busy marker (a live
  * spinner keeps writing, so busy + long-silent = a mid-stream stall). Pass the
@@ -2345,6 +2433,77 @@ export async function extractMenu(logPath: string, cli: string): Promise<MenuSta
   return parseMenu(lines, { needsInput: cfg.needsInput, working: cfg.working });
 }
 
+/**
+ * Poll `logFile`'s size until it goes `quietMs` without changing, or `maxWaitMs`
+ * total elapses (whichever first). Returns the final observed size, or null if
+ * the file can't be stat'd. Used by `ay send` both to wait out a paste's render
+ * (before submitting) and to detect whether a submit actually produced output
+ * (after submitting).
+ */
+export async function waitForLogQuiet(
+  logFile: string,
+  quietMs: number,
+  maxWaitMs: number,
+): Promise<number | null> {
+  const pollMs = 50;
+  let lastSize: number | null = null;
+  let lastChangeAt = Date.now();
+  const deadline = Date.now() + maxWaitMs;
+  while (Date.now() < deadline) {
+    const size = await stat(logFile)
+      .then((s) => s.size)
+      .catch(() => null);
+    if (size === null) return null;
+    if (size !== lastSize) {
+      lastSize = size;
+      lastChangeAt = Date.now();
+    } else if (Date.now() - lastChangeAt >= quietMs) {
+      return lastSize;
+    }
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+  return lastSize;
+}
+
+/**
+ * Send the trailing submit code and confirm the CLI actually acted on it —
+ * either a `working` busy marker appears, or the log grows meaningfully. Retries
+ * (re-sending just the trailing code) up to SEND_SUBMIT_MAX_RETRIES times when
+ * neither shows, since a swallowed Enter looks identical to a slow one until we
+ * check. Returns whether submission was confirmed, plus the final rendered tail
+ * (for a caller to show the user when it wasn't).
+ */
+export async function submitAndConfirm(
+  record: GlobalPidRecord,
+  fifoPath: string,
+  trailing: string,
+): Promise<{ confirmed: boolean; screen: string[] }> {
+  const logFile = record.log_file!;
+  const cfg = (await cliDefaults())[record.cli];
+  let screen: string[] = [];
+  for (let attempt = 0; attempt <= SEND_SUBMIT_MAX_RETRIES; attempt++) {
+    const sizeBefore =
+      (await stat(logFile)
+        .then((s) => s.size)
+        .catch(() => null)) ?? 0;
+    // A working marker already on screen BEFORE this attempt (e.g. a busy agent
+    // that queues typed input) proves nothing about whether THIS Enter landed —
+    // it could just be leftover from whatever the agent was already doing. Only
+    // a working marker that WASN'T there before, or actual log growth, counts.
+    const wasAlreadyWorking = isWorkingScreen(
+      (await renderLogTailLines(logFile, 40)) ?? [],
+      cfg?.working,
+    );
+    await writeToIpc(fifoPath, trailing);
+    const sizeAfter = await waitForLogQuiet(logFile, SEND_CONFIRM_QUIET_MS, SEND_CONFIRM_MAX_MS);
+    screen = (await renderLogTailLines(logFile, 40)) ?? [];
+    const grew = sizeAfter !== null && sizeAfter >= sizeBefore + SEND_CONFIRM_MIN_GROWTH_BYTES;
+    const nowWorking = isWorkingScreen(screen, cfg?.working);
+    if ((nowWorking && !wasAlreadyWorking) || grew) return { confirmed: true, screen };
+  }
+  return { confirmed: false, screen };
+}
+
 /** Poll until the agent is no longer parked on a menu (selection accepted → it
  * resumed / moved on) or the deadline passes. Returns true if it cleared. */
 async function waitForNeedsInputClear(
@@ -2375,6 +2534,13 @@ async function cmdSend(rest: string[]): Promise<number> {
       type: "boolean",
       default: false,
       description: "Skip the 'tailed recently' safety check (also: AGENT_YES_FORCE_SEND=1)",
+    })
+    .option("no-wait", {
+      type: "boolean",
+      default: false,
+      alias: "async",
+      description:
+        "Fire-and-forget: skip the paste-settle wait and submit confirmation, don't retry a swallowed Enter (also: AGENT_YES_SEND_NO_WAIT=1)",
     })
     .help(false)
     .version(false)
@@ -2438,21 +2604,57 @@ async function cmdSend(rest: string[]): Promise<number> {
   }
 
   // When an agent sends, prefix one line so the recipient knows who pinged it
-  // and exactly how to reply (to a resolvable pid — the sender's own).
-  const prefix = sender.agent
-    ? `[from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${sender.agent.pid} "..."]\n`
-    : "";
+  // and exactly how to reply (to a resolvable pid — the sender's own). BUT a
+  // slash command is only recognized when `/` is the very first character of the
+  // submitted message; the prefix would bump it to line 2 and the CLI would type
+  // the command as plain text. So skip the prefix for a command body and send it
+  // verbatim — attribution is dropped for the command, but it actually runs.
+  const prefix =
+    sender.agent && !isSlashCommand(body)
+      ? `[from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${sender.agent.pid} "..."]\n`
+      : "";
 
   const fullBody = prefix + body;
+  const noWait = Boolean(argv.noWait) || process.env.AGENT_YES_SEND_NO_WAIT === "1";
+  // Submit-confirm only applies to an actual submit (Enter/CR) with a body and a
+  // log to watch — other trailing codes (esc/ctrl-c/tab/none) don't have a "did
+  // it land" signal in the same sense, and retrying e.g. ctrl-c could
+  // double-interrupt. Checked against the resolved byte, not the code NAME, so
+  // every alias that resolves to Enter (--code=enter or --code=cr) is covered.
+  const canConfirm = trailing === "\r" && Boolean(fullBody) && !noWait;
+  let confirmed = true;
+  let lastScreen: string[] = [];
   if (fullBody && trailing) {
     await writeToIpc(fifoPath, fullBody);
-    await new Promise((r) => setTimeout(r, 200));
-    await writeToIpc(fifoPath, trailing);
+    if (canConfirm && record.log_file) {
+      // Wait for the paste to actually finish rendering — a long/multi-line body
+      // can take longer than any fixed guess, and sending Enter mid-paste gets
+      // swallowed by the CLI's bracketed-paste handling instead of submitting.
+      await waitForLogQuiet(record.log_file, SEND_SETTLE_QUIET_MS, SEND_SETTLE_MAX_MS);
+      ({ confirmed, screen: lastScreen } = await submitAndConfirm(record, fifoPath, trailing));
+    } else {
+      await new Promise((r) => setTimeout(r, 200));
+      await writeToIpc(fifoPath, trailing);
+    }
   } else {
     await writeToIpc(fifoPath, fullBody + trailing);
   }
   const payload = body + trailing;
-  process.stdout.write(`sent to pid ${record.pid} (${record.cli}): ${truncate(payload, 80)}\n`);
+  const status = confirmed ? "sent" : "sent but NOT confirmed submitted";
+  process.stdout.write(
+    `${status} to pid ${record.pid} (${record.cli}): ${truncate(payload, 80)}\n`,
+  );
+  if (!confirmed) {
+    process.stderr.write(
+      `\nwarning: couldn't confirm the CLI acted on it after ${SEND_SUBMIT_MAX_RETRIES + 1} attempt(s) — ` +
+        `it may still be sitting unsubmitted in the prompt. Last screen:\n` +
+        lastScreen
+          .slice(-8)
+          .map((l) => `  ${l}`)
+          .join("\n") +
+        "\n",
+    );
+  }
 
   const replyHint = sender.agent
     ? `  ay send ${sender.agent.pid} "..."              # reply to sender\n`
@@ -2467,7 +2669,7 @@ async function cmdSend(rest: string[]): Promise<number> {
     const tip = stopTipForCli(record.cli, record.pid);
     if (tip) process.stderr.write(tip);
   }
-  return 0;
+  return confirmed ? 0 : 1;
 }
 
 // Resolve a keyword to one agent and return it with a writable FIFO, or throw
@@ -2876,6 +3078,14 @@ async function cmdStop(rest: string[]): Promise<number> {
 export function isExitRequest(body: string): boolean {
   const t = body.trim().toLowerCase();
   return t === "exit" || t === "/exit";
+}
+
+/** A body that the CLI will parse as a slash command — `/` as the very first
+ * character (claude requires column 0, no leading whitespace, then a letter).
+ * Such a body must be sent verbatim: any prefix line bumps the `/` off column 0
+ * and the CLI types the command as plain text instead of running it. */
+export function isSlashCommand(body: string): boolean {
+  return /^\/[A-Za-z]/.test(body);
 }
 
 /**

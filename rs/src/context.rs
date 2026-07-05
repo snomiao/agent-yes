@@ -33,6 +33,22 @@ const RETRY_BASE_SECS: u64 = 8; // first backoff; doubles each consecutive failu
 /// screen (output → idle resets → stall clears) well within this window.
 const STALL_ESC_GRACE_SECS: u64 = 30;
 const RETRY_MAX_DELAY_SECS: u64 = 256; // cap per-retry backoff: 8,16,32,…,256 then hold
+
+/// Minimum quiet time (no PTY output, no forwarded stdin — see idle_waiter.ping()
+/// call sites) required before a scheduled auto-retry may actually fire, on top
+/// of the backoff delay above. The backoff schedule alone can elapse while the
+/// user is mid-typing into the prompt; typing "retry" + Enter over that would
+/// submit a mangled line. Deliberately short — this only debounces against
+/// active typing, not a real excuse to delay recovery.
+const RETRY_MIN_IDLE_MS: u64 = 5_000;
+
+// Rapid-Ctrl-C panic gesture: a human escape hatch for an agent wedged on a
+// silent stall that ignores forwarded Ctrl-C. Pressing Ctrl-C this many times
+// within the window is read as "get me out": the first completed gesture
+// Esc-cancels the in-flight request; a second while still stuck forces a restart
+// (exit 75 → a --robust parent resumes with --continue).
+const PANIC_CTRL_C_COUNT: usize = 5;
+const PANIC_CTRL_C_WINDOW_SECS: u64 = 2;
 const RETRY_GIVE_UP_SECS: u64 = 8 * 3600; // stop after 8h (claude's usage window is ~5h)
 
 /// What the no-output watchdog should do this tick. Pure decision so it can be
@@ -70,12 +86,44 @@ fn decide_stall_action(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum PanicAction {
+    /// Gesture incomplete: fewer than `threshold` presses in the window.
+    None,
+    /// Gesture complete, first time this stall: Esc-cancel the request.
+    Esc,
+    /// Gesture complete again while an Esc is still in flight (output hasn't
+    /// resumed): escalate to a forced restart.
+    ForceKill,
+}
+
+/// Decide the rapid-Ctrl-C panic action. `recent` is the number of Ctrl-C
+/// presses inside the trailing window; `esc_in_flight` is true once this gesture
+/// already sent an Esc that output hasn't recovered from yet.
+fn decide_panic_action(recent: usize, threshold: usize, esc_in_flight: bool) -> PanicAction {
+    if recent < threshold {
+        return PanicAction::None;
+    }
+    if esc_in_flight {
+        PanicAction::ForceKill
+    } else {
+        PanicAction::Esc
+    }
+}
+
 /// Exponential backoff (seconds) for the Nth consecutive auto-retry, capped.
 fn retry_backoff_secs(streak: u32) -> u64 {
     let shift = streak.min(20); // guard against shift overflow on pathological streaks
     RETRY_BASE_SECS
         .saturating_mul(1u64 << shift)
         .min(RETRY_MAX_DELAY_SECS)
+}
+
+/// Whether a scheduled auto-retry may actually fire: the agent must be sitting
+/// idle at a ready prompt (not mid-work) AND the terminal must have been quiet
+/// for at least `min_idle_ms` — see RETRY_MIN_IDLE_MS.
+fn should_fire_retry(working: bool, ready: bool, idle_ms: u64, min_idle_ms: u64) -> bool {
+    !working && ready && idle_ms >= min_idle_ms
 }
 
 /// Agent context - centralized session state
@@ -166,6 +214,14 @@ pub struct AgentContext {
     stall_esc_sent_at: Option<Instant>,
     pub stall_force_restart: bool,
 
+    // Rapid-Ctrl-C panic gesture (human escape hatch, see PANIC_CTRL_C_COUNT).
+    // `ctrl_c_times` holds recent Ctrl-C Instants trimmed to the trailing window;
+    // `panic_esc_sent_at` arms once the gesture Esc-cancels a wedged request and
+    // clears the moment visible output resumes, so a repeat gesture escalates to
+    // a forced restart rather than re-sending Esc.
+    ctrl_c_times: Vec<Instant>,
+    panic_esc_sent_at: Option<Instant>,
+
     // Our own pid — needed to update this agent's pid_store record (the
     // unresponsive flag) from inside the loop.
     pid: u32,
@@ -229,6 +285,8 @@ impl AgentContext {
             auto_retry_next_at: None,
             stall_esc_sent_at: None,
             stall_force_restart: false,
+            ctrl_c_times: Vec::new(),
+            panic_esc_sent_at: None,
             last_idle_scan_at: None,
             stdout_drop_count: 0,
             log_writer: LogWriter::new(pid, &cwd),
@@ -552,10 +610,56 @@ impl AgentContext {
                             exit_code = 130;
                             break;
                         } else {
-                            // Forward Ctrl+C to agent — a live TUI redraws (e.g.
-                            // an interrupt prompt), so treat it as a liveness poke.
-                            send_ctrl_c(&writer)?;
-                            self.mark_stdin_sent();
+                            // Record the press(es) and check the rapid-Ctrl-C
+                            // panic gesture — a human escape hatch for an agent
+                            // wedged on a silent stall that ignores forwarded
+                            // Ctrl-C. Count every 0x03 in the chunk: a fast burst
+                            // can arrive coalesced in a single read, and one
+                            // timestamp per chunk would never reach the threshold.
+                            let now = Instant::now();
+                            let presses = data.iter().filter(|&&b| b == 0x03).count().max(1);
+                            for _ in 0..presses {
+                                self.ctrl_c_times.push(now);
+                            }
+                            let window = Duration::from_secs(PANIC_CTRL_C_WINDOW_SECS);
+                            self.ctrl_c_times
+                                .retain(|t| now.duration_since(*t) <= window);
+                            match decide_panic_action(
+                                self.ctrl_c_times.len(),
+                                PANIC_CTRL_C_COUNT,
+                                self.panic_esc_sent_at.is_some(),
+                            ) {
+                                PanicAction::None => {
+                                    // Forward Ctrl+C to agent — a live TUI redraws
+                                    // (e.g. an interrupt prompt), so treat it as a
+                                    // liveness poke.
+                                    send_ctrl_c(&writer)?;
+                                    self.idle_waiter.ping();
+                                    self.mark_stdin_sent();
+                                }
+                                PanicAction::Esc => {
+                                    warn!(
+                                        "Panic gesture: {}x Ctrl-C in {}s — sending Esc to \
+                                         cancel a wedged request (repeat to force restart)",
+                                        PANIC_CTRL_C_COUNT, PANIC_CTRL_C_WINDOW_SECS
+                                    );
+                                    // send_esc (NOT send_text) so we don't reset the
+                                    // idle timer; mirrors the no-output watchdog. If
+                                    // output resumes, handle_output disarms this.
+                                    send_esc(&writer)?;
+                                    self.panic_esc_sent_at = Some(now);
+                                    self.ctrl_c_times.clear();
+                                }
+                                PanicAction::ForceKill => {
+                                    warn!(
+                                        "Panic gesture repeated while still stuck — forcing \
+                                         restart (a --robust run resumes with --continue)"
+                                    );
+                                    // Picked up next heartbeat → exit 75 → restart.
+                                    self.stall_force_restart = true;
+                                    self.ctrl_c_times.clear();
+                                }
+                            }
                         }
                     }
                     // Check for Ctrl+Y (toggle auto-yes)
@@ -796,6 +900,9 @@ impl AgentContext {
         let stripped = strip_ansi_escapes::strip_str(output);
         if !stripped.trim().is_empty() {
             self.idle_waiter.ping();
+            // Output resumed → a panic-Esc unstuck the stream. Disarm so the next
+            // gesture starts fresh at Esc rather than jumping to force-restart.
+            self.panic_esc_sent_at = None;
         }
 
         // Check patterns
@@ -896,11 +1003,15 @@ impl AgentContext {
                 self.auto_retry_streak = 0;
             } else if now >= next_at {
                 // Re-render the screen to confirm the agent is idle at a prompt —
-                // never type "retry" while it's busy (e.g. the CLI's own retry).
+                // never type "retry" while it's busy (e.g. the CLI's own retry) —
+                // and require a few quiet seconds on top of the backoff delay, so
+                // a scheduled retry doesn't collide with a line the user is
+                // actively typing (see RETRY_MIN_IDLE_MS).
                 let screen = self.vterm.contents();
                 let working = self.cli_config.working.iter().any(|p| p.is_match(&screen));
                 let ready = self.cli_config.ready.iter().any(|p| p.is_match(&screen));
-                if working || !ready {
+                let idle_ms = self.idle_waiter.idle_time_ms();
+                if !should_fire_retry(working, ready, idle_ms, RETRY_MIN_IDLE_MS) {
                     self.auto_retry_next_at = Some(now + Duration::from_millis(500));
                 } else {
                     self.auto_retry_streak = self.auto_retry_streak.saturating_add(1);
@@ -1318,6 +1429,20 @@ mod tests {
     }
 
     #[test]
+    fn test_should_fire_retry_requires_ready_not_working_and_quiet() {
+        // Busy — never fire even if otherwise ready and quiet.
+        assert!(!should_fire_retry(true, true, 10_000, 5_000));
+        // Not at a recognized ready prompt — don't fire.
+        assert!(!should_fire_retry(false, false, 10_000, 5_000));
+        // Ready and idle, but the quiet window hasn't elapsed yet (user may
+        // still be mid-typing) — defer.
+        assert!(!should_fire_retry(false, true, 4_999, 5_000));
+        // Ready, idle, and past the quiet window — fire.
+        assert!(should_fire_retry(false, true, 5_000, 5_000));
+        assert!(should_fire_retry(false, true, 10_000, 5_000));
+    }
+
+    #[test]
     fn test_stall_disabled_when_timeout_zero() {
         // timeout 0 always clears, even if it otherwise looks stalled.
         assert_eq!(
@@ -1333,6 +1458,30 @@ mod tests {
             decide_stall_action(300, false, 9999, None, 30),
             StallAction::Clear
         );
+    }
+
+    #[test]
+    fn test_panic_below_threshold_is_none() {
+        // 4 presses in the window → gesture incomplete, forward as normal.
+        assert_eq!(decide_panic_action(4, 5, false), PanicAction::None);
+    }
+
+    #[test]
+    fn test_panic_at_threshold_sends_esc() {
+        // 5th press completes the gesture, no Esc yet → Esc-cancel.
+        assert_eq!(decide_panic_action(5, 5, false), PanicAction::Esc);
+    }
+
+    #[test]
+    fn test_panic_repeat_while_esc_in_flight_force_kills() {
+        // Gesture repeats while a prior Esc hasn't recovered → force restart.
+        assert_eq!(decide_panic_action(5, 5, true), PanicAction::ForceKill);
+    }
+
+    #[test]
+    fn test_panic_below_threshold_ignores_esc_state() {
+        // An armed Esc doesn't lower the bar: still need a full gesture.
+        assert_eq!(decide_panic_action(4, 5, true), PanicAction::None);
     }
 
     #[test]

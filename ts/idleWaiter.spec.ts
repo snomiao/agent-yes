@@ -59,6 +59,18 @@ describe("IdleWaiter", () => {
     expect(result).toBe(waiter);
   });
 
+  it("idleTimeMs reflects elapsed time since the last ping", async () => {
+    const waiter = new IdleWaiter();
+    waiter.ping();
+    expect(waiter.idleTimeMs()).toBeLessThan(20);
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(waiter.idleTimeMs()).toBeGreaterThanOrEqual(50);
+
+    waiter.ping();
+    expect(waiter.idleTimeMs()).toBeLessThan(20);
+  });
+
   it("should wait until idle period has passed", async () => {
     const waiter = new IdleWaiter();
     waiter.checkInterval = 10;
