@@ -20,6 +20,7 @@ import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
 import {
   classifyNeedsInput,
+  classifySelfRetry,
   isWorkingScreen,
   parseMenu,
   type MenuState,
@@ -1105,6 +1106,12 @@ async function deriveLiveState(
   if (r.log_file) {
     const ni = await extractNeedsInput(r.log_file, r.cli);
     if (ni) return { state: "needs_input", question: ni.question };
+    // The CLI is auto-retrying an API call on its own backoff ("will retry in …").
+    // Checked BEFORE the stuck heuristic: a backoff wait draws a busy marker while
+    // the log briefly goes quiet between countdown ticks, which would otherwise
+    // read as `stuck`. It recovers itself, so surface `retrying`, not `stuck`.
+    const retry = await extractSelfRetry(r.log_file, r.cli);
+    if (retry) return { state: "retrying", question: retry };
     // Quiet long enough to read "idle", but the screen still shows a busy marker
     // => wedged mid-stream, not finished. Surface as `stuck`, not `idle`.
     if (base === "idle" && (await isAgentStuck(r))) return { state: "stuck", question: null };
@@ -1136,7 +1143,7 @@ async function cmdLs(rest: string[]): Promise<number> {
       type: "boolean",
       default: false,
       description:
-        "Stream agent state transitions (needs_input | idle | active | stuck | stopped) as NDJSON " +
+        "Stream agent state transitions (needs_input | retrying | idle | active | stuck | stopped) as NDJSON " +
         "across all matched agents — one event stream for a whole fan-out, instead of N " +
         "per-pid `ay status --watch`es. Runs until Ctrl-C.",
     })
@@ -2066,6 +2073,21 @@ export async function extractNeedsInput(logPath: string, cli: string): Promise<N
 }
 
 /**
+ * Detect whether the CLI is auto-retrying an API call on its own backoff (state
+ * `retrying`, e.g. claude "Waiting for API response · will retry in …"). Reads
+ * the same rendered tail as {@link extractNeedsInput} and returns the banner text
+ * for the UI detail, or null when no self-retry marker is on screen (or the CLI
+ * defines none).
+ */
+export async function extractSelfRetry(logPath: string, cli: string): Promise<string | null> {
+  const cfg = (await cliDefaults())[cli];
+  if (!cfg?.selfRetry?.length) return null;
+  const lines = await renderLogTailLines(logPath, 40);
+  if (!lines) return null;
+  return classifySelfRetry(lines, { selfRetry: cfg.selfRetry })?.note ?? null;
+}
+
+/**
  * Whether an alive agent is wedged: its log has been silent for at least
  * STUCK_THRESHOLD_MS yet its screen still shows a `working` busy marker (a live
  * spinner keeps writing, so busy + long-silent = a mid-stream stall). Pass the
@@ -2325,7 +2347,10 @@ export async function extractMenu(logPath: string, cli: string): Promise<MenuSta
 
 /** Poll until the agent is no longer parked on a menu (selection accepted → it
  * resumed / moved on) or the deadline passes. Returns true if it cleared. */
-async function waitForNeedsInputClear(record: GlobalPidRecord, timeoutMs: number): Promise<boolean> {
+async function waitForNeedsInputClear(
+  record: GlobalPidRecord,
+  timeoutMs: number,
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await new Promise((r) => setTimeout(r, 250));
@@ -2547,9 +2572,7 @@ async function cmdSelect(rest: string[]): Promise<number> {
   const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
   const n = Number(argv._[1]);
   if (!keyword || !Number.isInteger(n) || n < 1) {
-    throw new Error(
-      "usage: ay select <keyword> <N>   (N = the 1-based option number to choose)",
-    );
+    throw new Error("usage: ay select <keyword> <N>   (N = the 1-based option number to choose)");
   }
 
   const opts: CommonOpts = {
@@ -2561,7 +2584,9 @@ async function cmdSelect(rest: string[]): Promise<number> {
   };
   const record = await resolveWritableAgent(keyword, opts);
   if (!record.log_file) {
-    throw new Error(`pid ${record.pid}: no log_file recorded — can't read the menu to select from.`);
+    throw new Error(
+      `pid ${record.pid}: no log_file recorded — can't read the menu to select from.`,
+    );
   }
   const force = Boolean(argv.force) || process.env.AGENT_YES_FORCE_SEND === "1";
   await enforceSendGuards(record, force);
@@ -2573,9 +2598,7 @@ async function cmdSelect(rest: string[]): Promise<number> {
     );
   }
   if (menu.options.length > 0 && !menu.options.includes(n)) {
-    throw new Error(
-      `option ${n} is out of range — this menu offers ${menu.options.join(", ")}.`,
-    );
+    throw new Error(`option ${n} is out of range — this menu offers ${menu.options.join(", ")}.`);
   }
 
   // Move the cursor from where it sits to option N, then confirm. Delta from the
@@ -2585,7 +2608,8 @@ async function cmdSelect(rest: string[]): Promise<number> {
   await writeKeysPaced(record.fifo_file!, byteSeqs, Math.max(0, argv.pace));
 
   const delta = n - menu.cursor;
-  const moved = delta === 0 ? "cursor already there" : `${Math.abs(delta)}× ${delta > 0 ? "down" : "up"}`;
+  const moved =
+    delta === 0 ? "cursor already there" : `${Math.abs(delta)}× ${delta > 0 ? "down" : "up"}`;
   process.stdout.write(
     `pid ${record.pid} (${record.cli}): selected option ${n} (${moved} + enter)\n`,
   );
@@ -3415,9 +3439,16 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
   let question: string | null = null;
   if (state !== "stopped" && record.log_file) {
     const ni = await extractNeedsInput(record.log_file, record.cli);
+    const retry = ni ? null : await extractSelfRetry(record.log_file, record.cli);
     if (ni) {
       state = "needs_input";
       question = ni.question;
+    } else if (retry) {
+      // The CLI is auto-retrying an API call on its own backoff — it recovers
+      // itself, so surface `retrying` (before the stuck heuristic, since a backoff
+      // wait draws a busy marker while the log briefly goes quiet between ticks).
+      state = "retrying";
+      question = retry;
     } else if (state === "idle" && (await isAgentStuck(record, logMtimeMs))) {
       // Quiet long enough to read "idle", but still showing a busy marker: wedged.
       state = "stuck";

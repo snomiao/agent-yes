@@ -1,11 +1,12 @@
 import { expect, test } from "vitest";
-import { classifyNeedsInput, isWorkingScreen, parseMenu } from "./needsInput.ts";
+import { classifyNeedsInput, classifySelfRetry, isWorkingScreen, parseMenu } from "./needsInput.ts";
 import { loadSharedCliDefaults } from "./configShared.ts";
 
 // Use the REAL shipped claude/codex patterns so the test guards the actual config.
 const defaults = await loadSharedCliDefaults();
 const claude = { needsInput: defaults.claude?.needsInput, working: defaults.claude?.working };
 const codex = { needsInput: defaults.codex?.needsInput, working: defaults.codex?.working };
+const claudeRetry = { selfRetry: defaults.claude?.selfRetry };
 
 test("claude config actually ships a needsInput pattern", () => {
   expect(claude.needsInput?.length).toBeGreaterThan(0);
@@ -112,4 +113,56 @@ test("parseMenu: a 'N.M' version in an option label isn't mistaken for another o
   const menu = parseMenu(screen, claude);
   expect(menu!.cursor).toBe(1);
   expect(menu!.options).toEqual([1, 2]);
+});
+
+test("claude config actually ships a selfRetry pattern", () => {
+  expect(claudeRetry.selfRetry?.length).toBeGreaterThan(0);
+});
+
+test("classifySelfRetry: detects claude's 'will retry in …' backoff banner", () => {
+  const screen = [
+    "⏺ Reading the file…",
+    "",
+    "✻ Waiting for API response · will retry in 2m 17s · check your network",
+  ];
+  const retry = classifySelfRetry(screen, claudeRetry);
+  expect(retry).not.toBeNull();
+  expect(retry!.note).toContain("will retry in");
+});
+
+test("classifySelfRetry: reports the CURRENT (last) banner, not a stale one above", () => {
+  const screen = [
+    "✻ Waiting for API response · will retry in 4m 00s · check your network",
+    "✻ Waiting for API response · will retry in 1m 05s · check your network",
+  ];
+  const retry = classifySelfRetry(screen, claudeRetry);
+  expect(retry!.note).toContain("1m 05s");
+});
+
+test("classifySelfRetry: a normal in-flight 'Waiting for API response' is NOT retrying", () => {
+  const screen = ["✻ Waiting for API response… (esc to interrupt)"];
+  expect(classifySelfRetry(screen, claudeRetry)).toBeNull();
+});
+
+test("classifySelfRetry: an agent merely DISCUSSING retries doesn't self-trigger (anchored to the banner)", () => {
+  // No "Waiting for API response" preamble → not Claude's backoff banner.
+  const screen = [
+    "⏺ The request failed, so the client will retry in 5 seconds with backoff.",
+    "  I'll retry in 2 minutes if it's still down.",
+  ];
+  expect(classifySelfRetry(screen, claudeRetry)).toBeNull();
+});
+
+test("classifySelfRetry: null when no selfRetry patterns are configured", () => {
+  expect(classifySelfRetry(["will retry in 5s"], { selfRetry: [] })).toBeNull();
+  expect(classifySelfRetry(["will retry in 5s"], {})).toBeNull();
+});
+
+test("classifySelfRetry: falls back to the joined text when the banner spans a line wrap", () => {
+  // A pattern that only matches across the wrap (no single line carries it).
+  const spanning = { selfRetry: [/will retry[\s\S]*in \d/] };
+  const screen = ["… some prefix will retry", "in 30s · check your network"];
+  const retry = classifySelfRetry(screen, spanning);
+  expect(retry).not.toBeNull();
+  expect(retry!.note).toBe("waiting for API response — retrying");
 });

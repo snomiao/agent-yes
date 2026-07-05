@@ -67,6 +67,39 @@ export function classifyNeedsInput(
   return { question: block.join(" • ").slice(0, 400) };
 }
 
+/**
+ * Detect, from an agent's rendered TUI screen, whether the CLI is auto-retrying
+ * an API call on its OWN backoff — e.g. claude's "✻ Waiting for API response ·
+ * will retry in 2m 17s · check your network". Surfaced as the `retrying` state so
+ * the console shows the agent is waiting on the API, not wedged.
+ *
+ * Unlike {@link classifyNeedsInput}, a `working` spinner does NOT short-circuit
+ * this: the retry banner IS drawn alongside the busy spinner (you can still press
+ * esc to interrupt), so keying off `working` would hide every retry. Returns the
+ * matched banner line (trimmed, for the UI detail) or null. Pure + synchronous.
+ */
+export function classifySelfRetry(
+  lines: string[],
+  cfg: { selfRetry?: RegExp[] },
+): { note: string } | null {
+  const patterns = cfg.selfRetry ?? [];
+  if (patterns.length === 0) return null;
+  // Scan newest-first so the note reflects the CURRENT countdown, not a stale
+  // banner higher in the scrollback.
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!;
+    if (patterns.some((re) => reTest(re, line))) {
+      return { note: line.trim().slice(0, 400) };
+    }
+  }
+  // A pattern may span a line wrap; fall back to matching the joined text.
+  const text = lines.join("\n");
+  if (patterns.some((re) => reTest(re, text))) {
+    return { note: "waiting for API response — retrying" };
+  }
+  return null;
+}
+
 export interface MenuState {
   /** The 1-based option number the menu cursor (❯/›/>) currently sits on. */
   cursor: number;
@@ -78,7 +111,7 @@ export interface MenuState {
 
 // An option row: an optional cursor glyph / bullet, then "N. " (the trailing
 // space rejects version-like "3.5GB" that isn't a menu option).
-const OPTION_LINE = /^[\s❯›>▶◉○●·*\-]*?(\d+)\.\s/;
+const OPTION_LINE = /^[\s❯›>▶◉○●·*-]*?(\d+)\.\s/;
 
 /**
  * Parse the selection menu a `needs_input` agent is parked on into a cursor

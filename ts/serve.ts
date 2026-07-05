@@ -10,6 +10,7 @@ import {
   controlCodeFromName,
   deriveLiveStatus,
   extractNeedsInput,
+  extractSelfRetry,
   extractTaskCounts,
   listRecords,
   readNotes,
@@ -961,6 +962,30 @@ export async function cmdServe(rest: string[]): Promise<number> {
     }
   };
 
+  // Per-agent "self-retrying" detection: the CLI is auto-retrying an API call on
+  // its OWN backoff (config `selfRetry`, e.g. claude "Waiting for API response ·
+  // will retry in …"). agent-yes injects nothing here — the CLI recovers itself —
+  // so this only drives the console's `retrying` badge. Same (size, mtime) cache
+  // as logNeedsInput so the 1s list tick stays cheap. Returns the banner text
+  // (shown in the UI), or null when the agent isn't retrying.
+  const retryCache = new Map<string, { size: number; mtimeMs: number; note: string | null }>();
+  const logSelfRetry = async (
+    logFile: string | null | undefined,
+    cli: string,
+  ): Promise<string | null> => {
+    if (!logFile) return null;
+    try {
+      const { size, mtimeMs } = await stat(logFile);
+      const hit = retryCache.get(logFile);
+      if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.note;
+      const note = await extractSelfRetry(logFile, cli);
+      retryCache.set(logFile, { size, mtimeMs, note });
+      return note;
+    } catch {
+      return null;
+    }
+  };
+
   // Per-repo git snapshot for the list (branch + dirty/changed + ahead/behind, from
   // one `git status --porcelain=v2 --branch`). v2 (not v1) so the submodule field
   // lets us split real file changes from submodule pin-drift, which would otherwise
@@ -1132,17 +1157,37 @@ export async function cmdServe(rest: string[]): Promise<number> {
     // dot and the CLI agree.
     const question =
       status !== "exited" && !r.unresponsive ? await logNeedsInput(r.log_file, r.cli) : null;
+    // "Waiting on the API": the CLI is auto-retrying on its own backoff (it
+    // recovers itself, so this is NOT `stuck`). Checked only for live agents that
+    // aren't already parked on a menu — needs_input (your turn) outranks it, and
+    // the Rust `unresponsive` wedge flag still wins (same precedence as
+    // deriveLiveState). That's safe: a live backoff redraws its countdown every
+    // second, so Rust never flags a genuinely-retrying agent unresponsive.
+    const retry =
+      status !== "exited" && !r.unresponsive && !question
+        ? await logSelfRetry(r.log_file, r.cli)
+        : null;
     return {
       ...r,
       // Precedence: exited stays exited; the Rust supervisor's unresponsive flag is
       // an authoritative wedge signal (`stuck`); then a blocked menu (`needs_input`);
-      // else the base live status — so the console's dot matches `ay ls`. (A dead
-      // agent is never unresponsive — Rust clears the flag on exit.)
+      // then the CLI's own API-retry backoff (`retrying`); else the base live status
+      // — so the console's dot matches `ay ls`. (A dead agent is never unresponsive
+      // — Rust clears the flag on exit.)
       status:
-        status === "exited" ? status : r.unresponsive ? "stuck" : question ? "needs_input" : status,
-      // The pending menu/question text when needs_input, for the console to show
-      // WHAT the agent is waiting on. Null otherwise.
-      question,
+        status === "exited"
+          ? status
+          : r.unresponsive
+            ? "stuck"
+            : question
+              ? "needs_input"
+              : retry
+                ? "retrying"
+                : status,
+      // The pending menu/question text when needs_input, or the self-retry banner
+      // when retrying, for the console to show WHAT the agent is waiting on. Null
+      // otherwise.
+      question: question ?? retry,
       title: await logTitle(r.log_file),
       git: status === "exited" ? null : await gitStatus(r.cwd),
       // Task progress from the rendered todo block (null when none detected → no

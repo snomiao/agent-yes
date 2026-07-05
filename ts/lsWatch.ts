@@ -10,7 +10,7 @@
  * `needsInput.ts`.
  */
 
-export type LiveState = "active" | "idle" | "stopped" | "needs_input" | "stuck";
+export type LiveState = "active" | "idle" | "stopped" | "needs_input" | "stuck" | "retrying";
 
 /** The observable state of one agent at a single tick. */
 export interface LsAgentState {
@@ -18,7 +18,11 @@ export interface LsAgentState {
   cli: string;
   cwd: string;
   state: LiveState;
-  /** Pending menu text when state === "needs_input", else null. */
+  /**
+   * Pending menu text when state === "needs_input", or the CLI's self-retry
+   * banner ("Waiting for API response · will retry in …") when state ===
+   * "retrying". Null otherwise.
+   */
   question: string | null;
 }
 

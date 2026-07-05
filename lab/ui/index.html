@@ -843,6 +843,23 @@
       .dot.needs_input {
         background: var(--accent);
       }
+      /* Waiting on the API: the CLI is auto-retrying a request on its OWN backoff
+         ("will retry in …"). It recovers itself — NOT stuck, NOT your turn — so
+         purple, distinct from red-stuck / blue-needs_input / amber-idle. Pulses to
+         read as "in-flight, hold on". */
+      .dot.retrying {
+        background: var(--purple);
+        animation: dotpulse 1.4s ease-in-out infinite;
+      }
+      @keyframes dotpulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.35;
+        }
+      }
       .dot.stopped,
       .dot.exited {
         background: var(--muted);
@@ -895,6 +912,11 @@
          needs_input dot, reading as "your turn / here's what it's asking". */
       .detail.ask {
         color: var(--accent);
+      }
+      /* The self-retry banner when an agent is `retrying` — purple to match the
+         retrying dot, reading as "waiting on the API, it'll recover". */
+      .detail.retry {
+        color: var(--purple);
       }
       .detail {
         color: var(--muted);
@@ -3299,9 +3321,11 @@
         ${
           e.status === "needs_input" && e.question
             ? `<div class="detail ask" title="${esc(e.question)}">⌨ ${esc(e.question)}</div>`
-            : e.prompt
-              ? `<div class="detail" title="${esc(e.prompt)}">${esc(e.prompt)}</div>`
-              : ""
+            : e.status === "retrying" && e.question
+              ? `<div class="detail retry" title="${esc(e.question)}">↻ ${esc(e.question)}</div>`
+              : e.prompt
+                ? `<div class="detail" title="${esc(e.prompt)}">${esc(e.prompt)}</div>`
+                : ""
         }
         <div class="rowtags">${tags}</div>
       </div>`;

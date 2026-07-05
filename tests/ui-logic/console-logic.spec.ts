@@ -624,6 +624,7 @@ describe("statusGlyph", () => {
   it("maps status → glyph", () => {
     expect(statusGlyph("needs_input")).toBe("⌨");
     expect(statusGlyph("stuck")).toBe("⚠");
+    expect(statusGlyph("retrying")).toBe("↻");
     expect(statusGlyph("active")).toBe("●");
     expect(statusGlyph("idle")).toBe("○");
     expect(statusGlyph("exited")).toBe("✗");
@@ -694,17 +695,19 @@ describe("sortEntries", () => {
     expect(keys(input)).toEqual(["x", "y"]); // original order untouched
   });
 
-  it("state mode: attention-first state order (needs_input < stuck < active < idle < stopped)", () => {
+  it("state mode: attention-first state order (needs_input < stuck < retrying < active < idle < stopped)", () => {
     const list = [
       a({ _k: "idle", status: "idle" }),
       a({ _k: "stopped", status: "stopped" }),
       a({ _k: "needs", status: "needs_input" }),
       a({ _k: "active", status: "active" }),
+      a({ _k: "retrying", status: "retrying" }),
       a({ _k: "stuck", status: "stuck" }),
     ];
     expect(keys(sortEntries(list, "state"))).toEqual([
       "needs",
       "stuck",
+      "retrying",
       "active",
       "idle",
       "stopped",
