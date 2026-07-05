@@ -127,12 +127,19 @@ jobs:
           mkdir -p artifacts
           cp rs/target/${{ matrix.target }}/release/agent-yes${{ matrix.ext }} artifacts/${{ matrix.artifact }}${{ matrix.ext }}
           chmod +x artifacts/${{ matrix.artifact }}${{ matrix.ext }} || true
+          # Windows also ships the ay-spawn-hidden launcher (a second [[bin]]).
+          # `ay serve install` interposes it so pm2/oxmgr don't flash a console
+          # window on each daemon (re)start. It rides along in the same zip and
+          # extracts beside the main binary in rustBinary.ts getBinDir().
+          if [ "${{ matrix.ext }}" = ".exe" ]; then
+            cp rs/target/${{ matrix.target }}/release/ay-spawn-hidden.exe artifacts/ay-spawn-hidden.exe
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: artifacts/${{ matrix.artifact }}${{ matrix.ext }}
+          path: artifacts/
           if-no-files-found: error
 
   # Create a combined artifact with all binaries
