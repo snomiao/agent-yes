@@ -102,6 +102,36 @@ export function findRustBinary(verbose = false): string | undefined {
 }
 
 /**
+ * Locate the `ay-spawn-hidden` launcher (Windows-only). Returns undefined off
+ * Windows, or when the launcher isn't present — older installs, or a release
+ * that predates it. Callers MUST fall back to spawning the program directly.
+ *
+ * The launcher is a second `[[bin]]` built alongside `agent-yes`, so it sits
+ * next to the Rust binary in every install shape: the cargo `target/` build
+ * dir, the downloaded release bin dir (getBinDir), and `~/.cargo/bin` on PATH.
+ */
+export function findSpawnHiddenLauncher(): string | undefined {
+  if (process.platform !== "win32") return undefined;
+
+  const dir = import.meta.dirname ?? import.meta.dir;
+  const searchPaths = [
+    // 1. Dev build, right next to the target/release agent-yes.exe
+    path.resolve(dir, "../rs/target/release/ay-spawn-hidden.exe"),
+    path.resolve(dir, "../rs/target/debug/ay-spawn-hidden.exe"),
+    // 2. npm package bin / version-scoped download cache (getBinDir), where the
+    //    win32 release zip extracts it beside agent-yes-win32-x64.exe.
+    path.join(getBinDir(), "ay-spawn-hidden.exe"),
+    // 3. cargo-installed (`bun run build:rs`) → on PATH.
+    Bun.which("ay-spawn-hidden") ?? "",
+  ];
+
+  for (const p of searchPaths) {
+    if (p && existsSync(p)) return p;
+  }
+  return undefined;
+}
+
+/**
  * Get GitHub release download URL for the binary
  */
 export function getDownloadUrl(version = "latest"): string {
