@@ -20,6 +20,7 @@ import {
   type CommonOpts,
 } from "./subcommands.ts";
 import { updateGlobalPidStatus } from "./globalPidIndex.ts";
+import { findSpawnHiddenLauncher } from "./rustBinary.ts";
 import { pgidForWrapper } from "./reaper.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
@@ -172,12 +173,15 @@ function loginShellEnv(): Record<string, string> | null {
     // Delimiters fence off the env dump from any banner/prompt noise the rc files
     // print to stdout; `env -0` is NUL-separated so values with newlines survive.
     const delim = "_AY_SHELL_ENV_DELIM_";
-    const res = Bun.spawnSync([shell, "-ilc", `printf %s "${delim}"; env -0; printf %s "${delim}"`], {
-      stdin: "ignore",
-      stderr: "ignore",
-      timeout: 5_000,
-      env: process.env as Record<string, string>,
-    });
+    const res = Bun.spawnSync(
+      [shell, "-ilc", `printf %s "${delim}"; env -0; printf %s "${delim}"`],
+      {
+        stdin: "ignore",
+        stderr: "ignore",
+        timeout: 5_000,
+        env: process.env as Record<string, string>,
+      },
+    );
     const out = res.stdout?.toString() ?? "";
     const start = out.indexOf(delim);
     const end = out.lastIndexOf(delim);
@@ -507,6 +511,17 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     // args after `--`. Both auto-restart on crash by default (pm2) / via the
     // explicit flag (oxmgr).
     const serveArgv = ayServeArgv(effArgs);
+    // On Windows, interpose the window-less launcher so the manager (pm2/oxmgr)
+    // doesn't flash a console window on each (re)start. `ay-spawn-hidden` is a
+    // GUI-subsystem shim that starts the real `ay serve …` with CREATE_NO_WINDOW
+    // and mirrors its lifetime/exit-code, so the manager still tracks it exactly.
+    // Resolves to undefined off Windows or when the launcher isn't installed
+    // (older builds / a release predating it) → fall back to the raw command.
+    const spawnHidden = findSpawnHiddenLauncher();
+    // The command the manager launches: unchanged normally, or the launcher
+    // followed by the real argv when interposing. Split into program + args for
+    // pm2 (which takes `<program> … -- <args>`); oxmgr takes the joined string.
+    const managedArgv = spawnHidden ? [spawnHidden, ...serveArgv] : serveArgv;
     // WebRTC daemons get an oxmgr health watchdog: the native WebRTC stack can
     // freeze the JS event loop (host answers nobody, no in-process timer can
     // recover it), so an EXTERNAL probe of the serve heartbeat is the only thing
@@ -530,7 +545,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
         ? [
             mgr.bin,
             "start",
-            serveArgv.join(" "),
+            managedArgv.join(" "),
             "--name",
             DAEMON_NAME,
             "--restart",
@@ -546,7 +561,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
         : [
             mgr.bin,
             "start",
-            serveArgv[0]!,
+            managedArgv[0]!,
             "--name",
             DAEMON_NAME,
             "--interpreter",
@@ -559,7 +574,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
             "--exp-backoff-restart-delay",
             "200",
             "--",
-            ...serveArgv.slice(1),
+            ...managedArgv.slice(1),
           ];
     const proc = Bun.spawn(startArgv, { stdio: ["ignore", "inherit", "inherit"] });
     const code = await proc.exited;
