@@ -143,14 +143,22 @@ describe("notifyStore (fs)", () => {
     await release();
   });
 
-  it("registers and expires watcher heartbeats", async () => {
-    await heartbeatWatcher(1, 111);
-    await heartbeatWatcher(2, 222);
-    expect([...(await liveWatchers())].sort()).toEqual([1, 2]);
-    await clearWatcher(1);
-    expect([...(await liveWatchers())]).toEqual([2]);
-    // A far-future `now` makes both heartbeats stale.
+  it("registers and expires watcher heartbeats (fresh AND process alive)", async () => {
+    const alive = process.pid; // a definitely-alive pid
+    await heartbeatWatcher(alive, 111);
+    const live = await liveWatchers();
+    expect(live.has(alive)).toBe(true);
+    expect(live.get(alive)).toBe(111); // parent's self-reported started_at
+    await clearWatcher(alive);
+    expect((await liveWatchers()).has(alive)).toBe(false);
+    // A far-future `now` makes the heartbeat stale even for a live pid.
+    await heartbeatWatcher(alive, 111);
     expect((await liveWatchers(Date.now() + 10 * 60_000)).size).toBe(0);
+  });
+
+  it("drops a watcher whose heartbeat is fresh but whose process is DEAD (I3)", async () => {
+    await heartbeatWatcher(424242, 999); // 424242 is not a live process
+    expect((await liveWatchers()).has(424242)).toBe(false);
   });
 
   it("minConsumerCursor returns the smallest cursor across consumers (0 if none)", async () => {

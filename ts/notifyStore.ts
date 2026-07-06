@@ -19,7 +19,6 @@ import {
   cursorPath,
   inboxDir,
   inboxPath,
-  liveWatcherPids,
   maxSeq,
   nextSeq,
   parseCursor,
@@ -307,19 +306,33 @@ export async function clearWatcher(parentPid: number): Promise<void> {
   await rm(watcherPath(parentPid), { force: true }).catch(() => {});
 }
 
-/** The set of parent pids with a fresh (non-expired) watch heartbeat. */
-export async function liveWatchers(now = Date.now()): Promise<Set<number>> {
+/**
+ * Live watchers as a map of parent pid → the parent's own `started_at` (its
+ * authoritative self-reported start time, so the daemon never has to guess it
+ * from the registry and stamp a 0). A watcher counts as live ONLY if its
+ * heartbeat is fresh AND its process is actually alive — so a crashed `watch`
+ * whose heartbeat lingers for the TTL doesn't keep the daemon writing to a dead
+ * parent's inbox (which would violate "nothing happens unless you watch").
+ */
+export async function liveWatchers(now = Date.now()): Promise<Map<number, number>> {
   const names = await readdir(watchersDir()).catch(() => [] as string[]);
-  const entries: { pid: number; ts: number }[] = [];
+  const live = new Map<number, number>();
   for (const n of names) {
     if (!n.endsWith(".json")) continue;
     const raw = await readFile(path.join(watchersDir(), n), "utf8").catch(() => "");
     try {
-      const o = JSON.parse(raw) as { pid: number; ts: number };
-      if (typeof o?.pid === "number" && typeof o?.ts === "number") entries.push(o);
+      const o = JSON.parse(raw) as { pid: number; started_at?: number; ts: number };
+      if (
+        typeof o?.pid === "number" &&
+        typeof o?.ts === "number" &&
+        now - o.ts <= WATCHER_TTL_MS &&
+        pidAlive(o.pid)
+      ) {
+        live.set(o.pid, typeof o.started_at === "number" ? o.started_at : 0);
+      }
     } catch {
       /* skip torn heartbeat */
     }
   }
-  return liveWatcherPids(entries, now, WATCHER_TTL_MS);
+  return live;
 }

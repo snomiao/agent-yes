@@ -155,18 +155,22 @@ async function observeChildren(): Promise<ObserveResult> {
     if (typeof parent !== "number" || parent <= 0) continue;
     if (!watching.has(parent)) continue; // scope: only watched parents' children
     const { state, question } = await deriveLiveState(r);
+    // Parent start time: prefer the WATCHER's self-reported value (authoritative,
+    // never 0) over a registry-wrapper lookup that can miss and stamp a 0 — a 0
+    // would slip past the reader's parent pid-reuse guard.
+    const parentStart = watching.get(parent) || startedAtByWrapper.get(parent) || 0;
     obs.push({
       pid: r.pid,
       wrapper_pid: r.wrapper_pid ?? undefined,
       started_at: r.started_at,
       parent_pid: parent,
-      parent_started_at: startedAtByWrapper.get(parent) ?? 0,
+      parent_started_at: parentStart,
       cli: r.cli,
       cwd: r.cwd,
       state,
       question,
     });
-    parentStartedAt.set(r.pid, startedAtByWrapper.get(parent) ?? 0);
+    parentStartedAt.set(r.pid, parentStart);
     childStartedAt.set(r.pid, r.started_at);
     logFiles.set(r.pid, r.log_file ?? null);
   }

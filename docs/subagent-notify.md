@@ -72,9 +72,13 @@ parent addresses its own inbox with no argument.
 - **Consumer-side opt-in via a watcher registry — nothing happens unless a parent
   watches.** `ay notify watch` writes a **heartbeat** (`notify/watchers/<pid>.json`,
   refreshed every poll, TTL 15s) and the daemon:
-  - **scopes** its work to children whose parent has a live heartbeat — so an
-    unrelated agent that never watches gets **no inbox** (the scope matches the
-    "nothing happens unless you watch" promise);
+  - **scopes** its work to children whose parent has a live heartbeat — where
+    "live" means the heartbeat is fresh AND the watcher process is actually alive
+    (a crashed `watch` whose heartbeat lingers for the TTL does NOT keep the
+    daemon writing to a dead parent's inbox) — so an unrelated agent that never
+    watches gets **no inbox** (the scope matches the "nothing happens unless you
+    watch" promise). The daemon takes the parent's `started_at` from the watcher's
+    own heartbeat (authoritative, never 0), not a registry lookup that could miss;
   - **stays alive** while any heartbeat is live, self-exiting only after a grace
     window with none.
 
@@ -164,10 +168,13 @@ parent addresses its own inbox with no argument.
   (`notify/cursors/<host>/<parent>/<consumer>.json`) so it survives parent
   restarts. `--unread` reads `seq > cursor`.
 
-- **At-least-once by default.** `ay notify watch` does **not** advance the cursor
-  unless you pass `--ack` (or use `ay notify read --ack`). A consumer that
-  crashes mid-handling (a Monitor torn down at session end) re-reads the edge on
-  restart instead of dropping it.
+- **At-least-once by default; ack is monotonic.** `ay notify watch` does **not**
+  advance the cursor unless you pass `--ack` (or use `ay notify read --ack`). A
+  consumer that crashes mid-handling (a Monitor torn down at session end) re-reads
+  the edge on restart instead of dropping it. When `--ack` IS set, the cursor
+  advances to the high-water of what was shown and **never regresses** — an empty
+  poll doesn't lower it — so a restarted `watch --ack` resumes past what it
+  already delivered, not from a stale cursor.
 
 - **Startup reconcile.** On start the daemon seeds the router's memory from each
   inbox's already-written edges, so a restart does not re-emit a baseline the

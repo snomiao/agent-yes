@@ -4114,13 +4114,20 @@ async function cmdNotify(rest: string[]): Promise<number> {
       if (Number.isFinite(argv["since-ts"])) events = filterSinceTs(events, argv["since-ts"] as number);
     }
     printNotifyEvents(events, argv.json);
-    const top = maxSeq(events);
-    if (argv.ack && top > 0) await setCursor(host, parent, top, consumer);
-    return top;
+    return maxSeq(events);
+  };
+
+  // Advance the cursor MONOTONICALLY — never below its current value, and never
+  // regressing on an empty batch. This is what makes `watch --ack` safe across a
+  // consumer restart: the high-water of what we've shown is always persisted.
+  const ackTo = async (seq: number) => {
+    const cur = await getCursor(host, parent, consumer);
+    if (seq > cur) await setCursor(host, parent, seq, consumer);
   };
 
   if (verb === "read") {
-    await drain();
+    const top = await drain();
+    if (argv.ack && top > 0) await ackTo(top);
     return 0;
   }
 
@@ -4144,6 +4151,7 @@ async function cmdNotify(rest: string[]): Promise<number> {
     : Number.isFinite(argv.since)
       ? (argv.since as number)
       : maxSeq(await readInbox(host, parent));
+  let acked = lastSeq; // high-water already persisted to the cursor
   let stop = false;
   // On signal: drop our heartbeat and exit promptly. (Even if this is missed on
   // a hard kill, the watcher's TTL makes the stale heartbeat non-live, so the
@@ -4162,6 +4170,14 @@ async function cmdNotify(rest: string[]): Promise<number> {
       await ensure();
       const top = await drain(lastSeq);
       if (top > lastSeq) lastSeq = top;
+      // Persist the high-water monotonically (only when it advanced), so a batch
+      // that showed events is acked even if the NEXT poll is empty — a restarted
+      // `watch --ack` then resumes past what it already delivered, not from the
+      // stale cursor.
+      if (argv.ack && lastSeq > acked) {
+        await ackTo(lastSeq);
+        acked = lastSeq;
+      }
       await new Promise((r) => setTimeout(r, intervalMs));
     }
   } finally {
