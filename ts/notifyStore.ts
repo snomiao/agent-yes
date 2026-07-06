@@ -9,7 +9,7 @@
  * contention is negligible even with many parents.
  */
 
-import { mkdir, readFile, readdir, rm, stat, writeFile, appendFile } from "fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, writeFile, appendFile } from "fs/promises";
 import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "path";
@@ -52,17 +52,23 @@ function pidAlive(pid: number): boolean {
 
 /**
  * Pure steal decision for a per-inbox lock (extracted so it's unit-testable):
- * steal the lock ONLY when its holder is provably gone (torn/missing owner past
- * the grace, or a dead pid) or its heartbeat is stale — NEVER merely because
- * we've waited a while, so a live holder mid-critical-section keeps its lock.
- * There is no wall-clock backstop: `elapsed` gates only the torn-owner grace.
+ * steal the lock ONLY when its holder is provably gone (torn/missing owner on a
+ * lock that has EXISTED longer than the grace, or a dead pid) or its heartbeat is
+ * stale — NEVER merely because the contender has waited a while.
+ *
+ * Crucially, the torn-owner grace is measured from the LOCK INSTANCE's age
+ * (`lockAgeMs` = now − lockDir mtime), NOT from how long the contender has been
+ * waiting. Otherwise a contender that waited out one holder could instantly steal
+ * the NEXT holder's freshly-created lock during its mkdir→write-owner window
+ * (torn but brand-new) — letting two writers into the critical section.
  */
 export function shouldStealLock(
   ownerRaw: string,
   now: number,
   opts: {
     staleMs: number;
-    elapsed: number;
+    /** Age of THIS lock instance (now − lockDir mtime). Gates the torn grace. */
+    lockAgeMs: number;
     selfPid: number;
     isAlive: (p: number) => boolean;
     /** Grace for a JUST-created lock whose owner file isn't written yet. */
@@ -81,13 +87,12 @@ export function shouldStealLock(
   } catch {
     /* torn / not-yet-written owner */
   }
-  // An empty/torn owner (or one with no heartbeat ts yet) is the mkdir→writeFile
+  // An empty/torn owner (or one with no heartbeat ts yet) is the mkdir→write-owner
   // window of a holder mid-acquire — NOT proof of a dead holder. Only steal it
-  // after a short grace, so we can't rob a lock that was just legitimately
-  // created (which would let two writers into the critical section and duplicate
-  // a seq). A holder that actually crashed in that window is reclaimed once the
-  // grace elapses.
-  if (!parsed || ownerPid <= 0 || ownerTs <= 0) return opts.elapsed > graceMs;
+  // once THIS lock instance has existed torn longer than the grace (a real crash
+  // in that window), so we can never rob a lock that was just legitimately created
+  // (which would let two writers into the critical section and duplicate a seq).
+  if (!parsed || ownerPid <= 0 || ownerTs <= 0) return opts.lockAgeMs > graceMs;
   // Steal ONLY on positive evidence the holder is gone: its pid is dead, or its
   // heartbeat went stale. A LIVE holder refreshes its heartbeat for the whole
   // time it holds the lock (see acquireLock), so a long-but-legitimate critical
@@ -121,7 +126,6 @@ export async function acquireLock(
   staleMs = 30_000,
 ): Promise<() => Promise<void>> {
   const ownerFile = path.join(lockDir, "owner");
-  const start = Date.now();
   // A fencing token unique to THIS acquisition. Everything we do to the lock is
   // gated on the owner file still carrying our token — so if we were stale-stolen
   // mid-critical-section and the lock re-created by another writer, we neither
@@ -134,23 +138,39 @@ export async function acquireLock(
       return null;
     }
   };
-  const stampOwner = () =>
-    writeFile(ownerFile, JSON.stringify({ pid: process.pid, ts: Date.now(), token })).catch(
-      () => {},
-    );
+  // ATOMIC owner write (temp + rename): a reader never observes a torn/partial
+  // owner mid-write, so `readOwnerToken()===null` reliably means "no owner file"
+  // (a NEW instance mid-acquire), never "our own write in progress". That in turn
+  // lets the heartbeat safely stop on a null read without self-eviction.
+  const stampOwner = async () => {
+    const tmp = `${ownerFile}.${token}.tmp`;
+    try {
+      await writeFile(tmp, JSON.stringify({ pid: process.pid, ts: Date.now(), token }));
+      await rename(tmp, ownerFile);
+    } catch {
+      await rm(tmp, { force: true }).catch(() => {});
+    }
+  };
+  const lockAgeMs = async (): Promise<number> => {
+    const m = await stat(lockDir)
+      .then((s) => s.mtimeMs)
+      .catch(() => Date.now());
+    return Date.now() - m;
+  };
   for (;;) {
     try {
       await mkdir(lockDir, { recursive: false });
       await stampOwner();
       // Heartbeat the owner ts while we hold the lock, so a LONG critical section
-      // (a big gcInboxes rewrite) never crosses staleMs and gets stolen out from
-      // under us. Before each refresh, verify we STILL own it (token match) — if
-      // we were superseded (a torn/late steal), stop beating so we don't clobber
-      // the new owner's owner file. Refresh well inside staleMs; cleared on release.
+      // (a big gcInboxes rewrite) never crosses staleMs and gets stolen. Refresh
+      // ONLY while the owner still carries OUR token: any other value — a
+      // different token (superseded) OR null/absent (a new instance's mkdir→write
+      // window) — means we no longer own it, so we stop rather than clobber an
+      // unknown/absent owner. Atomic writes above mean a null read is never just
+      // our own write in flight. Refresh well inside staleMs; cleared on release.
       const beat = setInterval(() => {
         void (async () => {
-          const cur = await readOwnerToken();
-          if (cur !== null && cur !== token) {
+          if ((await readOwnerToken()) !== token) {
             clearInterval(beat);
             return;
           }
@@ -171,7 +191,7 @@ export async function acquireLock(
       if (
         shouldStealLock(raw, Date.now(), {
           staleMs,
-          elapsed: Date.now() - start,
+          lockAgeMs: await lockAgeMs(),
           selfPid: process.pid,
           isAlive: pidAlive,
         })

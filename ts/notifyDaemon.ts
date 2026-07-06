@@ -17,7 +17,7 @@
 
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "fs/promises";
+import { mkdir, readFile, rename, rm, stat, writeFile } from "fs/promises";
 import {
   type ChildObservation,
   type PendingNotification,
@@ -86,9 +86,15 @@ async function recentTail(logFile: string | null | undefined): Promise<string | 
 export async function reconcileFromInboxes(
   host: string,
   liveChildren: Map<number, number>,
+  watchedParents: Set<number>,
 ): Promise<RouterState> {
   const state: RouterState = new Map();
   for (const parent of await listInboxParents(host)) {
+    // Scope to CURRENTLY-watched parents only. Seeding an unwatched parent's
+    // inbox would let this daemon carry its children forward and later write a
+    // synthetic exited into an inbox nobody is watching — violating "nothing
+    // happens unless you watch".
+    if (!watchedParents.has(parent)) continue;
     const events = await readInbox(host, parent);
     const lastByChild = new Map<number, NotifyEvent>();
     const exitedChildren = new Set<number>();
@@ -253,12 +259,22 @@ async function readDaemonOwnerToken(): Promise<string | null> {
   }
 }
 
-/** Stamp the lock owner file with our identity + a fresh heartbeat ts + token. */
+/**
+ * Stamp the lock owner file with our identity + a fresh heartbeat ts + token,
+ * ATOMICALLY (temp + rename) so a reader (status/stop/another daemon) never sees
+ * a torn owner mid-write — a null read then reliably means "no owner file yet".
+ */
 async function writeOwner(): Promise<void> {
-  await writeFile(
-    daemonLockOwnerPath(),
-    JSON.stringify({ pid: process.pid, started_at: daemonStartedAt, ts: Date.now(), token: daemonToken }),
-  ).catch(() => {});
+  const tmp = `${daemonLockOwnerPath()}.${daemonToken}.tmp`;
+  try {
+    await writeFile(
+      tmp,
+      JSON.stringify({ pid: process.pid, started_at: daemonStartedAt, ts: Date.now(), token: daemonToken }),
+    );
+    await rename(tmp, daemonLockOwnerPath());
+  } catch {
+    await rm(tmp, { force: true }).catch(() => {});
+  }
 }
 
 /**
@@ -273,7 +289,6 @@ export async function acquireDaemonLock(isAlive: (pid: number) => boolean = isPi
   // The lock dir lives under notify/ — ensure that exists first, else mkdir of
   // the lock throws ENOENT which must NOT be mistaken for "someone holds it".
   await mkdir(notifyDir(), { recursive: true }).catch(() => {});
-  const start = Date.now();
   for (;;) {
     try {
       await mkdir(daemonLockDir(), { recursive: false });
@@ -308,10 +323,15 @@ export async function acquireDaemonLock(isAlive: (pid: number) => boolean = isPi
       // torn-past-grace) — the same invariant the per-inbox lock uses, so a
       // torn owner (the mkdir→writeOwner window of a concurrent daemon start) is
       // respected within the grace and two starts can't both win. Else wait.
+      const lockAgeMs =
+        now -
+        (await stat(daemonLockDir())
+          .then((s) => s.mtimeMs)
+          .catch(() => now));
       if (
         shouldStealLock(raw, now, {
           staleMs: OWNER_TTL_MS,
-          elapsed: now - start,
+          lockAgeMs,
           selfPid: process.pid,
           isAlive,
         })
@@ -337,7 +357,8 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
     // already running — otherwise we'd re-emit baselines it has handled — and
     // seed from the inbox so even standalone we don't duplicate prior edges.
     if (await daemonStatus()) return 0;
-    const prev = await reconcileFromInboxes(host, await liveChildrenSnapshot());
+    const watched = new Set((await liveWatchers()).keys());
+    const prev = await reconcileFromInboxes(host, await liveChildrenSnapshot(), watched);
     await tickState(host, prev);
     return 0;
   }
@@ -354,10 +375,12 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   // Refresh well inside the TTL; cleared on shutdown.
   const ownerBeat = setInterval(() => {
     void (async () => {
-      // Stop beating (and never overwrite) if we've been superseded — the fencing
-      // token in the owner file is no longer ours.
-      const cur = await readDaemonOwnerToken();
-      if (cur !== null && cur !== daemonToken) {
+      // Refresh ONLY while the owner still carries OUR token. Any other value — a
+      // different token (superseded) OR null/absent (a new daemon's mkdir→write
+      // window) — means we no longer own it, so stop rather than clobber an
+      // unknown/absent owner. Atomic writeOwner means a null read is never our own
+      // write in flight.
+      if ((await readDaemonOwnerToken()) !== daemonToken) {
         clearInterval(ownerBeat);
         return;
       }
@@ -376,9 +399,14 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   process.on("SIGINT", () => void cleanup().then(() => process.exit(0)));
   process.on("SIGTERM", () => void cleanup().then(() => process.exit(0)));
 
-  // Seed the router from prior inbox state, guarded against pid reuse by the
-  // current registry snapshot (see reconcileFromInboxes).
-  let prev = await reconcileFromInboxes(host, await liveChildrenSnapshot());
+  // Seed the router from prior inbox state — scoped to currently-watched parents
+  // and guarded against pid reuse by the current registry snapshot.
+  const watchedAtStart = new Set((await liveWatchers()).keys());
+  let prev = await reconcileFromInboxes(
+    host,
+    await liveChildrenSnapshot(),
+    watchedAtStart,
+  );
   let ticks = 0;
   let emptySince: number | null = null;
 

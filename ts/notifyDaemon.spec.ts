@@ -171,7 +171,7 @@ describe("startup reconcile pid-reuse guard", () => {
 
   it("seeds a child still live with the SAME start time (no re-emit) + copies identity", async () => {
     await appendEvent(1, { ...exitedEv(555, 1000), parent_started_at: 42 });
-    const seeded = await reconcileFromInboxes(host, new Map([[555, 1000]]));
+    const seeded = await reconcileFromInboxes(host, new Map([[555, 1000]]), new Set([1]));
     expect(seeded.get(555)?.exitedEmitted).toBe(true);
     // I2: identity copied into the seeded state so the hot-path guard can fire.
     expect(seeded.get(555)?.started_at).toBe(1000);
@@ -182,13 +182,13 @@ describe("startup reconcile pid-reuse guard", () => {
     await appendEvent(1, exitedEv(555, 1000));
     // pid 555 now belongs to a NEW child (started_at 2000) → must not inherit
     // the old child's exitedEmitted, else its own exit would be suppressed.
-    const seeded = await reconcileFromInboxes(host, new Map([[555, 2000]]));
+    const seeded = await reconcileFromInboxes(host, new Map([[555, 2000]]), new Set([1]));
     expect(seeded.has(555)).toBe(false);
   });
 
   it("does NOT seed a reaped child absent from the registry", async () => {
     await appendEvent(1, exitedEv(555, 1000));
-    const seeded = await reconcileFromInboxes(host, new Map());
+    const seeded = await reconcileFromInboxes(host, new Map(), new Set([1]));
     expect(seeded.has(555)).toBe(false);
   });
 
@@ -196,7 +196,16 @@ describe("startup reconcile pid-reuse guard", () => {
     // A pre-C2 / synthetic event without a start time can't be identity-checked,
     // so it must not seed (better a duplicate edge than a suppressed one).
     await appendEvent(1, { ...exitedEv(555, 1000), child_started_at: 0 });
-    const seeded = await reconcileFromInboxes(host, new Map([[555, 1000]]));
+    const seeded = await reconcileFromInboxes(host, new Map([[555, 1000]]), new Set([1]));
     expect(seeded.has(555)).toBe(false);
+  });
+
+  it("does NOT seed an inbox whose parent is NOT currently watched (I1)", async () => {
+    // Parent 1's inbox exists, but no one is watching parent 1 now → the daemon
+    // must not hold its state (else it could later write a synthetic exited into
+    // an unwatched inbox, violating "nothing happens unless you watch").
+    await appendEvent(1, exitedEv(555, 1000));
+    const seeded = await reconcileFromInboxes(host, new Map([[555, 1000]]), new Set()); // none watched
+    expect(seeded.size).toBe(0);
   });
 });

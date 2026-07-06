@@ -37,18 +37,18 @@ describe("notifyStore — lock steal decision (C1: holder liveness, not wait tim
   const now = 1_000_000;
   const opts = (over = {}) => ({
     staleMs: 30_000,
-    elapsed: 0,
+    lockAgeMs: 0,
     selfPid: 1,
     isAlive: (p: number) => p === 42, // only pid 42 is "alive"
     ...over,
   });
 
-  it("does NOT steal a LIVE holder with a fresh heartbeat, even after an extreme wait", () => {
+  it("does NOT steal a LIVE holder with a fresh heartbeat, regardless of lock age", () => {
     const owner = JSON.stringify({ pid: 42, ts: now - 1_000 });
-    // With no wall-clock backstop, elapsed alone NEVER steals — a live, fresh
-    // holder is inviolable no matter how long we've waited.
-    expect(shouldStealLock(owner, now, opts({ elapsed: 50_000 }))).toBe(false);
-    expect(shouldStealLock(owner, now, opts({ elapsed: 10 * 60_000 }))).toBe(false);
+    // A live holder with a fresh heartbeat is inviolable — lockAgeMs only gates
+    // the torn-owner grace, never a holder we have positive live evidence for.
+    expect(shouldStealLock(owner, now, opts({ lockAgeMs: 50_000 }))).toBe(false);
+    expect(shouldStealLock(owner, now, opts({ lockAgeMs: 10 * 60_000 }))).toBe(false);
   });
 
   it("steals a DEAD holder", () => {
@@ -64,18 +64,18 @@ describe("notifyStore — lock steal decision (C1: holder liveness, not wait tim
   it("does NOT steal a torn/empty owner within the grace (mkdir→writeFile window)", () => {
     // A just-created lock whose owner file isn't written yet must be respected,
     // else two writers race into the critical section and duplicate a seq.
-    expect(shouldStealLock("", now, opts({ elapsed: 0, graceMs: 1000 }))).toBe(false);
-    expect(shouldStealLock("{ torn", now, opts({ elapsed: 100, graceMs: 1000 }))).toBe(false);
+    expect(shouldStealLock("", now, opts({ lockAgeMs: 0, graceMs: 1000 }))).toBe(false);
+    expect(shouldStealLock("{ torn", now, opts({ lockAgeMs: 100, graceMs: 1000 }))).toBe(false);
   });
 
   it("steals a torn/empty owner once the grace elapses (holder crashed mid-acquire)", () => {
-    expect(shouldStealLock("", now, opts({ elapsed: 1500, graceMs: 1000 }))).toBe(true);
+    expect(shouldStealLock("", now, opts({ lockAgeMs: 1500, graceMs: 1000 }))).toBe(true);
   });
 
   it("treats an owner with no heartbeat ts as torn (grace), not immediately steal", () => {
     const owner = JSON.stringify({ pid: 42, started_at: 1 }); // no ts
-    expect(shouldStealLock(owner, now, opts({ elapsed: 0, graceMs: 1000 }))).toBe(false);
-    expect(shouldStealLock(owner, now, opts({ elapsed: 1500, graceMs: 1000 }))).toBe(true);
+    expect(shouldStealLock(owner, now, opts({ lockAgeMs: 0, graceMs: 1000 }))).toBe(false);
+    expect(shouldStealLock(owner, now, opts({ lockAgeMs: 1500, graceMs: 1000 }))).toBe(true);
   });
 });
 
