@@ -195,8 +195,12 @@ parent addresses its own inbox with no argument.
   `notify/inbox/<host>/<parent>.ndjson`; every event carries a per-inbox `seq`
   (the authoritative watermark; `ts` is display-only, since clocks skew). A
   consumer's cursor lives in a separate file
-  (`notify/cursors/<host>/<parent>/<consumer>.json`) so it survives parent
-  restarts. `--unread` reads `seq > cursor`.
+  (`notify/cursors/<host>/<parent>/<consumer>.json`). `--unread` reads
+  `seq > cursor`. NOTE: inbox and cursor are keyed by the parent's WRAPPER PID, so
+  the cursor persists across a restart of the `ay notify watch` **subprocess**
+  within the same parent-agent session — NOT across a restart of the parent agent
+  itself, which gets a new pid (and thus a fresh inbox). A truly stable parent
+  identity across pid changes is a follow-up (issue #169).
 
 - **At-least-once by default; ack is monotonic.** `ay notify watch` does **not**
   advance the cursor unless you pass `--ack` (or use `ay notify read --ack`). A

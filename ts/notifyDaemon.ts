@@ -173,10 +173,18 @@ async function observeChildren(): Promise<ObserveResult> {
   const logFiles = new Map<number, string | null>();
   // Liveness of ALL children (any parent), pid → started_at — the router uses
   // this to avoid false-exiting a child it merely stopped observing (watcher
-  // lapsed), while still exiting a pid reused by a different child.
+  // lapsed), while still exiting a pid reused by a different child. Only a CURRENT
+  // (non-exited) record whose pid is alive counts as liveness evidence: a stale
+  // `exited` record must not vouch for a pid that a different process now reuses
+  // (which would make the router suppress the old child's exited forever).
   const aliveChildStartedAt = new Map<number, number>();
   for (const r of records) {
-    if (typeof r.parent_pid === "number" && r.parent_pid > 0 && isPidAlive(r.pid))
+    if (
+      typeof r.parent_pid === "number" &&
+      r.parent_pid > 0 &&
+      r.status !== "exited" &&
+      isPidAlive(r.pid)
+    )
       aliveChildStartedAt.set(r.pid, r.started_at);
   }
   for (const r of records) {
@@ -264,7 +272,7 @@ async function readDaemonOwnerToken(): Promise<string | null> {
  * ATOMICALLY (temp + rename) so a reader (status/stop/another daemon) never sees
  * a torn owner mid-write — a null read then reliably means "no owner file yet".
  */
-async function writeOwner(): Promise<void> {
+async function writeOwner(): Promise<boolean> {
   const tmp = `${daemonLockOwnerPath()}.${daemonToken}.tmp`;
   try {
     await writeFile(
@@ -272,8 +280,10 @@ async function writeOwner(): Promise<void> {
       JSON.stringify({ pid: process.pid, started_at: daemonStartedAt, ts: Date.now(), token: daemonToken }),
     );
     await rename(tmp, daemonLockOwnerPath());
+    return true;
   } catch {
     await rm(tmp, { force: true }).catch(() => {});
+    return false;
   }
 }
 
@@ -294,7 +304,12 @@ export async function acquireDaemonLock(isAlive: (pid: number) => boolean = isPi
       await mkdir(daemonLockDir(), { recursive: false });
       daemonStartedAt = Date.now(); // fixed for this daemon's lifetime
       daemonToken = randomUUID(); // fencing token for this ownership
-      await writeOwner();
+      // If we can't write our owner file, we don't own the lock — drop and retry.
+      if (!(await writeOwner())) {
+        await rm(daemonLockDir(), { recursive: true, force: true }).catch(() => {});
+        await new Promise((r) => setTimeout(r, 15));
+        continue;
+      }
       return true;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; // real error — propagate

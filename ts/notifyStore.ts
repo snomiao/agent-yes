@@ -142,13 +142,15 @@ export async function acquireLock(
   // owner mid-write, so `readOwnerToken()===null` reliably means "no owner file"
   // (a NEW instance mid-acquire), never "our own write in progress". That in turn
   // lets the heartbeat safely stop on a null read without self-eviction.
-  const stampOwner = async () => {
+  const stampOwner = async (): Promise<boolean> => {
     const tmp = `${ownerFile}.${token}.tmp`;
     try {
       await writeFile(tmp, JSON.stringify({ pid: process.pid, ts: Date.now(), token }));
       await rename(tmp, ownerFile);
+      return true;
     } catch {
       await rm(tmp, { force: true }).catch(() => {});
+      return false;
     }
   };
   const lockAgeMs = async (): Promise<number> => {
@@ -160,7 +162,14 @@ export async function acquireLock(
   for (;;) {
     try {
       await mkdir(lockDir, { recursive: false });
-      await stampOwner();
+      // If we can't write our owner file, we do NOT own the lock — a later
+      // contender would see a torn owner, steal past the grace, and enter the
+      // critical section alongside us. Drop the lock dir and retry.
+      if (!(await stampOwner())) {
+        await rm(lockDir, { recursive: true, force: true }).catch(() => {});
+        await new Promise((r) => setTimeout(r, 15));
+        continue;
+      }
       // Heartbeat the owner ts while we hold the lock, so a LONG critical section
       // (a big gcInboxes rewrite) never crosses staleMs and gets stolen. Refresh
       // ONLY while the owner still carries OUR token: any other value — a
