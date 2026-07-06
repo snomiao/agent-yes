@@ -4100,11 +4100,13 @@ async function cmdNotify(rest: string[]): Promise<number> {
 
   const drain = async (sinceSeqOverride?: number): Promise<number> => {
     let events = await readInbox(host, parent);
-    // pid-reuse guard: drop events whose parent_started_at disagrees with ours.
-    if (selfStartedAt > 0)
-      events = events.filter(
-        (e) => !e.parent_started_at || e.parent_started_at === selfStartedAt,
-      );
+    // Parent pid-reuse guard (fail-safe): when we know our own start time, deliver
+    // ONLY events whose parent_started_at EXACTLY matches it — a mismatched OR
+    // missing parent identity is dropped, never fail-open-delivered to a possibly-
+    // recycled pid. The daemon always stamps parent_started_at from the watcher's
+    // heartbeat (the same value this reader resolves), so every legitimate event
+    // matches; only truly-legacy identity-less events fall out.
+    if (selfStartedAt > 0) events = events.filter((e) => e.parent_started_at === selfStartedAt);
     if (argv.unread) {
       const cursor = await getCursor(host, parent, consumer);
       events = filterUnread(events, sinceSeqOverride ?? cursor);

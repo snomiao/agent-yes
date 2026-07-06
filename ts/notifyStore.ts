@@ -12,6 +12,7 @@
 import { mkdir, readFile, readdir, rm, stat, writeFile, appendFile } from "fs/promises";
 import os from "node:os";
 import path from "path";
+import { logger } from "./logger.ts";
 import {
   type NotifyEvent,
   WATCHER_TTL_MS,
@@ -282,6 +283,14 @@ export async function gcInboxes(
         const kept = rotateKeep(events, capBytes, protectAboveSeq);
         if (kept.length < events.length) {
           await writeFile(inboxPath(host, p), kept.map(serializeEvent).join("\n") + "\n");
+        } else {
+          // Oversize but nothing was trimmable — every event is unacked (min
+          // cursor at/below the oldest). `capBytes` is a SOFT cap here (we never
+          // drop an unacked edge), so surface the unbounded growth rather than
+          // silently exceeding it. A parent that never acks is the usual cause.
+          logger.warn(
+            `[notify] inbox for parent ${p} is ${size} bytes (> soft cap ${capBytes}) but all events are unacked — cursor not advancing?`,
+          );
         }
       } finally {
         await release();

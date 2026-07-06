@@ -131,20 +131,21 @@ export function stepRouter(
     if (typeof obs.parent_pid !== "number" || obs.parent_pid <= 0) continue;
     seen.add(obs.pid);
     let p = prev.get(obs.pid);
-    // Hot-path pid-reuse guard (mirrors the startup reconcile guard): if this pid
-    // is now a DIFFERENT child (its start time changed), the old child is gone —
-    // `seen` marks the pid, so the vanished-loop below won't fire for it. Emit its
-    // synthetic exited here, then drop `p` so the new child rebuilds fresh state
-    // (else it would inherit the old child's idleEmitted/exitedEmitted and have
-    // its first idle/needs_input/exited suppressed).
-    if (
-      p &&
-      p.started_at != null &&
-      obs.started_at != null &&
-      p.started_at !== obs.started_at
-    ) {
+    // Hot-path pid-reuse guard (mirrors the startup reconcile guard). Two cases,
+    // both fail-safe — an unverifiable identity is NEVER inherited:
+    //  1. CONFIRMED reuse: both start times known and different → the old child
+    //     is gone. `seen` marks the pid so the vanished-loop won't fire; emit its
+    //     synthetic exited here, then drop `p` so the new child rebuilds fresh.
+    //  2. UNVERIFIABLE: the observation has a start time but the tracked state has
+    //     none (e.g. seeded without one). We can't confirm it's the same child,
+    //     so we DON'T inherit its emitted-edge memory (a re-emit / duplicate is
+    //     safe; a suppressed first edge is not) — but we also DON'T synthesize an
+    //     exited, since it may well be the same child (avoid a false exited).
+    if (p && obs.started_at != null && p.started_at != null && p.started_at !== obs.started_at) {
       if (!p.exitedEmitted) events.push(syntheticExited(p, obs.pid));
       p = undefined;
+    } else if (p && obs.started_at != null && p.started_at == null) {
+      p = undefined; // unverifiable — rebuild fresh, no inherit, no synthetic exited
     }
     const cs: ChildRouterState = {
       parent_pid: obs.parent_pid,

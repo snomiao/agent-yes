@@ -254,6 +254,36 @@ describe("notifyRouter — hot-path pid reuse (Important)", () => {
     expect(r.next.get(100)!.exitedEmitted).toBe(false);
   });
 
+  it("does NOT inherit emitted-memory from a tracked state with no start time (fail-safe)", () => {
+    // Old state seeded WITHOUT a start time (unverifiable). A same-pid child now
+    // observed with a start time must NOT inherit idleEmitted/exitedEmitted — else
+    // its first edge is suppressed. It rebuilds fresh (a duplicate is acceptable),
+    // and NO synthetic exited is emitted (it may be the same child).
+    const seeded: RouterState = new Map([
+      [
+        100,
+        {
+          parent_pid: 1,
+          started_at: undefined, // unverifiable
+          cli: "claude",
+          cwd: "/repo",
+          state: "idle",
+          idleSince: 0,
+          idleEmitted: true, // already emitted for the OLD episode
+          inNeedsInput: false,
+          needsInputQuestion: null,
+          exitedEmitted: false,
+        },
+      ],
+    ]);
+    const r = stepRouter(seeded, [child({ pid: 100, started_at: 5000, state: "idle" })], 0, {
+      idleConfirmMs: 30_000,
+    });
+    expect(r.events.some((e) => e.edge === "exited")).toBe(false); // no false exited
+    expect(r.next.get(100)!.idleEmitted).toBe(false); // fresh — not inherited
+    expect(r.next.get(100)!.started_at).toBe(5000);
+  });
+
   it("does not double-close an old child that had already exited", () => {
     let s: RouterState = new Map();
     s = step(s, [child({ pid: 100, started_at: 1000, state: "stopped" })], 0).next; // exited emitted
@@ -286,13 +316,16 @@ describe("notifyRouter — startup reconcile (baseline)", () => {
 
   it("respects a SEEDED prior state (no duplicate baseline across daemon restart)", () => {
     // The daemon seeds prior emitted state from the inbox so a restart doesn't
-    // re-emit. A seeded exitedEmitted child that is still `stopped` stays quiet.
+    // re-emit. A seeded exitedEmitted child that is still `stopped` stays quiet —
+    // the seed carries the SAME start time as the observation, so the identity is
+    // verifiable and the emitted-memory is (correctly) inherited.
     const seeded: RouterState = new Map([
       [
         100,
         {
           parent_pid: 1,
           wrapper_pid: 100,
+          started_at: 7000, // matches the child() factory → verifiable identity
           cli: "claude",
           cwd: "/repo",
           state: "stopped",
