@@ -28,7 +28,14 @@ import {
 } from "./needsInput.ts";
 import { diffLsStates, type LiveState, type LsAgentState } from "./lsWatch.ts";
 import { filterSinceSeq, filterSinceTs, filterUnread, maxSeq, type NotifyEvent } from "./notifyInbox.ts";
-import { getCursor, hostId, readInbox, setCursor } from "./notifyStore.ts";
+import {
+  clearWatcher,
+  getCursor,
+  heartbeatWatcher,
+  hostId,
+  readInbox,
+  setCursor,
+} from "./notifyStore.ts";
 import {
   buildStoredResult,
   normalizeEnvelope,
@@ -4086,9 +4093,17 @@ async function cmdNotify(rest: string[]): Promise<number> {
   const parent = resolveParentPid(argv.parent as number | undefined);
   const host = hostId();
   const consumer = String(argv.consumer);
+  // The reader's own start time — used to reject inbox events addressed to a
+  // PRIOR incarnation of this pid (pid reuse). 0 = unknown → skip the guard.
+  const selfStartedAt = await resolveParentStartedAt(parent);
 
   const drain = async (sinceSeqOverride?: number): Promise<number> => {
     let events = await readInbox(host, parent);
+    // pid-reuse guard: drop events whose parent_started_at disagrees with ours.
+    if (selfStartedAt > 0)
+      events = events.filter(
+        (e) => !e.parent_started_at || e.parent_started_at === selfStartedAt,
+      );
     if (argv.unread) {
       const cursor = await getCursor(host, parent, consumer);
       events = filterUnread(events, sinceSeqOverride ?? cursor);
@@ -4110,10 +4125,16 @@ async function cmdNotify(rest: string[]): Promise<number> {
 
   // watch: tail -f the inbox. Default no-ack (at-least-once) so a consumer that
   // crashes mid-handling re-reads on restart; pass --ack to advance the cursor.
-  if (argv["ensure-daemon"]) {
+  const ensure = async () => {
+    if (!argv["ensure-daemon"]) return;
     const { ensureDaemon } = await import("./notifyDaemon.ts");
     await ensureDaemon().catch(() => null);
-  }
+  };
+  // Register this parent as a live watcher BEFORE the first poll and ensure a
+  // daemon exists — so a parent that watches *before* spawning any child (or
+  // across a fan-out gap) still has a running, correctly-scoped daemon.
+  await heartbeatWatcher(parent, selfStartedAt);
+  await ensure();
   const intervalMs = Math.max(500, (Number.isFinite(argv.interval) ? argv.interval : 2) * 1000);
   // Baseline: from the cursor (unread) or the caller's --since, else from now
   // (only new edges). Track high-water seq in-memory between polls.
@@ -4123,17 +4144,42 @@ async function cmdNotify(rest: string[]): Promise<number> {
       ? (argv.since as number)
       : maxSeq(await readInbox(host, parent));
   let stop = false;
+  // On signal: drop our heartbeat and exit promptly. (Even if this is missed on
+  // a hard kill, the watcher's TTL makes the stale heartbeat non-live, so the
+  // daemon's scope/self-exit stays correct — this is just prompt cleanup.)
   const onSig = () => {
     stop = true;
+    void clearWatcher(parent).finally(() => process.exit(0));
   };
   process.on("SIGINT", onSig);
   process.on("SIGTERM", onSig);
-  while (!stop) {
-    const top = await drain(lastSeq);
-    if (top > lastSeq) lastSeq = top;
-    await new Promise((r) => setTimeout(r, intervalMs));
+  try {
+    while (!stop) {
+      // Refresh our heartbeat and keep the daemon alive every tick — it self-
+      // exits after a grace window with no watchers, so a long watch must renew.
+      await heartbeatWatcher(parent, selfStartedAt);
+      await ensure();
+      const top = await drain(lastSeq);
+      if (top > lastSeq) lastSeq = top;
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  } finally {
+    await clearWatcher(parent);
   }
   return 0;
+}
+
+/** Resolve the started_at of the agent whose wrapper pid is `parent` (0 if unknown). */
+async function resolveParentStartedAt(parent: number): Promise<number> {
+  const records = await listRecords(undefined, {
+    all: true,
+    active: false,
+    json: false,
+    latest: false,
+    cwdScope: null,
+  }).catch(() => [] as GlobalPidRecord[]);
+  const rec = records.find((r) => r.wrapper_pid === parent || r.pid === parent);
+  return rec?.started_at ?? 0;
 }
 
 async function cmdNotifyCursor(args: string[]): Promise<number> {
@@ -4196,7 +4242,7 @@ async function cmdNotifyd(rest: string[]): Promise<number> {
       return 0;
     }
     default:
-      process.stderr.write("usage: ay notifyd <run|start|status|stop>\n");
+      process.stderr.write("usage: ay notifyd <run|once|start|status|stop>\n");
       return 1;
   }
 }

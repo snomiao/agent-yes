@@ -69,11 +69,35 @@ parent addresses its own inbox with no argument.
   spinner/elapsed-seconds cosmetic redraw does not double-fire. `exited` fires
   once. `idle` fires once per idle episode; returning to work resets it.
 
-- **Consumer-side opt-in — nothing happens unless a parent watches.** The daemon
-  is started on demand (`ay notify watch --ensure-daemon`, default on) and
-  self-exits after a grace window with nothing to watch. If no parent ever
+- **Consumer-side opt-in via a watcher registry — nothing happens unless a parent
+  watches.** `ay notify watch` writes a **heartbeat** (`notify/watchers/<pid>.json`,
+  refreshed every poll, TTL 15s) and the daemon:
+  - **scopes** its work to children whose parent has a live heartbeat — so an
+    unrelated agent that never watches gets **no inbox** (the scope matches the
+    "nothing happens unless you watch" promise);
+  - **stays alive** while any heartbeat is live, self-exiting only after a grace
+    window with none.
+
+  `ay notify watch` also **re-ensures the daemon every poll**, so a parent that
+  watches BEFORE spawning children (or across a fan-out gap where the daemon
+  self-exited) always has a running, correctly-scoped daemon. If no parent ever
   watches, the daemon never runs and **no files are created** — fully backward
   compatible. Monitor-on-HEAD keeps working, now strictly dominated by this.
+
+- **Singleton lock with liveness-based steal.** The daemon holds an mkdir lock
+  recording its owner pid (`notify/notifyd.lock/owner.json`). A stale lock left by
+  a crashed daemon is detected (owner pid dead / torn) and **stolen**, so the
+  daemon can never permanently deadlock; a lock held by a **live** owner is
+  respected (no double daemon). The parent `notify/` dir is created first so a
+  clean install can't misread an `ENOENT` as "held".
+
+- **pid-reuse guard.** Every event stamps `parent_started_at`; the reader drops
+  events whose `parent_started_at` disagrees with its own record's start time, so
+  a recycled pid never reads a prior incarnation's edges.
+
+- **Rotation preserves at-least-once.** GC rotation of an oversized live inbox
+  never evicts an event above the **minimum consumer cursor** (unacked) — only
+  already-acked events are trimmed.
 
 - **Append-only inbox + monotonic seq + separate cursor.** Each parent has
   `notify/inbox/<host>/<parent>.ndjson`; every event carries a per-inbox `seq`

@@ -14,18 +14,22 @@ import os from "node:os";
 import path from "path";
 import {
   type NotifyEvent,
+  WATCHER_TTL_MS,
+  cursorDir,
   cursorPath,
   inboxDir,
   inboxPath,
+  liveWatcherPids,
   maxSeq,
   nextSeq,
-  notifyDir,
   parseCursor,
   parseInboxText,
   rotateKeep,
   seqPath,
   serializeCursor,
   serializeEvent,
+  watcherPath,
+  watchersDir,
 } from "./notifyInbox.ts";
 
 /** Stable local host id — the pid namespace is per-host. */
@@ -119,6 +123,20 @@ export async function getCursor(host: string, parentPid: number, consumer = "par
   return parseCursor(text).seq;
 }
 
+/**
+ * Minimum cursor across ALL consumers of a parent inbox — the watermark below
+ * which rotation may evict events (nothing above it has been acked by every
+ * reader). Returns 0 when there are no consumers (nothing to protect).
+ */
+export async function minConsumerCursor(host: string, parentPid: number): Promise<number> {
+  const names = await readdir(cursorDir(host, parentPid)).catch(() => [] as string[]);
+  const cursors = names.filter((n) => n.endsWith(".json")).map((n) => n.slice(0, -5));
+  if (cursors.length === 0) return 0;
+  let min = Infinity;
+  for (const c of cursors) min = Math.min(min, await getCursor(host, parentPid, c));
+  return Number.isFinite(min) ? min : 0;
+}
+
 export async function setCursor(
   host: string,
   parentPid: number,
@@ -146,19 +164,19 @@ export async function gcInboxes(
     if (!livePids.has(p) && !liveChildParentPids.has(p)) {
       await rm(inboxPath(host, p), { force: true }).catch(() => {});
       await rm(seqPath(host, p), { force: true }).catch(() => {});
-      await rm(path.join(notifyDir(), "cursors", host, String(p)), {
-        recursive: true,
-        force: true,
-      }).catch(() => {});
+      // Sanitized cursor dir (matches cursorPath), not a raw host join.
+      await rm(cursorDir(host, p), { recursive: true, force: true }).catch(() => {});
       continue;
     }
-    // Live inbox — rotate if oversized.
+    // Live inbox — rotate if oversized, but NEVER evict an event above the min
+    // consumer cursor (unacked): at-least-once must survive rotation.
     const size = await stat(inboxPath(host, p))
       .then((s) => s.size)
       .catch(() => 0);
     if (size > capBytes) {
       const events = await readInbox(host, p);
-      const kept = rotateKeep(events, capBytes);
+      const protectAboveSeq = await minConsumerCursor(host, p);
+      const kept = rotateKeep(events, capBytes, protectAboveSeq);
       if (kept.length < events.length) {
         const lock = path.join(inboxDir(host), `${p}.lock`);
         const release = await acquireLock(lock);
@@ -170,4 +188,42 @@ export async function gcInboxes(
       }
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Watcher registry — the set of parents currently running `ay notify watch`.
+// The daemon scopes its work to these parents (so an unrelated agent's children
+// never get an inbox) and stays alive while any watcher is live; a watcher
+// refreshes its heartbeat every poll and removes it on exit.
+// ---------------------------------------------------------------------------
+
+/** Register / refresh this parent's watch heartbeat. */
+export async function heartbeatWatcher(parentPid: number, startedAt: number): Promise<void> {
+  await ensureDir(watchersDir());
+  await writeFile(
+    watcherPath(parentPid),
+    JSON.stringify({ pid: parentPid, started_at: startedAt, ts: Date.now() }),
+  ).catch(() => {});
+}
+
+/** Remove this parent's watch heartbeat (on watch exit). */
+export async function clearWatcher(parentPid: number): Promise<void> {
+  await rm(watcherPath(parentPid), { force: true }).catch(() => {});
+}
+
+/** The set of parent pids with a fresh (non-expired) watch heartbeat. */
+export async function liveWatchers(now = Date.now()): Promise<Set<number>> {
+  const names = await readdir(watchersDir()).catch(() => [] as string[]);
+  const entries: { pid: number; ts: number }[] = [];
+  for (const n of names) {
+    if (!n.endsWith(".json")) continue;
+    const raw = await readFile(path.join(watchersDir(), n), "utf8").catch(() => "");
+    try {
+      const o = JSON.parse(raw) as { pid: number; ts: number };
+      if (typeof o?.pid === "number" && typeof o?.ts === "number") entries.push(o);
+    } catch {
+      /* skip torn heartbeat */
+    }
+  }
+  return liveWatcherPids(entries, now, WATCHER_TTL_MS);
 }

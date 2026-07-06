@@ -103,6 +103,35 @@ export function daemonLockDir(): string {
   return path.join(notifyDir(), "notifyd.lock");
 }
 
+/** Owner metadata inside the lock dir, for stale-lock liveness detection. */
+export function daemonLockOwnerPath(): string {
+  return path.join(daemonLockDir(), "owner.json");
+}
+
+/** Registry dir of parents currently running `ay notify watch` (heartbeats). */
+export function watchersDir(): string {
+  return path.join(notifyDir(), "watchers");
+}
+
+/** Heartbeat file for one watching parent. */
+export function watcherPath(parentPid: number): string {
+  return path.join(watchersDir(), `${parentPid}.json`);
+}
+
+/** A watcher heartbeat is "live" if refreshed within this window. */
+export const WATCHER_TTL_MS = 15_000;
+
+/** Parse a set of live parent pids from watcher heartbeat file contents. */
+export function liveWatcherPids(
+  entries: { pid: number; ts: number }[],
+  now: number,
+  ttlMs = WATCHER_TTL_MS,
+): Set<number> {
+  const out = new Set<number>();
+  for (const e of entries) if (now - e.ts <= ttlMs) out.add(e.pid);
+  return out;
+}
+
 /** Where the running daemon records its pid, for `ay notifyd status/stop`. */
 export function daemonPidPath(): string {
   return path.join(notifyDir(), "notifyd.pid");
@@ -210,20 +239,33 @@ export function inboxesToGC(
 }
 
 /**
- * Rotation decision (pure): given an inbox's events and a byte cap, return the
- * events to KEEP after rotating. We never drop an event at-or-below the minimum
- * un-acked cursor is the caller's concern; here we keep the newest events whose
- * serialized size fits the cap, always preserving at least `minKeep` newest.
+ * Rotation decision (pure): given an inbox's events, a byte cap, and the minimum
+ * un-acked cursor across ALL consumers, return the events to KEEP after
+ * rotating. Critically, an event with `seq > protectAboveSeq` is NEVER dropped —
+ * that is the at-least-once guarantee: we must not evict an edge no consumer has
+ * acknowledged yet, even under the byte cap. Below that watermark we keep the
+ * newest events that fit the cap (and at least `minKeep`).
  */
-export function rotateKeep(events: NotifyEvent[], capBytes: number, minKeep = 100): NotifyEvent[] {
+export function rotateKeep(
+  events: NotifyEvent[],
+  capBytes: number,
+  protectAboveSeq = 0,
+  minKeep = 100,
+): NotifyEvent[] {
   if (events.length <= minKeep) return events.slice();
   const kept: NotifyEvent[] = [];
   let bytes = 0;
   for (let i = events.length - 1; i >= 0; i--) {
-    const line = serializeEvent(events[i]!) + "\n";
+    const e = events[i]!;
+    const line = serializeEvent(e) + "\n";
     bytes += line.length;
-    if (bytes > capBytes && kept.length >= minKeep) break;
-    kept.push(events[i]!);
+    // Always retain unacked events (above the min cursor) and the newest minKeep.
+    if (e.seq > protectAboveSeq || kept.length < minKeep || bytes <= capBytes) {
+      kept.push(e);
+    }
+    // Once we're past the cap AND past minKeep AND below the protection
+    // watermark, older events can be dropped — stop scanning.
+    else break;
   }
   kept.reverse();
   return kept;

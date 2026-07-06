@@ -1,17 +1,18 @@
 /**
  * `ay notifyd` — the always-on-while-watched detection engine. Polls every
- * agent's live state (the runtime-agnostic query layer, so BOTH Rust and TS
- * children are covered), runs the pure debounce router (`notifyRouter.ts`), and
- * appends the decided edges — enriched with a payload the parent can act on
+ * WATCHED agent's live state (the runtime-agnostic query layer, so BOTH Rust and
+ * TS children are covered), runs the pure debounce router (`notifyRouter.ts`),
+ * and appends the decided edges — enriched with a payload the parent can act on
  * without tailing — into each parent's inbox (`notifyStore.ts`).
  *
- * Lifecycle: a host singleton (mkdir lock). Started on demand by
- * `ay notify watch --ensure-daemon` (default) or explicitly via
- * `ay notifyd start`. Self-exits after a grace window with nothing to watch, so
- * it never lingers as a zombie. It is opt-IN at the consumer: if no parent ever
- * watches, the daemon is never started and NO files are created — fully
- * backward compatible with existing flows (the Monitor-on-HEAD polling keeps
- * working unchanged, now strictly dominated by this).
+ * Lifecycle: a host singleton, guarded by an mkdir lock that records its owner
+ * pid so a crashed daemon's stale lock is detected and STOLEN (never a permanent
+ * deadlock). Scope + liveness are driven by the WATCHER REGISTRY: the daemon only
+ * processes children whose parent is currently running `ay notify watch` (so an
+ * unrelated agent never gets an inbox), and it stays alive as long as any watcher
+ * heartbeat is live, self-exiting only after a grace window with no watchers.
+ * `ay notify watch` re-ensures the daemon every poll, so a parent that watches
+ * BEFORE spawning children (or across a fan-out gap) always has a live daemon.
  */
 
 import { execFile } from "node:child_process";
@@ -24,13 +25,16 @@ import {
 import {
   type NotifyEvent,
   daemonLockDir,
+  daemonLockOwnerPath,
   daemonPidPath,
+  notifyDir,
 } from "./notifyInbox.ts";
 import {
   appendEvent,
   gcInboxes,
   hostId,
   listInboxParents,
+  liveWatchers,
   readInbox,
 } from "./notifyStore.ts";
 import { deriveLiveState, isPidAlive, listRecords, renderLogTailLines } from "./subcommands.ts";
@@ -38,7 +42,7 @@ import { logger } from "./logger.ts";
 
 const POLL_MS = 2000;
 const GC_EVERY_TICKS = 30; // ~every 60s
-const IDLE_EXIT_GRACE_MS = 60_000; // exit if nothing to watch this long
+const IDLE_EXIT_GRACE_MS = 60_000; // exit if no watcher this long
 
 const LS_OPTS = { all: true, active: false, json: false, latest: false, cwdScope: null } as const;
 
@@ -68,9 +72,7 @@ async function recentTail(logFile: string | null | undefined): Promise<string | 
 
 /**
  * Seed the router's prior state from what each inbox has ALREADY recorded, so a
- * daemon restart does not re-emit a baseline the parent already saw. For each
- * child we reconstruct the emitted-edge memory from its last (and any exited)
- * event.
+ * daemon restart does not re-emit a baseline the parent already saw.
  */
 async function reconcileFromInboxes(host: string): Promise<RouterState> {
   const state: RouterState = new Map();
@@ -97,7 +99,6 @@ async function reconcileFromInboxes(host: string): Promise<RouterState> {
         cli: last.cli,
         cwd: last.cwd,
         state: seededState,
-        // A still-idle child keeps idleEmitted so we don't re-fire across restart.
         idleSince: last.edge === "idle" ? 0 : null,
         idleEmitted: last.edge === "idle",
         inNeedsInput: last.edge === "needs_input",
@@ -109,15 +110,32 @@ async function reconcileFromInboxes(host: string): Promise<RouterState> {
   return state;
 }
 
-/** Build this tick's observations for every child that has a parent. */
-async function observeChildren(): Promise<{ obs: ChildObservation[]; childParentPids: Set<number> }> {
+interface ObserveResult {
+  obs: ChildObservation[];
+  /** child pid → the parent's started_at, for the pid-reuse guard. */
+  parentStartedAt: Map<number, number>;
+  /** log file per child pid, for payload enrichment. */
+  logFiles: Map<number, string | null>;
+  watcherCount: number;
+}
+
+/** Observe every child WHOSE PARENT IS WATCHING. Nothing else gets an inbox. */
+async function observeChildren(): Promise<ObserveResult> {
+  const watching = await liveWatchers();
   const records = await listRecords(undefined, LS_OPTS);
+  // Parent wrapper pid → its own started_at (for the pid-reuse stamp).
+  const startedAtByWrapper = new Map<number, number>();
+  for (const r of records) {
+    if (typeof r.wrapper_pid === "number" && r.wrapper_pid > 0)
+      startedAtByWrapper.set(r.wrapper_pid, r.started_at);
+  }
   const obs: ChildObservation[] = [];
-  const childParentPids = new Set<number>();
+  const parentStartedAt = new Map<number, number>();
+  const logFiles = new Map<number, string | null>();
   for (const r of records) {
     const parent = r.parent_pid;
     if (typeof parent !== "number" || parent <= 0) continue;
-    childParentPids.add(parent);
+    if (!watching.has(parent)) continue; // scope: only watched parents' children
     const { state, question } = await deriveLiveState(r);
     obs.push({
       pid: r.pid,
@@ -128,14 +146,51 @@ async function observeChildren(): Promise<{ obs: ChildObservation[]; childParent
       state,
       question,
     });
+    parentStartedAt.set(r.pid, startedAtByWrapper.get(parent) ?? 0);
+    logFiles.set(r.pid, r.log_file ?? null);
   }
-  return { obs, childParentPids };
+  return { obs, parentStartedAt, logFiles, watcherCount: watching.size };
 }
 
 export interface DaemonOptions {
   intervalMs?: number;
   /** Run a single tick and return (for tests / `--once`), no lock, no loop. */
   once?: boolean;
+}
+
+/**
+ * Acquire the singleton lock, stealing a stale one whose owner is dead. The
+ * liveness predicate is injectable so the steal/keep race is unit-testable.
+ * Returns true if WE now hold the lock, false if a LIVE owner holds it.
+ */
+export async function acquireDaemonLock(isAlive: (pid: number) => boolean = isPidAlive): Promise<boolean> {
+  // The lock dir lives under notify/ — ensure that exists first, else mkdir of
+  // the lock throws ENOENT which must NOT be mistaken for "someone holds it".
+  await mkdir(notifyDir(), { recursive: true }).catch(() => {});
+  for (let attempt = 0; attempt < 3; attempt++) {
+    try {
+      await mkdir(daemonLockDir(), { recursive: false });
+      await writeFile(
+        daemonLockOwnerPath(),
+        JSON.stringify({ pid: process.pid, started_at: Date.now() }),
+      ).catch(() => {});
+      return true;
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; // real error — propagate
+      // Lock exists — is its owner still alive?
+      const raw = await readFile(daemonLockOwnerPath(), "utf8").catch(() => "");
+      let ownerPid = 0;
+      try {
+        ownerPid = (JSON.parse(raw) as { pid: number }).pid ?? 0;
+      } catch {
+        /* missing/torn owner — treat as stale */
+      }
+      if (ownerPid > 0 && ownerPid !== process.pid && isAlive(ownerPid)) return false; // live daemon
+      // Stale (dead owner or unreadable) — steal and retry.
+      await rm(daemonLockDir(), { recursive: true, force: true }).catch(() => {});
+    }
+  }
+  return false;
 }
 
 /**
@@ -147,15 +202,12 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   const intervalMs = opts.intervalMs ?? POLL_MS;
 
   if (opts.once) {
-    await tick(host, new Map());
+    await tickState(host, new Map());
     return 0;
   }
 
-  // Singleton guard: whoever holds the mkdir lock is THE daemon.
-  try {
-    await mkdir(daemonLockDir(), { recursive: false });
-  } catch {
-    logger.debug("[notifyd] another daemon already holds the lock — exiting");
+  if (!(await acquireDaemonLock())) {
+    logger.debug("[notifyd] another live daemon holds the lock — exiting");
     return 0;
   }
   await writeFile(daemonPidPath(), String(process.pid)).catch(() => {});
@@ -174,18 +226,16 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   let emptySince: number | null = null;
 
   while (running) {
-    const hadWork = await tickState(host, prev).then((r) => {
-      prev = r.next;
-      return r.hadChildren;
-    });
+    const { next, watcherCount } = await tickState(host, prev);
+    prev = next;
     ticks++;
     if (ticks % GC_EVERY_TICKS === 0) await gcTick(host).catch(() => {});
 
-    // Self-exit when there's nothing to watch for a grace window.
-    if (hadWork) emptySince = null;
+    // Self-exit when no parent is watching for a grace window.
+    if (watcherCount > 0) emptySince = null;
     else if (emptySince == null) emptySince = Date.now();
     if (emptySince != null && Date.now() - emptySince > IDLE_EXIT_GRACE_MS) {
-      logger.debug("[notifyd] nothing to watch — exiting");
+      logger.debug("[notifyd] no watchers — exiting");
       break;
     }
     await new Promise((r) => setTimeout(r, intervalMs));
@@ -194,28 +244,22 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   return 0;
 }
 
-/** One tick used by `--once` (no state threading). */
-async function tick(host: string, prev: RouterState): Promise<void> {
-  await tickState(host, prev);
-}
-
 async function tickState(
   host: string,
   prev: RouterState,
-): Promise<{ next: RouterState; hadChildren: boolean }> {
-  const { obs, childParentPids } = await observeChildren();
+): Promise<{ next: RouterState; watcherCount: number }> {
+  const { obs, parentStartedAt, logFiles, watcherCount } = await observeChildren();
   const { events, next } = stepRouter(prev, obs, Date.now());
   for (const ev of events) {
-    // Enrich: tail + git head for actionable edges; exited is best-effort (log
-    // may already be reaped). Never let git/log I/O block or crash emission.
+    // Enrich: tail + git head for actionable edges; exited is best-effort (the
+    // log may already be reaped). Never let git/log I/O block or crash emission.
     let tail: string | null = null;
     let git_head: string | null = null;
     try {
-      const rec = obs.find((o) => o.pid === ev.child_pid);
-      if (rec && ev.edge !== "exited") {
+      if (ev.edge !== "exited") {
         [tail, git_head] = await Promise.all([
-          recentTailForPid(ev.child_pid),
-          gitHead(rec.cwd),
+          recentTail(logFiles.get(ev.child_pid)),
+          gitHead(ev.cwd),
         ]);
       }
     } catch {
@@ -225,6 +269,9 @@ async function tickState(
       ts: Date.now(),
       host,
       parent_pid: ev.parent_pid,
+      // The parent's start time — the read side rejects an event whose parent
+      // started_at doesn't match the reader's, guarding against pid reuse.
+      parent_started_at: parentStartedAt.get(ev.child_pid) ?? 0,
       child_pid: ev.child_pid,
       child_wrapper_pid: ev.child_wrapper_pid,
       cli: ev.cli,
@@ -240,15 +287,7 @@ async function tickState(
       logger.warn(`[notifyd] append failed for parent ${ev.parent_pid}: ${e}`),
     );
   }
-  return { next, hadChildren: childParentPids.size > 0 };
-}
-
-// Resolve a child's log file to render its tail. We re-read the record set here
-// only for the (rare) emit path, keeping the hot observe path lean.
-async function recentTailForPid(childPid: number): Promise<string | null> {
-  const records = await listRecords(undefined, LS_OPTS).catch(() => []);
-  const r = records.find((x) => x.pid === childPid);
-  return recentTail(r?.log_file);
+  return { next, watcherCount };
 }
 
 async function gcTick(host: string): Promise<void> {

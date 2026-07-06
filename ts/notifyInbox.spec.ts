@@ -8,6 +8,7 @@ import {
   filterUnread,
   inboxPath,
   inboxesToGC,
+  liveWatcherPids,
   maxSeq,
   nextSeq,
   parseCursor,
@@ -131,18 +132,53 @@ describe("notifyInbox — retention", () => {
 });
 
 describe("notifyInbox — rotation", () => {
-  it("keeps the newest events within the byte cap, preserving a minimum", () => {
-    const events = Array.from({ length: 500 }, (_, i) => ev({ seq: i + 1 }));
-    const kept = rotateKeep(events, 200, 10);
-    expect(kept.length).toBeGreaterThanOrEqual(10);
+  const many = () => Array.from({ length: 500 }, (_, i) => ev({ seq: i + 1 }));
+
+  it("keeps EVERYTHING when nothing is acked (min cursor 0) — at-least-once", () => {
+    // Every event is unacked, so none may be dropped even under a tiny cap. The
+    // inbox only shrinks once a consumer acks (advances its cursor).
+    const kept = rotateKeep(many(), 1, 0, 10);
+    expect(kept.length).toBe(500);
+  });
+
+  it("trims ACKED events (below the min cursor) under the byte cap", () => {
+    // seq 1..495 acked (min cursor 495), 496..500 unacked → only acked ones are
+    // eligible for eviction under the tiny cap.
+    const kept = rotateKeep(many(), 1, 495, 5);
     expect(kept.length).toBeLessThan(500);
-    // newest are retained, in ascending order
-    expect(kept[kept.length - 1]!.seq).toBe(500);
-    expect(kept[0]!.seq).toBeLessThan(kept[kept.length - 1]!.seq);
+    expect(kept[kept.length - 1]!.seq).toBe(500); // newest retained
+    expect(kept.some((e) => e.seq === 1)).toBe(false); // old acked evicted
+    for (let seq = 496; seq <= 500; seq++) expect(kept.some((e) => e.seq === seq)).toBe(true);
+  });
+
+  it("NEVER evicts an unacked event above the min cursor (at-least-once)", () => {
+    // protectAboveSeq=490 → every event with seq>490 must survive even under a
+    // tiny cap and a small minKeep. This is the guarantee codex flagged.
+    const kept = rotateKeep(many(), 1, 490, 5);
+    for (let seq = 491; seq <= 500; seq++) {
+      expect(kept.some((e) => e.seq === seq)).toBe(true);
+    }
+    expect(kept.length).toBeLessThan(500); // older, acked events still trimmed
   });
 
   it("returns everything when under minKeep", () => {
     const events = [ev({ seq: 1 }), ev({ seq: 2 })];
-    expect(rotateKeep(events, 1, 100).map((e) => e.seq)).toEqual([1, 2]);
+    expect(rotateKeep(events, 1, 0, 100).map((e) => e.seq)).toEqual([1, 2]);
+  });
+});
+
+describe("notifyInbox — watcher liveness", () => {
+  it("counts only heartbeats within the TTL", () => {
+    const now = 100_000;
+    const live = liveWatcherPids(
+      [
+        { pid: 1, ts: now - 1_000 }, // fresh
+        { pid: 2, ts: now - 999_999 }, // stale
+        { pid: 3, ts: now }, // fresh
+      ],
+      now,
+      15_000,
+    );
+    expect([...live].sort()).toEqual([1, 3]);
   });
 });
