@@ -4197,7 +4197,13 @@ async function cmdNotify(rest: string[]): Promise<number> {
   return 0;
 }
 
-/** Resolve the started_at of the agent whose wrapper pid is `parent` (0 if unknown). */
+/**
+ * Resolve the started_at of the LIVE agent whose wrapper pid is `parent`. Returns
+ * 0 (→ the caller fails closed) when there is no such record, when the matching
+ * record is stale (exited / pid not alive), or when the match is ambiguous
+ * (>1 live record) — so a leftover stale record can't make a recycled parent pid
+ * resolve to a PRIOR incarnation's start time and fail-open the identity guard.
+ */
 async function resolveParentStartedAt(parent: number): Promise<number> {
   const records = await listRecords(undefined, {
     all: true,
@@ -4206,8 +4212,15 @@ async function resolveParentStartedAt(parent: number): Promise<number> {
     latest: false,
     cwdScope: null,
   }).catch(() => [] as GlobalPidRecord[]);
-  const rec = records.find((r) => r.wrapper_pid === parent || r.pid === parent);
-  return rec?.started_at ?? 0;
+  const live = records.filter(
+    (r) =>
+      (r.wrapper_pid === parent || r.pid === parent) &&
+      r.status !== "exited" &&
+      isPidAlive(r.pid),
+  );
+  // Exactly one live match, or fail closed.
+  if (live.length !== 1) return 0;
+  return live[0]!.started_at ?? 0;
 }
 
 async function cmdNotifyCursor(args: string[]): Promise<number> {

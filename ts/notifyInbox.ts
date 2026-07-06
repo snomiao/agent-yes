@@ -181,12 +181,16 @@ function isValidEvent(ev: unknown): ev is NotifyEvent {
   const e = ev as Record<string, unknown>;
   return (
     typeof e.seq === "number" &&
+    typeof e.ts === "number" &&
+    typeof e.host === "string" &&
     typeof e.parent_pid === "number" &&
     typeof e.child_pid === "number" &&
     typeof e.cli === "string" &&
     typeof e.cwd === "string" &&
     typeof e.edge === "string" &&
-    EDGES.has(e.edge)
+    EDGES.has(e.edge) &&
+    typeof e.state === "string" &&
+    (e.question === null || typeof e.question === "string")
   );
 }
 

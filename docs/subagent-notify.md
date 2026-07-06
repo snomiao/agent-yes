@@ -232,6 +232,22 @@ parent addresses its own inbox with no argument.
   (tail + git head), daemon lifecycle.
 - `ts/subcommands.ts` — `ay notify` / `ay notifyd` CLI.
 
+## Known limitations (v1 — tracked as follow-ups)
+
+These are deliberately out of v1 scope; each is a bounded, low-probability edge
+with a documented mitigation, tracked in a single follow-up issue.
+
+- **`notifyd stop` trusts the owner file's identity, not the OS process start
+  time.** A pid recycled onto an unrelated process WITHIN the tight `OWNER_TTL`
+  window (a few ticks) could be briefly trusted and signalled. Reading the real
+  OS start time is non-portable (`/proc/<pid>/stat` on Linux vs `ps -o lstart` /
+  `proc_pidinfo` on macOS); heartbeat freshness + a few-tick TTL bound the window
+  to seconds. A strict OS start-time cross-check is a follow-up.
+- **The watcher heartbeat proves parent-liveness, not the `ay notify watch`
+  subprocess's own liveness.** A crashed watch stops refreshing, so its heartbeat
+  goes stale within the TTL and is dropped — but carrying the watch subprocess's
+  pid/token in the heartbeat for a strict check is a follow-up.
+
 ## Known limitation
 
 - **An inbox nobody acks can grow unbounded.** Rotation only evicts events at or
