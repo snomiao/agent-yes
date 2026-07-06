@@ -1091,14 +1091,41 @@ async function runAllRemotesLs(opts: {
     ),
   ]);
 
-  type HostedRow = { host: string; rec: any };
-  const rows: HostedRow[] = [];
+  // Group by host in a stable order (local first, then each remote alias in
+  // config order), so the aggregated table reads top-down per machine.
+  const byHost: { host: string; records: any[] }[] = [];
   if (localResult.status === "fulfilled") {
-    for (const r of localResult.value.records) rows.push({ host: "local", rec: r });
+    // Local records come from listRecords() RAW — unlike the remote /api/ls
+    // payload they carry no derived live-state, last_active_at, or task counts,
+    // so left alone they'd render a flat "active" with no age/badge. Enrich them
+    // to the same shape the API returns, so local agents get the same
+    // idle/needs_input/stuck status, staleness age, and task badges.
+    const enriched = await Promise.all(
+      localResult.value.records.map(async (r) => {
+        const { state, question } = await deriveLiveState(r);
+        return {
+          ...r,
+          status: state,
+          question,
+          last_active_at: await deriveLastActiveAt(r),
+          tasks: state === "stopped" || !r.log_file ? null : await extractTaskCounts(r.log_file),
+        };
+      }),
+    );
+    byHost.push({ host: "local", records: enriched });
   }
   for (const res of remoteResults) {
-    if (res.status === "fulfilled") {
-      for (const r of res.value.records) rows.push({ host: res.value.host, rec: r });
+    if (res.status === "fulfilled") byHost.push({ host: res.value.host, records: res.value.records });
+  }
+
+  // Flatten each host's records into its agent>subagent forest (parent_pid links),
+  // carrying the box-drawing tree prefix — the same nesting the console's left
+  // panel shows. Degrades to a flat newest-first list when there are no links.
+  type HostedRow = { host: string; rec: any; prefix: string };
+  const rows: HostedRow[] = [];
+  for (const { host, records } of byHost) {
+    for (const { record, prefix } of flattenForest(buildAgentForest(records))) {
+      rows.push({ host, rec: record, prefix });
     }
   }
 
@@ -1108,12 +1135,19 @@ async function runAllRemotesLs(opts: {
   }
 
   const termWidth = (process.stdout as any).columns ?? 120;
+  const now = Date.now();
+  const ageOf = (rec: any) => humanizeAge(now - (rec.last_active_at ?? rec.started_at));
+  const badgeOf = (rec: any) => (rec.tasks ? `${rec.tasks.done}/${rec.tasks.total} ` : "");
   const hostW = Math.max(4, ...rows.map((r) => r.host.length));
   const pidW = Math.max(3, ...rows.map((r) => String(r.rec.pid).length));
   const cliW = Math.max(3, ...rows.map((r) => String(r.rec.cli).length));
   const statusW = Math.max(6, ...rows.map((r) => String(r.rec.status).length));
+  const ageW = Math.max(3, ...rows.map((r) => ageOf(r.rec).length));
   const cwdW = Math.max(3, ...rows.map((r) => shortenPath(String(r.rec.cwd)).length));
-  const promptBudget = Math.max(20, termWidth - hostW - pidW - cliW - statusW - cwdW - 5 * 2 - 1);
+  const promptBudget = Math.max(
+    20,
+    termWidth - hostW - pidW - cliW - statusW - ageW - cwdW - 6 * 2 - 1,
+  );
 
   process.stdout.write(
     [
@@ -1121,18 +1155,24 @@ async function runAllRemotesLs(opts: {
       "PID".padEnd(pidW),
       "CLI".padEnd(cliW),
       "STATUS".padEnd(statusW),
+      "AGE".padEnd(ageW),
       "CWD".padEnd(cwdW),
       "PROMPT",
     ].join("  ") + "\n",
   );
-  for (const { host, rec } of rows) {
-    const label = rec.prompt ? truncate(`→ ${rec.prompt}`, promptBudget) : "";
+  for (const { host, rec, prefix } of rows) {
+    // The tree prefix + task badge live inside the PROMPT column, so they eat
+    // into this row's text budget — same as the single-host table.
+    const badge = badgeOf(rec);
+    const budget = Math.max(8, promptBudget - prefix.length - badge.length);
+    const label = prefix + badge + (rec.prompt ? truncate(`→ ${rec.prompt}`, budget) : "");
     process.stdout.write(
       [
         host.padEnd(hostW),
         String(rec.pid).padEnd(pidW),
         String(rec.cli).padEnd(cliW),
         String(rec.status).padEnd(statusW),
+        ageOf(rec).padEnd(ageW),
         shortenPath(String(rec.cwd)).padEnd(cwdW),
         label,
       ].join("  ") + "\n",
@@ -1189,6 +1229,20 @@ async function deriveLiveState(
     if (base === "idle" && (await isAgentStuck(r))) return { state: "stuck", question: null };
   }
   return { state: base, question: null };
+}
+
+/**
+ * When the agent last wrote stdout — the log file's mtime, falling back to
+ * started_at when there's no log yet (freshly spawned). Mirrors serve.ts's
+ * `last_active_at`, so the `ay ls` AGE column measures STALENESS (time since the
+ * agent last produced output) rather than lifetime — matching the console's
+ * left-panel age. A long-lived but quiet agent then reads as stale, not "new".
+ */
+async function deriveLastActiveAt(r: GlobalPidRecord): Promise<number> {
+  if (!r.log_file) return r.started_at;
+  return stat(r.log_file)
+    .then((s) => s.mtimeMs)
+    .catch(() => r.started_at);
 }
 
 async function cmdLs(rest: string[]): Promise<number> {
@@ -1350,12 +1404,21 @@ async function cmdLs(rest: string[]): Promise<number> {
   // context and users on narrow ones don't get an awkwardly-wrapped table.
   const termWidth = (process.stdout as any).columns ?? 120;
 
+  // AGE is time since last stdout (staleness), not lifetime — same signal the
+  // console's left panel shows. Precomputed here (one stat() per agent) so the
+  // width pass and the row pass agree without stat()ing twice.
+  const now = Date.now();
+  const lastActive = new Map<number, number>(
+    await Promise.all(records.map(async (r) => [r.pid, await deriveLastActiveAt(r)] as const)),
+  );
+  const ageOf = (r: GlobalPidRecord) => humanizeAge(now - (lastActive.get(r.pid) ?? r.started_at));
+
   const rawCwds = records.map((r) => shortenPath(r.cwd));
   const widths = {
     pid: Math.max(3, ...records.map((r) => String(r.pid).length)),
     cli: Math.max(3, ...records.map((r) => r.cli.length)),
     status: Math.max(6, ...records.map((r) => r.status.length)),
-    age: Math.max(3, ...records.map((r) => humanizeAge(Date.now() - r.started_at).length)),
+    age: Math.max(3, ...records.map((r) => ageOf(r).length)),
     cwd: Math.max(3, ...rawCwds.map((c) => c.length)),
   };
   const fixedWidth = widths.pid + widths.cli + widths.status + widths.age + widths.cwd + 5 * 2; // 5 separators of "  "
@@ -1399,7 +1462,7 @@ async function cmdLs(rest: string[]): Promise<number> {
         pid: String(r.pid),
         cli: r.cli,
         status: displayStatus,
-        age: humanizeAge(Date.now() - r.started_at),
+        age: ageOf(r),
         cwd: shortenPath(r.cwd),
         label,
         hasNote,
