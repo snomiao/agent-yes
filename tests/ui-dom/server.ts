@@ -14,6 +14,8 @@
  *   GET  /api/tail/:pid?raw=1   → SSE; one JSON-encoded chunk then keep-alive
  *   POST /api/resize/:pid       → ok
  *   POST /api/send              → ok
+ *   POST /api/kill              → { ok: true }  (Cmd+K /kill, ⋯ Force-kill)
+ *   POST /api/restart           → { ok: true }  (Cmd+K /restart, ⋯ Restart)
  */
 import http from "http";
 import { readFileSync } from "fs";
@@ -102,6 +104,13 @@ export async function startServer(): Promise<{ url: string; close: () => void }>
     if (req.method === "POST" && (p.startsWith("/api/resize/") || p === "/api/send")) {
       res.writeHead(200, { "Content-Type": "text/plain" });
       return res.end("ok");
+    }
+    // Recovery endpoints (Cmd+K /kill · /restart, and the ⋯-menu buttons). Ack ok
+    // so restartAgent()'s success path runs; the test asserts the target from the
+    // captured request body.
+    if (req.method === "POST" && (p === "/api/kill" || p === "/api/restart")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: true }));
     }
 
     res.writeHead(404);

@@ -240,6 +240,59 @@ describe("console DOM behaviour", () => {
     }
   });
 
+  it("Cmd+K /restart and /kill fire the open agent's recovery endpoints", async () => {
+    // The slash commands mirror the ⋯-menu Restart / Force-kill buttons: they act
+    // on the agent that was open when the palette launched (the anchor), and hit
+    // the very same POST /api/restart · /api/kill with a STRING keyword=pid.
+    const { ctx, page } = await openConsole(browser, url);
+    const posts: { path: string; body: any }[] = [];
+    page.on("request", (r) => {
+      const u = new URL(r.url());
+      if (r.method() === "POST" && (u.pathname === "/api/kill" || u.pathname === "/api/restart")) {
+        try {
+          posts.push({ path: u.pathname, body: r.postDataJSON() });
+        } catch {}
+      }
+    });
+    // The commands reuse the ⋯-menu confirm() gate — auto-accept it.
+    page.on("dialog", (d) => d.accept());
+    try {
+      // Open agent 101, then launch the palette so 101 is the anchor.
+      await page.click('.list .row[data-key="local#101"]');
+      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#101");
+      await page.keyboard.press("Control+k");
+      await expect.poll(() => page.locator("#omni").isVisible()).toBe(true);
+
+      // "/" lists the commands; both /restart and /kill are offered.
+      await page.fill("#omni-input", "/");
+      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(2);
+      const menu = (await page.locator("#omni-results").innerText()).toLowerCase();
+      expect(menu).toContain("restart");
+      expect(menu).toContain("kill");
+
+      // "/restart" narrows to one row; ⏎ fires POST /api/restart for pid 101.
+      await page.fill("#omni-input", "/restart");
+      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(1);
+      await page.keyboard.press("Enter");
+      await expect.poll(() => posts.filter((x) => x.path === "/api/restart").length).toBe(1);
+      const restart = posts.find((x) => x.path === "/api/restart")!;
+      expect(restart.body.keyword).toBe("101");
+      expect(typeof restart.body.keyword).toBe("string");
+
+      // Re-open and run "/kill" → POST /api/kill for the same agent.
+      await page.keyboard.press("Control+k");
+      await expect.poll(() => page.locator("#omni").isVisible()).toBe(true);
+      await page.fill("#omni-input", "/kill");
+      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(1);
+      await page.keyboard.press("Enter");
+      await expect.poll(() => posts.filter((x) => x.path === "/api/kill").length).toBe(1);
+      const kill = posts.find((x) => x.path === "/api/kill")!;
+      expect(kill.body.keyword).toBe("101");
+    } finally {
+      await ctx.close();
+    }
+  });
+
   it("key bar + composer apply sticky Ctrl/Alt and never leak the modifier", async () => {
     const { ctx, page } = await openConsole(
       browser,
