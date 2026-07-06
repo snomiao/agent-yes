@@ -629,6 +629,14 @@ export async function daemonStatus(now = Date.now()): Promise<number | null> {
 export async function requestDaemonStop(): Promise<number | null> {
   const id = await daemonIdentity();
   if (!id) return null;
+  // Capture the owner's fencing token, then RE-READ it right before removing the
+  // lock: if daemon A exited and B took over between the identity check and the
+  // rm, the token changed → we must NOT remove B's lock (which would stop the new
+  // daemon). Same fence discipline as the lock release.
+  const token1 = await readDaemonOwnerToken();
+  if (token1 === null) return null;
+  const token2 = await readDaemonOwnerToken();
+  if (token2 !== token1) return null; // taken over between reads — don't touch it
   await rm(daemonLockDir(), { recursive: true, force: true }).catch(() => {});
   return id.pid;
 }

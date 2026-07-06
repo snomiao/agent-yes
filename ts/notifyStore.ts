@@ -110,6 +110,23 @@ async function ensureDir(dir: string): Promise<void> {
 }
 
 /**
+ * Atomically overwrite a single file (temp + rename) so a concurrent reader never
+ * observes a torn/partial write — the sweep invariant for every single-file
+ * mutation (cursor, watcher heartbeat, lock owner). Returns whether it landed.
+ */
+async function atomicWrite(file: string, data: string): Promise<boolean> {
+  const tmp = `${file}.${randomUUID()}.tmp`;
+  try {
+    await writeFile(tmp, data);
+    await rename(tmp, file);
+    return true;
+  } catch {
+    await rm(tmp, { force: true }).catch(() => {});
+    return false;
+  }
+}
+
+/**
  * Acquire a per-inbox lock; returns a release fn. Ownership is proven ONLY by a
  * successful `mkdir(recursive:false)` (atomic exclusive create), and stealing is
  * driven by HOLDER LIVENESS, not elapsed wait time: the holder writes an
@@ -308,7 +325,7 @@ export async function setCursor(
 ): Promise<void> {
   const p = cursorPath(host, parentPid, consumer);
   await ensureDir(path.dirname(p));
-  await writeFile(p, serializeCursor(seq));
+  await atomicWrite(p, serializeCursor(seq));
 }
 
 /**
@@ -324,41 +341,41 @@ export async function gcInboxes(
 ): Promise<void> {
   const parents = await listInboxParents(host);
   for (const p of parents) {
-    if (!livePids.has(p) && !liveChildParentPids.has(p)) {
-      await rm(inboxPath(host, p), { force: true }).catch(() => {});
-      await rm(seqPath(host, p), { force: true }).catch(() => {});
-      // Sanitized cursor dir (matches cursorPath), not a raw host join.
-      await rm(cursorDir(host, p), { recursive: true, force: true }).catch(() => {});
-      continue;
-    }
-    // Live inbox — rotate if oversized, but NEVER evict an event above the min
-    // consumer cursor (unacked): at-least-once must survive rotation. The size
-    // check is a cheap gate; the read→compute→write all happen UNDER the lock so
-    // a concurrent appendEvent can't be lost between a stale read and the write.
-    const size = await stat(inboxPath(host, p))
-      .then((s) => s.size)
-      .catch(() => 0);
-    if (size > capBytes) {
-      const lock = path.join(inboxDir(host), `${p}.lock`);
-      const release = await acquireLock(lock);
-      try {
-        const events = await readInbox(host, p);
-        const protectAboveSeq = await minConsumerCursor(host, p);
-        const kept = rotateKeep(events, capBytes, protectAboveSeq);
-        if (kept.length < events.length) {
-          await writeFile(inboxPath(host, p), kept.map(serializeEvent).join("\n") + "\n");
-        } else {
-          // Oversize but nothing was trimmable — every event is unacked (min
-          // cursor at/below the oldest). `capBytes` is a SOFT cap here (we never
-          // drop an unacked edge), so surface the unbounded growth rather than
-          // silently exceeding it. A parent that never acks is the usual cause.
-          logger.warn(
-            `[notify] inbox for parent ${p} is ${size} bytes (> soft cap ${capBytes}) but all events are unacked — cursor not advancing?`,
-          );
-        }
-      } finally {
-        await release();
+    // BOTH the delete and the rotation mutate the inbox/.seq/cursor, so BOTH run
+    // under the same per-inbox lock `appendEvent` takes — a concurrent append can
+    // never be lost to a mid-flight delete or rotation.
+    const lock = path.join(inboxDir(host), `${p}.lock`);
+    const release = await acquireLock(lock);
+    try {
+      if (!livePids.has(p) && !liveChildParentPids.has(p)) {
+        await rm(inboxPath(host, p), { force: true }).catch(() => {});
+        await rm(seqPath(host, p), { force: true }).catch(() => {});
+        // Sanitized cursor dir (matches cursorPath), not a raw host join.
+        await rm(cursorDir(host, p), { recursive: true, force: true }).catch(() => {});
+        continue;
       }
+      // Live inbox — rotate if oversized, but NEVER evict an event above the min
+      // consumer cursor (unacked): at-least-once must survive rotation.
+      const size = await stat(inboxPath(host, p))
+        .then((s) => s.size)
+        .catch(() => 0);
+      if (size <= capBytes) continue;
+      const events = await readInbox(host, p);
+      const protectAboveSeq = await minConsumerCursor(host, p);
+      const kept = rotateKeep(events, capBytes, protectAboveSeq);
+      if (kept.length < events.length) {
+        await writeFile(inboxPath(host, p), kept.map(serializeEvent).join("\n") + "\n");
+      } else {
+        // Oversize but nothing was trimmable — every event is unacked (min cursor
+        // at/below the oldest). `capBytes` is a SOFT cap here (we never drop an
+        // unacked edge), so surface the unbounded growth rather than silently
+        // exceeding it. A parent that never acks is the usual cause.
+        logger.warn(
+          `[notify] inbox for parent ${p} is ${size} bytes (> soft cap ${capBytes}) but all events are unacked — cursor not advancing?`,
+        );
+      }
+    } finally {
+      await release();
     }
   }
 }
@@ -370,13 +387,14 @@ export async function gcInboxes(
 // refreshes its heartbeat every poll and removes it on exit.
 // ---------------------------------------------------------------------------
 
-/** Register / refresh this parent's watch heartbeat. */
+/** Register / refresh this parent's watch heartbeat (atomically, so a concurrent
+ * liveWatchers never reads a torn file and transiently drops the watcher). */
 export async function heartbeatWatcher(parentPid: number, startedAt: number): Promise<void> {
   await ensureDir(watchersDir());
-  await writeFile(
+  await atomicWrite(
     watcherPath(parentPid),
     JSON.stringify({ pid: parentPid, started_at: startedAt, ts: Date.now() }),
-  ).catch(() => {});
+  );
 }
 
 /** Remove this parent's watch heartbeat (on watch exit). */
@@ -390,7 +408,10 @@ export async function clearWatcher(parentPid: number): Promise<void> {
  * from the registry and stamp a 0). A watcher counts as live ONLY if its
  * heartbeat is fresh AND its process is actually alive — so a crashed `watch`
  * whose heartbeat lingers for the TTL doesn't keep the daemon writing to a dead
- * parent's inbox (which would violate "nothing happens unless you watch").
+ * parent's inbox (which would violate "nothing happens unless you watch"). A
+ * heartbeat with a missing/non-positive `started_at` is treated as NOT live: the
+ * daemon's cross-session scope guard keys off a positive parent start time, so a
+ * 0 would defeat it — fail closed.
  */
 export async function liveWatchers(now = Date.now()): Promise<Map<number, number>> {
   const names = await readdir(watchersDir()).catch(() => [] as string[]);
@@ -402,11 +423,13 @@ export async function liveWatchers(now = Date.now()): Promise<Map<number, number
       const o = JSON.parse(raw) as { pid: number; started_at?: number; ts: number };
       if (
         typeof o?.pid === "number" &&
+        typeof o?.started_at === "number" &&
+        o.started_at > 0 &&
         typeof o?.ts === "number" &&
         now - o.ts <= WATCHER_TTL_MS &&
         pidAlive(o.pid)
       ) {
-        live.set(o.pid, typeof o.started_at === "number" ? o.started_at : 0);
+        live.set(o.pid, o.started_at);
       }
     } catch {
       /* skip torn heartbeat */

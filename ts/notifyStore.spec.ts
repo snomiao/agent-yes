@@ -200,6 +200,13 @@ describe("notifyStore (fs)", () => {
     expect((await liveWatchers()).has(424242)).toBe(false);
   });
 
+  it("drops a watcher with a missing/non-positive started_at (fail-closed)", async () => {
+    // A 0 started_at would defeat the daemon's cross-session scope guard, so such
+    // a heartbeat is treated as NOT live.
+    await heartbeatWatcher(process.pid, 0);
+    expect((await liveWatchers()).has(process.pid)).toBe(false);
+  });
+
   it("minConsumerCursor returns the smallest cursor across consumers (0 if none)", async () => {
     expect(await minConsumerCursor(host, 999)).toBe(0);
     await setCursor(host, 999, 8, "parent");
