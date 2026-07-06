@@ -32,6 +32,20 @@ export const BADGE_DEFS: BadgeDef[] = [
     title: "Usage session limit hit — waiting for the reset time shown on screen",
     pattern: /you['’]?ve hit your session limit/i,
   },
+  {
+    // The CLI is auto-retrying an API call on its OWN backoff — claude prints
+    // "✻ Waiting for API response · will retry in 2m 17s · check your network"
+    // and recovers by itself. agent-yes injects NOTHING here (unlike the runtime's
+    // autoRetry, which types "retry"); this badge just annotates "waiting on the
+    // API, no action needed" so the agent doesn't read as plainly busy. Anchored
+    // on the FULL banner (not a bare "will retry in") so an agent merely
+    // *discussing* retries can't light it up; `[\s\S]{0,40}` spans the "· "
+    // separator and any line-wrap between the two phrases.
+    id: "retrying",
+    label: "retry",
+    title: "Waiting for the API — the CLI is auto-retrying on its own backoff (no action needed)",
+    pattern: /Waiting for API response[\s\S]{0,40}will retry in \d/i,
+  },
 ];
 
 /**

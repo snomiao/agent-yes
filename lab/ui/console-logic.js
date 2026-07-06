@@ -191,6 +191,10 @@ export const BADGE_META = {
     label: "limit",
     title: "Usage session limit hit — waiting for the reset time shown on screen",
   },
+  retrying: {
+    label: "retry",
+    title: "Waiting for the API — the CLI is auto-retrying on its own backoff (no action needed)",
+  },
 };
 
 // Status-flag chips ("badges") matched against the agent's screen — e.g. an
