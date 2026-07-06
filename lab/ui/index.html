@@ -630,6 +630,10 @@
       .omni-spawn .omni-title {
         color: var(--green);
       }
+      /* Destructive slash command (/kill) — red title, matching the ⋯-menu Force-kill. */
+      .omni-spawn.danger .omni-title {
+        color: var(--red);
+      }
       .omni-empty {
         padding: 14px;
         color: var(--muted);
@@ -2819,8 +2823,10 @@
       //   Force — escalation a stuck agent can't ignore: a real SIGKILL of its process
       //           GROUP, server-side via POST /api/kill. Use when /exit does nothing.
       const GRACEFUL_EXIT = { claude: "/exit", codex: "/exit", gemini: "/quit" };
-      async function stopAgent(force) {
-        const e = sel ? entries.find((x) => x._key === sel) : null;
+      // `ent` targets a specific agent (the Cmd+K /kill · /restart commands pass the
+      // omnibox anchor); the ⋯-menu buttons omit it and act on the selected agent.
+      async function stopAgent(force, ent) {
+        const e = ent || (sel ? entries.find((x) => x._key === sel) : null);
         if (!e) return;
         const who = `pid ${e.pid} ${cliLabel(e) || ident(e) || ""}`.trim();
         const tx = txFor(e),
@@ -2843,8 +2849,8 @@
       // Restart — stop (if live) + relaunch resuming the session, server-side via
       // POST /api/restart (the `ay restart` flow). The server runs it detached, so
       // it's decoupled from this agent's lifecycle — no prompt typed into the agent.
-      async function restartAgent() {
-        const e = sel ? entries.find((x) => x._key === sel) : null;
+      async function restartAgent(ent) {
+        const e = ent || (sel ? entries.find((x) => x._key === sel) : null);
         if (!e) return;
         const who = `pid ${e.pid} ${cliLabel(e) || ident(e) || ""}`.trim();
         if (!confirm(`Restart ${who}?\nStops it (if live) and relaunches resuming the session.`))
@@ -3889,6 +3895,42 @@
         return cur && cur.cwd && cur.git && cur.git.branch ? cur : null;
       }
 
+      // Slash commands that act on the OPEN agent (the omnibox anchor), mirroring the
+      // ⋯-menu recovery buttons. Typing "/" in the omnibox lists them; "/k" / "/r"
+      // narrows. Each runs the very same handler the dropdown button does, so the
+      // confirm prompt and server call are identical — /kill = Force-kill (SIGKILL),
+      // /restart = Restart (resume).
+      const OMNI_COMMANDS = [
+        {
+          cmd: "/restart",
+          icon: "↻",
+          title: "Restart (resume)",
+          desc: "stops it (if live) and relaunches resuming the session",
+          run: (e) => restartAgent(e),
+        },
+        {
+          cmd: "/kill",
+          icon: "✕",
+          title: "Force-kill (SIGKILL)",
+          desc: "terminates the process immediately",
+          danger: true,
+          run: (e) => stopAgent(true, e),
+        },
+      ];
+      // Build the command rows for a "/…"-prefixed query, targeting the anchor agent.
+      // Empty when nothing is open (a command with no agent to act on is a no-op) so
+      // the omnibox falls through to its normal search/spawn behaviour.
+      function omniCommandRows(q) {
+        const target = omniAnchor();
+        if (!target) return [];
+        const term = q.slice(1).toLowerCase(); // text after the leading "/"
+        return OMNI_COMMANDS.filter((c) => c.cmd.slice(1).startsWith(term)).map((c) => ({
+          kind: "cmd",
+          cmd: c,
+          target,
+        }));
+      }
+
       // Which agent the highlighted candidate should preview in the background: an
       // agent row → that agent; the spawn row / an empty list → the launch-time
       // agent (so the backdrop shows the spawn target's cwd).
@@ -3975,6 +4017,16 @@
                   <div class="omni-sub">⏎ to choose a working dir &nbsp;·&nbsp; prompt: ${esc(q || "(empty)")}</div>
                 </div></div>`;
             }
+            if (r.kind === "cmd") {
+              const t = r.target;
+              const dz = r.cmd.danger ? " danger" : "";
+              return `<div class="omni-row omni-spawn${dz}${sc}" data-i="${i}">
+                <span class="dot ${esc(t.status)}"></span>
+                <div class="omni-main">
+                  <div class="omni-title">${r.cmd.icon} ${esc(r.cmd.title)} <span style="opacity:.55">${esc(r.cmd.cmd)}</span></div>
+                  <div class="omni-sub">pid ${esc(String(t.pid))} ${esc(cliLabel(t) || ident(t) || "")} &nbsp;·&nbsp; ${esc(r.cmd.desc)}</div>
+                </div></div>`;
+            }
             const e = r.entry;
             const snip = r.snippet ? `<div class="omni-snip">…${r.snippet}…</div>` : "";
             return `<div class="omni-row${sc}" data-i="${i}">
@@ -3993,6 +4045,18 @@
 
       function runOmni() {
         const q = $("omni-input").value.trim();
+        // A "/…" query is a slash command against the open agent, not a search —
+        // show the matching command rows and skip the agent/spawn/tail machinery.
+        if (q.startsWith("/")) {
+          const cmds = omniCommandRows(q);
+          if (cmds.length) {
+            if (omniTailTimer) clearTimeout(omniTailTimer);
+            omniRows = cmds;
+            omniIdx = 0;
+            renderOmni();
+            return;
+          }
+        }
         const toks = q.split(/\s+/).filter(Boolean);
         // Tier 1 — instant title/identity match, ranked title-first then by recency.
         const hits = entries
@@ -4085,6 +4149,13 @@
         const q = $("omni-input").value.trim();
         const row = omniRows[omniIdx];
         const anchor = omniAnchor();
+        // A slash command runs its ⋯-menu handler against the pinned target. Handled
+        // before the spawn fallthrough so ⌘⏎ on a "/kill" row can't spawn instead.
+        if (row && row.kind === "cmd") {
+          closeOmni(false);
+          await row.cmd.run(row.target);
+          return;
+        }
         // ⌘⏎ always = spawn-here (the fast default), regardless of the selected row.
         if (forceSpawn || (row && row.kind === "spawn")) {
           closeOmni(false); // committing — keep the bg as-is, spawnAndSelect takes over
