@@ -96,11 +96,7 @@ export async function reconcileFromInboxes(
     if (!watchedParents.has(parent)) continue;
     const events = await readInbox(host, parent);
     const lastByChild = new Map<number, NotifyEvent>();
-    const exitedChildren = new Set<number>();
-    for (const e of events) {
-      lastByChild.set(e.child_pid, e);
-      if (e.edge === "exited") exitedChildren.add(e.child_pid);
-    }
+    for (const e of events) lastByChild.set(e.child_pid, e);
     for (const [childPid, last] of lastByChild) {
       const liveStarted = liveChildren.get(childPid);
       if (liveStarted === undefined) continue; // reaped / gone — nothing to suppress
@@ -140,7 +136,11 @@ export async function reconcileFromInboxes(
         idleEmitted: false,
         inNeedsInput: false,
         needsInputQuestion: null,
-        exitedEmitted: exitedChildren.has(childPid),
+        // Identity-aware: `last` already matched this incarnation's start time, so
+        // exitedEmitted is true ONLY if THIS child's last recorded edge is exited.
+        // A pid reused by a NEW child (whose last edge is e.g. idle) does NOT
+        // inherit the prior incarnation's exit — its own exit still fires.
+        exitedEmitted: last.edge === "exited",
       });
     }
   }

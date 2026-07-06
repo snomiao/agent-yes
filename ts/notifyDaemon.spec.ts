@@ -204,6 +204,22 @@ describe("startup reconcile pid-reuse guard", () => {
     expect(seeded.get(555)?.parent_started_at).toBe(42);
   });
 
+  it("does NOT inherit exitedEmitted when the pid was reused after an exit (identity-aware)", async () => {
+    // Old child (pid 555, started 1000) exited; then pid 555 is reused by a NEW
+    // child (started 2000) whose latest edge is idle. On reconcile the new child
+    // matches liveStarted=2000, and its exitedEmitted must be FALSE (its own exit
+    // still fires later), not inherited from the old incarnation's exit.
+    await appendEvent(1, exitedEv(555, 1000)); // old child exited
+    await appendEvent(1, {
+      ...exitedEv(555, 2000),
+      edge: "idle",
+      state: "idle",
+    }); // new child's later idle
+    const cs = (await reconcileFromInboxes(host, new Map([[555, 2000]]), new Set([1]))).get(555)!;
+    expect(cs.started_at).toBe(2000);
+    expect(cs.exitedEmitted).toBe(false);
+  });
+
   it("does NOT seed the idle emitted flag — a restart RE-CONFIRMS idle (never suppress)", async () => {
     const idleEv: Omit<NotifyEvent, "seq"> = {
       ts: 1,

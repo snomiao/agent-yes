@@ -258,6 +258,12 @@ with a documented mitigation, tracked in a single follow-up issue.
   subprocess's own liveness.** A crashed watch stops refreshing, so its heartbeat
   goes stale within the TTL and is dropped — but carrying the watch subprocess's
   pid/token in the heartbeat for a strict check is a follow-up.
+- **No postmortem inbox inspection after the parent exits.** `ay notify
+  read/watch` fail closed when the parent isn't a live registry record (started_at
+  can't be resolved) — deliberately, so a recycled parent pid can't read another
+  session's inbox. The trade-off is that you can't inspect a parent's inbox after
+  that parent has exited. A read-only "postmortem" mode (inspect without
+  registering as a watcher, identity-checked by started_at) is a follow-up.
 - **Event-loop-block false steal.** The daemon heartbeats its lock owner on a
   single-threaded JS timer. If the daemon loop ever blocked SYNCHRONOUSLY longer
   than `OWNER_TTL` (30s), the heartbeat would stall and another `watch` could
