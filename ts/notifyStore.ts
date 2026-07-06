@@ -50,10 +50,10 @@ function pidAlive(pid: number): boolean {
 
 /**
  * Pure steal decision for a per-inbox lock (extracted so it's unit-testable):
- * steal the lock ONLY when its holder is provably gone (torn/missing owner, or a
- * dead pid) or its heartbeat is stale — NEVER merely because we've waited a
- * while, so a live holder mid-critical-section keeps its lock. `elapsed > hardMs`
- * is a last-resort backstop against a wedged-but-"alive" holder.
+ * steal the lock ONLY when its holder is provably gone (torn/missing owner past
+ * the grace, or a dead pid) or its heartbeat is stale — NEVER merely because
+ * we've waited a while, so a live holder mid-critical-section keeps its lock.
+ * There is no wall-clock backstop: `elapsed` gates only the torn-owner grace.
  */
 export function shouldStealLock(
   ownerRaw: string,

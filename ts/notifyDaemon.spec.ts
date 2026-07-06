@@ -169,10 +169,13 @@ describe("startup reconcile pid-reuse guard", () => {
     question: null,
   });
 
-  it("seeds a child still live with the SAME start time (no re-emit)", async () => {
-    await appendEvent(1, exitedEv(555, 1000));
+  it("seeds a child still live with the SAME start time (no re-emit) + copies identity", async () => {
+    await appendEvent(1, { ...exitedEv(555, 1000), parent_started_at: 42 });
     const seeded = await reconcileFromInboxes(host, new Map([[555, 1000]]));
     expect(seeded.get(555)?.exitedEmitted).toBe(true);
+    // I2: identity copied into the seeded state so the hot-path guard can fire.
+    expect(seeded.get(555)?.started_at).toBe(1000);
+    expect(seeded.get(555)?.parent_started_at).toBe(42);
   });
 
   it("does NOT seed a pid whose live start time differs (reused pid emits fresh)", async () => {

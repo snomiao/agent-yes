@@ -90,6 +90,16 @@ export type RouterState = Map<number, ChildRouterState>;
 export interface RouterConfig {
   /** How long a child must stay continuously idle before we emit an idle edge. */
   idleConfirmMs: number;
+  /**
+   * The pids of children that are ACTUALLY ALIVE right now (from the registry).
+   * A tracked child that drops out of this tick's observations is only given a
+   * synthetic `exited` if its pid is NOT in this set — i.e. it truly died. A
+   * child absent from observations but still alive (e.g. its parent's watcher
+   * lapsed, so the daemon stopped observing it) is CARRIED FORWARD, never
+   * false-exited. When omitted, any unobserved tracked child is treated as
+   * exited (the caller has no liveness info).
+   */
+  aliveChildPids?: Set<number>;
 }
 
 const DEFAULT_IDLE_CONFIRM_MS = 30_000;
@@ -229,8 +239,17 @@ export function stepRouter(
   // "done" transition is never dropped, then forget it.
   for (const [pid, cs] of prev) {
     if (seen.has(pid)) continue;
+    // Distinguish "child died" from "child merely not observed this tick" (its
+    // parent's watcher lapsed, so it fell out of the observed scope). Only a
+    // child whose pid is NOT alive is truly gone → synthesize its exited. A child
+    // still alive is carried forward untouched, so we never emit a false exited
+    // for a still-running child.
+    if (config.aliveChildPids && config.aliveChildPids.has(pid)) {
+      next.set(pid, cs);
+      continue;
+    }
     if (!cs.exitedEmitted) events.push(syntheticExited(cs, pid));
-    // Do not carry a vanished child forward — it is gone from the registry.
+    // Dead & gone — drop from the tracked set.
   }
 
   return { events, next };

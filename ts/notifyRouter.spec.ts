@@ -190,6 +190,47 @@ describe("notifyRouter — idle-prompt fixture (P1 regression)", () => {
   });
 });
 
+describe("notifyRouter — carry-forward vs exited (C2: watcher-lapse ≠ child-death)", () => {
+  it("carries forward an unobserved-but-ALIVE child (no false exited)", () => {
+    // Track a child, then a tick with NO observation of it but its pid still
+    // alive (its parent's watcher lapsed). It must NOT be false-exited.
+    let s: RouterState = new Map();
+    s = stepRouter(s, [child({ pid: 100, state: "active" })], 0).next;
+    const r = stepRouter(s, [], 1_000, { aliveChildPids: new Set([100]) });
+    expect(r.events).toEqual([]); // no false exited
+    expect(r.next.has(100)).toBe(true); // carried forward
+    expect(r.next.get(100)!.started_at).toBe(7000); // identity preserved
+  });
+
+  it("synthesizes exited only when the child is gone AND not alive", () => {
+    let s: RouterState = new Map();
+    s = stepRouter(s, [child({ pid: 100, state: "active" })], 0).next;
+    const r = stepRouter(s, [], 1_000, { aliveChildPids: new Set() }); // pid dead
+    expect(r.events.map((e) => e.edge)).toEqual(["exited"]);
+    expect(r.events[0]!.child_started_at).toBe(7000);
+  });
+
+  it("recovers the old child's exited on watcher RETURN (pid reused during lapse)", () => {
+    // Child tracked; watcher lapses (carry-forward while pid appears alive); when
+    // the watcher returns, the pid is observed with a NEW start time → the old
+    // child's exited is recovered by the hot-path identity guard (delayed, not
+    // lost), and the new child starts fresh.
+    let s: RouterState = new Map();
+    s = stepRouter(s, [child({ pid: 100, started_at: 1000, state: "idle" })], 0).next;
+    s = stepRouter(s, [], 1_000, { aliveChildPids: new Set([100]) }).next; // lapse, carried
+    const r = stepRouter(
+      s,
+      [child({ pid: 100, started_at: 2000, state: "needs_input", question: "New?" })],
+      2_000,
+    );
+    const edges = r.events.map((e) => e.edge);
+    expect(edges).toContain("exited"); // old child (1000) recovered
+    expect(r.events.find((e) => e.edge === "exited")!.child_started_at).toBe(1000);
+    expect(edges).toContain("needs_input"); // new child (2000) fresh
+    expect(r.next.get(100)!.started_at).toBe(2000);
+  });
+});
+
 describe("notifyRouter — hot-path pid reuse (Important)", () => {
   it("treats a same-pid child with a NEW start time as a fresh child", () => {
     // Old child exits at pid 100; then pid 100 is recycled by a NEW child that

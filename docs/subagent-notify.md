@@ -141,6 +141,33 @@ parent addresses its own inbox with no argument.
   state — so a recycled pid mid-run doesn't inherit the old child's emitted-edge
   memory and get its first edge suppressed.
 
+- **Three liveness signals, kept separate (so a watcher lapse ≠ a child death).**
+  - _child liveness_ = `isPidAlive(child.pid)` from the registry — the sole truth
+    for whether a child process is alive.
+  - _watcher presence_ = a fresh + alive heartbeat — governs ONLY the emission
+    scope (which parents' inboxes get written) and the daemon's lifetime.
+  - _daemon liveness_ = `owner.json` (`{pid, started_at, ts}`).
+
+  The load-bearing consequence: a tracked child that drops out of a tick's
+  observations gets a synthetic `exited` **only if its pid is actually dead**. A
+  child that's merely unobserved because its parent's watcher lapsed (so it left
+  the observed scope) is **carried forward untouched** — never false-exited while
+  still running. If such a carried-forward child dies and its pid is reused during
+  the lapse, the old child's `exited` is recovered (with its identity) the moment
+  the watcher returns and the hot-path guard sees the new start time — delayed,
+  never dropped.
+
+- **The daemon heartbeats its owner on a background timer**, not once per loop, so
+  a slow tick (many watched children, slow log I/O) can't let the heartbeat cross
+  `OWNER_TTL` and have another `watch` steal the lock as "stale" → double daemon.
+  `started_at` is captured once at acquire; the heartbeat updates only `ts`, so
+  `stop`'s identity re-check never sees it move.
+
+- **Append is at-least-once even under a transient FS/lock blip.** An append that
+  fails is retried a few times; if it still fails, that edge's "emitted" mark is
+  rolled back in the router state so the next tick re-emits it (a duplicate is
+  acceptable; a drop is not) — scoped to the one child, no cross-parent churn.
+
 - **The lock heartbeats while held.** The lock owner's `ts` is refreshed on a
   timer for the whole time the lock is held, so a long critical section (a big GC
   rewrite) never crosses `staleMs` and gets stolen out from under a live holder.

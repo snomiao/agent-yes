@@ -19,6 +19,7 @@ import { execFile } from "node:child_process";
 import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import {
   type ChildObservation,
+  type PendingNotification,
   type RouterState,
   stepRouter,
 } from "./notifyRouter.ts";
@@ -112,6 +113,11 @@ export async function reconcileFromInboxes(
       state.set(childPid, {
         parent_pid: last.parent_pid,
         wrapper_pid: last.child_wrapper_pid,
+        // Carry BOTH start times into the seeded state, so the hot-path pid-reuse
+        // guard can fire on the next observation and a synthetic exited from this
+        // seed still stamps identity (else the guard is blind until re-observed).
+        started_at: last.child_started_at,
+        parent_started_at: last.parent_started_at,
         cli: last.cli,
         cwd: last.cwd,
         state: seededState,
@@ -134,6 +140,12 @@ interface ObserveResult {
   childStartedAt: Map<number, number>;
   /** log file per child pid, for payload enrichment. */
   logFiles: Map<number, string | null>;
+  /**
+   * EVERY currently-alive child pid in the registry (regardless of whether its
+   * parent is watching) — so the router can tell a truly-dead child from one it
+   * merely stopped observing when a watcher lapsed.
+   */
+  aliveChildPids: Set<number>;
   watcherCount: number;
 }
 
@@ -151,6 +163,13 @@ async function observeChildren(): Promise<ObserveResult> {
   const parentStartedAt = new Map<number, number>();
   const childStartedAt = new Map<number, number>();
   const logFiles = new Map<number, string | null>();
+  // Liveness of ALL children (any parent) — the router uses this to avoid
+  // false-exiting a child it merely stopped observing (watcher lapsed).
+  const aliveChildPids = new Set<number>();
+  for (const r of records) {
+    if (typeof r.parent_pid === "number" && r.parent_pid > 0 && isPidAlive(r.pid))
+      aliveChildPids.add(r.pid);
+  }
   for (const r of records) {
     const parent = r.parent_pid;
     if (typeof parent !== "number" || parent <= 0) continue;
@@ -175,7 +194,14 @@ async function observeChildren(): Promise<ObserveResult> {
     childStartedAt.set(r.pid, r.started_at);
     logFiles.set(r.pid, r.log_file ?? null);
   }
-  return { obs, parentStartedAt, childStartedAt, logFiles, watcherCount: watching.size };
+  return {
+    obs,
+    parentStartedAt,
+    childStartedAt,
+    logFiles,
+    aliveChildPids,
+    watcherCount: watching.size,
+  };
 }
 
 /** Registry snapshot: every record's pid → its started_at (for reconcile guard). */
@@ -204,11 +230,17 @@ export interface DaemonIdentity {
   ts: number;
 }
 
+// The daemon's start time, captured ONCE when it acquires the lock. The
+// heartbeat updates only `ts` — never `started_at` — so `stop`'s two-read
+// identity check (pid + started_at unchanged) can't see it move and mistake the
+// running daemon for "not running".
+let daemonStartedAt = 0;
+
 /** Stamp the lock owner file with our identity + a fresh heartbeat ts. */
 async function writeOwner(): Promise<void> {
   await writeFile(
     daemonLockOwnerPath(),
-    JSON.stringify({ pid: process.pid, started_at: Date.now(), ts: Date.now() }),
+    JSON.stringify({ pid: process.pid, started_at: daemonStartedAt, ts: Date.now() }),
   ).catch(() => {});
 }
 
@@ -228,6 +260,7 @@ export async function acquireDaemonLock(isAlive: (pid: number) => boolean = isPi
   for (;;) {
     try {
       await mkdir(daemonLockDir(), { recursive: false });
+      daemonStartedAt = Date.now(); // fixed for this daemon's lifetime
       await writeOwner();
       return true;
     } catch (e) {
@@ -292,8 +325,18 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   }
 
   let running = true;
+  // Heartbeat the owner ts on a BACKGROUND timer (not once per loop) so a slow
+  // tick — many watched children, slow log I/O — can't let the heartbeat cross
+  // OWNER_TTL and have another `watch` steal the lock as "stale" → double daemon.
+  // Refresh well inside the TTL; cleared on shutdown.
+  const ownerBeat = setInterval(
+    () => void writeOwner(),
+    Math.max(1000, Math.floor(OWNER_TTL_MS / 3)),
+  );
+  if (typeof ownerBeat.unref === "function") ownerBeat.unref();
   const cleanup = async () => {
     running = false;
+    clearInterval(ownerBeat);
     await rm(daemonLockDir(), { recursive: true, force: true }).catch(() => {});
   };
   process.on("SIGINT", () => void cleanup().then(() => process.exit(0)));
@@ -306,7 +349,6 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   let emptySince: number | null = null;
 
   while (running) {
-    await writeOwner(); // refresh the identity heartbeat so `status`/`stop` trust us
     const { next, watcherCount } = await tickState(host, prev);
     prev = next;
     ticks++;
@@ -329,8 +371,9 @@ async function tickState(
   host: string,
   prev: RouterState,
 ): Promise<{ next: RouterState; watcherCount: number }> {
-  const { obs, parentStartedAt, childStartedAt, logFiles, watcherCount } = await observeChildren();
-  const { events, next } = stepRouter(prev, obs, Date.now());
+  const { obs, parentStartedAt, childStartedAt, logFiles, aliveChildPids, watcherCount } =
+    await observeChildren();
+  const { events, next } = stepRouter(prev, obs, Date.now(), { aliveChildPids });
 
   // Enrich all edges CONCURRENTLY (a burst of N edges must not serialize N git
   // timeouts). Enrichment is best-effort and never throws; the append that
@@ -372,12 +415,68 @@ async function tickState(
       return stored;
     }),
   );
-  for (const stored of enriched) {
-    await appendEvent(stored.parent_pid, stored).catch((e) =>
-      logger.warn(`[notifyd] append failed for parent ${stored.parent_pid}: ${e}`),
-    );
+  for (let i = 0; i < enriched.length; i++) {
+    const stored = enriched[i]!;
+    const ev = events[i]!;
+    const ok = await appendWithRetry(stored);
+    if (!ok) {
+      // at-least-once: a transient FS/lock failure must NOT permanently drop an
+      // edge. Roll back this edge's "emitted" mark in the next state so the next
+      // tick re-detects and re-appends it (a duplicate is acceptable; a drop is
+      // not). Scoped to this child only — no cross-parent re-emission.
+      rollbackEmit(next, ev);
+      logger.warn(`[notifyd] append failed for parent ${stored.parent_pid} — will retry next tick`);
+    }
   }
   return { next, watcherCount };
+}
+
+/** Append with a few quick retries — a transient lock/FS blip shouldn't lose an edge. */
+async function appendWithRetry(stored: Omit<NotifyEvent, "seq">, attempts = 3): Promise<boolean> {
+  for (let a = 0; a < attempts; a++) {
+    try {
+      await appendEvent(stored.parent_pid, stored);
+      return true;
+    } catch {
+      await new Promise((r) => setTimeout(r, 25 * (a + 1)));
+    }
+  }
+  return false;
+}
+
+/**
+ * Undo the router's "emitted" mark for one edge so the NEXT tick re-emits it
+ * (used when its append failed). For a synthetic exited whose child was dropped
+ * from `next`, re-insert a minimal tracked state so the vanished-loop re-fires.
+ */
+function rollbackEmit(next: RouterState, ev: PendingNotification): void {
+  const cs = next.get(ev.child_pid);
+  if (cs) {
+    if (ev.edge === "idle") cs.idleEmitted = false;
+    else if (ev.edge === "needs_input") {
+      cs.inNeedsInput = false;
+      cs.needsInputQuestion = null;
+    } else if (ev.edge === "exited") cs.exitedEmitted = false;
+    return;
+  }
+  if (ev.edge === "exited") {
+    // Synthetic exited for a child already dropped from tracking — re-add it so
+    // the next tick's vanished-loop retries the exited append.
+    next.set(ev.child_pid, {
+      parent_pid: ev.parent_pid,
+      wrapper_pid: ev.child_wrapper_pid,
+      started_at: ev.child_started_at,
+      parent_started_at: ev.parent_started_at,
+      cli: ev.cli,
+      cwd: ev.cwd,
+      state: ev.prev_state ?? "active",
+      idleSince: null,
+      idleEmitted: false,
+      inNeedsInput: false,
+      needsInputQuestion: null,
+      exitedEmitted: false,
+    });
+  }
 }
 
 async function gcTick(host: string): Promise<void> {
