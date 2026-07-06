@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
-import { acquireDaemonLock, daemonStatus, reconcileFromInboxes } from "./notifyDaemon.ts";
+import {
+  acquireDaemonLock,
+  daemonStatus,
+  reconcileFromInboxes,
+  requestDaemonStop,
+} from "./notifyDaemon.ts";
+import { stat } from "fs/promises";
 import { daemonLockDir, daemonLockOwnerPath } from "./notifyInbox.ts";
 import { appendEvent, hostId } from "./notifyStore.ts";
 import type { NotifyEvent } from "./notifyInbox.ts";
@@ -138,6 +144,26 @@ describe("notifyd identity (status/stop safety)", () => {
       JSON.stringify({ pid: process.pid, ts: Date.now() }),
     );
     expect(await daemonStatus()).toBeNull();
+  });
+
+  it("requestDaemonStop removes the lock (cooperative) for a valid owner", async () => {
+    await mkdir(daemonLockDir(), { recursive: true });
+    await writeFile(
+      daemonLockOwnerPath(),
+      JSON.stringify({ pid: process.pid, started_at: 1, ts: Date.now(), token: "T" }),
+    );
+    expect(await requestDaemonStop()).toBe(process.pid);
+    await expect(stat(daemonLockDir())).rejects.toThrow(); // lock removed
+  });
+
+  it("requestDaemonStop refuses an owner with no fencing token (can't confirm identity)", async () => {
+    await mkdir(daemonLockDir(), { recursive: true });
+    await writeFile(
+      daemonLockOwnerPath(),
+      JSON.stringify({ pid: process.pid, started_at: 1, ts: Date.now() }), // no token
+    );
+    expect(await requestDaemonStop()).toBeNull();
+    await expect(stat(daemonLockDir())).resolves.toBeTruthy(); // lock untouched
   });
 });
 

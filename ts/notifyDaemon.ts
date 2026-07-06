@@ -260,6 +260,8 @@ export interface DaemonIdentity {
   pid: number;
   started_at: number;
   ts: number;
+  /** The owner fencing token at validation time — pins THIS incarnation. */
+  token: string | null;
 }
 
 // The daemon's start time, captured ONCE when it acquires the lock. The
@@ -605,7 +607,12 @@ export async function daemonIdentity(now = Date.now()): Promise<DaemonIdentity |
       now - o.ts <= OWNER_TTL_MS &&
       isPidAlive(o.pid)
     ) {
-      return { pid: o.pid, started_at: o.started_at, ts: o.ts };
+      return {
+        pid: o.pid,
+        started_at: o.started_at,
+        ts: o.ts,
+        token: typeof o.token === "string" ? o.token : null,
+      };
     }
   } catch {
     /* missing / torn owner — no daemon */
@@ -628,15 +635,14 @@ export async function daemonStatus(now = Date.now()): Promise<number | null> {
  */
 export async function requestDaemonStop(): Promise<number | null> {
   const id = await daemonIdentity();
-  if (!id) return null;
-  // Capture the owner's fencing token, then RE-READ it right before removing the
-  // lock: if daemon A exited and B took over between the identity check and the
-  // rm, the token changed → we must NOT remove B's lock (which would stop the new
-  // daemon). Same fence discipline as the lock release.
-  const token1 = await readDaemonOwnerToken();
-  if (token1 === null) return null;
-  const token2 = await readDaemonOwnerToken();
-  if (token2 !== token1) return null; // taken over between reads — don't touch it
+  if (!id || id.token === null) return null;
+  // Re-read the owner token right before removing the lock and compare it to the
+  // token we VALIDATED above (this incarnation's). If daemon A validated, then
+  // exited, and B took over before the rm, the current token is B's — different
+  // from A's — so we do NOT remove B's lock (which would stop the new daemon).
+  // The residual re-read→rm window is the unavoidable FS-single-CAS gap (bounded).
+  const cur = await readDaemonOwnerToken();
+  if (cur !== id.token) return null;
   await rm(daemonLockDir(), { recursive: true, force: true }).catch(() => {});
   return id.pid;
 }
@@ -646,20 +652,23 @@ export async function ensureDaemon(): Promise<number | null> {
   const existing = await daemonStatus();
   if (existing) return existing;
   const { spawn } = await import("node:child_process");
-  // Resolve our own launcher the way serve/schedule do: on POSIX `ay` is a
-  // `#!/usr/bin/env bun` script (run via process.execPath), on Windows it's a
-  // self-contained ay.exe. Fall back to a bare `ay` on PATH.
-  const ayBin = Bun.which("ay");
-  const launcher = ayBin
-    ? process.platform === "win32"
-      ? [ayBin]
-      : [process.execPath, ayBin]
-    : ["ay"];
+  // Resolve our own launcher the way serve/schedule/restart do: on POSIX `ay` is
+  // a `#!/usr/bin/env bun` script (run via process.execPath), on Windows it's a
+  // self-contained ay.exe. Fall back to THIS process's own script path
+  // (process.argv[1]) — which is always present — rather than a bare `ay` that a
+  // minimal PATH / absolute-path launch wouldn't resolve.
+  const ayBin = Bun.which("ay") ?? process.argv[1];
+  if (!ayBin) return null;
+  const launcher = process.platform === "win32" ? [ayBin] : [process.execPath, ayBin];
   const [cmd, ...pre] = launcher;
   const child = spawn(cmd!, [...pre, "notifyd", "run"], {
     detached: true,
     stdio: "ignore",
   });
+  // spawn's ENOENT surfaces ASYNC as an 'error' event — without a handler it
+  // crashes the process. Swallow it; the daemonStatus() check below reports the
+  // real outcome (null if the spawn didn't come up).
+  child.on("error", () => {});
   child.unref();
   // Give it a moment to acquire the lock + stamp its owner file.
   await new Promise((r) => setTimeout(r, 300));

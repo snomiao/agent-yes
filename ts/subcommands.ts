@@ -4071,7 +4071,7 @@ async function cmdNotify(rest: string[]): Promise<number> {
   if (verb === "cursor") return cmdNotifyCursor(args);
   if (verb !== "read" && verb !== "watch") {
     process.stderr.write(
-      "usage: ay notify <read|watch|cursor> [--parent <pid>] [--since <seq>] [--unread] [--ack] [--json]\n",
+      "usage: ay notify <read|watch|cursor> [--parent <pid>] [--since <seq>] [--since-ts <ms>] [--unread] [--ack] [--json]\n",
     );
     return 1;
   }
