@@ -214,7 +214,7 @@
           spawn agents from anywhere.
         </p>
         <div class="cta">
-          <a class="btn" href="/w/">Open the console →</a>
+          <a class="btn" href="/w/" autofocus>Open the console →</a>
           <a class="btn ghost" href="https://github.com/snomiao/agent-yes">Star on GitHub</a>
         </div>
         <div class="install">
@@ -273,5 +273,15 @@ powershell -c "irm https://agent-yes.com/setup.ps1 | iex"</code></pre>
         </div>
       </footer>
     </div>
+    <script>
+      // Focus the "Open the console" CTA on load so keyboard/Enter users land
+      // straight on it. `autofocus` on <a> isn't honored everywhere, so back it
+      // up here — but skip on touch devices where focusing scroll-jumps the page.
+      (function () {
+        if (matchMedia("(hover: none)").matches) return;
+        var cta = document.querySelector(".hero .cta a.btn");
+        if (cta) cta.focus({ preventScroll: true });
+      })();
+    </script>
   </body>
 </html>
