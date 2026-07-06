@@ -127,10 +127,19 @@ export async function reconcileFromInboxes(
         cli: last.cli,
         cwd: last.cwd,
         state: seededState,
-        idleSince: last.edge === "idle" ? 0 : null,
-        idleEmitted: last.edge === "idle",
-        inNeedsInput: last.edge === "needs_input",
-        needsInputQuestion: last.edge === "needs_input" ? last.question : null,
+        // "Never suppress, duplicate OK": do NOT seed the idle/needs_input emitted
+        // memory. If notifyd was down while a child went idle→active→idle, the new
+        // idle episode (the "probably done" signal — this feature's whole point)
+        // must NOT be swallowed as the "same" pre-restart episode. So a restart
+        // RE-CONFIRMS idle/needs_input as a fresh episode (a duplicate on the wire
+        // is acceptable; a lost edge is not). Only `exited` — a terminal state
+        // that can't recur for the same child — keeps its emitted flag to avoid a
+        // pointless duplicate. Identity (start times) is still seeded so the
+        // hot-path pid-reuse guard works on the next observation.
+        idleSince: null,
+        idleEmitted: false,
+        inNeedsInput: false,
+        needsInputQuestion: null,
         exitedEmitted: exitedChildren.has(childPid),
       });
     }
@@ -670,7 +679,20 @@ export async function ensureDaemon(): Promise<number | null> {
   // real outcome (null if the spawn didn't come up).
   child.on("error", () => {});
   child.unref();
-  // Give it a moment to acquire the lock + stamp its owner file.
-  await new Promise((r) => setTimeout(r, 300));
-  return daemonStatus();
+  // Poll for the daemon to come up with a bounded φ-backoff (golden-ratio, the
+  // repo convention) instead of a single fixed wait — a cold `bun` start or slow
+  // FS can take longer than any one fixed delay, so a fixed wait falsely reports
+  // "failed". Early-return the moment it's up; give up after a bounded total.
+  const PHI = 1.618;
+  let delay = 50;
+  let waited = 0;
+  const BUDGET_MS = 3000;
+  for (;;) {
+    await new Promise((r) => setTimeout(r, delay));
+    waited += delay;
+    const pid = await daemonStatus();
+    if (pid) return pid;
+    if (waited >= BUDGET_MS) return null;
+    delay = Math.min(Math.round(delay * PHI), 800);
+  }
 }

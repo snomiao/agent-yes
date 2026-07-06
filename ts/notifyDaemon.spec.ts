@@ -204,6 +204,29 @@ describe("startup reconcile pid-reuse guard", () => {
     expect(seeded.get(555)?.parent_started_at).toBe(42);
   });
 
+  it("does NOT seed the idle emitted flag — a restart RE-CONFIRMS idle (never suppress)", async () => {
+    const idleEv: Omit<NotifyEvent, "seq"> = {
+      ts: 1,
+      host,
+      parent_pid: 1,
+      child_pid: 555,
+      child_started_at: 1000,
+      cli: "claude",
+      cwd: "/repo",
+      edge: "idle",
+      prev_state: "active",
+      state: "idle",
+      question: null,
+    };
+    await appendEvent(1, idleEv);
+    const cs = (await reconcileFromInboxes(host, new Map([[555, 1000]]), new Set([1]))).get(555)!;
+    // Identity is seeded (hot-path guard), but the idle episode is NOT marked
+    // emitted → the post-restart idle observation re-confirms and re-emits.
+    expect(cs.started_at).toBe(1000);
+    expect(cs.idleEmitted).toBe(false);
+    expect(cs.idleSince).toBeNull();
+  });
+
   it("does NOT seed a pid whose live start time differs (reused pid emits fresh)", async () => {
     await appendEvent(1, exitedEv(555, 1000));
     // pid 555 now belongs to a NEW child (started_at 2000) → must not inherit
