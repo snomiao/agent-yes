@@ -111,6 +111,29 @@ parent addresses its own inbox with no argument.
   And it never evicts an event above the **minimum consumer cursor** (unacked) —
   only already-acked events are trimmed.
 
+- **The per-inbox lock steals on HOLDER LIVENESS, not wait time.** The lock dir
+  carries an `owner` file (`{pid, ts}`); a contender steals only when the holder
+  is dead or its heartbeat is stale — never merely because it waited a while, so
+  a live holder mid-critical-section (a big GC rewrite, a slow disk) is never
+  robbed into a seq-duplicating double-entry. A torn/empty owner (the
+  mkdir→writeFile window of a holder mid-acquire) is respected for a short grace,
+  so a just-created lock can't be stolen out from under its creator.
+
+- **`appendEvent` trusts the sidecar seq counter.** The counter is written under
+  the lock on every append and stays valid across a GC rewrite, so the hot path
+  is O(1) (no full inbox parse) — a full scan only self-heals a missing/corrupt
+  counter. This keeps the lock-hold window tiny.
+
+- **The pid-reuse guard survives a synthetic exited.** The child's `started_at`
+  is carried in the router's per-child state, so a synthetic `exited` for a
+  vanished/reaped child still stamps `child_started_at`; reconcile seeds a child
+  only on a positive identity match (missing/zero start time → don't seed → allow
+  a re-emit rather than risk suppressing a recycled pid's first edge).
+
+- **`notifyd stop` re-verifies identity before signalling.** It re-reads the
+  owner (`pid` + `started_at`) immediately before `SIGTERM`, so a pid recycled
+  between the status read and the kill is never signalled.
+
 - **Enrichment is concurrent.** A burst of N edges enriches (tail + git head) in
   parallel; only the inbox appends stay serial (for unambiguous seq allocation),
   so N git timeouts don't serialize.

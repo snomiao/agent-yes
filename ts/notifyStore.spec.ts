@@ -13,6 +13,7 @@ import {
   minConsumerCursor,
   readInbox,
   setCursor,
+  shouldStealLock,
 } from "./notifyStore.ts";
 import { inboxPath, type NotifyEvent } from "./notifyInbox.ts";
 
@@ -29,6 +30,50 @@ const baseEvent = (edge: NotifyEvent["edge"], over: Partial<NotifyEvent> = {}) =
   state: edge === "exited" ? "stopped" : edge,
   question: null,
   ...over,
+});
+
+describe("notifyStore — lock steal decision (C1: holder liveness, not wait time)", () => {
+  const now = 1_000_000;
+  const opts = (over = {}) => ({
+    staleMs: 30_000,
+    hardMs: 60_000,
+    elapsed: 0,
+    selfPid: 1,
+    isAlive: (p: number) => p === 42, // only pid 42 is "alive"
+    ...over,
+  });
+
+  it("does NOT steal a LIVE holder with a fresh heartbeat, even after a long wait", () => {
+    const owner = JSON.stringify({ pid: 42, ts: now - 1_000 });
+    // 50s elapsed but holder alive + fresh → must NOT steal (this was the bug).
+    expect(shouldStealLock(owner, now, opts({ elapsed: 50_000 }))).toBe(false);
+  });
+
+  it("steals a DEAD holder", () => {
+    const owner = JSON.stringify({ pid: 99, ts: now }); // 99 not alive
+    expect(shouldStealLock(owner, now, opts())).toBe(true);
+  });
+
+  it("steals a live holder whose heartbeat is STALE (wedged)", () => {
+    const owner = JSON.stringify({ pid: 42, ts: now - 40_000 }); // alive but stale
+    expect(shouldStealLock(owner, now, opts())).toBe(true);
+  });
+
+  it("does NOT steal a torn/empty owner within the grace (mkdir→writeFile window)", () => {
+    // A just-created lock whose owner file isn't written yet must be respected,
+    // else two writers race into the critical section and duplicate a seq.
+    expect(shouldStealLock("", now, opts({ elapsed: 0, graceMs: 1000 }))).toBe(false);
+    expect(shouldStealLock("{ torn", now, opts({ elapsed: 100, graceMs: 1000 }))).toBe(false);
+  });
+
+  it("steals a torn/empty owner once the grace elapses (holder crashed mid-acquire)", () => {
+    expect(shouldStealLock("", now, opts({ elapsed: 1500, graceMs: 1000 }))).toBe(true);
+  });
+
+  it("hardMs backstop steals even a fresh-looking holder after an extreme wait", () => {
+    const owner = JSON.stringify({ pid: 42, ts: now });
+    expect(shouldStealLock(owner, now, opts({ elapsed: 61_000 }))).toBe(true);
+  });
 });
 
 describe("notifyStore (fs)", () => {
@@ -68,6 +113,19 @@ describe("notifyStore (fs)", () => {
     const inbox = await readInbox(host, 999);
     expect(inbox.length).toBe(30);
     expect(new Set(inbox.map((e) => e.seq)).size).toBe(30); // no duplicates
+  });
+
+  it("trusts the sidecar seq counter across a GC that shrank the inbox (I2)", async () => {
+    // Fill past rotateKeep's minKeep(100), ack most, then GC to a smaller inbox;
+    // the counter must keep seq monotonic so the next append is maxSeq+1, NOT
+    // max(remaining events)+1.
+    for (let i = 0; i < 130; i++) await appendEvent(999, baseEvent("idle"));
+    await setCursor(host, 999, 120, "parent");
+    await gcInboxes(host, new Set([999]), new Set([999]), 1); // trims acked (<=120)
+    const after = await readInbox(host, 999);
+    expect(after.length).toBeLessThan(130); // did shrink
+    const nextSeq = await appendEvent(999, baseEvent("needs_input"));
+    expect(nextSeq).toBe(131); // continues from the counter, no seq reuse
   });
 
   it("registers and expires watcher heartbeats", async () => {

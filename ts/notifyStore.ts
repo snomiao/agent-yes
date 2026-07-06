@@ -37,39 +37,108 @@ export function hostId(): string {
   return os.hostname() || "localhost";
 }
 
+// Local liveness probe (kill(pid,0)) — kept here so notifyStore doesn't import
+// subcommands (which imports notifyStore: a cycle). Mirrors isPidAlive.
+function pidAlive(pid: number): boolean {
+  if (!Number.isFinite(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === "EPERM"; // exists, not ours
+  }
+}
+
+/**
+ * Pure steal decision for a per-inbox lock (extracted so it's unit-testable):
+ * steal the lock ONLY when its holder is provably gone (torn/missing owner, or a
+ * dead pid) or its heartbeat is stale — NEVER merely because we've waited a
+ * while, so a live holder mid-critical-section keeps its lock. `elapsed > hardMs`
+ * is a last-resort backstop against a wedged-but-"alive" holder.
+ */
+export function shouldStealLock(
+  ownerRaw: string,
+  now: number,
+  opts: {
+    staleMs: number;
+    hardMs: number;
+    elapsed: number;
+    selfPid: number;
+    isAlive: (p: number) => boolean;
+    /** Grace for a JUST-created lock whose owner file isn't written yet. */
+    graceMs?: number;
+  },
+): boolean {
+  const graceMs = opts.graceMs ?? 1000;
+  let ownerPid = 0;
+  let ownerTs = 0;
+  let parsed = false;
+  try {
+    const o = JSON.parse(ownerRaw) as { pid: number; ts: number };
+    ownerPid = o?.pid ?? 0;
+    ownerTs = o?.ts ?? 0;
+    parsed = true;
+  } catch {
+    /* torn / not-yet-written owner */
+  }
+  // An empty/torn owner is the mkdir→writeFile window of a holder mid-acquire —
+  // NOT proof of a dead holder. Only steal it after a short grace, so we can't
+  // rob a lock that was just legitimately created (which would let two writers
+  // into the critical section and duplicate a seq). The hardMs backstop still
+  // reclaims a holder that crashed exactly in that window.
+  if (!parsed || ownerPid <= 0) return opts.elapsed > graceMs;
+  const holderDead = ownerPid !== opts.selfPid && !opts.isAlive(ownerPid);
+  const holderStale = ownerTs > 0 && now - ownerTs > opts.staleMs;
+  return holderDead || holderStale || opts.elapsed > opts.hardMs;
+}
+
 async function ensureDir(dir: string): Promise<void> {
   await mkdir(dir, { recursive: true }).catch(() => {});
 }
 
 /**
- * Acquire a per-inbox mkdir lock; returns a release fn. Ownership is proven ONLY
- * by a successful `mkdir(recursive:false)` — the atomic, exclusive create. A
- * presumed-stale lock (held past `staleMs`) is removed ONCE and then we re-
- * contend: whoever's next `mkdir` succeeds owns it, so two would-be stealers can
- * never both enter the critical section (the loser EEXISTs and keeps waiting).
+ * Acquire a per-inbox lock; returns a release fn. Ownership is proven ONLY by a
+ * successful `mkdir(recursive:false)` (atomic exclusive create), and stealing is
+ * driven by HOLDER LIVENESS, not elapsed wait time: the holder writes an
+ * `owner` file ({pid, ts}) on acquire, and a contender steals ONLY when that
+ * holder is dead or its heartbeat is stale. So a live holder whose critical
+ * section legitimately runs long (a big GC rewrite, a slow disk) is never robbed
+ * — which, together with the counter-trusting append below, closes the seq-dup /
+ * event-loss window. A generous `hardMs` is a final backstop against a wedged-
+ * but-"alive" holder.
  */
 async function acquireLock(
   lockDir: string,
-  staleMs = 2000,
-  hardMs = 10_000,
+  staleMs = 30_000,
+  hardMs = 60_000,
 ): Promise<() => Promise<void>> {
+  const ownerFile = path.join(lockDir, "owner");
   const start = Date.now();
-  let stole = false;
   for (;;) {
     try {
       await mkdir(lockDir, { recursive: false });
+      await writeFile(ownerFile, JSON.stringify({ pid: process.pid, ts: Date.now() })).catch(
+        () => {},
+      );
       return async () => {
         await rm(lockDir, { recursive: true, force: true }).catch(() => {});
       };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
-      const elapsed = Date.now() - start;
-      if (elapsed > hardMs) throw new Error(`notify lock timed out: ${lockDir}`);
-      // Remove the presumed-stale lock at most once, then loop back to re-contend
-      // — the next mkdir(recursive:false) is the sole ownership proof.
-      if (elapsed > staleMs && !stole) {
-        stole = true;
+      const raw = await readFile(ownerFile, "utf8").catch(() => "");
+      if (
+        shouldStealLock(raw, Date.now(), {
+          staleMs,
+          hardMs,
+          elapsed: Date.now() - start,
+          selfPid: process.pid,
+          isAlive: pidAlive,
+        })
+      ) {
+        // Steal, then loop back — the next mkdir(recursive:false) re-proves
+        // ownership, so two contenders can't both enter the critical section.
         await rm(lockDir, { recursive: true, force: true }).catch(() => {});
+        continue;
       }
       await new Promise((r) => setTimeout(r, 15));
     }
@@ -90,16 +159,23 @@ export async function appendEvent(
   const lock = path.join(dir, `${parentPid}.lock`);
   const release = await acquireLock(lock);
   try {
-    // Prefer the sidecar counter; fall back to scanning the inbox (self-heals if
-    // the counter is lost). Guarantees a strictly increasing per-inbox seq.
+    // TRUST the sidecar counter — it is written under this same lock on every
+    // append, so it is always the authoritative last-allocated seq (and it stays
+    // valid across a GC rewrite, whose kept seqs are all <= the counter). Only
+    // when the counter is missing/corrupt do we fall back to an O(file) scan to
+    // self-heal. This keeps the hot path — and thus the lock-hold window — O(1),
+    // which is what makes a long steal window (C1) a non-issue.
     let last = 0;
     const counterRaw = await readFile(seqPath(host, parentPid), "utf8").catch(() => "");
     const parsed = parseInt(counterRaw.trim(), 10);
-    if (Number.isFinite(parsed) && parsed > 0) last = parsed;
-    const existing = parseInboxText(
-      await readFile(inboxPath(host, parentPid), "utf8").catch(() => ""),
-    );
-    last = Math.max(last, maxSeq(existing));
+    if (Number.isFinite(parsed) && parsed > 0) {
+      last = parsed;
+    } else {
+      const existing = parseInboxText(
+        await readFile(inboxPath(host, parentPid), "utf8").catch(() => ""),
+      );
+      last = maxSeq(existing);
+    }
     const seq = nextSeq(last);
     const full: NotifyEvent = { ...ev, seq };
     await appendFile(inboxPath(host, parentPid), serializeEvent(full) + "\n");

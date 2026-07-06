@@ -108,6 +108,16 @@ describe("notifyd identity (status/stop safety)", () => {
   it("returns null when no owner file exists", async () => {
     expect(await daemonStatus()).toBeNull();
   });
+
+  it("returns null for an INCOMPLETE owner missing started_at (I1)", async () => {
+    await mkdir(daemonLockDir(), { recursive: true });
+    // pid alive + fresh ts, but no started_at → identity incomplete, not trusted.
+    await writeFile(
+      daemonLockOwnerPath(),
+      JSON.stringify({ pid: process.pid, ts: Date.now() }),
+    );
+    expect(await daemonStatus()).toBeNull();
+  });
 });
 
 describe("startup reconcile pid-reuse guard", () => {
@@ -155,6 +165,14 @@ describe("startup reconcile pid-reuse guard", () => {
   it("does NOT seed a reaped child absent from the registry", async () => {
     await appendEvent(1, exitedEv(555, 1000));
     const seeded = await reconcileFromInboxes(host, new Map());
+    expect(seeded.has(555)).toBe(false);
+  });
+
+  it("does NOT seed an event with no child_started_at (C2: can't verify → re-emit)", async () => {
+    // A pre-C2 / synthetic event without a start time can't be identity-checked,
+    // so it must not seed (better a duplicate edge than a suppressed one).
+    await appendEvent(1, { ...exitedEv(555, 1000), child_started_at: 0 });
+    const seeded = await reconcileFromInboxes(host, new Map([[555, 1000]]));
     expect(seeded.has(555)).toBe(false);
   });
 });

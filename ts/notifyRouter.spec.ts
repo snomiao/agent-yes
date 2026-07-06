@@ -16,6 +16,7 @@ const CFG = {
 const child = (over: Partial<ChildObservation> = {}): ChildObservation => ({
   pid: 100,
   wrapper_pid: 100,
+  started_at: 7000,
   parent_pid: 1,
   cli: "claude",
   cwd: "/repo",
@@ -111,6 +112,10 @@ describe("notifyRouter — exited", () => {
     const r = step(s, [], 1_000); // child gone from the live set
     expect(r.events.map((e) => e.edge)).toEqual(["exited"]);
     expect(r.events[0]!.child_pid).toBe(100);
+    // C2: the synthetic exited must carry the child's start time even though the
+    // child is gone from the current observation — else the pid-reuse guard on
+    // reconcile can't verify identity and could suppress a recycled pid's edge.
+    expect(r.events[0]!.child_started_at).toBe(7000);
     expect(r.next.has(100)).toBe(false); // forgotten
   });
 

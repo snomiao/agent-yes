@@ -96,7 +96,10 @@ export async function reconcileFromInboxes(
     for (const [childPid, last] of lastByChild) {
       const liveStarted = liveChildren.get(childPid);
       if (liveStarted === undefined) continue; // reaped / gone — nothing to suppress
-      if (last.child_started_at && liveStarted !== last.child_started_at) continue; // pid reused
+      // Seed ONLY on a positively-matched identity. An event with no/zero
+      // child_started_at can't be verified, so we don't seed it — better to risk
+      // one duplicate edge than to suppress a recycled pid's first notification.
+      if (!last.child_started_at || liveStarted !== last.child_started_at) continue;
       const seededState =
         last.edge === "exited"
           ? "stopped"
@@ -155,6 +158,7 @@ async function observeChildren(): Promise<ObserveResult> {
     obs.push({
       pid: r.pid,
       wrapper_pid: r.wrapper_pid ?? undefined,
+      started_at: r.started_at,
       parent_pid: parent,
       cli: r.cli,
       cwd: r.cwd,
@@ -183,9 +187,16 @@ export interface DaemonOptions {
 }
 
 // How long an owner heartbeat stays "trusted" — a running daemon refreshes it
-// each tick, so a recycled pid (which isn't refreshing THIS file) reads as stale
-// and is neither trusted for `status` nor killed by `stop`.
-const OWNER_TTL_MS = 12_000;
+// each tick (POLL_MS), so a recycled pid (which isn't refreshing THIS file) reads
+// as stale within a few ticks and is neither trusted for `status` nor killed by
+// `stop`. Kept tight (a few ticks) to shrink the pid-reuse window.
+const OWNER_TTL_MS = 3 * POLL_MS;
+
+export interface DaemonIdentity {
+  pid: number;
+  started_at: number;
+  ts: number;
+}
 
 /** Stamp the lock owner file with our identity + a fresh heartbeat ts. */
 async function writeOwner(): Promise<void> {
@@ -308,7 +319,9 @@ async function tickState(
         parent_started_at: parentStartedAt.get(ev.child_pid) ?? 0,
         child_pid: ev.child_pid,
         child_wrapper_pid: ev.child_wrapper_pid,
-        child_started_at: childStartedAt.get(ev.child_pid) ?? 0,
+        // Carried by the router (survives a synthetic exited for a vanished child,
+        // which is no longer in childStartedAt); fall back to the live map.
+        child_started_at: ev.child_started_at ?? childStartedAt.get(ev.child_pid) ?? 0,
         cli: ev.cli,
         cwd: ev.cwd,
         edge: ev.edge,
@@ -342,23 +355,37 @@ async function gcTick(host: string): Promise<void> {
 }
 
 /**
- * The running daemon's pid, or null. The lock owner file is the SINGLE source of
- * truth: we trust it only if its pid is alive AND its heartbeat is fresh — a
- * recycled pid isn't refreshing this file, so its stale ts makes us return null
- * instead of trusting (or killing via `stop`) an unrelated process.
+ * The running daemon's full identity, or null. The lock owner file is the SINGLE
+ * source of truth: trusted only if it is COMPLETE (pid + started_at + ts), its
+ * pid is alive, AND its heartbeat is fresh. A recycled pid isn't refreshing this
+ * file, so its stale ts (or a torn/partial owner) yields null — we never trust or
+ * kill an unrelated process. `stop` re-reads and re-checks this identity right
+ * before signalling, so it can't SIGTERM a pid recycled between status and stop.
  */
-export async function daemonStatus(now = Date.now()): Promise<number | null> {
+export async function daemonIdentity(now = Date.now()): Promise<DaemonIdentity | null> {
   const raw = await readFile(daemonLockOwnerPath(), "utf8").catch(() => "");
   try {
-    const o = JSON.parse(raw) as { pid: number; ts?: number };
-    if (typeof o?.pid === "number" && o.pid > 0 && isPidAlive(o.pid)) {
-      // A running daemon refreshes ts every tick; tolerate a couple missed ticks.
-      if (o.ts === undefined || now - o.ts <= OWNER_TTL_MS) return o.pid;
+    const o = JSON.parse(raw) as Partial<DaemonIdentity>;
+    if (
+      typeof o?.pid === "number" &&
+      o.pid > 0 &&
+      typeof o.started_at === "number" &&
+      o.started_at > 0 &&
+      typeof o.ts === "number" &&
+      now - o.ts <= OWNER_TTL_MS &&
+      isPidAlive(o.pid)
+    ) {
+      return { pid: o.pid, started_at: o.started_at, ts: o.ts };
     }
   } catch {
     /* missing / torn owner — no daemon */
   }
   return null;
+}
+
+/** The running daemon's pid, or null (see daemonIdentity for the trust rules). */
+export async function daemonStatus(now = Date.now()): Promise<number | null> {
+  return (await daemonIdentity(now))?.pid ?? null;
 }
 
 /** Ensure a daemon is running; best-effort spawn detached. Returns its pid or null. */

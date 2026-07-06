@@ -30,6 +30,8 @@ import type { NotifyEdge } from "./notifyInbox.ts";
 export interface ChildObservation {
   pid: number;
   wrapper_pid?: number;
+  /** The child's own start time — carried into events for the pid-reuse guard. */
+  started_at?: number;
   /** The parent this child links to (parent wrapper pid). Required to route. */
   parent_pid: number;
   cli: string;
@@ -45,6 +47,8 @@ export interface PendingNotification {
   parent_pid: number;
   child_pid: number;
   child_wrapper_pid?: number;
+  /** The child's start time (from the observation / carried state). */
+  child_started_at?: number;
   cli: string;
   cwd: string;
   edge: NotifyEdge;
@@ -57,6 +61,8 @@ export interface PendingNotification {
 export interface ChildRouterState {
   parent_pid: number;
   wrapper_pid?: number;
+  /** The child's start time — so a synthetic exited (child already gone) keeps it. */
+  started_at?: number;
   cli: string;
   cwd: string;
   /** Last observed state. */
@@ -112,6 +118,7 @@ export function stepRouter(
     const cs: ChildRouterState = {
       parent_pid: obs.parent_pid,
       wrapper_pid: obs.wrapper_pid,
+      started_at: obs.started_at,
       cli: obs.cli,
       cwd: obs.cwd,
       state: obs.state,
@@ -127,6 +134,7 @@ export function stepRouter(
         parent_pid: obs.parent_pid,
         child_pid: obs.pid,
         child_wrapper_pid: obs.wrapper_pid,
+        child_started_at: obs.started_at,
         cli: obs.cli,
         cwd: obs.cwd,
         edge,
@@ -203,6 +211,7 @@ export function stepRouter(
         parent_pid: cs.parent_pid,
         child_pid: pid,
         child_wrapper_pid: cs.wrapper_pid,
+        child_started_at: cs.started_at,
         cli: cs.cli,
         cwd: cs.cwd,
         edge: "exited",
