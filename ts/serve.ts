@@ -1642,7 +1642,18 @@ export async function cmdServe(rest: string[]): Promise<number> {
         const record = await resolveOne(keyword, defaultOpts({ all: true }));
         const args = ["restart", String(record.pid)];
         if (body.fresh) args.push("--fresh");
-        const child = Bun.spawn(["agent-yes", ...args], {
+        // Resolve `ay` to an absolute command — same as the /api/spawn path below.
+        // The detached daemon (oxmgr/launchd/pm2) usually has a PATH WITHOUT
+        // ~/.bun/bin and ~/.cargo/bin, so a bare "agent-yes"/"ay" fails with
+        // "Executable not found in $PATH" — the exact error the console surfaced on
+        // restart. Prefer PATH; fall back to re-running THIS process's own ay entry
+        // (process.argv[1]) — always present, since the daemon is itself an `ay serve`.
+        const ayBin = Bun.which("ay") ?? process.argv[1];
+        const ayCmd =
+          process.platform === "win32" && ayBin.toLowerCase().endsWith(".exe")
+            ? [ayBin]
+            : [process.execPath, ayBin];
+        const child = Bun.spawn([...ayCmd, ...args], {
           cwd: record.cwd,
           detached: true,
           stdio: ["ignore", "ignore", "ignore"],
