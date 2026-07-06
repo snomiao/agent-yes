@@ -160,6 +160,7 @@ async function observeChildren(): Promise<ObserveResult> {
       wrapper_pid: r.wrapper_pid ?? undefined,
       started_at: r.started_at,
       parent_pid: parent,
+      parent_started_at: startedAtByWrapper.get(parent) ?? 0,
       cli: r.cli,
       cwd: r.cwd,
       state,
@@ -207,35 +208,61 @@ async function writeOwner(): Promise<void> {
 }
 
 /**
- * Acquire the singleton lock, stealing a stale one whose owner is dead. The
- * liveness predicate is injectable so the steal/keep race is unit-testable.
- * Returns true if WE now hold the lock, false if a LIVE owner holds it.
+ * Acquire the singleton lock. Returns true if WE now hold it, false if a LIVE
+ * daemon already does. Shares the inbox lock's invariant: ownership is proven by
+ * `mkdir(recursive:false)`, and a lock is stolen only when its owner is dead or
+ * its heartbeat is stale — never on a torn/empty owner WITHIN the grace (the
+ * mkdir→writeOwner window of another daemon coming up), so two concurrent starts
+ * can't both "win". The liveness predicate is injectable for tests.
  */
 export async function acquireDaemonLock(isAlive: (pid: number) => boolean = isPidAlive): Promise<boolean> {
   // The lock dir lives under notify/ — ensure that exists first, else mkdir of
   // the lock throws ENOENT which must NOT be mistaken for "someone holds it".
   await mkdir(notifyDir(), { recursive: true }).catch(() => {});
-  for (let attempt = 0; attempt < 3; attempt++) {
+  const start = Date.now();
+  const GRACE_MS = 1000;
+  const HARD_MS = 15_000;
+  for (;;) {
     try {
       await mkdir(daemonLockDir(), { recursive: false });
       await writeOwner();
       return true;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; // real error — propagate
-      // Lock exists — is its owner still alive?
       const raw = await readFile(daemonLockOwnerPath(), "utf8").catch(() => "");
-      let ownerPid = 0;
+      let owner: { pid?: number; ts?: number } | null = null;
       try {
-        ownerPid = (JSON.parse(raw) as { pid: number }).pid ?? 0;
+        owner = JSON.parse(raw) as { pid: number; ts: number };
       } catch {
-        /* missing/torn owner — treat as stale */
+        /* torn / not-yet-written */
       }
-      if (ownerPid > 0 && ownerPid !== process.pid && isAlive(ownerPid)) return false; // live daemon
-      // Stale (dead owner or unreadable) — steal and retry.
-      await rm(daemonLockDir(), { recursive: true, force: true }).catch(() => {});
+      const now = Date.now();
+      const elapsed = now - start;
+      // A COMPLETE, live, fresh owner (a different daemon) → we are not it.
+      if (
+        owner &&
+        typeof owner.pid === "number" &&
+        owner.pid > 0 &&
+        owner.pid !== process.pid &&
+        typeof owner.ts === "number" &&
+        now - owner.ts <= OWNER_TTL_MS &&
+        isAlive(owner.pid)
+      ) {
+        return false;
+      }
+      // Dead / stale / torn-past-grace → steal and re-prove via mkdir. A torn
+      // owner within the grace is another daemon mid-acquire: wait, don't steal.
+      const ownerPid = owner?.pid ?? 0;
+      const holderDead = ownerPid > 0 && ownerPid !== process.pid && !isAlive(ownerPid);
+      const holderStale = (owner?.ts ?? 0) > 0 && now - (owner!.ts ?? 0) > OWNER_TTL_MS;
+      const tornPastGrace = (!owner || ownerPid <= 0) && elapsed > GRACE_MS;
+      if (holderDead || holderStale || tornPastGrace || elapsed > HARD_MS) {
+        await rm(daemonLockDir(), { recursive: true, force: true }).catch(() => {});
+        continue;
+      }
+      await new Promise((r) => setTimeout(r, 15)); // torn within grace — wait it out
     }
   }
-  return false;
 }
 
 /**
@@ -316,7 +343,10 @@ async function tickState(
         parent_pid: ev.parent_pid,
         // The parent's/child's start times — the read side and the startup
         // reconcile reject an event whose start time disagrees, guarding pid reuse.
-        parent_started_at: parentStartedAt.get(ev.child_pid) ?? 0,
+        // Carried by the router so a synthetic exited (child gone from the live
+        // set) still stamps the real parent start, not 0 (which would bypass the
+        // reader's parent guard). Fall back to the live map, then 0.
+        parent_started_at: ev.parent_started_at ?? parentStartedAt.get(ev.child_pid) ?? 0,
         child_pid: ev.child_pid,
         child_wrapper_pid: ev.child_wrapper_pid,
         // Carried by the router (survives a synthetic exited for a vanished child,
@@ -361,6 +391,14 @@ async function gcTick(host: string): Promise<void> {
  * file, so its stale ts (or a torn/partial owner) yields null — we never trust or
  * kill an unrelated process. `stop` re-reads and re-checks this identity right
  * before signalling, so it can't SIGTERM a pid recycled between status and stop.
+ *
+ * Residual edge (documented, not yet closed): a pid recycled onto an UNRELATED
+ * live process WITHIN the tight OWNER_TTL window (a few ticks) could be briefly
+ * trusted, since we compare our recorded `started_at` against the owner file, not
+ * against the OS's actual process start time (which is non-portable to read:
+ * `/proc/<pid>/stat` on Linux vs `proc_pidinfo`/`ps -o lstart` on macOS). The
+ * heartbeat freshness + tight TTL keep the window to seconds; a real OS
+ * start-time cross-check is deferred to a future issue.
  */
 export async function daemonIdentity(now = Date.now()): Promise<DaemonIdentity | null> {
   const raw = await readFile(daemonLockOwnerPath(), "utf8").catch(() => "");

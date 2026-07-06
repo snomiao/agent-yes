@@ -34,6 +34,8 @@ export interface ChildObservation {
   started_at?: number;
   /** The parent this child links to (parent wrapper pid). Required to route. */
   parent_pid: number;
+  /** The parent's start time — carried so a synthetic exited keeps the parent guard. */
+  parent_started_at?: number;
   cli: string;
   cwd: string;
   /** `deriveLiveState` state: active | idle | stopped | needs_input | stuck. */
@@ -49,6 +51,8 @@ export interface PendingNotification {
   child_wrapper_pid?: number;
   /** The child's start time (from the observation / carried state). */
   child_started_at?: number;
+  /** The parent's start time (from the observation / carried state). */
+  parent_started_at?: number;
   cli: string;
   cwd: string;
   edge: NotifyEdge;
@@ -63,6 +67,8 @@ export interface ChildRouterState {
   wrapper_pid?: number;
   /** The child's start time — so a synthetic exited (child already gone) keeps it. */
   started_at?: number;
+  /** The parent's start time — carried so a synthetic exited keeps the parent guard. */
+  parent_started_at?: number;
   cli: string;
   cwd: string;
   /** Last observed state. */
@@ -134,6 +140,7 @@ export function stepRouter(
       parent_pid: obs.parent_pid,
       wrapper_pid: obs.wrapper_pid,
       started_at: obs.started_at,
+      parent_started_at: obs.parent_started_at,
       cli: obs.cli,
       cwd: obs.cwd,
       state: obs.state,
@@ -150,6 +157,7 @@ export function stepRouter(
         child_pid: obs.pid,
         child_wrapper_pid: obs.wrapper_pid,
         child_started_at: obs.started_at,
+        parent_started_at: obs.parent_started_at,
         cli: obs.cli,
         cwd: obs.cwd,
         edge,
@@ -239,6 +247,7 @@ function syntheticExited(cs: ChildRouterState, pid: number): PendingNotification
     child_pid: pid,
     child_wrapper_pid: cs.wrapper_pid,
     child_started_at: cs.started_at,
+    parent_started_at: cs.parent_started_at,
     cli: cs.cli,
     cwd: cs.cwd,
     edge: "exited",

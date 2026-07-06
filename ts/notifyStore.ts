@@ -108,20 +108,27 @@ async function ensureDir(dir: string): Promise<void> {
  * reclaims even a "live"-looking holder after an extreme wait, to guarantee
  * forward progress against a holder wedged without updating its heartbeat.
  */
-async function acquireLock(
+export async function acquireLock(
   lockDir: string,
   staleMs = 30_000,
   hardMs = 60_000,
 ): Promise<() => Promise<void>> {
   const ownerFile = path.join(lockDir, "owner");
   const start = Date.now();
+  const stampOwner = () =>
+    writeFile(ownerFile, JSON.stringify({ pid: process.pid, ts: Date.now() })).catch(() => {});
   for (;;) {
     try {
       await mkdir(lockDir, { recursive: false });
-      await writeFile(ownerFile, JSON.stringify({ pid: process.pid, ts: Date.now() })).catch(
-        () => {},
-      );
+      await stampOwner();
+      // Heartbeat the owner ts while we hold the lock, so a LONG critical section
+      // (a big gcInboxes rewrite) never crosses staleMs and gets stolen out from
+      // under us — which would let a second writer in and clobber/duplicate a seq.
+      // Refresh well inside staleMs; cleared on release.
+      const beat = setInterval(() => void stampOwner(), Math.max(500, Math.floor(staleMs / 3)));
+      if (typeof beat.unref === "function") beat.unref();
       return async () => {
+        clearInterval(beat);
         await rm(lockDir, { recursive: true, force: true }).catch(() => {});
       };
     } catch (e) {

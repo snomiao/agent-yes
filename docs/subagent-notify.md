@@ -124,11 +124,30 @@ parent addresses its own inbox with no argument.
   is O(1) (no full inbox parse) — a full scan only self-heals a missing/corrupt
   counter. This keeps the lock-hold window tiny.
 
-- **The pid-reuse guard survives a synthetic exited.** The child's `started_at`
-  is carried in the router's per-child state, so a synthetic `exited` for a
-  vanished/reaped child still stamps `child_started_at`; reconcile seeds a child
-  only on a positive identity match (missing/zero start time → don't seed → allow
-  a re-emit rather than risk suppressing a recycled pid's first edge).
+- **The pid-reuse guard survives a synthetic exited.** BOTH the child's and the
+  parent's `started_at` are carried in the router's per-child state, so a
+  synthetic `exited` for a vanished/reaped child still stamps `child_started_at`
+  AND `parent_started_at` (never 0, which would bypass the reader's parent guard).
+  Reconcile seeds a child only on a positive identity match (missing/zero start →
+  don't seed → allow a re-emit rather than risk suppressing a recycled pid's edge).
+
+- **Hot-path pid-reuse guard.** `stepRouter` applies the same identity check
+  per-tick: if an observed pid's start time differs from the tracked one, the old
+  child is closed out with a synthetic `exited` and the new child rebuilds fresh
+  state — so a recycled pid mid-run doesn't inherit the old child's emitted-edge
+  memory and get its first edge suppressed.
+
+- **The lock heartbeats while held.** The lock owner's `ts` is refreshed on a
+  timer for the whole time the lock is held, so a long critical section (a big GC
+  rewrite) never crosses `staleMs` and gets stolen out from under a live holder.
+  The daemon singleton lock shares the same torn-owner grace, so two concurrent
+  daemon starts can't both win.
+
+- **Residual (documented): `stop` identity vs OS start time.** `status`/`stop`
+  compare our recorded `started_at`, not the OS's real process start time (non-
+  portable to read), so a pid recycled onto an unrelated process within the tight
+  `OWNER_TTL` window could be briefly trusted. Heartbeat freshness + a few-tick
+  TTL bound it to seconds; a real OS start-time cross-check is deferred.
 
 - **`notifyd stop` re-verifies identity before signalling.** It re-reads the
   owner (`pid` + `started_at`) immediately before `SIGTERM`, so a pid recycled

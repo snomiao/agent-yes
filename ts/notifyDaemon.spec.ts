@@ -44,11 +44,23 @@ describe("notifyd singleton lock", () => {
 
   it("refuses the lock when a LIVE owner holds it (no double daemon)", async () => {
     await mkdir(daemonLockDir(), { recursive: true });
-    await writeFile(daemonLockOwnerPath(), JSON.stringify({ pid: 424242, started_at: 1 }));
-    // 424242 reported alive → must NOT steal.
+    // A complete, live, fresh owner (a real daemon always heartbeats its ts).
+    await writeFile(
+      daemonLockOwnerPath(),
+      JSON.stringify({ pid: 424242, started_at: 1, ts: Date.now() }),
+    );
     expect(await acquireDaemonLock((pid) => pid === 424242)).toBe(false);
     const owner = JSON.parse(await readFile(daemonLockOwnerPath(), "utf8"));
     expect(owner.pid).toBe(424242); // untouched
+  });
+
+  it("steals a live-but-STALE owner (heartbeat not refreshed → wedged/gone)", async () => {
+    await mkdir(daemonLockDir(), { recursive: true });
+    await writeFile(
+      daemonLockOwnerPath(),
+      JSON.stringify({ pid: 424242, started_at: 1, ts: 1 }), // ancient ts
+    );
+    expect(await acquireDaemonLock((pid) => pid === 424242)).toBe(true);
   });
 
   it("steals a lock with a torn/missing owner file (treated as stale)", async () => {

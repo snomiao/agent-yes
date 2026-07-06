@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtemp, rm, stat, writeFile } from "fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
 import {
+  acquireLock,
   appendEvent,
   clearWatcher,
   gcInboxes,
@@ -126,6 +127,20 @@ describe("notifyStore (fs)", () => {
     expect(after.length).toBeLessThan(130); // did shrink
     const nextSeq = await appendEvent(999, baseEvent("needs_input"));
     expect(nextSeq).toBe(131); // continues from the counter, no seq reuse
+  });
+
+  it("refreshes the lock owner heartbeat while held (I2: a long GC can't be stolen)", async () => {
+    const { mkdtemp } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const lockDir = path.join(await mkdtemp(path.join(tmpdir(), "ay-lock-")), "L");
+    // staleMs 1500 → beat every max(500, 500) = 500ms.
+    const release = await acquireLock(lockDir, 1500);
+    const ownerFile = path.join(lockDir, "owner");
+    const ts1 = JSON.parse(await readFile(ownerFile, "utf8")).ts as number;
+    await new Promise((r) => setTimeout(r, 700)); // past one beat interval
+    const ts2 = JSON.parse(await readFile(ownerFile, "utf8")).ts as number;
+    expect(ts2).toBeGreaterThan(ts1); // heartbeat advanced → holder stays "fresh"
+    await release();
   });
 
   it("registers and expires watcher heartbeats", async () => {
