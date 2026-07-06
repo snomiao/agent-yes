@@ -129,12 +129,18 @@ export function liveWatcherPids(
 }
 
 // Path-segment hygiene: a hostname or consumer label must never escape the
-// notify dir or collide via separators. Keep it filesystem-safe and stable.
+// notify dir or collide via separators. Keep it filesystem-safe and stable, and
+// reject the reserved "." / ".." segments (which dot-permitting sanitization
+// would otherwise pass through as a real relative-path component).
+function sanitizeSegment(s: string, fallback: string): string {
+  const cleaned = s.replace(/[^A-Za-z0-9._-]/g, "_");
+  return cleaned === "" || cleaned === "." || cleaned === ".." ? fallback : cleaned;
+}
 function sanitizeHost(host: string): string {
-  return host.replace(/[^A-Za-z0-9._-]/g, "_") || "localhost";
+  return sanitizeSegment(host, "localhost");
 }
 function sanitizeConsumer(consumer: string): string {
-  return consumer.replace(/[^A-Za-z0-9._-]/g, "_") || "parent";
+  return sanitizeSegment(consumer, "parent");
 }
 
 /** Serialize one event to its NDJSON line (no trailing newline). */

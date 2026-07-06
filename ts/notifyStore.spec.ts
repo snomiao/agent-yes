@@ -37,17 +37,18 @@ describe("notifyStore — lock steal decision (C1: holder liveness, not wait tim
   const now = 1_000_000;
   const opts = (over = {}) => ({
     staleMs: 30_000,
-    hardMs: 60_000,
     elapsed: 0,
     selfPid: 1,
     isAlive: (p: number) => p === 42, // only pid 42 is "alive"
     ...over,
   });
 
-  it("does NOT steal a LIVE holder with a fresh heartbeat, even after a long wait", () => {
+  it("does NOT steal a LIVE holder with a fresh heartbeat, even after an extreme wait", () => {
     const owner = JSON.stringify({ pid: 42, ts: now - 1_000 });
-    // 50s elapsed but holder alive + fresh → must NOT steal (this was the bug).
+    // With no wall-clock backstop, elapsed alone NEVER steals — a live, fresh
+    // holder is inviolable no matter how long we've waited.
     expect(shouldStealLock(owner, now, opts({ elapsed: 50_000 }))).toBe(false);
+    expect(shouldStealLock(owner, now, opts({ elapsed: 10 * 60_000 }))).toBe(false);
   });
 
   it("steals a DEAD holder", () => {
@@ -71,9 +72,10 @@ describe("notifyStore — lock steal decision (C1: holder liveness, not wait tim
     expect(shouldStealLock("", now, opts({ elapsed: 1500, graceMs: 1000 }))).toBe(true);
   });
 
-  it("hardMs backstop steals even a fresh-looking holder after an extreme wait", () => {
-    const owner = JSON.stringify({ pid: 42, ts: now });
-    expect(shouldStealLock(owner, now, opts({ elapsed: 61_000 }))).toBe(true);
+  it("treats an owner with no heartbeat ts as torn (grace), not immediately steal", () => {
+    const owner = JSON.stringify({ pid: 42, started_at: 1 }); // no ts
+    expect(shouldStealLock(owner, now, opts({ elapsed: 0, graceMs: 1000 }))).toBe(false);
+    expect(shouldStealLock(owner, now, opts({ elapsed: 1500, graceMs: 1000 }))).toBe(true);
   });
 });
 

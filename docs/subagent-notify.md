@@ -202,6 +202,17 @@ parent addresses its own inbox with no argument.
   (tail + git head), daemon lifecycle.
 - `ts/subcommands.ts` — `ay notify` / `ay notifyd` CLI.
 
+## Known limitation
+
+- **An inbox nobody acks can grow unbounded.** Rotation only evicts events at or
+  below the minimum consumer cursor (at-least-once). So a parent that runs
+  `ay notify watch` WITHOUT `--ack` (the default, at-least-once) and never
+  otherwise advances its cursor will accumulate events past `capBytes` until the
+  parent exits (then GC removes the whole inbox). This is a deliberate trade
+  (never drop an unacked edge) for the human-in-the-loop scale this targets; a
+  future safeguard could warn or apply an emergency hard cap that drops the
+  oldest unacked events with a logged notice.
+
 ## Not done — drafted for later
 
 - **Producer-side `--notify-parent` / `--no-notify-parent` spawn flag** for

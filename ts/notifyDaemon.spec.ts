@@ -35,8 +35,11 @@ describe("notifyd singleton lock", () => {
 
   it("steals a stale lock whose owner is dead (no permanent deadlock)", async () => {
     await mkdir(daemonLockDir(), { recursive: true });
-    await writeFile(daemonLockOwnerPath(), JSON.stringify({ pid: 424242, started_at: 1 }));
-    // 424242 reported dead → steal.
+    await writeFile(
+      daemonLockOwnerPath(),
+      JSON.stringify({ pid: 424242, started_at: 1, ts: Date.now() }),
+    );
+    // 424242 reported dead → steal (dead pid, no wait needed).
     expect(await acquireDaemonLock(() => false)).toBe(true);
     const owner = JSON.parse(await readFile(daemonLockOwnerPath(), "utf8"));
     expect(owner.pid).toBe(process.pid);
@@ -63,10 +66,16 @@ describe("notifyd singleton lock", () => {
     expect(await acquireDaemonLock((pid) => pid === 424242)).toBe(true);
   });
 
-  it("steals a lock with a torn/missing owner file (treated as stale)", async () => {
+  it("eventually steals a torn owner, but only AFTER the grace (no double daemon)", async () => {
+    // A torn owner is also the mkdir→writeOwner window of a concurrent daemon
+    // start, so it is respected within the grace (~1s) and stolen only past it —
+    // the same invariant as the per-inbox lock (the steal decision itself is
+    // unit-tested via shouldStealLock in notifyStore.spec).
     await mkdir(daemonLockDir(), { recursive: true });
     await writeFile(daemonLockOwnerPath(), "{ not json");
+    const t0 = Date.now();
     expect(await acquireDaemonLock(() => true)).toBe(true);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(900); // waited out the grace
   });
 
   it("a second live-owner acquire from a DIFFERENT pid is refused", async () => {

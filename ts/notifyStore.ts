@@ -60,7 +60,6 @@ export function shouldStealLock(
   now: number,
   opts: {
     staleMs: number;
-    hardMs: number;
     elapsed: number;
     selfPid: number;
     isAlive: (p: number) => boolean;
@@ -80,15 +79,23 @@ export function shouldStealLock(
   } catch {
     /* torn / not-yet-written owner */
   }
-  // An empty/torn owner is the mkdir→writeFile window of a holder mid-acquire —
-  // NOT proof of a dead holder. Only steal it after a short grace, so we can't
-  // rob a lock that was just legitimately created (which would let two writers
-  // into the critical section and duplicate a seq). The hardMs backstop still
-  // reclaims a holder that crashed exactly in that window.
-  if (!parsed || ownerPid <= 0) return opts.elapsed > graceMs;
+  // An empty/torn owner (or one with no heartbeat ts yet) is the mkdir→writeFile
+  // window of a holder mid-acquire — NOT proof of a dead holder. Only steal it
+  // after a short grace, so we can't rob a lock that was just legitimately
+  // created (which would let two writers into the critical section and duplicate
+  // a seq). A holder that actually crashed in that window is reclaimed once the
+  // grace elapses.
+  if (!parsed || ownerPid <= 0 || ownerTs <= 0) return opts.elapsed > graceMs;
+  // Steal ONLY on positive evidence the holder is gone: its pid is dead, or its
+  // heartbeat went stale. A LIVE holder refreshes its heartbeat for the whole
+  // time it holds the lock (see acquireLock), so a long-but-legitimate critical
+  // section (a big GC rewrite) is never robbed — and a wedged holder stops
+  // refreshing, so staleMs still reclaims it. Wall-clock wait time ALONE never
+  // steals (no hardMs backstop): that was the only path left that could rob a
+  // live holder.
   const holderDead = ownerPid !== opts.selfPid && !opts.isAlive(ownerPid);
-  const holderStale = ownerTs > 0 && now - ownerTs > opts.staleMs;
-  return holderDead || holderStale || opts.elapsed > opts.hardMs;
+  const holderStale = now - ownerTs > opts.staleMs;
+  return holderDead || holderStale;
 }
 
 async function ensureDir(dir: string): Promise<void> {
@@ -99,18 +106,17 @@ async function ensureDir(dir: string): Promise<void> {
  * Acquire a per-inbox lock; returns a release fn. Ownership is proven ONLY by a
  * successful `mkdir(recursive:false)` (atomic exclusive create), and stealing is
  * driven by HOLDER LIVENESS, not elapsed wait time: the holder writes an
- * `owner` file ({pid, ts}) on acquire, and a contender steals ONLY when that
- * holder is dead or its heartbeat is stale. So a live holder whose critical
- * section legitimately runs long (a big GC rewrite, a slow disk) is never robbed
- * — which, together with the counter-trusting append below, closes the seq-dup /
- * event-loss window. The one EXCEPTION is `hardMs`: a last-resort backstop that
- * reclaims even a "live"-looking holder after an extreme wait, to guarantee
- * forward progress against a holder wedged without updating its heartbeat.
+ * `owner` file ({pid, ts}) on acquire AND heartbeats its ts for the whole time
+ * it holds the lock, so a contender steals ONLY when that holder is dead or its
+ * heartbeat is stale. A live holder whose critical section legitimately runs long
+ * (a big GC rewrite, a slow disk) is never robbed — its heartbeat stays fresh;
+ * and a wedged holder stops heartbeating, so staleMs still reclaims it. There is
+ * deliberately NO wall-clock backstop: elapsed wait time alone never steals, so a
+ * live holder is inviolable.
  */
 export async function acquireLock(
   lockDir: string,
   staleMs = 30_000,
-  hardMs = 60_000,
 ): Promise<() => Promise<void>> {
   const ownerFile = path.join(lockDir, "owner");
   const start = Date.now();
@@ -136,7 +142,6 @@ export async function acquireLock(
       if (
         shouldStealLock(raw, Date.now(), {
           staleMs,
-          hardMs,
           elapsed: Date.now() - start,
           selfPid: process.pid,
           isAlive: pidAlive,

@@ -35,6 +35,7 @@ import {
   listInboxParents,
   liveWatchers,
   readInbox,
+  shouldStealLock,
 } from "./notifyStore.ts";
 import { deriveLiveState, isPidAlive, listRecords, renderLogTailLines } from "./subcommands.ts";
 import { logger } from "./logger.ts";
@@ -224,8 +225,6 @@ export async function acquireDaemonLock(isAlive: (pid: number) => boolean = isPi
   // the lock throws ENOENT which must NOT be mistaken for "someone holds it".
   await mkdir(notifyDir(), { recursive: true }).catch(() => {});
   const start = Date.now();
-  const GRACE_MS = 1000;
-  const HARD_MS = 15_000;
   for (;;) {
     try {
       await mkdir(daemonLockDir(), { recursive: false });
@@ -234,15 +233,15 @@ export async function acquireDaemonLock(isAlive: (pid: number) => boolean = isPi
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; // real error — propagate
       const raw = await readFile(daemonLockOwnerPath(), "utf8").catch(() => "");
+      const now = Date.now();
+      // A COMPLETE, live, fresh owner belonging to a DIFFERENT pid → another
+      // daemon is already running; we are not it.
       let owner: { pid?: number; ts?: number } | null = null;
       try {
         owner = JSON.parse(raw) as { pid: number; ts: number };
       } catch {
         /* torn / not-yet-written */
       }
-      const now = Date.now();
-      const elapsed = now - start;
-      // A COMPLETE, live, fresh owner (a different daemon) → we are not it.
       if (
         owner &&
         typeof owner.pid === "number" &&
@@ -254,17 +253,22 @@ export async function acquireDaemonLock(isAlive: (pid: number) => boolean = isPi
       ) {
         return false;
       }
-      // Dead / stale / torn-past-grace → steal and re-prove via mkdir. A torn
-      // owner within the grace is another daemon mid-acquire: wait, don't steal.
-      const ownerPid = owner?.pid ?? 0;
-      const holderDead = ownerPid > 0 && ownerPid !== process.pid && !isAlive(ownerPid);
-      const holderStale = (owner?.ts ?? 0) > 0 && now - (owner!.ts ?? 0) > OWNER_TTL_MS;
-      const tornPastGrace = (!owner || ownerPid <= 0) && elapsed > GRACE_MS;
-      if (holderDead || holderStale || tornPastGrace || elapsed > HARD_MS) {
+      // Otherwise steal per the SHARED decision (dead / heartbeat-stale /
+      // torn-past-grace) — the same invariant the per-inbox lock uses, so a
+      // torn owner (the mkdir→writeOwner window of a concurrent daemon start) is
+      // respected within the grace and two starts can't both win. Else wait.
+      if (
+        shouldStealLock(raw, now, {
+          staleMs: OWNER_TTL_MS,
+          elapsed: now - start,
+          selfPid: process.pid,
+          isAlive,
+        })
+      ) {
         await rm(daemonLockDir(), { recursive: true, force: true }).catch(() => {});
         continue;
       }
-      await new Promise((r) => setTimeout(r, 15)); // torn within grace — wait it out
+      await new Promise((r) => setTimeout(r, 15));
     }
   }
 }
