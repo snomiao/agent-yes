@@ -43,6 +43,8 @@ export interface NotifyEvent {
   /** The child that transitioned. */
   child_pid: number;
   child_wrapper_pid?: number;
+  /** Child's start time — guards startup-reconcile seeding against pid reuse. */
+  child_started_at?: number;
   cli: string;
   cwd: string;
   edge: NotifyEdge;
@@ -88,22 +90,16 @@ export function cursorPath(host: string, parentPid: number, consumer = "parent")
   return path.join(cursorDir(host, parentPid), `${sanitizeConsumer(consumer)}.json`);
 }
 
-/** Opt-in marker directory — a child that spawned with `--notify-parent`. */
-export function optinDir(): string {
-  return path.join(notifyDir(), "optin");
-}
-
-/** Marker path for one opted-in child (keyed by its wrapper pid). */
-export function optinMarkerPath(childWrapperPid: number): string {
-  return path.join(optinDir(), `${childWrapperPid}.json`);
-}
-
 /** The daemon singleton lock dir (mkdir-based, like pidStore). */
 export function daemonLockDir(): string {
   return path.join(notifyDir(), "notifyd.lock");
 }
 
-/** Owner metadata inside the lock dir, for stale-lock liveness detection. */
+/**
+ * Owner metadata inside the lock dir ({pid, started_at, ts}) — the SINGLE source
+ * of truth for the running daemon's identity, used for stale-lock steal and for
+ * `notifyd status`/`stop` (a running daemon refreshes `ts` each tick).
+ */
 export function daemonLockOwnerPath(): string {
   return path.join(daemonLockDir(), "owner.json");
 }
@@ -130,11 +126,6 @@ export function liveWatcherPids(
   const out = new Set<number>();
   for (const e of entries) if (now - e.ts <= ttlMs) out.add(e.pid);
   return out;
-}
-
-/** Where the running daemon records its pid, for `ay notifyd status/stop`. */
-export function daemonPidPath(): string {
-  return path.join(notifyDir(), "notifyd.pid");
 }
 
 // Path-segment hygiene: a hostname or consumer label must never escape the

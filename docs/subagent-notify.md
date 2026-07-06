@@ -84,20 +84,36 @@ parent addresses its own inbox with no argument.
   watches, the daemon never runs and **no files are created** — fully backward
   compatible. Monitor-on-HEAD keeps working, now strictly dominated by this.
 
-- **Singleton lock with liveness-based steal.** The daemon holds an mkdir lock
-  recording its owner pid (`notify/notifyd.lock/owner.json`). A stale lock left by
-  a crashed daemon is detected (owner pid dead / torn) and **stolen**, so the
-  daemon can never permanently deadlock; a lock held by a **live** owner is
-  respected (no double daemon). The parent `notify/` dir is created first so a
-  clean install can't misread an `ENOENT` as "held".
+- **Singleton lock with liveness-based steal; ownership proven only by mkdir.**
+  The daemon holds an mkdir lock whose `owner.json` records `{pid, started_at,
+  ts}`. A stale lock (owner pid dead / torn) is **stolen** — but the steal only
+  removes the dir; ownership is then re-proven by the next `mkdir(recursive:false)`
+  (the atomic, exclusive create), so two would-be stealers can never both enter.
+  A lock held by a **live** owner is respected. The parent `notify/` dir is
+  created first so a clean install can't misread `ENOENT` as "held".
 
-- **pid-reuse guard.** Every event stamps `parent_started_at`; the reader drops
-  events whose `parent_started_at` disagrees with its own record's start time, so
-  a recycled pid never reads a prior incarnation's edges.
+- **`owner.json` is the single source of truth for `status`/`stop`.** A running
+  daemon refreshes `ts` every tick; `notifyd status`/`stop` trust the owner pid
+  only if it's alive AND its heartbeat is fresh — so a recycled pid (not
+  refreshing this file) is never trusted or sent a wrong `SIGTERM`.
 
-- **Rotation preserves at-least-once.** GC rotation of an oversized live inbox
-  never evicts an event above the **minimum consumer cursor** (unacked) — only
-  already-acked events are trimmed.
+- **pid-reuse guards on BOTH read and reconcile.** Every event stamps
+  `parent_started_at` and `child_started_at`. The reader drops events whose
+  `parent_started_at` disagrees with its own record. The daemon's startup
+  reconcile seeds a child's emitted-edge memory ONLY if that pid is still in the
+  registry with the SAME `child_started_at` — so a new child recycling a pid never
+  inherits the old child's `exitedEmitted`/`idleEmitted` (which would suppress its
+  first notification).
+
+- **GC read+compute+write all under the inbox lock.** Rotation reads the inbox,
+  computes the keep-set, and rewrites — all inside the same lock `appendEvent`
+  takes, so a concurrent append can't be lost between a stale read and the write.
+  And it never evicts an event above the **minimum consumer cursor** (unacked) —
+  only already-acked events are trimmed.
+
+- **Enrichment is concurrent.** A burst of N edges enriches (tail + git head) in
+  parallel; only the inbox appends stay serial (for unambiguous seq allocation),
+  so N git timeouts don't serialize.
 
 - **Append-only inbox + monotonic seq + separate cursor.** Each parent has
   `notify/inbox/<host>/<parent>.ndjson`; every event carries a per-inbox `seq`

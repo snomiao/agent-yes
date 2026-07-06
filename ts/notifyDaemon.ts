@@ -26,7 +26,6 @@ import {
   type NotifyEvent,
   daemonLockDir,
   daemonLockOwnerPath,
-  daemonPidPath,
   notifyDir,
 } from "./notifyInbox.ts";
 import {
@@ -73,8 +72,18 @@ async function recentTail(logFile: string | null | undefined): Promise<string | 
 /**
  * Seed the router's prior state from what each inbox has ALREADY recorded, so a
  * daemon restart does not re-emit a baseline the parent already saw.
+ *
+ * pid-reuse guard: seed a child ONLY if it is still in the registry with the
+ * SAME start time as the inbox recorded (`liveChildren`: pid → started_at). A pid
+ * whose live start time differs is a NEW child recycling the pid — seeding it
+ * would suppress its first notification, so we skip it (it starts fresh). A pid
+ * absent from the registry (reaped) is skipped too: it won't be observed again,
+ * and if the pid is later reused, that new child was never seeded.
  */
-async function reconcileFromInboxes(host: string): Promise<RouterState> {
+export async function reconcileFromInboxes(
+  host: string,
+  liveChildren: Map<number, number>,
+): Promise<RouterState> {
   const state: RouterState = new Map();
   for (const parent of await listInboxParents(host)) {
     const events = await readInbox(host, parent);
@@ -85,6 +94,9 @@ async function reconcileFromInboxes(host: string): Promise<RouterState> {
       if (e.edge === "exited") exitedChildren.add(e.child_pid);
     }
     for (const [childPid, last] of lastByChild) {
+      const liveStarted = liveChildren.get(childPid);
+      if (liveStarted === undefined) continue; // reaped / gone — nothing to suppress
+      if (last.child_started_at && liveStarted !== last.child_started_at) continue; // pid reused
       const seededState =
         last.edge === "exited"
           ? "stopped"
@@ -114,6 +126,8 @@ interface ObserveResult {
   obs: ChildObservation[];
   /** child pid → the parent's started_at, for the pid-reuse guard. */
   parentStartedAt: Map<number, number>;
+  /** child pid → the child's OWN started_at, stamped into events (reuse guard). */
+  childStartedAt: Map<number, number>;
   /** log file per child pid, for payload enrichment. */
   logFiles: Map<number, string | null>;
   watcherCount: number;
@@ -131,6 +145,7 @@ async function observeChildren(): Promise<ObserveResult> {
   }
   const obs: ChildObservation[] = [];
   const parentStartedAt = new Map<number, number>();
+  const childStartedAt = new Map<number, number>();
   const logFiles = new Map<number, string | null>();
   for (const r of records) {
     const parent = r.parent_pid;
@@ -147,15 +162,37 @@ async function observeChildren(): Promise<ObserveResult> {
       question,
     });
     parentStartedAt.set(r.pid, startedAtByWrapper.get(parent) ?? 0);
+    childStartedAt.set(r.pid, r.started_at);
     logFiles.set(r.pid, r.log_file ?? null);
   }
-  return { obs, parentStartedAt, logFiles, watcherCount: watching.size };
+  return { obs, parentStartedAt, childStartedAt, logFiles, watcherCount: watching.size };
+}
+
+/** Registry snapshot: every record's pid → its started_at (for reconcile guard). */
+async function liveChildrenSnapshot(): Promise<Map<number, number>> {
+  const records = await listRecords(undefined, LS_OPTS).catch(() => []);
+  const m = new Map<number, number>();
+  for (const r of records) m.set(r.pid, r.started_at);
+  return m;
 }
 
 export interface DaemonOptions {
   intervalMs?: number;
   /** Run a single tick and return (for tests / `--once`), no lock, no loop. */
   once?: boolean;
+}
+
+// How long an owner heartbeat stays "trusted" — a running daemon refreshes it
+// each tick, so a recycled pid (which isn't refreshing THIS file) reads as stale
+// and is neither trusted for `status` nor killed by `stop`.
+const OWNER_TTL_MS = 12_000;
+
+/** Stamp the lock owner file with our identity + a fresh heartbeat ts. */
+async function writeOwner(): Promise<void> {
+  await writeFile(
+    daemonLockOwnerPath(),
+    JSON.stringify({ pid: process.pid, started_at: Date.now(), ts: Date.now() }),
+  ).catch(() => {});
 }
 
 /**
@@ -170,10 +207,7 @@ export async function acquireDaemonLock(isAlive: (pid: number) => boolean = isPi
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       await mkdir(daemonLockDir(), { recursive: false });
-      await writeFile(
-        daemonLockOwnerPath(),
-        JSON.stringify({ pid: process.pid, started_at: Date.now() }),
-      ).catch(() => {});
+      await writeOwner();
       return true;
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e; // real error — propagate
@@ -210,22 +244,23 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
     logger.debug("[notifyd] another live daemon holds the lock — exiting");
     return 0;
   }
-  await writeFile(daemonPidPath(), String(process.pid)).catch(() => {});
 
   let running = true;
   const cleanup = async () => {
     running = false;
     await rm(daemonLockDir(), { recursive: true, force: true }).catch(() => {});
-    await rm(daemonPidPath(), { force: true }).catch(() => {});
   };
   process.on("SIGINT", () => void cleanup().then(() => process.exit(0)));
   process.on("SIGTERM", () => void cleanup().then(() => process.exit(0)));
 
-  let prev = await reconcileFromInboxes(host);
+  // Seed the router from prior inbox state, guarded against pid reuse by the
+  // current registry snapshot (see reconcileFromInboxes).
+  let prev = await reconcileFromInboxes(host, await liveChildrenSnapshot());
   let ticks = 0;
   let emptySince: number | null = null;
 
   while (running) {
+    await writeOwner(); // refresh the identity heartbeat so `status`/`stop` trust us
     const { next, watcherCount } = await tickState(host, prev);
     prev = next;
     ticks++;
@@ -248,43 +283,47 @@ async function tickState(
   host: string,
   prev: RouterState,
 ): Promise<{ next: RouterState; watcherCount: number }> {
-  const { obs, parentStartedAt, logFiles, watcherCount } = await observeChildren();
+  const { obs, parentStartedAt, childStartedAt, logFiles, watcherCount } = await observeChildren();
   const { events, next } = stepRouter(prev, obs, Date.now());
-  for (const ev of events) {
-    // Enrich: tail + git head for actionable edges; exited is best-effort (the
-    // log may already be reaped). Never let git/log I/O block or crash emission.
-    let tail: string | null = null;
-    let git_head: string | null = null;
-    try {
+
+  // Enrich all edges CONCURRENTLY (a burst of N edges must not serialize N git
+  // timeouts). Enrichment is best-effort and never throws; the append that
+  // follows stays serial so per-inbox seq allocation is unambiguous.
+  const enriched = await Promise.all(
+    events.map(async (ev) => {
+      let tail: string | null = null;
+      let git_head: string | null = null;
       if (ev.edge !== "exited") {
         [tail, git_head] = await Promise.all([
-          recentTail(logFiles.get(ev.child_pid)),
-          gitHead(ev.cwd),
+          recentTail(logFiles.get(ev.child_pid)).catch(() => null),
+          gitHead(ev.cwd).catch(() => null),
         ]);
       }
-    } catch {
-      /* enrichment is best-effort */
-    }
-    const stored: Omit<NotifyEvent, "seq"> = {
-      ts: Date.now(),
-      host,
-      parent_pid: ev.parent_pid,
-      // The parent's start time — the read side rejects an event whose parent
-      // started_at doesn't match the reader's, guarding against pid reuse.
-      parent_started_at: parentStartedAt.get(ev.child_pid) ?? 0,
-      child_pid: ev.child_pid,
-      child_wrapper_pid: ev.child_wrapper_pid,
-      cli: ev.cli,
-      cwd: ev.cwd,
-      edge: ev.edge,
-      prev_state: ev.prev_state,
-      state: ev.state,
-      question: ev.question,
-      tail,
-      git_head,
-    };
-    await appendEvent(ev.parent_pid, stored).catch((e) =>
-      logger.warn(`[notifyd] append failed for parent ${ev.parent_pid}: ${e}`),
+      const stored: Omit<NotifyEvent, "seq"> = {
+        ts: Date.now(),
+        host,
+        parent_pid: ev.parent_pid,
+        // The parent's/child's start times — the read side and the startup
+        // reconcile reject an event whose start time disagrees, guarding pid reuse.
+        parent_started_at: parentStartedAt.get(ev.child_pid) ?? 0,
+        child_pid: ev.child_pid,
+        child_wrapper_pid: ev.child_wrapper_pid,
+        child_started_at: childStartedAt.get(ev.child_pid) ?? 0,
+        cli: ev.cli,
+        cwd: ev.cwd,
+        edge: ev.edge,
+        prev_state: ev.prev_state,
+        state: ev.state,
+        question: ev.question,
+        tail,
+        git_head,
+      };
+      return stored;
+    }),
+  );
+  for (const stored of enriched) {
+    await appendEvent(stored.parent_pid, stored).catch((e) =>
+      logger.warn(`[notifyd] append failed for parent ${stored.parent_pid}: ${e}`),
     );
   }
   return { next, watcherCount };
@@ -302,11 +341,23 @@ async function gcTick(host: string): Promise<void> {
   await gcInboxes(host, livePids, childParentPids);
 }
 
-/** Read the daemon's recorded pid, or null. */
-export async function daemonStatus(): Promise<number | null> {
-  const raw = await readFile(daemonPidPath(), "utf8").catch(() => "");
-  const pid = parseInt(raw.trim(), 10);
-  if (Number.isFinite(pid) && pid > 0 && isPidAlive(pid)) return pid;
+/**
+ * The running daemon's pid, or null. The lock owner file is the SINGLE source of
+ * truth: we trust it only if its pid is alive AND its heartbeat is fresh — a
+ * recycled pid isn't refreshing this file, so its stale ts makes us return null
+ * instead of trusting (or killing via `stop`) an unrelated process.
+ */
+export async function daemonStatus(now = Date.now()): Promise<number | null> {
+  const raw = await readFile(daemonLockOwnerPath(), "utf8").catch(() => "");
+  try {
+    const o = JSON.parse(raw) as { pid: number; ts?: number };
+    if (typeof o?.pid === "number" && o.pid > 0 && isPidAlive(o.pid)) {
+      // A running daemon refreshes ts every tick; tolerate a couple missed ticks.
+      if (o.ts === undefined || now - o.ts <= OWNER_TTL_MS) return o.pid;
+    }
+  } catch {
+    /* missing / torn owner — no daemon */
+  }
   return null;
 }
 
@@ -330,7 +381,7 @@ export async function ensureDaemon(): Promise<number | null> {
     stdio: "ignore",
   });
   child.unref();
-  // Give it a moment to acquire the lock + write its pidfile.
+  // Give it a moment to acquire the lock + stamp its owner file.
   await new Promise((r) => setTimeout(r, 300));
   return daemonStatus();
 }

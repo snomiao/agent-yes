@@ -57,6 +57,19 @@ describe("notifyStore (fs)", () => {
     expect(inbox.map((e) => e.seq).sort((a, b) => a - b)).toEqual([1, 2, 3]);
   });
 
+  it("many concurrent appends get unique, contiguous seqs (lock serializes)", async () => {
+    // 30 writers race on the same inbox. Ownership is proven only by mkdir, so
+    // even under the steal path no two writers share the critical section →
+    // seqs are 1..30 with no gap or duplicate.
+    const seqs = await Promise.all(
+      Array.from({ length: 30 }, () => appendEvent(999, baseEvent("idle"))),
+    );
+    expect([...seqs].sort((a, b) => a - b)).toEqual(Array.from({ length: 30 }, (_, i) => i + 1));
+    const inbox = await readInbox(host, 999);
+    expect(inbox.length).toBe(30);
+    expect(new Set(inbox.map((e) => e.seq)).size).toBe(30); // no duplicates
+  });
+
   it("registers and expires watcher heartbeats", async () => {
     await heartbeatWatcher(1, 111);
     await heartbeatWatcher(2, 222);
@@ -81,6 +94,25 @@ describe("notifyStore (fs)", () => {
     // 999 dead + unreferenced → GC; 888 referenced by a live child → keep.
     await gcInboxes(host, new Set<number>(), new Set([888]));
     expect(await listInboxParents(host)).toEqual([888]);
+  });
+
+  it("concurrent GC and appends never lose an event (read+write both under lock)", async () => {
+    // Seed enough to trigger rotation, ack a chunk so GC has something to trim.
+    for (let i = 0; i < 40; i++) await appendEvent(999, baseEvent("idle"));
+    await setCursor(host, 999, 15, "parent");
+    // Fire a GC pass concurrently with a burst of appends. Because GC reads AND
+    // writes inside the inbox lock, no append can be clobbered by a stale-snapshot
+    // rewrite — every appended seq must survive.
+    const appends = Array.from({ length: 20 }, () => appendEvent(999, baseEvent("needs_input")));
+    const [seqs] = await Promise.all([
+      Promise.all(appends),
+      gcInboxes(host, new Set([999]), new Set([999]), 1),
+    ]);
+    const inbox = await readInbox(host, 999);
+    const present = new Set(inbox.map((e) => e.seq));
+    for (const s of seqs) expect(present.has(s)).toBe(true); // no append lost
+    // Seqs are still unique (no duplication from a racing rewrite).
+    expect(inbox.length).toBe(new Set(inbox.map((e) => e.seq)).size);
   });
 
   it("GC rotation never drops unacked events even past the byte cap", async () => {

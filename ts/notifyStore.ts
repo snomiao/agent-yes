@@ -41,25 +41,35 @@ async function ensureDir(dir: string): Promise<void> {
   await mkdir(dir, { recursive: true }).catch(() => {});
 }
 
-/** Acquire a per-inbox mkdir lock; returns a release fn. Best-effort, bounded. */
-async function acquireLock(lockDir: string, timeoutMs = 2000): Promise<() => Promise<void>> {
+/**
+ * Acquire a per-inbox mkdir lock; returns a release fn. Ownership is proven ONLY
+ * by a successful `mkdir(recursive:false)` — the atomic, exclusive create. A
+ * presumed-stale lock (held past `staleMs`) is removed ONCE and then we re-
+ * contend: whoever's next `mkdir` succeeds owns it, so two would-be stealers can
+ * never both enter the critical section (the loser EEXISTs and keeps waiting).
+ */
+async function acquireLock(
+  lockDir: string,
+  staleMs = 2000,
+  hardMs = 10_000,
+): Promise<() => Promise<void>> {
   const start = Date.now();
-  // Back off between attempts; the critical section is tiny so this rarely loops.
+  let stole = false;
   for (;;) {
     try {
       await mkdir(lockDir, { recursive: false });
       return async () => {
         await rm(lockDir, { recursive: true, force: true }).catch(() => {});
       };
-    } catch {
-      if (Date.now() - start > timeoutMs) {
-        // Stale lock (a crashed writer) — steal it rather than deadlock. The
-        // critical section is idempotent-safe on seq via re-read below.
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const elapsed = Date.now() - start;
+      if (elapsed > hardMs) throw new Error(`notify lock timed out: ${lockDir}`);
+      // Remove the presumed-stale lock at most once, then loop back to re-contend
+      // — the next mkdir(recursive:false) is the sole ownership proof.
+      if (elapsed > staleMs && !stole) {
+        stole = true;
         await rm(lockDir, { recursive: true, force: true }).catch(() => {});
-        await mkdir(lockDir, { recursive: true }).catch(() => {});
-        return async () => {
-          await rm(lockDir, { recursive: true, force: true }).catch(() => {});
-        };
       }
       await new Promise((r) => setTimeout(r, 15));
     }
@@ -169,22 +179,24 @@ export async function gcInboxes(
       continue;
     }
     // Live inbox — rotate if oversized, but NEVER evict an event above the min
-    // consumer cursor (unacked): at-least-once must survive rotation.
+    // consumer cursor (unacked): at-least-once must survive rotation. The size
+    // check is a cheap gate; the read→compute→write all happen UNDER the lock so
+    // a concurrent appendEvent can't be lost between a stale read and the write.
     const size = await stat(inboxPath(host, p))
       .then((s) => s.size)
       .catch(() => 0);
     if (size > capBytes) {
-      const events = await readInbox(host, p);
-      const protectAboveSeq = await minConsumerCursor(host, p);
-      const kept = rotateKeep(events, capBytes, protectAboveSeq);
-      if (kept.length < events.length) {
-        const lock = path.join(inboxDir(host), `${p}.lock`);
-        const release = await acquireLock(lock);
-        try {
+      const lock = path.join(inboxDir(host), `${p}.lock`);
+      const release = await acquireLock(lock);
+      try {
+        const events = await readInbox(host, p);
+        const protectAboveSeq = await minConsumerCursor(host, p);
+        const kept = rotateKeep(events, capBytes, protectAboveSeq);
+        if (kept.length < events.length) {
           await writeFile(inboxPath(host, p), kept.map(serializeEvent).join("\n") + "\n");
-        } finally {
-          await release();
         }
+      } finally {
+        await release();
       }
     }
   }
