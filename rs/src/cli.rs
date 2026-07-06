@@ -20,8 +20,9 @@ use std::env;
 /// Management subcommands handled by the TypeScript CLI, not this runner.
 /// MUST mirror `SUBCOMMANDS` in ts/subcommands.ts — keep the two in sync.
 pub const SUBCOMMANDS: &[&str] = &[
-    "ls", "list", "ps", "status", "result", "read", "cat", "tail", "head", "send", "spawn",
-    "attach", "stop", "exit", "restart", "note", "serve", "schedule", "remote", "reap", "help",
+    "ls", "list", "ps", "status", "result", "notify", "notifyd", "read", "cat", "tail", "head",
+    "send", "spawn", "attach", "stop", "exit", "restart", "note", "serve", "schedule", "remote",
+    "reap", "help",
 ];
 
 /// Subcommands reserved for the generic manager entry (`ay`/`agent-yes`), not a

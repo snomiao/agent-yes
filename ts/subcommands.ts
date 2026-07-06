@@ -27,6 +27,15 @@ import {
   type NeedsInput,
 } from "./needsInput.ts";
 import { diffLsStates, type LiveState, type LsAgentState } from "./lsWatch.ts";
+import { filterSinceSeq, filterSinceTs, filterUnread, maxSeq, type NotifyEvent } from "./notifyInbox.ts";
+import {
+  clearWatcher,
+  getCursor,
+  heartbeatWatcher,
+  hostId,
+  readInbox,
+  setCursor,
+} from "./notifyStore.ts";
 import {
   buildStoredResult,
   normalizeEnvelope,
@@ -255,6 +264,8 @@ const SUBCOMMANDS = new Set([
   "ps",
   "status",
   "result",
+  "notify",
+  "notifyd",
   "read",
   "cat",
   "tail",
@@ -341,6 +352,10 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdStatus(rest);
       case "result":
         return await cmdResult(rest);
+      case "notify":
+        return await cmdNotify(rest);
+      case "notifyd":
+        return await cmdNotifyd(rest);
       case "read":
       case "cat":
         return await cmdRead(rest, { mode: "cat" });
@@ -1231,7 +1246,7 @@ export async function deriveLiveStatus(r: GlobalPidRecord): Promise<"active" | "
  * consumer. Builds on the cheap deriveLiveStatus, then adds the menu (needs_input)
  * override, which DOES read the log tail.
  */
-async function deriveLiveState(
+export async function deriveLiveState(
   r: GlobalPidRecord,
 ): Promise<{ state: LiveState; question: string | null }> {
   const base = await deriveLiveStatus(r);
@@ -2330,7 +2345,7 @@ function cliDefaults(): Promise<Record<string, AgentCliConfig>> {
  * null on any read/render error or an empty log. Shared by the needs_input and
  * stuck classifiers so they don't each re-implement the tail read.
  */
-async function renderLogTailLines(logPath: string, n = 40): Promise<string[] | null> {
+export async function renderLogTailLines(logPath: string, n = 40): Promise<string[] | null> {
   const TAIL_BYTES = 32 * 1024;
   let buf: Uint8Array;
   try {
@@ -4224,4 +4239,269 @@ async function cmdResultSet(rest: string[]): Promise<number> {
   await writeFile(resultPath(pid), JSON.stringify(stored) + "\n");
   process.stdout.write(`result envelope written for pid ${pid}\n`);
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// ay notify / ay notifyd — subagent→parent status-transition notifications.
+//
+// See docs/subagent-notify.md. `ay notifyd` is the detection engine (query-layer
+// watcher, runtime-agnostic); `ay notify` is the parent-facing inbox reader. A
+// parent typically runs ONE command in its Monitor loop:
+//
+//     ay notify watch --unread          # tail its inbox, ensure the daemon
+//
+// and gets every child's needs_input / sustained-idle / exited edge, each with a
+// payload (question / tail / git head) so it can act without tailing the child.
+// ---------------------------------------------------------------------------
+
+/** Resolve the parent pid a `ay notify` invocation is draining. */
+function resolveParentPid(explicit: number | undefined): number {
+  if (Number.isFinite(explicit) && (explicit as number) > 0) return explicit as number;
+  const self = Number(process.env.AGENT_YES_PID);
+  if (Number.isFinite(self) && self > 0) return self;
+  throw new Error(
+    "ay notify: not running inside an agent (no AGENT_YES_PID) — pass --parent <pid>",
+  );
+}
+
+function printNotifyEvents(events: NotifyEvent[], json: boolean): void {
+  if (json) {
+    for (const e of events) process.stdout.write(JSON.stringify(e) + "\n");
+    return;
+  }
+  for (const e of events) {
+    // Plain ASCII tag (no emoji): stays legible over the Rust/CLI path and old
+    // terminals, and is easy to grep for consumers that log-parse the stream.
+    const tag = `[${e.edge}]`;
+    const head = `[${e.seq}] ${tag} pid ${e.child_pid} (${e.cli}) ${e.cwd}`;
+    process.stdout.write(head + "\n");
+    if (e.git_head) process.stdout.write(`      HEAD ${e.git_head}\n`);
+    if (e.question) process.stdout.write(`      Q: ${e.question}\n`);
+    if (e.tail)
+      process.stdout.write(
+        e.tail
+          .split("\n")
+          .map((l) => `      | ${l}`)
+          .join("\n") + "\n",
+      );
+  }
+}
+
+async function cmdNotify(rest: string[]): Promise<number> {
+  const verb = rest[0];
+  const args = rest.slice(1);
+
+  if (verb === "cursor") return cmdNotifyCursor(args);
+  if (verb !== "read" && verb !== "watch") {
+    process.stderr.write(
+      "usage: ay notify <read|watch|cursor> [--parent <pid>] [--since <seq>] [--since-ts <ms>] [--unread] [--ack] [--json]\n",
+    );
+    return 1;
+  }
+
+  const y = yargs(args)
+    .option("parent", { type: "number", description: "Parent pid whose inbox to drain (default: $AGENT_YES_PID)" })
+    .option("since", { type: "number", description: "Only edges with seq greater than this" })
+    .option("since-ts", { type: "number", description: "Only edges at/after this epoch-ms" })
+    .option("unread", { type: "boolean", default: false, description: "Only edges past the saved cursor" })
+    .option("ack", { type: "boolean", default: false, description: "Advance the cursor past what's shown (at-least-once: off by default)" })
+    .option("json", { type: "boolean", default: false, description: "Emit raw NDJSON events" })
+    .option("consumer", { type: "string", default: "parent", description: "Cursor identity (for multiple readers)" })
+    .option("interval", { type: "number", default: 2, description: "Poll interval in seconds (watch)" })
+    .option("ensure-daemon", { type: "boolean", default: true, description: "Start the notifyd singleton if not running (watch)" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+  const argv = await y.parseAsync();
+
+  const parent = resolveParentPid(argv.parent as number | undefined);
+  const host = hostId();
+  const consumer = String(argv.consumer);
+  // The reader's own start time — used to reject inbox events addressed to a
+  // PRIOR incarnation of this pid (pid reuse). FAIL-CLOSED: if we can't resolve
+  // the parent's identity (no live registry record → started_at 0), we refuse to
+  // open the notification path at all rather than fail-open and risk delivering a
+  // recycled pid's inbox to an unrelated agent (or registering a 0-identity
+  // watcher). "If we don't know who the parent is, don't open the path."
+  const selfStartedAt = await resolveParentStartedAt(parent);
+  if (selfStartedAt <= 0)
+    throw new Error(
+      `cannot resolve identity for pid ${parent} (no live agent record) — ` +
+        `refusing to open the notification path (pass --parent for a live agent).`,
+    );
+
+  const drain = async (sinceSeqOverride?: number): Promise<number> => {
+    let events = await readInbox(host, parent);
+    // Parent pid-reuse guard (fail-safe): when we know our own start time, deliver
+    // ONLY events whose parent_started_at EXACTLY matches it — a mismatched OR
+    // missing parent identity is dropped, never fail-open-delivered to a possibly-
+    // recycled pid. The daemon always stamps parent_started_at from the watcher's
+    // heartbeat (the same value this reader resolves), so every legitimate event
+    // matches; only truly-legacy identity-less events fall out.
+    if (selfStartedAt > 0) events = events.filter((e) => e.parent_started_at === selfStartedAt);
+    if (argv.unread) {
+      const cursor = await getCursor(host, parent, consumer);
+      events = filterUnread(events, sinceSeqOverride ?? cursor);
+    } else {
+      if (sinceSeqOverride !== undefined) events = filterSinceSeq(events, sinceSeqOverride);
+      else if (Number.isFinite(argv.since)) events = filterSinceSeq(events, argv.since as number);
+      if (Number.isFinite(argv["since-ts"])) events = filterSinceTs(events, argv["since-ts"] as number);
+    }
+    printNotifyEvents(events, argv.json);
+    return maxSeq(events);
+  };
+
+  // Advance the cursor MONOTONICALLY — never below its current value, and never
+  // regressing on an empty batch. This is what makes `watch --ack` safe across a
+  // consumer restart: the high-water of what we've shown is always persisted.
+  const ackTo = async (seq: number) => {
+    const cur = await getCursor(host, parent, consumer);
+    if (seq > cur) await setCursor(host, parent, seq, consumer);
+  };
+
+  if (verb === "read") {
+    const top = await drain();
+    if (argv.ack && top > 0) await ackTo(top);
+    return 0;
+  }
+
+  // watch: tail -f the inbox. Default no-ack (at-least-once) so a consumer that
+  // crashes mid-handling re-reads on restart; pass --ack to advance the cursor.
+  const ensure = async () => {
+    if (!argv["ensure-daemon"]) return;
+    const { ensureDaemon } = await import("./notifyDaemon.ts");
+    await ensureDaemon().catch(() => null);
+  };
+  // Register this parent as a live watcher BEFORE the first poll and ensure a
+  // daemon exists — so a parent that watches *before* spawning any child (or
+  // across a fan-out gap) still has a running, correctly-scoped daemon.
+  await heartbeatWatcher(parent, selfStartedAt);
+  await ensure();
+  const intervalMs = Math.max(500, (Number.isFinite(argv.interval) ? argv.interval : 2) * 1000);
+  // Baseline: from the cursor (unread) or the caller's --since, else from now
+  // (only new edges). Track high-water seq in-memory between polls.
+  let lastSeq = argv.unread
+    ? await getCursor(host, parent, consumer)
+    : Number.isFinite(argv.since)
+      ? (argv.since as number)
+      : maxSeq(await readInbox(host, parent));
+  let acked = lastSeq; // high-water already persisted to the cursor
+  let stop = false;
+  // On signal: drop our heartbeat and exit promptly. (Even if this is missed on
+  // a hard kill, the watcher's TTL makes the stale heartbeat non-live, so the
+  // daemon's scope/self-exit stays correct — this is just prompt cleanup.)
+  const onSig = () => {
+    stop = true;
+    void clearWatcher(parent).finally(() => process.exit(0));
+  };
+  process.on("SIGINT", onSig);
+  process.on("SIGTERM", onSig);
+  try {
+    while (!stop) {
+      // Refresh our heartbeat and keep the daemon alive every tick — it self-
+      // exits after a grace window with no watchers, so a long watch must renew.
+      await heartbeatWatcher(parent, selfStartedAt);
+      await ensure();
+      const top = await drain(lastSeq);
+      if (top > lastSeq) lastSeq = top;
+      // Persist the high-water monotonically (only when it advanced), so a batch
+      // that showed events is acked even if the NEXT poll is empty — a restarted
+      // `watch --ack` then resumes past what it already delivered, not from the
+      // stale cursor.
+      if (argv.ack && lastSeq > acked) {
+        await ackTo(lastSeq);
+        acked = lastSeq;
+      }
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  } finally {
+    await clearWatcher(parent);
+  }
+  return 0;
+}
+
+/**
+ * Resolve the started_at of the LIVE agent whose wrapper pid is `parent`. Returns
+ * 0 (→ the caller fails closed) when there is no such record, when the matching
+ * record is stale (exited / pid not alive), or when the match is ambiguous
+ * (>1 live record) — so a leftover stale record can't make a recycled parent pid
+ * resolve to a PRIOR incarnation's start time and fail-open the identity guard.
+ */
+async function resolveParentStartedAt(parent: number): Promise<number> {
+  const records = await listRecords(undefined, {
+    all: true,
+    active: false,
+    json: false,
+    latest: false,
+    cwdScope: null,
+  }).catch(() => [] as GlobalPidRecord[]);
+  const live = records.filter(
+    (r) =>
+      (r.wrapper_pid === parent || r.pid === parent) &&
+      r.status !== "exited" &&
+      isPidAlive(r.pid),
+  );
+  // Exactly one live match, or fail closed.
+  if (live.length !== 1) return 0;
+  return live[0]!.started_at ?? 0;
+}
+
+async function cmdNotifyCursor(args: string[]): Promise<number> {
+  const action = args[0];
+  const y = yargs(args.slice(1))
+    .option("parent", { type: "number" })
+    .option("consumer", { type: "string", default: "parent" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+  const argv = await y.parseAsync();
+  const parent = resolveParentPid(argv.parent as number | undefined);
+  const host = hostId();
+  const consumer = String(argv.consumer);
+  if (action === "get") {
+    process.stdout.write(String(await getCursor(host, parent, consumer)) + "\n");
+    return 0;
+  }
+  if (action === "set") {
+    const seq = Number(argv._[0]);
+    if (!Number.isFinite(seq) || seq < 0) throw new Error("ay notify cursor set <seq>");
+    await setCursor(host, parent, seq, consumer);
+    return 0;
+  }
+  process.stderr.write("usage: ay notify cursor <get|set <seq>> [--parent <pid>]\n");
+  return 1;
+}
+
+async function cmdNotifyd(rest: string[]): Promise<number> {
+  const sub = rest[0] ?? "status";
+  const daemon = await import("./notifyDaemon.ts");
+  switch (sub) {
+    case "run":
+      return daemon.runDaemon();
+    case "once":
+      return daemon.runDaemon({ once: true });
+    case "start": {
+      const pid = await daemon.ensureDaemon();
+      process.stdout.write(pid ? `notifyd running (pid ${pid})\n` : "notifyd: failed to start\n");
+      return pid ? 0 : 1;
+    }
+    case "status": {
+      const pid = await daemon.daemonStatus();
+      process.stdout.write(pid ? `notifyd running (pid ${pid})\n` : "notifyd: not running\n");
+      return pid ? 0 : 1;
+    }
+    case "stop": {
+      // Cooperative, non-destructive stop: remove the daemon's lock and let it
+      // exit itself on the next tick — never SIGTERM a pid that may have been
+      // recycled onto an unrelated process.
+      const pid = await daemon.requestDaemonStop();
+      process.stdout.write(
+        pid ? `notifyd: stop requested (pid ${pid} will exit shortly)\n` : "notifyd: not running\n",
+      );
+      return 0;
+    }
+    default:
+      process.stderr.write("usage: ay notifyd <run|once|start|status|stop>\n");
+      return 1;
+  }
 }
