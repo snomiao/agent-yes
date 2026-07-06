@@ -190,9 +190,14 @@ export async function appendEvent(
       last = maxSeq(existing);
     }
     const seq = nextSeq(last);
+    // RESERVE the seq before writing the line: update the counter FIRST, then
+    // append. If a crash lands between the two, we're left with a reserved-but-
+    // unused seq (a harmless GAP) — never a REUSED seq. That ordering matters
+    // because the cursor is seq-based: a duplicated seq would let an acked batch
+    // silently skip a later, distinct notification. Gap OK, dup NOT ok.
     const full: NotifyEvent = { ...ev, seq };
-    await appendFile(inboxPath(host, parentPid), serializeEvent(full) + "\n");
     await writeFile(seqPath(host, parentPid), String(seq));
+    await appendFile(inboxPath(host, parentPid), serializeEvent(full) + "\n");
     return seq;
   } finally {
     await release();

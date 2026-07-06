@@ -315,7 +315,12 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   const intervalMs = opts.intervalMs ?? POLL_MS;
 
   if (opts.once) {
-    await tickState(host, new Map());
+    // A single reconciled tick (test/debug). Skip entirely if a real daemon is
+    // already running — otherwise we'd re-emit baselines it has handled — and
+    // seed from the inbox so even standalone we don't duplicate prior edges.
+    if (await daemonStatus()) return 0;
+    const prev = await reconcileFromInboxes(host, await liveChildrenSnapshot());
+    await tickState(host, prev);
     return 0;
   }
 
