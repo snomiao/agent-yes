@@ -10,6 +10,7 @@
  */
 
 import { mkdir, readFile, readdir, rm, stat, writeFile, appendFile } from "fs/promises";
+import { randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "path";
 import { logger } from "./logger.ts";
@@ -121,21 +122,48 @@ export async function acquireLock(
 ): Promise<() => Promise<void>> {
   const ownerFile = path.join(lockDir, "owner");
   const start = Date.now();
+  // A fencing token unique to THIS acquisition. Everything we do to the lock is
+  // gated on the owner file still carrying our token — so if we were stale-stolen
+  // mid-critical-section and the lock re-created by another writer, we neither
+  // overwrite their owner nor delete their lock. Classic fencing.
+  const token = randomUUID();
+  const readOwnerToken = async (): Promise<string | null> => {
+    try {
+      return (JSON.parse(await readFile(ownerFile, "utf8")) as { token?: string }).token ?? null;
+    } catch {
+      return null;
+    }
+  };
   const stampOwner = () =>
-    writeFile(ownerFile, JSON.stringify({ pid: process.pid, ts: Date.now() })).catch(() => {});
+    writeFile(ownerFile, JSON.stringify({ pid: process.pid, ts: Date.now(), token })).catch(
+      () => {},
+    );
   for (;;) {
     try {
       await mkdir(lockDir, { recursive: false });
       await stampOwner();
       // Heartbeat the owner ts while we hold the lock, so a LONG critical section
       // (a big gcInboxes rewrite) never crosses staleMs and gets stolen out from
-      // under us — which would let a second writer in and clobber/duplicate a seq.
-      // Refresh well inside staleMs; cleared on release.
-      const beat = setInterval(() => void stampOwner(), Math.max(500, Math.floor(staleMs / 3)));
+      // under us. Before each refresh, verify we STILL own it (token match) — if
+      // we were superseded (a torn/late steal), stop beating so we don't clobber
+      // the new owner's owner file. Refresh well inside staleMs; cleared on release.
+      const beat = setInterval(() => {
+        void (async () => {
+          const cur = await readOwnerToken();
+          if (cur !== null && cur !== token) {
+            clearInterval(beat);
+            return;
+          }
+          await stampOwner();
+        })();
+      }, Math.max(500, Math.floor(staleMs / 3)));
       if (typeof beat.unref === "function") beat.unref();
       return async () => {
         clearInterval(beat);
-        await rm(lockDir, { recursive: true, force: true }).catch(() => {});
+        // Release ONLY if we still hold it — never delete a lock another writer
+        // now owns (which would open the critical section to a third writer).
+        if ((await readOwnerToken()) === token)
+          await rm(lockDir, { recursive: true, force: true }).catch(() => {});
       };
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;

@@ -68,6 +68,14 @@ describe("notifyInbox — NDJSON round-trip + torn-line tolerance", () => {
     const got = parseInboxText(text);
     expect(got.map((e) => e.seq)).toEqual([1]);
   });
+
+  it("drops a partial event missing correlation fields (full validation)", () => {
+    const partial = JSON.stringify({ seq: 2, edge: "idle" }); // no parent_pid/child_pid/cwd
+    const badEdge = JSON.stringify({ ...ev({ seq: 3 }), edge: "bogus" });
+    const text = [serializeEvent(ev({ seq: 1 })), partial, badEdge].join("\n");
+    // Only the fully-formed event survives to a consumer's output.
+    expect(parseInboxText(text).map((e) => e.seq)).toEqual([1]);
+  });
 });
 
 describe("notifyInbox — seq allocation", () => {

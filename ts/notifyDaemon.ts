@@ -16,6 +16,7 @@
  */
 
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, writeFile } from "fs/promises";
 import {
   type ChildObservation,
@@ -235,12 +236,26 @@ export interface DaemonIdentity {
 // identity check (pid + started_at unchanged) can't see it move and mistake the
 // running daemon for "not running".
 let daemonStartedAt = 0;
+// Fencing token for THIS daemon's lock ownership (see the inbox lock). We only
+// overwrite the owner file or delete the lock while it still carries our token,
+// so a stale-stolen daemon can't clobber or delete the new daemon's lock.
+let daemonToken = "";
 
-/** Stamp the lock owner file with our identity + a fresh heartbeat ts. */
+/** The token currently written in the daemon lock owner file, or null. */
+async function readDaemonOwnerToken(): Promise<string | null> {
+  try {
+    const o = JSON.parse(await readFile(daemonLockOwnerPath(), "utf8")) as { token?: string };
+    return o.token ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Stamp the lock owner file with our identity + a fresh heartbeat ts + token. */
 async function writeOwner(): Promise<void> {
   await writeFile(
     daemonLockOwnerPath(),
-    JSON.stringify({ pid: process.pid, started_at: daemonStartedAt, ts: Date.now() }),
+    JSON.stringify({ pid: process.pid, started_at: daemonStartedAt, ts: Date.now(), token: daemonToken }),
   ).catch(() => {});
 }
 
@@ -261,6 +276,7 @@ export async function acquireDaemonLock(isAlive: (pid: number) => boolean = isPi
     try {
       await mkdir(daemonLockDir(), { recursive: false });
       daemonStartedAt = Date.now(); // fixed for this daemon's lifetime
+      daemonToken = randomUUID(); // fencing token for this ownership
       await writeOwner();
       return true;
     } catch (e) {
@@ -334,15 +350,26 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   // tick — many watched children, slow log I/O — can't let the heartbeat cross
   // OWNER_TTL and have another `watch` steal the lock as "stale" → double daemon.
   // Refresh well inside the TTL; cleared on shutdown.
-  const ownerBeat = setInterval(
-    () => void writeOwner(),
-    Math.max(1000, Math.floor(OWNER_TTL_MS / 3)),
-  );
+  const ownerBeat = setInterval(() => {
+    void (async () => {
+      // Stop beating (and never overwrite) if we've been superseded — the fencing
+      // token in the owner file is no longer ours.
+      const cur = await readDaemonOwnerToken();
+      if (cur !== null && cur !== daemonToken) {
+        clearInterval(ownerBeat);
+        return;
+      }
+      await writeOwner();
+    })();
+  }, Math.max(1000, Math.floor(OWNER_TTL_MS / 3)));
   if (typeof ownerBeat.unref === "function") ownerBeat.unref();
   const cleanup = async () => {
     running = false;
     clearInterval(ownerBeat);
-    await rm(daemonLockDir(), { recursive: true, force: true }).catch(() => {});
+    // Delete the lock ONLY if it still carries our token — never remove a lock a
+    // newer daemon now owns.
+    if ((await readDaemonOwnerToken()) === daemonToken)
+      await rm(daemonLockDir(), { recursive: true, force: true }).catch(() => {});
   };
   process.on("SIGINT", () => void cleanup().then(() => process.exit(0)));
   process.on("SIGTERM", () => void cleanup().then(() => process.exit(0)));

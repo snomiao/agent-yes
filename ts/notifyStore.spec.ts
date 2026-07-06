@@ -131,6 +131,31 @@ describe("notifyStore (fs)", () => {
     expect(nextSeq).toBe(131); // continues from the counter, no seq reuse
   });
 
+  it("release() does NOT delete a lock that was STOLEN out from under it (fencing)", async () => {
+    const { mkdtemp, writeFile } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const lockDir = path.join(await mkdtemp(path.join(tmpdir(), "ay-fence-")), "L");
+    const release = await acquireLock(lockDir, 30_000);
+    // Simulate another writer stealing + re-creating the lock: its owner file now
+    // carries a DIFFERENT fencing token.
+    await writeFile(
+      path.join(lockDir, "owner"),
+      JSON.stringify({ pid: 999999, ts: Date.now(), token: "someone-else" }),
+    );
+    await release();
+    // We must NOT have removed the new owner's lock.
+    await expect(stat(lockDir)).resolves.toBeTruthy();
+  });
+
+  it("release() deletes the lock when we still hold it", async () => {
+    const { mkdtemp } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const lockDir = path.join(await mkdtemp(path.join(tmpdir(), "ay-fence2-")), "L");
+    const release = await acquireLock(lockDir, 30_000);
+    await release();
+    await expect(stat(lockDir)).rejects.toThrow(); // gone
+  });
+
   it("refreshes the lock owner heartbeat while held (I2: a long GC can't be stolen)", async () => {
     const { mkdtemp } = await import("fs/promises");
     const { tmpdir } = await import("os");

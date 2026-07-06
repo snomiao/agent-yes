@@ -161,12 +161,33 @@ export function parseInboxText(text: string): NotifyEvent[] {
     if (!t) continue;
     try {
       const ev = JSON.parse(t) as NotifyEvent;
-      if (ev && typeof ev.seq === "number" && typeof ev.edge === "string") out.push(ev);
+      if (isValidEvent(ev)) out.push(ev);
     } catch {
       /* torn / malformed line — skip */
     }
   }
   return out;
+}
+
+const EDGES = new Set<string>(["needs_input", "idle", "exited"]);
+
+/**
+ * Full shape validation at the storage boundary — a torn/partial line missing
+ * the correlation fields must never flow through to a consumer's output. Every
+ * event we surface has the fields a reader relies on.
+ */
+function isValidEvent(ev: unknown): ev is NotifyEvent {
+  if (!ev || typeof ev !== "object") return false;
+  const e = ev as Record<string, unknown>;
+  return (
+    typeof e.seq === "number" &&
+    typeof e.parent_pid === "number" &&
+    typeof e.child_pid === "number" &&
+    typeof e.cli === "string" &&
+    typeof e.cwd === "string" &&
+    typeof e.edge === "string" &&
+    EDGES.has(e.edge)
+  );
 }
 
 /** Next seq to allocate given the last stored seq counter (or the inbox max). */

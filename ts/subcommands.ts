@@ -4095,8 +4095,17 @@ async function cmdNotify(rest: string[]): Promise<number> {
   const host = hostId();
   const consumer = String(argv.consumer);
   // The reader's own start time — used to reject inbox events addressed to a
-  // PRIOR incarnation of this pid (pid reuse). 0 = unknown → skip the guard.
+  // PRIOR incarnation of this pid (pid reuse). FAIL-CLOSED: if we can't resolve
+  // the parent's identity (no live registry record → started_at 0), we refuse to
+  // open the notification path at all rather than fail-open and risk delivering a
+  // recycled pid's inbox to an unrelated agent (or registering a 0-identity
+  // watcher). "If we don't know who the parent is, don't open the path."
   const selfStartedAt = await resolveParentStartedAt(parent);
+  if (selfStartedAt <= 0)
+    throw new Error(
+      `ay notify: cannot resolve identity for pid ${parent} (no live agent record) — ` +
+        `refusing to open the notification path (pass --parent for a live agent).`,
+    );
 
   const drain = async (sinceSeqOverride?: number): Promise<number> => {
     let events = await readInbox(host, parent);
