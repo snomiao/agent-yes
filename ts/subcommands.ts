@@ -4103,7 +4103,7 @@ async function cmdNotify(rest: string[]): Promise<number> {
   const selfStartedAt = await resolveParentStartedAt(parent);
   if (selfStartedAt <= 0)
     throw new Error(
-      `ay notify: cannot resolve identity for pid ${parent} (no live agent record) — ` +
+      `cannot resolve identity for pid ${parent} (no live agent record) — ` +
         `refusing to open the notification path (pass --parent for a live agent).`,
     );
 
