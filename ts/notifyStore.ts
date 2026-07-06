@@ -287,7 +287,9 @@ export async function getCursor(host: string, parentPid: number, consumer = "par
 /**
  * Minimum cursor across ALL consumers of a parent inbox — the watermark below
  * which rotation may evict events (nothing above it has been acked by every
- * reader). Returns 0 when there are no consumers (nothing to protect).
+ * reader). Returns 0 when there are no consumers — which PROTECTS EVERYTHING:
+ * with a 0 watermark, `rotateKeep` treats every event as unacked and evicts
+ * nothing (an inbox nobody reads is never trimmed).
  */
 export async function minConsumerCursor(host: string, parentPid: number): Promise<number> {
   const names = await readdir(cursorDir(host, parentPid)).catch(() => [] as string[]);

@@ -251,6 +251,13 @@ with a documented mitigation, tracked in a single follow-up issue.
   subprocess's own liveness.** A crashed watch stops refreshing, so its heartbeat
   goes stale within the TTL and is dropped — but carrying the watch subprocess's
   pid/token in the heartbeat for a strict check is a follow-up.
+- **Event-loop-block false steal.** The daemon heartbeats its lock owner on a
+  single-threaded JS timer. If the daemon loop ever blocked SYNCHRONOUSLY longer
+  than `OWNER_TTL` (30s), the heartbeat would stall and another `watch` could
+  steal the singleton lock → a second daemon. The loop is all `await`s and never
+  blocks for seconds, and `OWNER_TTL` is set well above any realistic sync block,
+  so this is a theoretical window; fully closing it needs a worker-isolated
+  heartbeat (follow-up).
 - **An inbox nobody acks can grow unbounded.** Rotation only evicts events at or
   below the minimum consumer cursor (at-least-once). So a parent that runs
   `ay notify watch` WITHOUT `--ack` (the default, at-least-once) and never

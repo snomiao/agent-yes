@@ -20,7 +20,6 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "fs/promises";
 import {
   type ChildObservation,
-  type PendingNotification,
   type RouterState,
   stepRouter,
 } from "./notifyRouter.ts";
@@ -235,11 +234,17 @@ export interface DaemonOptions {
   once?: boolean;
 }
 
-// How long an owner heartbeat stays "trusted" — a running daemon refreshes it
-// each tick (POLL_MS), so a recycled pid (which isn't refreshing THIS file) reads
-// as stale within a few ticks and is neither trusted for `status` nor killed by
-// `stop`. Kept tight (a few ticks) to shrink the pid-reuse window.
-const OWNER_TTL_MS = 3 * POLL_MS;
+// How long an owner heartbeat stays "trusted". A background timer refreshes it
+// every OWNER_TTL/3 (decoupled from tick duration). Set comfortably ABOVE any
+// realistic SYNCHRONOUS event-loop block, so a slow tick can't let the heartbeat
+// go stale and have another `watch` steal the singleton lock → double daemon.
+// The daemon loop is all `await`s (log render + git are async, reconcile runs
+// once at startup), so it never blocks the loop for seconds — but a single-
+// threaded JS process can only bound, not eliminate, an event-loop-block false
+// steal (a worker-isolated heartbeat would be needed to close it; tracked as a
+// follow-up). 30s also bounds the `stop` pid-reuse window (mitigated further by
+// the pid+started_at re-check before SIGTERM).
+const OWNER_TTL_MS = 30_000;
 
 export interface DaemonIdentity {
   pid: number;
@@ -424,9 +429,11 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   );
   let ticks = 0;
   let emptySince: number | null = null;
+  // Durable across ticks: edges whose append failed, retried until they land.
+  const pendingRetry = new Map<string, Omit<NotifyEvent, "seq">>();
 
   while (running) {
-    const { next, watcherCount } = await tickState(host, prev);
+    const { next, watcherCount } = await tickState(host, prev, pendingRetry);
     prev = next;
     ticks++;
     if (ticks % GC_EVERY_TICKS === 0) await gcTick(host).catch(() => {});
@@ -444,10 +451,30 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   return 0;
 }
 
+/**
+ * A durable-in-memory retry queue for edges whose append failed. Keyed by the
+ * event's identity so a pid reused by a different child never collides (the key
+ * includes child_started_at). The router state is NOT rolled back on failure —
+ * re-delivery is owned entirely by this queue, so a failed OLD-child exited and
+ * the NEW same-pid child's edges are retried independently (at-least-once per
+ * event). Bounded so a permanently-unwritable inbox can't grow it without bound.
+ */
+const RETRY_CAP = 1000;
+function retryKey(e: Omit<NotifyEvent, "seq">): string {
+  return `${e.parent_pid}:${e.child_pid}:${e.child_started_at ?? 0}:${e.edge}:${e.ts}`;
+}
+
 async function tickState(
   host: string,
   prev: RouterState,
+  pendingRetry: Map<string, Omit<NotifyEvent, "seq">> = new Map(),
 ): Promise<{ next: RouterState; watcherCount: number }> {
+  // First, retry anything a previous tick couldn't append (transient FS/lock
+  // blip). Success removes it; a persistent failure stays queued for next tick.
+  for (const [k, stored] of pendingRetry) {
+    if (await appendWithRetry(stored)) pendingRetry.delete(k);
+  }
+
   const { obs, parentStartedAt, childStartedAt, logFiles, aliveChildStartedAt, watcherCount } =
     await observeChildren();
   const { events, next } = stepRouter(prev, obs, Date.now(), { aliveChildStartedAt });
@@ -492,17 +519,16 @@ async function tickState(
       return stored;
     }),
   );
-  for (let i = 0; i < enriched.length; i++) {
-    const stored = enriched[i]!;
-    const ev = events[i]!;
-    const ok = await appendWithRetry(stored);
-    if (!ok) {
-      // at-least-once: a transient FS/lock failure must NOT permanently drop an
-      // edge. Roll back this edge's "emitted" mark in the next state so the next
-      // tick re-detects and re-appends it (a duplicate is acceptable; a drop is
-      // not). Scoped to this child only — no cross-parent re-emission.
-      rollbackEmit(next, ev);
-      logger.warn(`[notifyd] append failed for parent ${stored.parent_pid} — will retry next tick`);
+  for (const stored of enriched) {
+    if (await appendWithRetry(stored)) continue;
+    // at-least-once: a transient FS/lock failure must NOT drop an edge. Queue it
+    // by IDENTITY for re-append on a later tick — never touch the router state
+    // (which is keyed by pid and can't hold both an old and a new same-pid child).
+    if (pendingRetry.size < RETRY_CAP) {
+      pendingRetry.set(retryKey(stored), stored);
+      logger.warn(`[notifyd] append failed for parent ${stored.parent_pid} — queued for retry`);
+    } else {
+      logger.warn(`[notifyd] retry queue full (${RETRY_CAP}) — dropping edge for parent ${stored.parent_pid}`);
     }
   }
   return { next, watcherCount };
@@ -519,41 +545,6 @@ async function appendWithRetry(stored: Omit<NotifyEvent, "seq">, attempts = 3): 
     }
   }
   return false;
-}
-
-/**
- * Undo the router's "emitted" mark for one edge so the NEXT tick re-emits it
- * (used when its append failed). For a synthetic exited whose child was dropped
- * from `next`, re-insert a minimal tracked state so the vanished-loop re-fires.
- */
-function rollbackEmit(next: RouterState, ev: PendingNotification): void {
-  const cs = next.get(ev.child_pid);
-  if (cs) {
-    if (ev.edge === "idle") cs.idleEmitted = false;
-    else if (ev.edge === "needs_input") {
-      cs.inNeedsInput = false;
-      cs.needsInputQuestion = null;
-    } else if (ev.edge === "exited") cs.exitedEmitted = false;
-    return;
-  }
-  if (ev.edge === "exited") {
-    // Synthetic exited for a child already dropped from tracking — re-add it so
-    // the next tick's vanished-loop retries the exited append.
-    next.set(ev.child_pid, {
-      parent_pid: ev.parent_pid,
-      wrapper_pid: ev.child_wrapper_pid,
-      started_at: ev.child_started_at,
-      parent_started_at: ev.parent_started_at,
-      cli: ev.cli,
-      cwd: ev.cwd,
-      state: ev.prev_state ?? "active",
-      idleSince: null,
-      idleEmitted: false,
-      inNeedsInput: false,
-      needsInputQuestion: null,
-      exitedEmitted: false,
-    });
-  }
 }
 
 async function gcTick(host: string): Promise<void> {
