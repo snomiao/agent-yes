@@ -142,11 +142,12 @@ interface ObserveResult {
   /** log file per child pid, for payload enrichment. */
   logFiles: Map<number, string | null>;
   /**
-   * EVERY currently-alive child pid in the registry (regardless of whether its
-   * parent is watching) — so the router can tell a truly-dead child from one it
-   * merely stopped observing when a watcher lapsed.
+   * pid → started_at for EVERY currently-alive child in the registry (regardless
+   * of whether its parent is watching) — so the router can tell a truly-dead (or
+   * pid-reused) child from one it merely stopped observing when a watcher lapsed,
+   * identity-aware.
    */
-  aliveChildPids: Set<number>;
+  aliveChildStartedAt: Map<number, number>;
   watcherCount: number;
 }
 
@@ -164,12 +165,13 @@ async function observeChildren(): Promise<ObserveResult> {
   const parentStartedAt = new Map<number, number>();
   const childStartedAt = new Map<number, number>();
   const logFiles = new Map<number, string | null>();
-  // Liveness of ALL children (any parent) — the router uses this to avoid
-  // false-exiting a child it merely stopped observing (watcher lapsed).
-  const aliveChildPids = new Set<number>();
+  // Liveness of ALL children (any parent), pid → started_at — the router uses
+  // this to avoid false-exiting a child it merely stopped observing (watcher
+  // lapsed), while still exiting a pid reused by a different child.
+  const aliveChildStartedAt = new Map<number, number>();
   for (const r of records) {
     if (typeof r.parent_pid === "number" && r.parent_pid > 0 && isPidAlive(r.pid))
-      aliveChildPids.add(r.pid);
+      aliveChildStartedAt.set(r.pid, r.started_at);
   }
   for (const r of records) {
     const parent = r.parent_pid;
@@ -200,7 +202,7 @@ async function observeChildren(): Promise<ObserveResult> {
     parentStartedAt,
     childStartedAt,
     logFiles,
-    aliveChildPids,
+    aliveChildStartedAt,
     watcherCount: watching.size,
   };
 }
@@ -403,9 +405,9 @@ async function tickState(
   host: string,
   prev: RouterState,
 ): Promise<{ next: RouterState; watcherCount: number }> {
-  const { obs, parentStartedAt, childStartedAt, logFiles, aliveChildPids, watcherCount } =
+  const { obs, parentStartedAt, childStartedAt, logFiles, aliveChildStartedAt, watcherCount } =
     await observeChildren();
-  const { events, next } = stepRouter(prev, obs, Date.now(), { aliveChildPids });
+  const { events, next } = stepRouter(prev, obs, Date.now(), { aliveChildStartedAt });
 
   // Enrich all edges CONCURRENTLY (a burst of N edges must not serialize N git
   // timeouts). Enrichment is best-effort and never throws; the append that

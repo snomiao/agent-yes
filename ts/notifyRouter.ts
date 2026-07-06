@@ -91,15 +91,18 @@ export interface RouterConfig {
   /** How long a child must stay continuously idle before we emit an idle edge. */
   idleConfirmMs: number;
   /**
-   * The pids of children that are ACTUALLY ALIVE right now (from the registry).
-   * A tracked child that drops out of this tick's observations is only given a
-   * synthetic `exited` if its pid is NOT in this set — i.e. it truly died. A
-   * child absent from observations but still alive (e.g. its parent's watcher
-   * lapsed, so the daemon stopped observing it) is CARRIED FORWARD, never
-   * false-exited. When omitted, any unobserved tracked child is treated as
-   * exited (the caller has no liveness info).
+   * pid → started_at for every child ACTUALLY ALIVE right now (from the registry).
+   * A tracked child that drops out of this tick's observations is carried forward
+   * (not false-exited) ONLY when the live pid's start time still MATCHES the
+   * tracked one — i.e. it is the SAME child, merely unobserved (its parent's
+   * watcher lapsed). If the pid is alive but with a DIFFERENT start time, the old
+   * child died and its pid was reused during the lapse → synthesize its exited
+   * immediately (identity-aware, no waiting for the watcher to return). If the
+   * tracked start time is unknown (rare), fall back to liveness-only carry-forward
+   * to avoid a false exited. When omitted entirely, any unobserved tracked child
+   * is treated as exited (the caller has no liveness info).
    */
-  aliveChildPids?: Set<number>;
+  aliveChildStartedAt?: Map<number, number>;
 }
 
 const DEFAULT_IDLE_CONFIRM_MS = 30_000;
@@ -241,16 +244,23 @@ export function stepRouter(
   for (const [pid, cs] of prev) {
     if (seen.has(pid)) continue;
     // Distinguish "child died" from "child merely not observed this tick" (its
-    // parent's watcher lapsed, so it fell out of the observed scope). Only a
-    // child whose pid is NOT alive is truly gone → synthesize its exited. A child
-    // still alive is carried forward untouched, so we never emit a false exited
-    // for a still-running child.
-    if (config.aliveChildPids && config.aliveChildPids.has(pid)) {
-      next.set(pid, cs);
-      continue;
+    // parent's watcher lapsed, so it fell out of the observed scope) — and do it
+    // IDENTITY-AWARE, so a pid reused during the lapse doesn't masquerade as the
+    // same still-running child. Carry forward only when the SAME child is still
+    // alive (live start time matches, or the tracked start time is unknown —
+    // fail-safe against a false exited). Otherwise the child is gone (dead, or its
+    // pid now belongs to a different child) → synthesize its exited.
+    if (config.aliveChildStartedAt) {
+      const liveStart = config.aliveChildStartedAt.get(pid);
+      const sameChildAlive =
+        liveStart !== undefined && (cs.started_at == null || liveStart === cs.started_at);
+      if (sameChildAlive) {
+        next.set(pid, cs);
+        continue;
+      }
     }
     if (!cs.exitedEmitted) events.push(syntheticExited(cs, pid));
-    // Dead & gone — drop from the tracked set.
+    // Dead & gone (or pid reused) — drop from the tracked set.
   }
 
   return { events, next };

@@ -73,9 +73,12 @@ parent addresses its own inbox with no argument.
   watches.** `ay notify watch` writes a **heartbeat** (`notify/watchers/<pid>.json`,
   refreshed every poll, TTL 15s) and the daemon:
   - **scopes** its work to children whose parent has a live heartbeat — where
-    "live" means the heartbeat is fresh AND the watcher process is actually alive
-    (a crashed `watch` whose heartbeat lingers for the TTL does NOT keep the
-    daemon writing to a dead parent's inbox) — so an unrelated agent that never
+    "live" means the heartbeat is fresh (refreshed within the TTL) AND the parent
+    agent's pid is alive. A crashed `watch` stops refreshing, so its heartbeat
+    goes stale within the TTL and is dropped; a dead parent is dropped
+    immediately. (The heartbeat proves parent-liveness + freshness, not the watch
+    subprocess's own pid — carrying the watch pid/token in the heartbeat for a
+    strict check is a documented follow-up.) So an unrelated agent that never
     watches gets **no inbox** (the scope matches the "nothing happens unless you
     watch" promise). The daemon takes the parent's `started_at` from the watcher's
     own heartbeat (authoritative, never 0), not a registry lookup that could miss;

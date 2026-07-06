@@ -191,33 +191,45 @@ describe("notifyRouter — idle-prompt fixture (P1 regression)", () => {
 });
 
 describe("notifyRouter — carry-forward vs exited (C2: watcher-lapse ≠ child-death)", () => {
-  it("carries forward an unobserved-but-ALIVE child (no false exited)", () => {
-    // Track a child, then a tick with NO observation of it but its pid still
-    // alive (its parent's watcher lapsed). It must NOT be false-exited.
+  it("carries forward an unobserved SAME child (alive, matching start time)", () => {
+    // Track a child, then a tick with NO observation of it but the SAME child
+    // still alive (matching started_at → parent's watcher merely lapsed).
     let s: RouterState = new Map();
-    s = stepRouter(s, [child({ pid: 100, state: "active" })], 0).next;
-    const r = stepRouter(s, [], 1_000, { aliveChildPids: new Set([100]) });
+    s = stepRouter(s, [child({ pid: 100, started_at: 7000, state: "active" })], 0).next;
+    const r = stepRouter(s, [], 1_000, { aliveChildStartedAt: new Map([[100, 7000]]) });
     expect(r.events).toEqual([]); // no false exited
     expect(r.next.has(100)).toBe(true); // carried forward
     expect(r.next.get(100)!.started_at).toBe(7000); // identity preserved
   });
 
-  it("synthesizes exited only when the child is gone AND not alive", () => {
+  it("synthesizes exited when the child's pid is not alive at all", () => {
     let s: RouterState = new Map();
     s = stepRouter(s, [child({ pid: 100, state: "active" })], 0).next;
-    const r = stepRouter(s, [], 1_000, { aliveChildPids: new Set() }); // pid dead
+    const r = stepRouter(s, [], 1_000, { aliveChildStartedAt: new Map() }); // pid dead
     expect(r.events.map((e) => e.edge)).toEqual(["exited"]);
     expect(r.events[0]!.child_started_at).toBe(7000);
   });
 
-  it("recovers the old child's exited on watcher RETURN (pid reused during lapse)", () => {
-    // Child tracked; watcher lapses (carry-forward while pid appears alive); when
-    // the watcher returns, the pid is observed with a NEW start time → the old
-    // child's exited is recovered by the hot-path identity guard (delayed, not
-    // lost), and the new child starts fresh.
+  it("synthesizes exited IMMEDIATELY when the pid is reused by a different child during a lapse", () => {
+    // The identity-aware fix: pid 100 is alive but its start time now differs
+    // (7000 → 9000) — the old child died and its pid was reused. We must NOT
+    // carry it forward as if still running; emit the old child's exited now, no
+    // waiting for the watcher to return.
+    let s: RouterState = new Map();
+    s = stepRouter(s, [child({ pid: 100, started_at: 7000, state: "active" })], 0).next;
+    const r = stepRouter(s, [], 1_000, { aliveChildStartedAt: new Map([[100, 9000]]) });
+    expect(r.events.map((e) => e.edge)).toEqual(["exited"]);
+    expect(r.events[0]!.child_started_at).toBe(7000); // the OLD child's identity
+    expect(r.next.has(100)).toBe(false); // dropped
+  });
+
+  it("recovers the old child's exited on watcher RETURN (same-child lapse then reuse)", () => {
+    // Child tracked; watcher lapses with the SAME child still alive (carried);
+    // when the watcher returns, the pid is observed with a NEW start time → the
+    // old child's exited is recovered by the hot-path guard, new child fresh.
     let s: RouterState = new Map();
     s = stepRouter(s, [child({ pid: 100, started_at: 1000, state: "idle" })], 0).next;
-    s = stepRouter(s, [], 1_000, { aliveChildPids: new Set([100]) }).next; // lapse, carried
+    s = stepRouter(s, [], 1_000, { aliveChildStartedAt: new Map([[100, 1000]]) }).next; // carried
     const r = stepRouter(
       s,
       [child({ pid: 100, started_at: 2000, state: "needs_input", question: "New?" })],
