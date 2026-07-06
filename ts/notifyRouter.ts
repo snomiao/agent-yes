@@ -114,7 +114,22 @@ export function stepRouter(
   for (const obs of observations) {
     if (typeof obs.parent_pid !== "number" || obs.parent_pid <= 0) continue;
     seen.add(obs.pid);
-    const p = prev.get(obs.pid);
+    let p = prev.get(obs.pid);
+    // Hot-path pid-reuse guard (mirrors the startup reconcile guard): if this pid
+    // is now a DIFFERENT child (its start time changed), the old child is gone —
+    // `seen` marks the pid, so the vanished-loop below won't fire for it. Emit its
+    // synthetic exited here, then drop `p` so the new child rebuilds fresh state
+    // (else it would inherit the old child's idleEmitted/exitedEmitted and have
+    // its first idle/needs_input/exited suppressed).
+    if (
+      p &&
+      p.started_at != null &&
+      obs.started_at != null &&
+      p.started_at !== obs.started_at
+    ) {
+      if (!p.exitedEmitted) events.push(syntheticExited(p, obs.pid));
+      p = undefined;
+    }
     const cs: ChildRouterState = {
       parent_pid: obs.parent_pid,
       wrapper_pid: obs.wrapper_pid,
@@ -206,22 +221,29 @@ export function stepRouter(
   // "done" transition is never dropped, then forget it.
   for (const [pid, cs] of prev) {
     if (seen.has(pid)) continue;
-    if (!cs.exitedEmitted) {
-      events.push({
-        parent_pid: cs.parent_pid,
-        child_pid: pid,
-        child_wrapper_pid: cs.wrapper_pid,
-        child_started_at: cs.started_at,
-        cli: cs.cli,
-        cwd: cs.cwd,
-        edge: "exited",
-        prev_state: cs.state,
-        state: "stopped",
-        question: null,
-      });
-    }
+    if (!cs.exitedEmitted) events.push(syntheticExited(cs, pid));
     // Do not carry a vanished child forward — it is gone from the registry.
   }
 
   return { events, next };
+}
+
+/**
+ * A synthetic `exited` for a child that left the live set without our observing
+ * its stop — either reaped between ticks, or displaced by a pid-reuse. Built from
+ * the last-known router state so it still carries the child's identity.
+ */
+function syntheticExited(cs: ChildRouterState, pid: number): PendingNotification {
+  return {
+    parent_pid: cs.parent_pid,
+    child_pid: pid,
+    child_wrapper_pid: cs.wrapper_pid,
+    child_started_at: cs.started_at,
+    cli: cs.cli,
+    cwd: cs.cwd,
+    edge: "exited",
+    prev_state: cs.state,
+    state: "stopped",
+    question: null,
+  };
 }

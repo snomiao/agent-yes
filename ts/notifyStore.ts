@@ -104,8 +104,9 @@ async function ensureDir(dir: string): Promise<void> {
  * holder is dead or its heartbeat is stale. So a live holder whose critical
  * section legitimately runs long (a big GC rewrite, a slow disk) is never robbed
  * — which, together with the counter-trusting append below, closes the seq-dup /
- * event-loss window. A generous `hardMs` is a final backstop against a wedged-
- * but-"alive" holder.
+ * event-loss window. The one EXCEPTION is `hardMs`: a last-resort backstop that
+ * reclaims even a "live"-looking holder after an extreme wait, to guarantee
+ * forward progress against a holder wedged without updating its heartbeat.
  */
 async function acquireLock(
   lockDir: string,

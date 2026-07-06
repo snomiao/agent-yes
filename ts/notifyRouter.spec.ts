@@ -187,6 +187,39 @@ describe("notifyRouter — idle-prompt fixture (P1 regression)", () => {
   });
 });
 
+describe("notifyRouter — hot-path pid reuse (Important)", () => {
+  it("treats a same-pid child with a NEW start time as a fresh child", () => {
+    // Old child exits at pid 100; then pid 100 is recycled by a NEW child that
+    // goes needs_input. The new child's needs_input must fire (not be suppressed
+    // by the old child's state), and the old child gets a synthetic exited.
+    let s: RouterState = new Map();
+    s = step(s, [child({ pid: 100, started_at: 1000, state: "idle" })], 0).next;
+    s = step(s, [child({ pid: 100, started_at: 1000, state: "idle" })], 30_000).next; // old idle-emitted
+    const r = step(
+      s,
+      [child({ pid: 100, started_at: 2000, state: "needs_input", question: "New?" })],
+      31_000,
+    );
+    const edges = r.events.map((e) => e.edge);
+    expect(edges).toContain("exited"); // old child (started_at 1000) closed out
+    expect(edges).toContain("needs_input"); // new child (started_at 2000) fires
+    expect(r.events.find((e) => e.edge === "exited")!.child_started_at).toBe(1000);
+    expect(r.events.find((e) => e.edge === "needs_input")!.child_started_at).toBe(2000);
+    // The next state reflects the NEW child only.
+    expect(r.next.get(100)!.started_at).toBe(2000);
+    expect(r.next.get(100)!.exitedEmitted).toBe(false);
+  });
+
+  it("does not double-close an old child that had already exited", () => {
+    let s: RouterState = new Map();
+    s = step(s, [child({ pid: 100, started_at: 1000, state: "stopped" })], 0).next; // exited emitted
+    const r = step(s, [child({ pid: 100, started_at: 2000, state: "idle" })], 1_000);
+    // Old child already exited → no second exited; new child just starts its idle timer.
+    expect(r.events).toEqual([]);
+    expect(r.next.get(100)!.started_at).toBe(2000);
+  });
+});
+
 describe("notifyRouter — startup reconcile (baseline)", () => {
   it("emits needs_input immediately for a child already blocked at daemon start", () => {
     const r = step(new Map(), [child({ state: "needs_input", question: "Q" })], 5_000);

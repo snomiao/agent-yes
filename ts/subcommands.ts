@@ -4047,9 +4047,10 @@ function printNotifyEvents(events: NotifyEvent[], json: boolean): void {
     return;
   }
   for (const e of events) {
-    const tag =
-      e.edge === "needs_input" ? "❓ needs_input" : e.edge === "idle" ? "💤 idle" : "✓ exited";
-    const head = `[${e.seq}] ${tag}  pid ${e.child_pid} (${e.cli}) ${e.cwd}`;
+    // Plain ASCII tag (no emoji): stays legible over the Rust/CLI path and old
+    // terminals, and is easy to grep for consumers that log-parse the stream.
+    const tag = `[${e.edge}]`;
+    const head = `[${e.seq}] ${tag} pid ${e.child_pid} (${e.cli}) ${e.cwd}`;
     process.stdout.write(head + "\n");
     if (e.git_head) process.stdout.write(`      HEAD ${e.git_head}\n`);
     if (e.question) process.stdout.write(`      Q: ${e.question}\n`);
