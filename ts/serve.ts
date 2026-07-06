@@ -1165,8 +1165,18 @@ export async function cmdServe(rest: string[]): Promise<number> {
     // dot and the CLI agree.
     const question =
       status !== "exited" && !r.unresponsive ? await logNeedsInput(r.log_file, r.cli) : null;
+    // Last-active time: the log file's mtime, i.e. when the agent last wrote
+    // output (stdout). The console's left panel shows the age off this instead
+    // of started_at, so a long-lived-but-quiet agent reads as stale, not "new".
+    // Falls back to started_at when there's no log yet (freshly spawned).
+    const lastActiveAt = r.log_file
+      ? await stat(r.log_file)
+          .then((s) => s.mtimeMs)
+          .catch(() => r.started_at)
+      : r.started_at;
     return {
       ...r,
+      last_active_at: lastActiveAt,
       // Precedence: exited stays exited; the Rust supervisor's unresponsive flag is
       // an authoritative wedge signal (`stuck`); then a blocked menu (`needs_input`);
       // else the base live status — so the console's dot matches `ay ls`. (A dead
