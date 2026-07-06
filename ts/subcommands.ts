@@ -4268,26 +4268,13 @@ async function cmdNotifyd(rest: string[]): Promise<number> {
       return pid ? 0 : 1;
     }
     case "stop": {
-      const id = await daemon.daemonIdentity();
-      if (!id) {
-        process.stdout.write("notifyd: not running\n");
-        return 0;
-      }
-      // Re-read the owner identity immediately before signalling: if the pid was
-      // recycled (or a new daemon took over) between the read above and now, the
-      // pid+started_at won't match and we must NOT SIGTERM an unrelated process.
-      const again = await daemon.daemonIdentity();
-      if (!again || again.pid !== id.pid || again.started_at !== id.started_at) {
-        process.stdout.write("notifyd: not running\n");
-        return 0;
-      }
-      try {
-        process.kill(again.pid, "SIGTERM");
-        process.stdout.write(`notifyd stopped (pid ${again.pid})\n`);
-      } catch (e) {
-        process.stderr.write(`notifyd: failed to stop pid ${again.pid}: ${e}\n`);
-        return 1;
-      }
+      // Cooperative, non-destructive stop: remove the daemon's lock and let it
+      // exit itself on the next tick — never SIGTERM a pid that may have been
+      // recycled onto an unrelated process.
+      const pid = await daemon.requestDaemonStop();
+      process.stdout.write(
+        pid ? `notifyd: stop requested (pid ${pid} will exit shortly)\n` : "notifyd: not running\n",
+      );
       return 0;
     }
     default:

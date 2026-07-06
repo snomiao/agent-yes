@@ -210,6 +210,13 @@ parent addresses its own inbox with no argument.
   poll doesn't lower it — so a restarted `watch --ack` resumes past what it
   already delivered, not from a stale cursor.
 
+  Monitor-loop guidance: with the default (no `--ack`), a restarted `watch`
+  **replays** everything above the persisted cursor (unread), which is what you
+  want for a durable, restart-safe consumer that re-processes idempotently. If
+  your Monitor is NOT idempotent (must see each edge once), pass `--ack` so the
+  cursor advances as edges are shown — or track the high-water in-process and
+  filter — accepting that a crash between "shown" and "handled" drops that edge.
+
 - **Startup reconcile.** On start the daemon seeds the router's memory from each
   inbox's already-written edges, so a restart does not re-emit a baseline the
   parent already saw — while still emitting the current terminal state
@@ -265,7 +272,11 @@ with a documented mitigation, tracked in a single follow-up issue.
   parent exits (then GC removes the whole inbox). This is a deliberate trade
   (never drop an unacked edge) for the human-in-the-loop scale this targets; a
   future safeguard could warn or apply an emergency hard cap that drops the
-  oldest unacked events with a logged notice.
+  oldest unacked events with a logged notice. `gcInboxes` already logs a warning
+  when it can't trim an oversize inbox. **Manual cleanup:** an operator can delete
+  `$AGENT_YES_HOME/notify/inbox/<host>/<parent>.ndjson` (and its `.seq` +
+  `cursors/<host>/<parent>/`) for a parent that is done; the whole inbox is GC'd
+  automatically once that parent is dead and unreferenced.
 
 ## Not done — drafted for later
 

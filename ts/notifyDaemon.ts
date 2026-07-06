@@ -190,6 +190,16 @@ async function observeChildren(): Promise<ObserveResult> {
     const parent = r.parent_pid;
     if (typeof parent !== "number" || parent <= 0) continue;
     if (!watching.has(parent)) continue; // scope: only watched parents' children
+    // Cross-session guard: a child cannot predate its parent, so a child of THIS
+    // watcher incarnation must have started at/after it. Exclude a stale orphan
+    // spawned under a PRIOR agent that held this pid (now recycled by the current
+    // watcher) — otherwise its state/tail/question would be mis-delivered to an
+    // unrelated session. (The child record carries parent_pid but not the parent's
+    // start time, so we rely on the invariant child.started_at >= parent.started_at;
+    // pids are unique among live processes, so pid-match + this bound pins the
+    // exact incarnation.)
+    const watcherStart = watching.get(parent) ?? 0;
+    if (watcherStart > 0 && r.started_at < watcherStart) continue;
     const { state, question } = await deriveLiveState(r);
     // Parent start time: prefer the WATCHER's self-reported value (authoritative,
     // never 0) over a registry-wrapper lookup that can miss and stamp a 0 — a 0
@@ -433,6 +443,13 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   const pendingRetry = new Map<string, Omit<NotifyEvent, "seq">>();
 
   while (running) {
+    // Cooperative stop: `notify notifyd stop` removes our lock rather than
+    // SIGTERM-ing a possibly-recycled pid. If our lock is gone (or taken over),
+    // exit gracefully.
+    if ((await readDaemonOwnerToken()) !== daemonToken) {
+      logger.debug("[notifyd] lock lost/removed — exiting");
+      break;
+    }
     const { next, watcherCount } = await tickState(host, prev, pendingRetry);
     prev = next;
     ticks++;
@@ -599,6 +616,21 @@ export async function daemonIdentity(now = Date.now()): Promise<DaemonIdentity |
 /** The running daemon's pid, or null (see daemonIdentity for the trust rules). */
 export async function daemonStatus(now = Date.now()): Promise<number | null> {
   return (await daemonIdentity(now))?.pid ?? null;
+}
+
+/**
+ * Cooperatively request the running daemon to stop, NON-DESTRUCTIVELY: remove its
+ * lock rather than SIGTERM-ing the pid. The daemon checks its owner token every
+ * tick and exits when the lock is gone, so a pid recycled onto an unrelated
+ * process is never signalled. Returns the daemon's pid if one was running, else
+ * null. (A wedged daemon that isn't ticking relies on OS/self-exit — a residual
+ * tracked in the follow-up issue.)
+ */
+export async function requestDaemonStop(): Promise<number | null> {
+  const id = await daemonIdentity();
+  if (!id) return null;
+  await rm(daemonLockDir(), { recursive: true, force: true }).catch(() => {});
+  return id.pid;
 }
 
 /** Ensure a daemon is running; best-effort spawn detached. Returns its pid or null. */
