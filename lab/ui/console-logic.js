@@ -344,7 +344,7 @@ function agentForestNodes(list) {
 // flat entry list BEFORE layeredRows builds the room/peer/agent tree (which keeps
 // the given order for siblings and first-seen order for room/peer groups). So
 // sorting reorders roots and siblings without breaking the nesting.
-export const SORT_MODES = ["state", "created", "identity"];
+export const SORT_MODES = ["state", "active", "created", "identity"];
 
 // Attention-first state ranking: someone scanning the fleet wants the agents that
 // need them (needs_input) up top, then the wedged ones (stuck), then live work,
@@ -371,19 +371,29 @@ function gitWeight(e) {
   return (g.changed || 0) + (g.ahead || 0) + (g.behind || 0) + (g.dirty ? 0.5 : 0);
 }
 
+// Last-active instant for an entry: its last stdout write (last_active_at),
+// falling back to started_at when the server hasn't stamped one yet.
+function lastActive(e) {
+  return e.last_active_at ?? e.started_at ?? 0;
+}
+
 // Return a NEW array sorted for display per `mode` (default "state"):
 //   - "state":    attention-first state, then git busyness, then newest.
+//   - "active":   most recently active first (last_active_at desc).
 //   - "created":  newest first (started_at desc).
 //   - "identity": user@host:owner/repo/branch (alphabetical).
 // Every comparator falls back to newest-first so order is total & deterministic.
 export function sortEntries(entries, mode = "state") {
   const byNewest = (a, b) => (b.started_at || 0) - (a.started_at || 0);
+  const byActive = (a, b) => lastActive(b) - lastActive(a) || byNewest(a, b);
   const cmp =
-    mode === "created"
-      ? byNewest
-      : mode === "identity"
-        ? (a, b) => fullIdent(a).localeCompare(fullIdent(b)) || byNewest(a, b)
-        : (a, b) => stateRank(a) - stateRank(b) || gitWeight(b) - gitWeight(a) || byNewest(a, b);
+    mode === "active"
+      ? byActive
+      : mode === "created"
+        ? byNewest
+        : mode === "identity"
+          ? (a, b) => fullIdent(a).localeCompare(fullIdent(b)) || byNewest(a, b)
+          : (a, b) => stateRank(a) - stateRank(b) || gitWeight(b) - gitWeight(a) || byNewest(a, b);
   return entries.slice().sort(cmp);
 }
 

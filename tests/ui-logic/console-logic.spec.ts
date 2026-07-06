@@ -729,7 +729,7 @@ describe("sortEntries", () => {
   const keys = (arr, k = "_k") => arr.map((e) => e[k]);
 
   it("SORT_MODES is the documented cycle", () => {
-    expect(SORT_MODES).toEqual(["state", "created", "identity"]);
+    expect(SORT_MODES).toEqual(["state", "active", "created", "identity"]);
   });
 
   it("returns a new array and does not mutate the input", () => {
@@ -777,6 +777,23 @@ describe("sortEntries", () => {
       a({ _k: "mid", started_at: 500 }),
     ];
     expect(keys(sortEntries(list, "created"))).toEqual(["new", "mid", "old"]);
+  });
+
+  it("active mode: most recently active (last_active_at) first", () => {
+    const list = [
+      a({ _k: "old", started_at: 900, last_active_at: 100 }),
+      a({ _k: "fresh", started_at: 100, last_active_at: 900 }),
+      a({ _k: "mid", started_at: 500, last_active_at: 500 }),
+    ];
+    expect(keys(sortEntries(list, "active"))).toEqual(["fresh", "mid", "old"]);
+  });
+
+  it("active mode: falls back to started_at when last_active_at is absent", () => {
+    const list = [
+      a({ _k: "old", started_at: 100 }),
+      a({ _k: "new", started_at: 900 }),
+    ];
+    expect(keys(sortEntries(list, "active"))).toEqual(["new", "old"]);
   });
 
   it("identity mode: alphabetical by full identity (user@host:owner/repo/branch)", () => {
