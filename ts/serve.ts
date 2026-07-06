@@ -243,22 +243,65 @@ const DAEMON_NAME = "agent-yes";
 
 type DaemonManager = { id: "oxmgr" | "pm2"; bin: string };
 
-// Pick the process manager used to daemonize `ay serve`. oxmgr's daemon talks
-// over a fixed TCP port; on Windows a crashed daemon routinely leaves the
-// socket orphaned on a dead PID, which wedges every subsequent oxmgr command
-// with "daemon did not become ready in time". pm2's named-pipe daemon does not
-// have that failure mode, so we prefer pm2 on Windows. Elsewhere oxmgr stays
-// the default. AGENT_YES_DAEMON_MANAGER=pm2|oxmgr forces a choice.
+// Parse an `oxmgr --version` line ("oxmgr 0.4.0+winfix") and decide whether the
+// build carries the Windows daemon-socket-inheritance fix. oxmgr's daemon talks
+// over a fixed TCP port; on stock builds <= 0.4.0 a crashed daemon leaves that
+// listener inherited by a managed child (bInheritHandles) onto a dead PID, which
+// wedges every subsequent oxmgr command with "daemon did not become ready in
+// time". The fix clears HANDLE_FLAG_INHERIT on the listeners and ships as the
+// `+winfix` build-metadata tag on the fork (snomiao/OxMgr,
+// fix/windows-daemon-socket-inheritance), and is assumed present in any release
+// strictly newer than the last wedged stock build (0.4.0) once it's upstreamed.
+// Split out from the probe so it's unit-testable without spawning.
+export function oxmgrVersionHasWindowsFix(versionOutput: string): boolean {
+  const m = /(\d+)\.(\d+)\.(\d+)(?:[-+]([0-9A-Za-z.-]+))?/.exec(versionOutput);
+  if (!m) return false;
+  const build = m[4] ?? "";
+  if (/winfix/i.test(build)) return true;
+  const [maj, min, pat] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (maj !== 0) return maj > 0; // 1.x.x and up → fix assumed upstreamed
+  if (min !== 4) return min > 4; // 0.5.x+ → assumed upstreamed
+  return pat > 0; // 0.4.1+ → assumed upstreamed; 0.4.0 and earlier still wedge
+}
+
+// Probe the installed oxmgr for the Windows fix (cheap synchronous
+// `oxmgr --version`, cached for the process lifetime). On any probe failure we
+// treat it as UNFIXED so a broken/ancient oxmgr can't wedge Windows — the caller
+// falls back to pm2.
+let oxmgrWinFixCache: boolean | undefined;
+function oxmgrHasWindowsFix(bin: string): boolean {
+  if (oxmgrWinFixCache !== undefined) return oxmgrWinFixCache;
+  try {
+    const out = execFileSync(bin, ["--version"], {
+      encoding: "utf-8",
+      timeout: 3000,
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    oxmgrWinFixCache = oxmgrVersionHasWindowsFix(out);
+  } catch {
+    oxmgrWinFixCache = false;
+  }
+  return oxmgrWinFixCache;
+}
+
+// Pick the process manager used to daemonize `ay serve`. oxmgr is the default
+// everywhere — including Windows, now that its daemon-socket-inheritance wedge is
+// fixed (see oxmgrVersionHasWindowsFix). The one Windows caveat: only PREFER
+// oxmgr there when the installed build actually carries the fix; stock builds
+// <= 0.4.0 still wedge, so on those we fall back to pm2 (whose named-pipe daemon
+// never had that failure mode) and keep oxmgr only as a last resort if pm2 is
+// absent. AGENT_YES_DAEMON_MANAGER=pm2|oxmgr forces a choice (bypasses the probe).
 function resolveDaemonManager(): DaemonManager | null {
-  const oxmgr = Bun.which("oxmgr");
-  const pm2 = Bun.which("pm2");
+  const oxmgrBin = Bun.which("oxmgr");
+  const pm2Bin = Bun.which("pm2");
   const override = process.env.AGENT_YES_DAEMON_MANAGER?.toLowerCase();
-  if (override === "pm2") return pm2 ? { id: "pm2", bin: pm2 } : null;
-  if (override === "oxmgr") return oxmgr ? { id: "oxmgr", bin: oxmgr } : null;
-  const order: Array<DaemonManager | null> =
-    process.platform === "win32"
-      ? [pm2 && { id: "pm2", bin: pm2 }, oxmgr && { id: "oxmgr", bin: oxmgr }]
-      : [oxmgr && { id: "oxmgr", bin: oxmgr }, pm2 && { id: "pm2", bin: pm2 }];
+  if (override === "pm2") return pm2Bin ? { id: "pm2", bin: pm2Bin } : null;
+  if (override === "oxmgr") return oxmgrBin ? { id: "oxmgr", bin: oxmgrBin } : null;
+  const oxmgr: DaemonManager | null = oxmgrBin ? { id: "oxmgr", bin: oxmgrBin } : null;
+  const pm2: DaemonManager | null = pm2Bin ? { id: "pm2", bin: pm2Bin } : null;
+  // On Windows, demote oxmgr below pm2 unless it's the winfix build.
+  const winWedge = process.platform === "win32" && oxmgr && !oxmgrHasWindowsFix(oxmgr.bin);
+  const order: Array<DaemonManager | null> = winWedge ? [pm2, oxmgr] : [oxmgr, pm2];
   return order.find((m): m is DaemonManager => !!m) ?? null;
 }
 
@@ -291,8 +334,15 @@ const WIN_RUN_VALUE = DAEMON_NAME;
 //     `loginctl enable-linger`, which keeps the user's systemd instance — and
 //     thus our service — running from boot. Best-effort; linger failing just
 //     downgrades us to login-scope.
-//   - Windows (pm2): pm2 core can't install a startup hook here, so we save the
-//     process list and add a HKCU Run entry that runs `pm2 resurrect` at login.
+//   - Windows (oxmgr): `oxmgr service install` registers a Task Scheduler
+//     ONLOGON task (`oxmgr daemon run`); on login the daemon comes up and
+//     restarts our `--restart always` managed process. This is oxmgr's native
+//     Windows persistence — no HKCU Run entry / `resurrect` needed (that path is
+//     pm2-only, below). Handled by the shared oxmgr branch — no Windows special-
+//     casing in the code, just in the receipt wording.
+//   - Windows (pm2, fallback when oxmgr lacks the winfix build): pm2 core can't
+//     install a startup hook here, so we save the process list and add a HKCU Run
+//     entry that runs `pm2 resurrect` at login.
 //   - macOS (pm2): `pm2 startup` wires a launchd agent (best-effort).
 // Idempotent and best-effort: returns false on failure without aborting the
 // install — the process is still crash-managed, just not boot/login-persistent.
@@ -591,7 +641,13 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       process.stdout.write(
         `\n${priorArgs !== null ? `rolled '${DAEMON_NAME}' forward to` : `installed '${DAEMON_NAME}' as a daemon via ${mgr.id} —`} v${current}\n`,
       );
-      if (mgr.id === "oxmgr")
+      if (mgr.id === "oxmgr" && process.platform === "win32")
+        process.stdout.write(
+          onBoot
+            ? `start-on-login: enabled (Task Scheduler ONLOGON runs \`oxmgr daemon run\`)\n`
+            : `start-on-login: not registered — run \`oxmgr service install\` to enable\n`,
+        );
+      else if (mgr.id === "oxmgr")
         process.stdout.write(
           onBoot
             ? `start-on-boot: enabled (systemd --user + linger, starts at boot)\n`
@@ -752,7 +808,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  --tls-cert FILE   TLS certificate PEM\n` +
         `  --tls-key  FILE   TLS private key PEM\n\n` +
         `Subcommands:\n` +
-        `  ay serve install    install as background daemon (pm2 on Windows, else oxmgr)\n` +
+        `  ay serve install    install as background daemon (oxmgr; pm2 fallback on Windows without the winfix build)\n` +
         `  ay serve status     show daemon/server status (add --json for scripts)\n` +
         `  ay serve uninstall  remove daemon\n` +
         `  ay serve logs       view daemon logs\n\n` +
