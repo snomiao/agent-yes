@@ -204,11 +204,16 @@ export function badgesFor(e) {
   return (e.badges || []).map((id) => ({ id, ...(BADGE_META[id] || { label: id, title: id }) }));
 }
 
-// Human age of an agent ("12s" / "5m" / "3h"). `now` is injectable so tests
-// don't depend on the wall clock; the browser calls age(e) and gets Date.now().
+// Time since the agent was last active ("12s" / "5m" / "3h") — measured from
+// its last stdout write (last_active_at, the log file's mtime), so a long-lived
+// but quiet agent reads as stale rather than "new". Falls back to started_at
+// when the server hasn't stamped a last-active time (e.g. freshly spawned, no
+// log yet). `now` is injectable so tests don't depend on the wall clock; the
+// browser calls age(e) and gets Date.now().
 export function age(e, now = Date.now()) {
-  if (!e.started_at) return "";
-  const s = Math.max(0, (now - e.started_at) / 1000);
+  const at = e.last_active_at ?? e.started_at;
+  if (!at) return "";
+  const s = Math.max(0, (now - at) / 1000);
   if (s < 60) return Math.floor(s) + "s";
   if (s < 3600) return Math.floor(s / 60) + "m";
   return Math.floor(s / 3600) + "h";

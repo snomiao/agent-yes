@@ -314,6 +314,14 @@ describe("age", () => {
   it("clamps a future start time to 0s instead of going negative", () => {
     expect(age(agent({ started_at: now + 10_000 }), now)).toBe("0s");
   });
+  it("prefers last_active_at (last stdout) over started_at when present", () => {
+    expect(
+      age(agent({ started_at: now - 3 * 3_600_000, last_active_at: now - 5_000 }), now),
+    ).toBe("5s");
+  });
+  it("falls back to started_at when last_active_at is absent", () => {
+    expect(age(agent({ started_at: now - 5 * 60_000, last_active_at: undefined }), now)).toBe("5m");
+  });
 });
 
 describe("matches", () => {
