@@ -18,7 +18,7 @@ import path from "path";
 import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
-import { matchBadges } from "./badges.ts";
+import { badgeDef, matchBadges } from "./badges.ts";
 import {
   classifyNeedsInput,
   isWorkingScreen,
@@ -1094,21 +1094,36 @@ async function runAllRemotesLs(opts: {
   // Group by host in a stable order (local first, then each remote alias in
   // config order), so the aggregated table reads top-down per machine.
   const byHost: { host: string; records: any[] }[] = [];
+  // Shared per-invocation caches so local agents in the same repo spawn
+  // `git status` once (see gitStatusOnce).
+  const gitRootCache = new Map<string, string>();
+  const gitInfoCache = new Map<string, GitInfo | null>();
   if (localResult.status === "fulfilled") {
     // Local records come from listRecords() RAW — unlike the remote /api/ls
-    // payload they carry no derived live-state, last_active_at, or task counts,
-    // so left alone they'd render a flat "active" with no age/badge. Enrich them
-    // to the same shape the API returns, so local agents get the same
-    // idle/needs_input/stuck status, staleness age, and task badges.
+    // payload they carry no derived live-state, last_active_at, task counts,
+    // status badges, or git tag, so left alone they'd render a flat "active"
+    // with no age/badge/git. Enrich them to the same shape the API returns, so
+    // local agents get the same idle/needs_input/stuck status, staleness age,
+    // task badges, status-flag chips, and git dirty/sync tag.
     const enriched = await Promise.all(
       localResult.value.records.map(async (r) => {
         const { state, question } = await deriveLiveState(r);
+        const alive = state !== "stopped";
+        const [tasks, badges, git] = alive
+          ? await Promise.all([
+              r.log_file ? extractTaskCounts(r.log_file) : Promise.resolve(null),
+              r.log_file ? extractBadges(r.log_file) : Promise.resolve([]),
+              gitStatusOnce(r.cwd, gitRootCache, gitInfoCache),
+            ])
+          : [null, [], null];
         return {
           ...r,
           status: state,
           question,
           last_active_at: await deriveLastActiveAt(r),
-          tasks: state === "stopped" || !r.log_file ? null : await extractTaskCounts(r.log_file),
+          tasks,
+          badges,
+          git,
         };
       }),
     );
@@ -1161,11 +1176,16 @@ async function runAllRemotesLs(opts: {
     ].join("  ") + "\n",
   );
   for (const { host, rec, prefix } of rows) {
-    // The tree prefix + task badge live inside the PROMPT column, so they eat
-    // into this row's text budget — same as the single-host table.
-    const badge = badgeOf(rec);
-    const budget = Math.max(8, promptBudget - prefix.length - badge.length);
-    const label = prefix + badge + (rec.prompt ? truncate(`→ ${rec.prompt}`, budget) : "");
+    // The tree prefix + task badge + flag chips + git tag live inside the PROMPT
+    // column, so they eat into this row's text budget — same as the single-host
+    // table. Both local (enriched above) and remote (/api/ls) records carry
+    // `tasks`, `badges`, and `git` in the same shape.
+    const flagStr = badgeLabels(rec.badges);
+    const gitStr = gitLabel(rec.git);
+    const deco =
+      badgeOf(rec) + (flagStr ? flagStr + " " : "") + (gitStr ? gitStr + " " : "");
+    const budget = Math.max(8, promptBudget - prefix.length - deco.length);
+    const label = prefix + deco + (rec.prompt ? truncate(`→ ${rec.prompt}`, budget) : "");
     process.stdout.write(
       [
         host.padEnd(hostW),
@@ -1243,6 +1263,130 @@ async function deriveLastActiveAt(r: GlobalPidRecord): Promise<number> {
   return stat(r.log_file)
     .then((s) => s.mtimeMs)
     .catch(() => r.started_at);
+}
+
+// Git dirty/sync counts for one repo, in the shape serve.ts's /api/ls returns
+// (so `ay ls` can format LOCAL agents' git the same way it formats remote ones,
+// whose `git` field already arrives in this shape).
+interface GitInfo {
+  branch: string | null;
+  dirty: boolean;
+  changed: number; // real file changes (excludes submodule pin-bumps & internal dirt)
+  pins: number; // submodule gitlinks pointing at new commit(s) — pin-bump/drift
+  subDirty: number; // submodule has internal changes but its recorded pin is unchanged
+  ahead: number;
+  behind: number;
+}
+
+/**
+ * Format a GitInfo into the console's compact tag: "±3" changed files, "⑂2"
+ * submodule pin-bumps, "⊙1" submodule internal dirt, "↑1" ahead, "↓2" behind.
+ * Mirrors gitLabel() in lab/ui/console-logic.js so `ay ls` and the web panel's
+ * left rail read identically. "" when clean / in sync / not a repo.
+ */
+function gitLabel(g: GitInfo | null | undefined): string {
+  if (!g) return "";
+  const parts: string[] = [];
+  if (g.changed > 0) parts.push("±" + g.changed);
+  if (g.pins > 0) parts.push("⑂" + g.pins);
+  if (g.subDirty > 0) parts.push("⊙" + g.subDirty);
+  if (g.ahead > 0) parts.push("↑" + g.ahead);
+  if (g.behind > 0) parts.push("↓" + g.behind);
+  return parts.join(" ");
+}
+
+/**
+ * Short status-flag chips ("goal", "retry", "limit") for a list of badge ids —
+ * the same flags the console shows, resolved to their labels via badges.ts.
+ * "" when none. (Remote records carry `badges` from /api/ls; local ones are
+ * matched here via extractBadges.)
+ */
+function badgeLabels(ids: string[] | null | undefined): string {
+  if (!ids || ids.length === 0) return "";
+  return ids.map((id) => badgeDef(id)?.label ?? id).join(" ");
+}
+
+// porcelain=v2 --branch parser — mirrors parseGitStatus in serve.ts (that copy
+// lives inside the serve closure and is watcher-driven, so it can't be shared
+// without a refactor; keep the two in sync). Submodule pin-bumps/internal dirt
+// are split out of `changed` so a submodule-heavy repo doesn't read as dirty.
+function parseGitStatus(out: string): GitInfo {
+  let branch: string | null = null;
+  let ahead = 0;
+  let behind = 0;
+  let changed = 0;
+  let pins = 0;
+  let subDirty = 0;
+  for (const line of out.split("\n")) {
+    if (line.length === 0) continue;
+    if (line[0] === "#") {
+      const head = /^# branch\.head (.+)$/.exec(line);
+      if (head) {
+        branch = head[1] === "(detached)" ? null : head[1]!;
+        continue;
+      }
+      const ab = /^# branch\.ab \+(\d+) -(\d+)/.exec(line);
+      if (ab) {
+        ahead = Number(ab[1]);
+        behind = Number(ab[2]);
+      }
+      continue;
+    }
+    const type = line[0];
+    if (type === "?" || type === "u") {
+      changed++;
+    } else if (type === "1" || type === "2") {
+      const sub = line.split(" ")[2] ?? "N...";
+      if (sub[0] === "S") {
+        if (sub[1] === "C") pins++;
+        else subDirty++;
+      } else {
+        changed++;
+      }
+    }
+  }
+  return { branch, dirty: changed > 0, changed, pins, subDirty, ahead, behind };
+}
+
+async function runGitCli(args: string[], cwd: string): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(["git", ...args], {
+      cwd,
+      stdout: "pipe",
+      stderr: "ignore",
+      signal: AbortSignal.timeout(2000),
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    return proc.exitCode === 0 ? out : null;
+  } catch {
+    return null; // git missing, not a repo, or timed out
+  }
+}
+
+/**
+ * One-shot git status for the `ay ls` CLI. serve.ts keeps a per-repo watcher so
+ * its request path never spawns git; a one-shot CLI has no watcher, so it spawns
+ * `git status` directly — but deduped per repo root via the two caches, so N
+ * agents sharing a repo (or its submodules/subdirs) cost ONE `git status`.
+ */
+async function gitStatusOnce(
+  cwd: string | null | undefined,
+  rootCache: Map<string, string>,
+  infoCache: Map<string, GitInfo | null>,
+): Promise<GitInfo | null> {
+  if (!cwd) return null;
+  let root = rootCache.get(cwd);
+  if (root === undefined) {
+    root = ((await runGitCli(["rev-parse", "--show-toplevel"], cwd)) ?? "").trim();
+    rootCache.set(cwd, root);
+  }
+  if (!root) return null; // not a git repo
+  if (infoCache.has(root)) return infoCache.get(root)!;
+  const out = await runGitCli(["status", "--porcelain=v2", "--branch"], root);
+  const info = out != null ? parseGitStatus(out) : null;
+  infoCache.set(root, info);
+  return info;
 }
 
 async function cmdLs(rest: string[]): Promise<number> {
@@ -1431,33 +1575,49 @@ async function cmdLs(rest: string[]): Promise<number> {
   const forestRows = flattenForest(buildAgentForest(records));
 
   const notes = await readNotes();
+  // Shared per-invocation caches so agents in the same repo spawn `git status`
+  // once (see gitStatusOnce). One `ay ls` call, not one per agent.
+  const gitRootCache = new Map<string, string>();
+  const gitInfoCache = new Map<string, GitInfo | null>();
   const rows = await Promise.all(
     forestRows.map(async ({ record: r, prefix }) => {
       // Same live-state derivation as the --json path: stopped/idle/active, with
       // needs_input when the agent is parked on an unanswered menu.
       const displayStatus: string = (await deriveLiveState(r)).state;
+      const alive = displayStatus !== "stopped";
       const note = notes.get(r.pid);
-      // Task progress ("2/5") parsed from the rendered todo block — same source as
-      // the console badge. Omitted when no block is detected.
-      const tasks =
-        displayStatus !== "stopped" && r.log_file ? await extractTaskCounts(r.log_file) : null;
-      const badge = tasks ? `${tasks.done}/${tasks.total} ` : "";
-      // The tree branch prefix + badge sit inside the NOTE/PROMPT column, so they
-      // eat into this row's text budget.
-      const budget = Math.max(8, promptBudget - prefix.length - badge.length);
+      // Task progress ("2/5"), status-flag chips ("goal"/"retry"/"limit"), and the
+      // git dirty/sync tag ("±3 ⑂2 ↓1") — the same three decorations the console's
+      // left rail shows. Skipped for stopped agents (screen no longer live).
+      const [tasks, flags, git] = alive
+        ? await Promise.all([
+            r.log_file ? extractTaskCounts(r.log_file) : Promise.resolve(null),
+            r.log_file ? extractBadges(r.log_file) : Promise.resolve([]),
+            gitStatusOnce(r.cwd, gitRootCache, gitInfoCache),
+          ])
+        : [null, [], null];
+      const taskBadge = tasks ? `${tasks.done}/${tasks.total} ` : "";
+      const flagStr = badgeLabels(flags);
+      const gitStr = gitLabel(git);
+      // task badge, then flag chips, then git tag — compact, single-spaced.
+      const deco =
+        taskBadge + (flagStr ? flagStr + " " : "") + (gitStr ? gitStr + " " : "");
+      // The tree branch prefix + these decorations sit inside the NOTE/PROMPT
+      // column, so they eat into this row's text budget.
+      const budget = Math.max(8, promptBudget - prefix.length - deco.length);
       let label: string;
       let hasNote = false;
       if (note) {
         label = truncate(note, budget);
         hasNote = true;
-      } else if (r.log_file && displayStatus !== "stopped") {
+      } else if (r.log_file && alive) {
         const activity = await extractActivity(r.log_file);
         label = truncate(activity ?? (r.prompt ? `→ ${r.prompt}` : ""), budget);
       } else {
         label = truncate(r.prompt ? `→ ${r.prompt}` : "", budget);
       }
-      // Note marker + task badge sit after the branch prefix so the tree aligns.
-      label = prefix + (hasNote ? "* " : "") + badge + label;
+      // Note marker + decorations sit after the branch prefix so the tree aligns.
+      label = prefix + (hasNote ? "* " : "") + deco + label;
       return {
         pid: String(r.pid),
         cli: r.cli,
