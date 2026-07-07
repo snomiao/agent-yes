@@ -1196,9 +1196,13 @@ async function runAllRemotesLs(opts: {
     // table. Both local (enriched above) and remote (/api/ls) records carry
     // `tasks`, `badges`, and `git` in the same shape.
     const flagStr = badgeLabels(rec.badges);
+    const branchStr = branchLabel(rec.git);
     const gitStr = gitLabel(rec.git);
     const deco =
-      badgeOf(rec) + (flagStr ? flagStr + " " : "") + (gitStr ? gitStr + " " : "");
+      badgeOf(rec) +
+      (flagStr ? flagStr + " " : "") +
+      (branchStr ? branchStr + " " : "") +
+      (gitStr ? gitStr + " " : "");
     const budget = Math.max(8, promptBudget - prefix.length - deco.length);
     const label = prefix + deco + (rec.prompt ? truncate(`→ ${rec.prompt}`, budget) : "");
     process.stdout.write(
@@ -1308,6 +1312,17 @@ function gitLabel(g: GitInfo | null | undefined): string {
   if (g.ahead > 0) parts.push("↑" + g.ahead);
   if (g.behind > 0) parts.push("↓" + g.behind);
   return parts.join(" ");
+}
+
+/**
+ * The checked-out branch as "⎇<name>" (⎇ = the branch/alt-key glyph). Shows the
+ * ACTUAL git branch, which can differ from the worktree folder in the cwd (a
+ * feature branch checked out in .../tree/main, a detached HEAD, etc.). "" when
+ * detached / not a repo. Kept separate from gitLabel so gitLabel stays a mirror
+ * of the web console's tag.
+ */
+function branchLabel(g: GitInfo | null | undefined): string {
+  return g?.branch ? "⎇" + g.branch : "";
 }
 
 /**
@@ -1613,10 +1628,15 @@ async function cmdLs(rest: string[]): Promise<number> {
         : [null, [], null];
       const taskBadge = tasks ? `${tasks.done}/${tasks.total} ` : "";
       const flagStr = badgeLabels(flags);
+      const branchStr = branchLabel(git);
       const gitStr = gitLabel(git);
-      // task badge, then flag chips, then git tag — compact, single-spaced.
+      // task badge, flag chips, then the git group (⎇branch + dirty/sync tag) —
+      // compact, single-spaced.
       const deco =
-        taskBadge + (flagStr ? flagStr + " " : "") + (gitStr ? gitStr + " " : "");
+        taskBadge +
+        (flagStr ? flagStr + " " : "") +
+        (branchStr ? branchStr + " " : "") +
+        (gitStr ? gitStr + " " : "");
       // The tree branch prefix + these decorations sit inside the NOTE/PROMPT
       // column, so they eat into this row's text budget.
       const budget = Math.max(8, promptBudget - prefix.length - deco.length);
