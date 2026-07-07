@@ -12,6 +12,7 @@ import {
   extractBadges,
   extractNeedsInput,
   extractTaskCounts,
+  isUserTyping,
   listRecords,
   readNotes,
   readPtysize,
@@ -21,6 +22,7 @@ import {
   writeToIpc,
   type CommonOpts,
 } from "./subcommands.ts";
+import { TYPING_BADGE } from "./badges.ts";
 import { updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { spawnRejectionReason } from "./spawnGate.ts";
 import { findSpawnHiddenLauncher } from "./rustBinary.ts";
@@ -28,8 +30,10 @@ import { pgidForWrapper } from "./reaper.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
 import {
+  getProvisionHook,
   getProvisionRoot,
   getSpawnHook,
+  hasProvisionHook,
   hasSpawnHook,
   isProvisionAllowed,
   resolveSpawnCwd,
@@ -233,6 +237,80 @@ function freshAgentEnv(): Record<string, string> {
     }
   }
   return env;
+}
+
+// Best-effort owner/repo from a worktree's github origin remote — used to build
+// the KOHO_* env a provision hook branches on (which account to select for this
+// repo). Mirrors codehost's forkWorktree parse; null when there's no github
+// origin (the hook still runs, just without KOHO_OWNER/REPO).
+function originOwnerRepo(cwd: string): { owner: string; repo: string } | null {
+  try {
+    const r = Bun.spawnSync(["git", "-C", cwd, "remote", "get-url", "origin"]);
+    if (r.exitCode !== 0) return null;
+    const url = new TextDecoder().decode(r.stdout).trim();
+    const m = url.match(/github\.com[:/]([^/]+)\/(.+?)(?:\.git)?\/?$/i);
+    return m && m[1] && m[2] ? { owner: m[1], repo: m[2] } : null;
+  } catch {
+    return null;
+  }
+}
+
+type ProvisionHookResult =
+  | { ran: false }
+  | { ran: true; ok: boolean; code: number | null; detail: string };
+
+// Run the "koho-style" provision hook (a host-local trusted shell hook) BEFORE a
+// fork/from git op. Its purpose is to prepare the host for provisioning — most
+// usefully to select the right git identity (e.g. `gh auth switch --user <who>`,
+// keyed on the KOHO_* env we export) before the clone/worktree/setup runs. When
+// configured it is ALSO the provisioning gate: its exit code decides admission
+// (0 = allow, non-zero = deny), overriding the static provisionAllowlist.
+// Returns { ran:false } when no hook is set, so the caller falls back to the
+// allowlist. Unlike the spawn hook there is no `exec "$@"`: this hook runs to
+// completion and hands control back — it prepares state, it is not the agent.
+async function runProvisionHook(
+  cwd: string,
+  koho: Record<string, string>,
+): Promise<ProvisionHookResult> {
+  const hook = getProvisionHook();
+  if (!hook) return { ran: false };
+  const shell =
+    process.env.AGENT_YES_PROVISION_SHELL?.trim() ||
+    process.env.AGENT_YES_SPAWN_SHELL?.trim() ||
+    "/bin/sh";
+  const outPath = path.join(
+    agentYesHome(),
+    `provision-hook-${process.pid}-${performance.now().toString(36).replace(".", "")}.log`,
+  );
+  const timeoutMs = Number(process.env.AGENT_YES_PROVISION_HOOK_TIMEOUT_MS) || 60_000;
+  let code: number | null = null;
+  try {
+    // The daemon's own env (NOT freshAgentEnv): the hook wants gh/git on PATH and
+    // the machine's real HOME/credentials to switch accounts. `set -e` so any
+    // failing step denies the provision.
+    const child = Bun.spawn([shell, "-c", `set -e\n${hook}`], {
+      cwd,
+      env: { ...process.env, ...koho },
+      stdin: "ignore",
+      stdout: Bun.file(outPath),
+      stderr: Bun.file(outPath),
+    });
+    code = await Promise.race([
+      child.exited,
+      new Promise<number>((r) => setTimeout(() => r(124), timeoutMs)),
+    ]);
+    if (code === 124) child.kill();
+  } catch (e) {
+    return { ran: true, ok: false, code: null, detail: (e as Error).message };
+  }
+  let detail = "";
+  try {
+    detail = (await Bun.file(outPath).text()).slice(0, 4096).trimEnd();
+  } catch {
+    /* no output captured */
+  }
+  await unlink(outPath).catch(() => {});
+  return { ran: true, ok: code === 0, code, detail };
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,8 +1270,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
       // badge). Skipped for exited agents — their screen is no longer live.
       tasks: status === "exited" ? null : await logTasks(r.log_file),
       // Status flags matched against the rendered screen (see badges.ts) — e.g.
-      // an active /goal loop. [] when none matched or for exited agents.
-      badges: status === "exited" ? [] : await logBadges(r.log_file),
+      // an active /goal loop. [] when none matched or for exited agents. The
+      // time-derived "typing" chip (user typing at the terminal) is appended
+      // from the stdin-activity marker, not the screen — same chip `ay ls` shows.
+      badges:
+        status === "exited"
+          ? []
+          : await logBadges(r.log_file).then(async (b) =>
+              (await isUserTyping(r.pid)) ? [...b, TYPING_BADGE.id] : b,
+            ),
     };
   };
 
@@ -1361,7 +1446,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
     // share token are not necessarily host admins. Setting it stays host-local
     // (edit ~/.agent-yes/config.json) — there is no PUT.
     if (req.method === "GET" && p === "/api/spawn-config") {
-      return Response.json({ hasSpawnHook: hasSpawnHook() });
+      return Response.json({
+        hasSpawnHook: hasSpawnHook(),
+        hasProvisionHook: hasProvisionHook(),
+      });
     }
 
     // GET /api/notes
@@ -1815,6 +1903,25 @@ export async function cmdServe(rest: string[]): Promise<number> {
             { status: 501 },
           );
         }
+        // koho-style provision gate — runs BEFORE the worktree + setup-repo.sh so
+        // it can select the git identity for this fork; its exit code overrides
+        // the allowlist. When no hook is configured, falls through to the allowlist
+        // check after the fork resolves owner/repo.
+        const forkOrigin = originOwnerRepo(fork.fromCwd);
+        const forkHook = await runProvisionHook(fork.fromCwd, {
+          KOHO_ACTION: "fork",
+          KOHO_FROM_CWD: fork.fromCwd,
+          KOHO_BRANCH: fork.branch,
+          KOHO_OWNER: forkOrigin?.owner ?? "",
+          KOHO_REPO: forkOrigin?.repo ?? "",
+          KOHO_WS_ROOT: getProvisionRoot() ?? "",
+        });
+        if (forkHook.ran && !forkHook.ok)
+          return new Response(
+            `provision hook denied this fork (exit ${forkHook.code})` +
+              (forkHook.detail ? `:\n${forkHook.detail}` : ""),
+            { status: 403 },
+          );
         let result: {
           ok: boolean;
           folder: string;
@@ -1833,11 +1940,14 @@ export async function cmdServe(rest: string[]): Promise<number> {
           return new Response(`fork failed: ${(e as Error).message}`, { status: 502 });
         }
         if (!result?.ok) return new Response(result?.error ?? "fork failed", { status: 502 });
-        // Same allowlist gate as `from` — the fork runs setup-repo.sh (code exec).
-        if (result.spec && !isProvisionAllowed(result.spec.owner, result.spec.repo))
+        // Allowlist gate — only when a provision hook did NOT already gate this
+        // (a configured hook overrides the allowlist). The fork runs setup-repo.sh
+        // (code exec), the same risk surface as `from`.
+        if (!forkHook.ran && result.spec && !isProvisionAllowed(result.spec.owner, result.spec.repo))
           return new Response(
             `forking '${result.spec.owner}/${result.spec.repo}' is not allowed — add the owner ` +
-              `to provisionAllowlist in ~/.agent-yes/config.json (or "*" to allow all)`,
+              `to provisionAllowlist in ~/.agent-yes/config.json (or "*" to allow all), ` +
+              `or set a provisionHook to gate it yourself`,
             { status: 403 },
           );
         cwd = result.folder;
@@ -1873,14 +1983,34 @@ export async function cmdServe(rest: string[]): Promise<number> {
         }
         if (!spec) return new Response(`unrecognized spawn source: ${from}`, { status: 400 });
         // Provisioning clones the repo and runs its setup script (dependency
-        // installs + package lifecycle hooks = code execution on the host), so
-        // gate it behind an owner/repo allowlist — empty allowlist = deny all.
-        if (!isProvisionAllowed(spec.owner, spec.repo))
+        // installs + package lifecycle hooks = code execution on the host), so it
+        // is gated. A koho-style provision hook, when configured, runs first (to
+        // select the git identity for the clone) and its exit code IS the gate,
+        // overriding the allowlist; otherwise the owner/repo allowlist gates it
+        // (empty allowlist = deny all).
+        const fromHook = await runProvisionHook(getProvisionRoot() ?? homedir(), {
+          KOHO_ACTION: "from",
+          KOHO_SOURCE: from,
+          KOHO_OWNER: spec.owner,
+          KOHO_REPO: spec.repo,
+          KOHO_BRANCH: spec.branch,
+          KOHO_WS_ROOT: getProvisionRoot() ?? "",
+        });
+        if (fromHook.ran) {
+          if (!fromHook.ok)
+            return new Response(
+              `provision hook denied '${spec.owner}/${spec.repo}' (exit ${fromHook.code})` +
+                (fromHook.detail ? `:\n${fromHook.detail}` : ""),
+              { status: 403 },
+            );
+        } else if (!isProvisionAllowed(spec.owner, spec.repo)) {
           return new Response(
             `provisioning '${spec.owner}/${spec.repo}' is not allowed — add the owner to ` +
-              `provisionAllowlist in ~/.agent-yes/config.json (or "*" to allow all)`,
+              `provisionAllowlist in ~/.agent-yes/config.json (or "*" to allow all), ` +
+              `or set a provisionHook to gate it yourself`,
             { status: 403 },
           );
+        }
         let result: { ok: boolean; folder: string; action: string; error?: string };
         try {
           const wsRoot = getProvisionRoot();
