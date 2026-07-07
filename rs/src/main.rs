@@ -310,6 +310,9 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
         if let Some(ref p) = fifo_path {
             fifo::cleanup_fifo(p);
         }
+        // Drop the typing-activity marker so a dead pid's stale timestamp can't
+        // linger and mislead `ay ls`/`ay send` after this agent is gone.
+        fifo::cleanup_stdin_activity(pid);
 
         // Render the full scrollback to <pid>.log and drop the now-redundant
         // raw byte log (kept only when the session used the alternate screen).

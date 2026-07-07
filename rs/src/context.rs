@@ -18,6 +18,10 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 const HEARTBEAT_INTERVAL_MS: u64 = 50; // Check frequently for Enter timing and patterns
+// Min gap between "user is typing" activity-file writes. Small enough that the
+// badge/backoff sees typing within a fraction of a second, large enough that a
+// fast keystroke burst doesn't hammer the filesystem.
+const STDIN_ACTIVITY_THROTTLE_MS: u64 = 250;
 const FORCE_READY_TIMEOUT_MS: u64 = 10000;
 const ENTER_IDLE_WAIT_MS: u64 = 50; // Wait for 50ms idle before sending Enter (reduced from 1000 due to cursor control sequences)
 const ENTER_RETRY_1_MS: u64 = 500; // Retry after 500ms if no response
@@ -409,12 +413,33 @@ impl AgentContext {
         let stdin_handle = tokio::spawn({
             let stdin_tx = stdin_tx.clone();
             async move {
+                // Only a human attached to a terminal "types"; a piped/headless
+                // run's stdin is the fed prompt, not interactive input, so don't
+                // let it light the typing badge. FIFO/`ay send` input arrives on
+                // a different reader and is never stamped here.
+                let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+                let my_pid = std::process::id();
+                let mut last_touch: Option<Instant> = None;
                 let mut stdin = tokio::io::stdin();
                 let mut buf = [0u8; 1024];
                 loop {
                     match stdin.read(&mut buf).await {
                         Ok(0) => break,
                         Ok(n) => {
+                            if is_tty {
+                                // Throttle: the first keystroke after a pause
+                                // stamps immediately (badge lights at once); a
+                                // fast burst coalesces to one write per window.
+                                let now = Instant::now();
+                                let due = last_touch.is_none_or(|t| {
+                                    now.duration_since(t)
+                                        >= Duration::from_millis(STDIN_ACTIVITY_THROTTLE_MS)
+                                });
+                                if due {
+                                    crate::fifo::touch_stdin_activity(my_pid);
+                                    last_touch = Some(now);
+                                }
+                            }
                             if stdin_tx.send(buf[..n].to_vec()).await.is_err() {
                                 break;
                             }

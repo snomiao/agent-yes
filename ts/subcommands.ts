@@ -18,7 +18,8 @@ import path from "path";
 import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
-import { badgeDef, matchBadges } from "./badges.ts";
+import { agentYesHome } from "./agentYesHome.ts";
+import { badgeDef, matchBadges, TYPING_BADGE } from "./badges.ts";
 import {
   classifyNeedsInput,
   isWorkingScreen,
@@ -316,6 +317,12 @@ const SEND_CONFIRM_QUIET_MS = 400; // after Enter, no growth for this long → r
 const SEND_CONFIRM_MAX_MS = 1200; // cap per confirm attempt
 const SEND_CONFIRM_MIN_GROWTH_BYTES = 8; // filters out pure cursor-blink/frame noise
 const SEND_SUBMIT_MAX_RETRIES = 2; // total attempts = 1 + this
+// `ay send` typing-backoff: if the user is actively typing at the target's
+// terminal, injecting our body mid-line would fuse into their text and submit a
+// mangled line. Poll until they pause (activity older than TYPING_WINDOW_MS) or
+// we give up, then send anyway with a warning rather than dropping the message.
+const SEND_TYPING_POLL_MS = 200;
+const SEND_TYPING_MAX_WAIT_MS = 10_000;
 
 /**
  * Whether `name` is a subcommand. `managerCommands` (default true, for the
@@ -1124,20 +1131,21 @@ async function runAllRemotesLs(opts: {
       localResult.value.records.map(async (r) => {
         const { state, question } = await deriveLiveState(r);
         const alive = state !== "stopped";
-        const [tasks, badges, git] = alive
+        const [tasks, badges, git, typing] = alive
           ? await Promise.all([
               r.log_file ? extractTaskCounts(r.log_file) : Promise.resolve(null),
               r.log_file ? extractBadges(r.log_file) : Promise.resolve([]),
               gitStatusOnce(r.cwd, gitRootCache, gitInfoCache),
+              isUserTyping(r.pid),
             ])
-          : [null, [], null];
+          : [null, [], null, false];
         return {
           ...r,
           status: state,
           question,
           last_active_at: await deriveLastActiveAt(r),
           tasks,
-          badges,
+          badges: typing ? [...(badges as string[]), TYPING_BADGE.id] : badges,
           git,
         };
       }),
@@ -1619,15 +1627,16 @@ async function cmdLs(rest: string[]): Promise<number> {
       // Task progress ("2/5"), status-flag chips ("goal"/"retry"/"limit"), and the
       // git dirty/sync tag ("±3 ⑂2 ↓1") — the same three decorations the console's
       // left rail shows. Skipped for stopped agents (screen no longer live).
-      const [tasks, flags, git] = alive
+      const [tasks, flags, git, typing] = alive
         ? await Promise.all([
             r.log_file ? extractTaskCounts(r.log_file) : Promise.resolve(null),
             r.log_file ? extractBadges(r.log_file) : Promise.resolve([]),
             gitStatusOnce(r.cwd, gitRootCache, gitInfoCache),
+            isUserTyping(r.pid),
           ])
-        : [null, [], null];
+        : [null, [], null, false];
       const taskBadge = tasks ? `${tasks.done}/${tasks.total} ` : "";
-      const flagStr = badgeLabels(flags);
+      const flagStr = badgeLabels(typing ? [...(flags as string[]), TYPING_BADGE.id] : flags);
       const branchStr = branchLabel(git);
       const gitStr = gitLabel(git);
       // task badge, flag chips, then the git group (⎇branch + dirty/sync tag) —
@@ -2413,6 +2422,36 @@ export async function extractBadges(logPath: string): Promise<string[]> {
   return matchBadges(lines);
 }
 
+// Window within which a recorded human keystroke still counts as "the user is
+// typing" — lights the chip and makes `ay send` back off. Comfortably longer
+// than the Rust writer's throttle (STDIN_ACTIVITY_THROTTLE_MS) so continuous
+// typing never flickers off between writes.
+export const TYPING_WINDOW_MS = 3000;
+
+// Path to the Rust runner's per-pid stdin-activity marker — the tiny file it
+// stamps with the unix-ms of the user's last terminal keystroke (never `ay
+// send`/FIFO input). Mirrors rs/src/fifo.rs `stdin_activity_path`; a plain file
+// on all platforms (unlike the FIFO, which is a named pipe on Windows).
+export function stdinActivityPath(pid: number): string {
+  return path.resolve(agentYesHome(), "activity", `${pid}.stdin`);
+}
+
+// Epoch-ms of the user's most recent keystroke at this agent's terminal, or
+// null if never/at rest. A missing or unparseable marker just means "not
+// typing" — this is a best-effort liveness hint, never a hard signal.
+export async function lastStdinAt(pid: number): Promise<number | null> {
+  const raw = await readFile(stdinActivityPath(pid), "utf-8").catch(() => null);
+  if (raw === null) return null;
+  const ms = Number(raw.trim());
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+// Whether the user typed at this agent's terminal within `windowMs`.
+export async function isUserTyping(pid: number, windowMs = TYPING_WINDOW_MS): Promise<boolean> {
+  const at = await lastStdinAt(pid);
+  return at !== null && Date.now() - at <= windowMs;
+}
+
 /**
  * Whether an alive agent is wedged: its log has been silent for at least
  * STUCK_THRESHOLD_MS yet its screen still shows a `working` busy marker (a live
@@ -2704,6 +2743,28 @@ export async function waitForLogQuiet(
 }
 
 /**
+ * Block while the user is typing at `pid`'s terminal, so `ay send` doesn't inject
+ * mid-line. Polls the stdin-activity marker every SEND_TYPING_POLL_MS until the
+ * user pauses (last keystroke older than the typing window) or `maxWaitMs`
+ * elapses. Returns `{ clear, waitedMs }`: `clear` is true if they paused, false
+ * if still typing at the deadline (caller sends anyway, with a warning).
+ */
+export async function backoffWhileTyping(
+  pid: number,
+  maxWaitMs: number,
+): Promise<{ clear: boolean; waitedMs: number }> {
+  const start = Date.now();
+  const deadline = start + maxWaitMs;
+  let waited = false;
+  while (Date.now() < deadline) {
+    if (!(await isUserTyping(pid))) return { clear: true, waitedMs: waited ? Date.now() - start : 0 };
+    waited = true;
+    await new Promise((r) => setTimeout(r, SEND_TYPING_POLL_MS));
+  }
+  return { clear: false, waitedMs: Date.now() - start };
+}
+
+/**
  * Send the trailing submit code and confirm the CLI actually acted on it —
  * either a `working` busy marker appears, or the log grows meaningfully. Retries
  * (re-sending just the trailing code) up to SEND_SUBMIT_MAX_RETRIES times when
@@ -2771,7 +2832,8 @@ async function cmdSend(rest: string[]): Promise<number> {
     .option("force", {
       type: "boolean",
       default: false,
-      description: "Skip the 'tailed recently' safety check (also: AGENT_YES_FORCE_SEND=1)",
+      description:
+        "Skip the 'tailed recently' safety check and the wait-while-user-typing backoff (also: AGENT_YES_FORCE_SEND=1)",
     })
     .option("no-wait", {
       type: "boolean",
@@ -2854,6 +2916,26 @@ async function cmdSend(rest: string[]): Promise<number> {
 
   const fullBody = prefix + body;
   const noWait = Boolean(argv.noWait) || process.env.AGENT_YES_SEND_NO_WAIT === "1";
+
+  // Back off while the user is typing at the target's terminal — injecting our
+  // body mid-line fuses into their text and submits a mangled line. Only for a
+  // real text body; skipped for --force (caller means it), --no-wait
+  // (fire-and-forget), and empty bodies (a bare esc/ctrl-c interrupt is usually
+  // intentional and time-sensitive). Sends anyway after the deadline so a
+  // message is never silently dropped.
+  if (fullBody && !noWait && !force) {
+    const { clear, waitedMs } = await backoffWhileTyping(record.pid, SEND_TYPING_MAX_WAIT_MS);
+    if (!clear) {
+      process.stderr.write(
+        `warning: user still typing at pid ${record.pid} after ${Math.round(waitedMs / 1000)}s — ` +
+          `sending anyway (may interleave with their line). Use --force to skip this wait.\n`,
+      );
+    } else if (waitedMs > 0) {
+      process.stderr.write(
+        `waited ${Math.round(waitedMs / 1000)}s for the user to pause typing before sending.\n`,
+      );
+    }
+  }
   // Submit-confirm only applies to an actual submit (Enter/CR) with a body and a
   // log to watch — other trailing codes (esc/ctrl-c/tab/none) don't have a "did
   // it land" signal in the same sense, and retrying e.g. ctrl-c could

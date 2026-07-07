@@ -57,6 +57,20 @@ export function matchBadges(lines: string[], defs: BadgeDef[] = BADGE_DEFS): str
   return defs.filter((d) => d.pattern.test(text)).map((d) => d.id);
 }
 
+/**
+ * A time-derived flag (NOT screen-matched): lit when the user typed at this
+ * agent's terminal within the last few seconds. The ls code appends its id from
+ * the Rust runner's stdin-activity marker, so it resolves through `badgeDef`
+ * like any other chip — but `matchBadges` never produces it (it isn't in
+ * BADGE_DEFS, and its pattern can't match), keeping screen matching pure.
+ */
+export const TYPING_BADGE: BadgeDef = {
+  id: "typing",
+  label: "typing",
+  title: "The user is typing at this agent's terminal — ay send backs off until they pause",
+  pattern: /(?!)/, // never matches; presence comes from stdin activity, not the screen
+};
+
 export function badgeDef(id: string, defs: BadgeDef[] = BADGE_DEFS): BadgeDef | undefined {
-  return defs.find((d) => d.id === id);
+  return defs.find((d) => d.id === id) ?? (id === TYPING_BADGE.id ? TYPING_BADGE : undefined);
 }

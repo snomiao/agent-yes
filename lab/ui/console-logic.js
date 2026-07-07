@@ -195,6 +195,10 @@ export const BADGE_META = {
     label: "retry",
     title: "Waiting for the API — the CLI is auto-retrying on its own backoff (no action needed)",
   },
+  typing: {
+    label: "typing",
+    title: "The user is typing at this agent's terminal — ay send backs off until they pause",
+  },
 };
 
 // Status-flag chips ("badges") matched against the agent's screen — e.g. an

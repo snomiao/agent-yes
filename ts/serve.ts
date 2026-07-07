@@ -12,6 +12,7 @@ import {
   extractBadges,
   extractNeedsInput,
   extractTaskCounts,
+  isUserTyping,
   listRecords,
   readNotes,
   readPtysize,
@@ -21,6 +22,7 @@ import {
   writeToIpc,
   type CommonOpts,
 } from "./subcommands.ts";
+import { TYPING_BADGE } from "./badges.ts";
 import { updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { spawnRejectionReason } from "./spawnGate.ts";
 import { findSpawnHiddenLauncher } from "./rustBinary.ts";
@@ -1192,8 +1194,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
       // badge). Skipped for exited agents — their screen is no longer live.
       tasks: status === "exited" ? null : await logTasks(r.log_file),
       // Status flags matched against the rendered screen (see badges.ts) — e.g.
-      // an active /goal loop. [] when none matched or for exited agents.
-      badges: status === "exited" ? [] : await logBadges(r.log_file),
+      // an active /goal loop. [] when none matched or for exited agents. The
+      // time-derived "typing" chip (user typing at the terminal) is appended
+      // from the stdin-activity marker, not the screen — same chip `ay ls` shows.
+      badges:
+        status === "exited"
+          ? []
+          : await logBadges(r.log_file).then(async (b) =>
+              (await isUserTyping(r.pid)) ? [...b, TYPING_BADGE.id] : b,
+            ),
     };
   };
 
