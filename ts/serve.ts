@@ -285,12 +285,15 @@ async function runProvisionHook(
   const timeoutMs = Number(process.env.AGENT_YES_PROVISION_HOOK_TIMEOUT_MS) || 60_000;
   let code: number | null = null;
   try {
-    // The daemon's own env (NOT freshAgentEnv): the hook wants gh/git on PATH and
-    // the machine's real HOME/credentials to switch accounts. `set -e` so any
-    // failing step denies the provision.
+    // Recovered login-shell env (freshAgentEnv), NOT the daemon's raw env: the
+    // oxmgr/launchd daemon runs with a minimal PATH (/usr/bin:/bin:…) that lacks
+    // Homebrew/bun/etc., so `gh`/`git` would be "command not found" and `set -e`
+    // would deny EVERY provision. freshAgentEnv re-derives the user's real PATH
+    // (as a fresh terminal would) while preserving HOME — so the hook finds `gh`
+    // and its credential store. `set -e` so any failing step denies the provision.
     const child = Bun.spawn([shell, "-c", `set -e\n${hook}`], {
       cwd,
-      env: { ...process.env, ...koho },
+      env: { ...freshAgentEnv(), ...koho },
       stdin: "ignore",
       stdout: Bun.file(outPath),
       stderr: Bun.file(outPath),
