@@ -348,7 +348,7 @@ function agentForestNodes(list) {
 // flat entry list BEFORE layeredRows builds the room/peer/agent tree (which keeps
 // the given order for siblings and first-seen order for room/peer groups). So
 // sorting reorders roots and siblings without breaking the nesting.
-export const SORT_MODES = ["state", "active", "created", "identity"];
+export const SORT_MODES = ["state", "active", "stdin", "created", "identity"];
 
 // Attention-first state ranking: someone scanning the fleet wants the agents that
 // need them (needs_input) up top, then the wedged ones (stuck), then live work,
@@ -383,21 +383,26 @@ function lastActive(e) {
 
 // Return a NEW array sorted for display per `mode` (default "state"):
 //   - "state":    attention-first state, then git busyness, then newest.
-//   - "active":   most recently active first (last_active_at desc).
+//   - "active":   most recently active first (last_active_at, i.e. stdout, desc).
+//   - "stdin":    most recently FED first (last_stdin_at desc) — which agent was
+//                 just driven/typed-into/`ay send`-ed. Agents never fed sort last.
 //   - "created":  newest first (started_at desc).
 //   - "identity": user@host:owner/repo/branch (alphabetical).
 // Every comparator falls back to newest-first so order is total & deterministic.
 export function sortEntries(entries, mode = "state") {
   const byNewest = (a, b) => (b.started_at || 0) - (a.started_at || 0);
   const byActive = (a, b) => lastActive(b) - lastActive(a) || byNewest(a, b);
+  const byStdin = (a, b) => (b.last_stdin_at ?? 0) - (a.last_stdin_at ?? 0) || byNewest(a, b);
   const cmp =
     mode === "active"
       ? byActive
-      : mode === "created"
-        ? byNewest
-        : mode === "identity"
-          ? (a, b) => fullIdent(a).localeCompare(fullIdent(b)) || byNewest(a, b)
-          : (a, b) => stateRank(a) - stateRank(b) || gitWeight(b) - gitWeight(a) || byNewest(a, b);
+      : mode === "stdin"
+        ? byStdin
+        : mode === "created"
+          ? byNewest
+          : mode === "identity"
+            ? (a, b) => fullIdent(a).localeCompare(fullIdent(b)) || byNewest(a, b)
+            : (a, b) => stateRank(a) - stateRank(b) || gitWeight(b) - gitWeight(a) || byNewest(a, b);
   return entries.slice().sort(cmp);
 }
 

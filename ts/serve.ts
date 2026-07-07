@@ -1232,6 +1232,47 @@ export async function cmdServe(rest: string[]): Promise<number> {
     return ensureRepoWatch(root).val; // cached — the request path never spawns `git status`
   };
 
+  // Denoised "last meaningful stdin" tracking — drives the console's stdin flash
+  // and the `stdin` sort order. The FIFO's mtime alone is too noisy: xterm forwards
+  // the agent TUI's terminal-protocol auto-replies (cursor-position / device-
+  // attributes reports) to stdin, so a mere resize/redraw would bump it and the row
+  // would false-flash. So we stamp what WE write, split two ways: `meaningfulStdinAt`
+  // skips those auto-replies; `anyDaemonWriteAt` records every write we make. A FIFO
+  // mtime NEWER than any write we made can only be a local `ay send` (which writes
+  // the FIFO directly, bypassing us) — always meaningful — so it still counts. See
+  // resolveLastStdinAt below and the /api/send handler that stamps these.
+  const meaningfulStdinAt = new Map<number, number>();
+  const anyDaemonWriteAt = new Map<number, number>();
+  // A payload that is PURELY a terminal auto-reply (Cursor Position Report, Device
+  // Attributes, Device Status Report) — protocol chatter a TUI emits on redraw/resize,
+  // not a keystroke. Anchored so a chunk that also carries real input never matches;
+  // real typing (incl. arrow keys like `ESC[A`) never looks like one of these.
+  const isTerminalReply = (s: string) => /^\x1b\[(\d+;\d+R|\?[\d;]*c|>[\d;]*c|\d*n)$/.test(s);
+  // Stamp both maps after a daemon FIFO write, keyed off the FIFO's post-write mtime
+  // (so `anyDaemonWriteAt` is exactly our write's mtime — an external write bumps it
+  // strictly higher, which is how resolveLastStdinAt tells them apart with no clock skew).
+  const noteStdinWrite = async (pid: number, fifo: string, meaningful: boolean) => {
+    const mt = await stat(fifo)
+      .then((s) => s.mtimeMs)
+      .catch(() => null);
+    if (mt == null) return;
+    anyDaemonWriteAt.set(pid, mt);
+    if (meaningful) meaningfulStdinAt.set(pid, mt);
+  };
+  // last_stdin_at for a record: newest of (a) the last meaningful write we made and
+  // (b) a FIFO write we did NOT make (a local `ay send`, always meaningful). A mtime
+  // at/below our last write means the newest write was ours → use the meaningful stamp
+  // (which excludes auto-replies); a strictly newer mtime is an external real write.
+  const resolveLastStdinAt = async (r: { pid: number; fifo_file?: string | null }) => {
+    const meaningful = meaningfulStdinAt.get(r.pid) ?? null;
+    if (!r.fifo_file) return meaningful;
+    const mtime = await stat(r.fifo_file)
+      .then((s) => s.mtimeMs)
+      .catch(() => null);
+    if (mtime == null) return meaningful;
+    return mtime > (anyDaemonWriteAt.get(r.pid) ?? 0) ? mtime : meaningful;
+  };
+
   // One agent record decorated for the console: the latest OSC title + a git
   // snapshot (skipped for exited agents — their repo state is no longer live).
   const withMeta = async (r: Awaited<ReturnType<typeof listRecords>>[number]) => {
@@ -1255,19 +1296,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
           .then((s) => s.mtimeMs)
           .catch(() => r.started_at)
       : r.started_at;
-    // Last-stdin time: the mtime of the agent's stdin FIFO, which the kernel
-    // bumps on EVERY write to it — the console composer, a remote `ay send`, or
-    // a peer's `ay send` all funnel through writeToIpc(fifo_file, …). So this is
-    // a source-agnostic "someone just fed this agent input" signal, distinct from
-    // last_active_at (stdout). The console flashes a row when it advances, so a
-    // collaborator sees keystrokes land even when they weren't the one typing.
-    // Null when there's no live input pipe (exited, or no fifo yet).
-    const lastStdinAt =
-      status !== "exited" && r.fifo_file
-        ? await stat(r.fifo_file)
-            .then((s) => s.mtimeMs)
-            .catch(() => null)
-        : null;
+    // Last-stdin time: when this agent was last fed MEANINGFUL input — a real
+    // keystroke, the console composer, or an `ay send` (local or remote) — but NOT
+    // the TUI's terminal-protocol auto-replies, which would otherwise make a resize
+    // or redraw look like input. The console flashes a row when this advances (so a
+    // collaborator sees input land even when they weren't the one sending it) and can
+    // sort by it. See resolveLastStdinAt / noteStdinWrite. Null for exited agents.
+    const lastStdinAt = status !== "exited" ? await resolveLastStdinAt(r) : null;
     return {
       ...r,
       last_active_at: lastActiveAt,
@@ -1667,6 +1702,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
         } else {
           await writeToIpc(record.fifo_file, msg + trailing);
         }
+        // Record this write for the stdin flash / sort. A payload that is purely a
+        // terminal auto-reply (xterm answering the TUI's cursor/DA query, forwarded
+        // over this same wire) is protocol noise, not input — stamp anyDaemonWriteAt
+        // but not the "meaningful" time, so a resize/redraw can't trip the flash.
+        await noteStdinWrite(record.pid, record.fifo_file, !isTerminalReply(msg));
         return Response.json({ ok: true, pid: record.pid });
       } catch (e) {
         return new Response((e as Error).message, { status: 404 });

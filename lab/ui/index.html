@@ -2860,7 +2860,10 @@
         const listEl = $("list");
         if (!listEl) return;
         for (const el of listEl.querySelectorAll(".row[data-key]")) {
-          const on = (flashUntil.get(el.getAttribute("data-key")) || 0) > now;
+          const key = el.getAttribute("data-key");
+          // Mirror rowFlags: never pulse the agent you have open (you see its input
+          // live; also stops your own terminal's protocol replies blinking the row).
+          const on = key !== sel && (flashUntil.get(key) || 0) > now;
           el.classList.toggle("stdinflash", on);
         }
       }, 200);
@@ -3451,9 +3454,13 @@
       // Extra row classes for collaborative presence: a yellow bar when a human
       // peer is watching this agent, plus the stdin pulse while its input just
       // advanced. Empty in the solo case, so a single-user list is unchanged.
+      // The pulse is suppressed on the agent YOU have open (e._key === sel): you
+      // already see its input land live in the terminal, so a flash there is
+      // redundant — and it's the only row your own terminal's protocol replies
+      // could ever nudge, so this also keeps a resize from blinking your own row.
       function rowFlags(e) {
         const peers = focusByKey.get(e._key) || 0;
-        const flash = (flashUntil.get(e._key) || 0) > Date.now();
+        const flash = e._key !== sel && (flashUntil.get(e._key) || 0) > Date.now();
         return (peers ? " peerfocus" : "") + (flash ? " stdinflash" : "");
       }
       // A yellow chip showing how many peers are watching this agent ("" if none).

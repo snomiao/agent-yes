@@ -856,7 +856,7 @@ describe("sortEntries", () => {
   const keys = (arr, k = "_k") => arr.map((e) => e[k]);
 
   it("SORT_MODES is the documented cycle", () => {
-    expect(SORT_MODES).toEqual(["state", "active", "created", "identity"]);
+    expect(SORT_MODES).toEqual(["state", "active", "stdin", "created", "identity"]);
   });
 
   it("returns a new array and does not mutate the input", () => {
@@ -921,6 +921,24 @@ describe("sortEntries", () => {
       a({ _k: "new", started_at: 900 }),
     ];
     expect(keys(sortEntries(list, "active"))).toEqual(["new", "old"]);
+  });
+
+  it("stdin mode: most recently fed (last_stdin_at) first, never-fed sort last", () => {
+    const list = [
+      a({ _k: "old", started_at: 900, last_stdin_at: 100 }),
+      a({ _k: "never", started_at: 800 }), // no last_stdin_at → sorts last
+      a({ _k: "fresh", started_at: 100, last_stdin_at: 900 }),
+      a({ _k: "mid", started_at: 500, last_stdin_at: 500 }),
+    ];
+    expect(keys(sortEntries(list, "stdin"))).toEqual(["fresh", "mid", "old", "never"]);
+  });
+
+  it("stdin mode: ties (same/absent last_stdin_at) fall back to newest started_at", () => {
+    const list = [
+      a({ _k: "olderNoStdin", started_at: 100 }),
+      a({ _k: "newerNoStdin", started_at: 900 }),
+    ];
+    expect(keys(sortEntries(list, "stdin"))).toEqual(["newerNoStdin", "olderNoStdin"]);
   });
 
   it("identity mode: alphabetical by full identity (user@host:owner/repo/branch)", () => {
