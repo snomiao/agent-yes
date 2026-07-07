@@ -5,7 +5,7 @@
 // a panic). It targets the recorded pgid of a CONFIRMED-DEAD wrapper — never
 // ppid==1 — so it is container-safe and never touches an unrelated process.
 
-import { appendFile, mkdir, readFile, rename, writeFile } from "fs/promises";
+import { appendFile, mkdir, readdir, readFile, rename, unlink, writeFile } from "fs/promises";
 import path from "path";
 import { agentYesHome } from "./agentYesHome.ts";
 
@@ -60,6 +60,10 @@ export async function register(wrapperPid: number, pgid: number): Promise<void> 
 /** SIGKILL the recorded group of every agent whose wrapper has exited, and
  *  rewrite the registry keeping only still-running agents. Best-effort. */
 export async function sweep(): Promise<void> {
+  // Independent of the reaper registry (an agent may leak an activity marker
+  // without ever being registered), so prune first — before the no-registry
+  // early return below.
+  await pruneStaleActivityMarkers();
   let content: string;
   try {
     content = await readFile(registryPath(), "utf8");
@@ -99,4 +103,32 @@ export async function sweep(): Promise<void> {
   } catch {
     // best-effort
   }
+}
+
+/** Prune typing-activity markers (`activity/<pid>.stdin`) left by hard-killed
+ *  agents whose own exit cleanup never ran. Independent of the reaper registry
+ *  above, so it catches every dead pid. A leaked marker is harmless (it ages out
+ *  of the typing window and stopped agents never render the chip); this just
+ *  keeps the dir from accumulating dead entries. Mirrors rs/src/fifo.rs
+ *  `prune_stale_activity_markers`. Best-effort. */
+async function pruneStaleActivityMarkers(): Promise<void> {
+  const dir = path.join(agentYesHome(), "activity");
+  let names: string[];
+  try {
+    names = await readdir(dir);
+  } catch {
+    return; // no activity dir yet
+  }
+  await Promise.all(
+    names.map(async (name) => {
+      if (!name.endsWith(".stdin")) return;
+      const pid = Number(name.slice(0, -".stdin".length));
+      if (!Number.isInteger(pid) || isAlive(pid)) return;
+      try {
+        await unlink(path.join(dir, name));
+      } catch {
+        // raced with another sweep / the agent's own cleanup
+      }
+    }),
+  );
 }

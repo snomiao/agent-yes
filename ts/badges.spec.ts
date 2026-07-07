@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { badgeDef, BADGE_DEFS, matchBadges, type BadgeDef } from "./badges.ts";
+import { badgeDef, BADGE_DEFS, matchBadges, TYPING_BADGE, type BadgeDef } from "./badges.ts";
 
 describe("matchBadges", () => {
   it("matches goal-active when the /goal status line is on screen", () => {
@@ -85,5 +85,20 @@ describe("badgeDef", () => {
 
   it("returns undefined for an unknown id", () => {
     expect(badgeDef("does-not-exist")).toBeUndefined();
+  });
+
+  it("resolves the time-derived typing badge even though it isn't in BADGE_DEFS", () => {
+    expect(badgeDef("typing")).toBe(TYPING_BADGE);
+    expect(BADGE_DEFS).not.toContain(TYPING_BADGE);
+  });
+});
+
+describe("TYPING_BADGE", () => {
+  it("is never produced by screen matching (its pattern can't match)", () => {
+    // Presence is derived from the stdin-activity marker, not the rendered
+    // screen — matchBadges must never surface it, even against text mentioning
+    // typing. A screen can't cause a false 'user is typing' chip.
+    expect(matchBadges(["the user is typing a lot right now", "typing typing typing"])).toEqual([]);
+    expect(TYPING_BADGE.pattern.test("typing")).toBe(false);
   });
 });
