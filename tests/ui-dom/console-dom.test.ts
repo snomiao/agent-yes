@@ -45,6 +45,13 @@ async function openConsole(
     route.fulfill({ status: 200, contentType: "application/javascript", body });
   });
   const page = await ctx.newPage();
+  // Pin the platform so the suite is hermetic to the DEV machine's OS and matches
+  // CI (Linux). The agent-switch combo is platform-gated in the page (Cmd+Arrow on
+  // Mac, Alt+Arrow on Windows/Linux); without this, the Alt+Arrow test would no-op
+  // on a Mac dev box. CI already runs Linux, so this is a no-op there.
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "platform", { get: () => "Linux x86_64" });
+  });
   await page.goto(url);
   await page.waitForSelector(".list .row", { timeout: 10_000 });
   return { ctx, page };
@@ -176,9 +183,19 @@ describe("console DOM behaviour", () => {
   it("Alt+ArrowDown/ArrowUp cycles selection and is intercepted before xterm", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
-      // Select the first agent (builds the stubbed terminal + focuses it).
-      await page.click('.list .row[data-key="local#101"]');
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#101");
+      // The list is sorted for DISPLAY (default "state" mode = attention-first:
+      // active agents before idle ones), so nav follows the RENDERED order, not
+      // pid order — here [101, 103, 102] since 102 is idle. Drive the assertions
+      // off the actual rendered order so this stays correct if the sort changes.
+      const sel = () => page.locator(".row.sel").getAttribute("data-key");
+      const order = await page
+        .locator(".list .row")
+        .evaluateAll((rs) => rs.map((r) => r.getAttribute("data-key")));
+      expect(order.length).toBe(3);
+
+      // Select the first row (builds the stubbed terminal + focuses it).
+      await page.click(`.list .row[data-key="${order[0]}"]`);
+      await expect.poll(sel).toBe(order[0]);
 
       // Spy on document keydown in the BUBBLE phase: the page's capture-phase
       // handler calls stopPropagation, so these Alt+Arrow combos must never
@@ -195,13 +212,13 @@ describe("console DOM behaviour", () => {
       });
 
       await page.keyboard.press("Alt+ArrowDown");
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#102");
+      await expect.poll(sel).toBe(order[1]);
       await page.keyboard.press("Alt+ArrowDown");
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#103");
+      await expect.poll(sel).toBe(order[2]);
       await page.keyboard.press("Alt+ArrowDown"); // clamps at the bottom
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#103");
+      await expect.poll(sel).toBe(order[2]);
       await page.keyboard.press("Alt+ArrowUp");
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#102");
+      await expect.poll(sel).toBe(order[1]);
 
       // The combo was swallowed by the capture-phase intercept.
       expect(await page.evaluate(() => (window as any).__bubble)).toEqual([]);
