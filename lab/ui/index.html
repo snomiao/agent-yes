@@ -3899,7 +3899,8 @@
       // ⋯-menu recovery buttons. Typing "/" in the omnibox lists them; "/k" / "/r"
       // narrows. Each runs the very same handler the dropdown button does, so the
       // confirm prompt and server call are identical — /kill = Force-kill (SIGKILL),
-      // /restart = Restart (resume).
+      // /restart = Restart (resume). "/fork [topic]" is also offered here (built in
+      // omniCommandRows, not this list, since it spawns rather than acts in place).
       const OMNI_COMMANDS = [
         {
           cmd: "/restart",
@@ -3923,12 +3924,35 @@
       function omniCommandRows(q) {
         const target = omniAnchor();
         if (!target) return [];
-        const term = q.slice(1).toLowerCase(); // text after the leading "/"
-        return OMNI_COMMANDS.filter((c) => c.cmd.slice(1).startsWith(term)).map((c) => ({
+        // Match on the FIRST token so a command can carry args after it
+        // (e.g. "/fork fix the auth bug" → cmd "fork", topic "fix the auth bug").
+        const parts = q.slice(1).trim().split(/\s+/).filter(Boolean);
+        const cmdTerm = (parts[0] || "").toLowerCase(); // command token after "/"
+        const rows = OMNI_COMMANDS.filter((c) => c.cmd.slice(1).startsWith(cmdTerm)).map((c) => ({
           kind: "cmd",
           cmd: c,
           target,
         }));
+        // "/fork [topic]" — a slash alias for the fork spawn row so fork is reachable
+        // straight from the command palette (⌘K → "/fork"), not only via the row that
+        // auto-appends to a search. It's a spawn (kind:"fork"), not a kind:"cmd" that
+        // acts on an existing agent, so it's built here rather than in OMNI_COMMANDS —
+        // omniActivate's fork branch (branch prompt → /api/spawn {fork}) handles it.
+        // Needs a real fork source (the open agent with a live git branch); when the
+        // anchor has none, forking is meaningless so the row is omitted.
+        if ("fork".startsWith(cmdTerm)) {
+          const src = omniForkSource();
+          if (src)
+            rows.push({
+              kind: "fork",
+              branch: forkSlug(parts.slice(1).join(" "), src.git.branch),
+              srcBranch: src.git.branch,
+              fromCwd: src.cwd,
+              cli: src.cli,
+              room: src._room,
+            });
+        }
+        return rows;
       }
 
       // Which agent the highlighted candidate should preview in the background: an
