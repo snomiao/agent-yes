@@ -2820,6 +2820,12 @@ async function waitForNeedsInputClear(
 
 async function cmdSend(rest: string[]): Promise<number> {
   const y = yargs(rest)
+    // Disable yargs' `--no-<flag>` negation: without this, `--no-wait` is parsed
+    // as negating a phantom `wait` option (argv.wait=false) instead of setting our
+    // explicitly-defined `no-wait`/`noWait` flag — so `--no-wait` silently did
+    // nothing and still ran the (blocking) submit-confirm. The `--async` alias
+    // masked this. No option here has a meaningful `--no-` form to lose.
+    .parserConfiguration({ "boolean-negation": false })
     .usage("Usage: ay send <keyword> <msg|-> [options]")
     .option("code", {
       type: "string",

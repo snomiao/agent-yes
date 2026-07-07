@@ -255,3 +255,54 @@ describe("notifyStore (fs)", () => {
     await expect(stat(inboxPath(host, 999))).resolves.toBeTruthy();
   });
 });
+
+// These exercise the O(file) self-heal fallback (counter lost/corrupt) and the
+// "no reader / never acked" cursor defaults — all pure-fs, so they run and count
+// on every platform (Windows included), unlike the FIFO/e2e paths.
+describe("notifyStore — seq self-heal + cursor defaults", () => {
+  let home: string;
+  const prev = process.env.AGENT_YES_HOME;
+  beforeEach(async () => {
+    home = await mkdtemp(path.join(tmpdir(), "ay-notify-heal-"));
+    process.env.AGENT_YES_HOME = home;
+  });
+  afterEach(async () => {
+    if (prev === undefined) delete process.env.AGENT_YES_HOME;
+    else process.env.AGENT_YES_HOME = prev;
+    await rm(home, { recursive: true, force: true }).catch(() => {});
+  });
+
+  it("self-heals the seq from the inbox when the .seq counter is MISSING (no reuse)", async () => {
+    // The sidecar counter is the O(1) hot path. If it's lost (e.g. a partial
+    // cleanup deleted it but left the inbox), appendEvent must fall back to an
+    // O(file) scan of the inbox and continue from maxSeq — never reset to 1 and
+    // duplicate a seq that a cursor has already acked past.
+    const { seqPath } = await import("./notifyInbox.ts");
+    await appendEvent(999, baseEvent("idle")); // seq 1
+    await appendEvent(999, baseEvent("idle")); // seq 2
+    await rm(seqPath(host, 999), { force: true }); // lose the counter
+    const seq = await appendEvent(999, baseEvent("needs_input"));
+    expect(seq).toBe(3); // scanned the inbox (maxSeq 2) → 3, not a reused 1
+  });
+
+  it("self-heals from the inbox when the .seq counter is CORRUPT (non-numeric)", async () => {
+    const { seqPath } = await import("./notifyInbox.ts");
+    await appendEvent(999, baseEvent("idle")); // seq 1
+    await writeFile(seqPath(host, 999), "not-a-number\n"); // torn/garbage counter
+    const seq = await appendEvent(999, baseEvent("idle"));
+    expect(seq).toBe(2); // NaN counter → fall back to the inbox scan → 2
+  });
+
+  it("getCursor returns 0 when the consumer has never acked (no cursor file)", async () => {
+    const { getCursor } = await import("./notifyStore.ts");
+    expect(await getCursor(host, 999)).toBe(0);
+    expect(await getCursor(host, 999, "auditor")).toBe(0);
+  });
+
+  it("minConsumerCursor returns 0 (protect-everything) when a parent has no consumers", async () => {
+    // A 0 watermark makes rotation treat every event as unacked → evicts nothing,
+    // so an inbox nobody reads is never trimmed.
+    await appendEvent(999, baseEvent("idle"));
+    expect(await minConsumerCursor(host, 999)).toBe(0);
+  });
+});
