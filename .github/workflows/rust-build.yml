@@ -57,17 +57,20 @@ jobs:
             ext: ""
             cross: true
 
-          # macOS x64 (Intel) - cross-compile from ARM64
+          # macOS x64 (Intel) — cross-compiled from Linux via cargo-zigbuild
+          # (no macOS runner: the zigbuild Docker image bundles the macOS SDK).
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: ubuntu-latest
             artifact: agent-yes-darwin-x64
             ext: ""
+            zig: true
 
-          # macOS ARM64 (Apple Silicon)
+          # macOS ARM64 (Apple Silicon) — cross-compiled from Linux via zigbuild
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: ubuntu-latest
             artifact: agent-yes-darwin-arm64
             ext: ""
+            zig: true
 
           # Windows x64
           - target: x86_64-pc-windows-msvc
@@ -116,8 +119,24 @@ jobs:
         working-directory: rs
         run: cross build --release --target ${{ matrix.target }}
 
+      # Cross-compile the macOS binaries from Linux with cargo-zigbuild. The
+      # image ships zig + the macOS SDK, so no macOS runner is needed. build.rs
+      # takes its "CI cross-build" branch (rs/default.config.yaml already copied
+      # above, ../default.config.yaml absent inside the rs-only mount). Output
+      # lands in rs/target/<target>/release/agent-yes, same path the native
+      # build uses, so "Prepare artifact" below is unchanged.
+      - name: Build darwin with cargo-zigbuild (Docker)
+        if: matrix.zig
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/rs":/io \
+            -w /io \
+            -e CARGO_TERM_COLOR=always \
+            ghcr.io/rust-cross/cargo-zigbuild:latest \
+            bash -c "rustup target add ${{ matrix.target }} && cargo zigbuild --release --locked --target ${{ matrix.target }} --bin agent-yes"
+
       - name: Build with cargo
-        if: "!matrix.cross"
+        if: "!matrix.cross && !matrix.zig"
         working-directory: rs
         run: cargo build --release --target ${{ matrix.target }}
 
