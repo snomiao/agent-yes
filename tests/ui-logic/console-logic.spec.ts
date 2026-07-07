@@ -21,6 +21,7 @@ import {
   deviceCount,
   forestOrder,
   layeredRows,
+  foldSummaries,
   sortEntries,
   SORT_MODES,
   taskLabel,
@@ -236,6 +237,59 @@ describe("layeredRows parentEntry", () => {
     const childRow = rows.find((r) => r.entry?.pid === 2);
     expect(rootRow?.parentEntry).toBeNull();
     expect(childRow?.parentEntry).toBe(root);
+  });
+});
+
+describe("foldSummaries (collapsed subagent roll-up)", () => {
+  // A root with two direct subagents and one grandchild, all in one worktree so
+  // parent_pid wiring drives the tree (see forestOrder tests above).
+  const tree = () => [
+    agent({ pid: 1, wrapper_pid: 1, cwd: "/x/o/r/tree/w", status: "active" }),
+    agent({
+      pid: 2,
+      wrapper_pid: 2,
+      parent_pid: 1,
+      cwd: "/x/o/r/tree/w/a",
+      status: "active",
+      last_active_at: 1000,
+    }),
+    agent({
+      pid: 3,
+      wrapper_pid: 3,
+      parent_pid: 1,
+      cwd: "/x/o/r/tree/w/b",
+      status: "idle",
+      last_active_at: 5000,
+    }),
+    agent({
+      pid: 4,
+      wrapper_pid: 4,
+      parent_pid: 2,
+      cwd: "/x/o/r/tree/w/a/c",
+      status: "active",
+      last_active_at: 3000,
+    }),
+  ];
+
+  it("rolls a root's whole subtree into working/total + newest last-active", () => {
+    const rows = layeredRows(tree());
+    const sum = foldSummaries(rows);
+    const root = rows.find((r) => r.entry?.pid === 1).entry;
+    expect(sum.get(root)).toEqual({ total: 3, working: 2, lastActive: 5000 });
+  });
+
+  it("excludes exited descendants from total, working and last-active", () => {
+    const list = tree();
+    list[2].status = "exited"; // pid 3 (had the newest last_active_at)
+    const rows = layeredRows(list);
+    const sum = foldSummaries(rows);
+    const root = rows.find((r) => r.entry?.pid === 1).entry;
+    expect(sum.get(root)).toEqual({ total: 2, working: 2, lastActive: 3000 });
+  });
+
+  it("omits roots with no (alive) subagents", () => {
+    const rows = layeredRows([agent({ pid: 1, wrapper_pid: 1 })]);
+    expect(foldSummaries(rows).size).toBe(0);
   });
 });
 

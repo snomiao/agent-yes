@@ -481,3 +481,74 @@ describe("console DOM behaviour", () => {
     }
   });
 });
+
+// A nested fixture: root 201 with two subagents (202 active, 203 idle) and a
+// grandchild 204 under 202. All in one worktree so the parent_pid links drive
+// the forest. Exercises the fold toggle + summary chip, which the flat fixture
+// above (all roots) can't reach.
+describe("fold subagent trees", () => {
+  let browser: Browser;
+  let url: string;
+  let close: () => void;
+  const NESTED = [
+    { pid: 201, wrapper_pid: 201, cli: "claude", cwd: "/home/u/ws/o/r/tree/w", title: "root", status: "active", started_at: 1_700_000_000_000 },
+    { pid: 202, wrapper_pid: 202, parent_pid: 201, cli: "claude", cwd: "/home/u/ws/o/r/tree/w/a", title: "sub-a", status: "active", started_at: 1_700_000_000_000, last_active_at: 1_700_000_005_000 },
+    { pid: 203, wrapper_pid: 203, parent_pid: 201, cli: "claude", cwd: "/home/u/ws/o/r/tree/w/b", title: "sub-b", status: "idle", started_at: 1_700_000_000_000, last_active_at: 1_700_000_001_000 },
+    { pid: 204, wrapper_pid: 204, parent_pid: 202, cli: "claude", cwd: "/home/u/ws/o/r/tree/w/a/c", title: "grandchild", status: "active", started_at: 1_700_000_000_000, last_active_at: 1_700_000_003_000 },
+  ];
+
+  beforeAll(async () => {
+    ({ url, close } = await startServer(NESTED));
+    browser = await chromium.launch({ headless: true });
+  }, 60_000);
+
+  afterAll(async () => {
+    await browser?.close();
+    close?.();
+  });
+
+  it("folds by default, hiding subagents behind a working/total chip", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      // Only the root is visible; its three descendants are folded away.
+      await expect.poll(() => page.locator(".list .row").count()).toBe(1);
+      await expect
+        .poll(() => page.locator(".row[data-key='local#201'] .subs").innerText())
+        .toBe("⊞ 2/3");
+      // The recency the badge face omits lives in the tooltip.
+      expect(await page.locator(".row[data-key='local#201'] .subs").getAttribute("title")).toContain(
+        "last active",
+      );
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("the toolbar button unfolds every tree, and folds again", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      await expect.poll(() => page.locator(".list .row").count()).toBe(1);
+      await page.click("#foldbtn");
+      // All four agents (root + 3 descendants) now render; the chip is gone.
+      await expect.poll(() => page.locator(".list .row").count()).toBe(4);
+      expect(await page.locator(".subs").count()).toBe(0);
+      await page.click("#foldbtn");
+      await expect.poll(() => page.locator(".list .row").count()).toBe(1);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("clicking the summary chip expands the trees instead of selecting the row", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      await expect.poll(() => page.locator(".list .row").count()).toBe(1);
+      await page.click(".row[data-key='local#201'] .subs");
+      await expect.poll(() => page.locator(".list .row").count()).toBe(4);
+      // The click expanded rather than selecting the root row.
+      expect(await page.locator(".row.sel").count()).toBe(0);
+    } finally {
+      await ctx.close();
+    }
+  });
+});

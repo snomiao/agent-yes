@@ -66,7 +66,12 @@ function file(res: http.ServerResponse, path: string, type: string) {
   res.end(readFileSync(path));
 }
 
-export async function startServer(): Promise<{ url: string; close: () => void }> {
+// `agents` defaults to the flat AGENTS fixture; a test can pass its own set
+// (e.g. a nested parent+subagent tree) to exercise fold-specific wiring without
+// disturbing the shared fixture the other tests assert exact counts against.
+export async function startServer(
+  agents: unknown[] = AGENTS,
+): Promise<{ url: string; close: () => void }> {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || "/", "http://localhost");
     const p = url.pathname;
@@ -84,7 +89,7 @@ export async function startServer(): Promise<{ url: string; close: () => void }>
 
     if (req.method === "GET" && p === "/api/ls") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify(AGENTS));
+      return res.end(JSON.stringify(agents));
     }
     if (req.method === "GET" && p.startsWith("/api/size/")) {
       res.writeHead(200, { "Content-Type": "application/json" });
