@@ -136,7 +136,7 @@ jobs:
             -w /io \
             -e CARGO_TERM_COLOR=always \
             ghcr.io/rust-cross/cargo-zigbuild:latest \
-            bash -c "rustup target add ${{ matrix.target }} && cargo zigbuild --release --locked --target ${{ matrix.target }} --bin agent-yes"
+            bash -c "rustup target add ${{ matrix.target }} && cargo zigbuild --release --target ${{ matrix.target }} --bin agent-yes"
 
       - name: Build with cargo
         if: "!matrix.cross && !matrix.zig"
