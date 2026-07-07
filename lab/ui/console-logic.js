@@ -492,6 +492,48 @@ function toAgentNode(n) {
   return { kind: "agent", entry: n.entry, children: n.children.map(toAgentNode) };
 }
 
+// When the subagent trees are folded away, each surviving root agent shows a
+// summary chip of the descendants hidden beneath it. Given the FULL layeredRows
+// output, returns a Map keyed by the root agent's `entry` →
+// { total, working, lastActive }:
+//   total      = alive (non-exited) descendant subagents, at every depth
+//   working    = those whose status is "active"
+//   lastActive = newest last_active_at (fallback started_at) among the alive
+//                descendants, or null when none is stamped
+// Descendants roll up to their nearest folded-away ancestor's root, so a folded
+// tree summarizes its whole subtree in one chip. Roots with no alive descendant
+// aren't in the map (no chip). Pure so tests can exercise it without a DOM.
+export function foldSummaries(rows) {
+  // Direct parent-agent entry → child agent entries (skip room/peer headers).
+  const kids = new Map();
+  for (const r of rows) {
+    if (r.kind !== "agent" || !r.parentEntry) continue;
+    const arr = kids.get(r.parentEntry) || [];
+    arr.push(r.entry);
+    kids.set(r.parentEntry, arr);
+  }
+  const summaries = new Map();
+  for (const r of rows) {
+    if (r.kind !== "agent" || r.parentEntry) continue; // roots only
+    const acc = { total: 0, working: 0, lastActive: null };
+    const stack = [...(kids.get(r.entry) || [])];
+    const seen = new Set();
+    while (stack.length) {
+      const e = stack.pop();
+      if (seen.has(e)) continue; // guard a pathological parent cycle
+      seen.add(e);
+      for (const c of kids.get(e) || []) stack.push(c);
+      if (e.status === "exited") continue;
+      acc.total++;
+      if (e.status === "active") acc.working++;
+      const at = e.last_active_at ?? e.started_at;
+      if (at != null && (acc.lastActive == null || at > acc.lastActive)) acc.lastActive = at;
+    }
+    if (acc.total > 0) summaries.set(r.entry, acc);
+  }
+  return summaries;
+}
+
 // Next selection index when stepping the list by `dir` (+1 down / -1 up).
 // No current selection (i<0) lands on the first (down) or last (up) row;
 // otherwise clamps at the ends. Returns -1 for an empty list.

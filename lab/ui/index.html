@@ -895,6 +895,26 @@
         color: var(--green);
         border-color: #2a3a2a;
       }
+      /* Folded-subagent summary chip ("⊞ 3/5" = 3 working of 5 hidden subagents),
+         shown on a root agent row when the subagent trees are collapsed. Same pill
+         shape as .tasks; the ⊞ glyph echoes the fold toolbar button. Turns accent
+         when any hidden subagent is still working, so a collapsed tree with live
+         children stands out from a quiet one. Hover for the count + last-active. */
+      .subs {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--muted);
+        white-space: nowrap;
+        flex: none;
+        padding: 0 5px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      .subs.active {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
       /* Status-flag chip ("badge") matched server-side against the agent's
          screen — e.g. an active /goal loop (ts/badges.ts). Same pill shape as
          .tasks but accent-colored so a matched flag stands out as a distinct
@@ -1374,6 +1394,7 @@
           <div class="meta">
             <span id="count"></span>
             <span class="metaright">
+              <button id="foldbtn" class="viewbtn" title="fold subagent trees">⊞ subs</button>
               <button id="sortbtn" class="viewbtn" title="cycle sort order">⇅ state</button>
               <button id="viewbtn" class="viewbtn" title="toggle compact list">☰</button>
               <button id="newbtn" class="newbtn" title="spawn a new agent on this fleet">
@@ -1558,6 +1579,7 @@
         hasIdent,
         deviceCount,
         layeredRows,
+        foldSummaries,
         sortEntries,
         SORT_MODES,
         taskLabel,
@@ -3197,6 +3219,14 @@
       // Compact list: one line per agent (dot + cli + title), persisted per device.
       let compactList = localStorage.getItem("ay.compactList") === "1";
 
+      // Fold subagent trees: hide nested (sub)agent rows and roll each root's
+      // hidden descendants into a summary chip. Folded BY DEFAULT (only "0" opts
+      // out) so a busy fleet reads as a flat list of top-level agents at a glance.
+      let foldSubs = localStorage.getItem("ay.foldSubs") !== "0";
+      // Per-render Map(rootEntry → { total, working, lastActive }); rebuilt by
+      // renderList whenever folding is on, consumed by foldChipHtml.
+      let foldSum = null;
+
       // Display sort order, cycled by the sort button and persisted per device.
       // Default "state" (attention-first state, then git busyness). Guard against
       // a stale/garbage stored value so we never start in an unknown mode.
@@ -3240,6 +3270,21 @@
         return `<span class="tasks${allDone ? " done" : ""}" title="${esc(tip)}">${esc(label)}</span>`;
       }
 
+      // Folded-subagent summary chip ("⊞ 3/5") for a root agent whose subagent
+      // tree is collapsed — working/total of its hidden descendants, from the
+      // per-render foldSum map. "" when folding is off or this row has no hidden
+      // subagents. Clicking it expands the trees (see the list click handler).
+      // The tooltip carries the recency the badge face omits ("last active 5s ago").
+      function foldChipHtml(e) {
+        const s = foldSum && foldSum.get(e);
+        if (!s) return "";
+        const rel = s.lastActive != null ? age({ last_active_at: s.lastActive }) : "";
+        const tip =
+          `${s.total} subagent${s.total === 1 ? "" : "s"} folded · ${s.working} working` +
+          (rel ? ` · last active ${rel} ago` : "");
+        return `<span class="subs${s.working ? " active" : ""}" data-fold-chip="1" title="${esc(tip)}">⊞ ${s.working}/${s.total}</span>`;
+      }
+
       // Status-flag chips ("badges") matched server-side against the agent's
       // screen (ts/badges.ts) — e.g. an active /goal loop. One small pill per
       // matched flag; "" when none matched. CSS class is "flag" (not "badge")
@@ -3270,9 +3315,18 @@
         const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
         // Build the full signalling-server > rooms > peers > agents > subagents
         // tree. Single-node room/peer layers fold away; ≥2 become ├ └ │ branches.
-        const rows = layeredRows(orderedEntries(toks));
-        const agentRows = rows.filter((r) => r.kind === "agent");
+        const fullRows = layeredRows(orderedEntries(toks));
+        const agentRows = fullRows.filter((r) => r.kind === "agent");
+        // Fold: summarize each root's hidden descendants, then drop subagent rows
+        // (any agent row with a parent agent). The count still reports every
+        // matching agent, so folding never makes the fleet look smaller.
+        foldSum = foldSubs ? foldSummaries(fullRows) : null;
+        const rows = foldSubs
+          ? fullRows.filter((r) => !(r.kind === "agent" && r.parentEntry))
+          : fullRows;
         $("count").textContent = `${agentRows.length} / ${entries.length} agents`;
+        $("foldbtn").textContent = foldSubs ? "⊞ subs" : "⊟ subs";
+        $("foldbtn").classList.toggle("on", !foldSubs);
         $("viewbtn").classList.toggle("on", compactList);
         // Show the active sort mode on the button so it's self-documenting; the
         // default ("state") is also highlighted to hint it's the implicit order.
@@ -3299,6 +3353,7 @@
         ${hasIdent(id) ? `<span class="cident" title="${esc(fullIdent(e))}">${esc(id)}</span>` : ""}
         ${cli ? `<span class="cname">${esc(cli)}</span>` : ""}
         <span class="ctitle ${e.title ? "" : "dim"}" title="${esc(t)}">${esc(t)}</span>
+        ${foldChipHtml(e)}
         ${taskChipHtml(e)}
         ${badgeChipsHtml(e)}
         ${gitChipHtml(e)}
@@ -3325,6 +3380,7 @@
         <div class="r1">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}<span class="dot ${esc(e.status)}"></span>
           <span class="name">${esc(cliLabel(e) || ident(e) || "agent")}</span>
           <span class="badge">pid ${e.pid}</span>
+          ${foldChipHtml(e)}
           ${taskChipHtml(e)}
           ${badgeChipsHtml(e)}
           ${gitChipHtml(e)}
@@ -3686,6 +3742,14 @@
       }
 
       $("list").addEventListener("click", (ev) => {
+        // Clicking a folded-subagent chip expands the trees instead of selecting
+        // the row, so the hidden children it summarizes become reachable.
+        if (ev.target.closest("[data-fold-chip]")) {
+          foldSubs = false;
+          localStorage.setItem("ay.foldSubs", "0");
+          renderList();
+          return;
+        }
         const row = ev.target.closest(".row");
         if (row) select(row.dataset.key);
       });
@@ -3745,6 +3809,12 @@
         localStorage.setItem("ay.compactList", compactList ? "1" : "0");
         renderList();
       });
+      // Fold / unfold every subagent tree (global toggle, persisted per device).
+      $("foldbtn").addEventListener("click", () => {
+        foldSubs = !foldSubs;
+        localStorage.setItem("ay.foldSubs", foldSubs ? "1" : "0");
+        renderList();
+      });
       // Cycle the sort order: state → created → identity → state.
       $("sortbtn").addEventListener("click", () => {
         sortMode = SORT_MODES[(SORT_MODES.indexOf(sortMode) + 1) % SORT_MODES.length];
@@ -3787,9 +3857,10 @@
       // renders. Clamps at the ends, scrolls the row into view.
       function stepSelection(dir) {
         const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
-        // Must match renderList's order; step only over agent rows (skip headers).
+        // Must match renderList's order; step only over agent rows (skip headers),
+        // and skip folded-away subagents so nav lands only on visible rows.
         const shown = layeredRows(orderedEntries(toks))
-          .filter((r) => r.kind === "agent")
+          .filter((r) => r.kind === "agent" && !(foldSubs && r.parentEntry))
           .map((r) => r.entry);
         if (!shown.length) return;
         const cur = shown.findIndex((e) => e._key === sel);
