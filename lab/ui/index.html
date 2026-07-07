@@ -4482,19 +4482,19 @@
       }
 
       // Auto-derive a branch name from the typed prompt for the Cmd+K fork action
-      // (editable at launch). Forks off a default branch get the flat `fork/`
-      // namespace, e.g. main + "fix the auth bug" → "fork/fix-the-auth-bug".
-      // Forks off any other branch dash-prefix the source to show lineage, so
-      // "def" forked from "feat-abc" reads as a stacked branch "feat-abc-def".
+      // (editable at launch). The new branch dash-prefixes the source branch to
+      // show lineage, e.g. main + "fix the auth bug" → "main-fix-the-auth-bug",
+      // and "def" forked from "feat-abc" reads as a stacked branch "feat-abc-def".
       // We dash-join (not slash-nest "feat-abc/def") on purpose: git stores refs
       // as files, so `feat-abc/def` can't be created while `feat-abc` still
       // exists (D/F conflict) — and the source branch is normally still live when
       // we fork from it. Any slashes in the source (e.g. a prior "fork/x") are
-      // flattened to dashes so the new ref stays a single node.
+      // flattened to dashes so the new ref stays a single node. Only when the
+      // source branch is unknown do we fall back to the flat `fork/` namespace.
       function forkSlug(q, srcBranch) {
         const topic = branchSlug(q) || "wip";
         const base = branchSlug(srcBranch);
-        if (!base || /^(main|master)$/.test((srcBranch || "").trim())) return "fork/" + topic;
+        if (!base) return "fork/" + topic;
         return base + "-" + topic;
       }
 
