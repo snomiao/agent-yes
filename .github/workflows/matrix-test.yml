@@ -20,6 +20,10 @@ jobs:
             runtime-version: "latest"
 
     runs-on: ${{ matrix.os }}
+    # Cap runaways: with no timeout, a hung test ran GitHub's 6h default and
+    # burned ~2,176 macOS minutes ($134.91) in a single day (Jul 3), which
+    # billing-locked the account. Fail fast instead of paying for 6h of a hang.
+    timeout-minutes: 20
 
     steps:
       - name: Checkout

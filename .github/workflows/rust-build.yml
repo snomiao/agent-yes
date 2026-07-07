@@ -27,6 +27,9 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # Generous cap for Rust LTO + cross/zig darwin builds, but far under the 6h
+    # default so a stuck compile/link can't run away.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -166,6 +169,7 @@ jobs:
     name: Combine Artifacts
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -195,6 +199,7 @@ jobs:
       github.event_name == 'release' ||
       (github.event_name == 'workflow_dispatch' && inputs.upload_release == true)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:
