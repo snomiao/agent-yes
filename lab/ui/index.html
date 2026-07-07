@@ -37,6 +37,9 @@
         --purple: #bc8cff;
         --pink: #f778ba;
         --red: #f85149;
+        /* Peer-focus yellow: a human collaborator (not you) is on this agent.
+           Distinct from your own blue (--accent) and the idle-dot amber. */
+        --peer: #e3b341;
         --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
         /* Safe-area insets — non-zero only in a standalone PWA on a notched /
            gesture-bar device (else 0, so these are harmless on desktop). Consumed
@@ -70,6 +73,7 @@
           --purple: #8250df;
           --pink: #bf3989;
           --red: #cf222e;
+          --peer: #bf8700;
         }
       }
       * {
@@ -419,6 +423,21 @@
         color: var(--muted);
         font-size: 11.5px;
         margin-top: 8px;
+      }
+      .metaleft {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+      /* Peers badge beside the agent counter — how many other humans are in the
+         fleet right now. Yellow ("here") when a peer shares the agent you have
+         open, muted otherwise. Hidden entirely when you're alone. */
+      .peers {
+        color: var(--muted);
+        cursor: default;
+      }
+      .peers.here {
+        color: var(--peer);
       }
       .connbadge {
         cursor: pointer;
@@ -817,6 +836,39 @@
       .row.sel {
         background: var(--panel);
         box-shadow: inset 3px 0 0 var(--accent);
+      }
+      /* A human peer (not you) is watching this agent: yellow, mirrored on the
+         RIGHT edge so it can coexist with your own blue selection bar on the
+         left — a row you BOTH have open shows blue-left + yellow-right. */
+      .row.peerfocus {
+        box-shadow: inset -3px 0 0 var(--peer);
+        background: color-mix(in srgb, var(--peer) 7%, transparent);
+      }
+      .row.sel.peerfocus {
+        background: var(--panel);
+        box-shadow: inset 3px 0 0 var(--accent), inset -3px 0 0 var(--peer);
+      }
+      /* stdin just landed here (someone typed, or `ay send` pushed a command) —
+         pulse the row regardless of who (if anyone) is focused on it. Runs while
+         the .stdinflash class is present; index.html removes it after the window. */
+      .row.stdinflash {
+        animation: stdinpulse 0.6s ease-in-out infinite;
+      }
+      @keyframes stdinpulse {
+        0%,
+        100% {
+          background-color: transparent;
+        }
+        50% {
+          background-color: color-mix(in srgb, var(--peer) 24%, transparent);
+        }
+      }
+      /* Per-row chip: how many peers are watching THIS agent (yellow, mono). */
+      .peerchip {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--peer);
+        flex: none;
       }
       .r1 {
         display: flex;
@@ -1392,7 +1444,10 @@
             />
           </div>
           <div class="meta">
-            <span id="count"></span>
+            <span class="metaleft">
+              <span id="count"></span>
+              <span id="peers" class="peers" hidden></span>
+            </span>
             <span class="metaright">
               <button id="foldbtn" class="viewbtn" title="fold subagent trees">⊞ subs</button>
               <button id="sortbtn" class="viewbtn" title="cycle sort order">⇅ state</button>
@@ -1584,6 +1639,8 @@
         SORT_MODES,
         taskLabel,
         badgesFor,
+        advanceStdinFlashes,
+        focusSummary,
         hashHue,
         selFromBottom,
         parseSel,
@@ -1610,6 +1667,17 @@
 
       let entries = [];
       let sel = null; // selected agent's composite key (room#pid)
+      // Collaborative presence, fleet-wide: focusByKey maps an agent's _key ->
+      // how many OTHER human peers are watching it (yellow bars + per-row chip);
+      // peerTotal is the distinct-peer count for the header badge. stdinSeen +
+      // flashUntil drive the stdin pulse: stdinSeen remembers each agent's last
+      // last_stdin_at so we can spot a bump, flashUntil holds the deadline the
+      // row keeps pulsing to. See advanceStdinFlashes/focusSummary (console-logic).
+      let focusByKey = new Map();
+      let peerTotal = 0;
+      const stdinSeen = new Map();
+      const flashUntil = new Map();
+      const STDIN_FLASH_MS = 1200;
       let es = null; // live-tail subscription closer
       let term = null; // xterm.js Terminal rendering the raw PTY stream
       let fit = null;
@@ -2713,10 +2781,65 @@
         }
         renderPeerSelections();
       }
+      // Fleet-wide presence: unlike pollPresence (only the SELECTED agent's host,
+      // for the terminal overlay), this reads EVERY live source's blackboard so
+      // the left panel can colour any agent a peer is watching. Each viewer
+      // self-reports the pid it's on; we map that back to the source's composite
+      // _key. Best-effort — a source that 404s (older host) contributes nothing.
+      async function pollFleetPresence() {
+        const recs = [];
+        await Promise.all(
+          [...sources.values()].map(async (s) => {
+            if (!s.tx || !s.live) return;
+            let all;
+            try {
+              all = await s.tx.fetchJSON("/api/presence");
+            } catch {
+              return;
+            }
+            if (!Array.isArray(all)) return;
+            const keyOfPid = new Map((s.agents || []).map((e) => [String(e.pid), e._key]));
+            for (const v of all) {
+              if (!v || v.viewer === myViewerId) continue;
+              const key = keyOfPid.get(String(v.agent));
+              // Prefix the viewer id with its source so the same id on two hosts
+              // still counts as two distinct people in the fleet total.
+              if (key) recs.push({ key, viewer: s.id + ":" + v.viewer });
+            }
+          }),
+        );
+        const sum = focusSummary(recs);
+        focusByKey = sum.byKey;
+        peerTotal = sum.total;
+        paintPeersBadge();
+        renderList();
+      }
+      // "N peers" badge beside the agent counter. Yellow when a peer shares the
+      // agent you have open ("same agent"); its tooltip breaks the count down by
+      // agent so you can see who's where. Hidden when you're the only one here.
+      function paintPeersBadge() {
+        const el = $("peers");
+        if (!el) return;
+        if (!peerTotal) {
+          el.hidden = true;
+          el.removeAttribute("title");
+          return;
+        }
+        el.hidden = false;
+        el.textContent = `👤 ${peerTotal} peer${peerTotal === 1 ? "" : "s"}`;
+        el.classList.toggle("here", !!(sel && focusByKey.get(sel)));
+        const lines = [...focusByKey.entries()].map(([k, n]) => {
+          const e = entries.find((x) => x._key === k);
+          const name = e ? e.title || cliLabel(e) || ident(e) || `pid ${e.pid}` : k;
+          return `  ${n} on ${name}`;
+        });
+        el.title = "peers watching agents in this fleet:\n" + lines.join("\n");
+      }
       // 3s heartbeat (< the host's 12s TTL): refresh our presence + read others',
       // and follow the canonical grid size (resize+scale, never reflow) so all
       // viewers stay on one shared canvas and selections line up.
       setInterval(() => {
+        pollFleetPresence(); // fleet-wide peer focus (independent of what's selected)
         if (!sel) return;
         sendPresence();
         pollPresence();
@@ -2727,6 +2850,20 @@
             .then(followAgentSize)
             .catch(() => {});
       }, 3000);
+      // Fast pulse loop: drive the stdin flash on the STABLE list DOM (toggle a
+      // class, no re-render) so a pulse begins/ends promptly regardless of the
+      // list's own render cadence. Cheap — a no-op until something is flashing.
+      setInterval(() => {
+        if (!flashUntil.size) return;
+        const now = Date.now();
+        for (const [k, until] of [...flashUntil.entries()]) if (until <= now) flashUntil.delete(k);
+        const listEl = $("list");
+        if (!listEl) return;
+        for (const el of listEl.querySelectorAll(".row[data-key]")) {
+          const on = (flashUntil.get(el.getAttribute("data-key")) || 0) > now;
+          el.classList.toggle("stdinflash", on);
+        }
+      }, 200);
 
       // Peer-selection overlay. The coordinate math (parseSel / selSegments /
       // hashHue) lives in console-logic.js (unit-tested); here we just measure the
@@ -3311,6 +3448,22 @@
         return `<div class="ghead g-${r.kind}">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}<span class="gicon">${icon}</span><span class="glabel">${esc(r.label || "")}</span>${ctag}<span class="gkind">${r.kind}</span></div>`;
       }
 
+      // Extra row classes for collaborative presence: a yellow bar when a human
+      // peer is watching this agent, plus the stdin pulse while its input just
+      // advanced. Empty in the solo case, so a single-user list is unchanged.
+      function rowFlags(e) {
+        const peers = focusByKey.get(e._key) || 0;
+        const flash = (flashUntil.get(e._key) || 0) > Date.now();
+        return (peers ? " peerfocus" : "") + (flash ? " stdinflash" : "");
+      }
+      // A yellow chip showing how many peers are watching this agent ("" if none).
+      function peerChipHtml(e) {
+        const n = focusByKey.get(e._key) || 0;
+        return n
+          ? `<span class="peerchip" title="${n} peer${n === 1 ? "" : "s"} watching this agent">👤${n}</span>`
+          : "";
+      }
+
       function renderList() {
         const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
         // Build the full signalling-server > rooms > peers > agents > subagents
@@ -3325,6 +3478,7 @@
           ? fullRows.filter((r) => !(r.kind === "agent" && r.parentEntry))
           : fullRows;
         $("count").textContent = `${agentRows.length} / ${entries.length} agents`;
+        paintPeersBadge(); // keep the peers badge in step with sel / the entry list
         $("foldbtn").textContent = foldSubs ? "⊞ subs" : "⊟ subs";
         $("foldbtn").classList.toggle("on", !foldSubs);
         $("viewbtn").classList.toggle("on", compactList);
@@ -3347,7 +3501,7 @@
                 const t = e.title || e.prompt || "";
                 const id = compactIdent(e, ctx, 3, r.parentEntry);
                 const cli = cliLabel(e);
-                return `<div class="row crow ${e._key === sel ? "sel" : ""}" data-key="${esc(e._key)}">
+                return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">
         ${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}
         <span class="dot ${esc(e.status)}"></span>
         ${hasIdent(id) ? `<span class="cident" title="${esc(fullIdent(e))}">${esc(id)}</span>` : ""}
@@ -3357,6 +3511,7 @@
         ${taskChipHtml(e)}
         ${badgeChipsHtml(e)}
         ${gitChipHtml(e)}
+        ${peerChipHtml(e)}
         <span class="age">${age(e)}</span></div>`;
               })
               .join("") || `<div class="empty">no match</div>`;
@@ -3376,7 +3531,7 @@
                     `<span class="rtag" data-k="${k}"><span style="opacity:.55">${k}:</span>${esc(v)}</span>`,
                 )
                 .join("");
-              return `<div class="row ${e._key === sel ? "sel" : ""}" data-key="${esc(e._key)}">
+              return `<div class="row ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">
         <div class="r1">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}<span class="dot ${esc(e.status)}"></span>
           <span class="name">${esc(cliLabel(e) || ident(e) || "agent")}</span>
           <span class="badge">pid ${e.pid}</span>
@@ -3384,6 +3539,7 @@
           ${taskChipHtml(e)}
           ${badgeChipsHtml(e)}
           ${gitChipHtml(e)}
+          ${peerChipHtml(e)}
           <span class="age">${age(e)}</span></div>
         ${e.title ? `<div class="rowtitle" title="${esc(e.title)}">${esc(e.title)}</div>` : ""}
         ${
@@ -3445,6 +3601,13 @@
       function mergeRender() {
         const srcs = [...sources.values()];
         entries = srcs.flatMap((s) => s.agents || []);
+        // Spot agents whose stdin just advanced (last_stdin_at bumped since we
+        // last saw them — someone typed, or `ay send` pushed input) and arm the
+        // pulse. Runs before renderList so the flashing rows render pulsing; the
+        // fast loop above stops them when the window lapses. Streamed deltas carry
+        // the new mtime, so a silent `ay send` still trips the flash within ~1s.
+        const until = Date.now() + STDIN_FLASH_MS;
+        for (const k of advanceStdinFlashes(entries, stdinSeen)) flashUntil.set(k, until);
         // Badge: total agents + how many rooms are live. Red only when nothing
         // at all is reachable (no source answered).
         const roomSrcs = srcs.filter((s) => s.id !== LOCAL);

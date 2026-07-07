@@ -1255,9 +1255,23 @@ export async function cmdServe(rest: string[]): Promise<number> {
           .then((s) => s.mtimeMs)
           .catch(() => r.started_at)
       : r.started_at;
+    // Last-stdin time: the mtime of the agent's stdin FIFO, which the kernel
+    // bumps on EVERY write to it — the console composer, a remote `ay send`, or
+    // a peer's `ay send` all funnel through writeToIpc(fifo_file, …). So this is
+    // a source-agnostic "someone just fed this agent input" signal, distinct from
+    // last_active_at (stdout). The console flashes a row when it advances, so a
+    // collaborator sees keystrokes land even when they weren't the one typing.
+    // Null when there's no live input pipe (exited, or no fifo yet).
+    const lastStdinAt =
+      status !== "exited" && r.fifo_file
+        ? await stat(r.fifo_file)
+            .then((s) => s.mtimeMs)
+            .catch(() => null)
+        : null;
     return {
       ...r,
       last_active_at: lastActiveAt,
+      last_stdin_at: lastStdinAt,
       // Precedence: exited stays exited; the Rust supervisor's unresponsive flag is
       // an authoritative wedge signal (`stuck`); then a blocked menu (`needs_input`);
       // else the base live status — so the console's dot matches `ay ls`. (A dead
