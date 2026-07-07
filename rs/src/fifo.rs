@@ -83,6 +83,33 @@ pub fn cleanup_stdin_activity(pid: u32) {
     }
 }
 
+/// Defense-in-depth for the SIGKILL case: an agent hard-killed before running
+/// `cleanup_stdin_activity` leaves its marker behind. That's harmless on its own
+/// (a stale marker ages out of the typing window and stopped agents never render
+/// the chip), but the reaper prunes it so the `activity/` dir doesn't accumulate
+/// dead entries. Removes every `<pid>.stdin` whose pid `is_alive` reports dead.
+pub fn prune_stale_activity_markers(is_alive: impl Fn(u32) -> bool) {
+    let Some(dir) = crate::log_files::global_dir().map(|d| d.join("activity")) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return; // no activity dir yet — nothing to prune
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_suffix(".stdin"))
+            .and_then(|p| p.parse::<u32>().ok())
+        else {
+            continue; // not a <pid>.stdin marker
+        };
+        if !is_alive(pid) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Create the FIFO (idempotent — if it already exists from a stale run, unlink first).
 #[cfg(unix)]
 pub fn create_fifo(path: &Path) -> std::io::Result<()> {
@@ -326,6 +353,11 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
+    // Serializes tests that mutate the AGENT_YES_HOME env var — std::env::set_var
+    // is process-global, so two of them running in parallel clobber each other's
+    // root (Mutex::new is const, usable directly in a static).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_create_and_round_trip() {
         let dir = tempfile::tempdir().unwrap();
@@ -399,6 +431,7 @@ mod tests {
 
     #[test]
     fn test_touch_and_cleanup_stdin_activity_roundtrip() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         // Point the global home at a tempdir so we don't touch the real ~/.agent-yes.
         let dir = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("AGENT_YES_HOME");
@@ -414,6 +447,31 @@ mod tests {
 
         cleanup_stdin_activity(4242);
         assert!(!path.exists(), "cleanup removes the marker");
+
+        match prev {
+            Some(v) => std::env::set_var("AGENT_YES_HOME", v),
+            None => std::env::remove_var("AGENT_YES_HOME"),
+        }
+    }
+
+    #[test]
+    fn test_prune_stale_activity_markers() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("AGENT_YES_HOME");
+        std::env::set_var("AGENT_YES_HOME", dir.path());
+
+        // Two markers: one "alive" pid, one "dead" pid.
+        touch_stdin_activity(111); // pretend-alive
+        touch_stdin_activity(222); // pretend-dead
+        let live = stdin_activity_path(111).unwrap();
+        let dead = stdin_activity_path(222).unwrap();
+        assert!(live.exists() && dead.exists());
+
+        // Only 111 is alive → 222's marker is pruned, 111's is kept.
+        prune_stale_activity_markers(|pid| pid == 111);
+        assert!(live.exists(), "live pid's marker kept");
+        assert!(!dead.exists(), "dead pid's marker pruned");
 
         match prev {
             Some(v) => std::env::set_var("AGENT_YES_HOME", v),

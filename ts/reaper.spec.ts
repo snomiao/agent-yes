@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, test } from "vitest";
-import { mkdtempSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 import { pgidForWrapper, register, sweep } from "./reaper.ts";
@@ -34,6 +34,23 @@ test("sweep keeps live wrappers and drops dead ones", async () => {
   const lines = liveLines();
   expect(lines.length).toBe(1);
   expect(lines[0]).toContain(String(process.pid));
+});
+
+test("sweep prunes activity markers of dead pids and keeps live ones", async () => {
+  const activityDir = path.join(process.env.AGENT_YES_HOME!, "activity");
+  mkdirSync(activityDir, { recursive: true });
+  const live = path.join(activityDir, `${process.pid}.stdin`); // our own pid = alive
+  const dead = path.join(activityDir, `999999.stdin`); // not a running process
+  const junk = path.join(activityDir, `not-a-marker.txt`); // ignored (no .stdin pid)
+  writeFileSync(live, String(Date.now()));
+  writeFileSync(dead, String(Date.now()));
+  writeFileSync(junk, "x");
+
+  await sweep();
+
+  expect(existsSync(live)).toBe(true); // alive → kept
+  expect(existsSync(dead)).toBe(false); // dead → pruned
+  expect(existsSync(junk)).toBe(true); // non-marker file untouched
 });
 
 test("register refuses to persist a pgid <= 1", async () => {
