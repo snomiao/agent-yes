@@ -1399,6 +1399,59 @@
           display: flex;
         }
       }
+      /* Terminal right-click context menu: Copy the selection or fire a
+         customizable quick command (e.g. /fork [selection]). Positioned at the
+         cursor via inline top/left; clamped into the viewport by JS after mount. */
+      .ctxmenu {
+        position: fixed;
+        z-index: 40;
+        min-width: 180px;
+        max-width: 320px;
+        padding: 4px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+        font-family: var(--mono);
+        font-size: 13px;
+      }
+      .ctxmenu-item {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 6px 10px;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--fg);
+        font: inherit;
+        text-align: left;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      .ctxmenu-item:hover:not(:disabled),
+      .ctxmenu-item:focus-visible {
+        background: color-mix(in srgb, var(--accent) 18%, transparent);
+        outline: none;
+      }
+      .ctxmenu-item:disabled {
+        color: var(--muted);
+        cursor: default;
+      }
+      .ctxmenu-item .ctxmenu-hint {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 11px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .ctxmenu-sep {
+        height: 1px;
+        margin: 4px 6px;
+        background: var(--line);
+      }
     </style>
     <link
       rel="stylesheet"
@@ -3030,6 +3083,210 @@
           alert(`Restart failed for ${who}:\n${(res && res.text) || "request failed"}`);
       }
 
+      // ---- Terminal right-click menu: copy + customizable quick commands ----
+      // A right-click on the terminal used to copy the selection outright. Now it
+      // opens a small menu: Copy, Paste, and user-defined quick commands. A quick
+      // command is a template whose `[selection]` placeholder is filled with the
+      // highlighted text and sent to the agent's stdin (with a trailing Enter),
+      // e.g. `/fork [selection]`. Templates live in localStorage so they survive
+      // reloads and can be edited from the menu itself.
+      const QUICKCMD_KEY = "ay.quickCmds";
+      const DEFAULT_QUICKCMDS = [{ label: "Fork with selection", template: "/fork [selection]" }];
+      function loadQuickCmds() {
+        try {
+          const v = JSON.parse(localStorage.getItem(QUICKCMD_KEY) || "null");
+          if (Array.isArray(v))
+            return v
+              .filter((c) => c && typeof c.template === "string" && c.template.trim())
+              .map((c) => ({ label: String(c.label || c.template), template: c.template }));
+        } catch {}
+        return DEFAULT_QUICKCMDS.map((c) => ({ ...c }));
+      }
+      function saveQuickCmds(list) {
+        localStorage.setItem(QUICKCMD_KEY, JSON.stringify(list));
+      }
+      // Serialize/parse for the editor textarea: one `Label | template` per line.
+      // A line without `|` uses the whole line as both label and template. `|` in
+      // the template is preserved (we split on the FIRST separator only).
+      function quickCmdsToText(list) {
+        return list.map((c) => `${c.label} | ${c.template}`).join("\n");
+      }
+      function textToQuickCmds(text) {
+        return text
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => {
+            const i = line.indexOf("|");
+            if (i < 0) return { label: line, template: line };
+            const label = line.slice(0, i).trim();
+            const template = line.slice(i + 1).trim();
+            return { label: label || template, template };
+          })
+          .filter((c) => c.template);
+      }
+
+      let ctxMenuEl = null;
+      function hideTermMenu() {
+        if (!ctxMenuEl) return;
+        ctxMenuEl.remove();
+        ctxMenuEl = null;
+        document.removeEventListener("pointerdown", onCtxOutside, true);
+        document.removeEventListener("keydown", onCtxKey, true);
+        window.removeEventListener("blur", hideTermMenu);
+        window.removeEventListener("resize", hideTermMenu);
+      }
+      function onCtxOutside(ev) {
+        if (ctxMenuEl && !ctxMenuEl.contains(ev.target)) hideTermMenu();
+      }
+      function onCtxKey(ev) {
+        if (ev.key === "Escape") {
+          ev.preventDefault();
+          hideTermMenu();
+        }
+      }
+      // Fill `[selection]` and dispatch the command to the active agent's stdin.
+      // A trailing Enter submits it (these are "quick commands", not drafts). The
+      // selection is cleared so the highlight doesn't linger after firing.
+      function runQuickCmd(cmd, selText, term) {
+        const text = String(cmd.template).replace(/\[selection\]/g, selText || "");
+        sendToSelected(text + "\r");
+        try {
+          term && term.clearSelection && term.clearSelection();
+        } catch {}
+      }
+      function showTermMenu(ev, term) {
+        ev.preventDefault();
+        hideTermMenu();
+        const selText = term && term.hasSelection && term.hasSelection() ? term.getSelection() : "";
+        const menu = document.createElement("div");
+        menu.className = "ctxmenu";
+        menu.setAttribute("role", "menu");
+        const addItem = (label, opts, onClick) => {
+          const it = document.createElement("button");
+          it.type = "button";
+          it.className = "ctxmenu-item";
+          it.textContent = label;
+          it.setAttribute("role", "menuitem");
+          if (opts && opts.hint) {
+            const h = document.createElement("span");
+            h.className = "ctxmenu-hint";
+            h.textContent = opts.hint;
+            it.appendChild(h);
+          }
+          if (opts && opts.disabled) it.disabled = true;
+          else
+            it.addEventListener("click", () => {
+              hideTermMenu();
+              onClick();
+            });
+          menu.appendChild(it);
+          return it;
+        };
+        const addSep = () => {
+          const s = document.createElement("div");
+          s.className = "ctxmenu-sep";
+          menu.appendChild(s);
+        };
+
+        // Copy: disabled with nothing selected (mirrors the old behavior, minus
+        // the auto-copy — the user now chooses it explicitly).
+        addItem("Copy", { disabled: !selText }, () => {
+          if (selText && navigator.clipboard)
+            navigator.clipboard.writeText(selText).then(
+              () => term.clearSelection(),
+              () => {},
+            );
+        });
+        // Paste: best-effort; readText is gated behind a permission prompt and is
+        // undefined over plain HTTP, so hide it when unavailable.
+        if (navigator.clipboard && navigator.clipboard.readText)
+          addItem("Paste", {}, async () => {
+            try {
+              const t = await navigator.clipboard.readText();
+              if (t) sendToSelected(t);
+            } catch {}
+          });
+
+        const cmds = loadQuickCmds();
+        if (cmds.length) {
+          addSep();
+          for (const cmd of cmds)
+            addItem(cmd.label, { hint: selText ? "[sel]" : "" }, () =>
+              runQuickCmd(cmd, selText, term),
+            );
+        }
+        addSep();
+        addItem("Edit quick commands…", {}, editQuickCmds);
+
+        document.body.appendChild(menu);
+        ctxMenuEl = menu;
+        // Clamp into the viewport so a right-click near an edge stays fully visible.
+        const r = menu.getBoundingClientRect();
+        const x = Math.max(4, Math.min(ev.clientX, window.innerWidth - r.width - 4));
+        const y = Math.max(4, Math.min(ev.clientY, window.innerHeight - r.height - 4));
+        menu.style.left = x + "px";
+        menu.style.top = y + "px";
+        document.addEventListener("pointerdown", onCtxOutside, true);
+        document.addEventListener("keydown", onCtxKey, true);
+        window.addEventListener("blur", hideTermMenu);
+        window.addEventListener("resize", hideTermMenu);
+      }
+      // Lightweight editor: overlay + textarea of `Label | template` lines. Save
+      // writes localStorage; Reset restores the built-in defaults.
+      function editQuickCmds() {
+        hideTermMenu();
+        const overlay = document.createElement("div");
+        overlay.className = "launchoverlay";
+        overlay.style.zIndex = "41";
+        const box = document.createElement("div");
+        box.className = "omnibox";
+        box.style.padding = "16px";
+        box.style.width = "min(560px, 92vw)";
+        box.innerHTML =
+          '<div style="color:var(--fg);font-size:14px;margin-bottom:6px">Quick commands</div>' +
+          '<div style="color:var(--muted);font-size:12px;margin-bottom:10px">One per line: <code>Label | template</code>. Use <code>[selection]</code> for the highlighted text, e.g. <code>/fork [selection]</code>.</div>';
+        const ta = document.createElement("textarea");
+        ta.value = quickCmdsToText(loadQuickCmds());
+        ta.spellcheck = false;
+        ta.style.cssText =
+          "width:100%;box-sizing:border-box;height:180px;resize:vertical;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:10px;font:13px var(--mono);outline:none";
+        box.appendChild(ta);
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;gap:8px;justify-content:flex-end;margin-top:12px";
+        const mkBtn = (label, primary) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = label;
+          b.style.cssText =
+            "padding:7px 14px;border-radius:6px;font:13px var(--mono);cursor:pointer;border:1px solid var(--line);" +
+            (primary
+              ? "background:var(--accent);color:#fff;border-color:var(--accent)"
+              : "background:var(--panel2);color:var(--fg)");
+          row.appendChild(b);
+          return b;
+        };
+        const close = () => overlay.remove();
+        mkBtn("Reset", false).addEventListener("click", () => {
+          ta.value = quickCmdsToText(DEFAULT_QUICKCMDS);
+        });
+        mkBtn("Cancel", false).addEventListener("click", close);
+        mkBtn("Save", true).addEventListener("click", () => {
+          saveQuickCmds(textToQuickCmds(ta.value));
+          close();
+        });
+        box.appendChild(row);
+        overlay.appendChild(box);
+        overlay.addEventListener("pointerdown", (ev) => {
+          if (ev.target === overlay) close();
+        });
+        overlay.addEventListener("keydown", (ev) => {
+          if (ev.key === "Escape") close();
+        });
+        document.body.appendChild(overlay);
+        ta.focus();
+      }
+
       // ---- On-screen key bar (mobile) -------------------------------------
       // A phone keyboard has no Esc/Tab/Ctrl/arrows, so agent TUIs (claude,
       // codex, vim…) are otherwise undriveable. The bar posts raw byte
@@ -3753,24 +4010,14 @@
           /* addon CDN blocked — terminal still works, just without auto-links */
         }
         term.open(logEl);
-        // Right-click to copy the current selection (terminal convention): when
-        // text is selected, a context-menu click copies it to the clipboard and
-        // suppresses the browser menu, then clears the selection so the highlight
-        // doesn't linger. With nothing selected we leave the default menu alone
-        // (and a mouse-tracking TUI still gets its own right-click via xterm).
-        // The Clipboard API is undefined over plain HTTP and can reject on a
-        // permission denial — only suppress the menu when we can actually copy,
-        // clear the selection once the write resolves, and swallow a failure
-        // quietly (the highlight stays so the user can retry).
+        // Right-click opens our own menu (Copy / Paste / customizable quick
+        // commands like `/fork [selection]`) instead of copying outright. We
+        // always suppress the browser's native menu here so the custom one shows
+        // even with nothing selected (Copy just renders disabled). showTermMenu
+        // clamps itself into the viewport and dismisses on outside click / Esc.
         term.element?.addEventListener("contextmenu", (ev) => {
-          if (!term || !term.hasSelection()) return;
-          const text = term.getSelection();
-          if (!text || !navigator.clipboard) return;
-          ev.preventDefault();
-          navigator.clipboard.writeText(text).then(
-            () => term.clearSelection(),
-            () => {},
-          );
+          if (!term) return;
+          showTermMenu(ev, term);
         });
         // On a phone, auto-focusing yanks up the soft keyboard the moment you open
         // an agent — even when you only meant to read the tail. Skip it there; a tap
