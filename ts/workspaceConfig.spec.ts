@@ -8,9 +8,11 @@ import {
   getMinFreeMb,
   getSpawnWaitMs,
   getProvisionAllowlist,
+  getProvisionHook,
   getProvisionRoot,
   getSpawnHook,
   getWorkspaceRoot,
+  hasProvisionHook,
   hasSpawnHook,
   isProvisionAllowed,
   resolveSpawnCwd,
@@ -31,6 +33,7 @@ describe("workspaceConfig", () => {
     delete process.env.CODEHOST_WS_ROOT;
     delete process.env.CODEHOST_PROVISION_ALLOWLIST;
     delete process.env.AGENT_YES_SPAWN_HOOK;
+    delete process.env.AGENT_YES_PROVISION_HOOK;
     delete process.env.AGENT_YES_MAX_AGENTS;
     delete process.env.AGENT_YES_MIN_FREE_MB;
     delete process.env.AGENT_YES_SPAWN_WAIT_MS;
@@ -265,6 +268,51 @@ describe("workspaceConfig", () => {
         expect(getSpawnHook()).toBeNull();
         chmodSync(path.join(tmp, "config.json"), 0o600);
         expect(getSpawnHook()).toBe("echo pwned");
+      },
+    );
+  });
+
+  describe("getProvisionHook / hasProvisionHook", () => {
+    const isPosix = process.platform !== "win32";
+
+    it("is null/false when unset", () => {
+      expect(getProvisionHook()).toBeNull();
+      expect(hasProvisionHook()).toBe(false);
+    });
+
+    it("returns the configured hook from a private (0600) config", () => {
+      writeConfig({ provisionHook: 'gh auth switch --user "$KOHO_OWNER"' });
+      if (isPosix) chmodSync(path.join(tmp, "config.json"), 0o600);
+      expect(getProvisionHook()).toBe('gh auth switch --user "$KOHO_OWNER"');
+      expect(hasProvisionHook()).toBe(true);
+    });
+
+    it("ignores a blank hook", () => {
+      writeConfig({ provisionHook: "   " });
+      expect(getProvisionHook()).toBeNull();
+    });
+
+    it("env AGENT_YES_PROVISION_HOOK overrides the config", () => {
+      writeConfig({ provisionHook: "from-file" });
+      process.env.AGENT_YES_PROVISION_HOOK = "from-env";
+      expect(getProvisionHook()).toBe("from-env");
+    });
+
+    it("is independent of the spawn hook", () => {
+      writeConfig({ spawnHook: "spawn-only" });
+      if (isPosix) chmodSync(path.join(tmp, "config.json"), 0o600);
+      expect(getSpawnHook()).toBe("spawn-only");
+      expect(getProvisionHook()).toBeNull();
+    });
+
+    it.skipIf(!isPosix)(
+      "refuses a file-backed hook when the config is group/world-writable (tampering guard)",
+      () => {
+        writeConfig({ provisionHook: "echo pwned" });
+        chmodSync(path.join(tmp, "config.json"), 0o666);
+        expect(getProvisionHook()).toBeNull();
+        chmodSync(path.join(tmp, "config.json"), 0o600);
+        expect(getProvisionHook()).toBe("echo pwned");
       },
     );
   });
