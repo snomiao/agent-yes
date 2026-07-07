@@ -503,6 +503,52 @@ export function nextIndex(len, i, dir) {
 // coordinate math lives here so it's unit-testable without a browser.
 // ---------------------------------------------------------------------------
 
+// ---- collaborative presence: peer focus + stdin flash ----------------------
+// The left panel colour-codes who's on which agent: your own selection is blue
+// (the .sel bar), every OTHER human peer's focus is yellow (.peerfocus), and a
+// row pulses when its stdin was just written — independent of focus, since an
+// `ay send` feeds an agent no one is looking at. These pure helpers own the
+// bookkeeping so index.html only measures the DOM.
+
+// Detect agents whose stdin just advanced. `seen` maps _key -> the last
+// last_stdin_at we observed; given the current entries, return the _keys whose
+// last_stdin_at is NEWER than what we'd seen (someone typed / `ay send` pushed),
+// and fold the new values into `seen`. A key seen for the FIRST time never
+// flashes (else every agent would pulse on initial load) — only a later bump
+// does. Keys no longer present are pruned so `seen` can't grow without bound.
+export function advanceStdinFlashes(entries, seen) {
+  const fresh = [];
+  const alive = new Set();
+  for (const e of entries) {
+    const key = e._key;
+    if (!key) continue;
+    alive.add(key);
+    const at = e.last_stdin_at;
+    if (typeof at !== "number") continue;
+    const prev = seen.get(key);
+    if (prev !== undefined && at > prev) fresh.push(key);
+    if (prev === undefined || at > prev) seen.set(key, at);
+  }
+  for (const key of [...seen.keys()]) if (!alive.has(key)) seen.delete(key);
+  return fresh;
+}
+
+// Summarize fleet presence for the peers badge + per-row chips. `records` is one
+// entry per OTHER viewer currently watching an agent: { key, viewer } (key = the
+// composite _key of the agent they're on). Returns { total, byKey }: `total`
+// distinct viewers (the "N peers" badge), `byKey` a Map of _key -> how many
+// peers watch that agent (the yellow per-row chip + .peerfocus trigger).
+export function focusSummary(records) {
+  const viewers = new Set();
+  const byKey = new Map();
+  for (const r of records) {
+    if (!r || !r.key || !r.viewer) continue;
+    viewers.add(r.viewer);
+    byKey.set(r.key, (byKey.get(r.key) || 0) + 1);
+  }
+  return { total: viewers.size, byKey };
+}
+
 // Stable per-viewer hue (0..359) for colour-coding peers' selections.
 export function hashHue(s) {
   let h = 0;

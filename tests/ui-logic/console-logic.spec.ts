@@ -25,6 +25,8 @@ import {
   SORT_MODES,
   taskLabel,
   badgesFor,
+  advanceStdinFlashes,
+  focusSummary,
   hashHue,
   selFromBottom,
   parseSel,
@@ -505,6 +507,77 @@ describe("badgesFor (status flag chips)", () => {
       "goal-active",
       "some-future-flag",
     ]);
+  });
+});
+
+describe("advanceStdinFlashes (stdin pulse detection)", () => {
+  it("never flashes an agent seen for the first time (no pulse on initial load)", () => {
+    const seen = new Map();
+    const fresh = advanceStdinFlashes(
+      [
+        { _key: "a", last_stdin_at: 1000 },
+        { _key: "b", last_stdin_at: 2000 },
+      ],
+      seen,
+    );
+    expect(fresh).toEqual([]);
+    expect(seen.get("a")).toBe(1000);
+    expect(seen.get("b")).toBe(2000);
+  });
+
+  it("flashes only the agents whose last_stdin_at advanced since last seen", () => {
+    const seen = new Map([
+      ["a", 1000],
+      ["b", 2000],
+    ]);
+    const fresh = advanceStdinFlashes(
+      [
+        { _key: "a", last_stdin_at: 1500 }, // bumped → flash
+        { _key: "b", last_stdin_at: 2000 }, // unchanged → no flash
+      ],
+      seen,
+    );
+    expect(fresh).toEqual(["a"]);
+    expect(seen.get("a")).toBe(1500);
+  });
+
+  it("ignores entries without a numeric last_stdin_at, and prunes gone keys", () => {
+    const seen = new Map([["gone", 1000]]);
+    const fresh = advanceStdinFlashes([{ _key: "x", last_stdin_at: null }, { _key: "y" }], seen);
+    expect(fresh).toEqual([]);
+    expect(seen.has("gone")).toBe(false); // pruned — not in the new entry list
+    expect(seen.has("x")).toBe(false); // null stdin → not tracked
+  });
+});
+
+describe("focusSummary (peers badge + per-row chips)", () => {
+  it("counts distinct viewers and groups counts by agent key", () => {
+    const { total, byKey } = focusSummary([
+      { key: "room#1", viewer: "h1:aaa" },
+      { key: "room#1", viewer: "h1:bbb" },
+      { key: "room#2", viewer: "h1:ccc" },
+    ]);
+    expect(total).toBe(3);
+    expect(byKey.get("room#1")).toBe(2);
+    expect(byKey.get("room#2")).toBe(1);
+  });
+
+  it("dedupes a viewer that somehow appears twice, and skips malformed records", () => {
+    const { total, byKey } = focusSummary([
+      { key: "k", viewer: "v" },
+      { key: "k", viewer: "v" }, // same viewer twice → still 1 distinct
+      { viewer: "no-key" },
+      { key: "no-viewer" },
+      null,
+    ]);
+    expect(total).toBe(1);
+    expect(byKey.get("k")).toBe(2); // per-key count still tallies both records
+  });
+
+  it("returns an empty summary for no records (solo case)", () => {
+    const { total, byKey } = focusSummary([]);
+    expect(total).toBe(0);
+    expect(byKey.size).toBe(0);
   });
 });
 
