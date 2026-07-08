@@ -374,6 +374,28 @@ async function managerRunnable(mgr: DaemonManager): Promise<boolean> {
   }
 }
 
+// Which manager is ACTUALLY running our daemon? `resolveDaemonManager` picks by
+// PATH order without a liveness check, so after a bootstrap oxmgr→pm2 fallback a
+// broken oxmgr shim (first on PATH) shadows the pm2 that really holds the daemon
+// — making `ay serve status` report `manager: oxmgr / installed: no` while pm2
+// serves. For reporting, probe each present manager and prefer the one that is
+// runnable AND has our daemon registered; fall back to the first runnable one,
+// else whatever resolveDaemonManager returns.
+async function resolveActiveManager(): Promise<DaemonManager | null> {
+  const oxmgr = Bun.which("oxmgr");
+  const pm2 = Bun.which("pm2");
+  const present: DaemonManager[] = [];
+  if (oxmgr) present.push({ id: "oxmgr", bin: oxmgr });
+  if (pm2) present.push({ id: "pm2", bin: pm2 });
+  let firstRunnable: DaemonManager | null = null;
+  for (const m of present) {
+    if (!(await managerRunnable(m))) continue;
+    firstRunnable ??= m;
+    if ((await readDaemonServeArgs(m)) !== null) return m; // this one holds the daemon
+  }
+  return firstRunnable ?? resolveDaemonManager();
+}
+
 // Install one PM package globally via the SAME JS package manager that installed
 // `ay` (bun preferred, npm fallback — no Rust toolchain required, so a fresh
 // Linux box with only bun from setup.sh works), then confirm the resulting
@@ -398,8 +420,15 @@ async function installAndVerify(pkg: "oxmgr" | "pm2"): Promise<DaemonManager | n
   if (!bin) return null;
   const mgr: DaemonManager = { id: pkg, bin };
   if (!(await managerRunnable(mgr))) {
+    // Name the actual reason: oxmgr ships a native binary (glibc), pm2 is a
+    // Node.js app that needs `node` on PATH — a bun-only box has neither by
+    // default, so a generic "glibc mismatch" would mislead for pm2.
+    const why =
+      pkg === "oxmgr"
+        ? "a native/glibc mismatch, e.g. glibc < 2.39"
+        : "pm2 needs a Node.js runtime and none was found";
     process.stderr.write(
-      `ay serve install: ${pkg} installed but can't exec here (likely a native/glibc mismatch)` +
+      `ay serve install: ${pkg} installed but can't exec here (${why})` +
         (pkg === "oxmgr" ? " — falling back to pm2\n" : "\n"),
     );
     return null;
@@ -597,8 +626,9 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
   if (!mgr) {
     process.stderr.write(
       "ay serve install: no usable process manager (need oxmgr or pm2)\n" +
-        "  install with:  bun add -g pm2\n" +
-        "             or: bun add -g oxmgr   (needs glibc ≥ 2.39 on Linux)\n",
+        "  - oxmgr: bun add -g oxmgr   (native binary; needs glibc ≥ 2.39 on Linux)\n" +
+        "  - pm2:   bun add -g pm2     (needs a Node.js runtime on PATH)\n" +
+        "  On a minimal bun-only box, install node (for pm2) or a newer glibc (for oxmgr).\n",
     );
     return 1;
   }
@@ -826,7 +856,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
 // Read-only: never mints a token or disturbs the daemon. `--json` for scripts.
 async function cmdServeStatus(args: string[]): Promise<number> {
   const json = args.includes("--json");
-  const mgr = resolveDaemonManager();
+  const mgr = await resolveActiveManager();
   const token = await loadTokenReadOnly();
   const shareLink = await readShareLink();
 
