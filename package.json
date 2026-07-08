@@ -66,6 +66,7 @@
     "lab/ui/index.html",
     "lab/ui/landing.html",
     "lab/ui/manifest.webmanifest",
+    "lab/ui/qrcode.js",
     "lab/ui/room-client.js",
     "lab/ui/sw.js",
     "lab/ui/blog/**"

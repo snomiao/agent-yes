@@ -2210,6 +2210,51 @@ export async function cmdServe(rest: string[]): Promise<number> {
       }
     }
 
+    // ---- Single-agent view-only shares (docs/agent-sharing.md, Option X) ------
+    // Mint / list / revoke scoped share rooms. Reachable by whoever already holds
+    // full control of this host (the local token or the master fleet room) — a
+    // scoped viewer can't reach these (its scopedFetch 403s /api/share*).
+
+    // POST /api/share  body {agent, perm?}  → mint a fresh view-only room for ONE
+    // agent and return its share link.
+    if (req.method === "POST" && p === "/api/share") {
+      let body: { agent?: string; perm?: "r" };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return new Response("invalid JSON body", { status: 400 });
+      }
+      if (!body.agent) return new Response("agent required", { status: 400 });
+      try {
+        const { createScopedShare } = await import("./agentShare.ts");
+        const share = await createScopedShare({
+          agent: body.agent,
+          perm: body.perm ?? "r",
+          localFetch: apiFetch,
+          apiToken: token,
+        });
+        return Response.json(share);
+      } catch (e) {
+        const msg = (e as Error).message;
+        const status = /too many active shares/.test(msg) ? 409 : /no agent matched|no stable/.test(msg) ? 404 : 500;
+        return new Response(msg, { status });
+      }
+    }
+
+    // GET /api/shares  → active scoped shares (for the manage/revoke UI).
+    if (req.method === "GET" && p === "/api/shares") {
+      const { listShares } = await import("./agentShare.ts");
+      return Response.json(listShares());
+    }
+
+    // DELETE /api/share/:shareId  → revoke (close the room).
+    const revokeM = /^\/api\/share\/([^/]+)$/.exec(p);
+    if (req.method === "DELETE" && revokeM) {
+      const { revokeShare } = await import("./agentShare.ts");
+      const ok = revokeShare(decodeURIComponent(revokeM[1]!));
+      return new Response(ok ? "revoked" : "no such share", { status: ok ? 200 : 404 });
+    }
+
     return new Response("Not Found", { status: 404 });
   };
 
@@ -2238,6 +2283,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return serveUiFile("console-logic.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/e2e.js")
       return serveUiFile("e2e.js", "text/javascript; charset=utf-8");
+    if (req.method === "GET" && p === "/qrcode.js")
+      return serveUiFile("qrcode.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/favicon.ico") return new Response(null, { status: 204 });
     return apiFetch(req);
   };
@@ -2388,6 +2435,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
   const shutdown = (resolve: () => void) => {
     if (heartbeat) clearInterval(heartbeat);
     closeShare?.();
+    // Close any scoped single-agent share rooms so viewers get an immediate drop.
+    void import("./agentShare.ts").then((m) => m.revokeAllShares()).catch(() => {});
     server?.stop();
     resolve();
   };

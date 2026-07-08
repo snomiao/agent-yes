@@ -303,6 +303,117 @@
         background: var(--line);
         margin: 4px 2px;
       }
+      /* View-only share: read-only badge in the header + hiding write controls. */
+      .robadge {
+        display: none;
+        align-items: center;
+        gap: 4px;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: 999px;
+        color: #b45309;
+        background: color-mix(in srgb, #f59e0b 18%, transparent);
+        border: 1px solid color-mix(in srgb, #f59e0b 45%, transparent);
+        white-space: nowrap;
+      }
+      .app.readonly-agent .robadge {
+        display: inline-flex;
+      }
+      /* A viewer can't steer/share — hide the composer, key bar and every agent
+         action in the ⋯ menu (Share/Stop/Restart/Kill). View prefs stay. */
+      .app.readonly-agent .composer,
+      .app.readonly-agent .keybar,
+      .app.readonly-agent .rmenuact {
+        display: none !important;
+      }
+      /* Share modal — QR + link for a single-agent view-only share. */
+      .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 60;
+        padding: 16px;
+      }
+      .modal-backdrop[hidden] {
+        display: none;
+      }
+      .sharebox {
+        background: var(--bg);
+        color: var(--fg);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        max-width: 380px;
+        width: 100%;
+        padding: 20px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+      }
+      .sharebox h3 {
+        margin: 0 0 4px;
+        font-size: 15px;
+      }
+      .sharebox .sub {
+        margin: 0 0 14px;
+        font-size: 12px;
+        opacity: 0.7;
+      }
+      .sharebox .qr {
+        display: flex;
+        justify-content: center;
+        padding: 12px;
+        background: #fff;
+        border-radius: 8px;
+        margin: 0 auto 14px;
+        width: fit-content;
+      }
+      .sharebox .qr canvas {
+        display: block;
+        image-rendering: pixelated;
+      }
+      .sharebox .shareurl {
+        width: 100%;
+        box-sizing: border-box;
+        font: 11px var(--mono);
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--bg2, var(--bg));
+        color: var(--fg);
+        word-break: break-all;
+      }
+      .sharebox .srow {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .sharebox button {
+        flex: 1;
+        padding: 9px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: var(--bg2, var(--bg));
+        color: var(--fg);
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .sharebox button.primary {
+        background: #2563eb;
+        border-color: #2563eb;
+        color: #fff;
+      }
+      .sharebox button.danger {
+        color: #dc2626;
+        border-color: color-mix(in srgb, #dc2626 45%, transparent);
+      }
+      .sharebox .note {
+        font-size: 11px;
+        opacity: 0.65;
+        margin-top: 12px;
+        line-height: 1.4;
+      }
       /* Terminal font-size stepper (a static row, not a hover/click target). */
       .rmenufont {
         justify-content: space-between;
@@ -1460,6 +1571,10 @@
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+    <!-- QR generator (MIT, Kazuhiko Arase) — vendored locally so single-agent
+         share QR codes render offline under `ay serve --http`. Classic script:
+         defines the global `qrcode`. -->
+    <script src="./qrcode.js"></script>
     <script type="module">
       // codehost room transport — vendored from codehost's `bun run build:lib`.
       // Loaded as a module (deferred), so the classic script below awaits the
@@ -1524,6 +1639,9 @@
           <span class="dot" id="rdot"></span>
           <span class="name" id="rname"></span>
           <span class="badge" id="rpid"></span>
+          <span class="robadge" title="view-only share — you can watch but not steer this agent"
+            >👁 read-only</span
+          >
           <span class="live"
             ><span class="dot" id="livedot"></span><span id="livetxt">connecting…</span></span
           >
@@ -1548,6 +1666,10 @@
               <label class="rmenuitem"
                 ><input type="checkbox" id="perfToggle" /> <span>Perf HUD</span></label
               >
+              <div class="rmenusep"></div>
+              <button class="rmenuitem rmenuact" id="shareAgent" type="button">
+                🔗 Share (read-only)
+              </button>
               <div class="rmenusep"></div>
               <button class="rmenuitem rmenuact" id="stopAgent" type="button">⏹ Stop agent</button>
               <button class="rmenuitem rmenuact" id="restartAgent" type="button">
@@ -1645,6 +1767,29 @@
 
     <div class="launchoverlay" id="launch" style="display: none"></div>
     <div class="launchoverlay" id="newform" style="display: none"></div>
+
+    <!-- Single-agent view-only share: QR + link a viewer can open to watch (not
+         steer) just this agent. The link opens a read-only console; the host
+         enforces read-only regardless of the client. -->
+    <div class="modal-backdrop" id="shareModal" hidden>
+      <div class="sharebox" role="dialog" aria-modal="true" aria-label="Share agent">
+        <h3>Share this agent</h3>
+        <p class="sub" id="shareSub">view-only · anyone with the link can watch</p>
+        <div class="qr" id="shareQr"></div>
+        <div class="shareurl" id="shareUrl"></div>
+        <div class="srow">
+          <button class="primary" id="shareCopy" type="button">Copy link</button>
+          <button id="shareClose" type="button">Close</button>
+        </div>
+        <div class="srow">
+          <button class="danger" id="shareRevoke" type="button">Revoke</button>
+        </div>
+        <p class="note" id="shareNote">
+          Read-only: viewers see this agent's terminal but cannot type, stop, or restart it.
+          The link expires automatically and stops working when revoked.
+        </p>
+      </div>
+    </div>
 
     <!-- Cmd/Ctrl+K omnibox: search agents by title (instant) then output (tail),
          or spawn a new agent in the highlighted agent's cwd with the typed prompt. -->
@@ -2269,6 +2414,10 @@
           });
           return { ok: r.ok, text: await r.text() };
         },
+        async del(path) {
+          const r = await fetch(withTok(path), { method: "DELETE" });
+          return { ok: r.ok, text: await r.text() };
+        },
         subscribe(path, onText, onOpen, onError) {
           const ev = new EventSource(withTok(path));
           ev.onopen = () => onOpen && onOpen();
@@ -2287,6 +2436,10 @@
           },
           async post(path, bodyObj) {
             const r = await rtc.req("POST", path, JSON.stringify(bodyObj));
+            return { ok: r.status >= 200 && r.status < 300, text: r.text };
+          },
+          async del(path) {
+            const r = await rtc.req("DELETE", path);
             return { ok: r.status >= 200 && r.status < 300, text: r.text };
           },
           subscribe(path, onText, onOpen, onError) {
@@ -2318,6 +2471,26 @@
       const sources = new Map(); // id -> { id, host, kind, tx, client, live, devices, serverCount }
       const srcFor = (e) => (e && sources.get(e._room)) || sources.get(LOCAL) || null;
       const txFor = (e) => srcFor(e)?.tx || localTx;
+      // True when the agent lives in a view-only share room (the host advertises
+      // this via /api/whoami → share.readonly and 403s every write regardless).
+      const isReadonlyEnt = (e) => !!srcFor(e)?.readonly;
+      // Wrap a source tx so every write (POST) is refused client-side on a
+      // read-only share — reads (fetchJSON/fetchText/subscribe) pass through. The
+      // host is the real boundary; this just stops the UI from firing doomed
+      // writes (send / resize / presence / kill / restart / share).
+      function readonlyTx(tx) {
+        if (!tx || tx._ro) return tx;
+        return {
+          ...tx,
+          _ro: true,
+          async post() {
+            return { ok: false, text: "read-only share" };
+          },
+          async del() {
+            return { ok: false, text: "read-only share" };
+          },
+        };
+      }
 
       // ---- connection-path classification (header [local/lan/wan/relay] pill) ----
       // Tells the user, at a glance, whether the terminal they're watching rides the
@@ -3083,6 +3256,113 @@
           alert(`Restart failed for ${who}:\n${(res && res.text) || "request failed"}`);
       }
 
+      // ---- Single-agent view-only share (QR + link) -----------------------
+      // Ask THIS agent's host to mint a fresh, scoped, read-only share room and
+      // show its link + QR. The host stands up an isolated e2ee room exposing
+      // only this agent (read-only) — see ts/agentShare.ts. Never reuses the
+      // fleet/master token, so the link can't reach other agents or steer.
+      let currentShare = null; // { shareId, link } of the share shown in the modal
+      async function shareAgent(ent) {
+        const e = ent || (sel ? entries.find((x) => x._key === sel) : null);
+        if (!e) return;
+        // A read-only viewer can't re-share; its tx 403s /api/share anyway.
+        if (isReadonlyEnt(e)) {
+          alert("This is a read-only shared view — you can't share it further.");
+          return;
+        }
+        // Scope by the stable agent_id when we have it (pid is reused); fall back
+        // to pid so an older host still resolves the right agent.
+        const agentRef = e.agent_id || String(e.pid);
+        const res = await txFor(e)
+          .post("/api/share", { agent: agentRef, perm: "r" })
+          .catch((err) => ({ ok: false, text: String(err?.message || err) }));
+        if (!res || !res.ok) {
+          alert(`Couldn't create share link:\n${(res && res.text) || "request failed"}`);
+          return;
+        }
+        let info;
+        try {
+          info = JSON.parse(res.text);
+        } catch {
+          alert("Share created but the response was unreadable.");
+          return;
+        }
+        currentShare = { shareId: info.shareId, link: info.link, srcRoom: e._room };
+        openShareModal(info, e);
+      }
+
+      function openShareModal(info, e) {
+        const modal = $("shareModal");
+        if (!modal) return;
+        const who = e.title || cliLabel(e) || ident(e) || `pid ${e.pid}`;
+        $("shareSub").textContent = `view-only · ${who}`;
+        $("shareUrl").textContent = info.link;
+        renderQr($("shareQr"), info.link);
+        modal.hidden = false;
+      }
+      function closeShareModal() {
+        const modal = $("shareModal");
+        if (modal) modal.hidden = true;
+      }
+      // Draw the QR onto a fresh canvas (white quiet-zone always, so it scans in
+      // dark mode too). `qrcode` is the vendored global from qrcode.js.
+      function renderQr(container, text) {
+        container.textContent = "";
+        try {
+          const qr = qrcode(0, "M"); // type 0 = smallest version that fits; EC level M
+          qr.addData(text);
+          qr.make();
+          const n = qr.getModuleCount();
+          const cell = 5,
+            margin = 4;
+          const px = (n + margin * 2) * cell;
+          const cv = document.createElement("canvas");
+          cv.width = cv.height = px;
+          const ctx = cv.getContext("2d");
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(0, 0, px, px);
+          ctx.fillStyle = "#000";
+          for (let r = 0; r < n; r++)
+            for (let c = 0; c < n; c++)
+              if (qr.isDark(r, c))
+                ctx.fillRect((c + margin) * cell, (r + margin) * cell, cell, cell);
+          container.appendChild(cv);
+        } catch (err) {
+          container.textContent = "QR unavailable";
+        }
+      }
+      async function revokeCurrentShare() {
+        if (!currentShare) return closeShareModal();
+        // DELETE over whichever transport owns the agent's host (local or the
+        // room the agent lives in) — the same host that minted the share.
+        const e = entries.find((x) => x._room === currentShare.srcRoom) || null;
+        const tx = (e ? srcFor(e)?.tx : null) || localTx;
+        try {
+          await tx.del("/api/share/" + encodeURIComponent(currentShare.shareId));
+        } catch {}
+        currentShare = null;
+        closeShareModal();
+      }
+      (function shareModalBoot() {
+        $("shareClose")?.addEventListener("click", closeShareModal);
+        $("shareRevoke")?.addEventListener("click", revokeCurrentShare);
+        $("shareCopy")?.addEventListener("click", async () => {
+          if (!currentShare) return;
+          try {
+            await navigator.clipboard.writeText(currentShare.link);
+            const b = $("shareCopy");
+            const t = b.textContent;
+            b.textContent = "Copied ✓";
+            setTimeout(() => (b.textContent = t), 1200);
+          } catch {
+            alert("Copy failed — select the link manually.");
+          }
+        });
+        $("shareModal")?.addEventListener("click", (ev) => {
+          if (ev.target === $("shareModal")) closeShareModal(); // backdrop click
+        });
+      })();
+
       // ---- Terminal right-click menu: copy + customizable quick commands ----
       // A right-click on the terminal used to copy the selection outright. Now it
       // opens a small menu: Copy, Paste, and user-defined quick commands. A quick
@@ -3477,6 +3757,7 @@
           });
         }
         if (cb) cb.addEventListener("change", () => setPerfHud(cb.checked));
+        $("shareAgent")?.addEventListener("click", () => (closePanel(), shareAgent()));
         $("stopAgent")?.addEventListener("click", () => (closePanel(), stopAgent(false)));
         $("restartAgent")?.addEventListener("click", () => (closePanel(), restartAgent()));
         $("killAgent")?.addEventListener("click", () => (closePanel(), stopAgent(true)));
@@ -3969,6 +4250,9 @@
         // Mobile: flip the single-column layout to the terminal ("detail") pane.
         // Done BEFORE term.open below so xterm measures a visible container.
         document.querySelector(".app").classList.add("show-detail");
+        // View-only share: hide the composer / key bar / agent-action menu items and
+        // show a read-only badge. Writes are also refused at the tx layer + the host.
+        document.querySelector(".app").classList.toggle("readonly-agent", isReadonlyEnt(e));
         $("rhead").style.display = "flex";
         $("rdot").className = "dot " + e.status;
         const rname = e.title || cliLabel(e) || ident(e) || "agent";
@@ -4053,6 +4337,12 @@
         let suppressPush = true;
         const pushSize = () => {
           if (term && sel === e._key && !suppressPush) {
+            // Read-only viewer: we can't drive the agent's PTY, so a pane resize
+            // just re-letterboxes the agent's fixed grid to fit — never a SIGWINCH.
+            if (isReadonlyEnt(e)) {
+              applyCanvasScale();
+              return;
+            }
             lastDroveAt = Date.now(); // we're driving the size now (lease the grid)
             tx.post("/api/resize/" + encodeURIComponent(pid), {
               cols: term.cols,
@@ -4094,6 +4384,16 @@
         const fitAndSync = (sz) => {
           if (sel !== selKey || !term) return;
           if (sz && sz.cols && sz.rows) agentSize = sz; // remember for the badge tooltip
+          // Read-only viewer: don't reflow the agent to our pane (we can't resize
+          // it, and shouldn't). Adopt the AGENT's own grid and CSS-scale it to fit,
+          // exactly like a shared-canvas watcher — otherwise the raw stream (emitted
+          // at the agent's width) wraps at the wrong column in our terminal.
+          if (isReadonlyEnt(e)) {
+            if (sz && sz.cols && sz.rows) followAgentSize(sz);
+            else applyCanvasScale();
+            suppressPush = false;
+            return;
+          }
           try {
             fit.fit();
           } catch {}
@@ -4868,12 +5168,20 @@
           // and tag this room's agents with it in listSource. Best-effort: an older
           // host with no /api/whoami just leaves rows device-less.
           try {
-            s.deviceLabel = (await s.tx.fetchJSON("/api/whoami"))?.host || "";
+            const who = await s.tx.fetchJSON("/api/whoami");
+            s.deviceLabel = who?.host || "";
+            // A single-agent view-only share advertises its capability here so the
+            // console enters read-only mode (hide + refuse writes). Wrap this
+            // source's tx so no write leaks through any call path; the host still
+            // enforces (403s writes) as the real boundary.
+            s.readonly = !!who?.share?.readonly;
+            s.shareAgentId = who?.share?.agent_id || null;
+            if (s.readonly) s.tx = readonlyTx(s.tx);
             // whoami resolves after the first listSource may have already rendered
             // this room's rows device-less (and activity-gated polling might not
             // re-fire soon on a backgrounded tab). Re-render now so the host label
-            // lands immediately instead of lagging a poll.
-            if (s.deviceLabel) loadList();
+            // (and any read-only state) lands immediately instead of lagging a poll.
+            if (s.deviceLabel || s.readonly) loadList();
           } catch {
             s.deviceLabel = "";
           }
