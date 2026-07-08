@@ -4413,7 +4413,18 @@
         // inside fitAndSync keeps an already-matching agent from a redundant SIGWINCH.
         // Returns the in-flight sync promise so the initial open can await it
         // before starting the tail (below); tab-reactivation callers ignore it.
-        resyncTerm = () => {
+        resyncTerm = async () => {
+          if (sel !== selKey || !term) return;
+          // Settle the source's read-only state first (bounded) so fitAndSync picks
+          // the right sizing path on the FIRST render: a read-only viewer must
+          // adopt the agent's grid, not fit-to-pane — the raw snapshot can't be
+          // re-wrapped later. Bounded so an older host without whoami never wedges.
+          const src = srcFor(e);
+          if (src?.whoamiReady) {
+            try {
+              await Promise.race([src.whoamiReady, new Promise((r) => setTimeout(r, 1500))]);
+            } catch {}
+          }
           if (sel !== selKey || !term) return;
           return tx
             .fetchJSON("/api/size/" + encodeURIComponent(pid))
@@ -5167,6 +5178,13 @@
           // every machine's rows would be unlabelled. Ask the host who it is once
           // and tag this room's agents with it in listSource. Best-effort: an older
           // host with no /api/whoami just leaves rows device-less.
+          // Expose whoami as an awaitable so the terminal can settle the read-only
+          // state BEFORE it sizes/renders — otherwise a fast selection races the
+          // fetch and the initial raw snapshot lands on a fit-to-pane grid that a
+          // later resize can't un-wrap (a read-only viewer must render at the
+          // AGENT's grid). Re-created on every (re)connect.
+          let resolveWhoami;
+          s.whoamiReady = new Promise((r) => (resolveWhoami = r));
           try {
             const who = await s.tx.fetchJSON("/api/whoami");
             s.deviceLabel = who?.host || "";
@@ -5184,6 +5202,11 @@
             if (s.deviceLabel || s.readonly) loadList();
           } catch {
             s.deviceLabel = "";
+            // No whoami (older host / error): treat as writable, don't wedge the
+            // terminal — resolve so any awaiter proceeds immediately.
+            s.readonly = s.readonly || false;
+          } finally {
+            resolveWhoami();
           }
         } finally {
           s.reconnecting = false;
