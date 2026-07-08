@@ -106,7 +106,14 @@ EOF
 # silently and let the user run `ay serve --share` themselves. We redirect the
 # spawned server's stdin from /dev/tty too, so its own "open the console in your
 # browser?" prompt has a terminal to read from.
-if command -v ay >/dev/null 2>&1 && [ -r /dev/tty ]; then
+#
+# The guard actually OPENS /dev/tty rather than testing `[ -r /dev/tty ]`: on a
+# headless host (SSM, CI, cron) the device node exists and `-r` passes, yet
+# open() fails with ENXIO ("cannot create /dev/tty: No such device or address"),
+# which then leaks to the log. `{ : < /dev/tty; }` performs the real open and is
+# false exactly when the terminal is unusable. `[ -t 0 ]` won't do — under
+# curl | sh stdin is the pipe, so it's false even on an interactive box.
+if command -v ay >/dev/null 2>&1 && { : < /dev/tty; } 2>/dev/null; then
   printf '\n\033[36m▸\033[0m Start sharing now and get a console link? [Y/n] ' > /dev/tty
   read -r ans < /dev/tty || ans=""
   case "$ans" in
