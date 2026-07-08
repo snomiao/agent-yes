@@ -18,6 +18,22 @@ elif command -v npm >/dev/null 2>&1; then
   RT="npm"
 else
   say "No bun or npm found — installing bun (https://bun.sh)…"
+  # bun's installer unpacks a .zip, so it hard-fails with "unzip is required to
+  # install bun" on a minimal image (e.g. stock Debian) that ships no unzip.
+  # Ensure it first via whatever package manager is present — best-effort, with
+  # sudo only when we aren't already root and sudo exists.
+  if ! command -v unzip >/dev/null 2>&1; then
+    say "Installing unzip (required by the bun installer)…"
+    if [ "$(id -u)" = 0 ]; then SUDO=""; elif command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else SUDO=""; fi
+    if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update -qq && $SUDO apt-get install -y -qq unzip
+    elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y -q unzip
+    elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y -q unzip
+    elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-progress unzip
+    elif command -v pacman >/dev/null 2>&1; then $SUDO pacman -Sy --noconfirm unzip
+    elif command -v zypper >/dev/null 2>&1; then $SUDO zypper -q install -y unzip
+    fi
+    command -v unzip >/dev/null 2>&1 || err "couldn't install unzip automatically — install it and re-run (e.g. apt-get install unzip)."
+  fi
   curl -fsSL https://bun.sh/install | bash
   # Make bun available to the rest of this script.
   BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
