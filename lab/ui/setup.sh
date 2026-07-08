@@ -110,10 +110,16 @@ EOF
 # The guard actually OPENS /dev/tty rather than testing `[ -r /dev/tty ]`: on a
 # headless host (SSM, CI, cron) the device node exists and `-r` passes, yet
 # open() fails with ENXIO ("cannot create /dev/tty: No such device or address"),
-# which then leaks to the log. `{ : < /dev/tty; }` performs the real open and is
-# false exactly when the terminal is unusable. `[ -t 0 ]` won't do — under
-# curl | sh stdin is the pipe, so it's false even on an interactive box.
-if command -v ay >/dev/null 2>&1 && { : < /dev/tty; } 2>/dev/null; then
+# which then leaks to the log. `[ -t 0 ]` won't do either — under curl | sh
+# stdin is the pipe, so it's false even on an interactive box.
+#
+# The open-test runs in a SUBSHELL `( : < /dev/tty )`, not a brace group: POSIX
+# makes a redirection error fatal to a non-interactive shell, and dash (Debian's
+# /bin/sh) enforces it — a `{ : < /dev/tty; }` that fails to open would kill the
+# whole script (exit 2), even inside this `if` and even with the error muted by
+# `2>/dev/null`. The subshell confines that fatal exit; the parent just reads its
+# non-zero status and skips the prompt cleanly.
+if command -v ay >/dev/null 2>&1 && ( : < /dev/tty ) 2>/dev/null; then
   printf '\n\033[36m▸\033[0m Start sharing now and get a console link? [Y/n] ' > /dev/tty
   read -r ans < /dev/tty || ans=""
   case "$ans" in
@@ -121,3 +127,10 @@ if command -v ay >/dev/null 2>&1 && { : < /dev/tty; } 2>/dev/null; then
     *)     exec ay serve --share < /dev/tty ;;
   esac
 fi
+
+# The install itself is done and successful by here. Exit 0 explicitly so the
+# script's status isn't inherited from the trailing `if` — on a non-tty host the
+# guard's `{ : < /dev/tty; }` is false, which would otherwise leave `curl … | sh`
+# exiting non-zero (2) and read as a failure by CI despite a clean install. Real
+# failures above already `exit 1` before reaching here, so this never masks them.
+exit 0
