@@ -24,6 +24,33 @@ export interface Env {
 
 const SUBPROTO = "ay-signal-1";
 
+// Defense-in-depth CSP for the console document. The console renders agent
+// metadata (terminal title / prompt / cwd) supplied by whatever host a share
+// link points at — untrusted by definition — so even with output escaping we
+// lock down where a hypothetical injection could send data. Blocks arbitrary
+// fetch/beacon exfil (connect-src / img-src), plugins (object-src), <base>
+// hijack (base-uri), clickjacking (frame-ancestors) and form exfil
+// (form-action). script-src keeps 'unsafe-inline' because the console is a
+// single-file inline app (no inline event-handler attributes exist, so a
+// stricter nonce split is a follow-up, not a regression risk); xterm loads from
+// jsdelivr. connect-src allows any wss: so custom / self-hosted signaling hosts
+// still work, while forbidding arbitrary https fetch exfil. Keep this in sync
+// with the copy in ts/serve.ts (serveUiFile).
+const CSP = [
+  "default-src 'self'",
+  "base-uri 'none'",
+  "object-src 'none'",
+  "frame-ancestors 'none'",
+  "form-action 'self'",
+  "img-src 'self' data:",
+  "font-src 'self' data:",
+  "style-src 'self' 'unsafe-inline'",
+  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+  "connect-src 'self' https://s.agent-yes.com https://agent-yes.com wss:",
+  "worker-src 'self'",
+  "manifest-src 'self'",
+].join("; ");
+
 // Heartbeat frames (host pings, server pongs). Defined once so the hibernation
 // auto-response pair below matches the host's wire bytes EXACTLY — the runtime
 // only auto-answers an incoming message that is byte-identical to PING.
@@ -52,6 +79,7 @@ export default {
     if (ct.includes("text/html") || ct.includes("javascript")) {
       const h = new Headers(res.headers);
       h.set("Cache-Control", "no-cache");
+      if (ct.includes("text/html")) h.set("Content-Security-Policy", CSP);
       return new Response(res.body, { status: res.status, statusText: res.statusText, headers: h });
     }
     return res;

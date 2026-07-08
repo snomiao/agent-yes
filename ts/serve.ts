@@ -2390,10 +2390,31 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // (the page holds no secrets); the page carries the token via the #k= link
   // and sends it on every /api call.
   const uiDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "lab", "ui");
+  // Defense-in-depth CSP for the console document served by --http (mirrors the
+  // one in lab/ui/cf/worker.ts — keep them in sync). The console renders remote
+  // host-supplied agent metadata, so we constrain where an injection could send
+  // data even though output is escaped. connect-src allows any wss: so custom
+  // signaling hosts still work; 'self' covers same-origin /api + EventSource.
+  const CONSOLE_CSP = [
+    "default-src 'self'",
+    "base-uri 'none'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+    "img-src 'self' data:",
+    "font-src 'self' data:",
+    "style-src 'self' 'unsafe-inline'",
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+    "connect-src 'self' https://s.agent-yes.com https://agent-yes.com wss:",
+    "worker-src 'self'",
+    "manifest-src 'self'",
+  ].join("; ");
   const serveUiFile = async (name: string, type: string): Promise<Response> => {
     try {
       const buf = await readFile(path.join(uiDir, name));
-      return new Response(buf, { headers: { "Content-Type": type } });
+      const headers: Record<string, string> = { "Content-Type": type };
+      if (type.includes("text/html")) headers["Content-Security-Policy"] = CONSOLE_CSP;
+      return new Response(buf, { headers });
     } catch {
       return new Response("UI assets not found in this install — use the /api endpoints", {
         status: 404,
