@@ -2874,6 +2874,19 @@ async function cmdSend(rest: string[]): Promise<number> {
   const trailing = controlCodeFromName(codeName);
 
   const record = await resolveOne(keyword, opts);
+
+  // Misdelivery guard: when the keyword isn't a plain pid (an exact identity),
+  // it resolved by cwd/cli/prompt substring — which can silently land on an
+  // unintended session in another tree (resolveOne returns a lone fuzzy match
+  // with no prompt). Echo exactly where it resolved to stderr BEFORE injecting,
+  // so the sender can catch a wrong target instead of only finding out when the
+  // reply never comes. Numeric identity sends stay quiet.
+  if (!/^\d+$/.test(keyword)) {
+    process.stderr.write(
+      `ay send → pid ${record.pid} ${record.cli} @ ${shortenPath(record.cwd)}\n`,
+    );
+  }
+
   const fifoPath = record.fifo_file;
   if (!fifoPath) {
     throw new Error(
@@ -2910,14 +2923,20 @@ async function cmdSend(rest: string[]): Promise<number> {
   }
 
   // When an agent sends, prefix one line so the recipient knows who pinged it
-  // and exactly how to reply (to a resolvable pid — the sender's own). BUT a
-  // slash command is only recognized when `/` is the very first character of the
-  // submitted message; the prefix would bump it to line 2 and the CLI would type
-  // the command as plain text. So skip the prefix for a command body and send it
-  // verbatim — attribution is dropped for the command, but it actually runs.
+  // and exactly how to reply. Reply to the sender's stable agent_id, NOT its pid:
+  // a pid is invalidated the moment the sender restarts (new pid), silently
+  // breaking the reply route; the agent_id is preserved across restart (see
+  // cmdRestart's AGENT_YES_AGENT_ID injection), so the route survives. The `#pid`
+  // stays in the header for human readability. Fall back to the pid only for a
+  // legacy agent with no recorded agent_id. BUT a slash command is only
+  // recognized when `/` is the very first character of the submitted message; the
+  // prefix would bump it to line 2 and the CLI would type the command as plain
+  // text. So skip the prefix for a command body and send it verbatim —
+  // attribution is dropped for the command, but it actually runs.
+  const replyTarget = sender.agent?.agent_id || sender.agent?.pid;
   const prefix =
     sender.agent && !isSlashCommand(body)
-      ? `[from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${sender.agent.pid} "..."]\n`
+      ? `[from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${replyTarget} "..."]\n`
       : "";
 
   const fullBody = prefix + body;
@@ -2983,7 +3002,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   }
 
   const replyHint = sender.agent
-    ? `  ay send ${sender.agent.pid} "..."              # reply to sender\n`
+    ? `  ay send ${replyTarget} "..."              # reply to sender\n`
     : "";
   process.stderr.write(
     `\n` +
@@ -3879,10 +3898,21 @@ async function cmdRestart(rest: string[]): Promise<number> {
 
   // Detached launcher; we deliberately don't track its pid — see restartHintLines
   // for why the resumed agent's pid isn't reportable synchronously.
+  //
+  // Carry the old record's agent_id into the relaunch so the resumed agent keeps
+  // the SAME stable id (only the pid changes). Without this the wrapper mints a
+  // fresh id and any `ay send <agent_id>` reply route breaks across a restart —
+  // exactly the misdelivery that made a pinned-pid reply header no-match after
+  // the sender restarted. The Rust/TS wrapper adopts AGENT_YES_AGENT_ID for its
+  // own record and strips it from the wrapped CLI's env (pty_spawner.rs /
+  // index.ts), so subagents don't collide on the id.
   Bun.spawn(["agent-yes", "--cli=" + record.cli, ...resumeArgs], {
     cwd: record.cwd,
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],
+    env: record.agent_id
+      ? { ...process.env, AGENT_YES_AGENT_ID: record.agent_id }
+      : process.env,
   });
 
   const { out, err } = restartHintLines(record.cli, record.cwd, strategy);
