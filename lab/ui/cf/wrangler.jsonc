@@ -19,7 +19,10 @@
     // ./public/blog/ (served at /blog/ — linked from the landing nav), and the
     // install scripts to ./public/ (agent-yes.com/setup.sh | setup.ps1). A glob
     // (../*.js) avoids silently breaking when the UI gains a new import.
-    "command": "mkdir -p ./public/w && cp ../index.html ../*.js ../manifest.webmanifest ../icon.svg ./public/w/ && cp ../landing.html ./public/index.html && cp ../architecture.html ./public/architecture.html && rm -rf ./public/blog && cp -R ../blog ./public/blog && cp ../setup.sh ../setup.ps1 ./public/",
+    // The _headers file (copied to ./public/_headers) applies the console CSP to
+    // the STATIC assets — Cloudflare serves them before the Worker, so worker.ts's
+    // CSP never reaches the document; _headers is the mechanism that does.
+    "command": "mkdir -p ./public/w && cp ../index.html ../*.js ../manifest.webmanifest ../icon.svg ./public/w/ && cp ../landing.html ./public/index.html && cp ../architecture.html ./public/architecture.html && rm -rf ./public/blog && cp -R ../blog ./public/blog && cp ../setup.sh ../setup.ps1 ./public/ && cp _headers ./public/_headers",
   },
   // Static console UI (served for every non-WebSocket request).
   "assets": { "directory": "./public", "binding": "ASSETS" },
