@@ -147,3 +147,47 @@ describe("scopedFetch — read metadata", () => {
     expect(res.status).toBe(403);
   });
 });
+
+describe("scopedFetch — read-write (rw / steer) share", () => {
+  const mkRw = () => scopedFetch(SHARED, makeInner({}), "rw");
+
+  it("advertises perm=rw and readonly=false on /api/whoami", async () => {
+    const res = await mkRw()(new Request("http://ay.local/api/whoami"));
+    const who = (await res.json()) as { share: { readonly: boolean; perm: string } };
+    expect(who.share.perm).toBe("rw");
+    expect(who.share.readonly).toBe(false);
+  });
+
+  it("still DENIES control (kill / restart / spawn) — rw is steer, not control", async () => {
+    for (const path of ["/api/kill", "/api/restart", "/api/spawn"]) {
+      const res = await mkRw()(new Request("http://ay.local" + path, { method: "POST" }));
+      expect(res.status).toBe(403);
+    }
+  });
+
+  it("DENIES send/resize aimed at an agent that isn't the shared one", async () => {
+    // keyword can't resolve on this machine → targetIsAgent false → 403, so an rw
+    // holder can only steer THE shared agent, never a sibling.
+    const send = await mkRw()(
+      new Request("http://ay.local/api/send", {
+        method: "POST",
+        body: JSON.stringify({ keyword: "zzzzzzzzzzzz-nope", msg: "x" }),
+      }),
+    );
+    expect(send.status).toBe(403);
+    const resize = await mkRw()(
+      new Request("http://ay.local/api/resize/zzzzzzzzzzzz-nope", { method: "POST" }),
+    );
+    expect(resize.status).toBe(403);
+  });
+
+  it("still denies send on a VIEW-ONLY (r) share", async () => {
+    const res = await mk()(
+      new Request("http://ay.local/api/send", {
+        method: "POST",
+        body: JSON.stringify({ keyword: "1", msg: "x" }),
+      }),
+    );
+    expect(res.status).toBe(403);
+  });
+});

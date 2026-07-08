@@ -327,6 +327,31 @@
       .app.readonly-agent .rmenuact {
         display: none !important;
       }
+      /* Read-write (steer) share: the viewer CAN type, so composer + key bar stay.
+         But they aren't granted control/admin, so hide stop/restart/kill/share. */
+      .rwbadge {
+        display: none;
+        align-items: center;
+        gap: 4px;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: 999px;
+        color: #7c3aed;
+        background: color-mix(in srgb, #8b5cf6 18%, transparent);
+        border: 1px solid color-mix(in srgb, #8b5cf6 45%, transparent);
+        white-space: nowrap;
+      }
+      .app.steer-agent .rwbadge {
+        display: inline-flex;
+      }
+      .app.steer-agent #stopAgent,
+      .app.steer-agent #restartAgent,
+      .app.steer-agent #killAgent,
+      .app.steer-agent #shareAgent,
+      .app.steer-agent #shareAgentRW {
+        display: none !important;
+      }
       /* Share modal — QR + link for a single-agent view-only share. */
       .modal-backdrop {
         position: fixed;
@@ -413,6 +438,42 @@
         opacity: 0.65;
         margin-top: 12px;
         line-height: 1.4;
+      }
+      .sharewarn[hidden] {
+        display: none;
+      }
+      .sharewarn {
+        border: 1px solid color-mix(in srgb, #dc2626 55%, transparent);
+        background: color-mix(in srgb, #dc2626 12%, transparent);
+        border-radius: 10px;
+        padding: 14px;
+        margin-bottom: 4px;
+      }
+      .sharewarn .warnhead {
+        font-weight: 700;
+        color: #dc2626;
+        margin-bottom: 8px;
+        font-size: 14px;
+      }
+      .sharewarn p {
+        margin: 0 0 8px;
+        font-size: 12.5px;
+        line-height: 1.45;
+      }
+      .sharewarn button {
+        width: 100%;
+        padding: 10px;
+        margin-top: 4px;
+        border-radius: 8px;
+        border: 1px solid #dc2626;
+        background: #dc2626;
+        color: #fff;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #shareRevealable[hidden] {
+        display: none;
       }
       /* Terminal font-size stepper (a static row, not a hover/click target). */
       .rmenufont {
@@ -1642,6 +1703,9 @@
           <span class="robadge" title="view-only share — you can watch but not steer this agent"
             >👁 read-only</span
           >
+          <span class="rwbadge" title="read-write share — you can type but not stop/restart this agent"
+            >✏️ read-write</span
+          >
           <span class="live"
             ><span class="dot" id="livedot"></span><span id="livetxt">connecting…</span></span
           >
@@ -1668,7 +1732,10 @@
               >
               <div class="rmenusep"></div>
               <button class="rmenuitem rmenuact" id="shareAgent" type="button">
-                🔗 Share (read-only)
+                👁 Share (view-only)
+              </button>
+              <button class="rmenuitem rmenuact" id="shareAgentRW" type="button">
+                ✏️ Share (read-write)…
               </button>
               <div class="rmenusep"></div>
               <button class="rmenuitem rmenuact" id="stopAgent" type="button">⏹ Stop agent</button>
@@ -1773,21 +1840,44 @@
          enforces read-only regardless of the client. -->
     <div class="modal-backdrop" id="shareModal" hidden>
       <div class="sharebox" role="dialog" aria-modal="true" aria-label="Share agent">
-        <h3>Share this agent</h3>
+        <h3 id="shareTitle">Share this agent</h3>
         <p class="sub" id="shareSub">view-only · anyone with the link can watch</p>
-        <div class="qr" id="shareQr"></div>
-        <div class="shareurl" id="shareUrl"></div>
-        <div class="srow">
-          <button class="primary" id="shareCopy" type="button">Copy link</button>
-          <button id="shareClose" type="button">Close</button>
+
+        <!-- Read-write warning gate: the link is NOT shown until the operator
+             acknowledges that it hands over control. Shown only for rw shares. -->
+        <div class="sharewarn" id="shareWarn" hidden>
+          <div class="warnhead">⚠️ This link lets anyone control this agent</div>
+          <p>
+            Whoever opens this link can <strong>type into this agent</strong> — and because an
+            agent can run commands, that can mean <strong>control of your whole system</strong>.
+            The link isn't a password prompt: no further confirmation is asked.
+          </p>
+          <p><strong>Only share it with someone you completely trust.</strong></p>
+          <button class="danger" id="shareReveal" type="button">
+            I understand — reveal the link
+          </button>
         </div>
-        <div class="srow">
-          <button class="danger" id="shareRevoke" type="button">Revoke</button>
+
+        <!-- Link + QR, hidden behind the warning for rw shares. -->
+        <div id="shareRevealable">
+          <div class="qr" id="shareQr"></div>
+          <div class="shareurl" id="shareUrl"></div>
+          <div class="srow">
+            <button class="primary" id="shareCopy" type="button">Copy link</button>
+            <button id="shareClose" type="button">Close</button>
+          </div>
+          <div class="srow">
+            <button class="danger" id="shareRevoke" type="button">Revoke</button>
+          </div>
+          <p class="note" id="shareNote">
+            View-only: viewers see this agent's terminal (which may include secrets) but cannot
+            type, stop, or restart it. The link expires automatically and stops working when
+            revoked.
+          </p>
         </div>
-        <p class="note" id="shareNote">
-          Read-only: viewers see this agent's terminal but cannot type, stop, or restart it.
-          The link expires automatically and stops working when revoked.
-        </p>
+        <div class="srow" id="shareWarnClose" hidden>
+          <button id="shareCloseAlt" type="button">Cancel</button>
+        </div>
       </div>
     </div>
 
@@ -3261,48 +3351,92 @@
       // show its link + QR. The host stands up an isolated e2ee room exposing
       // only this agent (read-only) — see ts/agentShare.ts. Never reuses the
       // fleet/master token, so the link can't reach other agents or steer.
-      let currentShare = null; // { shareId, link } of the share shown in the modal
-      async function shareAgent(ent) {
+      let currentShare = null; // { shareId, link, perm } of the share shown in the modal
+      let pendingRw = null; // the agent awaiting a read-write warning acknowledgement
+      // perm: "r" (view-only) or "rw" (read-write / steer). A read-write link hands
+      // over keystroke control of the agent — effectively control of the host — so
+      // it is NOT even minted until the operator clicks through the warning.
+      async function shareAgent(perm, ent) {
         const e = ent || (sel ? entries.find((x) => x._key === sel) : null);
         if (!e) return;
-        // A read-only viewer can't re-share; its tx 403s /api/share anyway.
-        if (isReadonlyEnt(e)) {
-          alert("This is a read-only shared view — you can't share it further.");
+        // A shared viewer can't re-share; its tx 403s /api/share anyway.
+        if (isReadonlyEnt(e) || sharePermOf(e)) {
+          alert("This is a shared view — you can't re-share it from here.");
           return;
         }
-        // Scope by the stable agent_id when we have it (pid is reused); fall back
-        // to pid so an older host still resolves the right agent.
-        const agentRef = e.agent_id || String(e.pid);
+        if (perm === "rw") {
+          // Show the warning FIRST; mint only after "reveal" (revealRwShare).
+          pendingRw = e;
+          openShareModal(null, e, "rw");
+          return;
+        }
+        const info = await mintShare(e, "r");
+        if (info) openShareModal(info, e, "r");
+      }
+      async function mintShare(e, perm) {
+        const agentRef = e.agent_id || String(e.pid); // stable id; fall back to pid
         const res = await txFor(e)
-          .post("/api/share", { agent: agentRef, perm: "r" })
+          .post("/api/share", { agent: agentRef, perm })
           .catch((err) => ({ ok: false, text: String(err?.message || err) }));
         if (!res || !res.ok) {
           alert(`Couldn't create share link:\n${(res && res.text) || "request failed"}`);
-          return;
+          return null;
         }
         let info;
         try {
           info = JSON.parse(res.text);
         } catch {
           alert("Share created but the response was unreadable.");
-          return;
+          return null;
         }
-        currentShare = { shareId: info.shareId, link: info.link, srcRoom: e._room };
-        openShareModal(info, e);
+        currentShare = { shareId: info.shareId, link: info.link, srcRoom: e._room, perm };
+        return info;
+      }
+      // "I understand — reveal": now that the operator has read the warning, mint
+      // the read-write share and reveal its URL/QR.
+      async function revealRwShare() {
+        const e = pendingRw;
+        if (!e) return;
+        pendingRw = null;
+        const info = await mintShare(e, "rw");
+        if (!info) return closeShareModal();
+        $("shareUrl").textContent = info.link;
+        renderQr($("shareQr"), info.link);
+        $("shareWarn").hidden = true;
+        $("shareWarnClose").hidden = true;
+        $("shareRevealable").hidden = false;
       }
 
-      function openShareModal(info, e) {
+      function openShareModal(info, e, perm) {
         const modal = $("shareModal");
         if (!modal) return;
         const who = e.title || cliLabel(e) || ident(e) || `pid ${e.pid}`;
-        $("shareSub").textContent = `view-only · ${who}`;
-        $("shareUrl").textContent = info.link;
-        renderQr($("shareQr"), info.link);
+        const rw = perm === "rw";
+        $("shareTitle").textContent = rw ? "Share control of this agent" : "Share this agent";
+        $("shareSub").textContent = `${rw ? "read-write · can type" : "view-only · can watch"} · ${who}`;
+        $("shareNote").textContent = rw
+          ? "Read-write: viewers can type into this agent (interrupt, run commands). They cannot stop or restart it. The link expires and stops working when revoked."
+          : "View-only: viewers see this agent's terminal (which may include secrets) but cannot type, stop, or restart it. The link expires and stops working when revoked.";
+        // Read-write opens in the warning state with NO link/QR shown or rendered
+        // yet; view-only shows the link immediately (the milder note suffices).
+        $("shareWarn").hidden = !rw;
+        $("shareWarnClose").hidden = !rw;
+        $("shareRevealable").hidden = rw;
+        if (!rw && info) {
+          $("shareUrl").textContent = info.link;
+          renderQr($("shareQr"), info.link);
+        }
         modal.hidden = false;
+      }
+      // The perm a shared SOURCE was granted (from whoami), or null when we're the
+      // owner. Used to hide re-share/admin controls a viewer isn't allowed.
+      function sharePermOf(e) {
+        return srcFor(e)?.sharePerm || null;
       }
       function closeShareModal() {
         const modal = $("shareModal");
         if (modal) modal.hidden = true;
+        pendingRw = null; // a cancelled read-write flow never minted anything
       }
       // Draw the QR onto a fresh canvas (white quiet-zone always, so it scans in
       // dark mode too). `qrcode` is the vendored global from qrcode.js.
@@ -3345,6 +3479,8 @@
       }
       (function shareModalBoot() {
         $("shareClose")?.addEventListener("click", closeShareModal);
+        $("shareCloseAlt")?.addEventListener("click", closeShareModal);
+        $("shareReveal")?.addEventListener("click", revealRwShare);
         $("shareRevoke")?.addEventListener("click", revokeCurrentShare);
         $("shareCopy")?.addEventListener("click", async () => {
           if (!currentShare) return;
@@ -3757,7 +3893,8 @@
           });
         }
         if (cb) cb.addEventListener("change", () => setPerfHud(cb.checked));
-        $("shareAgent")?.addEventListener("click", () => (closePanel(), shareAgent()));
+        $("shareAgent")?.addEventListener("click", () => (closePanel(), shareAgent("r")));
+        $("shareAgentRW")?.addEventListener("click", () => (closePanel(), shareAgent("rw")));
         $("stopAgent")?.addEventListener("click", () => (closePanel(), stopAgent(false)));
         $("restartAgent")?.addEventListener("click", () => (closePanel(), restartAgent()));
         $("killAgent")?.addEventListener("click", () => (closePanel(), stopAgent(true)));
@@ -4250,9 +4387,13 @@
         // Mobile: flip the single-column layout to the terminal ("detail") pane.
         // Done BEFORE term.open below so xterm measures a visible container.
         document.querySelector(".app").classList.add("show-detail");
-        // View-only share: hide the composer / key bar / agent-action menu items and
-        // show a read-only badge. Writes are also refused at the tx layer + the host.
+        // Shared-view gating (host-enforced; this is UX):
+        //  • view-only (r)  → readonly-agent: hide composer/keybar + ALL agent actions.
+        //  • read-write (rw) → steer-agent: keep composer/keybar (can type), but hide
+        //    the admin actions (stop/restart/kill/share) a viewer isn't granted.
+        const _perm = sharePermOf(e);
         document.querySelector(".app").classList.toggle("readonly-agent", isReadonlyEnt(e));
+        document.querySelector(".app").classList.toggle("steer-agent", _perm === "rw");
         $("rhead").style.display = "flex";
         $("rdot").className = "dot " + e.status;
         const rname = e.title || cliLabel(e) || ident(e) || "agent";
@@ -5193,6 +5334,7 @@
             // source's tx so no write leaks through any call path; the host still
             // enforces (403s writes) as the real boundary.
             s.readonly = !!who?.share?.readonly;
+            s.sharePerm = who?.share?.perm || null; // "r" | "rw" | null(owner)
             s.shareAgentId = who?.share?.agent_id || null;
             if (s.readonly) s.tx = readonlyTx(s.tx);
             // whoami resolves after the first listSource may have already rendered
