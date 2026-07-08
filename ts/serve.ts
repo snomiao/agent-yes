@@ -343,6 +343,88 @@ function resolveDaemonManager(): DaemonManager | null {
   return order.find((m): m is DaemonManager => !!m) ?? null;
 }
 
+// Ask a JS package manager for its global bin dir, so a binary we just
+// `-g`-installed is discoverable in THIS process even though a fresh login
+// shell hasn't added that dir to PATH yet (setup.sh warns about exactly this).
+//   - bun: `bun pm bin -g` prints the dir directly.
+//   - npm: `npm prefix -g` prints the prefix; the bin lives at <prefix>/bin.
+async function globalBinDir(installer: string[]): Promise<string | null> {
+  const isBun = installer[1] === "add";
+  const query = isBun
+    ? [installer[0]!, "pm", "bin", "-g"]
+    : [installer[0]!, "prefix", "-g"];
+  const p = Bun.spawn(query, { stdout: "pipe", stderr: "ignore" });
+  if ((await p.exited) !== 0) return null;
+  const out = (await new Response(p.stdout).text()).trim();
+  if (!out) return null;
+  return isBun ? out : path.join(out, "bin");
+}
+
+// Does this manager's binary actually execute? A `bun add -g oxmgr` can succeed
+// yet leave a binary that can't run: oxmgr vendors a native binary requiring
+// GLIBC_2.39, which a box like Debian 12 (glibc 2.36) lacks, so exec dies with
+// "GLIBC_2.39 not found". Probe with `--version`: exit 0 means runnable; a
+// non-zero exit or spawn failure means the shim is on PATH but unusable.
+async function managerRunnable(mgr: DaemonManager): Promise<boolean> {
+  try {
+    const p = Bun.spawn([mgr.bin, "--version"], { stdout: "ignore", stderr: "ignore" });
+    return ((await p.exited) ?? 1) === 0;
+  } catch {
+    return false;
+  }
+}
+
+// Install one PM package globally via the SAME JS package manager that installed
+// `ay` (bun preferred, npm fallback — no Rust toolchain required, so a fresh
+// Linux box with only bun from setup.sh works), then confirm the resulting
+// binary actually execs. Returns a runnable manager, or null if the install
+// failed or the binary can't run here (caller then tries the next candidate).
+async function installAndVerify(pkg: "oxmgr" | "pm2"): Promise<DaemonManager | null> {
+  const bun = Bun.which("bun");
+  const npm = Bun.which("npm");
+  const installer = bun ? [bun, "add", "-g", pkg] : npm ? [npm, "install", "-g", pkg] : null;
+  if (!installer) return null;
+  process.stderr.write(`ay serve install: installing ${pkg}…\n`);
+  const code = (await Bun.spawn(installer, { stdio: ["ignore", "inherit", "inherit"] }).exited) ?? 1;
+  if (code !== 0) {
+    process.stderr.write(`ay serve install: '${installer.join(" ")}' failed (exit ${code})\n`);
+    return null;
+  }
+  // The shim landed in the PM's global bin dir, which may not be on our PATH —
+  // prepend it before resolving so Bun.which can see the fresh binary.
+  const binDir = await globalBinDir(installer);
+  if (binDir) process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
+  const bin = Bun.which(pkg);
+  if (!bin) return null;
+  const mgr: DaemonManager = { id: pkg, bin };
+  if (!(await managerRunnable(mgr))) {
+    process.stderr.write(
+      `ay serve install: ${pkg} installed but can't exec here (likely a native/glibc mismatch)` +
+        (pkg === "oxmgr" ? " — falling back to pm2\n" : "\n"),
+    );
+    return null;
+  }
+  return mgr;
+}
+
+// No usable process manager → bootstrap one so `ay serve install` works out of
+// the box on a fresh machine. Try candidates in preference order (oxmgr first on
+// non-Windows, pm2 first on Windows where oxmgr's TCP daemon socket wedges);
+// each must actually EXEC, so a glibc-incompatible oxmgr transparently falls
+// through to pm2 — pure JS, runs anywhere bun/node does. This is why the old
+// `cargo install oxmgr`-only hint left serve-install dead on arrival on Linux.
+// AGENT_YES_NO_PM_BOOTSTRAP=1 opts out.
+async function bootstrapDaemonManager(): Promise<DaemonManager | null> {
+  if (process.env.AGENT_YES_NO_PM_BOOTSTRAP === "1") return null;
+  const candidates: Array<"oxmgr" | "pm2"> =
+    process.platform === "win32" ? ["pm2", "oxmgr"] : ["oxmgr", "pm2"];
+  for (const pkg of candidates) {
+    const mgr = await installAndVerify(pkg);
+    if (mgr) return mgr;
+  }
+  return null;
+}
+
 // Resolve the argv that launches `ay serve …` from the daemon. The daemon's
 // environment may not have ~/.bun/bin on PATH, so we use an absolute path.
 // On Windows the `ay` bin is a self-contained launcher (ay.exe) we exec
@@ -499,12 +581,24 @@ async function fetchDaemonVersion(port: number, token: string): Promise<string |
 }
 
 async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
-  const mgr = resolveDaemonManager();
+  // Prefer an already-installed manager — but only if it actually execs. A
+  // glibc-incompatible oxmgr (Debian 12: GLIBC_2.39 not found) can sit on PATH
+  // yet be unusable; treat it as absent so we bootstrap a working one instead of
+  // handing serve-install a manager that dies at runtime. Otherwise bootstrap
+  // (oxmgr→pm2 fallback) so a fresh box works out of the box.
+  let mgr = resolveDaemonManager();
+  if (mgr && !(await managerRunnable(mgr))) {
+    process.stderr.write(
+      `ay serve install: ${mgr.id} is on PATH but can't exec here (likely a native/glibc mismatch) — bootstrapping a working manager…\n`,
+    );
+    mgr = null;
+  }
+  if (!mgr) mgr = await bootstrapDaemonManager();
   if (!mgr) {
     process.stderr.write(
-      "ay serve install: no process manager found (need pm2 or oxmgr)\n" +
+      "ay serve install: no usable process manager (need oxmgr or pm2)\n" +
         "  install with:  bun add -g pm2\n" +
-        "             or: cargo install oxmgr\n",
+        "             or: bun add -g oxmgr   (needs glibc ≥ 2.39 on Linux)\n",
     );
     return 1;
   }
