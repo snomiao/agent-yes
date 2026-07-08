@@ -1118,6 +1118,16 @@ export async function cmdServe(rest: string[]): Promise<number> {
         const oscTitleRe = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
         let title: string | null = null;
         for (let m; (m = oscTitleRe.exec(text)); ) if (m[1]!.trim()) title = m[1]!.trim();
+        // Defense-in-depth: this title is remote-controlled text (an agent sets its
+        // own terminal title) that the web console renders. The console escapes it,
+        // but strip C0/C1 control bytes and cap the length at the SOURCE too, so a
+        // hostile title can't smuggle control characters into any current/future
+        // sink. Quotes are left intact (legitimate titles contain them) and handled
+        // by the console's HTML escaper.
+        if (title) {
+          // eslint-disable-next-line no-control-regex
+          title = title.replace(/[\x00-\x1f\x7f-\x9f]/g, "").slice(0, 256).trim() || null;
+        }
         titleCache.set(logFile, { size, mtimeMs, title });
         return title;
       } finally {
