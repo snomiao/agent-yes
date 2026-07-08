@@ -3002,7 +3002,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   }
 
   const replyHint = sender.agent
-    ? `  ay send ${sender.agent.pid} "..."              # reply to sender\n`
+    ? `  ay send ${replyTarget} "..."              # reply to sender\n`
     : "";
   process.stderr.write(
     `\n` +
