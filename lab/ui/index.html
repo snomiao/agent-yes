@@ -2041,8 +2041,17 @@
       });
 
       const $ = (id) => document.getElementById(id);
+      // Escape for HTML — including BOTH quote styles, because esc() is
+      // interpolated into double-quoted attribute values (title="${esc(...)}",
+      // data-key="${esc(...)}", …), not just element text. A remote host controls
+      // agent metadata (OSC terminal title, prompt, cwd) that lands in those
+      // attributes; without escaping " an agent titled `" onfocus=…` breaks out of
+      // the attribute and runs script at this origin (theft of saved room tokens).
       const esc = (s) =>
-        String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+        String(s ?? "").replace(
+          /[&<>"']/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+        );
 
       // ---- transport ---------------------------------------------------------
       // Local: same-origin fetch + EventSource (via the ay-serve proxy).
