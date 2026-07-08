@@ -9,6 +9,30 @@ set -eu
 say() { printf '\033[36m▸\033[0m %s\n' "$1"; }
 err() { printf '\033[31m✘ %s\033[0m\n' "$1" >&2; }
 
+# Install an OS package via whatever package manager is present.
+#   $1 = command to probe for (skips if already on PATH); $2 = package name.
+# Best-effort: sudo only when not already root; DEBIAN_FRONTEND=noninteractive so
+# apt/debconf never blocks or spews the dialog→readline fallback noise on a box
+# with no tty. Returns success iff the probe command exists afterward. Callers
+# invoke it in an `|| …` chain, which also suspends `set -e` for its body so a
+# package-manager hiccup degrades gracefully instead of aborting the installer.
+os_ensure() {
+  probe=$1
+  pkg=$2
+  command -v "$probe" >/dev/null 2>&1 && return 0
+  say "Installing ${pkg} (provides '${probe}')…"
+  if [ "$(id -u)" = 0 ]; then _sudo=""; elif command -v sudo >/dev/null 2>&1; then _sudo="sudo"; else _sudo=""; fi
+  export DEBIAN_FRONTEND=noninteractive
+  if command -v apt-get >/dev/null 2>&1; then $_sudo apt-get update -qq && $_sudo apt-get install -y -qq "$pkg"
+  elif command -v dnf >/dev/null 2>&1; then $_sudo dnf install -y -q "$pkg"
+  elif command -v yum >/dev/null 2>&1; then $_sudo yum install -y -q "$pkg"
+  elif command -v apk >/dev/null 2>&1; then $_sudo apk add --no-progress "$pkg"
+  elif command -v pacman >/dev/null 2>&1; then $_sudo pacman -Sy --noconfirm "$pkg"
+  elif command -v zypper >/dev/null 2>&1; then $_sudo zypper -q install -y "$pkg"
+  fi
+  command -v "$probe" >/dev/null 2>&1
+}
+
 # --- pick a package manager -------------------------------------------------
 if command -v bun >/dev/null 2>&1; then
   PM="bun add -g"
@@ -20,20 +44,10 @@ else
   say "No bun or npm found — installing bun (https://bun.sh)…"
   # bun's installer unpacks a .zip, so it hard-fails with "unzip is required to
   # install bun" on a minimal image (e.g. stock Debian) that ships no unzip.
-  # Ensure it first via whatever package manager is present — best-effort, with
-  # sudo only when we aren't already root and sudo exists.
-  if ! command -v unzip >/dev/null 2>&1; then
-    say "Installing unzip (required by the bun installer)…"
-    if [ "$(id -u)" = 0 ]; then SUDO=""; elif command -v sudo >/dev/null 2>&1; then SUDO="sudo"; else SUDO=""; fi
-    if command -v apt-get >/dev/null 2>&1; then $SUDO apt-get update -qq && $SUDO apt-get install -y -qq unzip
-    elif command -v dnf >/dev/null 2>&1; then $SUDO dnf install -y -q unzip
-    elif command -v yum >/dev/null 2>&1; then $SUDO yum install -y -q unzip
-    elif command -v apk >/dev/null 2>&1; then $SUDO apk add --no-progress unzip
-    elif command -v pacman >/dev/null 2>&1; then $SUDO pacman -Sy --noconfirm unzip
-    elif command -v zypper >/dev/null 2>&1; then $SUDO zypper -q install -y unzip
-    fi
-    command -v unzip >/dev/null 2>&1 || err "couldn't install unzip automatically — install it and re-run (e.g. apt-get install unzip)."
-  fi
+  os_ensure unzip unzip || {
+    err "couldn't install unzip automatically — install it and re-run (e.g. apt-get install unzip)."
+    exit 1
+  }
   curl -fsSL https://bun.sh/install | bash
   # Make bun available to the rest of this script.
   BUN_INSTALL="${BUN_INSTALL:-$HOME/.bun}"
@@ -43,6 +57,14 @@ else
     err "bun install finished but 'bun' is not on PATH — open a new shell and re-run."
     exit 1
   fi
+  # A box with neither bun nor npm also has no Node.js. `ay serve install`
+  # bootstraps a process manager, and its universal fallback (pm2, used when
+  # oxmgr's native binary can't run — e.g. glibc < 2.39) is a Node.js app, so
+  # ensure node now for a fully out-of-the-box `ay serve install`. Best-effort:
+  # if it can't be installed, serve-install still prints a clear "pm2 needs node"
+  # hint rather than failing mysteriously.
+  os_ensure node nodejs ||
+    say "node not installed — 'ay serve install' will need it for the pm2 fallback (install nodejs, or use a box with glibc >= 2.39 for oxmgr)."
   PM="bun add -g"
   RT="bun"
 fi
