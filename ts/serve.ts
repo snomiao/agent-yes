@@ -2413,7 +2413,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
     "form-action 'self'",
     "img-src 'self' data:",
     "font-src 'self' data:",
-    "style-src 'self' 'unsafe-inline'",
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
     "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
     "connect-src 'self' https://s.agent-yes.com https://agent-yes.com wss:",
     "worker-src 'self'",
