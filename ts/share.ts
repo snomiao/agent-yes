@@ -146,7 +146,7 @@ export async function loadOrCreateShareRoom(sighost = DEFAULT_SIGHOST): Promise<
   } catch {
     /* not yet minted */
   }
-  const room = "r" + randomBytes(3).toString("hex");
+  const room = "r" + randomBytes(6).toString("hex");
   const s = randomBytes(32).toString("hex");
   const url = `webrtc://${room}:${MARKER}${s}@${sighost}`;
   await mkdir(path.dirname(shareRoomPath()), { recursive: true });
@@ -284,7 +284,7 @@ export async function startShare(
   const initial = opts.url
     ? parseShareUrl(opts.url)
     : {
-        room: "r" + randomBytes(3).toString("hex"),
+        room: "r" + randomBytes(6).toString("hex"),
         token: `${MARKER}${randomBytes(32).toString("hex")}`,
         host: sighost,
       };
@@ -322,7 +322,7 @@ export async function startShare(
   const rotate = async (): Promise<boolean> => {
     if (!opts.onRotate || closed || rotateCount >= 5) return false;
     rotateCount++;
-    room = "r" + randomBytes(3).toString("hex");
+    room = "r" + randomBytes(6).toString("hex");
     token = `${MARKER}${randomBytes(32).toString("hex")}`;
     S = parseSecret(token).s;
     authToken = await deriveAuthToken(S, room, host);
