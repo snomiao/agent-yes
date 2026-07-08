@@ -2364,6 +2364,24 @@ export async function cmdServe(rest: string[]): Promise<number> {
           continue;
         }
         if (inUse) {
+          // The port is wedged by something we can't evict — classically a dead
+          // serve whose spawned child agents inherited its listen-socket handle
+          // (on Windows the socket lacks non-inheritable/CLOEXEC semantics, so it
+          // survives the parent and keeps :port LISTENING under a defunct PID).
+          // Exiting here just feeds a pm2 restart loop that can never re-bind.
+          // When WebRTC is also requested, degrade to WebRTC-only instead: the
+          // console still reaches this machine peer-to-peer with no port, so the
+          // daemon stays useful and stops crash-looping. Only give up when
+          // there's no WebRTC transport to fall back to (pure --http).
+          if (wantWebrtc) {
+            process.stderr.write(
+              `ay serve: port ${port} is still in use after retries — continuing WebRTC-only ` +
+                `(HTTP API disabled). Free the port and restart to re-enable HTTP, ` +
+                `or pick another with --port N.\n`,
+            );
+            server = null;
+            break;
+          }
           process.stderr.write(
             `ay serve: port ${port} is still in use after retries — pick another with --port N,\n` +
               `or run a port-free WebRTC-only share with: ay serve --webrtc\n`,
@@ -2374,22 +2392,26 @@ export async function cmdServe(rest: string[]): Promise<number> {
       }
     }
 
-    const uiHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-    process.stdout.write(`ay serve  ${scheme}://${host}:${port}\n`);
-    process.stdout.write(`token:    ${token}\n\n`);
-    process.stdout.write(`web console (token in the # is eaten on open):\n`);
-    process.stdout.write(`  ${scheme}://${uiHost}:${port}/#k=${token}\n\n`);
-    process.stdout.write(`connect from another machine:\n`);
-    process.stdout.write(`  ay ls   ${token}@<host>:${port}\n`);
-    process.stdout.write(`  ay tail ${token}@<host>:${port}:<keyword>\n`);
-    process.stdout.write(`  ay send ${token}@<host>:${port}:<keyword> "message"\n\n`);
-    process.stdout.write(`save as alias:\n`);
-    process.stdout.write(`  ay remote add <alias> ${scheme}://${token}@<host>:${port}\n\n`);
-    if (!useHttps) {
-      process.stdout.write(
-        `for HTTPS: ay serve --tls-cert cert.pem --tls-key key.pem\n` +
-          `  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'\n\n`,
-      );
+    // server is null only when we degraded to WebRTC-only above (port wedged);
+    // skip the HTTP connection banner since nothing is listening on the port.
+    if (server) {
+      const uiHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+      process.stdout.write(`ay serve  ${scheme}://${host}:${port}\n`);
+      process.stdout.write(`token:    ${token}\n\n`);
+      process.stdout.write(`web console (token in the # is eaten on open):\n`);
+      process.stdout.write(`  ${scheme}://${uiHost}:${port}/#k=${token}\n\n`);
+      process.stdout.write(`connect from another machine:\n`);
+      process.stdout.write(`  ay ls   ${token}@<host>:${port}\n`);
+      process.stdout.write(`  ay tail ${token}@<host>:${port}:<keyword>\n`);
+      process.stdout.write(`  ay send ${token}@<host>:${port}:<keyword> "message"\n\n`);
+      process.stdout.write(`save as alias:\n`);
+      process.stdout.write(`  ay remote add <alias> ${scheme}://${token}@<host>:${port}\n\n`);
+      if (!useHttps) {
+        process.stdout.write(
+          `for HTTPS: ay serve --tls-cert cert.pem --tls-key key.pem\n` +
+            `  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'\n\n`,
+        );
+      }
     }
   }
 
