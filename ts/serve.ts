@@ -2342,18 +2342,21 @@ export async function cmdServe(rest: string[]): Promise<number> {
     // POST /api/share  body {agent, perm?}  → mint a fresh view-only room for ONE
     // agent and return its share link.
     if (req.method === "POST" && p === "/api/share") {
-      let body: { agent?: string; perm?: "r" };
+      let body: { agent?: string; perm?: "r" | "rw" };
       try {
         body = (await req.json()) as typeof body;
       } catch {
         return new Response("invalid JSON body", { status: 400 });
       }
       if (!body.agent) return new Response("agent required", { status: 400 });
+      const perm = body.perm ?? "r";
+      if (perm !== "r" && perm !== "rw")
+        return new Response(`invalid perm ${perm} (want r or rw)`, { status: 400 });
       try {
         const { createScopedShare } = await import("./agentShare.ts");
         const share = await createScopedShare({
           agent: body.agent,
-          perm: body.perm ?? "r",
+          perm,
           localFetch: apiFetch,
           apiToken: token,
         });

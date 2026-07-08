@@ -15,7 +15,7 @@
 import { listRecords, resolveOne, type CommonOpts } from "./subcommands.ts";
 import { startShare } from "./share.ts";
 
-export type SharePerm = "r";
+export type SharePerm = "r" | "rw";
 
 export interface ScopedShare {
   shareId: string;
@@ -171,8 +171,37 @@ export function scopedFetch(
       return inner(req);
     }
 
-    // Everything else (send, resize, kill, restart, spawn, presence, notes,
-    // spawn-config, share*, …) is a write or a fleet-wide read → denied.
+    // Steer (rw): a read-WRITE share may drive THIS agent — send input, resize its
+    // PTY, and self-report presence. It still may NOT control it (kill/restart/
+    // spawn are machine-admin, excluded from a per-agent share) nor touch any other
+    // agent. Treat `send` as command-injection-equivalent — the warning shown when
+    // minting an rw link is the real safety gate (docs/agent-sharing.md).
+    if (perm.includes("w")) {
+      // POST /api/send  body {keyword, msg, code} — verify the target is us.
+      if (method === "POST" && p === "/api/send") {
+        let kw: unknown;
+        try {
+          kw = JSON.parse(await req.clone().text())?.keyword;
+        } catch {
+          return forbidden("bad body");
+        }
+        if (kw == null || !(await targetIsAgent(String(kw), agentId)))
+          return forbidden("agent not shared");
+        return inner(req);
+      }
+      // POST /api/resize/:kw — verify the target is us.
+      const rz = method === "POST" ? /^\/api\/resize\/(.+)$/.exec(p) : null;
+      if (rz) {
+        const kw = decodeURIComponent(rz[1]!);
+        if (!(await targetIsAgent(kw, agentId))) return forbidden("agent not shared");
+        return inner(req);
+      }
+      // POST /api/presence — cosmetic "who's watching" self-report, no agent control.
+      if (method === "POST" && p === "/api/presence") return inner(req);
+    }
+
+    // Everything else (kill, restart, spawn, notes, spawn-config, share*, …, and —
+    // for a view-only share — send/resize/presence too) is denied.
     return forbidden();
   };
 }
