@@ -14,6 +14,7 @@ on:
     branches: [main]
     paths:
       - "lab/ui/**"
+      - "scripts/build-rgui.ts"
       - ".github/workflows/deploy-agent-yes.yml"
   workflow_dispatch:
 
@@ -26,7 +27,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # submodules: the /rgui page is bundled from the lib/rgui submodule at
+      # deploy time (wrangler build.command → scripts/build-rgui.ts).
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      # bun runs scripts/build-rgui.ts inside wrangler's build step.
+      - uses: oven-sh/setup-bun@v2
       - name: Deploy worker + synced UI to Cloudflare
         working-directory: lab/ui/cf
         env:

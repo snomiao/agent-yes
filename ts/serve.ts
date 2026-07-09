@@ -16,6 +16,7 @@ import {
   listRecords,
   readNotes,
   readPtysize,
+  recentReadEdges,
   renderRawLog,
   resolveOne,
   snapshotStatus,
@@ -1454,6 +1455,17 @@ export async function cmdServe(rest: string[]): Promise<number> {
       });
     }
 
+    // GET /api/edges — recent inter-agent relationship edges for the /rgui wire
+    // view. Currently the read/tail edges (agent `by` read agent `target` within
+    // the last minute, from ~/.agent-yes/reads.jsonl). Directional, ephemeral.
+    if (req.method === "GET" && p === "/api/edges") {
+      try {
+        return Response.json({ reads: await recentReadEdges() });
+      } catch (e) {
+        return new Response((e as Error).message, { status: 500 });
+      }
+    }
+
     // GET /api/whoami — this host's device label (user@host), so a remote
     // console can tag each agent with the machine it came from. Unlike codehost,
     // `ay serve --share` carries no per-agent device id; the viewer fetches this
@@ -1573,6 +1585,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
           return new Response(`pid ${record.pid}: no log_file`, { status: 404 });
         const logPath = record.log_file;
 
+        // Assigned inside start(); called by BOTH the stream's cancel() and the
+        // req.signal abort listener, so client-disconnect teardown can't leak.
+        let cleanup = () => {};
         const stream = new ReadableStream({
           async start(ctrl) {
             const enc = new TextEncoder();
@@ -1645,9 +1660,21 @@ export async function cmdServe(rest: string[]): Promise<number> {
             } catch {
               /* fs.watch unsupported — the fallback poll below still works */
             }
-            const poller = setInterval(() => void flush(), 60);
+            // When fs.watch is live it already gives instant echo, so the poll is
+            // only a safety net → 500ms. Without a watcher it IS the primary path
+            // → keep it at 60ms for low typing-echo latency. This matters when many
+            // /api/tail streams are open at once (the /rgui viewer opens one per
+            // node): N × a 60ms poll each was needless load on the event loop.
+            const poller = setInterval(() => void flush(), watcher ? 500 : 60);
 
-            req.signal.addEventListener("abort", () => {
+            // Tear down on client disconnect via BOTH the req.signal 'abort'
+            // listener and the stream's cancel() — whichever the runtime fires
+            // (Bun uses abort here; other runtimes/paths may only cancel). `closed`
+            // makes it idempotent so it runs exactly once and never leaks the
+            // heartbeat/poller/fs-watcher/fd, however many /api/tail streams churn
+            // (the /rgui viewer opens+drops one per node while panning/zooming).
+            cleanup = () => {
+              if (closed) return;
               closed = true;
               clearInterval(heartbeat);
               clearInterval(poller);
@@ -1662,7 +1689,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
               } catch {
                 /* already closed */
               }
-            });
+            };
+            req.signal.addEventListener("abort", cleanup);
+          },
+          cancel() {
+            cleanup();
           },
         });
 

@@ -19,7 +19,11 @@
     // ./public/blog/ (served at /blog/ — linked from the landing nav), and the
     // install scripts to ./public/ (agent-yes.com/setup.sh | setup.ps1). A glob
     // (../*.js) avoids silently breaking when the UI gains a new import.
-    "command": "mkdir -p ./public/w && cp ../index.html ../*.js ../manifest.webmanifest ../icon.svg ./public/w/ && cp ../landing.html ./public/index.html && cp ../architecture.html ./public/architecture.html && rm -rf ./public/blog && cp -R ../blog ./public/blog && cp ../setup.sh ../setup.ps1 ./public/",
+    // The rgui variant of agent-yes (lab/ui/rgui) is bundled from the
+    // @snomiao/rgui submodule source (scripts/build-rgui.ts) into ./public/r —
+    // served at agent-yes.com/r/ (the rgui counterpart of the console at /w/).
+    // Also mirrored to /rgui for the older path.
+    "command": "mkdir -p ./public/w && cp ../index.html ../*.js ../manifest.webmanifest ../icon.svg ./public/w/ && cp ../landing.html ./public/index.html && cp ../architecture.html ./public/architecture.html && rm -rf ./public/blog && cp -R ../blog ./public/blog && cp ../setup.sh ../setup.ps1 ./public/ && bun ../../../scripts/build-rgui.ts ./public/r && rm -rf ./public/rgui && cp -R ./public/r ./public/rgui",
   },
   // Static console UI (served for every non-WebSocket request).
   "assets": { "directory": "./public", "binding": "ASSETS" },
