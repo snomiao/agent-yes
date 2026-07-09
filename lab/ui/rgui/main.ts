@@ -161,6 +161,12 @@ const INFO_H = 320;
 const SETUP_SH = "curl -fsSL https://agent-yes.com/setup.sh | sh";
 const SETUP_PS = 'powershell -c "irm https://agent-yes.com/setup.ps1 | iex"';
 
+// User-set per-node magnify (rgui contentScale via shift+drag on the corner
+// grip), remembered by node id so a manual "magnify this agent to watch it"
+// survives the setGraph that a spawn/exit elsewhere triggers — buildGraph
+// re-applies it to the rebuilt node. onNodeResizeEnd keeps this in sync.
+const scaleByNode = new Map<string, number>();
+
 // status → rgui category (open string; rgui derives a stable color per string)
 const CATEGORY: Record<AgentStatus, string> = {
   active: "active",
@@ -428,6 +434,13 @@ function buildGraph(records: AgentRecord[]): Graph {
     if (!isContainer.has(n.id) && !n.id.startsWith("repo:") && !n.id.startsWith("info:")) {
       n.draw = (ctx, r) => drawNode(n.id, ctx, r);
     }
+  }
+  // re-apply any user magnify (contentScale) after layout, so the node lenses in
+  // place — exactly where the live shift+drag rescale leaves it — instead of the
+  // manual zoom being lost on every structural rebuild.
+  for (const n of nodes.values()) {
+    const s = scaleByNode.get(n.id);
+    if (s && s !== 1) n.scale = s;
   }
   return { nodes: [...nodes.values()], edges: [] };
 }
@@ -1059,6 +1072,12 @@ const viewer: Rgui = createRgui(canvas, {
     updateNodeDebug();
     updateDocTitle(); // tab title follows the selected agent
   },
+  onNodeResizeEnd: (id, size) => {
+    // remember a shift+drag magnify (scale ≠ 1) so it persists across rebuilds;
+    // a reset back to 1 drops it. (Plain reflow resize isn't persisted.)
+    if (size.scale && Math.abs(size.scale - 1) > 0.01) scaleByNode.set(id, size.scale);
+    else scaleByNode.delete(id);
+  },
   onFrame: (view) => {
     updateNodeDebug(); // selected node's screen rect tracks pan/zoom every frame
     const now = Date.now();
@@ -1078,7 +1097,14 @@ const viewer: Rgui = createRgui(canvas, {
 });
 
 // expose for e2e/debugging (harmless): window.__rgui.viewer / .lastRecords
-(window as unknown as { __rgui: unknown }).__rgui = { viewer, get graph() { return viewer.graph; } };
+(window as unknown as { __rgui: unknown }).__rgui = {
+  viewer,
+  get graph() {
+    return viewer.graph;
+  },
+  scaleByNode, // e2e/debug: inspect persisted magnify
+  rebuild: () => viewer.setGraph(buildGraph([...recordsByPid.values()])), // e2e: force a structural rebuild
+};
 
 // Fit all agents, but never zoom out past a readable scale — a full forest fit
 // otherwise lands so far out that rgui's semantic-zoom LOD collapses the
