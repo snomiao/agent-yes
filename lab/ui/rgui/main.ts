@@ -21,6 +21,7 @@ import createRgui, {
   type GraphNode,
   type Panel,
   type PanelItem,
+  type Port,
   type Rgui,
 } from "@snomiao/rgui";
 // Shared ay-share (rtc) remote-room transport — the SAME WebRTC + e2e wire the
@@ -209,6 +210,28 @@ function nodeTitle(r: AgentRecord): string {
   return r.git?.branch ? `${r.cli} ⎇${r.git.branch}` : r.cli;
 }
 
+// An agent node's ports model the SEMANTIC signals that flow between agents —
+// deliberately NOT the raw CLI stdout (that byte stream, ANSI and all, is the
+// node's terminal BODY / content, not a typed value). stdout is parsed (by the
+// runtime + /api/ls) into these:
+//   inputs  — `prompt` (what you `ay send` it) · `reads` (upstream work/deps it tails)
+//   outputs — `status` (its derived state, the primary signal) · `ask` (the
+//             question it emits when it needs input — what a parent reacts to) ·
+//             `result` (the artifact it produced: its branch)
+function portsOf(r: AgentRecord): { inputs: Port[]; outputs: Port[] } {
+  const branch = r.git?.branch ?? null;
+  const inputs: Port[] = [
+    { id: "prompt", label: "prompt", kind: "ctl" },
+    { id: "deps", label: "reads", kind: "text" },
+  ];
+  // status output: kind = the status string so the port dot is color-coded per
+  // state (stable hashed color); the label (shown zoomed in) is the state text.
+  const outputs: Port[] = [{ id: "status", label: r.status, kind: r.status }];
+  if (r.question) outputs.push({ id: "ask", label: "needs input", kind: "ctl" });
+  if (branch) outputs.push({ id: "result", label: (r.git?.dirty ? "±" : "") + branch, kind: "text" });
+  return { inputs, outputs };
+}
+
 function nodeOf(r: AgentRecord): GraphNode {
   const branch = r.git?.branch ?? null;
   const prompt = (r.prompt ?? "").replace(/\s+/g, " ").trim();
@@ -228,9 +251,7 @@ function nodeOf(r: AgentRecord): GraphNode {
     x: 0,
     y: 0,
     w: CARD_W,
-    // one in/out port so relationship wires (reads/sends) can anchor to the node
-    inputs: [{ id: "i", label: "", kind: "ctl" }],
-    outputs: [{ id: "o", label: "", kind: "ctl" }],
+    ...portsOf(r), // semantic prompt/reads in, status/ask/result out (see portsOf)
     fields,
   };
 }
@@ -1162,6 +1183,7 @@ function updateContent(records: AgentRecord[]) {
       n.title = fresh.title;
       n.category = fresh.category;
       n.fields = fresh.fields;
+      n.outputs = fresh.outputs; // status/ask/result track live state (no relayout)
     } else if (cwdGroups.has(n.id)) {
       // same-cwd container: recompute the shared (loudest) state in place
       const st = aggStateOf(cwdGroups.get(n.id)!);
@@ -1229,9 +1251,12 @@ function applyEdges() {
   const edges: Edge[] = showWires
     ? readEdges
         .filter((e) => e.by !== e.target && present.has(String(e.by)) && present.has(String(e.target)))
+        // "by read target" is a dataflow: the watched agent's `status` output
+        // feeds the reader's `deps` input (Y.status → X.deps), so the arrow
+        // points the way the information actually travels.
         .map((e) => ({
-          from: { node: String(e.by), port: "o" },
-          to: { node: String(e.target), port: "i" },
+          from: { node: String(e.target), port: "status" },
+          to: { node: String(e.by), port: "deps" },
           dashed: true,
           style: { color: "#58a6ff", width: 1.5, dash: [6, 4] },
         }))
