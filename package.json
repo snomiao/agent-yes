@@ -86,6 +86,8 @@
     "build": "tsdown",
     "check:e2e": "bun scripts/check-e2e.ts",
     "cf": "bun scripts/cf.ts",
+    "build:rgui": "bun scripts/build-rgui.ts",
+    "dev:rgui": "bun lab/ui/rgui/dev.ts",
     "build:rs": "bun ./scripts/build-rs.ts",
     "postbuild": "bun ./ts/postbuild.ts",
     "demo": "bun run build && bun link && claude-yes -- demo",

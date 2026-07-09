@@ -171,6 +171,29 @@ async function lastReadAt(by: string, target: number): Promise<number | null> {
   return map.get(`${by}${READS_KEY_SEP}${target}`) ?? null;
 }
 
+/** Recent agent→agent read/tail edges (skips "human" readers), for the /rgui
+ * relationship-wire view. `by`/`target` are pids. */
+export interface ReadEdge {
+  by: number;
+  target: number;
+  at: number;
+}
+export async function recentReadEdges(windowMs = READ_WINDOW_MS): Promise<ReadEdge[]> {
+  const now = Date.now();
+  const map = await readReads();
+  const out: ReadEdge[] = [];
+  for (const [key, at] of map) {
+    if (now - at > windowMs) continue;
+    const i = key.indexOf(READS_KEY_SEP);
+    const by = key.slice(0, i);
+    if (!by.startsWith("agent:")) continue; // agent→agent only
+    const byPid = Number(by.slice("agent:".length));
+    const target = Number(key.slice(i + 1));
+    if (byPid && target && byPid !== target) out.push({ by: byPid, target, at });
+  }
+  return out;
+}
+
 // Identify the sender. An agent launched by `ay` inherits AGENT_YES_PID=<wrapper
 // pid>; the registered agent record carries that same wrapper_pid, so we map the
 // env value back to the agent's own canonical record. Falls back to a direct pid

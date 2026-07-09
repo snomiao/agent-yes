@@ -1,0 +1,494 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>agent-yes · rgui — live agent tree</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231c2126'/%3E%3Crect x='6' y='6' width='9' height='9' rx='2' fill='%239b34bf'/%3E%3Crect x='17' y='6' width='9' height='9' rx='2' fill='%23c74be0'/%3E%3Crect x='6' y='17' width='9' height='9' rx='2' fill='%23f3820d'/%3E%3Crect x='17' y='17' width='9' height='9' rx='2' fill='%23ffd21c'/%3E%3C/svg%3E"
+    />
+    <meta
+      name="description"
+      content="The live agent-yes agent forest rendered with @snomiao/rgui — a semantic-zoom readable-grid node graph. Parent agents contain their subagents; zoom out and a busy tree renormalizes into one readable block."
+    />
+    <script>
+      // set the theme BEFORE first paint (no flash): saved choice, else OS
+      document.documentElement.dataset.theme =
+        localStorage.getItem("rgui-theme") ??
+        (matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+    </script>
+    <style>
+      :root {
+        --bg: #1c2126;
+        --text: #e6e9ec;
+        --text-dim: #aeb6bf;
+        --text-muted: #8b949e;
+        --border: #3a4048;
+        --panel: rgba(20, 22, 26, 0.85);
+        --accent: #ffd60a;
+      }
+      :root[data-theme="light"] {
+        --bg: #f3f1ea;
+        --text: #22262b;
+        --text-dim: #4c545c;
+        --text-muted: #69737d;
+        --border: #cfc9bc;
+        --panel: rgba(252, 251, 247, 0.9);
+        --accent: #c8860a;
+      }
+      html,
+      body {
+        margin: 0;
+        height: 100%;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--text);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #viewer {
+        position: fixed;
+        inset: 0;
+        display: block;
+        width: 100vw;
+        height: 100vh;
+        touch-action: none;
+        cursor: grab;
+      }
+      /* top bar — title + live/demo status + refresh */
+      #bar {
+        position: fixed;
+        top: 10px;
+        left: 12px;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 12px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        font-size: 13px;
+        user-select: none;
+      }
+      #bar .brand {
+        font-weight: 700;
+        letter-spacing: 0.02em;
+      }
+      #bar .brand b {
+        color: var(--accent);
+      }
+      #status {
+        color: var(--text-muted);
+        font-size: 12px;
+      }
+      #status .dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-right: 4px;
+        vertical-align: baseline;
+        background: var(--text-muted);
+      }
+      #status.live .dot {
+        background: #3fb950;
+      }
+      #status.demo .dot {
+        background: #d29922;
+      }
+      #bar button {
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--text-dim);
+        border-radius: 6px;
+        padding: 3px 9px;
+        font: inherit;
+        font-size: 12px;
+        cursor: pointer;
+      }
+      #bar button:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      #debug {
+        position: fixed;
+        bottom: 8px;
+        left: 8px;
+        z-index: 10;
+        padding: 6px 8px;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        color: var(--text);
+        font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        white-space: pre;
+        pointer-events: none;
+        user-select: none;
+      }
+      #debug .dim {
+        color: var(--text-muted);
+      }
+      #debug .hi {
+        color: var(--accent);
+      }
+      /* second debug panel (we own it): selected node + its terminal overlay,
+         in screen px. rgui owns #debug and rewrites it every frame. */
+      #debug2 {
+        position: fixed;
+        top: 56px;
+        right: 12px;
+        z-index: 10;
+        padding: 6px 8px;
+        max-width: 46vw;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        color: var(--text);
+        font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        white-space: pre;
+        pointer-events: none;
+        user-select: none;
+      }
+      #debug2:empty {
+        display: none;
+      }
+      #debug2 .k {
+        color: var(--text-muted);
+      }
+      #debug2 .hi {
+        color: var(--accent);
+      }
+      /* ── per-node live terminal panel (rgui overlay, anchor:"over") ──────
+         Mirrors the console's right-side agent view: a title bar + the raw
+         xterm. rgui glues it over the node's screen rect and scale:"fit"s it,
+         so it's the node's content when zoomed in and yields to the summary
+         card when zoomed out. */
+      .ay-term {
+        /* hug the xterm's native px size (cols/rows from /api/size), so the raw
+           absolute-cursor stream lands on the right grid; rgui scale:"fit" then
+           fits the whole panel into the node's screen rect. */
+        display: flex;
+        flex-direction: column;
+        width: max-content;
+        background: #0d1117;
+        border-radius: 8px;
+        overflow: hidden;
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        /* promote to its own compositor layer so rgui's per-frame transform:scale
+           doesn't re-raster the live canvas each frame */
+        will-change: transform;
+        contain: layout paint;
+      }
+      .ay-term.ay-term-focused {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
+      :root[data-theme="light"] .ay-term {
+        background: #ffffff;
+      }
+      .ay-term-bar {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 6px 10px;
+        background: #161b22;
+        color: #c9d1d9;
+        font-size: 13px;
+        line-height: 1.3;
+        border-bottom: 1px solid #30363d;
+        white-space: nowrap;
+      }
+      :root[data-theme="light"] .ay-term-bar {
+        background: #f3f1ea;
+        color: #22262b;
+        border-bottom-color: #cfc9bc;
+      }
+      .ay-term-bar .dot {
+        flex: 0 0 auto;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: #8b949e;
+      }
+      .ay-term-bar .dot.active {
+        background: #3fb950;
+      }
+      .ay-term-bar .dot.needs_input {
+        background: #d29922;
+      }
+      .ay-term-bar .dot.stuck {
+        background: #f85149;
+      }
+      .ay-term-bar .dot.exited {
+        background: #6e7781;
+      }
+      .ay-term-bar .t {
+        flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-weight: 600;
+      }
+      .ay-term-bar .pid {
+        flex: 0 0 auto;
+        color: #8b949e;
+        font-size: 11px;
+      }
+      .ay-term-body {
+        padding: 4px 6px;
+      }
+
+      /* ── ⌘K command palette (go to / focus an agent) ─────────────────── */
+      #cmdk {
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        display: flex;
+        justify-content: center;
+        align-items: flex-start;
+        padding-top: 12vh;
+        background: rgba(0, 0, 0, 0.45);
+        backdrop-filter: blur(2px);
+      }
+      #cmdk[hidden] {
+        display: none;
+      }
+      .cmdk-box {
+        width: min(680px, 92vw);
+        max-height: 70vh;
+        display: flex;
+        flex-direction: column;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55);
+        overflow: hidden;
+      }
+      #cmdk-input {
+        border: 0;
+        outline: 0;
+        padding: 14px 16px;
+        background: transparent;
+        color: var(--text);
+        font: 15px ui-monospace, SFMono-Regular, Menlo, monospace;
+        border-bottom: 1px solid var(--border);
+      }
+      #cmdk-input::placeholder {
+        color: var(--text-faint, var(--text-muted));
+      }
+      #cmdk-list {
+        overflow-y: auto;
+        padding: 6px;
+      }
+      .cmdk-row {
+        display: flex;
+        align-items: baseline;
+        gap: 8px;
+        padding: 7px 10px;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 13px;
+        white-space: nowrap;
+      }
+      .cmdk-row.sel {
+        background: var(--accent);
+        color: #1c2126;
+      }
+      .cmdk-row.sel .cmdk-dim,
+      .cmdk-row.sel .cmdk-pid {
+        color: #1c2126;
+        opacity: 0.75;
+      }
+      .cmdk-row .dot {
+        flex: 0 0 auto;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--text-muted);
+        align-self: center;
+      }
+      .cmdk-row .dot.active {
+        background: #3fb950;
+      }
+      .cmdk-row .dot.needs_input {
+        background: #d29922;
+      }
+      .cmdk-row .dot.stuck {
+        background: #f85149;
+      }
+      .cmdk-row .dot.exited {
+        background: #6e7781;
+      }
+      .cmdk-title {
+        flex: 0 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        font-weight: 600;
+      }
+      .cmdk-pid {
+        flex: 0 0 auto;
+        color: var(--text-muted);
+        font-size: 11px;
+      }
+      .cmdk-dim {
+        flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        color: var(--text-muted);
+        font-size: 11px;
+        text-align: right;
+      }
+      .cmdk-foot {
+        padding: 7px 12px;
+        border-top: 1px solid var(--border);
+        color: var(--text-muted);
+        font-size: 11px;
+        display: flex;
+        gap: 14px;
+        flex-wrap: wrap;
+      }
+      .cmdk-foot b {
+        color: var(--text-dim);
+        font-weight: 600;
+      }
+
+      /* ── right-click batch-send popup ─────────────────────────────────── */
+      #ctxmenu {
+        position: fixed;
+        z-index: 110;
+        width: 340px;
+        max-width: 90vw;
+        background: var(--bg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+        overflow: hidden;
+        font-size: 13px;
+      }
+      #ctxmenu[hidden] {
+        display: none;
+      }
+      #ctxmenu .ctx-head {
+        padding: 8px 12px;
+        border-bottom: 1px solid var(--border);
+        color: var(--text-dim);
+        font-weight: 600;
+      }
+      #ctxmenu .ctx-head b {
+        color: var(--accent);
+      }
+      #ctxmenu textarea {
+        width: 100%;
+        box-sizing: border-box;
+        border: 0;
+        outline: 0;
+        resize: none;
+        padding: 10px 12px;
+        min-height: 44px;
+        background: transparent;
+        color: var(--text);
+        font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #ctxmenu textarea::placeholder {
+        color: var(--text-muted);
+      }
+      #ctxmenu .ctx-foot {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        padding: 7px 12px;
+        border-top: 1px solid var(--border);
+        color: var(--text-muted);
+        font-size: 11px;
+      }
+      #ctxmenu .ctx-foot button {
+        border: 1px solid var(--border);
+        background: var(--accent);
+        color: #1c2126;
+        border-radius: 6px;
+        padding: 4px 12px;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+
+      #hint {
+        position: fixed;
+        bottom: 8px;
+        right: 12px;
+        z-index: 10;
+        color: var(--text-muted);
+        font-size: 11px;
+        letter-spacing: 0.03em;
+        pointer-events: none;
+        user-select: none;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="viewer"></canvas>
+
+    <div id="bar">
+      <span class="brand">agent-yes · <b>rgui</b></span>
+      <span id="status"><span class="dot"></span><span class="label">connecting…</span></span>
+      <button id="fit" title="Fit all agents to view">fit</button>
+      <button id="wires" title="Toggle read/tail relationship wires">⇢ wires</button>
+      <button id="theme" title="Toggle light/dark">◐</button>
+    </div>
+
+    <div id="debug"></div>
+    <div id="debug2"></div>
+
+    <div id="ctxmenu" hidden>
+      <div class="ctx-head">Send to <b id="ctx-count">0</b> agent<span id="ctx-s">s</span></div>
+      <textarea
+        id="ctx-input"
+        rows="2"
+        autocomplete="off"
+        spellcheck="false"
+        placeholder="command or prompt — sent verbatim + Enter to each…"
+      ></textarea>
+      <div class="ctx-foot">
+        <span><b>⏎</b> send · <b>shift+⏎</b> newline · <b>esc</b> cancel</span>
+        <button id="ctx-send">Send</button>
+      </div>
+    </div>
+
+    <div id="cmdk" hidden>
+      <div class="cmdk-box">
+        <input
+          id="cmdk-input"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Go to agent — search title / branch / cwd / pid…"
+        />
+        <div id="cmdk-list"></div>
+        <div class="cmdk-foot">
+          <span><b>↑↓</b> select</span>
+          <span><b>⏎</b> focus node</span>
+          <span><b>⌘⏎</b> focus terminal</span>
+          <span><b>esc</b> close</span>
+        </div>
+      </div>
+    </div>
+    <div id="hint">⌘K = go to agent · drag = select · right-click = batch send · scroll = zoom</div>
+
+    <!-- xterm.js — SAME versions the console (agent-yes.com/w) uses, so each
+         node's live terminal renders the raw PTY stream identically. -->
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"
+    />
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
+    <!-- canvas renderer: a bitmap <canvas> CSS-scales as a cheap GPU composite,
+         so zooming doesn't make xterm re-measure chars + re-render every frame
+         (the DOM renderer's getBoundingClientRect includes the ancestor scale
+         transform → constant re-measure = the zoom flash) -->
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-canvas@0.7.0/lib/addon-canvas.min.js"></script>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>
