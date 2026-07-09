@@ -14,6 +14,11 @@
  * page tracks rgui's heavy dev directly.
  */
 import createRgui, { nodeHeight, type Edge, type Graph, type GraphNode, type Rgui } from "@snomiao/rgui";
+// Shared ay-share (rtc) remote-room transport — the SAME WebRTC + e2e wire the
+// console uses (lab/ui/rtc.js, which imports lab/ui/e2e.js). Bundled in by
+// scripts/build-rgui.ts. A .js module with no types → treated as any here.
+// @ts-ignore — sibling JS module, no .d.ts (bundled, not type-checked)
+import { RTCClient, parseRoomHash } from "../rtc.js";
 
 // ── /api/ls record shape (subset we use; see ts/globalPidIndex.ts + serve.ts) ──
 type AgentStatus = "active" | "idle" | "needs_input" | "stuck" | "exited";
@@ -31,6 +36,95 @@ interface AgentRecord {
   title?: string | null;
   git?: { branch: string | null; dirty?: boolean } | null;
   badges?: string[];
+}
+
+// ── data source: room · HTTP · sample ────────────────────────────────────────
+// The viewer reads from ONE of three wires, in priority order:
+//   1. a WebRTC room — when the URL hash is a share link (#room:token[@host] or
+//      webrtc://…): every /api/* call tunnels over the SAME DataChannel the
+//      console uses (rtc.js + e2e.js). This makes /r/#room:token@s.agent-yes.com
+//      show the host's REAL live agents.
+//   2. same-origin HTTP — the localhost `dev:rgui` / `ay serve` path (no room).
+//   3. the baked sample forest — when neither is reachable (static preview).
+// roomInfo is fixed at load from the hash. When a room IS configured we never
+// fall back to HTTP or the sample — you opened a share link, so we show that
+// room or its connection state.
+const roomInfo = parseRoomHash(location.hash) as
+  | { room: string; token: string; host: string }
+  | null;
+let room: InstanceType<typeof RTCClient> | null = null; // connected client (or null)
+let roomConnected = false;
+const usingRoom = () => !!roomInfo;
+const roomReady = () => !!(room && roomConnected);
+
+// GET a JSON body over the active wire (throws on any failure).
+async function apiJSON<T>(path: string): Promise<T> {
+  if (usingRoom()) {
+    if (!roomReady()) throw new Error("room not connected");
+    return JSON.parse((await room!.req("GET", path)).text) as T;
+  }
+  const res = await fetch(path, { headers: { accept: "application/json" } });
+  if (!res.ok) throw new Error(String(res.status));
+  const ct = res.headers.get("content-type") ?? "";
+  if (!ct.includes("json")) throw new Error("not json"); // static host served HTML
+  return res.json() as Promise<T>;
+}
+
+// POST a JSON body over the active wire (never throws; returns {ok,text}).
+async function apiPost(path: string, body: unknown): Promise<{ ok: boolean; text: string }> {
+  if (usingRoom()) {
+    if (!roomReady()) return { ok: false, text: "room not connected" };
+    const r = await room!.req("POST", path, JSON.stringify(body));
+    return { ok: r.status >= 200 && r.status < 300, text: r.text };
+  }
+  const r = await fetch(path, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return { ok: r.ok, text: await r.text() };
+}
+
+// Subscribe to an SSE-style stream over the active wire. onData receives each
+// parsed `data:` value (the raw terminal chunk) — identical to what an
+// EventSource.onmessage handler gets after JSON.parse(ev.data). Returns a handle
+// with .close() (drop-in for the EventSource the terminals used to hold).
+interface Sub {
+  close(): void;
+}
+function subscribeRaw(path: string, onData: (v: unknown) => void): Sub {
+  if (usingRoom()) {
+    if (!roomReady()) return { close() {} };
+    // room.subscribe yields raw DataChannel bytes — reassemble the SSE `data:`
+    // frames exactly the way the console's rtcTx does.
+    let buf = "";
+    const unsub = room!.subscribe(path, (raw: string) => {
+      buf += raw;
+      let i: number;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const evt = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        for (const line of evt.split("\n"))
+          if (line.startsWith("data:")) {
+            try {
+              onData(JSON.parse(line.slice(5).trim()));
+            } catch {
+              /* keepalive / non-JSON frame */
+            }
+          }
+      }
+    });
+    return { close: unsub };
+  }
+  const ev = new EventSource(path);
+  ev.onmessage = (e) => {
+    try {
+      onData(JSON.parse(e.data));
+    } catch {
+      /* non-JSON keepalive frame */
+    }
+  };
+  return { close: () => ev.close() };
 }
 
 // ── node geometry (world units) ──────────────────────────────────────────────
@@ -388,7 +482,7 @@ function termTheme() {
 interface TermEntry {
   el: HTMLElement;
   term: Xterm;
-  es: EventSource;
+  es: Sub; // stream handle (EventSource over HTTP, or the room DataChannel sub)
   miss: number; // consecutive ticks unwanted (grace before teardown)
   buf: string; // stream bytes deferred while the view moves (flushed on settle)
 }
@@ -452,27 +546,23 @@ function makeTerm(pid: string): TermEntry | null {
   // #nostream (debug): skip the live SSE so the page reaches network-idle and rech
   // can drive it; render a static pattern so the overlay still has content/size.
   const noStream = location.hash.includes("nostream");
-  const es = noStream
-    ? ({ close() {} } as unknown as EventSource)
-    : new EventSource(`/api/tail/${encodeURIComponent(pid)}?raw=1`);
+  // Stream handler shared by both wires (HTTP EventSource or the room channel):
+  // while the view is moving, DEFER writes — repainting the xterm canvas while
+  // rgui is CSS-scaling it every frame re-rasters = the zoom flash. Buffer now,
+  // flush once the view settles (see the settle interval).
+  const onStream = (data: unknown) => {
+    const s = data as string;
+    if (Date.now() - lastViewChangeAt < SETTLE_MS) {
+      entry.buf += s;
+      deferredWhileMoving++; // QA metric: stream bytes that arrived mid-gesture
+    } else term.write(s);
+  };
+  const es: Sub = noStream
+    ? { close() {} }
+    : subscribeRaw(`/api/tail/${encodeURIComponent(pid)}?raw=1`, onStream);
   const entry: TermEntry = { el, term, es, miss: 0, buf: "" };
   if (noStream) {
     for (let i = 0; i < 20; i++) term.write(`row ${i} · #${pid} · nostream debug pattern\r\n`);
-  } else {
-    (es as EventSource).onmessage = (ev) => {
-      try {
-        const data = JSON.parse(ev.data) as string;
-        // While the view is moving, DEFER writes: repainting the xterm canvas
-        // while rgui is CSS-scaling it every frame re-rasters = the zoom flash.
-        // Buffer now, flush once the view settles (see the settle interval).
-        if (Date.now() - lastViewChangeAt < SETTLE_MS) {
-          entry.buf += data;
-          deferredWhileMoving++; // QA metric: stream bytes that arrived mid-gesture
-        } else term.write(data);
-      } catch {
-        /* non-JSON keepalive frame */
-      }
-    };
   }
 
   // size probe (only under #qa): log the overlay's natural px once xterm lays out
@@ -486,9 +576,8 @@ function makeTerm(pid: string): TermEntry | null {
 
   // size to the agent's native grid so the absolute-cursor raw stream lands
   // correctly; NO resize is pushed back to the PTY.
-  fetch(`/api/size/${encodeURIComponent(pid)}`)
-    .then((res) => (res.ok ? res.json() : null))
-    .then((s: { cols?: number; rows?: number } | null) => {
+  apiJSON<{ cols?: number; rows?: number }>(`/api/size/${encodeURIComponent(pid)}`)
+    .then((s) => {
       if (s?.cols && s?.rows && terms.get(pid) === entry) term.resize(s.cols, s.rows);
     })
     .catch(() => {});
@@ -881,7 +970,7 @@ function apply(records: AgentRecord[], live: boolean) {
   statusEl.className = live ? "live" : "demo";
   const n = records.length;
   statusLabel.textContent = live
-    ? `live · ${n} agent${n === 1 ? "" : "s"}`
+    ? `live · ${n} agent${n === 1 ? "" : "s"}${usingRoom() ? " (room)" : ""}`
     : "demo · no local ay serve";
   updateDocTitle(); // keep the tab title's name/status/count fresh
 }
@@ -908,28 +997,83 @@ function applyEdges() {
 
 async function fetchEdges() {
   try {
-    const res = await fetch("/api/edges", { headers: { accept: "application/json" } });
-    if (!res.ok || !(res.headers.get("content-type") ?? "").includes("json")) return;
-    readEdges = ((await res.json()) as { reads?: ReadEdge[] }).reads ?? [];
+    readEdges = (await apiJSON<{ reads?: ReadEdge[] }>("/api/edges")).reads ?? [];
     applyEdges();
   } catch {
-    /* no /api/edges (static host / old daemon) — leave wires empty */
+    /* no /api/edges (static host / old daemon / room down) — leave wires empty */
   }
 }
 
 async function refresh() {
   try {
-    const res = await fetch("/api/ls", { headers: { accept: "application/json" } });
-    if (!res.ok) throw new Error(String(res.status));
-    const ct = res.headers.get("content-type") ?? "";
-    if (!ct.includes("json")) throw new Error("not json"); // static host served HTML
-    const records = (await res.json()) as AgentRecord[];
+    const records = await apiJSON<AgentRecord[]>("/api/ls");
     apply(records, true);
     void fetchEdges();
   } catch {
-    // no reachable /api/ls → show the sample forest (only until live appears)
-    if (!liveKnown) apply(sampleRecords(), false);
+    // No reachable source. With a room configured, keep the room's connection
+    // state on screen (never the sample) — the connect loop drives the label.
+    // Without one, fall back to the sample forest (only until live appears).
+    if (!usingRoom() && !liveKnown) apply(sampleRecords(), false);
   }
+}
+
+// ── room connection (only when the hash is a share link) ─────────────────────
+// Connect the shared RTCClient and keep it alive with jittered exponential
+// backoff — a dropped DataChannel (host restart) otherwise leaves the room dead
+// until a manual reload. Mirrors the console's connectRtcSource lifecycle.
+if (roomInfo) {
+  const RTC_MIN = 1000;
+  const RTC_MAX = 30000;
+  let delay = RTC_MIN;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const setRoomLabel = (text: string) => {
+    statusEl.className = "demo";
+    statusLabel.textContent = text;
+  };
+  const schedule = () => {
+    if (timer) return;
+    timer = setTimeout(() => {
+      timer = null;
+      void connectOnce();
+    }, delay);
+    delay = Math.min(RTC_MAX, delay * 2) + Math.floor(Math.random() * 500);
+  };
+  async function connectOnce() {
+    // Drop any stale peer first, detaching its onstate so its own "closed" can't
+    // re-arm a reconnect mid-replace (which would churn a healthy channel).
+    if (room) {
+      room.onstate = () => {};
+      try {
+        room.close();
+      } catch {
+        /* */
+      }
+      room = null;
+    }
+    roomConnected = false;
+    if (!liveKnown) setRoomLabel("connecting room…");
+    try {
+      const c = new RTCClient(roomInfo!.host, roomInfo!.room, roomInfo!.token);
+      c.onstate = (st: string) => {
+        // "disconnected" is transient (ICE hiccup) — only a real teardown reconnects.
+        if (st === "failed" || st === "closed") {
+          roomConnected = false;
+          setRoomLabel("room disconnected");
+          schedule();
+        }
+      };
+      await c.connect();
+      room = c;
+      roomConnected = true;
+      delay = RTC_MIN; // a healthy connect resets the backoff
+      void refresh(); // pull the first snapshot over the room immediately
+    } catch {
+      setRoomLabel("room disconnected");
+      schedule();
+    }
+  }
+  setRoomLabel("connecting room…");
+  void connectOnce();
 }
 
 refresh();
@@ -1186,11 +1330,9 @@ async function sendBatch() {
   closeBatchMenu();
   const results = await Promise.allSettled(
     pids.map((pid) =>
-      fetch("/api/send", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ keyword: pid, msg }),
-      }).then((r) => (r.ok ? r : Promise.reject(r.status))),
+      apiPost("/api/send", { keyword: pid, msg }).then((r) =>
+        r.ok ? r : Promise.reject(r.text),
+      ),
     ),
   );
   const ok = results.filter((r) => r.status === "fulfilled").length;
