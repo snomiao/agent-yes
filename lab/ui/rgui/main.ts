@@ -13,7 +13,15 @@
  * bundled by scripts/build-rgui.ts — never the published npm package, so the
  * page tracks rgui's heavy dev directly.
  */
-import createRgui, { nodeHeight, type Edge, type Graph, type GraphNode, type Rgui } from "@snomiao/rgui";
+import createRgui, {
+  nodeHeight,
+  type Edge,
+  type Graph,
+  type GraphNode,
+  type Panel,
+  type PanelItem,
+  type Rgui,
+} from "@snomiao/rgui";
 // Shared ay-share (rtc) remote-room transport — the SAME WebRTC + e2e wire the
 // console uses (lab/ui/rtc.js, which imports lab/ui/e2e.js). Bundled in by
 // scripts/build-rgui.ts. A .js module with no types → treated as any here.
@@ -138,6 +146,19 @@ const HEADER = 46; // room the container title needs above its children
 const GAP = 14; // gap between siblings inside a container
 const ROW_GAP = 30; // gap between top-level subtrees
 const WRAP_W = 3400; // wrap top-level subtrees to a new band past this x
+
+// ── the in-world "what is this" card ─────────────────────────────────────────
+// A world-space node (pans/zooms with the canvas, unlike the screen-fixed status
+// palette) that says what agent-yes is and how to install it. It's the stable
+// default the page always shows — the anchor a first-time /r/ visitor lands on,
+// whether or not any live room is attached. Positioned above the forest so it
+// never overlaps agents; drawn on the canvas for the zoomed-out LOD and mirrored
+// by a copyable HTML overlay (install commands + copy buttons) up close.
+const INFO_ID = "info:card";
+const INFO_W = 560;
+const INFO_H = 320;
+const SETUP_SH = "curl -fsSL https://agent-yes.com/setup.sh | sh";
+const SETUP_PS = 'powershell -c "irm https://agent-yes.com/setup.ps1 | iex"';
 
 // status → rgui category (open string; rgui derives a stable color per string)
 const CATEGORY: Record<AgentStatus, string> = {
@@ -370,6 +391,25 @@ function buildGraph(records: AgentRecord[]): Graph {
     }
   }
 
+  // Place the "what is this" card above the forest (its own band), left-aligned,
+  // so a full-forest fit frames both. Its HTML overlay is (re)attached after
+  // setGraph by attachInfoOverlay(); here it's just a positioned node with a
+  // canvas draw for the zoomed-out LOD.
+  nodes.set(INFO_ID, {
+    id: INFO_ID,
+    title: "agent-yes · console",
+    category: "info",
+    x: 0,
+    y: -(INFO_H + ROW_GAP + 20),
+    w: INFO_W,
+    h: INFO_H,
+    inputs: [],
+    outputs: [],
+    fields: [],
+    draw: drawInfoCard,
+  });
+  children.set(INFO_ID, []);
+
   // containers (nodes with children) render as frames around their kids — a
   // terminal "over" them would cover the children, so only LEAF agents get a
   // live terminal overlay.
@@ -377,7 +417,7 @@ function buildGraph(records: AgentRecord[]): Graph {
   // leaf agent nodes render via our LOD draw hook (terminal snapshot / identity),
   // instead of rgui's default field card — see drawNode.
   for (const n of nodes.values()) {
-    if (!isContainer.has(n.id) && !n.id.startsWith("repo:")) {
+    if (!isContainer.has(n.id) && !n.id.startsWith("repo:") && !n.id.startsWith("info:")) {
       n.draw = (ctx, r) => drawNode(n.id, ctx, r);
     }
   }
@@ -729,6 +769,120 @@ function drawNode(
   ctx.restore();
 }
 
+// ── the in-world "what is this" card ─────────────────────────────────────────
+// Canvas draw (zoomed-out LOD, under the HTML overlay): brand + one-liner + the
+// two install commands, so the card reads even when its overlay is hidden.
+function drawInfoCard(ctx: CanvasRenderingContext2D, rect: { width: number; height: number }) {
+  const light = isLight();
+  const w = rect.width;
+  const h = rect.height;
+  const mono = "ui-monospace, SFMono-Regular, Menlo, monospace";
+  ctx.fillStyle = light ? "#ffffff" : "#0d1117";
+  ctx.fillRect(0, 0, w, h);
+  const px = w * 0.055;
+  let y = h * 0.14;
+  ctx.textBaseline = "alphabetic";
+  // brand
+  ctx.fillStyle = "#ffd60a";
+  ctx.font = `700 ${h * 0.085}px ${mono}`;
+  ctx.fillText("agent-yes", px, y);
+  ctx.fillStyle = light ? "#69737d" : "#8b949e";
+  ctx.font = `${h * 0.06}px ${mono}`;
+  ctx.fillText(" · console", px + ctx.measureText("agent-yes").width, y);
+  // tagline
+  y += h * 0.11;
+  ctx.fillStyle = light ? "#22262b" : "#c9d1d9";
+  ctx.font = `${h * 0.05}px ${mono}`;
+  ctx.fillText("Live ay ls + per-agent tail & send.", px, y);
+  y += h * 0.075;
+  ctx.fillText("Backed by ay serve.", px, y);
+  // install command chips
+  const chip = (label: string, cmd: string, cy: number) => {
+    ctx.fillStyle = light ? "#69737d" : "#6e7781";
+    ctx.font = `${h * 0.042}px ${mono}`;
+    ctx.fillText(label, px, cy);
+    ctx.fillStyle = light ? "#f3f1ea" : "#161b22";
+    const bx = px;
+    const by = cy + h * 0.02;
+    const bw = w - 2 * px;
+    const bh = h * 0.085;
+    ctx.beginPath();
+    ctx.roundRect(bx, by, bw, bh, 5);
+    ctx.fill();
+    ctx.fillStyle = light ? "#116329" : "#3fb950";
+    ctx.font = `${h * 0.045}px ${mono}`;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(bx, by, bw - h * 0.04, bh);
+    ctx.clip();
+    ctx.textBaseline = "middle";
+    ctx.fillText(cmd, bx + h * 0.03, by + bh / 2);
+    ctx.restore();
+    ctx.textBaseline = "alphabetic";
+    return by + bh;
+  };
+  y = chip("install", SETUP_SH, y + h * 0.11);
+  chip("windows", SETUP_PS, y + h * 0.08);
+}
+
+// The copyable HTML mirror, built once and re-anchored over the info node after
+// each setGraph. Real selectable text + a copy button per command (canvas can't
+// host either). rgui scale:"fit"s it into the node's screen rect.
+let infoOverlayEl: HTMLElement | null = null;
+function copyRow(label: string, cmd: string): string {
+  return (
+    `<div class="ay-info-row"><span class="ay-info-lbl">${label}</span>` +
+    `<code>${cmd.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</code>` +
+    `<button class="ay-info-copy" data-cmd="${cmd.replace(/"/g, "&quot;")}">copy</button></div>`
+  );
+}
+function ensureInfoOverlay(): HTMLElement {
+  if (infoOverlayEl) return infoOverlayEl;
+  const el = document.createElement("div");
+  el.className = "ay-info";
+  el.dataset.rguiInteractive = "1";
+  el.style.width = `${INFO_W}px`;
+  el.style.height = `${INFO_H}px`;
+  el.innerHTML =
+    `<div class="ay-info-head"><b>agent-yes</b> · console</div>` +
+    `<div class="ay-info-tag">Live <code>ay ls</code> + per-agent tail &amp; send. Backed by <code>ay serve</code>.</div>` +
+    copyRow("install", SETUP_SH) +
+    copyRow("windows", SETUP_PS) +
+    `<a class="ay-info-link" href="https://agent-yes.com" target="_blank" rel="noopener">agent-yes.com ↗</a>`;
+  el.addEventListener("click", async (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLElement>(".ay-info-copy");
+    if (!btn) return;
+    e.stopPropagation();
+    try {
+      await navigator.clipboard.writeText(btn.dataset.cmd ?? "");
+      const prev = btn.textContent;
+      btn.textContent = "copied ✓";
+      btn.classList.add("ok");
+      setTimeout(() => {
+        btn.textContent = prev;
+        btn.classList.remove("ok");
+      }, 1200);
+    } catch {
+      /* clipboard blocked — the code is still selectable to copy by hand */
+    }
+  });
+  infoOverlayEl = el;
+  return el;
+}
+function attachInfoOverlay() {
+  if (!viewer.graph.nodes.some((n) => n.id === INFO_ID)) return;
+  viewer.setNodeOverlay(INFO_ID, {
+    el: ensureInfoOverlay(),
+    anchor: "over",
+    scale: "fit",
+    minScale: 0.16, // readable at the default forest fit; hides only far out
+    maxScale: 1,
+    clip: "node",
+    overflow: "hidden",
+    interactive: true,
+  });
+}
+
 // Decide which nodes deserve a live terminal this frame (on-screen leaf nodes,
 // big enough, capped by area), create/tear down to match.
 let lastTermSync = 0;
@@ -738,7 +892,7 @@ function syncTerminals(view: { x: number; y: number; k: number }) {
   const ch = canvas.clientHeight || innerHeight;
   const cand: { id: string; area: number }[] = [];
   for (const n of viewer.graph.nodes) {
-    if (isContainer.has(n.id)) continue;
+    if (isContainer.has(n.id) || !recordsByPid.has(n.id)) continue; // skip containers + the info card
     const sw = n.w * view.k;
     const sh = (n.h ?? CARD_H) * view.k;
     if (sw < TERM_MIN_W || sh < TERM_MIN_H) continue;
@@ -815,6 +969,61 @@ function updateDocTitle() {
   }
 }
 
+// ── system status palette (screen-fixed rgui Panel) ──────────────────────────
+// A viewport-anchored panel — it never zooms or pans with the world, unlike the
+// info card. Shows the fleet at a glance: live/total agents (title) + a
+// per-status breakdown (items). Drag its header and rgui snaps it to the
+// viewport edges / other panels; onPanelMove persists the anchor across reloads.
+const SYS_PANEL_KEY = "rgui-syspanel-anchor";
+function loadPanelAnchor(): Panel["anchor"] {
+  try {
+    const raw = localStorage.getItem(SYS_PANEL_KEY);
+    if (raw === "left" || raw === "right") return raw;
+    if (raw) {
+      const p = JSON.parse(raw);
+      if (p && typeof p.x === "number" && typeof p.y === "number") return p;
+    }
+  } catch {
+    /* corrupt stored anchor — fall through to the default edge */
+  }
+  return "right";
+}
+const sysPanel: Panel = { id: "sys", title: "agents", anchor: loadPanelAnchor(), w: 200, items: [] };
+const STATUS_ROWS: [AgentStatus, string][] = [
+  ["active", "active"],
+  ["needs_input", "waiting"],
+  ["stuck", "stuck"],
+  ["idle", "idle"],
+  ["exited", "exited"],
+];
+// Recompute the panel's headline + rows from the current record set and redraw.
+function updateSysPanel(records: AgentRecord[], live: boolean) {
+  const counts = new Map<AgentStatus, number>();
+  const cwds = new Set<string>();
+  const repos = new Set<string>();
+  for (const r of records) {
+    counts.set(r.status, (counts.get(r.status) ?? 0) + 1);
+    cwds.add(r.cwd);
+    repos.add(repoOf(r.cwd).key);
+  }
+  const total = records.length;
+  const alive = total - (counts.get("exited") ?? 0);
+  sysPanel.title = `${alive} / ${total} agents`;
+  const items: PanelItem[] = [];
+  for (const [st, label] of STATUS_ROWS) {
+    const n = counts.get(st) ?? 0;
+    if (n) items.push({ id: st, label: `${n}  ${label}`, color: DOT_COLOR[st] });
+  }
+  if (repos.size) items.push({ id: "scope", label: `${repos.size} repos · ${cwds.size} worktrees` });
+  items.push({
+    id: "conn",
+    label: live ? (usingRoom() ? "live · room" : "live · local") : "demo · no ay serve",
+    color: live ? "#3fb950" : "#d29922",
+  });
+  sysPanel.items = items;
+  viewer.setPanels([sysPanel]);
+}
+
 // ── bootstrap ────────────────────────────────────────────────────────────────
 const canvas = document.getElementById("viewer") as HTMLCanvasElement;
 const debug = document.getElementById("debug");
@@ -827,6 +1036,15 @@ const viewer: Rgui = createRgui(canvas, {
   graph: { nodes: [], edges: [] },
   theme: initialTheme,
   debug,
+  panels: [sysPanel],
+  onPanelMove: (_p, anchor) => {
+    // persist the dragged/snapped anchor so the palette stays where the user left it
+    try {
+      localStorage.setItem(SYS_PANEL_KEY, JSON.stringify(anchor));
+    } catch {
+      /* storage unavailable — position just won't persist */
+    }
+  },
   onNodeClick: (id) => {
     // focus the clicked agent — a real hook point for "open this agent's console"
     viewer.setSelection([id]);
@@ -957,6 +1175,7 @@ function apply(records: AgentRecord[], live: boolean) {
     // tear down terminals for agents that are gone (exited/removed)
     for (const id of [...terms.keys()]) if (!recordsByPid.has(id)) dropTerm(id);
     viewer.setGraph(buildGraph(records));
+    attachInfoOverlay(); // re-anchor the copyable info card over its (new) node
     applyEdges(); // rebuild wires on the new node set
     if (firstPaint) {
       fitReadable();
@@ -972,6 +1191,7 @@ function apply(records: AgentRecord[], live: boolean) {
   statusLabel.textContent = live
     ? `live · ${n} agent${n === 1 ? "" : "s"}${usingRoom() ? " (room)" : ""}`
     : "demo · no local ay serve";
+  updateSysPanel(records, live); // refresh the screen-fixed status palette
   updateDocTitle(); // keep the tab title's name/status/count fresh
 }
 
