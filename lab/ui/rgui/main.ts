@@ -14,6 +14,7 @@
  * page tracks rgui's heavy dev directly.
  */
 import createRgui, {
+  annotationNode,
   nodeHeight,
   type Edge,
   type Graph,
@@ -392,22 +393,31 @@ function buildGraph(records: AgentRecord[]): Graph {
   }
 
   // Place the "what is this" card above the forest (its own band), left-aligned,
-  // so a full-forest fit frames both. Its HTML overlay is (re)attached after
-  // setGraph by attachInfoOverlay(); here it's just a positioned node with a
-  // canvas draw for the zoomed-out LOD.
-  nodes.set(INFO_ID, {
+  // so a full-forest fit frames both. It's a first-class rgui annotation/sticky
+  // card (note node): the copyable install commands are its HTML body (el), with
+  // drawInfoCard as the canvas LOD body shown when the overlay hides far out. We
+  // override the overlay to scale:"fit" so the body tracks the world-space frame
+  // (annotationNode's default is a screen-fixed body).
+  const infoCard = annotationNode({
     id: INFO_ID,
-    title: "agent-yes · console",
-    category: "info",
     x: 0,
     y: -(INFO_H + ROW_GAP + 20),
     w: INFO_W,
     h: INFO_H,
-    inputs: [],
-    outputs: [],
-    fields: [],
+    el: ensureInfoOverlay(),
     draw: drawInfoCard,
+    bg: isLight() ? "#ffffff" : "#0d1117",
   });
+  if (infoCard.overlay && typeof infoCard.overlay === "object") {
+    Object.assign(infoCard.overlay, {
+      scale: "fit",
+      minScale: 0.16, // readable at the default forest fit; hides only far out
+      maxScale: 1,
+      clip: "node",
+      overflow: "hidden",
+    });
+  }
+  nodes.set(INFO_ID, infoCard);
   children.set(INFO_ID, []);
 
   // containers (nodes with children) render as frames around their kids — a
@@ -817,9 +827,9 @@ function drawInfoCard(ctx: CanvasRenderingContext2D, rect: { width: number; heig
   chip("windows", SETUP_PS, y + h * 0.08);
 }
 
-// The copyable HTML mirror, built once and re-anchored over the info node after
-// each setGraph. Real selectable text + a copy button per command (canvas can't
-// host either). rgui scale:"fit"s it into the node's screen rect.
+// The copyable card body: real selectable text + a copy button per command
+// (canvas can't host either). Built once and handed to annotationNode as its
+// `el`; rgui glues it over the note-card frame and re-binds it across setGraph.
 let infoOverlayEl: HTMLElement | null = null;
 function copyRow(label: string, cmd: string): string {
   return (
@@ -860,25 +870,6 @@ function ensureInfoOverlay(): HTMLElement {
   });
   infoOverlayEl = el;
   return el;
-}
-// Register the copyable info overlay ONCE, the first time its node exists. rgui
-// remembers imperative overlays by node id and re-binds them onto the new node
-// objects every setGraph, so there's no need to re-attach on each rebuild.
-let infoOverlayAttached = false;
-function attachInfoOverlay() {
-  if (infoOverlayAttached) return;
-  if (!viewer.graph.nodes.some((n) => n.id === INFO_ID)) return;
-  viewer.setNodeOverlay(INFO_ID, {
-    el: ensureInfoOverlay(),
-    anchor: "over",
-    scale: "fit",
-    minScale: 0.16, // readable at the default forest fit; hides only far out
-    maxScale: 1,
-    clip: "node",
-    overflow: "hidden",
-    interactive: true,
-  });
-  infoOverlayAttached = true;
 }
 
 // Decide which nodes deserve a live terminal this frame (on-screen leaf nodes,
@@ -1178,7 +1169,6 @@ function apply(records: AgentRecord[], live: boolean) {
     // tear down terminals for agents that are gone (exited/removed)
     for (const id of [...terms.keys()]) if (!recordsByPid.has(id)) dropTerm(id);
     viewer.setGraph(buildGraph(records));
-    attachInfoOverlay(); // one-time register; rgui re-binds it across later setGraphs
     applyEdges(); // rebuild wires on the new node set
     if (firstPaint) {
       fitReadable();
