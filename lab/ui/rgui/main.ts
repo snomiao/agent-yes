@@ -528,11 +528,6 @@ interface TermEntry {
 }
 const terms = new Map<string, TermEntry>();
 
-// The rgui HTML-overlay layer (holds every terminal); cached once it exists.
-let overlayLayerEl: HTMLElement | null = null;
-function overlayLayer(): HTMLElement | null {
-  return (overlayLayerEl ??= document.querySelector<HTMLElement>(".rgui-overlay-layer"));
-}
 // Timestamp of the last view change — terminals are only reconciled once the view
 // has been still for a bit, so a zoom/pan never opens/closes SSE streams mid-
 // gesture (that churn leaks server-side FIFO watchers and triggers reconnect
@@ -639,11 +634,8 @@ function makeTerm(pid: string): TermEntry | null {
     overflow: "hidden",
     interactive: true,
   });
-  // rgui leaves the <canvas> at z-index:1 (its GPU-underlay stacking) even after
-  // a WebGPU fallback tears the underlay down, which would bury the overlay layer
-  // (z-index:auto) — lift it above the canvas so the terminals show.
-  const layer = overlayLayer();
-  if (layer && layer.style.zIndex !== "2") layer.style.zIndex = "2";
+  // rgui now owns overlay-layer stacking (sits at canvas z-index + 1 after the
+  // WebGPU→canvas2d fallback), so no host z-index lift is needed here anymore.
   return entry;
 }
 
@@ -869,7 +861,12 @@ function ensureInfoOverlay(): HTMLElement {
   infoOverlayEl = el;
   return el;
 }
+// Register the copyable info overlay ONCE, the first time its node exists. rgui
+// remembers imperative overlays by node id and re-binds them onto the new node
+// objects every setGraph, so there's no need to re-attach on each rebuild.
+let infoOverlayAttached = false;
 function attachInfoOverlay() {
+  if (infoOverlayAttached) return;
   if (!viewer.graph.nodes.some((n) => n.id === INFO_ID)) return;
   viewer.setNodeOverlay(INFO_ID, {
     el: ensureInfoOverlay(),
@@ -881,6 +878,7 @@ function attachInfoOverlay() {
     overflow: "hidden",
     interactive: true,
   });
+  infoOverlayAttached = true;
 }
 
 // Decide which nodes deserve a live terminal this frame (on-screen leaf nodes,
@@ -1009,12 +1007,17 @@ function updateSysPanel(records: AgentRecord[], live: boolean) {
   const total = records.length;
   const alive = total - (counts.get("exited") ?? 0);
   sysPanel.title = `${alive} / ${total} agents`;
+  // label on the left, count right-aligned via PanelItem.value (rgui renders the
+  // value column and clips the label so it never runs under the number).
   const items: PanelItem[] = [];
   for (const [st, label] of STATUS_ROWS) {
     const n = counts.get(st) ?? 0;
-    if (n) items.push({ id: st, label: `${n}  ${label}`, color: DOT_COLOR[st] });
+    if (n) items.push({ id: st, label, value: String(n), color: DOT_COLOR[st] });
   }
-  if (repos.size) items.push({ id: "scope", label: `${repos.size} repos · ${cwds.size} worktrees` });
+  if (repos.size) {
+    items.push({ id: "repos", label: "repos", value: String(repos.size) });
+    items.push({ id: "worktrees", label: "worktrees", value: String(cwds.size) });
+  }
   items.push({
     id: "conn",
     label: live ? (usingRoom() ? "live · room" : "live · local") : "demo · no ay serve",
@@ -1175,7 +1178,7 @@ function apply(records: AgentRecord[], live: boolean) {
     // tear down terminals for agents that are gone (exited/removed)
     for (const id of [...terms.keys()]) if (!recordsByPid.has(id)) dropTerm(id);
     viewer.setGraph(buildGraph(records));
-    attachInfoOverlay(); // re-anchor the copyable info card over its (new) node
+    attachInfoOverlay(); // one-time register; rgui re-binds it across later setGraphs
     applyEdges(); // rebuild wires on the new node set
     if (firstPaint) {
       fitReadable();
