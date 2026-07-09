@@ -161,6 +161,9 @@ pub const SUPPORTED_CLIS: &[&str] = &[
     "auggie",
     "amp",
     "opencode",
+    "bash",
+    "cmd",
+    "powershell",
 ];
 
 // Most fields here are read elsewhere in the binary; the ones that aren't
@@ -701,7 +704,7 @@ mod tests {
 
     #[test]
     fn test_supported_clis_count() {
-        assert_eq!(SUPPORTED_CLIS.len(), 13);
+        assert_eq!(SUPPORTED_CLIS.len(), 16);
         // The claude-compatible providers (run the `claude` binary via env) must
         // be present, else their `*-yes` bins fail validation in the Rust runtime.
         for cli in ["glm", "openrouter", "pi"] {

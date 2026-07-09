@@ -131,8 +131,8 @@
         },
         "promptArg": {
           "type": "string",
-          "description": "How to pass the prompt: 'first-arg', 'last-arg', or a flag like '--prompt'",
-          "examples": ["first-arg", "last-arg", "--prompt", "-p"]
+          "description": "How to pass the prompt: 'first-arg', 'last-arg', a flag like '--prompt', or 'typed' to type it into an interactive session after the prompt is ready (shells)",
+          "examples": ["first-arg", "last-arg", "--prompt", "-p", "typed"]
         },
         "noEOL": {
           "type": "boolean",
