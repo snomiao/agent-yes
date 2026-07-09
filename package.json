@@ -45,7 +45,10 @@
     "openrouter-yes": "./dist/openrouter-yes.js",
     "orcy": "./dist/orcy.js",
     "pi-yes": "./dist/pi-yes.js",
-    "qwen-yes": "./dist/qwen-yes.js"
+    "qwen-yes": "./dist/qwen-yes.js",
+    "bash-yes": "./dist/bash-yes.js",
+    "cmd-yes": "./dist/cmd-yes.js",
+    "powershell-yes": "./dist/powershell-yes.js"
   },
   "directories": {
     "doc": "docs"

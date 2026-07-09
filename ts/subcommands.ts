@@ -3212,12 +3212,18 @@ export function stopTipForCli(cli: string, pid: number): string | null {
 ///   claude   — `/exit`
 ///   codex    — `/exit`
 ///   gemini   — `/quit`
+///   bash/cmd/powershell — `exit` (the shell builtin; closes the session at a
+///     bare prompt, far cleaner than Ctrl+C which would instead hit whatever
+///     app is running in the foreground).
 /// Other CLIs aren't in the table because their reliable graceful-exit
 /// command isn't well-known here; `ay stop` falls back to double Ctrl+C.
 export const GRACEFUL_EXIT_COMMANDS: Record<string, string> = {
   claude: "/exit",
   codex: "/exit",
   gemini: "/quit",
+  bash: "exit",
+  cmd: "exit",
+  powershell: "exit",
 };
 
 export function controlCodeFromName(name: string): string {
