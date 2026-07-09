@@ -435,13 +435,6 @@ function buildGraph(records: AgentRecord[]): Graph {
       n.draw = (ctx, r) => drawNode(n.id, ctx, r);
     }
   }
-  // re-apply any user magnify (contentScale) after layout, so the node lenses in
-  // place — exactly where the live shift+drag rescale leaves it — instead of the
-  // manual zoom being lost on every structural rebuild.
-  for (const n of nodes.values()) {
-    const s = scaleByNode.get(n.id);
-    if (s && s !== 1) n.scale = s;
-  }
   return { nodes: [...nodes.values()], edges: [] };
 }
 
@@ -1103,7 +1096,11 @@ const viewer: Rgui = createRgui(canvas, {
     return viewer.graph;
   },
   scaleByNode, // e2e/debug: inspect persisted magnify
-  rebuild: () => viewer.setGraph(buildGraph([...recordsByPid.values()])), // e2e: force a structural rebuild
+  // e2e: force a structural rebuild THROUGH the real path (setGraph + magnify restore)
+  rebuild: () => {
+    viewer.setGraph(buildGraph([...recordsByPid.values()]));
+    reapplyMagnify();
+  },
 };
 
 // Fit all agents, but never zoom out past a readable scale — a full forest fit
@@ -1182,6 +1179,17 @@ function updateContent(records: AgentRecord[]) {
   }
 }
 
+// Restore each remembered user magnify onto the rebuilt nodes via rescaleNode —
+// the ratio-preserving path (it scales w and h by the SAME factor and sets
+// scale). Setting n.scale alone would leave a base-sized box inconsistent with
+// the scale, and a later snapGraph() snaps w/h independently and skews the ratio
+// (per rgui's resize-or-scale author).
+function reapplyMagnify() {
+  if (!scaleByNode.size) return;
+  const present = new Set(viewer.graph.nodes.map((n) => n.id));
+  for (const [id, s] of scaleByNode) if (present.has(id)) viewer.rescaleNode(id, s);
+}
+
 function apply(records: AgentRecord[], live: boolean) {
   recordsByPid.clear();
   for (const r of records) recordsByPid.set(String(r.pid), r);
@@ -1193,6 +1201,7 @@ function apply(records: AgentRecord[], live: boolean) {
     // tear down terminals for agents that are gone (exited/removed)
     for (const id of [...terms.keys()]) if (!recordsByPid.has(id)) dropTerm(id);
     viewer.setGraph(buildGraph(records));
+    reapplyMagnify(); // restore user magnify on the rebuilt nodes (ratio-safe)
     applyEdges(); // rebuild wires on the new node set
     if (firstPaint) {
       fitReadable();
