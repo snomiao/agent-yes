@@ -239,6 +239,104 @@
         padding: 4px 6px;
       }
 
+      /* ── in-world "what is this" card (rgui overlay, anchor:"over") ──────
+         Copyable mirror of the drawInfoCard canvas draw: real selectable text +
+         a copy button per install command. rgui scale:"fit"s it over the node. */
+      .ay-info {
+        box-sizing: border-box;
+        display: flex;
+        flex-direction: column;
+        gap: 9px;
+        padding: 20px 22px;
+        background: #0d1117;
+        color: #c9d1d9;
+        border-radius: 10px;
+        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.45);
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        overflow: hidden;
+      }
+      :root[data-theme="light"] .ay-info {
+        background: #ffffff;
+        color: #22262b;
+      }
+      .ay-info-head {
+        font-size: 20px;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        color: var(--text-muted);
+      }
+      .ay-info-head b {
+        color: #ffd60a;
+      }
+      :root[data-theme="light"] .ay-info-head b {
+        color: #c8860a;
+      }
+      .ay-info-tag {
+        font-size: 13px;
+        line-height: 1.5;
+        color: var(--text-dim);
+      }
+      .ay-info-tag code {
+        color: var(--text);
+        font-weight: 600;
+      }
+      .ay-info-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 2px;
+      }
+      .ay-info-lbl {
+        flex: 0 0 54px;
+        font-size: 11px;
+        color: var(--text-muted);
+      }
+      .ay-info-row code {
+        flex: 1 1 auto;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        padding: 7px 10px;
+        border-radius: 6px;
+        background: #161b22;
+        color: #3fb950;
+        font-size: 12.5px;
+        user-select: all;
+      }
+      :root[data-theme="light"] .ay-info-row code {
+        background: #f3f1ea;
+        color: #116329;
+      }
+      .ay-info-copy {
+        flex: 0 0 auto;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--text-dim);
+        border-radius: 6px;
+        padding: 6px 10px;
+        font: inherit;
+        font-size: 11px;
+        cursor: pointer;
+      }
+      .ay-info-copy:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .ay-info-copy.ok {
+        border-color: #3fb950;
+        color: #3fb950;
+      }
+      .ay-info-link {
+        margin-top: auto;
+        align-self: flex-start;
+        font-size: 12px;
+        color: var(--text-muted);
+        text-decoration: none;
+      }
+      .ay-info-link:hover {
+        color: var(--accent);
+      }
+
       /* ── ⌘K command palette (go to / focus an agent) ─────────────────── */
       #cmdk {
         position: fixed;
