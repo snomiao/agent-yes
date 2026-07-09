@@ -395,29 +395,27 @@ function buildGraph(records: AgentRecord[]): Graph {
   // Place the "what is this" card above the forest (its own band), left-aligned,
   // so a full-forest fit frames both. It's a first-class rgui annotation/sticky
   // card (note node): the copyable install commands are its HTML body (el), with
-  // drawInfoCard as the canvas LOD body shown when the overlay hides far out. We
-  // override the overlay to scale:"fit" so the body tracks the world-space frame
-  // (annotationNode's default is a screen-fixed body).
-  const infoCard = annotationNode({
-    id: INFO_ID,
-    x: 0,
-    y: -(INFO_H + ROW_GAP + 20),
-    w: INFO_W,
-    h: INFO_H,
-    el: ensureInfoOverlay(),
-    draw: drawInfoCard,
-    bg: isLight() ? "#ffffff" : "#0d1117",
-  });
-  if (infoCard.overlay && typeof infoCard.overlay === "object") {
-    Object.assign(infoCard.overlay, {
+  // drawInfoCard as the canvas LOD body shown when the overlay hides far out.
+  // scale:"fit" makes the body track its world-space frame (annotationNode's
+  // default body is screen-fixed).
+  nodes.set(
+    INFO_ID,
+    annotationNode({
+      id: INFO_ID,
+      x: 0,
+      y: -(INFO_H + ROW_GAP + 20),
+      w: INFO_W,
+      h: INFO_H,
+      el: ensureInfoOverlay(),
+      draw: drawInfoCard,
+      bg: isLight() ? "#ffffff" : "#0d1117",
       scale: "fit",
       minScale: 0.16, // readable at the default forest fit; hides only far out
       maxScale: 1,
       clip: "node",
       overflow: "hidden",
-    });
-  }
-  nodes.set(INFO_ID, infoCard);
+    }),
+  );
   children.set(INFO_ID, []);
 
   // containers (nodes with children) render as frames around their kids — a
