@@ -81,11 +81,18 @@ export async function startServer(
     if (req.method === "GET" && p === "/console-logic.js")
       return file(res, join(UI, "console-logic.js"), "text/javascript; charset=utf-8");
     // index.html statically imports ./e2e.js too; without it the whole page
-    // module fails to load and nothing renders (the list stays empty).
+    // module fails to load and nothing renders (the list stays empty). Same for
+    // ./rtc.js (the extracted ay-share WebRTC wire) — a 404 on a module import
+    // halts the whole graph, so every row test times out. qrcode.js is a classic
+    // <script> (its 404 is non-fatal) but we serve it so the console stays clean.
     if (req.method === "GET" && p === "/e2e.js")
       return file(res, join(UI, "e2e.js"), "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/room-client.js")
       return file(res, join(UI, "room-client.js"), "text/javascript; charset=utf-8");
+    if (req.method === "GET" && p === "/rtc.js")
+      return file(res, join(UI, "rtc.js"), "text/javascript; charset=utf-8");
+    if (req.method === "GET" && p === "/qrcode.js")
+      return file(res, join(UI, "qrcode.js"), "text/javascript; charset=utf-8");
 
     if (req.method === "GET" && p === "/api/ls") {
       res.writeHead(200, { "Content-Type": "application/json" });

@@ -961,6 +961,7 @@
         margin-bottom: 4px;
       }
       .lcard .nfield input,
+      .lcard .nfield select,
       .lcard .nfield textarea {
         width: 100%;
         background: var(--bg);
@@ -973,6 +974,7 @@
         resize: vertical;
       }
       .lcard .nfield input:focus,
+      .lcard .nfield select:focus,
       .lcard .nfield textarea:focus {
         border-color: var(--accent);
       }
@@ -1018,7 +1020,9 @@
       }
       .row.sel.peerfocus {
         background: var(--panel);
-        box-shadow: inset 3px 0 0 var(--accent), inset -3px 0 0 var(--peer);
+        box-shadow:
+          inset 3px 0 0 var(--accent),
+          inset -3px 0 0 var(--peer);
       }
       /* stdin just landed here (someone typed, or `ay send` pushed a command) —
          pulse the row regardless of who (if anyone) is focused on it. Runs while
@@ -1703,7 +1707,9 @@
           <span class="robadge" title="view-only share — you can watch but not steer this agent"
             >👁 read-only</span
           >
-          <span class="rwbadge" title="read-write share — you can type but not stop/restart this agent"
+          <span
+            class="rwbadge"
+            title="read-write share — you can type but not stop/restart this agent"
             >✏️ read-write</span
           >
           <span class="live"
@@ -1848,9 +1854,9 @@
         <div class="sharewarn" id="shareWarn" hidden>
           <div class="warnhead">⚠️ This link lets anyone control this agent</div>
           <p>
-            Whoever opens this link can <strong>type into this agent</strong> — and because an
-            agent can run commands, that can mean <strong>control of your whole system</strong>.
-            The link isn't a password prompt: no further confirmation is asked.
+            Whoever opens this link can <strong>type into this agent</strong> — and because an agent
+            can run commands, that can mean <strong>control of your whole system</strong>. The link
+            isn't a password prompt: no further confirmation is asked.
           </p>
           <p><strong>Only share it with someone you completely trust.</strong></p>
           <button class="danger" id="shareReveal" type="button">
@@ -2058,14 +2064,121 @@
       // A codehost room can hold several machines: every `codehost serve`
       // daemon advertises its live agents (PeerMeta.agents) and proxies the
       // local ay-serve API over its WebRTC tunnel at /__codehost/agent-yes/*.
-      // This wire aggregates all hosts' agents into one list, then routes each
-      // per-agent call to the host that owns the pid. Known v1 limitation:
-      // pids may collide across hosts (last listed wins); the host: tag keeps
-      // them tellable-apart visually.
+      //
+      // Every machine in the room is its own fleet source, id "<room>/<peerId>",
+      // sharing the room's one signaling/WebRTC connection. A source is therefore
+      // always exactly one machine — the invariant the rest of the console already
+      // assumes (`local` and each ay-share room are one machine too). v1 instead
+      // hid N machines behind one transport and picked a peer per request, which
+      // silently pinned `/api/spawn` and `/api/ls/subscribe` to whichever host was
+      // listed first, and let equal pids on two machines overwrite each other.
       const CH_API = "/__codehost/agent-yes";
-      class CodehostClient {
-        constructor(token) {
-          Object.assign(this, { token, room: null, byPid: new Map(), onstate: () => {} });
+
+      // Machines that can answer for agents: anything advertising agents, plus
+      // root daemons (their ay serve may know agents the broadcast hasn't picked
+      // up yet, and an idle root is still a valid spawn target).
+      const isHostPeer = (p) =>
+        !!p?.meta && ((p.meta.agents || []).length > 0 || p.meta.kind === "root");
+
+      // One codehost machine behind the standard transport shape. Every call is
+      // pinned to `peerId`, so a source built on this tx can never leak a request
+      // to a sibling machine in the same room. Both the room handle and the peer's
+      // meta are read at call time, never captured: the handle isn't assigned yet
+      // if the first peer broadcast lands during joinRoom, and the meta goes stale
+      // on every rebroadcast.
+      function chPeerTx(chRoom, peerId, getMeta) {
+        const req = (method, path, init) => chRoom.room.fetch(peerId, method, CH_API + path, init);
+        const ok = (res) => res.status >= 200 && res.status < 300;
+        // The daemon is in the room but its `ay serve` may be down. It still
+        // advertises the agents it knows, so degrade to that list rather than
+        // dropping the machine out of the fleet entirely.
+        const advertised = () =>
+          (getMeta()?.agents || []).map((a) => ({
+            pid: a.pid,
+            cli: a.tool,
+            title: a.title || null,
+            prompt: a.title || null,
+            cwd: a.cwd,
+            status: a.state,
+            started_at: a.startedAt,
+          }));
+        return {
+          async fetchJSON(path) {
+            let res;
+            try {
+              res = await req("GET", path);
+              if (!ok(res)) throw new Error("HTTP " + res.status);
+            } catch (err) {
+              if (path.startsWith("/api/ls")) return advertised();
+              throw err;
+            }
+            return res.json();
+          },
+          async fetchText(path) {
+            const res = await req("GET", path);
+            if (!ok(res)) throw new Error("HTTP " + res.status);
+            return res.text();
+          },
+          async post(path, bodyObj) {
+            const res = await req("POST", path, {
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(bodyObj),
+            });
+            return { ok: ok(res), text: await res.text() };
+          },
+          async del(path) {
+            const res = await req("DELETE", path);
+            return { ok: ok(res), text: await res.text() };
+          },
+          subscribe(path, onText, onOpen, onError) {
+            let cancelled = false;
+            let reader = null;
+            (async () => {
+              try {
+                const res = await req("GET", path, { headers: { accept: "text/event-stream" } });
+                if (!ok(res) || !res.body) throw new Error("HTTP " + res.status);
+                onOpen && onOpen();
+                reader = res.body.getReader();
+                const dec = new TextDecoder();
+                let buf = "";
+                for (;;) {
+                  const { done, value } = await reader.read();
+                  if (done || cancelled) break;
+                  buf += dec.decode(value, { stream: true });
+                  let i;
+                  while ((i = buf.indexOf("\n\n")) >= 0) {
+                    const evt = buf.slice(0, i);
+                    buf = buf.slice(i + 2);
+                    for (const line of evt.split("\n"))
+                      if (line.startsWith("data:")) {
+                        try {
+                          onText(JSON.parse(line.slice(5).trim()));
+                        } catch {}
+                      }
+                  }
+                }
+                if (!cancelled) onError && onError();
+              } catch {
+                if (!cancelled) onError && onError();
+              }
+            })();
+            return () => {
+              cancelled = true;
+              try {
+                reader?.cancel();
+              } catch {}
+            };
+          },
+        };
+      }
+
+      // A joined codehost room. It owns the connection and keeps the fleet in sync
+      // with the room's server peers: a source appears when a machine joins and is
+      // dropped when it leaves. The room itself is never a source — only machines are.
+      class CodehostRoom {
+        constructor(name, token) {
+          Object.assign(this, { name, token, room: null, live: false, tried: false });
+          this.peers = new Map(); // peerId -> latest peer broadcast (meta included)
         }
         async connect() {
           if (!window.__codehost)
@@ -2075,10 +2188,24 @@
           this.room = window.__codehost.joinRoom({
             token: this.token,
             onStatus: (open) => {
-              if (!open) this.onstate("closed");
+              if (this.orphaned()) return;
+              this.live = open;
+              // Keep the machines listed while the socket retries — room-client
+              // self-heals, and dropping the rows would flicker the whole tree.
+              // Drop their streams though: a stream that never errors would leave
+              // `streaming` set, the reconcile poll would skip the machine, and it
+              // would sit offline forever. syncPeers re-arms them on reconnect.
+              if (!open)
+                for (const s of roomSources(this.name)) {
+                  s.live = false;
+                  unsubscribeSource(s);
+                }
+              renderRoomsIfOpen();
             },
-            onPeers: () => {
-              this.onstate("open");
+            onPeers: (peers) => {
+              if (this.orphaned()) return;
+              this.live = true;
+              this.syncPeers(peers);
               firstPeers();
             },
           });
@@ -2089,122 +2216,60 @@
         close() {
           this.room?.close();
         }
-        hosts() {
-          // Machines that can answer for agents: anything advertising agents,
-          // plus root daemons (their ay serve may know agents the broadcast
-          // hasn't picked up yet).
-          return (this.room?.peers || []).filter(
-            (p) => p.meta && ((p.meta.agents || []).length || p.meta.kind === "root"),
-          );
+        // True once the room has been forgotten (removeRoom drops it from chRooms)
+        // or superseded by a re-add under the same name. joinRoom's callbacks can
+        // fire a queued peer broadcast AFTER that, and without this guard syncPeers
+        // would `sources.set` the machines back for a room the user just forgot.
+        orphaned() {
+          return chRooms.get(this.name) !== this;
         }
-        anyHost() {
-          const h = this.hosts();
-          return h.length ? h[0].peerId : null;
-        }
-        peerFor(path) {
-          const m = /^\/api\/(?:tail|size|resize|read|status)\/([^/?]+)/.exec(path);
-          const kw = m ? decodeURIComponent(m[1]) : null;
-          return (kw && this.byPid.get(kw)) || null;
-        }
-        async ls(path) {
-          const hosts = this.hosts();
-          const lists = await Promise.all(
-            hosts.map(async (p) => {
-              try {
-                const res = await this.room.fetch(p.peerId, "GET", CH_API + path);
-                if (!res.ok) throw new Error("HTTP " + res.status);
-                return (await res.json()).map((e) => ({ ...e, _host: p.meta?.host }));
-              } catch {
-                // ay serve down on that host — fall back to the daemon-advertised list.
-                return (p.meta?.agents || []).map((a) => ({
-                  pid: a.pid,
-                  cli: a.tool,
-                  title: a.title || null,
-                  prompt: a.title || null,
-                  cwd: a.cwd,
-                  status: a.state,
-                  started_at: a.startedAt,
-                  _host: p.meta?.host,
-                }));
-              }
-            }),
-          );
-          const byPid = new Map();
-          const merged = [];
-          lists.forEach((arr, i) => {
-            for (const e of arr) {
-              byPid.set(String(e.pid), hosts[i].peerId);
-              merged.push(e);
+        // Reconcile the fleet against the room's current server peers. Called on
+        // every peer broadcast — including the frequent ones that only carry new
+        // agent meta — so it must stay cheap when the peer SET hasn't changed.
+        syncPeers(peers) {
+          if (this.orphaned()) return;
+          const hosts = (peers || []).filter(isHostPeer);
+          const seen = new Set();
+          let changed = false;
+          for (const p of hosts) {
+            seen.add(p.peerId);
+            this.peers.set(p.peerId, p);
+            const id = this.name + "/" + p.peerId;
+            let s = sources.get(id);
+            if (!s) {
+              s = {
+                id,
+                room: this.name,
+                peerId: p.peerId,
+                host: CH_HOST,
+                kind: "ch",
+                chRoom: this,
+                tx: chPeerTx(this, p.peerId, () => this.peers.get(p.peerId)?.meta),
+                client: null,
+                live: false,
+                tried: false,
+                devices: new Set(),
+                serverCount: 0,
+              };
+              sources.set(id, s);
+              changed = true;
             }
-          });
-          this.byPid = byPid;
-          return merged;
-        }
-        async fetchJSON(path) {
-          if (path.startsWith("/api/ls")) return this.ls(path);
-          const peer = this.peerFor(path) || this.anyHost();
-          if (!peer) throw new Error("no codehost peer");
-          const res = await this.room.fetch(peer, "GET", CH_API + path);
-          if (!res.ok) throw new Error("HTTP " + res.status);
-          return res.json();
-        }
-        async post(path, bodyObj) {
-          const kw = bodyObj && bodyObj.keyword != null ? String(bodyObj.keyword) : null;
-          const peer = (kw && this.byPid.get(kw)) || this.peerFor(path) || this.anyHost();
-          if (!peer) return { ok: false, text: "no codehost peer in the room" };
-          const res = await this.room.fetch(peer, "POST", CH_API + path, {
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(bodyObj),
-          });
-          return { ok: res.status >= 200 && res.status < 300, text: await res.text() };
-        }
-        subscribe(path, onText, onOpen, onError) {
-          let cancelled = false;
-          let reader = null;
-          (async () => {
-            const peer = this.peerFor(path) || this.anyHost();
-            if (!peer) {
-              onError && onError();
-              return;
-            }
-            try {
-              const res = await this.room.fetch(peer, "GET", CH_API + path, {
-                headers: { accept: "text/event-stream" },
-              });
-              if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
-              onOpen && onOpen();
-              reader = res.body.getReader();
-              const dec = new TextDecoder();
-              let buf = "";
-              for (;;) {
-                const { done, value } = await reader.read();
-                if (done || cancelled) break;
-                buf += dec.decode(value, { stream: true });
-                let i;
-                while ((i = buf.indexOf("\n\n")) >= 0) {
-                  const evt = buf.slice(0, i);
-                  buf = buf.slice(i + 2);
-                  for (const line of evt.split("\n"))
-                    if (line.startsWith("data:")) {
-                      try {
-                        onText(JSON.parse(line.slice(5).trim()));
-                      } catch {}
-                    }
-                }
-              }
-              if (!cancelled) onError && onError();
-            } catch {
-              if (!cancelled) onError && onError();
-            }
-          })();
-          return () => {
-            cancelled = true;
-            try {
-              reader?.cancel();
-            } catch {}
-          };
+            s.deviceLabel = p.meta?.host || "";
+            subscribeSource(s); // no-op while already streaming; re-arms after a drop
+          }
+          for (const peerId of [...this.peers.keys()]) {
+            if (seen.has(peerId)) continue;
+            this.peers.delete(peerId);
+            removeSource(this.name + "/" + peerId);
+            changed = true;
+          }
+          renderRoomsIfOpen();
+          if (changed)
+            loadList(); // poll the newcomers until their stream opens
+          else mergeRender();
         }
       }
+      const chRooms = new Map(); // room name -> CodehostRoom
 
       // `ay serve --http` serves this page itself and prints a #k=<token> link;
       // boot() stores the token and local /api calls carry it as ?token= (query,
@@ -2219,7 +2284,7 @@
 
       // ---- transports: a uniform { fetchJSON, post, subscribe } over each wire ----
       // local (same-origin ay serve), an ay-share RTCClient, or a codehost room.
-      // CodehostClient already exposes this shape, so it's used as a tx directly.
+      // A codehost room builds one of these per machine in it (see chPeerTx).
       const localTx = {
         async fetchJSON(path) {
           return (await fetch(withTok(path))).json();
@@ -2285,13 +2350,27 @@
       }
 
       // ---- fleet: local + every saved room, all connected at once ------------
-      // Each source contributes its agents to one merged list (tagged with the
-      // owning source on `_room`/`_key`); per-agent ops route back via srcFor/txFor.
+      // A source is ONE machine. Each contributes its agents to one merged list,
+      // tagged with the owning source on `_src` (routing: srcFor/txFor) and with
+      // the room it belongs to on `_room` (display: the tree's room grouping).
+      // Those differ only for codehost rooms, where one room holds many machines.
       // Live counts in the rooms panel come from each source's serverCount/devices.
       const LOCAL = "local";
-      const sources = new Map(); // id -> { id, host, kind, tx, client, live, devices, serverCount }
-      const srcFor = (e) => (e && sources.get(e._room)) || sources.get(LOCAL) || null;
+      const sources = new Map(); // id -> { id, room, host, kind, tx, client, live, devices, serverCount }
+      const srcFor = (e) => (e && sources.get(e._src)) || sources.get(LOCAL) || null;
       const txFor = (e) => srcFor(e)?.tx || localTx;
+      // Every machine belonging to a room (for an ay-share room, the room itself).
+      const roomSources = (name) => [...sources.values()].filter((s) => (s.room || s.id) === name);
+      const roomLive = (name) =>
+        chRooms.has(name) ? chRooms.get(name).live : !!sources.get(name)?.live;
+      // How a machine names itself in a picker: "room · user@host", or just the
+      // room when its device label hasn't arrived yet.
+      const sourceLabel = (s) => {
+        if (!s) return "";
+        if (s.id === LOCAL) return "local";
+        const room = s.room || s.id;
+        return s.deviceLabel ? room + " · " + s.deviceLabel : room;
+      };
       // True when the agent lives in a view-only share room (the host advertises
       // this via /api/whoami → share.readonly and 403s every write regardless).
       const isReadonlyEnt = (e) => !!srcFor(e)?.readonly;
@@ -2397,33 +2476,23 @@
           return null;
         }
       }
-      // Resolve the live RTCPeerConnection that carries a SPECIFIC agent. A codehost
-      // room holds one peer per host (room.rtcs keyed by peerId); byPid maps the
-      // agent's pid to its peerId, so each agent resolves to ITS host's connection —
+      // Resolve the live RTCPeerConnection that carries a source. A codehost room
+      // holds one peer per machine (room.rtcs keyed by peerId) and a source pins
+      // exactly one of them, so each agent resolves to ITS machine's connection —
       // a VPS agent reads wan while a tak.local agent in the same room reads lan.
-      function pcForAgent(s, e) {
+      function pcForAgent(s) {
         if (!s) return null;
         if (s.kind === "rtc") return s.client?.pc || null; // share room: one host
-        if (s.kind === "ch") {
-          const peerId = s.client?.byPid?.get(String(e?.pid));
-          return (peerId && s.client?.room?.rtcs?.get(peerId)?.pc) || null;
-        }
+        if (s.kind === "ch") return s.chRoom?.room?.rtcs?.get(s.peerId)?.pc || null;
         return null; // local ay-serve has no peer connection
       }
       // Two cache views, both filled from one classification pass:
-      //  - connKinds keyed by the true PEER (room + peerId) drives the header badge,
-      //    so two machines that happen to share a hostname never collide.
+      //  - connKinds keyed by the source, i.e. the true PEER, drives the header
+      //    badge, so two machines that share a hostname never collide.
       //  - hostKinds keyed by (room, host) drives the peer-group header tags, which
       //    only ever render when hosts are already distinct.
       const hostKeyOf = (e) => (e?._room || "") + " " + (e?._host || "");
-      function peerKeyOf(s, e) {
-        if (!s || s.id === LOCAL || s.kind == null) return LOCAL;
-        if (s.kind === "ch") {
-          const peerId = s.client?.byPid?.get(String(e?.pid));
-          return s.id + " " + (peerId || e?._host || "");
-        }
-        return s.id; // rtc share: one peer per room
-      }
+      const peerKeyOf = (s) => (!s || s.id === LOCAL || s.kind == null ? LOCAL : s.id);
       const connKinds = new Map(); // peerKey -> "local" | "lan" | "wan" | "relay"
       const hostKinds = new Map(); // hostKey -> same (peer-header tags)
       const connInfo = new Map(); // peerKey -> full detail for the hover tooltip
@@ -2461,7 +2530,7 @@
         // Probe each distinct peer once (not once per agent), keyed by peerKey.
         const reps = new Map(); // peerKey -> a representative entry for that peer
         for (const e of entries) {
-          const k = peerKeyOf(srcFor(e), e);
+          const k = peerKeyOf(srcFor(e));
           if (!reps.has(k)) reps.set(k, e);
         }
         connKinds.clear();
@@ -2480,7 +2549,7 @@
               }
               return;
             }
-            const info = await inspectConn(pcForAgent(s, e));
+            const info = await inspectConn(pcForAgent(s));
             if (info) {
               connKinds.set(key, info.kind);
               connInfo.set(key, { ...info, signaling: signalingOf(s) });
@@ -2490,7 +2559,7 @@
         // Project peer kinds onto (room,host) keys for the tree's peer headers.
         hostKinds.clear();
         for (const e of entries) {
-          const kind = connKinds.get(peerKeyOf(srcFor(e), e));
+          const kind = connKinds.get(peerKeyOf(srcFor(e)));
           if (kind) hostKinds.set(hostKeyOf(e), kind);
         }
         paintHeaderBadge();
@@ -2513,7 +2582,7 @@
         const badge = $("ctype");
         if (!badge) return;
         const e = sel ? entries.find((x) => x._key === sel) : null;
-        const key = e ? peerKeyOf(srcFor(e), e) : null;
+        const key = e ? peerKeyOf(srcFor(e)) : null;
         const kind = key ? connKinds.get(key) : null;
         if (!kind) {
           badge.hidden = true;
@@ -3120,7 +3189,7 @@
           alert("Share created but the response was unreadable.");
           return null;
         }
-        currentShare = { shareId: info.shareId, link: info.link, srcRoom: e._room, perm };
+        currentShare = { shareId: info.shareId, link: info.link, srcId: e._src, perm };
         return info;
       }
       // "I understand — reveal": now that the operator has read the warning, mint
@@ -3144,7 +3213,8 @@
         const who = e.title || cliLabel(e) || ident(e) || `pid ${e.pid}`;
         const rw = perm === "rw";
         $("shareTitle").textContent = rw ? "Share control of this agent" : "Share this agent";
-        $("shareSub").textContent = `${rw ? "read-write · can type" : "view-only · can watch"} · ${who}`;
+        $("shareSub").textContent =
+          `${rw ? "read-write · can type" : "view-only · can watch"} · ${who}`;
         $("shareNote").textContent = rw
           ? "Read-write: viewers can type into this agent (interrupt, run commands). They cannot stop or restart it. The link expires and stops working when revoked."
           : "View-only: viewers see this agent's terminal (which may include secrets) but cannot type, stop, or restart it. The link expires and stops working when revoked.";
@@ -3198,10 +3268,20 @@
       }
       async function revokeCurrentShare() {
         if (!currentShare) return closeShareModal();
-        // DELETE over whichever transport owns the agent's host (local or the
-        // room the agent lives in) — the same host that minted the share.
-        const e = entries.find((x) => x._room === currentShare.srcRoom) || null;
-        const tx = (e ? srcFor(e)?.tx : null) || localTx;
+        // DELETE over the transport of the exact MACHINE that minted the share.
+        // Keying by source id, not room, matters for a codehost room with several
+        // machines — routing by room would revoke against the wrong host.
+        const src = sources.get(currentShare.srcId);
+        // Only fall back to localTx for a LOCAL share. If a remote machine's source
+        // has dropped (room/peer gone while the modal sat open), sending the DELETE
+        // to localhost would 404 yet still close the modal — the operator would
+        // think the share was killed while it stays live on the (now unreachable)
+        // host. Say so and keep the modal open instead.
+        const tx = src?.tx || (currentShare.srcId === LOCAL ? localTx : null);
+        if (!tx) {
+          alert("Can't revoke: the machine that owns this share is no longer connected.");
+          return;
+        }
         try {
           await tx.del("/api/share/" + encodeURIComponent(currentShare.shareId));
         } catch {}
@@ -3673,25 +3753,25 @@
         }
       }
 
-      // Pull one source's agent list, tagging each row with its origin + a
-      // composite key (pids can collide across rooms). Updates the source's live
-      // flag, device set, and server count for the rooms panel.
-      // Stamp a source's raw /api/ls records with their origin + composite key
-      // (pids collide across rooms) and recompute the source's device set + server
-      // count for the rooms panel. Pure transform of the source's current records.
+      // Stamp a source's raw /api/ls records with their machine (`_src`, how every
+      // per-agent op routes back), their room (`_room`, how the tree groups), and a
+      // composite key. `_key` is per-MACHINE, not per-room: two machines in one
+      // codehost room can each run pid 1234, and a room-scoped key would collide.
+      // Recomputes the source's device set + server count for the rooms panel.
+      // Pure transform of the source's current records.
       function stampAgents(s) {
         s.devices = new Set();
+        const room = s.room || s.id;
         const out = [...(s.byPid?.values() || [])].map((e) => {
-          // codehost stamps _host per agent; agent-yes share rooms fall back to
-          // the room's device label (from /api/whoami). Local stays unlabelled
-          // (no deviceLabel) so a single-machine view keeps its clean path-only
-          // identity instead of a blank "@:" prefix.
-          const host = e._host || s.deviceLabel || "";
+          // A source is one machine, so its device label (codehost peer meta, or
+          // /api/whoami on an ay-share room) labels every agent on it. Local stays
+          // unlabelled (no deviceLabel) so a single-machine view keeps its clean
+          // path-only identity instead of a blank "@:" prefix.
+          const host = s.deviceLabel || "";
           if (host) s.devices.add(host);
-          return { ...e, _room: s.id, _key: s.id + "#" + e.pid, _host: host };
+          return { ...e, _src: s.id, _room: room, _key: s.id + "#" + e.pid, _host: host };
         });
-        s.serverCount =
-          s.kind === "ch" ? s.client?.hosts().length || 0 : s.devices.size || (s.live ? 1 : 0);
+        s.serverCount = s.kind === "ch" ? (s.live ? 1 : 0) : s.devices.size || (s.live ? 1 : 0);
         s.agents = out;
       }
 
@@ -3731,6 +3811,10 @@
           // backoff reconnect (no-op if one's already queued or the room's gone).
           if (s.kind === "rtc") scheduleRtcReconnect(s);
           return [];
+        } finally {
+          // A codehost machine has no connect phase of its own — it becomes "tried"
+          // the first time we poll it, so the badge doesn't sit on "connecting…".
+          s.tried = true;
         }
       }
 
@@ -3993,9 +4077,12 @@
         } catch {}
       }
 
-      // Match a stored/linked selection token against an entry: either the full
-      // composite key (room#pid) or a bare pid (?pid= deep links, legacy ay.sel).
-      const matchSel = (e, token) => e._key === token || String(e.pid) === String(token);
+      // Match a stored/linked selection token against an entry: the full composite
+      // key (`ay.sel` stores it verbatim), the `<room>#<pid>` deep-link form (the
+      // hash never names a machine — see the deep-link writer — so it resolves to
+      // whichever machine in the room owns that pid), or a bare pid (?pid= links).
+      const matchSel = (e, token) =>
+        e._key === token || e._room + "#" + e.pid === token || String(e.pid) === String(token);
 
       // Reconcile poll: refresh only the sources that aren't streaming (older
       // hosts, or ones whose stream hasn't delivered its first snapshot yet) and
@@ -4023,16 +4110,20 @@
         for (const k of advanceStdinFlashes(entries, stdinSeen)) flashUntil.set(k, until);
         // Badge: total agents + how many rooms are live. Red only when nothing
         // at all is reachable (no source answered).
+        // Count ROOMS, not machines — a codehost room with three machines is still
+        // one room, and it can be connecting before any machine has appeared.
         const roomSrcs = srcs.filter((s) => s.id !== LOCAL);
-        const liveRooms = roomSrcs.filter((s) => s.live).length;
+        const liveRooms = new Set(roomSrcs.filter((s) => s.live).map((s) => s.room || s.id)).size;
         const anyLive = srcs.some((s) => s.live);
-        const connecting = roomSrcs.some((s) => !s.tried);
+        const connecting =
+          roomSrcs.some((s) => !s.tried) || [...chRooms.values()].some((r) => !r.tried);
+        const roomCount = roomSrcs.length || chRooms.size;
         const n = entries.length;
-        if (!srcs.length) {
+        if (!srcs.length && !chRooms.size) {
           setConn("● no fleet", "var(--muted)");
         } else if (!anyLive) {
           if (connecting) setConn("● connecting…", "var(--amber)");
-          else setConn(roomSrcs.length ? "● rooms offline" : "● ay serve down", "var(--red)");
+          else setConn(roomCount ? "● rooms offline" : "● ay serve down", "var(--red)");
         } else {
           const roomBit = liveRooms ? ` · ${liveRooms} room${liveRooms === 1 ? "" : "s"}` : "";
           setConn(`● ${n} agent${n === 1 ? "" : "s"}${roomBit}`, "var(--green)");
@@ -4620,7 +4711,7 @@
               srcBranch: src.git.branch,
               fromCwd: src.cwd,
               cli: src.cli,
-              room: src._room,
+              src: src._src,
             });
         }
         return rows;
@@ -4775,7 +4866,7 @@
               srcBranch: forkSrc.git.branch,
               fromCwd: forkSrc.cwd,
               cli: forkSrc.cli,
-              room: forkSrc._room,
+              src: forkSrc._src,
             });
           omniRows.push({ kind: "spawncwd" });
         }
@@ -4856,7 +4947,7 @@
           closeOmni(false); // committing — keep the bg as-is, spawnAndSelect takes over
           await spawnAndSelect(
             { cli: anchor?.cli || "claude", cwd: anchor?.cwd || undefined, prompt: q || undefined },
-            anchor?._room,
+            anchor?._src,
           );
           return;
         }
@@ -4875,7 +4966,7 @@
               prompt: q || undefined,
               fork: { fromCwd: row.fromCwd, branch: branch.trim() },
             },
-            row.room,
+            row.src,
           );
           return;
         }
@@ -4885,7 +4976,7 @@
           closeOmni(false);
           await spawnAndSelect(
             { cli: anchor?.cli || "claude", cwd: cwd.trim() || undefined, prompt: q || undefined },
-            anchor?._room,
+            anchor?._src,
           );
           return;
         }
@@ -4987,8 +5078,10 @@
         return "ch-" + (h >>> 0).toString(36).slice(0, 4).padStart(4, "0");
       }
 
-      function removeSource(room) {
-        const s = sources.get(room);
+      // Drop ONE machine from the fleet. A codehost machine shares its room's
+      // connection, so only the room may close it (see removeRoom).
+      function removeSource(id) {
+        const s = sources.get(id);
         if (!s) return;
         s.removed = true; // stop any pending exp-backoff reconnect (see below)
         clearTimeout(s.reconnectTimer);
@@ -4997,7 +5090,21 @@
           s.client?.close?.();
           s.client?.pc?.close?.();
         } catch {}
-        sources.delete(room);
+        sources.delete(id);
+      }
+
+      // Forget a whole room: every machine in it, plus the room's own connection.
+      function removeRoom(name) {
+        const ch = chRooms.get(name);
+        if (ch) {
+          chRooms.delete(name);
+          for (const peerId of ch.peers.keys()) removeSource(name + "/" + peerId);
+          try {
+            ch.close();
+          } catch {}
+          return;
+        }
+        removeSource(name); // an ay-share room IS its single machine
       }
 
       // Exponential-backoff reconnect for an agent-yes share room (the RTCClient
@@ -5119,11 +5226,29 @@
       async function addRoomSource(room, token, host) {
         host = host || SIG_DEFAULT;
         saveRoom(room, token, host); // cache so the badge can list & reconnect later
+        // A codehost room is a connection, not a machine: it contributes one source
+        // per machine as peers announce themselves (CodehostRoom.syncPeers).
+        if (host === CH_HOST) {
+          if (chRooms.has(room)) return;
+          const ch = new CodehostRoom(room, token);
+          chRooms.set(room, ch);
+          renderRoomsIfOpen();
+          try {
+            await ch.connect();
+          } catch {
+            ch.live = false;
+          }
+          ch.tried = true;
+          renderRoomsIfOpen();
+          loadList();
+          return;
+        }
         if (sources.has(room)) return;
         const s = {
           id: room,
+          room,
           host,
-          kind: host === CH_HOST ? "ch" : "rtc",
+          kind: "rtc",
           tx: null,
           client: null,
           live: false,
@@ -5134,25 +5259,12 @@
         sources.set(room, s);
         renderRoomsIfOpen();
         try {
-          if (host === CH_HOST) {
-            const c = new CodehostClient(token);
-            c.onstate = (st) => {
-              if (st === "closed") {
-                s.live = false;
-                renderRoomsIfOpen();
-              }
-            };
-            await c.connect();
-            s.client = c;
-            s.tx = c;
-          } else {
-            s.token = token;
-            await connectRtcSource(s);
-          }
+          s.token = token;
+          await connectRtcSource(s);
           s.live = true;
         } catch (e) {
           s.live = false;
-          if (s.kind === "rtc") scheduleRtcReconnect(s);
+          scheduleRtcReconnect(s);
         }
         s.tried = true;
         renderRoomsIfOpen();
@@ -5194,10 +5306,9 @@
       // in it right now". The signaling layer can't tell us the count until we've
       // connected, so we show the source's last-known serverCount.
       function roomStatus(n) {
-        const s = sources.get(n);
-        if (!s) return `<span class="rstat off">○</span>`;
-        if (!s.live) return `<span class="rstat off" title="offline">○</span>`;
-        const c = s.serverCount;
+        if (!sources.has(n) && !chRooms.has(n)) return `<span class="rstat off">○</span>`;
+        if (!roomLive(n)) return `<span class="rstat off" title="offline">○</span>`;
+        const c = roomSources(n).filter((s) => s.live).length;
         return `<span class="rstat on" title="${c} live ${c === 1 ? "server" : "servers"}">● ${c}</span>`;
       }
 
@@ -5207,7 +5318,7 @@
         const items = names.length
           ? names
               .map(
-                (n) => `<div class="ritem ${sources.get(n)?.live ? "cur" : ""}">
+                (n) => `<div class="ritem ${roomLive(n) ? "cur" : ""}">
           ${roomStatus(n)}
           <span class="rname" data-room="${esc(n)}">${esc(n)}</span>
           <span class="rhost">${esc(r[n].host)}</span>
@@ -5254,7 +5365,7 @@
         }
         const del = ev.target.closest(".rx");
         if (del) {
-          removeSource(del.dataset.del);
+          removeRoom(del.dataset.del);
           dropRoom(del.dataset.del);
           renderRooms();
           loadList();
@@ -5287,13 +5398,28 @@
       // The link carries only WHAT to run; the capability to run it is the viewer's
       // own connected fleet (cached room) + a y/N confirm on that host. So a public
       // launch link can never spawn on a machine the clicker doesn't already control.
-      function showLaunch(spec) {
+      // One button per MACHINE we can actually reach, so a codehost room with three
+      // machines offers three targets. A saved room with no live machine yet (boot
+      // race, or the room is down) still gets one button under its own name —
+      // launchOn connects it, and spawnTarget then resolves a machine inside it.
+      function fleetTargets() {
         const rooms = loadRooms();
-        const names = Object.keys(rooms).sort((a, b) => rooms[b].ts - rooms[a].ts);
+        return Object.keys(rooms)
+          .sort((a, b) => rooms[b].ts - rooms[a].ts)
+          .flatMap((n) => {
+            const live = roomSources(n).filter((s) => s.live);
+            return live.length
+              ? live.map((s) => ({ id: s.id, label: sourceLabel(s) }))
+              : [{ id: n, label: n }];
+          });
+      }
+
+      function showLaunch(spec) {
+        const names = fleetTargets();
         const cmd = "ay " + (spec.cli || "claude") + (spec.prompt ? ` -- "${spec.prompt}"` : "");
         const fleets = names.length
-          ? `<div class="lfleets">${names.map((n) => `<button class="lfleet" data-room="${esc(n)}">▷ ${esc(n)}</button>`).join("")}</div>
-         <div class="lhint">pick a fleet to run on</div>`
+          ? `<div class="lfleets">${names.map((t) => `<button class="lfleet" data-room="${esc(t.id)}">▷ ${esc(t.label)}</button>`).join("")}</div>
+         <div class="lhint">pick a machine to run on</div>`
           : `<div class="lwarn">No connected fleet on this device. Run <code>bunx agent-yes serve --share</code>, open its link once, then reopen this launch link.</div>`;
         $("launch").innerHTML = `<div class="lcard">
       <div class="ltitle">Launch agent</div>
@@ -5305,11 +5431,16 @@
         $("launch").style.display = "flex";
       }
 
-      // Pick the fleet to spawn on: an explicit roomId, else the selected agent's
-      // source, else local, else any live source.
-      function spawnTarget(roomId) {
+      // Pick the MACHINE to spawn on: an explicit source id, else any live machine
+      // in an explicitly named room (a launch link names a room, not a machine, and
+      // a machine that has since left the room degrades to its room), else the
+      // selected agent's machine, else local, else any live machine.
+      function spawnTarget(id) {
+        const room = id && id.includes("/") ? id.slice(0, id.indexOf("/")) : null;
         return (
-          sources.get(roomId) ||
+          sources.get(id) ||
+          (id && roomSources(id).find((s) => s.live)) ||
+          (room && roomSources(room).find((s) => s.live)) ||
           srcFor(entries.find((e) => e._key === sel)) ||
           sources.get(LOCAL) ||
           [...sources.values()].find((s) => s.live) ||
@@ -5330,7 +5461,7 @@
         }
         // Match by "newest agent that wasn't here before" ON THIS fleet — the
         // spawn returns the wrapper pid, but the agent registers under its own.
-        const before = new Set(entries.filter((e) => e._room === target.id).map((e) => e.pid));
+        const before = new Set(entries.filter((e) => e._src === target.id).map((e) => e.pid));
         const res = await target.tx.post("/api/spawn", {
           cli: spec.cli || "claude",
           from: spec.from || undefined,
@@ -5345,7 +5476,7 @@
         for (let i = 0; i < 14; i++) {
           await loadList();
           const fresh = entries
-            .filter((e) => e._room === target.id && !before.has(e.pid))
+            .filter((e) => e._src === target.id && !before.has(e.pid))
             .sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
           if (fresh.length) {
             select(fresh[0]._key);
@@ -5356,12 +5487,17 @@
         return true;
       }
 
-      async function launchOn(room, spec) {
-        const r = loadRooms()[room];
-        if (!r) return;
-        $("launch").style.display = "none";
-        await connectRoom(room, r.token, r.host);
-        await spawnAndSelect(spec, room);
+      // `id` is a machine (source id) once its room is connected, or a bare room
+      // name when the launch link was opened before the room came up.
+      async function launchOn(id, spec) {
+        if (!sources.has(id)) {
+          const name = id.split("/")[0];
+          const r = loadRooms()[name];
+          if (!r) return;
+          $("launch").style.display = "none";
+          await connectRoom(name, r.token, r.host);
+        } else $("launch").style.display = "none";
+        await spawnAndSelect(spec, id);
       }
 
       $("launch").addEventListener("click", (ev) => {
@@ -5373,18 +5509,32 @@
         if (ev.target.closest(".lcancel")) $("launch").style.display = "none";
       });
 
-      // ---- "+ New agent": a spawn form for the CURRENTLY connected fleet ----
+      // ---- "+ New agent": a spawn form for one machine in the fleet ----------
       // Click → fill (cli defaults to claude, cwd prefilled from the selected agent
-      // when there is one, prompt optional) → POST /api/spawn on this connection.
+      // when there is one, prompt optional) → POST /api/spawn on that machine.
       // Always allowed: the console already controls every running agent's stdin.
+      //
+      // The Host row appears only when the fleet holds more than one machine. It
+      // defaults to spawnTarget()'s pick — the selected agent's machine — so the
+      // common "spawn next to what I'm looking at" flow needs no interaction.
       function showNew() {
         const here = entries.find((x) => x._key === sel);
         const cwd = here?.cwd || "";
         const target = spawnTarget();
-        const where = target ? (target.id === LOCAL ? "local" : target.id) : "local";
+        const hosts = [...sources.values()].filter((s) => s.live || s.id === target?.id);
         $("newform").dataset.room = target ? target.id : "";
+        const hostRow =
+          hosts.length > 1
+            ? `<div class="nfield"><label>Host</label><select id="nf-host">${hosts
+                .map(
+                  (s) =>
+                    `<option value="${esc(s.id)}"${s.id === target?.id ? " selected" : ""}>${esc(sourceLabel(s))}</option>`,
+                )
+                .join("")}</select></div>`
+            : "";
         $("newform").innerHTML = `<div class="lcard">
-      <div class="ltitle">New agent · ${esc(where)}</div>
+      <div class="ltitle">New agent · ${esc(sourceLabel(target) || "local")}</div>
+      ${hostRow}
       <div class="nfield"><label>CLI</label><input id="nf-cli" value="claude" spellcheck="false" autocapitalize="off" /></div>
       <div class="nfield"><label>Spawn from — optional</label><input id="nf-from" placeholder="github URL / owner/repo@branch — provisions a worktree" spellcheck="false" autocapitalize="off" /></div>
       <div class="nfield"><label>Working dir</label><input id="nf-cwd" value="${esc(cwd)}" placeholder="(host default — ignored when Spawn from is set)" spellcheck="false" autocapitalize="off" /></div>
@@ -5394,24 +5544,38 @@
         <button class="lcancel" id="nf-cancel">cancel</button>
       </div>
       <div id="nf-hook" class="lhint" style="display:none"></div>
-      <div class="lhint">POST /api/spawn on this fleet. ${IS_MAC ? "⌘" : "Ctrl"}+Enter to launch.</div></div>`;
+      <div class="lhint">POST /api/spawn on this machine. ${IS_MAC ? "⌘" : "Ctrl"}+Enter to launch.</div></div>`;
         $("newform").style.display = "flex";
         setTimeout(() => $("nf-prompt")?.focus(), 0);
-        // Surface whether this host runs a spawn hook (a trusted local command run
-        // before every launch — provisions env/cwd; see ~/.agent-yes/config.json).
-        // Read-only: /api/spawn-config discloses only the boolean, never the body.
-        if (target?.tx?.fetchJSON) {
-          target.tx
-            .fetchJSON("/api/spawn-config")
-            .then((c) => {
-              const el = $("nf-hook");
-              if (el && c && c.hasSpawnHook) {
-                el.textContent = "⚙ this host runs a spawn hook before launch";
-                el.style.display = "";
-              }
-            })
-            .catch(() => {});
-        }
+        // Retarget the form when the user picks another machine — the spawn-hook
+        // hint below is per-machine, so it has to be re-read too.
+        $("nf-host")?.addEventListener("change", (ev) => {
+          $("newform").dataset.room = ev.target.value;
+          showHook(sources.get(ev.target.value));
+        });
+        showHook(target);
+      }
+
+      // Surface whether the target host runs a spawn hook (a trusted local command
+      // run before every launch — provisions env/cwd; see ~/.agent-yes/config.json).
+      // Read-only: /api/spawn-config discloses only the boolean, never the body.
+      function showHook(target) {
+        const el = $("nf-hook");
+        if (el) el.style.display = "none";
+        if (!target?.tx?.fetchJSON) return;
+        const forId = target.id;
+        target.tx
+          .fetchJSON("/api/spawn-config")
+          .then((c) => {
+            // A slow answer for a host the user has since switched away from must
+            // not paint the new host's hint.
+            if (!el || $("newform").dataset.room !== forId) return;
+            if (c && c.hasSpawnHook) {
+              el.textContent = "⚙ this host runs a spawn hook before launch";
+              el.style.display = "";
+            }
+          })
+          .catch(() => {});
       }
 
       async function submitNew() {
@@ -5433,7 +5597,7 @@
           const norm = (p) => (p || "").replace(/\/+$/, "");
           const busy = entries.some(
             (e) =>
-              (room ? e._room === room : true) &&
+              (room ? e._src === room : true) &&
               e.exit_code == null &&
               norm(e.cwd) === norm(spec.cwd),
           );
@@ -5590,7 +5754,7 @@
         if (!m) return;
         const [, room, pid] = m;
         const key = room + "#" + pid;
-        const e = entries.find((x) => x._key === key);
+        const e = entries.find((x) => matchSel(x, key));
         if (e) {
           if (sel !== e._key) select(e._key);
           return;
@@ -5600,7 +5764,7 @@
         autoPid = key;
         autoPidExplicit = true;
         const r = loadRooms()[room];
-        if (r && !sources.get(room)) connectRoom(room, r.token, r.host);
+        if (r && !sources.has(room) && !chRooms.has(room)) connectRoom(room, r.token, r.host);
       });
 
       // ---- activity-gated polling + auto-reload on new deploy ----------------
