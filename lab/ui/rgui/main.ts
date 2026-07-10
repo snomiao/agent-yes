@@ -795,7 +795,24 @@ function drawNode(
     ctx.textBaseline = "top";
     const lines = [`#${id} · ${r.status}`, shortCwd(r.cwd) + (r.git?.branch ? ` ⎇${r.git.branch}` : "")];
     if (r.question) lines.push(`⏳ ${r.question.slice(0, 40)}`);
-    lines.forEach((ln, i) => ctx.fillText(ln, 8, bodyY + 8 + i * (fs + 3)));
+    // no terminal to show (demo, or not streamed yet) — fill the body with the
+    // agent's prompt (word-wrapped) so the card reads as work-in-flight
+    const maxLines = Math.floor((bodyH - 16) / (fs + 3));
+    if (r.prompt && lines.length + 2 <= maxLines) {
+      lines.push("");
+      const maxW = w - 16;
+      let ln = "▸";
+      for (const wd of r.prompt.split(/\s+/)) {
+        const t = `${ln} ${wd}`;
+        if (ctx.measureText(t).width > maxW && ln !== "▸") {
+          lines.push(ln);
+          if (lines.length >= maxLines) break;
+          ln = `  ${wd}`;
+        } else ln = t;
+      }
+      if (lines.length < maxLines) lines.push(ln);
+    }
+    lines.slice(0, maxLines).forEach((ln, i) => ctx.fillText(ln, 8, bodyY + 8 + i * (fs + 3)));
   }
   ctx.restore();
 }
@@ -906,6 +923,10 @@ function ensureInfoOverlay(): HTMLElement {
 let lastTermSync = 0;
 function syncTerminals(view: { x: number; y: number; k: number }) {
   if (!XTermCtor) return;
+  // live only: demo/sample records have no PTY behind them, so an xterm here
+  // could only ever be an empty black window over the card — the summary body
+  // (identity + prompt) carries the demo instead
+  if (!liveKnown) return;
   const cw = canvas.clientWidth || innerWidth;
   const ch = canvas.clientHeight || innerHeight;
   const cand: { id: string; area: number }[] = [];
