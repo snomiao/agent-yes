@@ -603,6 +603,14 @@ function makeTerm(pid: string): TermEntry | null {
   const el = document.createElement("div");
   el.className = "ay-term";
   el.dataset.rguiInteractive = "1"; // let scroll/select inside the terminal work
+  // right-click on the live terminal = right-click on the node: open the send
+  // menu instead of the browser menu — without this a terminal-covered card has
+  // NO input path at all (the room/share view is exactly one such card)
+  el.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    openBatchMenu(e.clientX, e.clientY, [pid]);
+  });
   const bar = document.createElement("div");
   bar.className = "ay-term-bar";
   bar.innerHTML =
@@ -1934,11 +1942,14 @@ ctxShareBtn.addEventListener("click", async () => {
     return;
   }
   const share = JSON.parse(r.text) as { link: string; agentId: string };
-  ctxShareLink.textContent = share.link;
+  // present the /r (viewer) form of the capability link — same room+secret,
+  // this surface; the holder can flip /r/# to /w/# for the full console
+  const link = share.link.replace("/w/#", "/r/#");
+  ctxShareLink.textContent = link;
   sharedIds.add(share.agentId);
   markShared();
   try {
-    await navigator.clipboard.writeText(share.link);
+    await navigator.clipboard.writeText(link);
   } catch {
     /* clipboard blocked — the link is still selectable */
   }
