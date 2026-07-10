@@ -122,6 +122,51 @@ describe("scopedFetch — /api/ls/subscribe SSE is filtered", () => {
   });
 });
 
+describe("scopedFetch — /api/ls/subscribe remove + teardown", () => {
+  // Inner whose stream announces both agents, then removes them: only the removal
+  // of a pid we actually FORWARDED may cross; a never-forwarded sibling pid is
+  // information (its existence) and must be dropped.
+  function removalInner(): (req: Request) => Promise<Response> {
+    const enc = new TextEncoder();
+    return async () =>
+      new Response(
+        new ReadableStream({
+          start(ctrl) {
+            ctrl.enqueue(
+              enc.encode(
+                `data: ${JSON.stringify({ full: true, upsert: [rec(1, SHARED), rec(2, OTHER)], remove: [] })}\n\n`,
+              ),
+            );
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ upsert: [], remove: [2] })}\n\n`));
+            ctrl.enqueue(enc.encode(`data: ${JSON.stringify({ upsert: [], remove: [1] })}\n\n`));
+            ctrl.close();
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" } },
+      );
+  }
+
+  it("forwards removes only for pids it forwarded (sibling removals stay hidden)", async () => {
+    const res = await scopedFetch(SHARED, removalInner(), "r")(
+      new Request("http://ay.local/api/ls/subscribe"),
+    );
+    const events = (await sse(res))
+      .split("\n\n")
+      .filter((e) => e.startsWith("data:"))
+      .map((e) => JSON.parse(e.slice(5)) as { upsert: unknown[]; remove: number[] });
+    // Snapshot (shared only) + the remove of OUR pid; OTHER's removal is dropped.
+    expect(events).toHaveLength(2);
+    expect(events[0]!.upsert).toHaveLength(1);
+    expect(events[1]!.remove).toEqual([1]);
+  });
+
+  it("cancelling the filtered stream tears down the upstream reader", async () => {
+    const res = await mk()(new Request("http://ay.local/api/ls/subscribe"));
+    await res.body!.cancel(); // viewer went away — must not leak the inner stream
+    expect(res.status).toBe(200);
+  });
+});
+
 describe("scopedFetch — read metadata", () => {
   it("passes /api/version through untouched", async () => {
     const res = await mk()(new Request("http://ay.local/api/version"));
