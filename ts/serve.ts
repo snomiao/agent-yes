@@ -17,6 +17,7 @@ import {
   readNotes,
   readPtysize,
   recentReadEdges,
+  renderLogTailLines,
   renderRawLog,
   resolveOne,
   snapshotStatus,
@@ -1139,6 +1140,33 @@ export async function cmdServe(rest: string[]): Promise<number> {
     }
   };
 
+  // Per-agent federated terminal preview: last ~12 rendered TUI lines for the
+  // /api/graph feed's renderHints.preview (rgui draws them as a real TUI card —
+  // see lib/rgui src/render/terminalPreview.ts). Cached per (size, mtime) like
+  // logTitle so a 5s feed poll over a big fleet stays cheap. Coarse redaction at
+  // the SOURCE: secret-shaped lines are dropped to "···" and long credential-ish
+  // blobs masked — the feed is token-gated, but tails travel to other rgui hosts.
+  const previewCache = new Map<string, { size: number; mtimeMs: number; lines: string[] | null }>();
+  const SECRETISH = /(api[-_]?key|secret|token|password|passwd|bearer|authorization|private[-_]?key)\s*[=:]/i;
+  const logPreviewLines = async (logFile: string | null | undefined): Promise<string[] | null> => {
+    if (!logFile) return null;
+    try {
+      const { size, mtimeMs } = await stat(logFile);
+      const hit = previewCache.get(logFile);
+      if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.lines;
+      const raw = await renderLogTailLines(logFile, 12);
+      const lines =
+        raw?.map((ln) =>
+          SECRETISH.test(ln) ? "···" : ln.replace(/[A-Za-z0-9+/_-]{40,}/g, "····").slice(0, 160),
+        ) ?? null;
+      while (lines?.length && !lines[lines.length - 1]!.trim()) lines.pop();
+      previewCache.set(logFile, { size, mtimeMs, lines });
+      return lines;
+    } catch {
+      return null;
+    }
+  };
+
   // Per-agent task progress ({done,total}) parsed from the agent's rendered TUI
   // screen (the durable raw log). Cached per (size, mtime) exactly like logTitle:
   // re-parse only when the log grew, so the 1s tick stays cheap even though each
@@ -1618,20 +1646,32 @@ export async function cmdServe(rest: string[]): Promise<number> {
         const textOut = { id: "text-out", label: "text", kind: "text" };
         const byWrapper = new Map(records.map((r) => [r.wrapper_pid ?? r.pid, r.pid]));
         const nid = (pid: number) => `${ns}/${pid}`;
-        const nodes = records.map((r, i) => ({
-          id: nid(r.pid),
-          app: "agent-yes",
-          type: `${r.cli}-agent`,
-          title: `${r.cli} #${r.pid}`,
-          category: "agent-yes",
-          owner: `agent-yes:${origin}`,
-          status: r.status,
-          parent: r.parent_pid && byWrapper.has(r.parent_pid) ? nid(byWrapper.get(r.parent_pid)!) : undefined,
-          pos: { x: (i % 8) * 320, y: Math.floor(i / 8) * 200 },
-          size: { w: 256, h: 128 },
-          inputs: [textIn],
-          outputs: [textOut],
-        }));
+        // renderHints.preview: the REAL agent TUI tail (redacted in
+        // logPreviewLines), drawn by rgui's federatedTerminalPreview as a live
+        // terminal card on the mirroring host
+        const previewOf = async (r: (typeof records)[number]) => {
+          const lines = await logPreviewLines(r.log_file);
+          if (!lines?.length) return undefined;
+          const title = (await logTitle(r.log_file)) ?? `${r.cli} #${r.pid}`;
+          return { preview: { kind: "terminal", title, status: r.status, lines } };
+        };
+        const nodes = await Promise.all(
+          records.map(async (r, i) => ({
+            id: nid(r.pid),
+            app: "agent-yes",
+            type: `${r.cli}-agent`,
+            title: `${r.cli} #${r.pid}`,
+            category: "agent-yes",
+            owner: `agent-yes:${origin}`,
+            status: r.status,
+            parent: r.parent_pid && byWrapper.has(r.parent_pid) ? nid(byWrapper.get(r.parent_pid)!) : undefined,
+            pos: { x: (i % 8) * 320, y: Math.floor(i / 8) * 200 },
+            size: { w: 256, h: 128 },
+            inputs: [textIn],
+            outputs: [textOut],
+            renderHints: await previewOf(r),
+          })),
+        );
         const codex = records
           .filter((r) => r.cli === "codex")
           .sort((a, b) => (b.last_active_at ?? 0) - (a.last_active_at ?? 0))[0];
@@ -1648,6 +1688,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
           size: { w: 256, h: 128 },
           inputs: [textIn],
           outputs: [textOut],
+          renderHints: codex ? await previewOf(codex) : undefined,
         });
         const present = new Set(nodes.map((n) => n.id));
         const edges = (await recentReadEdges())
