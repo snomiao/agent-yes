@@ -164,6 +164,11 @@
          xterm. rgui glues it over the node's screen rect and scale:"fit"s it,
          so it's the node's content when zoomed in and yields to the summary
          card when zoomed out. */
+      /* armed for direct typing — keystrokes go straight to the agent's PTY */
+      .ay-term.stdin {
+        outline: 2px solid #3fb950;
+        outline-offset: -1px;
+      }
       .ay-term {
         /* hug the xterm's native px size (cols/rows from /api/size), so the raw
            absolute-cursor stream lands on the right grid; rgui scale:"fit" then

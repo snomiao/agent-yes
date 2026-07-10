@@ -556,6 +556,8 @@ type Xterm = {
   open(el: HTMLElement): void;
   resize(cols: number, rows: number): void;
   dispose(): void;
+  focus(): void;
+  onData(cb: (d: string) => void): void;
   options: Record<string, unknown>;
 };
 const XTermCtor = (window as unknown as { Terminal?: new (o: unknown) => Xterm }).Terminal;
@@ -597,6 +599,26 @@ let prevY = 0;
 const SETTLE_MS = 180;
 let deferredWhileMoving = 0; // QA metric (see #qa): stream bytes deferred mid-gesture
 
+// Direct typing: pump xterm keystrokes (onData raw bytes — printable keys,
+// \r, arrows, ctrl-*) into the agent's PTY via POST /api/send {code:"none"}
+// (a bare writeToIpc — no trailing Enter). A promise chain keeps byte order;
+// per-keystroke POSTs are fine on both wires (HTTP and the room DataChannel).
+// Read-only shares deny host-side (403) — surface it once, don't spam.
+function attachStdin(term: Xterm, pid: string, onDenied: () => void) {
+  let chain = Promise.resolve();
+  let denied = false;
+  term.onData((data) => {
+    if (term.options.disableStdin) return;
+    chain = chain.then(async () => {
+      const r = await apiPost("/api/send", { keyword: pid, msg: data, code: "none" });
+      if (!r.ok && !denied) {
+        denied = true;
+        onDenied();
+      }
+    });
+  });
+}
+
 function makeTerm(pid: string): TermEntry | null {
   const r = recordsByPid.get(pid);
   if (!XTermCtor || !r) return null;
@@ -611,6 +633,24 @@ function makeTerm(pid: string): TermEntry | null {
     e.stopPropagation();
     openBatchMenu(e.clientX, e.clientY, [pid]);
   });
+  // click-to-type: arming the terminal routes keystrokes STRAIGHT into the
+  // agent's PTY (green outline = live stdin); click anywhere outside releases
+  const arm = (on: boolean) => {
+    el.classList.toggle("stdin", on);
+    term.options.disableStdin = !on;
+    term.options.cursorBlink = on;
+    if (on) term.focus();
+  };
+  el.addEventListener("mousedown", (e) => {
+    if (e.button === 0) arm(true);
+  });
+  addEventListener(
+    "mousedown",
+    (e) => {
+      if (!el.contains(e.target as Node)) arm(false);
+    },
+    true,
+  );
   const bar = document.createElement("div");
   bar.className = "ay-term-bar";
   bar.innerHTML =
@@ -662,6 +702,13 @@ function makeTerm(pid: string): TermEntry | null {
     ? { close() {} }
     : subscribeRaw(`/api/tail/${encodeURIComponent(pid)}?raw=1`, onStream);
   const entry: TermEntry = { el, term, es, miss: 0, buf: "" };
+  attachStdin(term, pid, () => {
+    const prev = statusLabel.textContent;
+    statusLabel.textContent = "⌨ input denied — read-only share";
+    setTimeout(() => {
+      if (statusLabel.textContent?.startsWith("⌨")) statusLabel.textContent = prev;
+    }, 2500);
+  });
   if (noStream) {
     for (let i = 0; i < 20; i++) term.write(`row ${i} · #${pid} · nostream debug pattern\r\n`);
   }
@@ -1560,6 +1607,15 @@ function initEmbed(pid: string) {
     .catch(() => {})
     .finally(() => requestAnimationFrame(fit));
   subscribeRaw(`/api/tail/${encodeURIComponent(pid)}?raw=1`, (d) => term.write(d as string));
+  // direct typing: the embed IS the terminal, so stdin is armed from the start
+  // (&ro keeps it read-only); click the page and type
+  if (!hashParts.includes("ro")) {
+    term.options.disableStdin = false;
+    term.options.cursorBlink = true;
+    attachStdin(term, pid, () => {
+      document.title = `agent-yes · #${pid} (read-only)`;
+    });
+  }
 
   // Prompt bar: the WRITE half of the embed. The #k= token that authorizes the
   // tail stream authorizes /api/send just the same, so an embed holder can talk
