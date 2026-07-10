@@ -438,7 +438,11 @@ function buildGraph(records: AgentRecord[]): Graph {
       bg: isLight() ? "#ffffff" : "#0d1117",
       scale: "fit",
       minScale: 0.16, // readable at the default forest fit; hides only far out
-      maxScale: 1,
+      // uncapped: the card is world-space (natural px == world units), so the
+      // overlay must keep scaling past 1× to stay glued over its frame — capped
+      // at 1 it froze at 560×320 while the canvas LOD body kept growing behind
+      // it, showing both layers at once when zoomed in
+      maxScale: Infinity,
       clip: "node",
       overflow: "hidden",
     }),
