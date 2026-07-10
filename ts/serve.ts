@@ -1600,6 +1600,81 @@ export async function cmdServe(rest: string[]): Promise<number> {
       }
     }
 
+    // GET /api/graph — the fleet as a read-only federated rgui graph envelope
+    // (org.rgui.graph.v1 — see lib/rgui src/core/federation.ts) so other rgui
+    // hosts (otoji.org etc.) can mirror it. A REDACTED projection of /api/ls:
+    // pid, cli type, status and the parent/subagent shape only — no cwd, prompt,
+    // question, or terminal bytes ever leave through this route. CORS-open on
+    // purpose: read-only + redacted, and the serve token still gates it like
+    // every /api route (hand out the feed URL with ?token=). The newest codex
+    // agent is ALSO exposed under the shared demo-chain id
+    // ay://agent-yes/codex-agent so cross-system edges have a stable target.
+    if (req.method === "GET" && p === "/api/graph") {
+      try {
+        const records = await listRecords(undefined, defaultOpts());
+        const origin = hostname();
+        const ns = `ay://${origin}`;
+        const textIn = { id: "text-in", label: "text", kind: "text" };
+        const textOut = { id: "text-out", label: "text", kind: "text" };
+        const byWrapper = new Map(records.map((r) => [r.wrapper_pid ?? r.pid, r.pid]));
+        const nid = (pid: number) => `${ns}/${pid}`;
+        const nodes = records.map((r, i) => ({
+          id: nid(r.pid),
+          app: "agent-yes",
+          type: `${r.cli}-agent`,
+          title: `${r.cli} #${r.pid}`,
+          category: "agent-yes",
+          owner: `agent-yes:${origin}`,
+          status: r.status,
+          parent: r.parent_pid && byWrapper.has(r.parent_pid) ? nid(byWrapper.get(r.parent_pid)!) : undefined,
+          pos: { x: (i % 8) * 320, y: Math.floor(i / 8) * 200 },
+          size: { w: 256, h: 128 },
+          inputs: [textIn],
+          outputs: [textOut],
+        }));
+        const codex = records
+          .filter((r) => r.cli === "codex")
+          .sort((a, b) => (b.last_active_at ?? 0) - (a.last_active_at ?? 0))[0];
+        nodes.push({
+          id: "ay://agent-yes/codex-agent",
+          app: "agent-yes",
+          type: "codex-agent",
+          title: "Codex Agent",
+          category: "agent-yes",
+          owner: `agent-yes:${origin}`,
+          status: codex?.status ?? "offline",
+          parent: undefined,
+          pos: { x: 0, y: -240 },
+          size: { w: 256, h: 128 },
+          inputs: [textIn],
+          outputs: [textOut],
+        });
+        const present = new Set(nodes.map((n) => n.id));
+        const edges = (await recentReadEdges())
+          .filter((e) => e.by !== e.target && present.has(nid(e.target)) && present.has(nid(e.by)))
+          .map((e) => ({
+            source: { node: nid(e.target), port: "text-out", type: "text" },
+            target: { node: nid(e.by), port: "text-in", type: "text" },
+            status: "readonly",
+            label: "reads",
+          }));
+        return Response.json(
+          {
+            kind: "rgui-federated-graph",
+            schema: "org.rgui.graph.v1",
+            producer: { app: "agent-yes", origin, label: `agent-yes fleet @ ${origin}` },
+            revision: Date.now(),
+            ts: Date.now(),
+            graph: { nodes, edges },
+            capabilities: { nodeTypes: [...new Set(nodes.map((n) => n.type))], portTypes: ["text"] },
+          },
+          { headers: { "Access-Control-Allow-Origin": "*" } },
+        );
+      } catch (e) {
+        return new Response((e as Error).message, { status: 500 });
+      }
+    }
+
     // GET /api/whoami — this host's device label (user@host), so a remote
     // console can tag each agent with the machine it came from. Unlike codehost,
     // `ay serve --share` carries no per-agent device id; the viewer fetches this

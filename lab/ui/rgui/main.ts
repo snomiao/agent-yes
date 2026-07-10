@@ -15,6 +15,9 @@
  */
 import createRgui, {
   annotationNode,
+  federatedDemoChain,
+  federatedGraphToRgui,
+  isFederatedGraphEnvelope,
   nodeHeight,
   type Edge,
   type Graph,
@@ -1237,6 +1240,97 @@ function reapplyMagnify() {
   for (const [id, s] of scaleByNode) if (present.has(id)) viewer.rescaleNode(id, s);
 }
 
+// ── federated mirrors (#feed=<url>[&feed=…] · #feddemo) ──────────────────────
+// Read-only subgraphs from OTHER rgui hosts (otoji.org etc.), as
+// org.rgui.graph.v1 envelopes (lib/rgui src/core/federation.ts). Each feed is
+// polled, converted via federatedGraphToRgui (clamped, remote:true = read-only
+// mirror) and merged under the local forest. Merge is id-based: the local graph
+// wins, then feeds in listed order — a feed carrying a STUB of another system's
+// node (e.g. otoji referencing ay://agent-yes/codex-agent) dedupes away when the
+// authoritative node is present, and its cross-system edges land on the real one.
+const FED_Y0 = 900; // world-y where the first federated subgraph mounts
+const FED_GAP = 300; // vertical gap between stacked federated subgraphs
+const fedHashParts = location.hash.slice(1).split("&");
+const fedFeeds = fedHashParts
+  .filter((s) => s.startsWith("feed="))
+  .map((s) => decodeURIComponent(s.slice(5)));
+const fedDemo = fedHashParts.includes("feddemo");
+const fedGraphs = new Map<string, Graph>(); // feed key -> converted subgraph
+const fedRevisions = new Map<string, string>();
+let lastLocalGraph: Graph = { nodes: [], edges: [] };
+
+function mergeFederated(local: Graph): Graph {
+  if (!fedGraphs.size) return local;
+  const nodes = [...local.nodes];
+  const edges = [...local.edges];
+  const seen = new Set(nodes.map((n) => n.id));
+  // stack subgraphs downward by MEASURED height (a big fleet mirror would
+  // otherwise run into the next subgraph); live feeds merge before the baked
+  // demo so an authoritative node (e.g. our codex-agent) beats the demo's stub
+  let cursor = Math.max(FED_Y0, ...local.nodes.map((n) => n.y + (n.h ?? CARD_H) + FED_GAP));
+  for (const key of [...fedFeeds, "demo"]) {
+    const g = fedGraphs.get(key);
+    if (!g?.nodes.length) continue;
+    const minX = Math.min(...g.nodes.map((n) => n.x));
+    const minY = Math.min(...g.nodes.map((n) => n.y));
+    let maxY = cursor;
+    for (const n of g.nodes) {
+      if (seen.has(n.id)) continue;
+      seen.add(n.id);
+      // clone with translated coords — the cached subgraph stays unshifted so a
+      // re-merge (feed update) can't drift it
+      const y = n.y - minY + cursor;
+      maxY = Math.max(maxY, y + (n.h ?? CARD_H));
+      nodes.push({ ...n, x: n.x - minX + 40, y });
+    }
+    edges.push(...g.edges);
+    cursor = maxY + FED_GAP;
+  }
+  return { nodes, edges: edges.filter((e) => seen.has(e.from.node) && seen.has(e.to.node)) };
+}
+
+// Feed edges survive applyEdges' wire rebuild (it truncates graph.edges).
+function fedEdges(present: Set<string>): Edge[] {
+  const out: Edge[] = [];
+  for (const g of fedGraphs.values())
+    out.push(...g.edges.filter((e) => present.has(e.from.node) && present.has(e.to.node)));
+  return out;
+}
+
+function refreshFedGraph() {
+  viewer.setGraph(mergeFederated(lastLocalGraph));
+  reapplyMagnify();
+  applyEdges();
+}
+
+async function pollFeeds() {
+  let changed = false;
+  for (let i = 0; i < fedFeeds.length; i++) {
+    const url = fedFeeds[i];
+    try {
+      const env = await (await fetch(url)).json();
+      if (!isFederatedGraphEnvelope(env)) continue;
+      const rev = String(env.revision);
+      if (fedRevisions.get(url) === rev) continue;
+      fedRevisions.set(url, rev);
+      fedGraphs.set(url, federatedGraphToRgui(env, { container: true }));
+      changed = true;
+    } catch {
+      /* feed unreachable — keep the last mirror (or none) */
+    }
+  }
+  if (changed) refreshFedGraph();
+}
+if (fedDemo) {
+  // offline showcase: the baked cross-system chain (plaintext → codex-agent →
+  // diff → filter → translate → tts) from rgui itself, no feed server needed
+  fedGraphs.set("demo", federatedGraphToRgui(federatedDemoChain(), { container: true }));
+}
+if (fedFeeds.length) {
+  void pollFeeds();
+  setInterval(() => void pollFeeds(), 5000);
+}
+
 function apply(records: AgentRecord[], live: boolean) {
   recordsByPid.clear();
   for (const r of records) recordsByPid.set(String(r.pid), r);
@@ -1247,7 +1341,8 @@ function apply(records: AgentRecord[], live: boolean) {
     lastContent = content;
     // tear down terminals for agents that are gone (exited/removed)
     for (const id of [...terms.keys()]) if (!recordsByPid.has(id)) dropTerm(id);
-    viewer.setGraph(buildGraph(records));
+    lastLocalGraph = buildGraph(records);
+    viewer.setGraph(mergeFederated(lastLocalGraph));
     reapplyMagnify(); // restore user magnify on the rebuilt nodes (ratio-safe)
     applyEdges(); // rebuild wires on the new node set
     if (firstPaint) {
@@ -1287,7 +1382,7 @@ function applyEdges() {
         }))
     : [];
   viewer.graph.edges.length = 0;
-  viewer.graph.edges.push(...edges);
+  viewer.graph.edges.push(...edges, ...fedEdges(present));
   viewer.setView(viewer.view); // schedule a redraw without a relayout
 }
 
