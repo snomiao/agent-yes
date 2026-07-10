@@ -2215,6 +2215,7 @@
           this.room = window.__codehost.joinRoom({
             token: this.token,
             onStatus: (open) => {
+              if (this.orphaned()) return;
               this.live = open;
               // Keep the machines listed while the socket retries — room-client
               // self-heals, and dropping the rows would flicker the whole tree.
@@ -2229,6 +2230,7 @@
               renderRoomsIfOpen();
             },
             onPeers: (peers) => {
+              if (this.orphaned()) return;
               this.live = true;
               this.syncPeers(peers);
               firstPeers();
@@ -2241,10 +2243,18 @@
         close() {
           this.room?.close();
         }
+        // True once the room has been forgotten (removeRoom drops it from chRooms)
+        // or superseded by a re-add under the same name. joinRoom's callbacks can
+        // fire a queued peer broadcast AFTER that, and without this guard syncPeers
+        // would `sources.set` the machines back for a room the user just forgot.
+        orphaned() {
+          return chRooms.get(this.name) !== this;
+        }
         // Reconcile the fleet against the room's current server peers. Called on
         // every peer broadcast — including the frequent ones that only carry new
         // agent meta — so it must stay cheap when the peer SET hasn't changed.
         syncPeers(peers) {
+          if (this.orphaned()) return;
           const hosts = (peers || []).filter(isHostPeer);
           const seen = new Set();
           let changed = false;
@@ -3899,9 +3909,12 @@
         } catch {}
       }
 
-      // Match a stored/linked selection token against an entry: either the full
-      // composite key (room#pid) or a bare pid (?pid= deep links, legacy ay.sel).
-      const matchSel = (e, token) => e._key === token || String(e.pid) === String(token);
+      // Match a stored/linked selection token against an entry: the full composite
+      // key (`ay.sel` stores it verbatim), the `<room>#<pid>` deep-link form (the
+      // hash never names a machine — see the deep-link writer — so it resolves to
+      // whichever machine in the room owns that pid), or a bare pid (?pid= links).
+      const matchSel = (e, token) =>
+        e._key === token || e._room + "#" + e.pid === token || String(e.pid) === String(token);
 
       // Reconcile poll: refresh only the sources that aren't streaming (older
       // hosts, or ones whose stream hasn't delivered its first snapshot yet) and
@@ -5518,7 +5531,7 @@
         if (!m) return;
         const [, room, pid] = m;
         const key = room + "#" + pid;
-        const e = entries.find((x) => x._key === key);
+        const e = entries.find((x) => matchSel(x, key));
         if (e) {
           if (sel !== e._key) select(e._key);
           return;

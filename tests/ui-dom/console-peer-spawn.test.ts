@@ -70,10 +70,13 @@ export function joinRoom({ onStatus, onPeers }) {
       return resp(200, {});
     },
   };
-  setTimeout(() => {
+  // Let a test replay a peer broadcast on demand — exercises the "late callback
+  // after the room was forgotten" race that the orphaned() guard closes.
+  window.__chRefire = () => {
     onStatus && onStatus(true);
     onPeers && onPeers(peers);
-  }, 0);
+  };
+  setTimeout(() => window.__chRefire(), 0);
   return room;
 }
 export const DEFAULT_SIGNAL_URL = "wss://signal.codehost.dev";
@@ -209,6 +212,45 @@ describe("codehost room with two machines", () => {
       const spawns = await spawnCalls(page);
       expect(spawns).toHaveLength(1);
       expect(spawns[0].peerId).toBe(PEER_A);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  // A #room:pid deep link never names a machine, so it must resolve to whichever
+  // machine in the room owns that pid. The per-machine `_key` broke exact-key
+  // matching, so this used to select nothing.
+  it("resolves a #room:pid deep link into the room to a machine", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      await page.evaluate((hash) => {
+        location.hash = hash;
+      }, `#${ROOM}:${DUP_PID}`);
+      await page.waitForSelector(".row.sel", { timeout: 10_000 });
+      const key = await page.locator(".row.sel").getAttribute("data-key");
+      expect(key).toMatch(new RegExp(`^${ROOM}/peer-[ab]#${DUP_PID}$`));
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  // Forgetting a room while joinRoom still has a queued peer broadcast must not
+  // resurrect its machines. Without the orphaned() guard the late onPeers would
+  // sources.set them back for a room the user just removed.
+  it("a late peer broadcast can't resurrect a forgotten room", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      await page.click("#conn"); // open the rooms panel
+      await page.click(`.rx[data-del="${ROOM}"]`); // forget the room
+      await page.waitForFunction(
+        () => document.querySelectorAll('.row[data-key^="ch-test/"]').length === 0,
+        undefined,
+        { timeout: 10_000 },
+      );
+      // Replay the broadcast the forgotten room's callback might still fire.
+      await page.evaluate(() => (window as never as { __chRefire: () => void }).__chRefire());
+      await page.waitForTimeout(300);
+      expect(await page.locator('.row[data-key^="ch-test/"]').count()).toBe(0);
     } finally {
       await ctx.close();
     }
