@@ -1649,11 +1649,19 @@ export async function cmdServe(rest: string[]): Promise<number> {
         // renderHints.preview: the REAL agent TUI tail (redacted in
         // logPreviewLines), drawn by rgui's federatedTerminalPreview as a live
         // terminal card on the mirroring host
-        const previewOf = async (r: (typeof records)[number]) => {
+        // renderHints.embed: the publisher's own single-agent live view — the
+        // consumer iframes it over the node rect (preview stays the LOD
+        // fallback). Carries the serve token: the feed itself is gated by the
+        // same token, so its consumers hold it already.
+        const embedBase = `${url.protocol}//${url.host}`;
+        const hintsOf = async (r: (typeof records)[number]) => {
+          const embed = {
+            url: `${embedBase}/r/#node=${r.pid}&embed&k=${encodeURIComponent(token)}`,
+          };
           const lines = await logPreviewLines(r.log_file);
-          if (!lines?.length) return undefined;
+          if (!lines?.length) return { embed };
           const title = (await logTitle(r.log_file)) ?? `${r.cli} #${r.pid}`;
-          return { preview: { kind: "terminal", title, status: r.status, lines } };
+          return { embed, preview: { kind: "terminal", title, status: r.status, lines } };
         };
         const nodes = await Promise.all(
           records.map(async (r, i) => ({
@@ -1669,7 +1677,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
             size: { w: 256, h: 128 },
             inputs: [textIn],
             outputs: [textOut],
-            renderHints: await previewOf(r),
+            renderHints: await hintsOf(r),
           })),
         );
         const codex = records
@@ -1688,7 +1696,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
           size: { w: 256, h: 128 },
           inputs: [textIn],
           outputs: [textOut],
-          renderHints: codex ? await previewOf(codex) : undefined,
+          renderHints: codex ? await hintsOf(codex) : undefined,
         });
         const present = new Set(nodes.map((n) => n.id));
         const edges = (await recentReadEdges())
@@ -2606,11 +2614,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
     "worker-src 'self'",
     "manifest-src 'self'",
   ].join("; ");
-  const serveUiFile = async (name: string, type: string): Promise<Response> => {
+  // The /r (rgui) page is embeddable: its #node=<pid>&embed view is the
+  // federation renderHints.embed target, iframed by OTHER rgui hosts over the
+  // node rect — so frame-ancestors opens up, unlike the console's 'none'.
+  const RGUI_CSP = CONSOLE_CSP.replace("frame-ancestors 'none'", "frame-ancestors *");
+  const serveUiFile = async (name: string, type: string, csp = CONSOLE_CSP): Promise<Response> => {
     try {
       const buf = await readFile(path.join(uiDir, name));
       const headers: Record<string, string> = { "Content-Type": type };
-      if (type.includes("text/html")) headers["Content-Security-Policy"] = CONSOLE_CSP;
+      if (type.includes("text/html")) headers["Content-Security-Policy"] = csp;
       return new Response(buf, { headers });
     } catch {
       return new Response("UI assets not found in this install — use the /api endpoints", {
@@ -2622,6 +2634,16 @@ export async function cmdServe(rest: string[]): Promise<number> {
     const p = new URL(req.url).pathname;
     if (req.method === "GET" && (p === "/" || p === "/index.html"))
       return serveUiFile("index.html", "text/html; charset=utf-8");
+    // /r — the rgui forest page (built to lab/ui/rgui/dist by scripts/build-rgui.ts),
+    // served here so renderHints.embed URLs work with no extra host. Relative
+    // asset paths need the trailing slash, so bare /r redirects.
+    if (req.method === "GET" && p === "/r") return Response.redirect("/r/", 302);
+    if (req.method === "GET" && (p === "/r/" || p === "/r/index.html"))
+      return serveUiFile("rgui/dist/index.html", "text/html; charset=utf-8", RGUI_CSP);
+    if (req.method === "GET" && p === "/r/main.js")
+      return serveUiFile("rgui/dist/main.js", "text/javascript; charset=utf-8");
+    if (req.method === "GET" && p === "/r/main.js.map")
+      return serveUiFile("rgui/dist/main.js.map", "application/json");
     if (req.method === "GET" && p === "/room-client.js")
       return serveUiFile("room-client.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/console-logic.js")

@@ -65,6 +65,21 @@ interface AgentRecord {
 const roomInfo = parseRoomHash(location.hash) as
   | { room: string; token: string; host: string }
   | null;
+// #k=<token>: same-origin HTTP auth for a serve-hosted /r page (the console's
+// #k= convention) — appended to every /api call. #node=<pid>&embed: render ONLY
+// that agent's live terminal, full-viewport — the federation embed leg
+// (renderHints.embed): consumers iframe this page over the node rect, with the
+// TUI-preview card as their LOD fallback. See rgui docs/federation.md.
+const hashParts = location.hash.slice(1).split("&");
+const httpToken = hashParts.find((s) => s.startsWith("k="))?.slice(2) ?? null;
+// canonical form #node=<pid>&embed; #embed=<pid> accepted as an alias
+const embedPid =
+  hashParts.find((s) => s.startsWith("node="))?.slice(5) ??
+  hashParts.find((s) => s.startsWith("embed="))?.slice(6) ??
+  null;
+const embedMode = !!embedPid && hashParts.some((s) => s === "embed" || s.startsWith("embed="));
+const withTok = (path: string) =>
+  httpToken ? `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(httpToken)}` : path;
 let room: InstanceType<typeof RTCClient> | null = null; // connected client (or null)
 let roomConnected = false;
 const usingRoom = () => !!roomInfo;
@@ -76,7 +91,7 @@ async function apiJSON<T>(path: string): Promise<T> {
     if (!roomReady()) throw new Error("room not connected");
     return JSON.parse((await room!.req("GET", path)).text) as T;
   }
-  const res = await fetch(path, { headers: { accept: "application/json" } });
+  const res = await fetch(withTok(path), { headers: { accept: "application/json" } });
   if (!res.ok) throw new Error(String(res.status));
   const ct = res.headers.get("content-type") ?? "";
   if (!ct.includes("json")) throw new Error("not json"); // static host served HTML
@@ -90,7 +105,7 @@ async function apiPost(path: string, body: unknown): Promise<{ ok: boolean; text
     const r = await room!.req("POST", path, JSON.stringify(body));
     return { ok: r.status >= 200 && r.status < 300, text: r.text };
   }
-  const r = await fetch(path, {
+  const r = await fetch(withTok(path), {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
@@ -129,7 +144,7 @@ function subscribeRaw(path: string, onData: (v: unknown) => void): Sub {
     });
     return { close: unsub };
   }
-  const ev = new EventSource(path);
+  const ev = new EventSource(withTok(path));
   ev.onmessage = (e) => {
     try {
       onData(JSON.parse(e.data));
@@ -1250,7 +1265,7 @@ function reapplyMagnify() {
 // authoritative node is present, and its cross-system edges land on the real one.
 const FED_Y0 = 900; // world-y where the first federated subgraph mounts
 const FED_GAP = 300; // vertical gap between stacked federated subgraphs
-const fedHashParts = location.hash.slice(1).split("&");
+const fedHashParts = hashParts;
 const fedFeeds = fedHashParts
   .filter((s) => s.startsWith("feed="))
   .map((s) => decodeURIComponent(s.slice(5)));
@@ -1467,8 +1482,62 @@ if (roomInfo) {
   void connectOnce();
 }
 
-refresh();
-setInterval(refresh, 3000);
+// ── embed mode: ONE agent's live terminal, full viewport (renderHints.embed) ──
+// No forest, no polling loops — just the raw tail into an xterm sized to the
+// agent's native PTY grid, scaled down to fit the (usually iframe) viewport.
+function initEmbed(pid: string) {
+  document.title = `agent-yes · #${pid}`;
+  // the forest page booted underneath — drop its chrome entirely (incl. chrome
+  // mounted LATER, e.g. the theme toggle); the embed IS the whole document now
+  const css = document.createElement("style");
+  css.textContent = "body.ay-embed > *:not(.ay-embed-wrap){display:none!important}";
+  document.head.appendChild(css);
+  document.body.classList.add("ay-embed");
+  const wrap = document.createElement("div");
+  wrap.className = "ay-embed-wrap";
+  wrap.style.cssText = "position:fixed;inset:0;z-index:99;background:#0d1117;overflow:hidden";
+  const inner = document.createElement("div");
+  inner.style.cssText = "transform-origin:0 0"; // scaled to fit; wrap bg stays full-viewport
+  wrap.appendChild(inner);
+  document.body.appendChild(wrap);
+  if (!XTermCtor) {
+    wrap.textContent = "xterm failed to load";
+    return;
+  }
+  const term = new XTermCtor({
+    fontSize: 14,
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+    theme: termTheme(),
+    disableStdin: true, // read-only mirror, same as the forest terminals
+    cursorBlink: false,
+    scrollback: 1000,
+    convertEol: false,
+  });
+  term.open(inner);
+  // scale the native-grid terminal to FIT the viewport (never upscale) — the
+  // iframe consumer sizes us to the node rect, so this is the whole fit story
+  const fit = () => {
+    const el = inner.querySelector(".xterm") as HTMLElement | null;
+    if (!el || !el.offsetWidth || !el.offsetHeight) return;
+    const s = Math.min(1, innerWidth / el.offsetWidth, innerHeight / el.offsetHeight);
+    inner.style.transform = `scale(${s})`;
+  };
+  addEventListener("resize", fit);
+  apiJSON<{ cols?: number; rows?: number }>(`/api/size/${encodeURIComponent(pid)}`)
+    .then((sz) => {
+      if (sz?.cols && sz?.rows) term.resize(sz.cols, sz.rows);
+    })
+    .catch(() => {})
+    .finally(() => requestAnimationFrame(fit));
+  subscribeRaw(`/api/tail/${encodeURIComponent(pid)}?raw=1`, (d) => term.write(d as string));
+}
+
+if (embedMode) {
+  initEmbed(embedPid!);
+} else {
+  refresh();
+  setInterval(refresh, 3000);
+}
 
 // QA (#qa): auto-zoom into a leaf so terminals spawn (the size probe in makeTerm
 // then logs each overlay's px), and run a slow zoom sweep logging how many times
