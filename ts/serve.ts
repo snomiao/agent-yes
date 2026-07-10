@@ -1767,23 +1767,32 @@ export async function cmdServe(rest: string[]): Promise<number> {
                 if (size < offset) offset = size; // truncated/rotated
                 if (size > offset) {
                   // The safety-net poll found appended bytes the watcher never
-                  // announced — the watcher is dead (a long-lived daemon can
-                  // reach a state where fs.watch callbacks stop firing
-                  // process-wide; observed alongside the node-datachannel
-                  // native-stack pathologies). Demote this stream to the fast
-                  // poll it would have used had watch() failed outright, or
-                  // every keystroke echo rides the slow poll (~500ms felt lag).
-                  // The 450ms grace absorbs the benign race where the poll tick
-                  // beats a healthy watcher to the same append by a few ms.
-                  if (viaPoll && watcher && Date.now() - lastWatcherFireAt > POLL_WATCHED - 50) {
-                    try {
-                      watcher.close();
-                    } catch {
-                      /* already dead */
-                    }
-                    watcher = null;
-                    clearInterval(poller);
-                    poller = setInterval(() => void flush(true), POLL_UNWATCHED);
+                  // announced — suspicious: the watcher may be dead (a
+                  // long-lived daemon can reach a state where fs.watch
+                  // callbacks stop firing process-wide; observed alongside the
+                  // node-datachannel native-stack pathologies), leaving every
+                  // keystroke echo riding the slow poll (~500ms felt lag). But
+                  // a HEALTHY watcher's callback may merely be queued behind
+                  // this very tick (sparse append landing just before the poll,
+                  // with lastWatcherFireAt stale from an idle stretch) — so
+                  // verify before demoting: give it 100ms to fire, and only
+                  // then demote this stream to the fast poll it would have used
+                  // had watch() failed outright.
+                  if (viaPoll && watcher && !demoteCheck && Date.now() - lastWatcherFireAt > POLL_WATCHED - 50) {
+                    const suspectAt = Date.now();
+                    demoteCheck = setTimeout(() => {
+                      demoteCheck = null;
+                      if (closed || !watcher) return;
+                      if (lastWatcherFireAt >= suspectAt) return; // fired since — healthy
+                      try {
+                        watcher.close();
+                      } catch {
+                        /* already dead */
+                      }
+                      watcher = null;
+                      clearInterval(poller);
+                      poller = setInterval(() => void flush(true), POLL_UNWATCHED);
+                    }, 100);
                   }
                   const len = size - offset;
                   const buf = Buffer.allocUnsafe(len);
@@ -1808,6 +1817,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
             };
 
             let lastWatcherFireAt = Date.now(); // grace at open — see demotion above
+            let demoteCheck: ReturnType<typeof setTimeout> | null = null;
             let watcher: ReturnType<typeof watch> | null = null;
             try {
               watcher = watch(logPath, () => {
@@ -1841,6 +1851,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
               closed = true;
               clearInterval(heartbeat);
               clearInterval(poller);
+              if (demoteCheck) clearTimeout(demoteCheck);
               try {
                 watcher?.close();
               } catch {
