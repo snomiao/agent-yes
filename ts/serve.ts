@@ -1759,13 +1759,41 @@ export async function cmdServe(rest: string[]): Promise<number> {
             // 300 ms full-file poll was the dominant typing-echo latency.
             const fh = await open(logPath, "r").catch(() => null);
             let reading = false;
-            const flush = async () => {
+            const flush = async (viaPoll = false) => {
               if (closed || reading || !fh) return;
               reading = true;
               try {
                 const { size } = await fh.stat();
                 if (size < offset) offset = size; // truncated/rotated
                 if (size > offset) {
+                  // The safety-net poll found appended bytes the watcher never
+                  // announced — suspicious: the watcher may be dead (a
+                  // long-lived daemon can reach a state where fs.watch
+                  // callbacks stop firing process-wide; observed alongside the
+                  // node-datachannel native-stack pathologies), leaving every
+                  // keystroke echo riding the slow poll (~500ms felt lag). But
+                  // a HEALTHY watcher's callback may merely be queued behind
+                  // this very tick (sparse append landing just before the poll,
+                  // with lastWatcherFireAt stale from an idle stretch) — so
+                  // verify before demoting: give it 100ms to fire, and only
+                  // then demote this stream to the fast poll it would have used
+                  // had watch() failed outright.
+                  if (viaPoll && watcher && !demoteCheck && Date.now() - lastWatcherFireAt > POLL_WATCHED - 50) {
+                    const suspectAt = Date.now();
+                    demoteCheck = setTimeout(() => {
+                      demoteCheck = null;
+                      if (closed || !watcher) return;
+                      if (lastWatcherFireAt >= suspectAt) return; // fired since — healthy
+                      try {
+                        watcher.close();
+                      } catch {
+                        /* already dead */
+                      }
+                      watcher = null;
+                      clearInterval(poller);
+                      poller = setInterval(() => void flush(true), POLL_UNWATCHED);
+                    }, 100);
+                  }
                   const len = size - offset;
                   const buf = Buffer.allocUnsafe(len);
                   const { bytesRead } = await fh.read(buf, 0, len, offset);
@@ -1788,9 +1816,14 @@ export async function cmdServe(rest: string[]): Promise<number> {
               }
             };
 
+            let lastWatcherFireAt = Date.now(); // grace at open — see demotion above
+            let demoteCheck: ReturnType<typeof setTimeout> | null = null;
             let watcher: ReturnType<typeof watch> | null = null;
             try {
-              watcher = watch(logPath, () => void flush());
+              watcher = watch(logPath, () => {
+                lastWatcherFireAt = Date.now();
+                void flush();
+              });
             } catch {
               /* fs.watch unsupported — the fallback poll below still works */
             }
@@ -1799,7 +1832,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
             // → keep it at 60ms for low typing-echo latency. This matters when many
             // /api/tail streams are open at once (the /rgui viewer opens one per
             // node): N × a 60ms poll each was needless load on the event loop.
-            const poller = setInterval(() => void flush(), watcher ? 500 : 60);
+            // (If the watcher turns out to be dead, flush() demotes to 60ms.)
+            const POLL_WATCHED = 500;
+            const POLL_UNWATCHED = 60;
+            let poller = setInterval(
+              () => void flush(true),
+              watcher ? POLL_WATCHED : POLL_UNWATCHED,
+            );
 
             // Tear down on client disconnect via BOTH the req.signal 'abort'
             // listener and the stream's cancel() — whichever the runtime fires
@@ -1812,6 +1851,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
               closed = true;
               clearInterval(heartbeat);
               clearInterval(poller);
+              if (demoteCheck) clearTimeout(demoteCheck);
               try {
                 watcher?.close();
               } catch {
