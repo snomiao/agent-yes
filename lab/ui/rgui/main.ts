@@ -37,6 +37,7 @@ import { RTCClient, parseRoomHash } from "../rtc.js";
 type AgentStatus = "active" | "idle" | "needs_input" | "stuck" | "exited";
 interface AgentRecord {
   pid: number;
+  agent_id?: string; // stable per-process id (pids are reused) — the share scope key
   cli: string;
   prompt: string | null;
   cwd: string;
@@ -1270,7 +1271,12 @@ const fedFeeds = fedHashParts
   .filter((s) => s.startsWith("feed="))
   .map((s) => decodeURIComponent(s.slice(5)));
 const fedDemo = fedHashParts.includes("feddemo");
-const fedGraphs = new Map<string, Graph>(); // feed key -> converted subgraph
+// feed key -> converted subgraph + the ONE id-scheme that feed may speak for
+// (`${producer.app}://`) — producers differ in how they scope origins under the
+// app (ay://agent-yes/…, otoji://room/<room>/…), so authority is enforced at
+// the app scheme: an otoji feed can never paint ay:// nodes and vice versa.
+// null ns = trusted local demo (ships in the bundle, spans all schemes).
+const fedGraphs = new Map<string, { g: Graph; ns: string | null }>();
 const fedRevisions = new Map<string, string>();
 let lastLocalGraph: Graph = { nodes: [], edges: [] };
 
@@ -1284,8 +1290,16 @@ function mergeFederated(local: Graph): Graph {
   // demo so an authoritative node (e.g. our codex-agent) beats the demo's stub
   let cursor = Math.max(FED_Y0, ...local.nodes.map((n) => n.y + (n.h ?? CARD_H) + FED_GAP));
   for (const key of [...fedFeeds, "demo"]) {
-    const g = fedGraphs.get(key);
-    if (!g?.nodes.length) continue;
+    const entry = fedGraphs.get(key);
+    if (!entry?.g.nodes.length) continue;
+    // ns enforcement: a feed only ever RENDERS nodes in its own namespace.
+    // Foreign-ns entries act as stubs — invisible, but their edges below still
+    // land when the authoritative feed provides the real node — so a hostile
+    // feed can't paint content as somebody else's agent.
+    const g = entry.ns
+      ? { ...entry.g, nodes: entry.g.nodes.filter((n) => n.id.startsWith(entry.ns)) }
+      : entry.g;
+    if (!g.nodes.length) continue;
     const minX = Math.min(...g.nodes.map((n) => n.x));
     const minY = Math.min(...g.nodes.map((n) => n.y));
     let maxY = cursor;
@@ -1307,7 +1321,7 @@ function mergeFederated(local: Graph): Graph {
 // Feed edges survive applyEdges' wire rebuild (it truncates graph.edges).
 function fedEdges(present: Set<string>): Edge[] {
   const out: Edge[] = [];
-  for (const g of fedGraphs.values())
+  for (const { g } of fedGraphs.values())
     out.push(...g.edges.filter((e) => present.has(e.from.node) && present.has(e.to.node)));
   return out;
 }
@@ -1328,7 +1342,10 @@ async function pollFeeds() {
       const rev = String(env.revision);
       if (fedRevisions.get(url) === rev) continue;
       fedRevisions.set(url, rev);
-      fedGraphs.set(url, federatedGraphToRgui(env, { container: true }));
+      fedGraphs.set(url, {
+        g: federatedGraphToRgui(env, { container: true }),
+        ns: `${env.producer.app}://`,
+      });
       changed = true;
     } catch {
       /* feed unreachable — keep the last mirror (or none) */
@@ -1339,7 +1356,9 @@ async function pollFeeds() {
 if (fedDemo) {
   // offline showcase: the baked cross-system chain (plaintext → codex-agent →
   // diff → filter → translate → tts) from rgui itself, no feed server needed
-  fedGraphs.set("demo", federatedGraphToRgui(federatedDemoChain(), { container: true }));
+  // the baked demo chain intentionally spans all three namespaces — it ships in
+  // the bundle (rgui source), not from a network feed, so it merges unenforced
+  fedGraphs.set("demo", { g: federatedGraphToRgui(federatedDemoChain(), { container: true }), ns: null });
 }
 if (fedFeeds.length) {
   void pollFeeds();
@@ -1358,6 +1377,7 @@ function apply(records: AgentRecord[], live: boolean) {
     for (const id of [...terms.keys()]) if (!recordsByPid.has(id)) dropTerm(id);
     lastLocalGraph = buildGraph(records);
     viewer.setGraph(mergeFederated(lastLocalGraph));
+    markShared();
     reapplyMagnify(); // restore user magnify on the rebuilt nodes (ratio-safe)
     applyEdges(); // rebuild wires on the new node set
     if (firstPaint) {
@@ -1415,6 +1435,7 @@ async function refresh() {
     const records = await apiJSON<AgentRecord[]>("/api/ls");
     apply(records, true);
     void fetchEdges();
+    void fetchShares();
   } catch {
     // No reachable source. With a room configured, keep the room's connection
     // state on screen (never the sample) — the connect loop drives the label.
@@ -1811,6 +1832,10 @@ const ctxInput = document.getElementById("ctx-input") as HTMLTextAreaElement;
 let ctxTargets: string[] = [];
 function openBatchMenu(sx: number, sy: number, pids: string[]) {
   ctxTargets = pids;
+  // "share this node" — single agent only (a share scopes to exactly one agent)
+  ctxSharePid = pids.length === 1 ? pids[0]! : null;
+  ctxShare.hidden = !ctxSharePid || usingRoom(); // a room viewer can't mint shares
+  ctxShareOut.hidden = true;
   document.getElementById("ctx-count")!.textContent = String(pids.length);
   document.getElementById("ctx-s")!.textContent = pids.length === 1 ? "" : "s";
   ctxmenu.hidden = false;
@@ -1855,6 +1880,72 @@ ctxInput.addEventListener("keydown", (e) => {
 document.getElementById("ctx-send")!.addEventListener("click", () => void sendBatch());
 addEventListener("mousedown", (e) => {
   if (!ctxmenu.hidden && !ctxmenu.contains(e.target as Node)) closeBatchMenu();
+});
+
+// ── share this node (right-click menu) ────────────────────────────────────────
+// Mints a scoped share via POST /api/share: its own e2ee WebRTC room exposing
+// exactly ONE agent, HOST-enforced (default-deny scopedFetch in agentShare.ts),
+// 24h TTL. "allow input" = perm rw (holder may send prompts in); output (view)
+// is what a share IS. The returned link pastes into any rgui surface — the
+// console (/w) opens it directly, /r/#room:… mirrors it — and the shared agent
+// gets flagged (node.shared) so rgui can halo it like remote-but-outbound.
+const ctxShare = document.getElementById("ctx-share")!;
+const ctxShareOut = document.getElementById("ctx-share-out")!;
+const ctxShareLink = document.getElementById("ctx-share-link")!;
+const ctxSharePerm = document.getElementById("ctx-share-input-perm") as HTMLInputElement;
+const ctxShareBtn = document.getElementById("ctx-share-btn") as HTMLButtonElement;
+let ctxSharePid: string | null = null;
+let sharedIds = new Set<string>(); // agent_ids with an active outbound share
+function markShared() {
+  let changed = false;
+  for (const n of viewer.graph.nodes) {
+    const rec = recordsByPid.get(n.id);
+    const want = !!rec?.agent_id && sharedIds.has(rec.agent_id);
+    const nn = n as { shared?: boolean };
+    if ((nn.shared ?? false) !== want) {
+      nn.shared = want;
+      changed = true;
+    }
+  }
+  if (changed) viewer.setView(viewer.view); // redraw, no relayout
+}
+async function fetchShares() {
+  try {
+    const list = await apiJSON<{ agentId: string }[]>("/api/shares");
+    sharedIds = new Set(list.map((x) => x.agentId));
+    markShared();
+  } catch {
+    /* no /api/shares on this wire (static demo / scoped room) */
+  }
+}
+ctxShareBtn.addEventListener("click", async () => {
+  if (!ctxSharePid) return;
+  ctxShareBtn.disabled = true;
+  ctxShareBtn.textContent = "sharing…";
+  const r = await apiPost("/api/share", {
+    agent: ctxSharePid,
+    perm: ctxSharePerm.checked ? "rw" : "r",
+  });
+  ctxShareBtn.disabled = false;
+  ctxShareBtn.textContent = "share this node";
+  ctxShareOut.hidden = false;
+  if (!r.ok) {
+    ctxShareLink.textContent = `✗ ${r.text}`;
+    return;
+  }
+  const share = JSON.parse(r.text) as { link: string; agentId: string };
+  ctxShareLink.textContent = share.link;
+  sharedIds.add(share.agentId);
+  markShared();
+  try {
+    await navigator.clipboard.writeText(share.link);
+  } catch {
+    /* clipboard blocked — the link is still selectable */
+  }
+});
+document.getElementById("ctx-share-copy")!.addEventListener("click", async () => {
+  const t = ctxShareLink.textContent ?? "";
+  if (t && !t.startsWith("✗")) await navigator.clipboard.writeText(t).catch(() => {});
 });
 
 // ── chrome controls ──────────────────────────────────────────────────────────

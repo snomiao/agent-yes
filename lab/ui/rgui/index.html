@@ -491,6 +491,45 @@
       #ctxmenu textarea::placeholder {
         color: var(--text-muted);
       }
+      #ctxmenu .ctx-share {
+        border-top: 1px solid var(--border);
+        padding: 8px 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      #ctxmenu .ctx-share-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 8px;
+        color: var(--text-dim);
+      }
+      #ctxmenu .ctx-share-row label {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      #ctxmenu .ctx-share-out {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      #ctxmenu .ctx-share-out[hidden] {
+        display: none;
+      }
+      #ctxmenu .ctx-share-out code {
+        flex: 1;
+        overflow-x: auto;
+        white-space: nowrap;
+        font-size: 11px;
+        color: #3fb950;
+        padding: 4px 6px;
+        background: var(--panel);
+        border-radius: 5px;
+      }
       #ctxmenu .ctx-foot {
         display: flex;
         justify-content: space-between;
@@ -550,6 +589,17 @@
       <div class="ctx-foot">
         <span><b>⏎</b> send · <b>shift+⏎</b> newline · <b>esc</b> cancel</span>
         <button id="ctx-send">Send</button>
+      </div>
+      <div class="ctx-share" id="ctx-share" hidden>
+        <div class="ctx-share-row">
+          <label title="share is always view (output); this also lets the holder send prompts in"
+            ><input type="checkbox" id="ctx-share-input-perm" /> allow input</label
+          >
+          <button id="ctx-share-btn">share this node</button>
+        </div>
+        <div class="ctx-share-out" id="ctx-share-out" hidden>
+          <code id="ctx-share-link"></code><button id="ctx-share-copy">copy</button>
+        </div>
       </div>
     </div>
 

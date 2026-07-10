@@ -1640,7 +1640,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
     if (req.method === "GET" && p === "/api/graph") {
       try {
         const records = await listRecords(undefined, defaultOpts());
-        const origin = hostname();
+        // ONE namespace for the whole feed: ns == `${producer.app}://${producer.origin}`
+        // == every node id's prefix, so a consumer can enforce "a feed only
+        // speaks for its own namespace" with a plain prefix check. The machine
+        // name is metadata (producer.deviceId/label), NOT part of the namespace —
+        // the shared demo-chain id ay://agent-yes/codex-agent must live in the
+        // same ns as the rest of the fleet or enforcement would drop it.
+        const origin = "agent-yes";
         const ns = `ay://${origin}`;
         const textIn = { id: "text-in", label: "text", kind: "text" };
         const textOut = { id: "text-out", label: "text", kind: "text" };
@@ -1679,7 +1685,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
             type: `${r.cli}-agent`,
             title: `${r.cli} #${r.pid}`,
             category: "agent-yes",
-            owner: `agent-yes:${origin}`,
+            owner: `agent-yes:${hostname()}`,
             status: r.status,
             parent: r.parent_pid && byWrapper.has(r.parent_pid) ? nid(byWrapper.get(r.parent_pid)!) : undefined,
             pos: { x: (i % 8) * (NODE_W + 64), y: Math.floor(i / 8) * 480 },
@@ -1698,7 +1704,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
           type: "codex-agent",
           title: "Codex Agent",
           category: "agent-yes",
-          owner: `agent-yes:${origin}`,
+          owner: `agent-yes:${hostname()}`,
           status: codex?.status ?? "offline",
           parent: undefined,
           pos: { x: 0, y: -560 },
@@ -1720,7 +1726,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
           {
             kind: "rgui-federated-graph",
             schema: "org.rgui.graph.v1",
-            producer: { app: "agent-yes", origin, label: `agent-yes fleet @ ${origin}` },
+            producer: { app: "ay", origin, deviceId: hostname(), label: `agent-yes fleet @ ${hostname()}` },
             revision: Date.now(),
             ts: Date.now(),
             graph: { nodes, edges },
@@ -2626,7 +2632,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // The /r (rgui) page is embeddable: its #node=<pid>&embed view is the
   // federation renderHints.embed target, iframed by OTHER rgui hosts over the
   // node rect — so frame-ancestors opens up, unlike the console's 'none'.
-  const RGUI_CSP = CONSOLE_CSP.replace("frame-ancestors 'none'", "frame-ancestors *");
+  const RGUI_CSP = CONSOLE_CSP.replace("frame-ancestors 'none'", "frame-ancestors *")
+    // #feed= mirrors fetch OTHER rgui hosts' envelopes (federation consumers):
+    // otoji.org in prod, localhost/loopback for wrangler-dev feeds
+    .replace("connect-src 'self'", "connect-src 'self' https://otoji.org http://127.0.0.1:* http://localhost:*");
   const serveUiFile = async (name: string, type: string, csp = CONSOLE_CSP): Promise<Response> => {
     try {
       const buf = await readFile(path.join(uiDir, name));
