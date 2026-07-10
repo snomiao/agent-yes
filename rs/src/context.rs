@@ -249,6 +249,12 @@ pub struct AgentContext {
     poke_unresponsive: bool,
     watchdog_stalled: bool,
     unresponsive: bool,
+
+    // Shell "typed" prompt (promptArg: typed — bash/cmd/powershell). When set,
+    // this command is typed into the interactive session once the shell prompt
+    // is first ready, then the session stays live. None for every other CLI
+    // (they receive the prompt via argv instead). See run_with_fifo.
+    initial_input: Option<String>,
 }
 
 impl AgentContext {
@@ -263,6 +269,7 @@ impl AgentContext {
         term_rows: u16,
         term_cols: u16,
         render_plain: bool,
+        initial_input: Option<String>,
     ) -> Self {
         Self {
             cli,
@@ -308,6 +315,7 @@ impl AgentContext {
             poke_unresponsive: false,
             watchdog_stalled: false,
             unresponsive: false,
+            initial_input,
         }
     }
 
@@ -377,6 +385,27 @@ impl AgentContext {
         fifo_path: Option<std::path::PathBuf>,
     ) -> Result<i32> {
         let writer = pty.get_writer();
+
+        // Shell "typed" prompt: once the shell prompt is first ready, type the
+        // initial command and leave the session interactive. This is how
+        // bash/cmd/powershell (promptArg: typed) receive an initial command
+        // without `-c`'s run-and-exit, so you can e.g. `ay bash 'claude'` and
+        // then keep launching things inside the same shell. Runs in its own
+        // task so it never blocks the main loop; writes exactly once.
+        if let Some(input) = self.initial_input.clone() {
+            let writer = writer.clone();
+            let mut first_ready = self.stdin_first_ready.clone();
+            tokio::spawn(async move {
+                first_ready.wait().await;
+                // Small settle so the command lands at the prompt, not mid-banner.
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                if let Ok(mut w) = writer.lock() {
+                    let _ = w.write_all(input.as_bytes());
+                    let _ = w.write_all(b"\r");
+                    let _ = w.flush();
+                }
+            });
+        }
 
         // Create message context
         let mut msg_ctx = MessageContext::new(

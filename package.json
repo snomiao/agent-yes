@@ -1,6 +1,6 @@
 {
   "name": "agent-yes",
-  "version": "1.172.1",
+  "version": "1.176.0",
   "description": "A wrapper tool that automates interactions with various AI CLI tools by automatically handling common prompts and responses.",
   "keywords": [
     "ai",
@@ -45,7 +45,10 @@
     "openrouter-yes": "./dist/openrouter-yes.js",
     "orcy": "./dist/orcy.js",
     "pi-yes": "./dist/pi-yes.js",
-    "qwen-yes": "./dist/qwen-yes.js"
+    "qwen-yes": "./dist/qwen-yes.js",
+    "bash-yes": "./dist/bash-yes.js",
+    "cmd-yes": "./dist/cmd-yes.js",
+    "powershell-yes": "./dist/powershell-yes.js"
   },
   "directories": {
     "doc": "docs"
@@ -66,6 +69,7 @@
     "lab/ui/index.html",
     "lab/ui/landing.html",
     "lab/ui/manifest.webmanifest",
+    "lab/ui/qrcode.js",
     "lab/ui/room-client.js",
     "lab/ui/sw.js",
     "lab/ui/blog/**"
@@ -85,6 +89,8 @@
     "build": "tsdown",
     "check:e2e": "bun scripts/check-e2e.ts",
     "cf": "bun scripts/cf.ts",
+    "build:rgui": "bun scripts/build-rgui.ts",
+    "dev:rgui": "bun lab/ui/rgui/dev.ts",
     "build:rs": "bun ./scripts/build-rs.ts",
     "postbuild": "bun ./ts/postbuild.ts",
     "demo": "bun run build && bun link && claude-yes -- demo",

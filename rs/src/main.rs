@@ -151,7 +151,12 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     // Build command arguments
     let mut cmd_args = args.cli_args.clone();
 
-    // Add prompt based on promptArg configuration
+    // Add prompt based on promptArg configuration.
+    //
+    // "typed" is the shell mode (bash/cmd/powershell): the prompt is NOT passed
+    // as an argv (that would run-and-exit, e.g. `bash -c`), it is typed into the
+    // interactive session after the shell prompt is ready — see `initial_input`
+    // below and its consumer in AgentContext::run_with_fifo.
     if let Some(ref prompt) = args.prompt {
         match cli_config.prompt_arg.as_str() {
             "first-arg" => {
@@ -160,6 +165,7 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             "last-arg" => {
                 cmd_args.push(prompt.clone());
             }
+            "typed" => {}
             flag if flag.starts_with("--") || flag.starts_with("-") => {
                 cmd_args.push(flag.to_string());
                 cmd_args.push(prompt.clone());
@@ -167,6 +173,14 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             _ => {}
         }
     }
+
+    // For "typed" (shell) CLIs, carry the prompt into the run loop so it is typed
+    // into the live session once ready; every other mode delivered it via argv.
+    let initial_input = if cli_config.prompt_arg == "typed" {
+        args.prompt.clone()
+    } else {
+        None
+    };
 
     // Add default args
     cmd_args.extend(cli_config.default_args.iter().cloned());
@@ -259,6 +273,7 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             term_rows,
             term_cols,
             render_plain,
+            initial_input.clone(),
         );
 
         // Create per-pid FIFO for `cy send <keyword> <msg>`. Best-effort —

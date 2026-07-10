@@ -56,3 +56,7 @@ lab/ui/cf/public/
 
 # agent-yes e2e scratch dir (ts/tests/shared-e2e.spec.ts)
 tmp-test-shared-e2e/
+
+# wrangler local cache (scripts/cf.ts) + rech/playwright scratch
+.wrangler/
+.playwright-cli-multi-tab/

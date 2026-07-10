@@ -6,13 +6,14 @@
 // fallback when offline, which is what makes the installed app launchable with no
 // network. WebSocket signaling and cross-origin CDN scripts are not GET fetches we
 // own, so they pass straight through.
-const CACHE = "agent-yes-w-v1";
+const CACHE = "agent-yes-w-v2";
 const SHELL = [
   "./",
   "./index.html",
   "./room-client.js",
   "./console-logic.js",
   "./e2e.js",
+  "./qrcode.js",
   "./manifest.webmanifest",
   "./icon.svg",
 ];

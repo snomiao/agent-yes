@@ -16,6 +16,7 @@ import {
   listRecords,
   readNotes,
   readPtysize,
+  recentReadEdges,
   renderRawLog,
   resolveOne,
   snapshotStatus,
@@ -343,6 +344,117 @@ function resolveDaemonManager(): DaemonManager | null {
   return order.find((m): m is DaemonManager => !!m) ?? null;
 }
 
+// Ask a JS package manager for its global bin dir, so a binary we just
+// `-g`-installed is discoverable in THIS process even though a fresh login
+// shell hasn't added that dir to PATH yet (setup.sh warns about exactly this).
+//   - bun: `bun pm bin -g` prints the dir directly.
+//   - npm: `npm prefix -g` prints the prefix; the bin lives at <prefix>/bin.
+async function globalBinDir(installer: string[]): Promise<string | null> {
+  const isBun = installer[1] === "add";
+  const query = isBun
+    ? [installer[0]!, "pm", "bin", "-g"]
+    : [installer[0]!, "prefix", "-g"];
+  const p = Bun.spawn(query, { stdout: "pipe", stderr: "ignore" });
+  if ((await p.exited) !== 0) return null;
+  const out = (await new Response(p.stdout).text()).trim();
+  if (!out) return null;
+  return isBun ? out : path.join(out, "bin");
+}
+
+// Does this manager's binary actually execute? A `bun add -g oxmgr` can succeed
+// yet leave a binary that can't run: oxmgr vendors a native binary requiring
+// GLIBC_2.39, which a box like Debian 12 (glibc 2.36) lacks, so exec dies with
+// "GLIBC_2.39 not found". Probe with `--version`: exit 0 means runnable; a
+// non-zero exit or spawn failure means the shim is on PATH but unusable.
+async function managerRunnable(mgr: DaemonManager): Promise<boolean> {
+  try {
+    const p = Bun.spawn([mgr.bin, "--version"], { stdout: "ignore", stderr: "ignore" });
+    return ((await p.exited) ?? 1) === 0;
+  } catch {
+    return false;
+  }
+}
+
+// Which manager is ACTUALLY running our daemon? `resolveDaemonManager` picks by
+// PATH order without a liveness check, so after a bootstrap oxmgr→pm2 fallback a
+// broken oxmgr shim (first on PATH) shadows the pm2 that really holds the daemon
+// — making `ay serve status` report `manager: oxmgr / installed: no` while pm2
+// serves. For reporting, probe each present manager and prefer the one that is
+// runnable AND has our daemon registered; fall back to the first runnable one,
+// else whatever resolveDaemonManager returns.
+async function resolveActiveManager(): Promise<DaemonManager | null> {
+  const oxmgr = Bun.which("oxmgr");
+  const pm2 = Bun.which("pm2");
+  const present: DaemonManager[] = [];
+  if (oxmgr) present.push({ id: "oxmgr", bin: oxmgr });
+  if (pm2) present.push({ id: "pm2", bin: pm2 });
+  let firstRunnable: DaemonManager | null = null;
+  for (const m of present) {
+    if (!(await managerRunnable(m))) continue;
+    firstRunnable ??= m;
+    if ((await readDaemonServeArgs(m)) !== null) return m; // this one holds the daemon
+  }
+  return firstRunnable ?? resolveDaemonManager();
+}
+
+// Install one PM package globally via the SAME JS package manager that installed
+// `ay` (bun preferred, npm fallback — no Rust toolchain required, so a fresh
+// Linux box with only bun from setup.sh works), then confirm the resulting
+// binary actually execs. Returns a runnable manager, or null if the install
+// failed or the binary can't run here (caller then tries the next candidate).
+async function installAndVerify(pkg: "oxmgr" | "pm2"): Promise<DaemonManager | null> {
+  const bun = Bun.which("bun");
+  const npm = Bun.which("npm");
+  const installer = bun ? [bun, "add", "-g", pkg] : npm ? [npm, "install", "-g", pkg] : null;
+  if (!installer) return null;
+  process.stderr.write(`ay serve install: installing ${pkg}…\n`);
+  const code = (await Bun.spawn(installer, { stdio: ["ignore", "inherit", "inherit"] }).exited) ?? 1;
+  if (code !== 0) {
+    process.stderr.write(`ay serve install: '${installer.join(" ")}' failed (exit ${code})\n`);
+    return null;
+  }
+  // The shim landed in the PM's global bin dir, which may not be on our PATH —
+  // prepend it before resolving so Bun.which can see the fresh binary.
+  const binDir = await globalBinDir(installer);
+  if (binDir) process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
+  const bin = Bun.which(pkg);
+  if (!bin) return null;
+  const mgr: DaemonManager = { id: pkg, bin };
+  if (!(await managerRunnable(mgr))) {
+    // Name the actual reason: oxmgr ships a native binary (glibc), pm2 is a
+    // Node.js app that needs `node` on PATH — a bun-only box has neither by
+    // default, so a generic "glibc mismatch" would mislead for pm2.
+    const why =
+      pkg === "oxmgr"
+        ? "a native/glibc mismatch, e.g. glibc < 2.39"
+        : "pm2 needs a Node.js runtime and none was found";
+    process.stderr.write(
+      `ay serve install: ${pkg} installed but can't exec here (${why})` +
+        (pkg === "oxmgr" ? " — falling back to pm2\n" : "\n"),
+    );
+    return null;
+  }
+  return mgr;
+}
+
+// No usable process manager → bootstrap one so `ay serve install` works out of
+// the box on a fresh machine. Try candidates in preference order (oxmgr first on
+// non-Windows, pm2 first on Windows where oxmgr's TCP daemon socket wedges);
+// each must actually EXEC, so a glibc-incompatible oxmgr transparently falls
+// through to pm2 — pure JS, runs anywhere bun/node does. This is why the old
+// `cargo install oxmgr`-only hint left serve-install dead on arrival on Linux.
+// AGENT_YES_NO_PM_BOOTSTRAP=1 opts out.
+async function bootstrapDaemonManager(): Promise<DaemonManager | null> {
+  if (process.env.AGENT_YES_NO_PM_BOOTSTRAP === "1") return null;
+  const candidates: Array<"oxmgr" | "pm2"> =
+    process.platform === "win32" ? ["pm2", "oxmgr"] : ["oxmgr", "pm2"];
+  for (const pkg of candidates) {
+    const mgr = await installAndVerify(pkg);
+    if (mgr) return mgr;
+  }
+  return null;
+}
+
 // Resolve the argv that launches `ay serve …` from the daemon. The daemon's
 // environment may not have ~/.bun/bin on PATH, so we use an absolute path.
 // On Windows the `ay` bin is a self-contained launcher (ay.exe) we exec
@@ -499,12 +611,25 @@ async function fetchDaemonVersion(port: number, token: string): Promise<string |
 }
 
 async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
-  const mgr = resolveDaemonManager();
+  // Prefer an already-installed manager — but only if it actually execs. A
+  // glibc-incompatible oxmgr (Debian 12: GLIBC_2.39 not found) can sit on PATH
+  // yet be unusable; treat it as absent so we bootstrap a working one instead of
+  // handing serve-install a manager that dies at runtime. Otherwise bootstrap
+  // (oxmgr→pm2 fallback) so a fresh box works out of the box.
+  let mgr = resolveDaemonManager();
+  if (mgr && !(await managerRunnable(mgr))) {
+    process.stderr.write(
+      `ay serve install: ${mgr.id} is on PATH but can't exec here (likely a native/glibc mismatch) — bootstrapping a working manager…\n`,
+    );
+    mgr = null;
+  }
+  if (!mgr) mgr = await bootstrapDaemonManager();
   if (!mgr) {
     process.stderr.write(
-      "ay serve install: no process manager found (need pm2 or oxmgr)\n" +
-        "  install with:  bun add -g pm2\n" +
-        "             or: cargo install oxmgr\n",
+      "ay serve install: no usable process manager (need oxmgr or pm2)\n" +
+        "  - oxmgr: bun add -g oxmgr   (native binary; needs glibc ≥ 2.39 on Linux)\n" +
+        "  - pm2:   bun add -g pm2     (needs a Node.js runtime on PATH)\n" +
+        "  On a minimal bun-only box, install node (for pm2) or a newer glibc (for oxmgr).\n",
     );
     return 1;
   }
@@ -732,7 +857,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
 // Read-only: never mints a token or disturbs the daemon. `--json` for scripts.
 async function cmdServeStatus(args: string[]): Promise<number> {
   const json = args.includes("--json");
-  const mgr = resolveDaemonManager();
+  const mgr = await resolveActiveManager();
   const token = await loadTokenReadOnly();
   const shareLink = await readShareLink();
 
@@ -994,6 +1119,16 @@ export async function cmdServe(rest: string[]): Promise<number> {
         const oscTitleRe = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
         let title: string | null = null;
         for (let m; (m = oscTitleRe.exec(text)); ) if (m[1]!.trim()) title = m[1]!.trim();
+        // Defense-in-depth: this title is remote-controlled text (an agent sets its
+        // own terminal title) that the web console renders. The console escapes it,
+        // but strip C0/C1 control bytes and cap the length at the SOURCE too, so a
+        // hostile title can't smuggle control characters into any current/future
+        // sink. Quotes are left intact (legitimate titles contain them) and handled
+        // by the console's HTML escaper.
+        if (title) {
+          // eslint-disable-next-line no-control-regex
+          title = title.replace(/[\x00-\x1f\x7f-\x9f]/g, "").slice(0, 256).trim() || null;
+        }
         titleCache.set(logFile, { size, mtimeMs, title });
         return title;
       } finally {
@@ -1454,6 +1589,17 @@ export async function cmdServe(rest: string[]): Promise<number> {
       });
     }
 
+    // GET /api/edges — recent inter-agent relationship edges for the /rgui wire
+    // view. Currently the read/tail edges (agent `by` read agent `target` within
+    // the last minute, from ~/.agent-yes/reads.jsonl). Directional, ephemeral.
+    if (req.method === "GET" && p === "/api/edges") {
+      try {
+        return Response.json({ reads: await recentReadEdges() });
+      } catch (e) {
+        return new Response((e as Error).message, { status: 500 });
+      }
+    }
+
     // GET /api/whoami — this host's device label (user@host), so a remote
     // console can tag each agent with the machine it came from. Unlike codehost,
     // `ay serve --share` carries no per-agent device id; the viewer fetches this
@@ -1573,6 +1719,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
           return new Response(`pid ${record.pid}: no log_file`, { status: 404 });
         const logPath = record.log_file;
 
+        // Assigned inside start(); called by BOTH the stream's cancel() and the
+        // req.signal abort listener, so client-disconnect teardown can't leak.
+        let cleanup = () => {};
         const stream = new ReadableStream({
           async start(ctrl) {
             const enc = new TextEncoder();
@@ -1645,9 +1794,21 @@ export async function cmdServe(rest: string[]): Promise<number> {
             } catch {
               /* fs.watch unsupported — the fallback poll below still works */
             }
-            const poller = setInterval(() => void flush(), 60);
+            // When fs.watch is live it already gives instant echo, so the poll is
+            // only a safety net → 500ms. Without a watcher it IS the primary path
+            // → keep it at 60ms for low typing-echo latency. This matters when many
+            // /api/tail streams are open at once (the /rgui viewer opens one per
+            // node): N × a 60ms poll each was needless load on the event loop.
+            const poller = setInterval(() => void flush(), watcher ? 500 : 60);
 
-            req.signal.addEventListener("abort", () => {
+            // Tear down on client disconnect via BOTH the req.signal 'abort'
+            // listener and the stream's cancel() — whichever the runtime fires
+            // (Bun uses abort here; other runtimes/paths may only cancel). `closed`
+            // makes it idempotent so it runs exactly once and never leaks the
+            // heartbeat/poller/fs-watcher/fd, however many /api/tail streams churn
+            // (the /rgui viewer opens+drops one per node while panning/zooming).
+            cleanup = () => {
+              if (closed) return;
               closed = true;
               clearInterval(heartbeat);
               clearInterval(poller);
@@ -1662,7 +1823,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
               } catch {
                 /* already closed */
               }
-            });
+            };
+            req.signal.addEventListener("abort", cleanup);
+          },
+          cancel() {
+            cleanup();
           },
         });
 
@@ -2210,6 +2375,54 @@ export async function cmdServe(rest: string[]): Promise<number> {
       }
     }
 
+    // ---- Single-agent view-only shares (docs/agent-sharing.md, Option X) ------
+    // Mint / list / revoke scoped share rooms. Reachable by whoever already holds
+    // full control of this host (the local token or the master fleet room) — a
+    // scoped viewer can't reach these (its scopedFetch 403s /api/share*).
+
+    // POST /api/share  body {agent, perm?}  → mint a fresh view-only room for ONE
+    // agent and return its share link.
+    if (req.method === "POST" && p === "/api/share") {
+      let body: { agent?: string; perm?: "r" | "rw" };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return new Response("invalid JSON body", { status: 400 });
+      }
+      if (!body.agent) return new Response("agent required", { status: 400 });
+      const perm = body.perm ?? "r";
+      if (perm !== "r" && perm !== "rw")
+        return new Response(`invalid perm ${perm} (want r or rw)`, { status: 400 });
+      try {
+        const { createScopedShare } = await import("./agentShare.ts");
+        const share = await createScopedShare({
+          agent: body.agent,
+          perm,
+          localFetch: apiFetch,
+          apiToken: token,
+        });
+        return Response.json(share);
+      } catch (e) {
+        const msg = (e as Error).message;
+        const status = /too many active shares/.test(msg) ? 409 : /no agent matched|no stable/.test(msg) ? 404 : 500;
+        return new Response(msg, { status });
+      }
+    }
+
+    // GET /api/shares  → active scoped shares (for the manage/revoke UI).
+    if (req.method === "GET" && p === "/api/shares") {
+      const { listShares } = await import("./agentShare.ts");
+      return Response.json(listShares());
+    }
+
+    // DELETE /api/share/:shareId  → revoke (close the room).
+    const revokeM = /^\/api\/share\/([^/]+)$/.exec(p);
+    if (req.method === "DELETE" && revokeM) {
+      const { revokeShare } = await import("./agentShare.ts");
+      const ok = revokeShare(decodeURIComponent(revokeM[1]!));
+      return new Response(ok ? "revoked" : "no such share", { status: ok ? 200 : 404 });
+    }
+
     return new Response("Not Found", { status: 404 });
   };
 
@@ -2218,10 +2431,31 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // (the page holds no secrets); the page carries the token via the #k= link
   // and sends it on every /api call.
   const uiDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "lab", "ui");
+  // Defense-in-depth CSP for the console document served by --http (mirrors the
+  // one in lab/ui/cf/worker.ts — keep them in sync). The console renders remote
+  // host-supplied agent metadata, so we constrain where an injection could send
+  // data even though output is escaped. connect-src allows any wss: so custom
+  // signaling hosts still work; 'self' covers same-origin /api + EventSource.
+  const CONSOLE_CSP = [
+    "default-src 'self'",
+    "base-uri 'none'",
+    "object-src 'none'",
+    "frame-ancestors 'none'",
+    "form-action 'self'",
+    "img-src 'self' data:",
+    "font-src 'self' data:",
+    "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+    "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+    "connect-src 'self' https://s.agent-yes.com https://agent-yes.com wss:",
+    "worker-src 'self'",
+    "manifest-src 'self'",
+  ].join("; ");
   const serveUiFile = async (name: string, type: string): Promise<Response> => {
     try {
       const buf = await readFile(path.join(uiDir, name));
-      return new Response(buf, { headers: { "Content-Type": type } });
+      const headers: Record<string, string> = { "Content-Type": type };
+      if (type.includes("text/html")) headers["Content-Security-Policy"] = CONSOLE_CSP;
+      return new Response(buf, { headers });
     } catch {
       return new Response("UI assets not found in this install — use the /api endpoints", {
         status: 404,
@@ -2238,6 +2472,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return serveUiFile("console-logic.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/e2e.js")
       return serveUiFile("e2e.js", "text/javascript; charset=utf-8");
+    if (req.method === "GET" && p === "/qrcode.js")
+      return serveUiFile("qrcode.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/favicon.ico") return new Response(null, { status: 204 });
     return apiFetch(req);
   };
@@ -2270,6 +2506,24 @@ export async function cmdServe(rest: string[]): Promise<number> {
           continue;
         }
         if (inUse) {
+          // The port is wedged by something we can't evict — classically a dead
+          // serve whose spawned child agents inherited its listen-socket handle
+          // (on Windows the socket lacks non-inheritable/CLOEXEC semantics, so it
+          // survives the parent and keeps :port LISTENING under a defunct PID).
+          // Exiting here just feeds a pm2 restart loop that can never re-bind.
+          // When WebRTC is also requested, degrade to WebRTC-only instead: the
+          // console still reaches this machine peer-to-peer with no port, so the
+          // daemon stays useful and stops crash-looping. Only give up when
+          // there's no WebRTC transport to fall back to (pure --http).
+          if (wantWebrtc) {
+            process.stderr.write(
+              `ay serve: port ${port} is still in use after retries — continuing WebRTC-only ` +
+                `(HTTP API disabled). Free the port and restart to re-enable HTTP, ` +
+                `or pick another with --port N.\n`,
+            );
+            server = null;
+            break;
+          }
           process.stderr.write(
             `ay serve: port ${port} is still in use after retries — pick another with --port N,\n` +
               `or run a port-free WebRTC-only share with: ay serve --webrtc\n`,
@@ -2280,22 +2534,26 @@ export async function cmdServe(rest: string[]): Promise<number> {
       }
     }
 
-    const uiHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-    process.stdout.write(`ay serve  ${scheme}://${host}:${port}\n`);
-    process.stdout.write(`token:    ${token}\n\n`);
-    process.stdout.write(`web console (token in the # is eaten on open):\n`);
-    process.stdout.write(`  ${scheme}://${uiHost}:${port}/#k=${token}\n\n`);
-    process.stdout.write(`connect from another machine:\n`);
-    process.stdout.write(`  ay ls   ${token}@<host>:${port}\n`);
-    process.stdout.write(`  ay tail ${token}@<host>:${port}:<keyword>\n`);
-    process.stdout.write(`  ay send ${token}@<host>:${port}:<keyword> "message"\n\n`);
-    process.stdout.write(`save as alias:\n`);
-    process.stdout.write(`  ay remote add <alias> ${scheme}://${token}@<host>:${port}\n\n`);
-    if (!useHttps) {
-      process.stdout.write(
-        `for HTTPS: ay serve --tls-cert cert.pem --tls-key key.pem\n` +
-          `  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'\n\n`,
-      );
+    // server is null only when we degraded to WebRTC-only above (port wedged);
+    // skip the HTTP connection banner since nothing is listening on the port.
+    if (server) {
+      const uiHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
+      process.stdout.write(`ay serve  ${scheme}://${host}:${port}\n`);
+      process.stdout.write(`token:    ${token}\n\n`);
+      process.stdout.write(`web console (token in the # is eaten on open):\n`);
+      process.stdout.write(`  ${scheme}://${uiHost}:${port}/#k=${token}\n\n`);
+      process.stdout.write(`connect from another machine:\n`);
+      process.stdout.write(`  ay ls   ${token}@<host>:${port}\n`);
+      process.stdout.write(`  ay tail ${token}@<host>:${port}:<keyword>\n`);
+      process.stdout.write(`  ay send ${token}@<host>:${port}:<keyword> "message"\n\n`);
+      process.stdout.write(`save as alias:\n`);
+      process.stdout.write(`  ay remote add <alias> ${scheme}://${token}@<host>:${port}\n\n`);
+      if (!useHttps) {
+        process.stdout.write(
+          `for HTTPS: ay serve --tls-cert cert.pem --tls-key key.pem\n` +
+            `  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'\n\n`,
+        );
+      }
     }
   }
 
@@ -2388,6 +2646,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
   const shutdown = (resolve: () => void) => {
     if (heartbeat) clearInterval(heartbeat);
     closeShare?.();
+    // Close any scoped single-agent share rooms so viewers get an immediate drop.
+    void import("./agentShare.ts").then((m) => m.revokeAllShares()).catch(() => {});
     server?.stop();
     resolve();
   };

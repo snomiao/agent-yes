@@ -62,7 +62,7 @@ if (!arg) {
   process.exit(1);
 } else if (arg === "--new") {
   host = process.argv[3] ?? process.env.AY_SIGHOST ?? "s.agent-yes.com";
-  room = "r" + randomBytes(3).toString("hex"); // short, non-secret mnemonic
+  room = "r" + randomBytes(6).toString("hex"); // short, non-secret mnemonic
   token = `${MARKER}${randomBytes(32).toString("hex")}`; // e1.<64hex> encrypted-link secret
   const ui = host === "s.agent-yes.com" ? "https://agent-yes.com" : "http://localhost:7778";
   const suffix = host === "s.agent-yes.com" ? "" : "@" + host;
