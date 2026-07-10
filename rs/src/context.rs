@@ -90,6 +90,30 @@ fn decide_stall_action(
     }
 }
 
+/// Whether the wedge detector trips. Complements the spinner-based stall
+/// detector above: some frozen states repaint no `working` marker at all
+/// (observed 2026-07: claude wedged mid-"Compacting conversation…" at 0% CPU
+/// for days, its screen matching neither `ready` nor `working` nor a
+/// needs-input menu). If the screen shows no ready prompt (parked/done), no
+/// working spinner (the stall detector's territory), and no interactive menu
+/// (a legitimate indefinite wait for a human), then `wedge_timeout_secs` of
+/// total PTY silence means the CLI is wedged. 0 disables — the default,
+/// enabled per-CLI in default.config.yaml only where the ready markers are
+/// trustworthy enough to tell "parked at prompt" from "frozen".
+fn is_wedged(
+    wedge_timeout_secs: u64,
+    working: bool,
+    ready: bool,
+    needs_input: bool,
+    idle_secs: u64,
+) -> bool {
+    wedge_timeout_secs > 0
+        && !working
+        && !ready
+        && !needs_input
+        && idle_secs >= wedge_timeout_secs
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum PanicAction {
     /// Gesture incomplete: fewer than `threshold` presses in the window.
@@ -985,13 +1009,31 @@ impl AgentContext {
         let working = self.cli_config.working.iter().any(|p| p.is_match(&screen));
         let idle_secs = self.idle_waiter.idle_time_ms() / 1000;
         let esc_elapsed = self.stall_esc_sent_at.map(|t| t.elapsed().as_secs());
-        let action = decide_stall_action(
-            timeout,
-            working,
-            idle_secs,
-            esc_elapsed,
-            STALL_ESC_GRACE_SECS,
-        );
+        // Wedge detector (see is_wedged): a frozen state that repaints no
+        // `working` marker. The extra ready/needs-input screen scans only run
+        // once the cheap conditions (enabled, spinner absent, long silence)
+        // already hold — never on a routine 50ms heartbeat.
+        let wedge_timeout = self.cli_config.wedge_timeout_secs;
+        let wedged = wedge_timeout > 0 && !working && idle_secs >= wedge_timeout && {
+            let ready = self.cli_config.ready.iter().any(|p| p.is_match(&screen));
+            let needs_input = self
+                .cli_config
+                .needs_input
+                .iter()
+                .any(|p| p.is_match(&screen));
+            is_wedged(wedge_timeout, working, ready, needs_input, idle_secs)
+        };
+        let action = if wedged {
+            // Reuse the stall ladder: `working: true` here just means "tripped".
+            decide_stall_action(wedge_timeout, true, idle_secs, esc_elapsed, STALL_ESC_GRACE_SECS)
+        } else {
+            decide_stall_action(timeout, working, idle_secs, esc_elapsed, STALL_ESC_GRACE_SECS)
+        };
+        let cause = if wedged {
+            "no ready prompt, no spinner, no menu"
+        } else {
+            "working spinner frozen"
+        };
         // Any non-Clear action means the "working" spinner is frozen → feed the
         // unified stuck flag. The stuck/recovered webhook is now emitted centrally
         // by update_unresponsive() (this used to fire its own "STUCK" notify); the
@@ -1004,9 +1046,11 @@ impl AgentContext {
             }
             StallAction::SendEsc => {
                 warn!(
-                    "No-output watchdog: spinner up with no visible output for {}s (>= {}s) — \
+                    "No-output watchdog: {} with no visible output for {}s (>= {}s) — \
                      stream looks stalled, sending Esc to cancel",
-                    idle_secs, timeout
+                    cause,
+                    idle_secs,
+                    if wedged { wedge_timeout } else { timeout }
                 );
                 // Esc cancels claude's in-flight request; harmless to other CLIs.
                 // Use send_esc (NOT send_text) so we don't ping the idle timer —
@@ -1018,9 +1062,9 @@ impl AgentContext {
             StallAction::Wait => {}
             StallAction::ForceRestart => {
                 warn!(
-                    "No-output watchdog: Esc did not recover the stream after {}s — forcing \
-                     restart (a --robust run resumes with --continue)",
-                    STALL_ESC_GRACE_SECS
+                    "No-output watchdog ({}): Esc did not recover the stream after {}s — \
+                     forcing restart (a --robust run resumes with --continue)",
+                    cause, STALL_ESC_GRACE_SECS
                 );
                 self.stall_force_restart = true;
             }
@@ -1467,6 +1511,23 @@ fn find_char_boundary(s: &str, at: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_is_wedged_trips_only_in_the_no_marker_state() {
+        // The real wedge: no ready, no spinner, no menu, long silence.
+        assert!(is_wedged(1800, false, false, false, 1800));
+        assert!(is_wedged(1800, false, false, false, 9999));
+        // Not yet silent long enough.
+        assert!(!is_wedged(1800, false, false, false, 1799));
+        // Disabled (the default for CLIs without trustworthy ready markers).
+        assert!(!is_wedged(0, false, false, false, 99999));
+        // Working spinner on screen — the stall detector's territory.
+        assert!(!is_wedged(1800, true, false, false, 9999));
+        // Parked at a ready prompt (idle/done) — a legitimate forever-wait.
+        assert!(!is_wedged(1800, false, true, false, 9999));
+        // Blocked on an interactive menu — waiting for a human, not wedged.
+        assert!(!is_wedged(1800, false, false, true, 9999));
+    }
 
     #[test]
     fn test_retry_backoff_secs_doubles_then_caps() {

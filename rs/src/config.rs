@@ -78,6 +78,19 @@ pub struct CliConfig {
     /// `await` never resolved). On trip: send Esc to cancel; if still stalled,
     /// exit non-zero so a `--robust` run restarts with `--continue`. 0 disables.
     pub stall_timeout_secs: u64,
+    /// Wedge watchdog timeout (seconds). Complements `stall_timeout_secs`:
+    /// some frozen states repaint no `working` marker at all (observed: claude
+    /// wedged mid-"Compacting conversation…" at 0% CPU for days, its screen
+    /// matching neither `ready` nor `working` nor `needs_input`). When the
+    /// screen shows none of those and the PTY has been silent this long, the
+    /// CLI is treated as wedged and recovered via the same Esc → force-restart
+    /// ladder. 0 disables — the default, enabled per-CLI in
+    /// default.config.yaml only where the ready markers are trustworthy.
+    pub wedge_timeout_secs: u64,
+    /// Needs-input menu patterns: the agent is parked on an interactive
+    /// selection (AskUserQuestion / permission prompt) — a legitimate
+    /// indefinite wait for a human, exempt from the wedge watchdog.
+    pub needs_input: Vec<Regex>,
     /// Liveness window in ms: if we send stdin and the agent produces no PTY
     /// output within this window, mark it `unresponsive`. 0 = disabled.
     pub unresponsive_timeout_ms: u64,
@@ -176,6 +189,8 @@ fn build_cli_config(raw: CliConfigOverride) -> Result<CliConfig> {
         yes_args: raw.yes_args.unwrap_or_default(),
         no_eol: raw.no_eol.unwrap_or(false),
         stall_timeout_secs: raw.stall_timeout_secs.unwrap_or(DEFAULT_STALL_TIMEOUT_SECS),
+        wedge_timeout_secs: raw.wedge_timeout_secs.unwrap_or(0),
+        needs_input: compile_regex_list(raw.needs_input)?,
         unresponsive_timeout_ms: raw.unresponsive_timeout_ms.unwrap_or(0),
     })
 }
@@ -295,6 +310,11 @@ mod tests {
             .any(|rx| rx.is_match("Press Enter to continue")));
         assert!(!config.working.is_empty());
         assert!(config.working[0].is_match("esc to interrupt"));
+        // Wedge watchdog is armed for claude (its ready markers are
+        // trustworthy) and needsInput exempts menu-parked sessions.
+        assert_eq!(config.wedge_timeout_secs, 1800);
+        assert!(!config.needs_input.is_empty());
+        assert!(config.needs_input[0].is_match("❯ 1. Yes, apply this fix"));
         assert!(!config.fatal.is_empty());
         assert!(config.fatal[0].is_match("error: unknown option '--foo'"));
         // Usage-limit / overload are now auto-retried (typed "retry"), not fatal.
