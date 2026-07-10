@@ -1759,13 +1759,32 @@ export async function cmdServe(rest: string[]): Promise<number> {
             // 300 ms full-file poll was the dominant typing-echo latency.
             const fh = await open(logPath, "r").catch(() => null);
             let reading = false;
-            const flush = async () => {
+            const flush = async (viaPoll = false) => {
               if (closed || reading || !fh) return;
               reading = true;
               try {
                 const { size } = await fh.stat();
                 if (size < offset) offset = size; // truncated/rotated
                 if (size > offset) {
+                  // The safety-net poll found appended bytes the watcher never
+                  // announced — the watcher is dead (a long-lived daemon can
+                  // reach a state where fs.watch callbacks stop firing
+                  // process-wide; observed alongside the node-datachannel
+                  // native-stack pathologies). Demote this stream to the fast
+                  // poll it would have used had watch() failed outright, or
+                  // every keystroke echo rides the slow poll (~500ms felt lag).
+                  // The 450ms grace absorbs the benign race where the poll tick
+                  // beats a healthy watcher to the same append by a few ms.
+                  if (viaPoll && watcher && Date.now() - lastWatcherFireAt > POLL_WATCHED - 50) {
+                    try {
+                      watcher.close();
+                    } catch {
+                      /* already dead */
+                    }
+                    watcher = null;
+                    clearInterval(poller);
+                    poller = setInterval(() => void flush(true), POLL_UNWATCHED);
+                  }
                   const len = size - offset;
                   const buf = Buffer.allocUnsafe(len);
                   const { bytesRead } = await fh.read(buf, 0, len, offset);
@@ -1788,9 +1807,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
               }
             };
 
+            let lastWatcherFireAt = Date.now(); // grace at open — see demotion above
             let watcher: ReturnType<typeof watch> | null = null;
             try {
-              watcher = watch(logPath, () => void flush());
+              watcher = watch(logPath, () => {
+                lastWatcherFireAt = Date.now();
+                void flush();
+              });
             } catch {
               /* fs.watch unsupported — the fallback poll below still works */
             }
@@ -1799,7 +1822,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
             // → keep it at 60ms for low typing-echo latency. This matters when many
             // /api/tail streams are open at once (the /rgui viewer opens one per
             // node): N × a 60ms poll each was needless load on the event loop.
-            const poller = setInterval(() => void flush(), watcher ? 500 : 60);
+            // (If the watcher turns out to be dead, flush() demotes to 60ms.)
+            const POLL_WATCHED = 500;
+            const POLL_UNWATCHED = 60;
+            let poller = setInterval(
+              () => void flush(true),
+              watcher ? POLL_WATCHED : POLL_UNWATCHED,
+            );
 
             // Tear down on client disconnect via BOTH the req.signal 'abort'
             // listener and the stream's cancel() — whichever the runtime fires
