@@ -1519,7 +1519,8 @@ function initEmbed(pid: string) {
   const fit = () => {
     const el = inner.querySelector(".xterm") as HTMLElement | null;
     if (!el || !el.offsetWidth || !el.offsetHeight) return;
-    const s = Math.min(1, innerWidth / el.offsetWidth, innerHeight / el.offsetHeight);
+    // wrap, not window: the prompt bar (below) carves its height off the wrap
+    const s = Math.min(1, wrap.clientWidth / el.offsetWidth, wrap.clientHeight / el.offsetHeight);
     inner.style.transform = `scale(${s})`;
   };
   addEventListener("resize", fit);
@@ -1530,6 +1531,40 @@ function initEmbed(pid: string) {
     .catch(() => {})
     .finally(() => requestAnimationFrame(fit));
   subscribeRaw(`/api/tail/${encodeURIComponent(pid)}?raw=1`, (d) => term.write(d as string));
+
+  // Prompt bar: the WRITE half of the embed. The #k= token that authorizes the
+  // tail stream authorizes /api/send just the same, so an embed holder can talk
+  // to the agent — this is federation's spec'd mutation path ("writes go
+  // through the publisher's own API with its own auth", rgui docs/federation.md).
+  // Append &ro to the embed URL for a strictly read-only view.
+  if (hashParts.includes("ro")) return;
+  const BAR_H = 36;
+  wrap.style.bottom = `${BAR_H}px`;
+  const bar = document.createElement("form");
+  bar.className = "ay-embed-wrap"; // survives the chrome-hiding CSS above
+  bar.style.cssText =
+    `position:fixed;left:0;right:0;bottom:0;height:${BAR_H}px;z-index:100;display:flex;gap:6px;` +
+    "align-items:center;padding:0 8px;background:#161b22;border-top:1px solid #30363d";
+  const input = document.createElement("input");
+  input.placeholder = `send to #${pid} — Enter ↵`;
+  input.style.cssText =
+    "flex:1;height:24px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;" +
+    "border-radius:5px;padding:0 8px;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;outline:none";
+  const state = document.createElement("span");
+  state.style.cssText = "font:11px ui-monospace,monospace;color:#8b949e;min-width:16px";
+  bar.append(input, state);
+  document.body.appendChild(bar);
+  bar.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const msg = input.value.trim();
+    if (!msg) return;
+    state.textContent = "…";
+    const r = await apiPost("/api/send", { keyword: pid, msg, code: "enter" });
+    state.textContent = r.ok ? "✓" : "✗";
+    state.title = r.ok ? "" : r.text;
+    if (r.ok) input.value = "";
+    setTimeout(() => (state.textContent = ""), 1500);
+  });
 }
 
 if (embedMode) {
@@ -1538,6 +1573,10 @@ if (embedMode) {
   refresh();
   setInterval(refresh, 3000);
 }
+// The whole page is configured from the hash (room / feeds / embed target / k=),
+// all read once at boot — a hash-only navigation (e.g. an iframe consumer
+// swapping #node=) must re-boot, not silently keep the old wiring.
+addEventListener("hashchange", () => location.reload());
 
 // QA (#qa): auto-zoom into a leaf so terminals spawn (the size probe in makeTerm
 // then logs each overlay's px), and run a slow zoom sweep logging how many times
