@@ -1654,6 +1654,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
         // fallback). Carries the serve token: the feed itself is gated by the
         // same token, so its consumers hold it already.
         const embedBase = `${url.protocol}//${url.host}`;
+        // node size mirrors the agent's REAL PTY aspect so a consumer that
+        // derives height from width (otoji chain slots) shows the embed with no
+        // letterboxing. Terminal cells are ~1:2 (w:h), so px aspect = cols/(2*rows).
+        const NODE_W = 520;
+        const sizeOf = async (pid: number) => {
+          const s = await readPtysize(pid).catch(() => null);
+          const aspect = s?.cols && s?.rows ? s.cols / (2 * s.rows) : 2;
+          return { w: NODE_W, h: Math.round(Math.min(NODE_W * 2, Math.max(96, NODE_W / aspect))) };
+        };
         const hintsOf = async (r: (typeof records)[number]) => {
           const embed = {
             url: `${embedBase}/r/#node=${r.pid}&embed&k=${encodeURIComponent(token)}`,
@@ -1673,8 +1682,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
             owner: `agent-yes:${origin}`,
             status: r.status,
             parent: r.parent_pid && byWrapper.has(r.parent_pid) ? nid(byWrapper.get(r.parent_pid)!) : undefined,
-            pos: { x: (i % 8) * 320, y: Math.floor(i / 8) * 200 },
-            size: { w: 256, h: 128 },
+            pos: { x: (i % 8) * (NODE_W + 64), y: Math.floor(i / 8) * 480 },
+            size: await sizeOf(r.pid),
             inputs: [textIn],
             outputs: [textOut],
             renderHints: await hintsOf(r),
@@ -1692,8 +1701,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
           owner: `agent-yes:${origin}`,
           status: codex?.status ?? "offline",
           parent: undefined,
-          pos: { x: 0, y: -240 },
-          size: { w: 256, h: 128 },
+          pos: { x: 0, y: -560 },
+          size: codex ? await sizeOf(codex.pid) : { w: NODE_W, h: 260 },
           inputs: [textIn],
           outputs: [textOut],
           renderHints: codex ? await hintsOf(codex) : undefined,
