@@ -3271,7 +3271,17 @@
         // DELETE over the transport of the exact MACHINE that minted the share.
         // Keying by source id, not room, matters for a codehost room with several
         // machines — routing by room would revoke against the wrong host.
-        const tx = sources.get(currentShare.srcId)?.tx || localTx;
+        const src = sources.get(currentShare.srcId);
+        // Only fall back to localTx for a LOCAL share. If a remote machine's source
+        // has dropped (room/peer gone while the modal sat open), sending the DELETE
+        // to localhost would 404 yet still close the modal — the operator would
+        // think the share was killed while it stays live on the (now unreachable)
+        // host. Say so and keep the modal open instead.
+        const tx = src?.tx || (currentShare.srcId === LOCAL ? localTx : null);
+        if (!tx) {
+          alert("Can't revoke: the machine that owns this share is no longer connected.");
+          return;
+        }
         try {
           await tx.del("/api/share/" + encodeURIComponent(currentShare.shareId));
         } catch {}
