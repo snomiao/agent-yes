@@ -50,6 +50,9 @@ interface AgentRecord {
   title?: string | null;
   git?: { branch: string | null; dirty?: boolean } | null;
   badges?: string[];
+  // stamped client-side on merge (console parity — see lab/ui/index.html):
+  _src: string; // owning wire id ("local" | room name) — routes every per-agent op
+  _key: string; // `<src>#<pid>` — node id AND the console's ay.sel format
 }
 
 // ── host environment (otoji environment-node adoption) ───────────────────────
@@ -68,27 +71,30 @@ interface HostInfo {
   uptime: number;
   caps?: Record<string, boolean>;
 }
-const ENV_HOST_ID = "env:host";
-let hostInfo: HostInfo | null = null;
+// One env node per SOURCE (machine): id "env:<src>" — with several /w/-connected
+// rooms merged into one forest, each machine gets its own ⬢ node.
+const envIdOf = (src: string) => `env:${src}`;
 // host-env → top-level-root wires, rebuilt by buildGraph, drawn by applyEdges
 const envEdges: Edge[] = [];
-function hostEnvFields(): [string, string][] {
-  const h = hostInfo;
+function hostEnvFields(src: string): [string, string][] {
+  const h = wires.get(src)?.hostInfo;
   if (!h) return [];
-  const recs = [...recordsByPid.values()];
+  const recs = [...recordsByKey.values()].filter((r) => r._src === src);
   const live = recs.filter((r) => r.status !== "exited");
   const stuck = live.filter((r) => r.status === "stuck").length;
   const load1 = h.loadavg?.[0] ?? 0;
   const hot = load1 > h.cpus; // 1-min load above core count = saturated host
-  const usedPct = h.mem.total ? Math.round(((h.mem.total - h.mem.free) / h.mem.total) * 100) : 0;
-  const fields: [string, string][] = [
-    ["scope", "native-device"],
-    ["os", `${h.platform}/${h.arch} · ${h.cpus} cpus`],
-  ];
+  const fields: [string, string][] = [["scope", "native-device"]];
+  // rows below degrade gracefully for a whoami-only fallback (older daemon
+  // without /api/host — identity known, health/caps unknown)
+  if (h.platform) fields.push(["os", `${h.platform}/${h.arch} · ${h.cpus} cpus`]);
   // Windows reports loadavg [0,0,0] — skip the row rather than show a lie
   if (h.loadavg?.some((n) => n > 0))
     fields.push([hot ? "⚠ load" : "load", h.loadavg.map((n) => n.toFixed(1)).join(" ")]);
-  fields.push(["mem", `${usedPct}% of ${(h.mem.total / 2 ** 30).toFixed(0)}G`]);
+  if (h.mem?.total) {
+    const usedPct = Math.round(((h.mem.total - h.mem.free) / h.mem.total) * 100);
+    fields.push(["mem", `${usedPct}% of ${(h.mem.total / 2 ** 30).toFixed(0)}G`]);
+  }
   fields.push(["agents", `${live.length} live${stuck ? ` · ⚠ ${stuck} stuck` : ""}`]);
   if (h.caps) {
     const on = Object.entries(h.caps).filter(([, v]) => v).map(([k]) => k);
@@ -97,24 +103,26 @@ function hostEnvFields(): [string, string][] {
   return fields;
 }
 
-// ── data source: room · HTTP · sample ────────────────────────────────────────
-// The viewer reads from ONE of three wires, in priority order:
-//   1. a WebRTC room — when the URL hash is a share link (#room:token[@host] or
-//      webrtc://…): every /api/* call tunnels over the SAME DataChannel the
-//      console uses (rtc.js + e2e.js). This makes /r/#room:token@s.agent-yes.com
-//      show the host's REAL live agents.
-//   2. same-origin HTTP — the localhost `dev:rgui` / `ay serve` path (no room).
-//   3. the baked sample forest — when neither is reachable (static preview).
-// roomInfo is fixed at load from the hash. When a room IS configured we never
-// fall back to HTTP or the sample — you opened a share link, so we show that
-// room or its connection state.
-// "ay.rooms" is the console's saved-room credential cache (same origin, same
-// shape — see saveRoom in lab/ui/index.html). Sharing it makes /r/ ⇄ /w/
-// switching token-less: a share link opened on EITHER page caches the secret,
-// and after that a bare #<room> (or #<room>:<pid> deep link) reconnects on
-// both. Mirrors /w/'s SECURITY behavior: the token is eaten from the URL on
-// open so it never lingers in history/omnibox — only the room mnemonic stays.
+// ── data sources: EVERY room /w/ knows + local HTTP, merged ──────────────────
+// /r/ and /w/ are two UIs over the SAME fleet. The console keeps a credential
+// cache of every room it has connected ("ay.rooms", shared same-origin) — /r/
+// connects to ALL of them in parallel (plus a hash share-link room, plus the
+// same-origin HTTP daemon when reachable) and merges the records into ONE
+// forest. Identity follows the console exactly: a record's key is
+// `<src>#<pid>` where src is "local" or the room name — the SAME format the
+// console persists in localStorage["ay.sel"], so selection round-trips
+// verbatim across the /w/ ⇄ /r/ switch.
+// The baked sample forest shows only when there is nothing to connect to at
+// all (static preview, no cached rooms). A hash share link still eats its
+// token from the URL on open (only the room mnemonic stays — /w/ parity).
 const ROOMS_KEY = "ay.rooms";
+function loadRooms(): Record<string, { token: string; host?: string; ts?: number }> {
+  try {
+    return JSON.parse(localStorage.getItem(ROOMS_KEY) || "{}");
+  } catch {
+    return {};
+  }
+}
 function cachedRoom(name: string): { token: string; host: string } | null {
   try {
     const r = JSON.parse(localStorage.getItem(ROOMS_KEY) || "{}")[name];
@@ -162,7 +170,21 @@ const roomInfo = resolveRoom(location.hash);
 // (Read AFTER resolveRoom: a share-link hash never carries k=/node= parts, and
 // resolveRoom's token-eating rewrite doesn't touch these forms.)
 const hashParts = location.hash.slice(1).split("&");
-const httpToken = hashParts.find((s) => s.startsWith("k="))?.slice(2) ?? null;
+// #k= is cached to localStorage["ay.localToken"] — the console's own local-token
+// cache — so the selection hash may replace #k= in the URL without losing auth
+// (and a /w/-authorized browser authorizes /r/ for free, and vice versa).
+const httpToken = (() => {
+  const t = hashParts.find((s) => s.startsWith("k="))?.slice(2) ?? null;
+  try {
+    if (t) {
+      localStorage.setItem("ay.localToken", decodeURIComponent(t));
+      return decodeURIComponent(t);
+    }
+    return localStorage.getItem("ay.localToken");
+  } catch {
+    return t;
+  }
+})();
 // canonical form #node=<pid>&embed; #embed=<pid> accepted as an alias
 const embedPid =
   hashParts.find((s) => s.startsWith("node="))?.slice(5) ??
@@ -171,17 +193,33 @@ const embedPid =
 const embedMode = !!embedPid && hashParts.some((s) => s === "embed" || s.startsWith("embed="));
 const withTok = (path: string) =>
   httpToken ? `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(httpToken)}` : path;
-let room: InstanceType<typeof RTCClient> | null = null; // connected client (or null)
-let roomConnected = false;
-const usingRoom = () => !!roomInfo;
-const roomReady = () => !!(room && roomConnected);
 
-// GET a JSON body over the active wire (throws on any failure).
-async function apiJSON<T>(path: string): Promise<T> {
-  if (usingRoom()) {
-    if (!roomReady()) throw new Error("room not connected");
-    return JSON.parse((await room!.req("GET", path)).text) as T;
-  }
+// ── wires: one transport per source, console-compatible ids ─────────────────
+// "local" (same-origin HTTP) + one RTC client per known room. Mirrors the
+// console's `sources` map so a record key `<src>#<pid>` means the same thing
+// on both pages.
+const LOCAL = "local";
+interface Wire {
+  id: string; // "local" | room name (== the console's source id for rtc rooms)
+  kind: "http" | "rtc";
+  sigHost: string; // rtc signaling host
+  token: string;
+  client: InstanceType<typeof RTCClient> | null;
+  connected: boolean; // rtc: channel up · http: last /api/ls succeeded
+  hostInfo: HostInfo | null; // per-machine GET /api/host (env node data)
+}
+const wires = new Map<string, Wire>();
+const usingRoom = () => !!roomInfo; // a hash share link pins expectations to that room
+const srcOf = (key: string) => key.slice(0, key.indexOf("#"));
+const pidOf = (key: string) => key.slice(key.indexOf("#") + 1);
+const wireReady = (w: Wire | undefined): w is Wire =>
+  !!w && (w.kind === "http" || (!!w.client && w.connected));
+
+// GET a JSON body over one wire (throws on any failure).
+async function apiJSON<T>(path: string, src: string = LOCAL): Promise<T> {
+  const w = wires.get(src);
+  if (!wireReady(w)) throw new Error(`wire not connected: ${src}`);
+  if (w.kind === "rtc") return JSON.parse((await w.client!.req("GET", path)).text) as T;
   const res = await fetch(withTok(path), { headers: { accept: "application/json" } });
   if (!res.ok) throw new Error(String(res.status));
   const ct = res.headers.get("content-type") ?? "";
@@ -189,11 +227,16 @@ async function apiJSON<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
-// POST a JSON body over the active wire (never throws; returns {ok,text}).
-async function apiPost(path: string, body: unknown): Promise<{ ok: boolean; text: string }> {
-  if (usingRoom()) {
-    if (!roomReady()) return { ok: false, text: "room not connected" };
-    const r = await room!.req("POST", path, JSON.stringify(body));
+// POST a JSON body over one wire (never throws; returns {ok,text}).
+async function apiPost(
+  path: string,
+  body: unknown,
+  src: string = LOCAL,
+): Promise<{ ok: boolean; text: string }> {
+  const w = wires.get(src);
+  if (!wireReady(w)) return { ok: false, text: `wire not connected: ${src}` };
+  if (w.kind === "rtc") {
+    const r = await w.client!.req("POST", path, JSON.stringify(body));
     return { ok: r.status >= 200 && r.status < 300, text: r.text };
   }
   const r = await fetch(withTok(path), {
@@ -204,20 +247,21 @@ async function apiPost(path: string, body: unknown): Promise<{ ok: boolean; text
   return { ok: r.ok, text: await r.text() };
 }
 
-// Subscribe to an SSE-style stream over the active wire. onData receives each
-// parsed `data:` value (the raw terminal chunk) — identical to what an
+// Subscribe to an SSE-style stream over one wire. onData receives each parsed
+// `data:` value (the raw terminal chunk) — identical to what an
 // EventSource.onmessage handler gets after JSON.parse(ev.data). Returns a handle
 // with .close() (drop-in for the EventSource the terminals used to hold).
 interface Sub {
   close(): void;
 }
-function subscribeRaw(path: string, onData: (v: unknown) => void): Sub {
-  if (usingRoom()) {
-    if (!roomReady()) return { close() {} };
+function subscribeRaw(path: string, onData: (v: unknown) => void, src: string = LOCAL): Sub {
+  const w = wires.get(src);
+  if (!wireReady(w)) return { close() {} };
+  if (w.kind === "rtc") {
     // room.subscribe yields raw DataChannel bytes — reassemble the SSE `data:`
     // frames exactly the way the console's rtcTx does.
     let buf = "";
-    const unsub = room!.subscribe(path, (raw: string) => {
+    const unsub = w.client!.subscribe(path, (raw: string) => {
       buf += raw;
       let i: number;
       while ((i = buf.indexOf("\n\n")) >= 0) {
@@ -352,12 +396,13 @@ function nodeOf(r: AgentRecord): GraphNode {
     ["status", r.status],
     ["cwd", shortCwd(r.cwd)],
   ];
+  if (r._src !== LOCAL) fields.push(["room", r._src]); // which machine (multi-source fleet)
   if (branch) fields.push(["branch", (r.git?.dirty ? "±" : "") + branch]);
   if (r.last_active_at) fields.push(["active", ago(r.last_active_at) + " ago"]);
   if (r.question) fields.push(["waiting", r.question.slice(0, 48)]);
   else if (prompt) fields.push(["prompt", prompt.slice(0, 56) + (prompt.length > 56 ? "…" : "")]);
   return {
-    id: String(r.pid),
+    id: r._key,
     title: nodeTitle(r),
     category: CATEGORY[r.status] ?? r.status,
     x: 0,
@@ -376,12 +421,13 @@ function nodeOf(r: AgentRecord): GraphNode {
  * into bands so a wide forest stays scannable.
  */
 function buildGraph(records: AgentRecord[]): Graph {
-  const byPid = new Map<number, AgentRecord>();
-  for (const r of records) byPid.set(r.pid, r);
+  const byKey = new Map<string, AgentRecord>();
+  for (const r of records) byKey.set(r._key, r);
   // wrapper_pid → the agent it belongs to, so a child's parent_pid resolves to a
-  // node id (the parent agent's own pid).
-  const ownerOfWrapper = new Map<number, number>();
-  for (const r of records) if (r.wrapper_pid != null) ownerOfWrapper.set(r.wrapper_pid, r.pid);
+  // node id. Scoped per SOURCE — pids from different machines can collide.
+  const ownerOfWrapper = new Map<string, string>();
+  for (const r of records)
+    if (r.wrapper_pid != null) ownerOfWrapper.set(`${r._src}:${r.wrapper_pid}`, r._key);
 
   const nodes = new Map<string, GraphNode>();
   const children = new Map<string, string[]>();
@@ -397,37 +443,41 @@ function buildGraph(records: AgentRecord[]): Graph {
   // future wire). cwd is the primary "workspace" unit; spawn is secondary.
   const cwdRoots: string[] = [];
   for (const r of records) {
-    const id = String(r.pid);
-    const parentPid = r.parent_pid != null ? ownerOfWrapper.get(r.parent_pid) : undefined;
+    const id = r._key;
+    const parentKey =
+      r.parent_pid != null ? ownerOfWrapper.get(`${r._src}:${r.parent_pid}`) : undefined;
     const parentSameCwd =
-      parentPid != null &&
-      parentPid !== r.pid &&
-      nodes.has(String(parentPid)) &&
-      byPid.get(parentPid)!.cwd === r.cwd;
+      parentKey != null &&
+      parentKey !== r._key &&
+      nodes.has(parentKey) &&
+      byKey.get(parentKey)!.cwd === r.cwd;
     if (parentSameCwd) {
-      nodes.get(id)!.parent = String(parentPid);
-      children.get(String(parentPid))!.push(id);
+      nodes.get(id)!.parent = parentKey;
+      children.get(parentKey)!.push(id);
     } else {
       cwdRoots.push(id);
     }
   }
 
-  // Snap agents together by cwd, then by repo. Agents in the SAME cwd cluster into
-  // a same-cwd container that surfaces their SHARED state (the loudest member —
-  // needs_input > stuck > active > idle); same-repo cwds then cluster into the
-  // repo container. A cwd/repo with a single member stays loose.
+  // Snap agents together by cwd, then by repo — scoped per source (the same
+  // path on two machines is two different worktrees). Agents in the SAME cwd
+  // cluster into a same-cwd container that surfaces their SHARED state (the
+  // loudest member — needs_input > stuck > active > idle); same-repo cwds then
+  // cluster into the repo container. A cwd/repo with a single member stays loose.
   cwdGroups.clear();
   const byRepo = new Map<string, string[]>();
   for (const id of cwdRoots) {
-    const key = repoOf(byPid.get(Number(id))!.cwd).key;
+    const r = byKey.get(id)!;
+    const key = `${r._src}:${repoOf(r.cwd).key}`;
     (byRepo.get(key) ?? byRepo.set(key, []).get(key)!).push(id);
   }
   const topLevel: string[] = [];
-  for (const [repoKey, repoIds] of byRepo) {
+  for (const [srcRepoKey, repoIds] of byRepo) {
+    const repoKey = srcRepoKey.slice(srcRepoKey.indexOf(":") + 1);
     // sub-group this repo's agents by EXACT cwd (same worktree)
     const byCwd = new Map<string, string[]>();
     for (const id of repoIds) {
-      const cwd = byPid.get(Number(id))!.cwd;
+      const cwd = byKey.get(id)!.cwd;
       (byCwd.get(cwd) ?? byCwd.set(cwd, []).get(cwd)!).push(id);
     }
     const repoChildren: string[] = [];
@@ -437,7 +487,7 @@ function buildGraph(records: AgentRecord[]): Graph {
         continue;
       }
       const st = aggStateOf(cids);
-      const cwdId = `cwd:${cwd}`;
+      const cwdId = `cwd:${srcRepoKey.slice(0, srcRepoKey.indexOf(":"))}:${cwd}`;
       cwdGroups.set(cwdId, cids);
       nodes.set(cwdId, {
         id: cwdId,
@@ -460,10 +510,10 @@ function buildGraph(records: AgentRecord[]): Graph {
       topLevel.push(...repoChildren);
       continue;
     }
-    const repoId = `repo:${repoKey}`;
+    const repoId = `repo:${srcRepoKey}`;
     nodes.set(repoId, {
       id: repoId,
-      title: repoOf(byPid.get(Number(repoIds[0]))!.cwd).label,
+      title: repoOf(byKey.get(repoIds[0]!)!.cwd).label,
       category: "repo",
       x: 0,
       y: 0,
@@ -516,34 +566,49 @@ function buildGraph(records: AgentRecord[]): Graph {
     return { w: node.w, h: node.h };
   }
 
-  // The host environment node (otoji environment-node adoption): the machine
-  // every top-level group runs on — identity, live load/mem, capability flags
-  // (see hostEnvFields). Absent until /api/host answers (old daemon: never).
+  // Host environment nodes (otoji environment-node adoption): one ⬢ node per
+  // SOURCE whose /api/host answered — identity, live load/mem, capability
+  // flags (see hostEnvFields) — wired env→ into that source's own top-level
+  // roots only (a room's agents belong to the room's machine, not the local
+  // one). Absent for wires whose daemon predates /api/host.
   envEdges.length = 0;
-  if (hostInfo) {
-    nodes.set(ENV_HOST_ID, {
-      id: ENV_HOST_ID,
-      title: `⬢ ${hostInfo.host}`,
+  const srcOfRoot = (id: string): string => {
+    if (id.startsWith("cwd:") || id.startsWith("repo:")) {
+      const rest = id.slice(id.indexOf(":") + 1);
+      return rest.slice(0, rest.indexOf(":"));
+    }
+    return byKey.get(id)?._src ?? LOCAL;
+  };
+  const envNodes: string[] = [];
+  for (const w of wires.values()) {
+    if (!w.hostInfo) continue;
+    const envId = envIdOf(w.id);
+    nodes.set(envId, {
+      id: envId,
+      title: `⬢ ${w.hostInfo.host}${w.kind === "rtc" ? ` · ${w.id}` : ""}`,
       category: "environment",
       x: 0,
       y: 0,
       w: CARD_W,
       inputs: [],
       outputs: [{ id: "env", label: "env", kind: "environment" }],
-      fields: hostEnvFields(),
+      fields: hostEnvFields(w.id),
     });
-    children.set(ENV_HOST_ID, []);
-    // host env → each top-level root (repo/cwd containers + loose agents);
-    // members nested inside a container inherit its environment visually
-    for (const id of topLevel)
+    children.set(envId, []);
+    // this host's env → each of ITS top-level roots (repo/cwd containers +
+    // loose agents); members nested inside a container inherit it visually
+    for (const id of topLevel) {
+      if (srcOfRoot(id) !== w.id) continue;
       envEdges.push({
-        from: { node: ENV_HOST_ID, port: "env" },
+        from: { node: envId, port: "env" },
         to: { node: id, port: "env" },
         dashed: true,
         style: { color: "#805ad5", width: 1.5, dash: [3, 5] },
       });
-    topLevel.unshift(ENV_HOST_ID);
+    }
+    envNodes.push(envId);
   }
+  topLevel.unshift(...envNodes);
 
   // tile the top-level nodes (repo containers + loose agents) into bands
   let x = 0;
@@ -629,6 +694,8 @@ function sampleRecords(): AgentRecord[] {
     started_at: now - 600_000,
     last_active_at: now - (extra.last_active_at ?? 30_000),
     git: { branch },
+    _src: LOCAL,
+    _key: `${LOCAL}#${pid}`,
     ...extra,
   });
   return [
@@ -651,12 +718,14 @@ function sampleRecords(): AgentRecord[] {
 // the panel over the node (scale:"fit"), so zoomed in you see the live terminal,
 // zoomed out the summary card. Virtualized + capped so we never run 40 terminals.
 let isContainer = new Set<string>();
-const recordsByPid = new Map<string, AgentRecord>();
+const recordsByKey = new Map<string, AgentRecord>();
 
 // relationship wires: recent agent→agent read/tail edges (from /api/edges).
+// Fetched per wire; by/target are node KEYS (`<src>#<pid>`) after mapping —
+// a read edge never crosses sources (the daemon only sees its own agents).
 interface ReadEdge {
-  by: number;
-  target: number;
+  by: string;
+  target: string;
   at: number;
 }
 let readEdges: ReadEdge[] = [];
@@ -667,7 +736,7 @@ let showWires = true;
 const cwdGroups = new Map<string, string[]>();
 const STATE_RANK: AgentStatus[] = ["needs_input", "stuck", "active", "idle", "exited"];
 function aggStateOf(pids: string[]): AgentStatus {
-  const s = new Set(pids.map((p) => recordsByPid.get(p)?.status).filter(Boolean));
+  const s = new Set(pids.map((p) => recordsByKey.get(p)?.status).filter(Boolean));
   return STATE_RANK.find((x) => s.has(x)) ?? "idle";
 }
 
@@ -675,7 +744,7 @@ function aggStateOf(pids: string[]): AgentStatus {
 // worktree share its branch, git index and bun-link targets — a real hazard
 // (they silently commit onto each other's branch), so it gets a ⚠ row.
 function cwdFields(pids: string[]): [string, string][] {
-  const live = pids.filter((p) => recordsByPid.get(p)?.status !== "exited").length;
+  const live = pids.filter((p) => recordsByKey.get(p)?.status !== "exited").length;
   const fields: [string, string][] = [
     ["agents", String(pids.length)],
     ["shared", aggStateOf(pids)],
@@ -744,13 +813,17 @@ let deferredWhileMoving = 0; // QA metric (see #qa): stream bytes deferred mid-g
 // (a bare writeToIpc — no trailing Enter). A promise chain keeps byte order;
 // per-keystroke POSTs are fine on both wires (HTTP and the room DataChannel).
 // Read-only shares deny host-side (403) — surface it once, don't spam.
-function attachStdin(term: Xterm, pid: string, onDenied: () => void) {
+function attachStdin(term: Xterm, key: string, onDenied: () => void) {
   let chain = Promise.resolve();
   let denied = false;
   term.onData((data) => {
     if (term.options.disableStdin) return;
     chain = chain.then(async () => {
-      const r = await apiPost("/api/send", { keyword: pid, msg: data, code: "none" });
+      const r = await apiPost(
+        "/api/send",
+        { keyword: pidOf(key), msg: data, code: "none" },
+        srcOf(key),
+      );
       if (!r.ok && !denied) {
         denied = true;
         onDenied();
@@ -760,7 +833,11 @@ function attachStdin(term: Xterm, pid: string, onDenied: () => void) {
 }
 
 function makeTerm(pid: string): TermEntry | null {
-  const r = recordsByPid.get(pid);
+  // `pid` here is the node KEY (`<src>#<pid>`) — kept as the param name the rest
+  // of the terminal machinery uses; the wire + real pid derive from it below.
+  const src = srcOf(pid);
+  const rawPid = pidOf(pid);
+  const r = recordsByKey.get(pid);
   if (!XTermCtor || !r) return null;
   const el = document.createElement("div");
   el.className = "ay-term";
@@ -795,7 +872,7 @@ function makeTerm(pid: string): TermEntry | null {
   bar.className = "ay-term-bar";
   bar.innerHTML =
     `<span class="dot ${r.status}"></span>` +
-    `<span class="t"></span><span class="pid">#${pid}</span>`;
+    `<span class="t"></span><span class="pid">#${rawPid}${src === LOCAL ? "" : ` · ${src}`}</span>`;
   (bar.querySelector(".t") as HTMLElement).textContent = nodeTitle(r);
   const body = document.createElement("div");
   body.className = "ay-term-body";
@@ -840,7 +917,7 @@ function makeTerm(pid: string): TermEntry | null {
   };
   const es: Sub = noStream
     ? { close() {} }
-    : subscribeRaw(`/api/tail/${encodeURIComponent(pid)}?raw=1`, onStream);
+    : subscribeRaw(`/api/tail/${encodeURIComponent(rawPid)}?raw=1`, onStream, src);
   const entry: TermEntry = { el, term, es, miss: 0, buf: "" };
   attachStdin(term, pid, () => {
     const prev = statusLabel.textContent;
@@ -864,7 +941,7 @@ function makeTerm(pid: string): TermEntry | null {
 
   // size to the agent's native grid so the absolute-cursor raw stream lands
   // correctly; NO resize is pushed back to the PTY.
-  apiJSON<{ cols?: number; rows?: number }>(`/api/size/${encodeURIComponent(pid)}`)
+  apiJSON<{ cols?: number; rows?: number }>(`/api/size/${encodeURIComponent(rawPid)}`, src)
     .then((s) => {
       if (s?.cols && s?.rows && terms.get(pid) === entry) term.resize(s.cols, s.rows);
     })
@@ -965,7 +1042,7 @@ function drawNode(
   ctx: CanvasRenderingContext2D,
   rect: { width: number; height: number },
 ) {
-  const r = recordsByPid.get(id);
+  const r = recordsByKey.get(id);
   const light = isLight();
   const w = rect.width;
   const h = rect.height;
@@ -1007,7 +1084,10 @@ function drawNode(
     const fs = Math.max(7, Math.min(12, bodyH * 0.16));
     ctx.font = `${fs}px ui-monospace, SFMono-Regular, Menlo, monospace`;
     ctx.textBaseline = "top";
-    const lines = [`#${id} · ${r.status}`, shortCwd(r.cwd) + (r.git?.branch ? ` ⎇${r.git.branch}` : "")];
+    const lines = [
+      `#${pidOf(id)}${r._src === LOCAL ? "" : ` · ${r._src}`} · ${r.status}`,
+      shortCwd(r.cwd) + (r.git?.branch ? ` ⎇${r.git.branch}` : ""),
+    ];
     if (r.question) lines.push(`⏳ ${r.question.slice(0, 40)}`);
     // no terminal to show (demo, or not streamed yet) — fill the body with the
     // agent's prompt (word-wrapped) so the card reads as work-in-flight
@@ -1145,7 +1225,7 @@ function syncTerminals(view: { x: number; y: number; k: number }) {
   const ch = canvas.clientHeight || innerHeight;
   const cand: { id: string; area: number }[] = [];
   for (const n of viewer.graph.nodes) {
-    if (isContainer.has(n.id) || !recordsByPid.has(n.id)) continue; // skip containers + the info card
+    if (isContainer.has(n.id) || !recordsByKey.has(n.id)) continue; // skip containers + the info card
     const sw = n.w * view.k;
     const sh = (n.h ?? CARD_H) * view.k;
     if (sw < TERM_MIN_W || sh < TERM_MIN_H) continue;
@@ -1213,11 +1293,11 @@ const STATUS_GLYPH: Record<string, string> = {
 };
 function updateDocTitle() {
   const id = viewer.selection[0];
-  const r = id ? recordsByPid.get(id) : undefined;
+  const r = id ? recordsByKey.get(id) : undefined;
   if (r) {
     document.title = `${STATUS_GLYPH[r.status] ?? ""} ${nodeTitle(r)} · agent-yes`.trim();
   } else {
-    const n = recordsByPid.size;
+    const n = recordsByKey.size;
     document.title = n ? `agent-yes · rgui · ${n} agents` : "agent-yes · rgui — live agent tree";
   }
 }
@@ -1273,19 +1353,25 @@ function updateSysPanel(records: AgentRecord[], live: boolean) {
     items.push({ id: "repos", label: "repos", value: String(repos.size) });
     items.push({ id: "worktrees", label: "worktrees", value: String(cwds.size) });
   }
-  if (hostInfo?.loadavg?.some((n) => n > 0)) {
-    const load1 = hostInfo.loadavg[0]!;
+  // one load row per machine whose /api/host answered (multi-source fleet)
+  for (const w of wires.values()) {
+    const h = w.hostInfo;
+    if (!h?.loadavg?.some((n) => n > 0)) continue;
+    const load1 = h.loadavg[0]!;
     items.push({
-      id: "load",
-      label: "host load",
+      id: `load:${w.id}`,
+      label: `${h.host} load`,
       value: load1.toFixed(1),
       // saturated host (1-min load past the core count) = the wedged-fleet smell
-      color: load1 > hostInfo.cpus ? "#f85149" : undefined,
+      color: load1 > h.cpus ? "#f85149" : undefined,
     });
   }
+  const liveW = [...wires.values()].filter(wireReady);
   items.push({
     id: "conn",
-    label: live ? (usingRoom() ? "live · room" : "live · local") : "demo · no ay serve",
+    label: live
+      ? `live · ${liveW.length} source${liveW.length === 1 ? "" : "s"}`
+      : "demo · no ay serve",
     color: live ? "#3fb950" : "#d29922",
   });
   sysPanel.items = items;
@@ -1327,7 +1413,7 @@ const viewer: Rgui = createRgui(canvas, {
     if (!sel.includes(id)) viewer.setSelection(base);
     const set = new Set<string>();
     for (const t of base) {
-      if (recordsByPid.has(t)) set.add(t);
+      if (recordsByKey.has(t)) set.add(t);
       else for (const d of agentDescendants(t)) set.add(d);
     }
     const targets = [...set];
@@ -1337,6 +1423,7 @@ const viewer: Rgui = createRgui(canvas, {
   onSelectionChange: () => {
     updateNodeDebug();
     updateDocTitle(); // tab title follows the selected agent
+    persistSelection(); // /w/ ⇄ /r/ focus sync: same ay.sel + #room:pid the console keeps
   },
   onNodeResizeEnd: (id, size) => {
     // remember a shift+drag magnify (scale ≠ 1) so it persists across rebuilds;
@@ -1368,10 +1455,11 @@ const viewer: Rgui = createRgui(canvas, {
   get graph() {
     return viewer.graph;
   },
+  wires, // e2e/debug: per-source transport state (multi-room merge)
   scaleByNode, // e2e/debug: inspect persisted magnify
   // e2e: force a structural rebuild THROUGH the real path (setGraph + magnify restore)
   rebuild: () => {
-    viewer.setGraph(buildGraph([...recordsByPid.values()]));
+    viewer.setGraph(buildGraph([...recordsByKey.values()]));
     reapplyMagnify();
   },
 };
@@ -1402,13 +1490,13 @@ function fitReadable(pad = 80) {
 //    and redraw — positions and terminals stay put.
 function structureSig(records: AgentRecord[]): string {
   return records
-    .map((r) => `${r.pid}>${r.parent_pid ?? ""}`)
+    .map((r) => `${r._key}>${r.parent_pid ?? ""}`)
     .sort()
     .join("|");
 }
 function contentSig(records: AgentRecord[]): string {
   return records
-    .map((r) => `${r.pid}:${r.status}:${r.question ?? ""}:${r.title ?? ""}:${r.git?.branch ?? ""}`)
+    .map((r) => `${r._key}:${r.status}:${r.question ?? ""}:${r.title ?? ""}:${r.git?.branch ?? ""}`)
     .sort()
     .join("|");
 }
@@ -1427,7 +1515,7 @@ let lastContent = "";
 // thing you watch up close) update themselves via their own streams, and their
 // title bars/status dots are refreshed cheaply below.
 function updateContent(records: AgentRecord[]) {
-  const byId = new Map(records.map((r) => [String(r.pid), r] as const));
+  const byId = new Map(records.map((r) => [r._key, r] as const));
   for (const n of viewer.graph.nodes) {
     const r = byId.get(n.id);
     if (r) {
@@ -1440,8 +1528,8 @@ function updateContent(records: AgentRecord[]) {
       // same-cwd container: recompute the shared (loudest) state in place
       n.category = `cwd-${aggStateOf(cwdGroups.get(n.id)!)}`;
       n.fields = cwdFields(cwdGroups.get(n.id)!);
-    } else if (n.id === ENV_HOST_ID) {
-      n.fields = hostEnvFields(); // live/stuck counts track the fresh records
+    } else if (n.id.startsWith("env:")) {
+      n.fields = hostEnvFields(n.id.slice(4)); // live/stuck counts track the fresh records
     }
   }
   for (const [pid, e] of terms) {
@@ -1505,9 +1593,8 @@ function mergeFederated(local: Graph): Graph {
     // Foreign-ns entries act as stubs — invisible, but their edges below still
     // land when the authoritative feed provides the real node — so a hostile
     // feed can't paint content as somebody else's agent.
-    const g = entry.ns
-      ? { ...entry.g, nodes: entry.g.nodes.filter((n) => n.id.startsWith(entry.ns)) }
-      : entry.g;
+    const ns = entry.ns;
+    const g = ns ? { ...entry.g, nodes: entry.g.nodes.filter((n) => n.id.startsWith(ns)) } : entry.g;
     if (!g.nodes.length) continue;
     const minX = Math.min(...g.nodes.map((n) => n.x));
     const minY = Math.min(...g.nodes.map((n) => n.y));
@@ -1575,15 +1662,15 @@ if (fedFeeds.length) {
 }
 
 function apply(records: AgentRecord[], live: boolean) {
-  recordsByPid.clear();
-  for (const r of records) recordsByPid.set(String(r.pid), r);
+  recordsByKey.clear();
+  for (const r of records) recordsByKey.set(r._key, r);
   const struct = structureSig(records);
   const content = contentSig(records);
   if (struct !== lastStruct) {
     lastStruct = struct;
     lastContent = content;
     // tear down terminals for agents that are gone (exited/removed)
-    for (const id of [...terms.keys()]) if (!recordsByPid.has(id)) dropTerm(id);
+    for (const id of [...terms.keys()]) if (!recordsByKey.has(id)) dropTerm(id);
     lastLocalGraph = buildGraph(records);
     viewer.setGraph(mergeFederated(lastLocalGraph));
     markShared();
@@ -1600,8 +1687,9 @@ function apply(records: AgentRecord[], live: boolean) {
   liveKnown = live;
   statusEl.className = live ? "live" : "demo";
   const n = records.length;
+  const liveW = [...wires.values()].filter(wireReady).length;
   statusLabel.textContent = live
-    ? `live · ${n} agent${n === 1 ? "" : "s"}${usingRoom() ? " (room)" : ""}`
+    ? `live · ${n} agent${n === 1 ? "" : "s"}${liveW > 1 ? ` · ${liveW} sources` : usingRoom() ? " (room)" : ""}`
     : "demo · no local ay serve";
   updateSysPanel(records, live); // refresh the screen-fixed status palette
   updateDocTitle(); // keep the tab title's name/status/count fresh
@@ -1614,13 +1702,13 @@ function applyEdges() {
   const present = new Set(viewer.graph.nodes.map((n) => n.id));
   const edges: Edge[] = showWires
     ? readEdges
-        .filter((e) => e.by !== e.target && present.has(String(e.by)) && present.has(String(e.target)))
+        .filter((e) => e.by !== e.target && present.has(e.by) && present.has(e.target))
         // "by read target" is a dataflow: the watched agent's `status` output
         // feeds the reader's `deps` input (Y.status → X.deps), so the arrow
         // points the way the information actually travels.
         .map((e) => ({
-          from: { node: String(e.target), port: "status" },
-          to: { node: String(e.by), port: "deps" },
+          from: { node: e.target, port: "status" },
+          to: { node: e.by, port: "deps" },
           dashed: true,
           style: { color: "#58a6ff", width: 1.5, dash: [6, 4] },
         }))
@@ -1637,63 +1725,109 @@ function applyEdges() {
 }
 
 async function fetchEdges() {
-  try {
-    readEdges = (await apiJSON<{ reads?: ReadEdge[] }>("/api/edges")).reads ?? [];
+  const results = await Promise.allSettled(
+    [...wires.values()].filter(wireReady).map(async (w) => {
+      const raw =
+        (await apiJSON<{ reads?: { by: number; target: number; at: number }[] }>("/api/edges", w.id))
+          .reads ?? [];
+      return raw.map((e) => ({ by: `${w.id}#${e.by}`, target: `${w.id}#${e.target}`, at: e.at }));
+    }),
+  );
+  const merged = results.flatMap((p) => (p.status === "fulfilled" ? p.value : []));
+  if (merged.length || readEdges.length) {
+    readEdges = merged;
     applyEdges();
-  } catch {
-    /* no /api/edges (static host / old daemon / room down) — leave wires empty */
   }
 }
 
-// Poll the host environment (identity + load/mem/caps) every 30s. The first
-// answer adds the env node to the forest (structure change → force a rebuild);
-// later answers only refresh its fields in place — same no-flash philosophy as
-// updateContent. A 404 (older daemon) just means no env node.
-async function fetchHost() {
-  try {
-    const h = await apiJSON<HostInfo>("/api/host");
-    const first = !hostInfo;
-    hostInfo = h;
-    if (first) {
-      lastStruct = ""; // env node joins the graph on the next apply()
-      void refresh();
-    } else {
-      const n = viewer.graph.nodes.find((x) => x.id === ENV_HOST_ID);
-      if (n) n.fields = hostEnvFields(); // picked up by the next natural frame
-    }
-  } catch {
-    /* /api/host unavailable (old daemon / static host / room down) */
+// Poll each wire's host environment (identity + load/mem/caps) every 30s. A
+// first answer adds that machine's env node to the forest (structure change →
+// force a rebuild); later answers only refresh its fields in place — same
+// no-flash philosophy as updateContent. A 404 (older daemon) = no env node.
+async function fetchHosts() {
+  let firstArrival = false;
+  await Promise.allSettled(
+    [...wires.values()].filter(wireReady).map(async (w) => {
+      try {
+        let h: HostInfo;
+        try {
+          h = await apiJSON<HostInfo>("/api/host", w.id);
+        } catch {
+          // older daemon without /api/host — fall back to /api/whoami (ancient)
+          // for a bare-identity env node: the machine still deserves its ⬢.
+          const who = await apiJSON<{ host: string }>("/api/whoami", w.id);
+          h = {
+            host: who.host,
+            platform: "",
+            arch: "",
+            cpus: 0,
+            loadavg: [],
+            mem: { total: 0, free: 0 },
+            uptime: 0,
+          };
+        }
+        if (!w.hostInfo) firstArrival = true;
+        w.hostInfo = h;
+        const n = viewer.graph.nodes.find((x) => x.id === envIdOf(w.id));
+        if (n) n.fields = hostEnvFields(w.id); // picked up by the next natural frame
+      } catch {
+        /* both unavailable (static host / wire down) */
+      }
+    }),
+  );
+  if (firstArrival) {
+    lastStruct = ""; // new env node joins the graph on the next apply()
+    void refresh();
   }
 }
-setInterval(() => void fetchHost(), 30_000);
+setInterval(() => void fetchHosts(), 30_000);
 
 async function refresh() {
-  try {
-    const records = await apiJSON<AgentRecord[]>("/api/ls");
-    apply(records, true);
+  const ws = [...wires.values()];
+  const results = await Promise.allSettled(
+    ws.map(async (w) => {
+      const recs = await apiJSON<AgentRecord[]>("/api/ls", w.id);
+      if (w.kind === "http") w.connected = true; // reachable — count it as a source
+      return recs.map((r) => ({ ...r, _src: w.id, _key: `${w.id}#${r.pid}` }));
+    }),
+  );
+  // an http wire that failed is not a source (static host / daemon down)
+  ws.forEach((w, i) => {
+    if (w.kind === "http" && results[i]!.status === "rejected") w.connected = false;
+  });
+  const merged = results.flatMap((p) => (p.status === "fulfilled" ? p.value : []));
+  if (results.some((p) => p.status === "fulfilled")) {
+    apply(merged, true);
     void fetchEdges();
     void fetchShares();
-  } catch {
-    // No reachable source. With a room configured, keep the room's connection
-    // state on screen (never the sample) — the connect loop drives the label.
-    // Without one, fall back to the sample forest (only until live appears).
-    if (!usingRoom() && !liveKnown) apply(sampleRecords(), false);
+    focusPendingSelection(); // ay.sel / #room:pid focus once its node exists
+  } else if (!liveKnown && ![...wires.values()].some((w) => w.kind === "rtc")) {
+    // nothing to connect to at all (static preview, no rooms known) — show the
+    // sample forest; with rooms configured we show their connection state instead
+    apply(sampleRecords(), false);
   }
 }
 
-// ── room connection (only when the hash is a share link) ─────────────────────
-// Connect the shared RTCClient and keep it alive with jittered exponential
-// backoff — a dropped DataChannel (host restart) otherwise leaves the room dead
-// until a manual reload. Mirrors the console's connectRtcSource lifecycle.
-if (roomInfo) {
+// ── wire boot: hash share link + every /w/-cached room + local HTTP ──────────
+// Each rtc wire keeps itself alive with jittered exponential backoff — a
+// dropped DataChannel (host restart) otherwise leaves that source dead until a
+// manual reload. Mirrors the console's connectRtcSource lifecycle.
+function addRtcWire(roomName: string, token: string, sigHost: string) {
+  if (wires.has(roomName)) return;
+  const w: Wire = {
+    id: roomName,
+    kind: "rtc",
+    sigHost: sigHost || "s.agent-yes.com",
+    token,
+    client: null,
+    connected: false,
+    hostInfo: null,
+  };
+  wires.set(roomName, w);
   const RTC_MIN = 1000;
   const RTC_MAX = 30000;
   let delay = RTC_MIN;
   let timer: ReturnType<typeof setTimeout> | null = null;
-  const setRoomLabel = (text: string) => {
-    statusEl.className = "demo";
-    statusLabel.textContent = text;
-  };
   const schedule = () => {
     if (timer) return;
     timer = setTimeout(() => {
@@ -1705,39 +1839,42 @@ if (roomInfo) {
   async function connectOnce() {
     // Drop any stale peer first, detaching its onstate so its own "closed" can't
     // re-arm a reconnect mid-replace (which would churn a healthy channel).
-    if (room) {
-      room.onstate = () => {};
+    if (w.client) {
+      (w.client as { onstate?: (st: string) => void }).onstate = () => {};
       try {
-        room.close();
+        w.client.close();
       } catch {
         /* */
       }
-      room = null;
+      w.client = null;
     }
-    roomConnected = false;
-    if (!liveKnown) setRoomLabel("connecting room…");
+    w.connected = false;
+    if (!liveKnown && usingRoom() && roomInfo!.room === w.id) {
+      statusEl.className = "demo";
+      statusLabel.textContent = "connecting room…";
+    }
     try {
-      const c = new RTCClient(roomInfo!.host, roomInfo!.room, roomInfo!.token);
+      const c = new RTCClient(w.sigHost, w.id, w.token) as InstanceType<typeof RTCClient> & {
+        onstate: (st: string) => void;
+      };
       c.onstate = (st: string) => {
         // "disconnected" is transient (ICE hiccup) — only a real teardown reconnects.
         if (st === "failed" || st === "closed") {
-          roomConnected = false;
-          setRoomLabel("room disconnected");
+          w.connected = false;
           schedule();
         }
       };
       await c.connect();
-      room = c;
-      roomConnected = true;
+      w.client = c;
+      w.connected = true;
       delay = RTC_MIN; // a healthy connect resets the backoff
-      void refresh(); // pull the first snapshot over the room immediately
-      void fetchHost(); // and the host env (the 30s interval keeps it fresh)
+      lastStruct = ""; // this source's agents join the forest on the next apply
+      void refresh(); // pull the first snapshot over the wire immediately
+      void fetchHosts(); // and its host env (the 30s interval keeps it fresh)
     } catch {
-      setRoomLabel("room disconnected");
       schedule();
     }
   }
-  setRoomLabel("connecting room…");
   void connectOnce();
 }
 
@@ -1795,7 +1932,8 @@ function initEmbed(pid: string) {
   if (!hashParts.includes("ro")) {
     term.options.disableStdin = false;
     term.options.cursorBlink = true;
-    attachStdin(term, pid, () => {
+    // the embed is served by the agent's own daemon (#k= auth) — local wire
+    attachStdin(term, `${LOCAL}#${pid}`, () => {
       document.title = `agent-yes · #${pid} (read-only)`;
     });
   }
@@ -1836,11 +1974,35 @@ function initEmbed(pid: string) {
 }
 
 if (embedMode) {
+  // the embed talks to its own serving daemon only — one local wire
+  wires.set(LOCAL, {
+    id: LOCAL,
+    kind: "http",
+    sigHost: "",
+    token: "",
+    client: null,
+    connected: true,
+    hostInfo: null,
+  });
   initEmbed(embedPid!);
 } else {
+  // Boot the wires: the local daemon + the hash room (if any) + EVERY room the
+  // console has cached (ay.rooms) — /w/ and /r/ are two UIs over one fleet.
+  wires.set(LOCAL, {
+    id: LOCAL,
+    kind: "http",
+    sigHost: "",
+    token: "",
+    client: null,
+    connected: true, // optimistic; refresh() flips it on the first failed /api/ls
+    hostInfo: null,
+  });
+  if (roomInfo) addRtcWire(roomInfo.room, roomInfo.token, roomInfo.host);
+  for (const [name, r] of Object.entries(loadRooms()))
+    if (r?.token) addRtcWire(name, r.token, r.host || "s.agent-yes.com");
   refresh();
   setInterval(refresh, 3000);
-  if (!usingRoom()) void fetchHost(); // room mode fetches on connect instead
+  void fetchHosts();
 }
 // The whole page is configured from the hash (room / feeds / embed target / k=),
 // all read once at boot — a hash-only navigation (e.g. an iframe consumer
@@ -1984,6 +2146,65 @@ function focusNode(id: string, overlay = false) {
   setTimeout(grab, 280);
 }
 
+// ── /w/ ⇄ /r/ selection sync ─────────────────────────────────────────────────
+// The console persists its open agent in localStorage["ay.sel"] as `<src>#<pid>`
+// and deep-links as #<room>:<pid> — /r/ speaks BOTH: on boot it focuses the
+// deep-linked or last-selected agent once its node exists; on every selection
+// it writes ay.sel back in the console's format, so switching /r/ → /w/ lands
+// on the same agent. A storage event (the console selecting in another tab)
+// follows live.
+const SEL_KEY = "ay.sel";
+// console key forms: "local#pid" · "<room>#pid" · "<room>/<peer>#pid" (codehost
+// rooms name a machine) — normalize the machine part away; our wires are rooms.
+function normalizeSelKey(s: string | null): string | null {
+  if (!s) return null;
+  const i = s.indexOf("#");
+  if (i <= 0) return null;
+  return `${s.slice(0, i).split("/")[0]}#${s.slice(i + 1)}`;
+}
+let pendingSel: string | null = (() => {
+  const h = decodeURIComponent(String(location.hash || "").replace(/^#/, ""));
+  const m = /^([A-Za-z0-9_-]+):(\d{1,7})$/.exec(h);
+  if (m) return `${m[1]}#${m[2]}`; // explicit deep link wins
+  try {
+    return normalizeSelKey(localStorage.getItem(SEL_KEY));
+  } catch {
+    return null;
+  }
+})();
+function focusPendingSelection() {
+  if (!pendingSel) return;
+  if (!recordsByKey.has(pendingSel)) return; // that source hasn't merged yet — retry next refresh
+  const key = pendingSel;
+  pendingSel = null;
+  focusNode(key, true);
+}
+function persistSelection() {
+  const key = viewer.selection.find((id: string) => recordsByKey.has(id));
+  if (!key) return;
+  try {
+    localStorage.setItem(SEL_KEY, key);
+  } catch {
+    /* private mode — the deep-link hash below still carries the selection */
+  }
+  // mirror the console's #<room>:<pid> deep-link hash (replaceState does NOT
+  // fire hashchange, so this never trips the reload-on-hashchange boot rule)
+  const r = recordsByKey.get(key)!;
+  try {
+    const want = r._src === LOCAL ? "" : `#${encodeURIComponent(r._src)}:${r.pid}`;
+    if (want && location.hash !== want)
+      history.replaceState(null, document.title, location.pathname + want);
+  } catch {
+    /* */
+  }
+}
+addEventListener("storage", (e) => {
+  // live follow: the console (another tab, same origin) opened an agent
+  if (e.key !== SEL_KEY) return;
+  const key = normalizeSelKey(e.newValue);
+  if (key && recordsByKey.has(key) && !viewer.selection.includes(key)) focusNode(key);
+});
+
 // ── ⌘K command palette (go to / focus an agent) ───────────────────────────────
 const cmdk = document.getElementById("cmdk")!;
 const cmdkInput = document.getElementById("cmdk-input") as HTMLInputElement;
@@ -1994,11 +2215,14 @@ let cmdkSel = 0;
 let cmdkRows: { id: string; title: string; status: string; sub: string }[] = [];
 
 function cmdkData() {
-  const rows = [...recordsByPid.values()].map((r) => ({
-    id: String(r.pid),
+  const rows = [...recordsByKey.values()].map((r) => ({
+    id: r._key,
     title: nodeTitle(r),
     status: r.status,
-    sub: shortCwd(r.cwd) + (r.git?.branch ? ` ⎇${r.git.branch}` : ""),
+    sub:
+      (r._src === LOCAL ? "" : `${r._src} · `) +
+      shortCwd(r.cwd) +
+      (r.git?.branch ? ` ⎇${r.git.branch}` : ""),
   }));
   rows.sort((a, b) => (a.status === "exited" ? 1 : 0) - (b.status === "exited" ? 1 : 0));
   return rows;
@@ -2066,7 +2290,7 @@ function agentDescendants(containerId: string): string[] {
   const parentOf = new Map(viewer.graph.nodes.map((n) => [n.id, n.parent]));
   const out: string[] = [];
   for (const n of viewer.graph.nodes) {
-    if (!recordsByPid.has(n.id)) continue;
+    if (!recordsByKey.has(n.id)) continue;
     let p = n.parent;
     while (p) {
       if (p === containerId) {
@@ -2082,33 +2306,48 @@ function agentDescendants(containerId: string): string[] {
 const ctxmenu = document.getElementById("ctxmenu")!;
 const ctxInput = document.getElementById("ctx-input") as HTMLTextAreaElement;
 let ctxTargets: string[] = [];
-let ctxSpawn: { cwd: string | null; cli: string } | null = null;
+let ctxSpawn: { src: string; cwd: string | null; cli: string } | null = null;
 
 // What "spawn here" means for a right-clicked node: an environment-ish node
-// (host env / cwd container / repo container) is a launch TARGET — the cwd the
-// new agent starts in; a plain agent spawns a sibling next to itself. The cli
-// follows the neighbours (spawn what already runs there), falling back to claude.
-function spawnSpecOf(id: string): { cwd: string | null; cli: string } | null {
-  const cliOf = (pids: string[]) => recordsByPid.get(pids[0] ?? "")?.cli ?? "claude";
-  if (id === ENV_HOST_ID) return { cwd: null, cli: cliOf([...recordsByPid.keys()]) };
-  if (id.startsWith("cwd:")) return { cwd: id.slice(4), cli: cliOf(cwdGroups.get(id) ?? []) };
-  if (id.startsWith("repo:")) return { cwd: id.slice(5), cli: cliOf(agentDescendants(id)) };
-  const r = recordsByPid.get(id);
-  return r ? { cwd: r.cwd, cli: r.cli } : null;
+// (host env / cwd container / repo container) is a launch TARGET — the machine
+// AND cwd the new agent starts in; a plain agent spawns a sibling next to
+// itself. The cli follows the neighbours, falling back to claude.
+// Container ids embed their source: "env:<src>" · "cwd:<src>:<path>" ·
+// "repo:<src>:<repoKey>".
+function spawnSpecOf(id: string): { src: string; cwd: string | null; cli: string } | null {
+  const cliOf = (keys: string[]) => recordsByKey.get(keys[0] ?? "")?.cli ?? "claude";
+  if (id.startsWith("env:")) {
+    const src = id.slice(4);
+    return { src, cwd: null, cli: cliOf([...recordsByKey.values()].filter((r) => r._src === src).map((r) => r._key)) };
+  }
+  if (id.startsWith("cwd:") || id.startsWith("repo:")) {
+    const rest = id.slice(id.indexOf(":") + 1);
+    const src = rest.slice(0, rest.indexOf(":"));
+    const cwd = rest.slice(rest.indexOf(":") + 1);
+    const members = id.startsWith("cwd:") ? (cwdGroups.get(id) ?? []) : agentDescendants(id);
+    return { src, cwd, cli: cliOf(members) };
+  }
+  const r = recordsByKey.get(id);
+  return r ? { src: r._src, cwd: r.cwd, cli: r.cli } : null;
 }
 
 function openBatchMenu(sx: number, sy: number, pids: string[], spawn: typeof ctxSpawn = null) {
   ctxTargets = pids;
   ctxSpawn = spawn;
-  // "share this node" — single agent only (a share scopes to exactly one agent)
+  // "share this node" — single agent only (a share scopes to exactly one agent),
+  // minted on the agent's OWN daemon: only offered for the local wire (a room
+  // viewer holds a share credential, not the host's minting rights).
   ctxSharePid = pids.length === 1 ? pids[0]! : null;
-  ctxShare.hidden = !ctxSharePid || usingRoom(); // a room viewer can't mint shares
+  ctxShare.hidden = !ctxSharePid || srcOf(ctxSharePid ?? "#") !== LOCAL;
   ctxShareOut.hidden = true;
   document.getElementById("ctx-count")!.textContent = String(pids.length);
   document.getElementById("ctx-s")!.textContent = pids.length === 1 ? "" : "s";
   const spawnBtn = document.getElementById("ctx-spawn") as HTMLButtonElement;
   spawnBtn.hidden = !spawn;
-  if (spawn) spawnBtn.title = `POST /api/spawn · ${spawn.cli} in ${spawn.cwd ?? "(host default dir)"}`;
+  if (spawn)
+    spawnBtn.title =
+      `POST /api/spawn on ${spawn.src === LOCAL ? "this machine" : spawn.src} · ` +
+      `${spawn.cli} in ${spawn.cwd ?? "(host default dir)"}`;
   ctxmenu.hidden = false;
   ctxmenu.style.left = `${Math.min(sx, innerWidth - 348)}px`;
   ctxmenu.style.top = `${Math.min(sy, innerHeight - 140)}px`;
@@ -2124,8 +2363,8 @@ async function sendBatch() {
   if (!msg.trim() || !pids.length) return closeBatchMenu();
   closeBatchMenu();
   const results = await Promise.allSettled(
-    pids.map((pid) =>
-      apiPost("/api/send", { keyword: pid, msg }).then((r) =>
+    pids.map((key) =>
+      apiPost("/api/send", { keyword: pidOf(key), msg }, srcOf(key)).then((r) =>
         r.ok ? r : Promise.reject(r.text),
       ),
     ),
@@ -2146,11 +2385,15 @@ async function spawnHere() {
   const prompt = ctxInput.value;
   closeBatchMenu();
   statusLabel.textContent = `▷ spawning ${spec.cli}…`;
-  const r = await apiPost("/api/spawn", {
-    cli: spec.cli,
-    ...(spec.cwd ? { cwd: spec.cwd } : {}),
-    prompt,
-  });
+  const r = await apiPost(
+    "/api/spawn",
+    {
+      cli: spec.cli,
+      ...(spec.cwd ? { cwd: spec.cwd } : {}),
+      prompt,
+    },
+    spec.src, // launch on the machine that owns the right-clicked environment
+  );
   statusLabel.textContent = r.ok ? "▷ spawned" : `spawn failed: ${r.text.slice(0, 80)}`;
   setTimeout(() => void refresh(), 1200);
   setTimeout(() => void refresh(), 4000); // and again once the wrapper registered
@@ -2192,7 +2435,7 @@ let sharedIds = new Set<string>(); // agent_ids with an active outbound share
 function markShared() {
   let changed = false;
   for (const n of viewer.graph.nodes) {
-    const rec = recordsByPid.get(n.id);
+    const rec = recordsByKey.get(n.id);
     const want = !!rec?.agent_id && sharedIds.has(rec.agent_id);
     const nn = n as { shared?: boolean };
     if ((nn.shared ?? false) !== want) {
@@ -2203,22 +2446,29 @@ function markShared() {
   if (changed) viewer.setView(viewer.view); // redraw, no relayout
 }
 async function fetchShares() {
-  try {
-    const list = await apiJSON<{ agentId: string }[]>("/api/shares");
-    sharedIds = new Set(list.map((x) => x.agentId));
+  // shares are minted per daemon — collect active ones from every live wire so
+  // the outbound halo shows no matter which machine the shared agent runs on
+  const results = await Promise.allSettled(
+    [...wires.values()].filter(wireReady).map((w) => apiJSON<{ agentId: string }[]>("/api/shares", w.id)),
+  );
+  const ids = results.flatMap((p) => (p.status === "fulfilled" ? p.value.map((x) => x.agentId) : []));
+  if (ids.length || sharedIds.size) {
+    sharedIds = new Set(ids);
     markShared();
-  } catch {
-    /* no /api/shares on this wire (static demo / scoped room) */
   }
 }
 ctxShareBtn.addEventListener("click", async () => {
   if (!ctxSharePid) return;
   ctxShareBtn.disabled = true;
   ctxShareBtn.textContent = "sharing…";
-  const r = await apiPost("/api/share", {
-    agent: ctxSharePid,
-    perm: ctxSharePerm.checked ? "rw" : "r",
-  });
+  const r = await apiPost(
+    "/api/share",
+    {
+      agent: pidOf(ctxSharePid),
+      perm: ctxSharePerm.checked ? "rw" : "r",
+    },
+    srcOf(ctxSharePid), // local-only per openBatchMenu's gate
+  );
   ctxShareBtn.disabled = false;
   ctxShareBtn.textContent = "share this node";
   ctxShareOut.hidden = false;
@@ -2272,7 +2522,17 @@ document.getElementById("theme")!.addEventListener("click", () => {
   const consoleBtn = document.getElementById("console") as HTMLButtonElement;
   if (/^\/(r|rgui)(\/|$)/.test(location.pathname)) {
     consoleBtn.addEventListener("click", () => {
-      location.href = roomInfo ? "/w/#" + encodeURIComponent(roomInfo.room) : "/w/";
+      // carry the selected agent as the console's own #<room>:<pid> deep link;
+      // ay.sel (written on every selection) covers the same-origin bare cases
+      const key = viewer.selection.find((id: string) => recordsByKey.has(id));
+      const r = key ? recordsByKey.get(key) : null;
+      const frag =
+        r && r._src !== LOCAL
+          ? "#" + encodeURIComponent(r._src) + ":" + r.pid
+          : roomInfo
+            ? "#" + encodeURIComponent(roomInfo.room)
+            : "";
+      location.href = "/w/" + frag;
     });
   } else {
     consoleBtn.hidden = true;
