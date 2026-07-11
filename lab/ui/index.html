@@ -37,6 +37,9 @@
         --purple: #bc8cff;
         --pink: #f778ba;
         --red: #f85149;
+        /* Peer-focus yellow: a human collaborator (not you) is on this agent.
+           Distinct from your own blue (--accent) and the idle-dot amber. */
+        --peer: #e3b341;
         --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
         /* Safe-area insets — non-zero only in a standalone PWA on a notched /
            gesture-bar device (else 0, so these are harmless on desktop). Consumed
@@ -70,6 +73,7 @@
           --purple: #8250df;
           --pink: #bf3989;
           --red: #cf222e;
+          --peer: #bf8700;
         }
       }
       * {
@@ -299,6 +303,178 @@
         background: var(--line);
         margin: 4px 2px;
       }
+      /* View-only share: read-only badge in the header + hiding write controls. */
+      .robadge {
+        display: none;
+        align-items: center;
+        gap: 4px;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: 999px;
+        color: #b45309;
+        background: color-mix(in srgb, #f59e0b 18%, transparent);
+        border: 1px solid color-mix(in srgb, #f59e0b 45%, transparent);
+        white-space: nowrap;
+      }
+      .app.readonly-agent .robadge {
+        display: inline-flex;
+      }
+      /* A viewer can't steer/share — hide the composer, key bar and every agent
+         action in the ⋯ menu (Share/Stop/Restart/Kill). View prefs stay. */
+      .app.readonly-agent .composer,
+      .app.readonly-agent .keybar,
+      .app.readonly-agent .rmenuact {
+        display: none !important;
+      }
+      /* Read-write (steer) share: the viewer CAN type, so composer + key bar stay.
+         But they aren't granted control/admin, so hide stop/restart/kill/share. */
+      .rwbadge {
+        display: none;
+        align-items: center;
+        gap: 4px;
+        font-size: 11px;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: 999px;
+        color: #7c3aed;
+        background: color-mix(in srgb, #8b5cf6 18%, transparent);
+        border: 1px solid color-mix(in srgb, #8b5cf6 45%, transparent);
+        white-space: nowrap;
+      }
+      .app.steer-agent .rwbadge {
+        display: inline-flex;
+      }
+      .app.steer-agent #stopAgent,
+      .app.steer-agent #restartAgent,
+      .app.steer-agent #killAgent,
+      .app.steer-agent #shareAgent,
+      .app.steer-agent #shareAgentRW {
+        display: none !important;
+      }
+      /* Share modal — QR + link for a single-agent view-only share. */
+      .modal-backdrop {
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.55);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 60;
+        padding: 16px;
+      }
+      .modal-backdrop[hidden] {
+        display: none;
+      }
+      .sharebox {
+        background: var(--bg);
+        color: var(--fg);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        max-width: 380px;
+        width: 100%;
+        padding: 20px;
+        box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+      }
+      .sharebox h3 {
+        margin: 0 0 4px;
+        font-size: 15px;
+      }
+      .sharebox .sub {
+        margin: 0 0 14px;
+        font-size: 12px;
+        opacity: 0.7;
+      }
+      .sharebox .qr {
+        display: flex;
+        justify-content: center;
+        padding: 12px;
+        background: #fff;
+        border-radius: 8px;
+        margin: 0 auto 14px;
+        width: fit-content;
+      }
+      .sharebox .qr canvas {
+        display: block;
+        image-rendering: pixelated;
+      }
+      .sharebox .shareurl {
+        width: 100%;
+        box-sizing: border-box;
+        font: 11px var(--mono);
+        padding: 8px;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        background: var(--bg2, var(--bg));
+        color: var(--fg);
+        word-break: break-all;
+      }
+      .sharebox .srow {
+        display: flex;
+        gap: 8px;
+        margin-top: 12px;
+      }
+      .sharebox button {
+        flex: 1;
+        padding: 9px;
+        border-radius: 8px;
+        border: 1px solid var(--line);
+        background: var(--bg2, var(--bg));
+        color: var(--fg);
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .sharebox button.primary {
+        background: #2563eb;
+        border-color: #2563eb;
+        color: #fff;
+      }
+      .sharebox button.danger {
+        color: #dc2626;
+        border-color: color-mix(in srgb, #dc2626 45%, transparent);
+      }
+      .sharebox .note {
+        font-size: 11px;
+        opacity: 0.65;
+        margin-top: 12px;
+        line-height: 1.4;
+      }
+      .sharewarn[hidden] {
+        display: none;
+      }
+      .sharewarn {
+        border: 1px solid color-mix(in srgb, #dc2626 55%, transparent);
+        background: color-mix(in srgb, #dc2626 12%, transparent);
+        border-radius: 10px;
+        padding: 14px;
+        margin-bottom: 4px;
+      }
+      .sharewarn .warnhead {
+        font-weight: 700;
+        color: #dc2626;
+        margin-bottom: 8px;
+        font-size: 14px;
+      }
+      .sharewarn p {
+        margin: 0 0 8px;
+        font-size: 12.5px;
+        line-height: 1.45;
+      }
+      .sharewarn button {
+        width: 100%;
+        padding: 10px;
+        margin-top: 4px;
+        border-radius: 8px;
+        border: 1px solid #dc2626;
+        background: #dc2626;
+        color: #fff;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      #shareRevealable[hidden] {
+        display: none;
+      }
       /* Terminal font-size stepper (a static row, not a hover/click target). */
       .rmenufont {
         justify-content: space-between;
@@ -419,6 +595,21 @@
         color: var(--muted);
         font-size: 11.5px;
         margin-top: 8px;
+      }
+      .metaleft {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+      }
+      /* Peers badge beside the agent counter — how many other humans are in the
+         fleet right now. Yellow ("here") when a peer shares the agent you have
+         open, muted otherwise. Hidden entirely when you're alone. */
+      .peers {
+        color: var(--muted);
+        cursor: default;
+      }
+      .peers.here {
+        color: var(--peer);
       }
       .connbadge {
         cursor: pointer;
@@ -630,6 +821,10 @@
       .omni-spawn .omni-title {
         color: var(--green);
       }
+      /* Destructive slash command (/kill) — red title, matching the ⋯-menu Force-kill. */
+      .omni-spawn.danger .omni-title {
+        color: var(--red);
+      }
       .omni-empty {
         padding: 14px;
         color: var(--muted);
@@ -766,6 +961,7 @@
         margin-bottom: 4px;
       }
       .lcard .nfield input,
+      .lcard .nfield select,
       .lcard .nfield textarea {
         width: 100%;
         background: var(--bg);
@@ -778,6 +974,7 @@
         resize: vertical;
       }
       .lcard .nfield input:focus,
+      .lcard .nfield select:focus,
       .lcard .nfield textarea:focus {
         border-color: var(--accent);
       }
@@ -813,6 +1010,41 @@
       .row.sel {
         background: var(--panel);
         box-shadow: inset 3px 0 0 var(--accent);
+      }
+      /* A human peer (not you) is watching this agent: yellow, mirrored on the
+         RIGHT edge so it can coexist with your own blue selection bar on the
+         left — a row you BOTH have open shows blue-left + yellow-right. */
+      .row.peerfocus {
+        box-shadow: inset -3px 0 0 var(--peer);
+        background: color-mix(in srgb, var(--peer) 7%, transparent);
+      }
+      .row.sel.peerfocus {
+        background: var(--panel);
+        box-shadow:
+          inset 3px 0 0 var(--accent),
+          inset -3px 0 0 var(--peer);
+      }
+      /* stdin just landed here (someone typed, or `ay send` pushed a command) —
+         pulse the row regardless of who (if anyone) is focused on it. Runs while
+         the .stdinflash class is present; index.html removes it after the window. */
+      .row.stdinflash {
+        animation: stdinpulse 0.6s ease-in-out infinite;
+      }
+      @keyframes stdinpulse {
+        0%,
+        100% {
+          background-color: transparent;
+        }
+        50% {
+          background-color: color-mix(in srgb, var(--peer) 24%, transparent);
+        }
+      }
+      /* Per-row chip: how many peers are watching THIS agent (yellow, mono). */
+      .peerchip {
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--peer);
+        flex: none;
       }
       .r1 {
         display: flex;
@@ -890,6 +1122,40 @@
       .tasks.done {
         color: var(--green);
         border-color: #2a3a2a;
+      }
+      /* Folded-subagent summary chip ("⊞ 3/5" = 3 working of 5 hidden subagents),
+         shown on a root agent row when the subagent trees are collapsed. Same pill
+         shape as .tasks; the ⊞ glyph echoes the fold toolbar button. Turns accent
+         when any hidden subagent is still working, so a collapsed tree with live
+         children stands out from a quiet one. Hover for the count + last-active. */
+      .subs {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--muted);
+        white-space: nowrap;
+        flex: none;
+        padding: 0 5px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        cursor: pointer;
+      }
+      .subs.active {
+        color: var(--accent);
+        border-color: var(--accent);
+      }
+      /* Status-flag chip ("badge") matched server-side against the agent's
+         screen — e.g. an active /goal loop (ts/badges.ts). Same pill shape as
+         .tasks but accent-colored so a matched flag stands out as a distinct
+         signal, not just a counter. */
+      .flag {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--accent);
+        white-space: nowrap;
+        flex: none;
+        padding: 0 5px;
+        border: 1px solid var(--accent);
+        border-radius: 8px;
       }
       /* The pending question when an agent needs_input — blue accent to match the
          needs_input dot, reading as "your turn / here's what it's asking". */
@@ -1309,6 +1575,59 @@
           display: flex;
         }
       }
+      /* Terminal right-click context menu: Copy the selection or fire a
+         customizable quick command (e.g. /fork [selection]). Positioned at the
+         cursor via inline top/left; clamped into the viewport by JS after mount. */
+      .ctxmenu {
+        position: fixed;
+        z-index: 40;
+        min-width: 180px;
+        max-width: 320px;
+        padding: 4px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.45);
+        font-family: var(--mono);
+        font-size: 13px;
+      }
+      .ctxmenu-item {
+        display: flex;
+        align-items: baseline;
+        gap: 10px;
+        width: 100%;
+        box-sizing: border-box;
+        padding: 6px 10px;
+        border: 0;
+        border-radius: 5px;
+        background: transparent;
+        color: var(--fg);
+        font: inherit;
+        text-align: left;
+        white-space: nowrap;
+        cursor: pointer;
+      }
+      .ctxmenu-item:hover:not(:disabled),
+      .ctxmenu-item:focus-visible {
+        background: color-mix(in srgb, var(--accent) 18%, transparent);
+        outline: none;
+      }
+      .ctxmenu-item:disabled {
+        color: var(--muted);
+        cursor: default;
+      }
+      .ctxmenu-item .ctxmenu-hint {
+        margin-left: auto;
+        color: var(--muted);
+        font-size: 11px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .ctxmenu-sep {
+        height: 1px;
+        margin: 4px 6px;
+        background: var(--line);
+      }
     </style>
     <link
       rel="stylesheet"
@@ -1317,6 +1636,10 @@
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+    <!-- QR generator (MIT, Kazuhiko Arase) — vendored locally so single-agent
+         share QR codes render offline under `ay serve --http`. Classic script:
+         defines the global `qrcode`. -->
+    <script src="./qrcode.js"></script>
     <script type="module">
       // codehost room transport — vendored from codehost's `bun run build:lib`.
       // Loaded as a module (deferred), so the classic script below awaits the
@@ -1354,8 +1677,12 @@
             />
           </div>
           <div class="meta">
-            <span id="count"></span>
+            <span class="metaleft">
+              <span id="count"></span>
+              <span id="peers" class="peers" hidden></span>
+            </span>
             <span class="metaright">
+              <button id="foldbtn" class="viewbtn" title="fold subagent trees">⊞ subs</button>
               <button id="sortbtn" class="viewbtn" title="cycle sort order">⇅ state</button>
               <button id="viewbtn" class="viewbtn" title="toggle compact list">☰</button>
               <button id="newbtn" class="newbtn" title="spawn a new agent on this fleet">
@@ -1377,6 +1704,14 @@
           <span class="dot" id="rdot"></span>
           <span class="name" id="rname"></span>
           <span class="badge" id="rpid"></span>
+          <span class="robadge" title="view-only share — you can watch but not steer this agent"
+            >👁 read-only</span
+          >
+          <span
+            class="rwbadge"
+            title="read-write share — you can type but not stop/restart this agent"
+            >✏️ read-write</span
+          >
           <span class="live"
             ><span class="dot" id="livedot"></span><span id="livetxt">connecting…</span></span
           >
@@ -1401,6 +1736,13 @@
               <label class="rmenuitem"
                 ><input type="checkbox" id="perfToggle" /> <span>Perf HUD</span></label
               >
+              <div class="rmenusep"></div>
+              <button class="rmenuitem rmenuact" id="shareAgent" type="button">
+                👁 Share (view-only)
+              </button>
+              <button class="rmenuitem rmenuact" id="shareAgentRW" type="button">
+                ✏️ Share (read-write)…
+              </button>
               <div class="rmenusep"></div>
               <button class="rmenuitem rmenuact" id="stopAgent" type="button">⏹ Stop agent</button>
               <button class="rmenuitem rmenuact" id="restartAgent" type="button">
@@ -1499,6 +1841,52 @@
     <div class="launchoverlay" id="launch" style="display: none"></div>
     <div class="launchoverlay" id="newform" style="display: none"></div>
 
+    <!-- Single-agent view-only share: QR + link a viewer can open to watch (not
+         steer) just this agent. The link opens a read-only console; the host
+         enforces read-only regardless of the client. -->
+    <div class="modal-backdrop" id="shareModal" hidden>
+      <div class="sharebox" role="dialog" aria-modal="true" aria-label="Share agent">
+        <h3 id="shareTitle">Share this agent</h3>
+        <p class="sub" id="shareSub">view-only · anyone with the link can watch</p>
+
+        <!-- Read-write warning gate: the link is NOT shown until the operator
+             acknowledges that it hands over control. Shown only for rw shares. -->
+        <div class="sharewarn" id="shareWarn" hidden>
+          <div class="warnhead">⚠️ This link lets anyone control this agent</div>
+          <p>
+            Whoever opens this link can <strong>type into this agent</strong> — and because an agent
+            can run commands, that can mean <strong>control of your whole system</strong>. The link
+            isn't a password prompt: no further confirmation is asked.
+          </p>
+          <p><strong>Only share it with someone you completely trust.</strong></p>
+          <button class="danger" id="shareReveal" type="button">
+            I understand — reveal the link
+          </button>
+        </div>
+
+        <!-- Link + QR, hidden behind the warning for rw shares. -->
+        <div id="shareRevealable">
+          <div class="qr" id="shareQr"></div>
+          <div class="shareurl" id="shareUrl"></div>
+          <div class="srow">
+            <button class="primary" id="shareCopy" type="button">Copy link</button>
+            <button id="shareClose" type="button">Close</button>
+          </div>
+          <div class="srow">
+            <button class="danger" id="shareRevoke" type="button">Revoke</button>
+          </div>
+          <p class="note" id="shareNote">
+            View-only: viewers see this agent's terminal (which may include secrets) but cannot
+            type, stop, or restart it. The link expires automatically and stops working when
+            revoked.
+          </p>
+        </div>
+        <div class="srow" id="shareWarnClose" hidden>
+          <button id="shareCloseAlt" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+
     <!-- Cmd/Ctrl+K omnibox: search agents by title (instant) then output (tail),
          or spawn a new agent in the highlighted agent's cwd with the typed prompt. -->
     <div class="omni" id="omni" style="display: none">
@@ -1540,9 +1928,13 @@
         hasIdent,
         deviceCount,
         layeredRows,
+        foldSummaries,
         sortEntries,
         SORT_MODES,
         taskLabel,
+        badgesFor,
+        advanceStdinFlashes,
+        focusSummary,
         hashHue,
         selFromBottom,
         parseSel,
@@ -1551,24 +1943,24 @@
         docTitle,
         omniScore,
       } from "./console-logic.js";
-      import {
-        MARKER as E2E_MARKER,
-        ALLOW_LEGACY_PLAINTEXT,
-        FLAG_CONFIRM,
-        CONFIRM_TIMEOUT_MS,
-        deriveAuthToken,
-        deriveDirKeys,
-        computeTranscriptHash,
-        seal as e2eSeal,
-        open as e2eOpen,
-        packEnvelope,
-        unpackEnvelope,
-        parseSecret,
-        randomHex,
-      } from "./e2e.js";
+      // The ay-share (rtc) remote-room transport lives in a shared module so the
+      // /r/ rgui viewer reuses the exact same WebRTC + e2e wire (rtc.js imports
+      // e2e.js internally). The console only needs the client class.
+      import { RTCClient } from "./rtc.js";
 
       let entries = [];
       let sel = null; // selected agent's composite key (room#pid)
+      // Collaborative presence, fleet-wide: focusByKey maps an agent's _key ->
+      // how many OTHER human peers are watching it (yellow bars + per-row chip);
+      // peerTotal is the distinct-peer count for the header badge. stdinSeen +
+      // flashUntil drive the stdin pulse: stdinSeen remembers each agent's last
+      // last_stdin_at so we can spot a bump, flashUntil holds the deadline the
+      // row keeps pulsing to. See advanceStdinFlashes/focusSummary (console-logic).
+      let focusByKey = new Map();
+      let peerTotal = 0;
+      const stdinSeen = new Map();
+      const flashUntil = new Map();
+      const STDIN_FLASH_MS = 1200;
       let es = null; // live-tail subscription closer
       let term = null; // xterm.js Terminal rendering the raw PTY stream
       let fit = null;
@@ -1644,8 +2036,17 @@
       });
 
       const $ = (id) => document.getElementById(id);
+      // Escape for HTML — including BOTH quote styles, because esc() is
+      // interpolated into double-quoted attribute values (title="${esc(...)}",
+      // data-key="${esc(...)}", …), not just element text. A remote host controls
+      // agent metadata (OSC terminal title, prompt, cwd) that lands in those
+      // attributes; without escaping " an agent titled `" onfocus=…` breaks out of
+      // the attribute and runs script at this origin (theft of saved room tokens).
       const esc = (s) =>
-        String(s ?? "").replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
+        String(s ?? "").replace(
+          /[&<>"']/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+        );
 
       // ---- transport ---------------------------------------------------------
       // Local: same-origin fetch + EventSource (via the ay-serve proxy).
@@ -1653,291 +2054,131 @@
       // `ay serve --share` — established through the signaling server. Same call
       // sites, two wires. Remote is selected by a URL hash: #room:token[@sighost].
       const SIG_DEFAULT = "s.agent-yes.com"; // signaling host (override in the hash with @host)
-      const SUB = "ay-signal-1";
 
-      // Tunnels request/response + streaming over one DataChannel. Mirrors the
-      // envelope in lab/ui/share-host.ts: {t:"req"|"abort"} out, {t:"res"|"data"|"end"} in.
-      class RTCClient {
-        constructor(host, room, token) {
-          let resolveKeys;
-          const keysReady = new Promise((r) => (resolveKeys = r));
-          Object.assign(this, {
-            host,
-            room,
-            token,
-            dc: null,
-            calls: new Map(),
-            streams: new Map(),
-            onstate: () => {},
-            // e2e (v2) per-connection state
-            _s: null,
-            _v2: false,
-            _send: { sendCtr: 0n },
-            _recvState: { lastSeen: -1n },
-            _tHash: null,
-            _keyH2C: null, // host->client: client decrypts with this
-            _keyC2H: null, // client->host: client encrypts with this
-            _keysReady: keysReady,
-            _resolveKeys: resolveKeys,
-            _myNonce: randomHex(16),
-            _confirmedIn: false,
-            _confirmedOut: false,
-            _confirmed: false,
-            _confirmTimer: null,
-            _recvChain: Promise.resolve(), // serialize decrypts (ordered replay check)
-            _sendChain: Promise.resolve(), // serialize seals (wire order == counter order)
-          });
-        }
-        async connect() {
-          // Parse the secret marker (fail-closed on malformed) and split into the
-          // server-visible authToken vs the end-to-end keys the server never sees.
-          const { s, v2 } = parseSecret(this.token);
-          this._s = s;
-          this._v2 = v2;
-          if (!v2 && !ALLOW_LEGACY_PLAINTEXT)
-            throw new Error(
-              "this link uses the old unencrypted protocol — ask the host to upgrade",
-            );
-          const authToken = v2 ? await deriveAuthToken(s, this.room, this.host) : this.token;
-          return new Promise((resolve, reject) => {
-            const ws = new WebSocket(`wss://${this.host}/${this.room}`, [SUB]);
-            this.ws = ws; // kept so close() can drop the signaling registration too
-            let pc,
-              settled = false;
-            const fail = (e) => {
-              if (!settled) {
-                settled = true;
-                reject(e);
-              }
-            };
-            // Resolve ONLY after the mutual key-confirmation completes (see _dcRecv),
-            // never on bare dc.onopen — there must be no "connected but unverified" window.
-            const done = () => {
-              if (!settled) {
-                settled = true;
-                this.onstate("open");
-                resolve();
-              }
-            };
-            ws.onopen = () =>
-              ws.send(JSON.stringify({ type: "hello", role: "client", v: 2, token: authToken }));
-            ws.onmessage = async (ev) => {
-              const m = JSON.parse(ev.data);
-              if (m.type === "welcome") {
-                if (this._v2 && m.v !== 2)
-                  return fail(new Error("host is running an old agent-yes — ask it to upgrade"));
-                // pc is created on the offer below so it can use the host-supplied
-                // iceServers (incl. short-lived TURN creds for relaying behind NAT).
-              } else if (m.type === "offer") {
-                if (!pc) {
-                  pc = new RTCPeerConnection({
-                    iceServers:
-                      m.iceServers && m.iceServers.length
-                        ? m.iceServers
-                        : [{ urls: "stun:stun.l.google.com:19302" }],
-                  });
-                  this.pc = pc;
-                  pc.onicecandidate = (e) => {
-                    if (e.candidate)
-                      ws.send(JSON.stringify({ type: "candidate", candidate: e.candidate }));
-                  };
-                  pc.onconnectionstatechange = () => this.onstate(pc.connectionState);
-                  pc.ondatachannel = (e) => {
-                    this.dc = e.channel;
-                    this.dc.binaryType = "arraybuffer";
-                    this.dc.onopen = async () => {
-                      try {
-                        await this._keysReady;
-                        // Open the bidirectional confirmation handshake.
-                        this._dcSend(FLAG_CONFIRM, { t: "confirm", nonce: this._myNonce });
-                        this._confirmTimer = setTimeout(() => {
-                          if (!this._confirmed) fail(new Error("key confirmation timed out"));
-                        }, CONFIRM_TIMEOUT_MS);
-                      } catch (err) {
-                        fail(err);
-                      }
-                    };
-                    this.dc.onmessage = (ev2) => {
-                      this._recvChain = this._recvChain
-                        .then(() => this._dcRecv(ev2.data, done))
-                        .catch(() => {});
-                    };
-                    this.dc.onclose = () => this.onstate("closed");
-                  };
-                }
-                await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
-                await pc.setLocalDescription(await pc.createAnswer());
-                ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription.sdp }));
-                // Derive per-connection keys now both descriptions are stable, before
-                // the DataChannel opens. Client: remote=host offer, local=our answer.
-                try {
-                  this._tHash = await computeTranscriptHash(
-                    pc.remoteDescription.sdp,
-                    pc.localDescription.sdp,
-                  );
-                  const { keyH2C, keyC2H } = await deriveDirKeys(this._s, this._tHash);
-                  this._keyH2C = keyH2C;
-                  this._keyC2H = keyC2H;
-                  this._resolveKeys();
-                } catch (err) {
-                  fail(err);
-                }
-              } else if (m.type === "candidate") {
-                if (pc) await pc.addIceCandidate(m.candidate).catch(() => {});
-              }
-            };
-            ws.onerror = () => fail(new Error("signaling error"));
-            ws.onclose = () => fail(new Error("signaling closed"));
-            setTimeout(() => fail(new Error("connect timeout")), 8000);
-          });
-        }
-        // Seal an envelope and send it, serialized so wire order == counter order.
-        _dcSend(flags, obj) {
-          this._sendChain = this._sendChain.then(async () => {
-            if (!this.dc || this.dc.readyState !== "open" || !this._keyC2H || !this._tHash) return;
-            let frame;
-            try {
-              frame = await e2eSeal(
-                this._keyC2H,
-                this._send,
-                flags,
-                this._tHash,
-                packEnvelope(obj),
-              );
-            } catch {
-              this.close();
-              return;
-            }
-            try {
-              this.dc.send(frame);
-            } catch {}
-          });
-          return this._sendChain;
-        }
-        // Decrypt + route one frame. Fail-closed: any failure, replay, string
-        // frame, or pre-confirmation app frame closes the connection.
-        async _dcRecv(data, done) {
-          if (!this.dc) return;
-          if (typeof data === "string" || !this._keyH2C || !this._tHash) return this.close();
-          let env;
-          try {
-            const { plaintext } = await e2eOpen(this._keyH2C, data, this._tHash, this._recvState);
-            env = unpackEnvelope(plaintext);
-          } catch {
-            return this.close();
-          }
-          if (!this._confirmed) {
-            if (!env || env.t !== "confirm") return this.close();
-            if (typeof env.nonce === "string" && !this._confirmedOut) {
-              // Send (and flush) our echo BEFORE marking confirmed-out, so connect()
-              // can't resolve and let a req() race ahead of the echo on the wire.
-              await this._dcSend(FLAG_CONFIRM, {
-                t: "confirm",
-                nonce: this._myNonce,
-                echo: env.nonce,
-              });
-              this._confirmedOut = true;
-            }
-            if (env.echo && env.echo === this._myNonce) this._confirmedIn = true;
-            if (this._confirmedIn && this._confirmedOut) {
-              this._confirmed = true;
-              if (this._confirmTimer) clearTimeout(this._confirmTimer);
-              done(); // connect() resolves only now — the channel is mutually verified
-            }
-            return;
-          }
-          if (!env || env.t === "confirm") return; // stray confirm after handshake
-          this._recv(env);
-        }
-        _recv(r) {
-          // Frames are authenticated + replay-checked before they reach here, so an
-          // id we don't know is a late/cancelled response from the legitimate host,
-          // not an attack — drop it rather than tear down the channel.
-          const call = this.calls.get(r.id),
-            stream = this.streams.get(r.id);
-          if (r.t === "res") {
-            if (call) call.status = r.status;
-          } else if (r.t === "data") {
-            if (call) {
-              call.body += r.chunk;
-              call.dataCount = (call.dataCount || 0) + 1;
-            }
-            if (stream) stream(r.chunk);
-          } else if (r.t === "end") {
-            if (call) {
-              clearTimeout(call.timer);
-              this.calls.delete(r.id);
-              // end.seq is the count of data frames the host sent; a mismatch means
-              // the stream was truncated, so don't resolve it as complete.
-              if (typeof r.seq === "number" && r.seq !== (call.dataCount || 0))
-                call.reject(new Error("truncated response"));
-              else if (r.error) call.reject(new Error(r.error));
-              else call.resolve({ status: call.status, text: call.body });
-            }
-          }
-        }
-        req(method, path, body) {
-          const id = randomHex(16);
-          return new Promise((resolve, reject) => {
-            // Without a deadline a request over a silently-dead DataChannel (host
-            // gone, ICE not yet timed out) never settles, so the caller — and the
-            // poll loop — hangs forever and the room never reconnects. Reject on a
-            // timeout so listSource sees the failure and triggers backoff.
-            const timer = setTimeout(() => {
-              if (this.calls.delete(id)) reject(new Error("request timed out"));
-            }, 12000);
-            this.calls.set(id, { status: 0, body: "", dataCount: 0, resolve, reject, timer });
-            this._dcSend(0, { t: "req", id, method, path, body }).catch((e) => {
-              clearTimeout(timer);
-              this.calls.delete(id);
-              reject(e); // channel already torn down
-            });
-          });
-        }
-        subscribe(path, onRaw) {
-          const id = randomHex(16);
-          this.streams.set(id, onRaw);
-          this._dcSend(0, { t: "req", id, method: "GET", path });
-          return () => {
-            this.streams.delete(id);
-            this._dcSend(0, { t: "abort", id });
-          };
-        }
-        // Tear down BOTH wires. Closing only the pc leaves the signaling socket
-        // open and this client registered in the room, so each reconnect would
-        // leak another peer on the host. onstate is detached by the caller first.
-        close() {
-          if (this._confirmTimer) clearTimeout(this._confirmTimer);
-          try {
-            this.ws?.close();
-          } catch {}
-          try {
-            this.pc?.close();
-          } catch {}
-          this.dc = null;
-          // Settle anything still in flight now, rather than letting each req's
-          // 12s timeout fire long after the client is gone.
-          for (const c of this.calls.values()) {
-            clearTimeout(c.timer);
-            c.reject(new Error("connection closed"));
-          }
-          this.calls.clear();
-          this.streams.clear();
-        }
-      }
+      // The RTCClient (ay-share rtc wire) now lives in the shared ./rtc.js module
+      // — imported above and reused by the /r/ rgui viewer. SUB (subprotocol) and
+      // the client class moved there; SIG_DEFAULT stays here (used by saveRoom /
+      // addRoomSource / the header pill below).
 
       // ---- codehost rooms: a THIRD wire -----------------------------------
       // A codehost room can hold several machines: every `codehost serve`
       // daemon advertises its live agents (PeerMeta.agents) and proxies the
       // local ay-serve API over its WebRTC tunnel at /__codehost/agent-yes/*.
-      // This wire aggregates all hosts' agents into one list, then routes each
-      // per-agent call to the host that owns the pid. Known v1 limitation:
-      // pids may collide across hosts (last listed wins); the host: tag keeps
-      // them tellable-apart visually.
+      //
+      // Every machine in the room is its own fleet source, id "<room>/<peerId>",
+      // sharing the room's one signaling/WebRTC connection. A source is therefore
+      // always exactly one machine — the invariant the rest of the console already
+      // assumes (`local` and each ay-share room are one machine too). v1 instead
+      // hid N machines behind one transport and picked a peer per request, which
+      // silently pinned `/api/spawn` and `/api/ls/subscribe` to whichever host was
+      // listed first, and let equal pids on two machines overwrite each other.
       const CH_API = "/__codehost/agent-yes";
-      class CodehostClient {
-        constructor(token) {
-          Object.assign(this, { token, room: null, byPid: new Map(), onstate: () => {} });
+
+      // Machines that can answer for agents: anything advertising agents, plus
+      // root daemons (their ay serve may know agents the broadcast hasn't picked
+      // up yet, and an idle root is still a valid spawn target).
+      const isHostPeer = (p) =>
+        !!p?.meta && ((p.meta.agents || []).length > 0 || p.meta.kind === "root");
+
+      // One codehost machine behind the standard transport shape. Every call is
+      // pinned to `peerId`, so a source built on this tx can never leak a request
+      // to a sibling machine in the same room. Both the room handle and the peer's
+      // meta are read at call time, never captured: the handle isn't assigned yet
+      // if the first peer broadcast lands during joinRoom, and the meta goes stale
+      // on every rebroadcast.
+      function chPeerTx(chRoom, peerId, getMeta) {
+        const req = (method, path, init) => chRoom.room.fetch(peerId, method, CH_API + path, init);
+        const ok = (res) => res.status >= 200 && res.status < 300;
+        // The daemon is in the room but its `ay serve` may be down. It still
+        // advertises the agents it knows, so degrade to that list rather than
+        // dropping the machine out of the fleet entirely.
+        const advertised = () =>
+          (getMeta()?.agents || []).map((a) => ({
+            pid: a.pid,
+            cli: a.tool,
+            title: a.title || null,
+            prompt: a.title || null,
+            cwd: a.cwd,
+            status: a.state,
+            started_at: a.startedAt,
+          }));
+        return {
+          async fetchJSON(path) {
+            let res;
+            try {
+              res = await req("GET", path);
+              if (!ok(res)) throw new Error("HTTP " + res.status);
+            } catch (err) {
+              if (path.startsWith("/api/ls")) return advertised();
+              throw err;
+            }
+            return res.json();
+          },
+          async fetchText(path) {
+            const res = await req("GET", path);
+            if (!ok(res)) throw new Error("HTTP " + res.status);
+            return res.text();
+          },
+          async post(path, bodyObj) {
+            const res = await req("POST", path, {
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(bodyObj),
+            });
+            return { ok: ok(res), text: await res.text() };
+          },
+          async del(path) {
+            const res = await req("DELETE", path);
+            return { ok: ok(res), text: await res.text() };
+          },
+          subscribe(path, onText, onOpen, onError) {
+            let cancelled = false;
+            let reader = null;
+            (async () => {
+              try {
+                const res = await req("GET", path, { headers: { accept: "text/event-stream" } });
+                if (!ok(res) || !res.body) throw new Error("HTTP " + res.status);
+                onOpen && onOpen();
+                reader = res.body.getReader();
+                const dec = new TextDecoder();
+                let buf = "";
+                for (;;) {
+                  const { done, value } = await reader.read();
+                  if (done || cancelled) break;
+                  buf += dec.decode(value, { stream: true });
+                  let i;
+                  while ((i = buf.indexOf("\n\n")) >= 0) {
+                    const evt = buf.slice(0, i);
+                    buf = buf.slice(i + 2);
+                    for (const line of evt.split("\n"))
+                      if (line.startsWith("data:")) {
+                        try {
+                          onText(JSON.parse(line.slice(5).trim()));
+                        } catch {}
+                      }
+                  }
+                }
+                if (!cancelled) onError && onError();
+              } catch {
+                if (!cancelled) onError && onError();
+              }
+            })();
+            return () => {
+              cancelled = true;
+              try {
+                reader?.cancel();
+              } catch {}
+            };
+          },
+        };
+      }
+
+      // A joined codehost room. It owns the connection and keeps the fleet in sync
+      // with the room's server peers: a source appears when a machine joins and is
+      // dropped when it leaves. The room itself is never a source — only machines are.
+      class CodehostRoom {
+        constructor(name, token) {
+          Object.assign(this, { name, token, room: null, live: false, tried: false });
+          this.peers = new Map(); // peerId -> latest peer broadcast (meta included)
         }
         async connect() {
           if (!window.__codehost)
@@ -1947,10 +2188,24 @@
           this.room = window.__codehost.joinRoom({
             token: this.token,
             onStatus: (open) => {
-              if (!open) this.onstate("closed");
+              if (this.orphaned()) return;
+              this.live = open;
+              // Keep the machines listed while the socket retries — room-client
+              // self-heals, and dropping the rows would flicker the whole tree.
+              // Drop their streams though: a stream that never errors would leave
+              // `streaming` set, the reconcile poll would skip the machine, and it
+              // would sit offline forever. syncPeers re-arms them on reconnect.
+              if (!open)
+                for (const s of roomSources(this.name)) {
+                  s.live = false;
+                  unsubscribeSource(s);
+                }
+              renderRoomsIfOpen();
             },
-            onPeers: () => {
-              this.onstate("open");
+            onPeers: (peers) => {
+              if (this.orphaned()) return;
+              this.live = true;
+              this.syncPeers(peers);
               firstPeers();
             },
           });
@@ -1961,122 +2216,60 @@
         close() {
           this.room?.close();
         }
-        hosts() {
-          // Machines that can answer for agents: anything advertising agents,
-          // plus root daemons (their ay serve may know agents the broadcast
-          // hasn't picked up yet).
-          return (this.room?.peers || []).filter(
-            (p) => p.meta && ((p.meta.agents || []).length || p.meta.kind === "root"),
-          );
+        // True once the room has been forgotten (removeRoom drops it from chRooms)
+        // or superseded by a re-add under the same name. joinRoom's callbacks can
+        // fire a queued peer broadcast AFTER that, and without this guard syncPeers
+        // would `sources.set` the machines back for a room the user just forgot.
+        orphaned() {
+          return chRooms.get(this.name) !== this;
         }
-        anyHost() {
-          const h = this.hosts();
-          return h.length ? h[0].peerId : null;
-        }
-        peerFor(path) {
-          const m = /^\/api\/(?:tail|size|resize|read|status)\/([^/?]+)/.exec(path);
-          const kw = m ? decodeURIComponent(m[1]) : null;
-          return (kw && this.byPid.get(kw)) || null;
-        }
-        async ls(path) {
-          const hosts = this.hosts();
-          const lists = await Promise.all(
-            hosts.map(async (p) => {
-              try {
-                const res = await this.room.fetch(p.peerId, "GET", CH_API + path);
-                if (!res.ok) throw new Error("HTTP " + res.status);
-                return (await res.json()).map((e) => ({ ...e, _host: p.meta?.host }));
-              } catch {
-                // ay serve down on that host — fall back to the daemon-advertised list.
-                return (p.meta?.agents || []).map((a) => ({
-                  pid: a.pid,
-                  cli: a.tool,
-                  title: a.title || null,
-                  prompt: a.title || null,
-                  cwd: a.cwd,
-                  status: a.state,
-                  started_at: a.startedAt,
-                  _host: p.meta?.host,
-                }));
-              }
-            }),
-          );
-          const byPid = new Map();
-          const merged = [];
-          lists.forEach((arr, i) => {
-            for (const e of arr) {
-              byPid.set(String(e.pid), hosts[i].peerId);
-              merged.push(e);
+        // Reconcile the fleet against the room's current server peers. Called on
+        // every peer broadcast — including the frequent ones that only carry new
+        // agent meta — so it must stay cheap when the peer SET hasn't changed.
+        syncPeers(peers) {
+          if (this.orphaned()) return;
+          const hosts = (peers || []).filter(isHostPeer);
+          const seen = new Set();
+          let changed = false;
+          for (const p of hosts) {
+            seen.add(p.peerId);
+            this.peers.set(p.peerId, p);
+            const id = this.name + "/" + p.peerId;
+            let s = sources.get(id);
+            if (!s) {
+              s = {
+                id,
+                room: this.name,
+                peerId: p.peerId,
+                host: CH_HOST,
+                kind: "ch",
+                chRoom: this,
+                tx: chPeerTx(this, p.peerId, () => this.peers.get(p.peerId)?.meta),
+                client: null,
+                live: false,
+                tried: false,
+                devices: new Set(),
+                serverCount: 0,
+              };
+              sources.set(id, s);
+              changed = true;
             }
-          });
-          this.byPid = byPid;
-          return merged;
-        }
-        async fetchJSON(path) {
-          if (path.startsWith("/api/ls")) return this.ls(path);
-          const peer = this.peerFor(path) || this.anyHost();
-          if (!peer) throw new Error("no codehost peer");
-          const res = await this.room.fetch(peer, "GET", CH_API + path);
-          if (!res.ok) throw new Error("HTTP " + res.status);
-          return res.json();
-        }
-        async post(path, bodyObj) {
-          const kw = bodyObj && bodyObj.keyword != null ? String(bodyObj.keyword) : null;
-          const peer = (kw && this.byPid.get(kw)) || this.peerFor(path) || this.anyHost();
-          if (!peer) return { ok: false, text: "no codehost peer in the room" };
-          const res = await this.room.fetch(peer, "POST", CH_API + path, {
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(bodyObj),
-          });
-          return { ok: res.status >= 200 && res.status < 300, text: await res.text() };
-        }
-        subscribe(path, onText, onOpen, onError) {
-          let cancelled = false;
-          let reader = null;
-          (async () => {
-            const peer = this.peerFor(path) || this.anyHost();
-            if (!peer) {
-              onError && onError();
-              return;
-            }
-            try {
-              const res = await this.room.fetch(peer, "GET", CH_API + path, {
-                headers: { accept: "text/event-stream" },
-              });
-              if (!res.ok || !res.body) throw new Error("HTTP " + res.status);
-              onOpen && onOpen();
-              reader = res.body.getReader();
-              const dec = new TextDecoder();
-              let buf = "";
-              for (;;) {
-                const { done, value } = await reader.read();
-                if (done || cancelled) break;
-                buf += dec.decode(value, { stream: true });
-                let i;
-                while ((i = buf.indexOf("\n\n")) >= 0) {
-                  const evt = buf.slice(0, i);
-                  buf = buf.slice(i + 2);
-                  for (const line of evt.split("\n"))
-                    if (line.startsWith("data:")) {
-                      try {
-                        onText(JSON.parse(line.slice(5).trim()));
-                      } catch {}
-                    }
-                }
-              }
-              if (!cancelled) onError && onError();
-            } catch {
-              if (!cancelled) onError && onError();
-            }
-          })();
-          return () => {
-            cancelled = true;
-            try {
-              reader?.cancel();
-            } catch {}
-          };
+            s.deviceLabel = p.meta?.host || "";
+            subscribeSource(s); // no-op while already streaming; re-arms after a drop
+          }
+          for (const peerId of [...this.peers.keys()]) {
+            if (seen.has(peerId)) continue;
+            this.peers.delete(peerId);
+            removeSource(this.name + "/" + peerId);
+            changed = true;
+          }
+          renderRoomsIfOpen();
+          if (changed)
+            loadList(); // poll the newcomers until their stream opens
+          else mergeRender();
         }
       }
+      const chRooms = new Map(); // room name -> CodehostRoom
 
       // `ay serve --http` serves this page itself and prints a #k=<token> link;
       // boot() stores the token and local /api calls carry it as ?token= (query,
@@ -2091,7 +2284,7 @@
 
       // ---- transports: a uniform { fetchJSON, post, subscribe } over each wire ----
       // local (same-origin ay serve), an ay-share RTCClient, or a codehost room.
-      // CodehostClient already exposes this shape, so it's used as a tx directly.
+      // A codehost room builds one of these per machine in it (see chPeerTx).
       const localTx = {
         async fetchJSON(path) {
           return (await fetch(withTok(path))).json();
@@ -2105,6 +2298,10 @@
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(bodyObj),
           });
+          return { ok: r.ok, text: await r.text() };
+        },
+        async del(path) {
+          const r = await fetch(withTok(path), { method: "DELETE" });
           return { ok: r.ok, text: await r.text() };
         },
         subscribe(path, onText, onOpen, onError) {
@@ -2125,6 +2322,10 @@
           },
           async post(path, bodyObj) {
             const r = await rtc.req("POST", path, JSON.stringify(bodyObj));
+            return { ok: r.status >= 200 && r.status < 300, text: r.text };
+          },
+          async del(path) {
+            const r = await rtc.req("DELETE", path);
             return { ok: r.status >= 200 && r.status < 300, text: r.text };
           },
           subscribe(path, onText, onOpen, onError) {
@@ -2149,13 +2350,47 @@
       }
 
       // ---- fleet: local + every saved room, all connected at once ------------
-      // Each source contributes its agents to one merged list (tagged with the
-      // owning source on `_room`/`_key`); per-agent ops route back via srcFor/txFor.
+      // A source is ONE machine. Each contributes its agents to one merged list,
+      // tagged with the owning source on `_src` (routing: srcFor/txFor) and with
+      // the room it belongs to on `_room` (display: the tree's room grouping).
+      // Those differ only for codehost rooms, where one room holds many machines.
       // Live counts in the rooms panel come from each source's serverCount/devices.
       const LOCAL = "local";
-      const sources = new Map(); // id -> { id, host, kind, tx, client, live, devices, serverCount }
-      const srcFor = (e) => (e && sources.get(e._room)) || sources.get(LOCAL) || null;
+      const sources = new Map(); // id -> { id, room, host, kind, tx, client, live, devices, serverCount }
+      const srcFor = (e) => (e && sources.get(e._src)) || sources.get(LOCAL) || null;
       const txFor = (e) => srcFor(e)?.tx || localTx;
+      // Every machine belonging to a room (for an ay-share room, the room itself).
+      const roomSources = (name) => [...sources.values()].filter((s) => (s.room || s.id) === name);
+      const roomLive = (name) =>
+        chRooms.has(name) ? chRooms.get(name).live : !!sources.get(name)?.live;
+      // How a machine names itself in a picker: "room · user@host", or just the
+      // room when its device label hasn't arrived yet.
+      const sourceLabel = (s) => {
+        if (!s) return "";
+        if (s.id === LOCAL) return "local";
+        const room = s.room || s.id;
+        return s.deviceLabel ? room + " · " + s.deviceLabel : room;
+      };
+      // True when the agent lives in a view-only share room (the host advertises
+      // this via /api/whoami → share.readonly and 403s every write regardless).
+      const isReadonlyEnt = (e) => !!srcFor(e)?.readonly;
+      // Wrap a source tx so every write (POST) is refused client-side on a
+      // read-only share — reads (fetchJSON/fetchText/subscribe) pass through. The
+      // host is the real boundary; this just stops the UI from firing doomed
+      // writes (send / resize / presence / kill / restart / share).
+      function readonlyTx(tx) {
+        if (!tx || tx._ro) return tx;
+        return {
+          ...tx,
+          _ro: true,
+          async post() {
+            return { ok: false, text: "read-only share" };
+          },
+          async del() {
+            return { ok: false, text: "read-only share" };
+          },
+        };
+      }
 
       // ---- connection-path classification (header [local/lan/wan/relay] pill) ----
       // Tells the user, at a glance, whether the terminal they're watching rides the
@@ -2241,33 +2476,23 @@
           return null;
         }
       }
-      // Resolve the live RTCPeerConnection that carries a SPECIFIC agent. A codehost
-      // room holds one peer per host (room.rtcs keyed by peerId); byPid maps the
-      // agent's pid to its peerId, so each agent resolves to ITS host's connection —
+      // Resolve the live RTCPeerConnection that carries a source. A codehost room
+      // holds one peer per machine (room.rtcs keyed by peerId) and a source pins
+      // exactly one of them, so each agent resolves to ITS machine's connection —
       // a VPS agent reads wan while a tak.local agent in the same room reads lan.
-      function pcForAgent(s, e) {
+      function pcForAgent(s) {
         if (!s) return null;
         if (s.kind === "rtc") return s.client?.pc || null; // share room: one host
-        if (s.kind === "ch") {
-          const peerId = s.client?.byPid?.get(String(e?.pid));
-          return (peerId && s.client?.room?.rtcs?.get(peerId)?.pc) || null;
-        }
+        if (s.kind === "ch") return s.chRoom?.room?.rtcs?.get(s.peerId)?.pc || null;
         return null; // local ay-serve has no peer connection
       }
       // Two cache views, both filled from one classification pass:
-      //  - connKinds keyed by the true PEER (room + peerId) drives the header badge,
-      //    so two machines that happen to share a hostname never collide.
+      //  - connKinds keyed by the source, i.e. the true PEER, drives the header
+      //    badge, so two machines that share a hostname never collide.
       //  - hostKinds keyed by (room, host) drives the peer-group header tags, which
       //    only ever render when hosts are already distinct.
       const hostKeyOf = (e) => (e?._room || "") + " " + (e?._host || "");
-      function peerKeyOf(s, e) {
-        if (!s || s.id === LOCAL || s.kind == null) return LOCAL;
-        if (s.kind === "ch") {
-          const peerId = s.client?.byPid?.get(String(e?.pid));
-          return s.id + " " + (peerId || e?._host || "");
-        }
-        return s.id; // rtc share: one peer per room
-      }
+      const peerKeyOf = (s) => (!s || s.id === LOCAL || s.kind == null ? LOCAL : s.id);
       const connKinds = new Map(); // peerKey -> "local" | "lan" | "wan" | "relay"
       const hostKinds = new Map(); // hostKey -> same (peer-header tags)
       const connInfo = new Map(); // peerKey -> full detail for the hover tooltip
@@ -2305,7 +2530,7 @@
         // Probe each distinct peer once (not once per agent), keyed by peerKey.
         const reps = new Map(); // peerKey -> a representative entry for that peer
         for (const e of entries) {
-          const k = peerKeyOf(srcFor(e), e);
+          const k = peerKeyOf(srcFor(e));
           if (!reps.has(k)) reps.set(k, e);
         }
         connKinds.clear();
@@ -2324,7 +2549,7 @@
               }
               return;
             }
-            const info = await inspectConn(pcForAgent(s, e));
+            const info = await inspectConn(pcForAgent(s));
             if (info) {
               connKinds.set(key, info.kind);
               connInfo.set(key, { ...info, signaling: signalingOf(s) });
@@ -2334,7 +2559,7 @@
         // Project peer kinds onto (room,host) keys for the tree's peer headers.
         hostKinds.clear();
         for (const e of entries) {
-          const kind = connKinds.get(peerKeyOf(srcFor(e), e));
+          const kind = connKinds.get(peerKeyOf(srcFor(e)));
           if (kind) hostKinds.set(hostKeyOf(e), kind);
         }
         paintHeaderBadge();
@@ -2357,7 +2582,7 @@
         const badge = $("ctype");
         if (!badge) return;
         const e = sel ? entries.find((x) => x._key === sel) : null;
-        const key = e ? peerKeyOf(srcFor(e), e) : null;
+        const key = e ? peerKeyOf(srcFor(e)) : null;
         const kind = key ? connKinds.get(key) : null;
         if (!kind) {
           badge.hidden = true;
@@ -2672,10 +2897,65 @@
         }
         renderPeerSelections();
       }
+      // Fleet-wide presence: unlike pollPresence (only the SELECTED agent's host,
+      // for the terminal overlay), this reads EVERY live source's blackboard so
+      // the left panel can colour any agent a peer is watching. Each viewer
+      // self-reports the pid it's on; we map that back to the source's composite
+      // _key. Best-effort — a source that 404s (older host) contributes nothing.
+      async function pollFleetPresence() {
+        const recs = [];
+        await Promise.all(
+          [...sources.values()].map(async (s) => {
+            if (!s.tx || !s.live) return;
+            let all;
+            try {
+              all = await s.tx.fetchJSON("/api/presence");
+            } catch {
+              return;
+            }
+            if (!Array.isArray(all)) return;
+            const keyOfPid = new Map((s.agents || []).map((e) => [String(e.pid), e._key]));
+            for (const v of all) {
+              if (!v || v.viewer === myViewerId) continue;
+              const key = keyOfPid.get(String(v.agent));
+              // Prefix the viewer id with its source so the same id on two hosts
+              // still counts as two distinct people in the fleet total.
+              if (key) recs.push({ key, viewer: s.id + ":" + v.viewer });
+            }
+          }),
+        );
+        const sum = focusSummary(recs);
+        focusByKey = sum.byKey;
+        peerTotal = sum.total;
+        paintPeersBadge();
+        renderList();
+      }
+      // "N peers" badge beside the agent counter. Yellow when a peer shares the
+      // agent you have open ("same agent"); its tooltip breaks the count down by
+      // agent so you can see who's where. Hidden when you're the only one here.
+      function paintPeersBadge() {
+        const el = $("peers");
+        if (!el) return;
+        if (!peerTotal) {
+          el.hidden = true;
+          el.removeAttribute("title");
+          return;
+        }
+        el.hidden = false;
+        el.textContent = `👤 ${peerTotal} peer${peerTotal === 1 ? "" : "s"}`;
+        el.classList.toggle("here", !!(sel && focusByKey.get(sel)));
+        const lines = [...focusByKey.entries()].map(([k, n]) => {
+          const e = entries.find((x) => x._key === k);
+          const name = e ? e.title || cliLabel(e) || ident(e) || `pid ${e.pid}` : k;
+          return `  ${n} on ${name}`;
+        });
+        el.title = "peers watching agents in this fleet:\n" + lines.join("\n");
+      }
       // 3s heartbeat (< the host's 12s TTL): refresh our presence + read others',
       // and follow the canonical grid size (resize+scale, never reflow) so all
       // viewers stay on one shared canvas and selections line up.
       setInterval(() => {
+        pollFleetPresence(); // fleet-wide peer focus (independent of what's selected)
         if (!sel) return;
         sendPresence();
         pollPresence();
@@ -2686,6 +2966,23 @@
             .then(followAgentSize)
             .catch(() => {});
       }, 3000);
+      // Fast pulse loop: drive the stdin flash on the STABLE list DOM (toggle a
+      // class, no re-render) so a pulse begins/ends promptly regardless of the
+      // list's own render cadence. Cheap — a no-op until something is flashing.
+      setInterval(() => {
+        if (!flashUntil.size) return;
+        const now = Date.now();
+        for (const [k, until] of [...flashUntil.entries()]) if (until <= now) flashUntil.delete(k);
+        const listEl = $("list");
+        if (!listEl) return;
+        for (const el of listEl.querySelectorAll(".row[data-key]")) {
+          const key = el.getAttribute("data-key");
+          // Mirror rowFlags: never pulse the agent you have open (you see its input
+          // live; also stops your own terminal's protocol replies blinking the row).
+          const on = key !== sel && (flashUntil.get(key) || 0) > now;
+          el.classList.toggle("stdinflash", on);
+        }
+      }, 200);
 
       // Peer-selection overlay. The coordinate math (parseSel / selSegments /
       // hashHue) lives in console-logic.js (unit-tested); here we just measure the
@@ -2804,8 +3101,10 @@
       //   Force — escalation a stuck agent can't ignore: a real SIGKILL of its process
       //           GROUP, server-side via POST /api/kill. Use when /exit does nothing.
       const GRACEFUL_EXIT = { claude: "/exit", codex: "/exit", gemini: "/quit" };
-      async function stopAgent(force) {
-        const e = sel ? entries.find((x) => x._key === sel) : null;
+      // `ent` targets a specific agent (the Cmd+K /kill · /restart commands pass the
+      // omnibox anchor); the ⋯-menu buttons omit it and act on the selected agent.
+      async function stopAgent(force, ent) {
+        const e = ent || (sel ? entries.find((x) => x._key === sel) : null);
         if (!e) return;
         const who = `pid ${e.pid} ${cliLabel(e) || ident(e) || ""}`.trim();
         const tx = txFor(e),
@@ -2828,8 +3127,8 @@
       // Restart — stop (if live) + relaunch resuming the session, server-side via
       // POST /api/restart (the `ay restart` flow). The server runs it detached, so
       // it's decoupled from this agent's lifecycle — no prompt typed into the agent.
-      async function restartAgent() {
-        const e = sel ? entries.find((x) => x._key === sel) : null;
+      async function restartAgent(ent) {
+        const e = ent || (sel ? entries.find((x) => x._key === sel) : null);
         if (!e) return;
         const who = `pid ${e.pid} ${cliLabel(e) || ident(e) || ""}`.trim();
         if (!confirm(`Restart ${who}?\nStops it (if live) and relaunches resuming the session.`))
@@ -2845,6 +3144,374 @@
           .catch((err) => ({ ok: false, text: String(err?.message || err) }));
         if (!res || !res.ok)
           alert(`Restart failed for ${who}:\n${(res && res.text) || "request failed"}`);
+      }
+
+      // ---- Single-agent view-only share (QR + link) -----------------------
+      // Ask THIS agent's host to mint a fresh, scoped, read-only share room and
+      // show its link + QR. The host stands up an isolated e2ee room exposing
+      // only this agent (read-only) — see ts/agentShare.ts. Never reuses the
+      // fleet/master token, so the link can't reach other agents or steer.
+      let currentShare = null; // { shareId, link, perm } of the share shown in the modal
+      let pendingRw = null; // the agent awaiting a read-write warning acknowledgement
+      // perm: "r" (view-only) or "rw" (read-write / steer). A read-write link hands
+      // over keystroke control of the agent — effectively control of the host — so
+      // it is NOT even minted until the operator clicks through the warning.
+      async function shareAgent(perm, ent) {
+        const e = ent || (sel ? entries.find((x) => x._key === sel) : null);
+        if (!e) return;
+        // A shared viewer can't re-share; its tx 403s /api/share anyway.
+        if (isReadonlyEnt(e) || sharePermOf(e)) {
+          alert("This is a shared view — you can't re-share it from here.");
+          return;
+        }
+        if (perm === "rw") {
+          // Show the warning FIRST; mint only after "reveal" (revealRwShare).
+          pendingRw = e;
+          openShareModal(null, e, "rw");
+          return;
+        }
+        const info = await mintShare(e, "r");
+        if (info) openShareModal(info, e, "r");
+      }
+      async function mintShare(e, perm) {
+        const agentRef = e.agent_id || String(e.pid); // stable id; fall back to pid
+        const res = await txFor(e)
+          .post("/api/share", { agent: agentRef, perm })
+          .catch((err) => ({ ok: false, text: String(err?.message || err) }));
+        if (!res || !res.ok) {
+          alert(`Couldn't create share link:\n${(res && res.text) || "request failed"}`);
+          return null;
+        }
+        let info;
+        try {
+          info = JSON.parse(res.text);
+        } catch {
+          alert("Share created but the response was unreadable.");
+          return null;
+        }
+        currentShare = { shareId: info.shareId, link: info.link, srcId: e._src, perm };
+        return info;
+      }
+      // "I understand — reveal": now that the operator has read the warning, mint
+      // the read-write share and reveal its URL/QR.
+      async function revealRwShare() {
+        const e = pendingRw;
+        if (!e) return;
+        pendingRw = null;
+        const info = await mintShare(e, "rw");
+        if (!info) return closeShareModal();
+        $("shareUrl").textContent = info.link;
+        renderQr($("shareQr"), info.link);
+        $("shareWarn").hidden = true;
+        $("shareWarnClose").hidden = true;
+        $("shareRevealable").hidden = false;
+      }
+
+      function openShareModal(info, e, perm) {
+        const modal = $("shareModal");
+        if (!modal) return;
+        const who = e.title || cliLabel(e) || ident(e) || `pid ${e.pid}`;
+        const rw = perm === "rw";
+        $("shareTitle").textContent = rw ? "Share control of this agent" : "Share this agent";
+        $("shareSub").textContent =
+          `${rw ? "read-write · can type" : "view-only · can watch"} · ${who}`;
+        $("shareNote").textContent = rw
+          ? "Read-write: viewers can type into this agent (interrupt, run commands). They cannot stop or restart it. The link expires and stops working when revoked."
+          : "View-only: viewers see this agent's terminal (which may include secrets) but cannot type, stop, or restart it. The link expires and stops working when revoked.";
+        // Read-write opens in the warning state with NO link/QR shown or rendered
+        // yet; view-only shows the link immediately (the milder note suffices).
+        $("shareWarn").hidden = !rw;
+        $("shareWarnClose").hidden = !rw;
+        $("shareRevealable").hidden = rw;
+        if (!rw && info) {
+          $("shareUrl").textContent = info.link;
+          renderQr($("shareQr"), info.link);
+        }
+        modal.hidden = false;
+      }
+      // The perm a shared SOURCE was granted (from whoami), or null when we're the
+      // owner. Used to hide re-share/admin controls a viewer isn't allowed.
+      function sharePermOf(e) {
+        return srcFor(e)?.sharePerm || null;
+      }
+      function closeShareModal() {
+        const modal = $("shareModal");
+        if (modal) modal.hidden = true;
+        pendingRw = null; // a cancelled read-write flow never minted anything
+      }
+      // Draw the QR onto a fresh canvas (white quiet-zone always, so it scans in
+      // dark mode too). `qrcode` is the vendored global from qrcode.js.
+      function renderQr(container, text) {
+        container.textContent = "";
+        try {
+          const qr = qrcode(0, "M"); // type 0 = smallest version that fits; EC level M
+          qr.addData(text);
+          qr.make();
+          const n = qr.getModuleCount();
+          const cell = 5,
+            margin = 4;
+          const px = (n + margin * 2) * cell;
+          const cv = document.createElement("canvas");
+          cv.width = cv.height = px;
+          const ctx = cv.getContext("2d");
+          ctx.fillStyle = "#fff";
+          ctx.fillRect(0, 0, px, px);
+          ctx.fillStyle = "#000";
+          for (let r = 0; r < n; r++)
+            for (let c = 0; c < n; c++)
+              if (qr.isDark(r, c))
+                ctx.fillRect((c + margin) * cell, (r + margin) * cell, cell, cell);
+          container.appendChild(cv);
+        } catch (err) {
+          container.textContent = "QR unavailable";
+        }
+      }
+      async function revokeCurrentShare() {
+        if (!currentShare) return closeShareModal();
+        // DELETE over the transport of the exact MACHINE that minted the share.
+        // Keying by source id, not room, matters for a codehost room with several
+        // machines — routing by room would revoke against the wrong host.
+        const src = sources.get(currentShare.srcId);
+        // Only fall back to localTx for a LOCAL share. If a remote machine's source
+        // has dropped (room/peer gone while the modal sat open), sending the DELETE
+        // to localhost would 404 yet still close the modal — the operator would
+        // think the share was killed while it stays live on the (now unreachable)
+        // host. Say so and keep the modal open instead.
+        const tx = src?.tx || (currentShare.srcId === LOCAL ? localTx : null);
+        if (!tx) {
+          alert("Can't revoke: the machine that owns this share is no longer connected.");
+          return;
+        }
+        try {
+          await tx.del("/api/share/" + encodeURIComponent(currentShare.shareId));
+        } catch {}
+        currentShare = null;
+        closeShareModal();
+      }
+      (function shareModalBoot() {
+        $("shareClose")?.addEventListener("click", closeShareModal);
+        $("shareCloseAlt")?.addEventListener("click", closeShareModal);
+        $("shareReveal")?.addEventListener("click", revealRwShare);
+        $("shareRevoke")?.addEventListener("click", revokeCurrentShare);
+        $("shareCopy")?.addEventListener("click", async () => {
+          if (!currentShare) return;
+          try {
+            await navigator.clipboard.writeText(currentShare.link);
+            const b = $("shareCopy");
+            const t = b.textContent;
+            b.textContent = "Copied ✓";
+            setTimeout(() => (b.textContent = t), 1200);
+          } catch {
+            alert("Copy failed — select the link manually.");
+          }
+        });
+        $("shareModal")?.addEventListener("click", (ev) => {
+          if (ev.target === $("shareModal")) closeShareModal(); // backdrop click
+        });
+      })();
+
+      // ---- Terminal right-click menu: copy + customizable quick commands ----
+      // A right-click on the terminal used to copy the selection outright. Now it
+      // opens a small menu: Copy, Paste, and user-defined quick commands. A quick
+      // command is a template whose `[selection]` placeholder is filled with the
+      // highlighted text and sent to the agent's stdin (with a trailing Enter),
+      // e.g. `/fork [selection]`. Templates live in localStorage so they survive
+      // reloads and can be edited from the menu itself.
+      const QUICKCMD_KEY = "ay.quickCmds";
+      const DEFAULT_QUICKCMDS = [{ label: "Fork with selection", template: "/fork [selection]" }];
+      function loadQuickCmds() {
+        try {
+          const v = JSON.parse(localStorage.getItem(QUICKCMD_KEY) || "null");
+          if (Array.isArray(v))
+            return v
+              .filter((c) => c && typeof c.template === "string" && c.template.trim())
+              .map((c) => ({ label: String(c.label || c.template), template: c.template }));
+        } catch {}
+        return DEFAULT_QUICKCMDS.map((c) => ({ ...c }));
+      }
+      function saveQuickCmds(list) {
+        localStorage.setItem(QUICKCMD_KEY, JSON.stringify(list));
+      }
+      // Serialize/parse for the editor textarea: one `Label | template` per line.
+      // A line without `|` uses the whole line as both label and template. `|` in
+      // the template is preserved (we split on the FIRST separator only).
+      function quickCmdsToText(list) {
+        return list.map((c) => `${c.label} | ${c.template}`).join("\n");
+      }
+      function textToQuickCmds(text) {
+        return text
+          .split("\n")
+          .map((line) => line.trim())
+          .filter(Boolean)
+          .map((line) => {
+            const i = line.indexOf("|");
+            if (i < 0) return { label: line, template: line };
+            const label = line.slice(0, i).trim();
+            const template = line.slice(i + 1).trim();
+            return { label: label || template, template };
+          })
+          .filter((c) => c.template);
+      }
+
+      let ctxMenuEl = null;
+      function hideTermMenu() {
+        if (!ctxMenuEl) return;
+        ctxMenuEl.remove();
+        ctxMenuEl = null;
+        document.removeEventListener("pointerdown", onCtxOutside, true);
+        document.removeEventListener("keydown", onCtxKey, true);
+        window.removeEventListener("blur", hideTermMenu);
+        window.removeEventListener("resize", hideTermMenu);
+      }
+      function onCtxOutside(ev) {
+        if (ctxMenuEl && !ctxMenuEl.contains(ev.target)) hideTermMenu();
+      }
+      function onCtxKey(ev) {
+        if (ev.key === "Escape") {
+          ev.preventDefault();
+          hideTermMenu();
+        }
+      }
+      // Fill `[selection]` and dispatch the command to the active agent's stdin.
+      // A trailing Enter submits it (these are "quick commands", not drafts). The
+      // selection is cleared so the highlight doesn't linger after firing.
+      function runQuickCmd(cmd, selText, term) {
+        const text = String(cmd.template).replace(/\[selection\]/g, selText || "");
+        sendToSelected(text + "\r");
+        try {
+          term && term.clearSelection && term.clearSelection();
+        } catch {}
+      }
+      function showTermMenu(ev, term) {
+        ev.preventDefault();
+        hideTermMenu();
+        const selText = term && term.hasSelection && term.hasSelection() ? term.getSelection() : "";
+        const menu = document.createElement("div");
+        menu.className = "ctxmenu";
+        menu.setAttribute("role", "menu");
+        const addItem = (label, opts, onClick) => {
+          const it = document.createElement("button");
+          it.type = "button";
+          it.className = "ctxmenu-item";
+          it.textContent = label;
+          it.setAttribute("role", "menuitem");
+          if (opts && opts.hint) {
+            const h = document.createElement("span");
+            h.className = "ctxmenu-hint";
+            h.textContent = opts.hint;
+            it.appendChild(h);
+          }
+          if (opts && opts.disabled) it.disabled = true;
+          else
+            it.addEventListener("click", () => {
+              hideTermMenu();
+              onClick();
+            });
+          menu.appendChild(it);
+          return it;
+        };
+        const addSep = () => {
+          const s = document.createElement("div");
+          s.className = "ctxmenu-sep";
+          menu.appendChild(s);
+        };
+
+        // Copy: disabled with nothing selected (mirrors the old behavior, minus
+        // the auto-copy — the user now chooses it explicitly).
+        addItem("Copy", { disabled: !selText }, () => {
+          if (selText && navigator.clipboard)
+            navigator.clipboard.writeText(selText).then(
+              () => term.clearSelection(),
+              () => {},
+            );
+        });
+        // Paste: best-effort; readText is gated behind a permission prompt and is
+        // undefined over plain HTTP, so hide it when unavailable.
+        if (navigator.clipboard && navigator.clipboard.readText)
+          addItem("Paste", {}, async () => {
+            try {
+              const t = await navigator.clipboard.readText();
+              if (t) sendToSelected(t);
+            } catch {}
+          });
+
+        const cmds = loadQuickCmds();
+        if (cmds.length) {
+          addSep();
+          for (const cmd of cmds)
+            addItem(cmd.label, { hint: selText ? "[sel]" : "" }, () =>
+              runQuickCmd(cmd, selText, term),
+            );
+        }
+        addSep();
+        addItem("Edit quick commands…", {}, editQuickCmds);
+
+        document.body.appendChild(menu);
+        ctxMenuEl = menu;
+        // Clamp into the viewport so a right-click near an edge stays fully visible.
+        const r = menu.getBoundingClientRect();
+        const x = Math.max(4, Math.min(ev.clientX, window.innerWidth - r.width - 4));
+        const y = Math.max(4, Math.min(ev.clientY, window.innerHeight - r.height - 4));
+        menu.style.left = x + "px";
+        menu.style.top = y + "px";
+        document.addEventListener("pointerdown", onCtxOutside, true);
+        document.addEventListener("keydown", onCtxKey, true);
+        window.addEventListener("blur", hideTermMenu);
+        window.addEventListener("resize", hideTermMenu);
+      }
+      // Lightweight editor: overlay + textarea of `Label | template` lines. Save
+      // writes localStorage; Reset restores the built-in defaults.
+      function editQuickCmds() {
+        hideTermMenu();
+        const overlay = document.createElement("div");
+        overlay.className = "launchoverlay";
+        overlay.style.zIndex = "41";
+        const box = document.createElement("div");
+        box.className = "omnibox";
+        box.style.padding = "16px";
+        box.style.width = "min(560px, 92vw)";
+        box.innerHTML =
+          '<div style="color:var(--fg);font-size:14px;margin-bottom:6px">Quick commands</div>' +
+          '<div style="color:var(--muted);font-size:12px;margin-bottom:10px">One per line: <code>Label | template</code>. Use <code>[selection]</code> for the highlighted text, e.g. <code>/fork [selection]</code>.</div>';
+        const ta = document.createElement("textarea");
+        ta.value = quickCmdsToText(loadQuickCmds());
+        ta.spellcheck = false;
+        ta.style.cssText =
+          "width:100%;box-sizing:border-box;height:180px;resize:vertical;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:10px;font:13px var(--mono);outline:none";
+        box.appendChild(ta);
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;gap:8px;justify-content:flex-end;margin-top:12px";
+        const mkBtn = (label, primary) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = label;
+          b.style.cssText =
+            "padding:7px 14px;border-radius:6px;font:13px var(--mono);cursor:pointer;border:1px solid var(--line);" +
+            (primary
+              ? "background:var(--accent);color:#fff;border-color:var(--accent)"
+              : "background:var(--panel2);color:var(--fg)");
+          row.appendChild(b);
+          return b;
+        };
+        const close = () => overlay.remove();
+        mkBtn("Reset", false).addEventListener("click", () => {
+          ta.value = quickCmdsToText(DEFAULT_QUICKCMDS);
+        });
+        mkBtn("Cancel", false).addEventListener("click", close);
+        mkBtn("Save", true).addEventListener("click", () => {
+          saveQuickCmds(textToQuickCmds(ta.value));
+          close();
+        });
+        box.appendChild(row);
+        overlay.appendChild(box);
+        overlay.addEventListener("pointerdown", (ev) => {
+          if (ev.target === overlay) close();
+        });
+        overlay.addEventListener("keydown", (ev) => {
+          if (ev.key === "Escape") close();
+        });
+        document.body.appendChild(overlay);
+        ta.focus();
       }
 
       // ---- On-screen key bar (mobile) -------------------------------------
@@ -3037,6 +3704,8 @@
           });
         }
         if (cb) cb.addEventListener("change", () => setPerfHud(cb.checked));
+        $("shareAgent")?.addEventListener("click", () => (closePanel(), shareAgent("r")));
+        $("shareAgentRW")?.addEventListener("click", () => (closePanel(), shareAgent("rw")));
         $("stopAgent")?.addEventListener("click", () => (closePanel(), stopAgent(false)));
         $("restartAgent")?.addEventListener("click", () => (closePanel(), restartAgent()));
         $("killAgent")?.addEventListener("click", () => (closePanel(), stopAgent(true)));
@@ -3084,25 +3753,25 @@
         }
       }
 
-      // Pull one source's agent list, tagging each row with its origin + a
-      // composite key (pids can collide across rooms). Updates the source's live
-      // flag, device set, and server count for the rooms panel.
-      // Stamp a source's raw /api/ls records with their origin + composite key
-      // (pids collide across rooms) and recompute the source's device set + server
-      // count for the rooms panel. Pure transform of the source's current records.
+      // Stamp a source's raw /api/ls records with their machine (`_src`, how every
+      // per-agent op routes back), their room (`_room`, how the tree groups), and a
+      // composite key. `_key` is per-MACHINE, not per-room: two machines in one
+      // codehost room can each run pid 1234, and a room-scoped key would collide.
+      // Recomputes the source's device set + server count for the rooms panel.
+      // Pure transform of the source's current records.
       function stampAgents(s) {
         s.devices = new Set();
+        const room = s.room || s.id;
         const out = [...(s.byPid?.values() || [])].map((e) => {
-          // codehost stamps _host per agent; agent-yes share rooms fall back to
-          // the room's device label (from /api/whoami). Local stays unlabelled
-          // (no deviceLabel) so a single-machine view keeps its clean path-only
-          // identity instead of a blank "@:" prefix.
-          const host = e._host || s.deviceLabel || "";
+          // A source is one machine, so its device label (codehost peer meta, or
+          // /api/whoami on an ay-share room) labels every agent on it. Local stays
+          // unlabelled (no deviceLabel) so a single-machine view keeps its clean
+          // path-only identity instead of a blank "@:" prefix.
+          const host = s.deviceLabel || "";
           if (host) s.devices.add(host);
-          return { ...e, _room: s.id, _key: s.id + "#" + e.pid, _host: host };
+          return { ...e, _src: s.id, _room: room, _key: s.id + "#" + e.pid, _host: host };
         });
-        s.serverCount =
-          s.kind === "ch" ? s.client?.hosts().length || 0 : s.devices.size || (s.live ? 1 : 0);
+        s.serverCount = s.kind === "ch" ? (s.live ? 1 : 0) : s.devices.size || (s.live ? 1 : 0);
         s.agents = out;
       }
 
@@ -3142,6 +3811,10 @@
           // backoff reconnect (no-op if one's already queued or the room's gone).
           if (s.kind === "rtc") scheduleRtcReconnect(s);
           return [];
+        } finally {
+          // A codehost machine has no connect phase of its own — it becomes "tried"
+          // the first time we poll it, so the badge doesn't sit on "connecting…".
+          s.tried = true;
         }
       }
 
@@ -3175,6 +3848,14 @@
 
       // Compact list: one line per agent (dot + cli + title), persisted per device.
       let compactList = localStorage.getItem("ay.compactList") === "1";
+
+      // Fold subagent trees: hide nested (sub)agent rows and roll each root's
+      // hidden descendants into a summary chip. Folded BY DEFAULT (only "0" opts
+      // out) so a busy fleet reads as a flat list of top-level agents at a glance.
+      let foldSubs = localStorage.getItem("ay.foldSubs") !== "0";
+      // Per-render Map(rootEntry → { total, working, lastActive }); rebuilt by
+      // renderList whenever folding is on, consumed by foldChipHtml.
+      let foldSum = null;
 
       // Display sort order, cycled by the sort button and persisted per device.
       // Default "state" (attention-first state, then git busyness). Guard against
@@ -3219,6 +3900,32 @@
         return `<span class="tasks${allDone ? " done" : ""}" title="${esc(tip)}">${esc(label)}</span>`;
       }
 
+      // Folded-subagent summary chip ("⊞ 3/5") for a root agent whose subagent
+      // tree is collapsed — working/total of its hidden descendants, from the
+      // per-render foldSum map. "" when folding is off or this row has no hidden
+      // subagents. Clicking it expands the trees (see the list click handler).
+      // The tooltip carries the recency the badge face omits ("last active 5s ago").
+      function foldChipHtml(e) {
+        const s = foldSum && foldSum.get(e);
+        if (!s) return "";
+        const rel = s.lastActive != null ? age({ last_active_at: s.lastActive }) : "";
+        const tip =
+          `${s.total} subagent${s.total === 1 ? "" : "s"} folded · ${s.working} working` +
+          (rel ? ` · last active ${rel} ago` : "");
+        return `<span class="subs${s.working ? " active" : ""}" data-fold-chip="1" title="${esc(tip)}">⊞ ${s.working}/${s.total}</span>`;
+      }
+
+      // Status-flag chips ("badges") matched server-side against the agent's
+      // screen (ts/badges.ts) — e.g. an active /goal loop. One small pill per
+      // matched flag; "" when none matched. CSS class is "flag" (not "badge")
+      // to avoid colliding with the existing pid pill's .badge class. See
+      // BADGE_META in console-logic.js for the id → label/title mapping.
+      function badgeChipsHtml(e) {
+        return badgesFor(e)
+          .map((b) => `<span class="flag" title="${esc(b.title)}">${esc(b.label)}</span>`)
+          .join("");
+      }
+
       // A room/peer group header row. Non-selectable; carries the same tree rails
       // as agent rows so the hierarchy reads as one tree. The room/peer layers
       // only appear here when there are ≥2 of them (single ones fold away in
@@ -3234,13 +3941,43 @@
         return `<div class="ghead g-${r.kind}">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}<span class="gicon">${icon}</span><span class="glabel">${esc(r.label || "")}</span>${ctag}<span class="gkind">${r.kind}</span></div>`;
       }
 
+      // Extra row classes for collaborative presence: a yellow bar when a human
+      // peer is watching this agent, plus the stdin pulse while its input just
+      // advanced. Empty in the solo case, so a single-user list is unchanged.
+      // The pulse is suppressed on the agent YOU have open (e._key === sel): you
+      // already see its input land live in the terminal, so a flash there is
+      // redundant — and it's the only row your own terminal's protocol replies
+      // could ever nudge, so this also keeps a resize from blinking your own row.
+      function rowFlags(e) {
+        const peers = focusByKey.get(e._key) || 0;
+        const flash = e._key !== sel && (flashUntil.get(e._key) || 0) > Date.now();
+        return (peers ? " peerfocus" : "") + (flash ? " stdinflash" : "");
+      }
+      // A yellow chip showing how many peers are watching this agent ("" if none).
+      function peerChipHtml(e) {
+        const n = focusByKey.get(e._key) || 0;
+        return n
+          ? `<span class="peerchip" title="${n} peer${n === 1 ? "" : "s"} watching this agent">👤${n}</span>`
+          : "";
+      }
+
       function renderList() {
         const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
         // Build the full signalling-server > rooms > peers > agents > subagents
         // tree. Single-node room/peer layers fold away; ≥2 become ├ └ │ branches.
-        const rows = layeredRows(orderedEntries(toks));
-        const agentRows = rows.filter((r) => r.kind === "agent");
+        const fullRows = layeredRows(orderedEntries(toks));
+        const agentRows = fullRows.filter((r) => r.kind === "agent");
+        // Fold: summarize each root's hidden descendants, then drop subagent rows
+        // (any agent row with a parent agent). The count still reports every
+        // matching agent, so folding never makes the fleet look smaller.
+        foldSum = foldSubs ? foldSummaries(fullRows) : null;
+        const rows = foldSubs
+          ? fullRows.filter((r) => !(r.kind === "agent" && r.parentEntry))
+          : fullRows;
         $("count").textContent = `${agentRows.length} / ${entries.length} agents`;
+        paintPeersBadge(); // keep the peers badge in step with sel / the entry list
+        $("foldbtn").textContent = foldSubs ? "⊞ subs" : "⊟ subs";
+        $("foldbtn").classList.toggle("on", !foldSubs);
         $("viewbtn").classList.toggle("on", compactList);
         // Show the active sort mode on the button so it's self-documenting; the
         // default ("state") is also highlighted to hint it's the implicit order.
@@ -3261,14 +3998,17 @@
                 const t = e.title || e.prompt || "";
                 const id = compactIdent(e, ctx, 3, r.parentEntry);
                 const cli = cliLabel(e);
-                return `<div class="row crow ${e._key === sel ? "sel" : ""}" data-key="${esc(e._key)}">
+                return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">
         ${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}
         <span class="dot ${esc(e.status)}"></span>
         ${hasIdent(id) ? `<span class="cident" title="${esc(fullIdent(e))}">${esc(id)}</span>` : ""}
         ${cli ? `<span class="cname">${esc(cli)}</span>` : ""}
         <span class="ctitle ${e.title ? "" : "dim"}" title="${esc(t)}">${esc(t)}</span>
+        ${foldChipHtml(e)}
         ${taskChipHtml(e)}
+        ${badgeChipsHtml(e)}
         ${gitChipHtml(e)}
+        ${peerChipHtml(e)}
         <span class="age">${age(e)}</span></div>`;
               })
               .join("") || `<div class="empty">no match</div>`;
@@ -3288,12 +4028,15 @@
                     `<span class="rtag" data-k="${k}"><span style="opacity:.55">${k}:</span>${esc(v)}</span>`,
                 )
                 .join("");
-              return `<div class="row ${e._key === sel ? "sel" : ""}" data-key="${esc(e._key)}">
+              return `<div class="row ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">
         <div class="r1">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}<span class="dot ${esc(e.status)}"></span>
           <span class="name">${esc(cliLabel(e) || ident(e) || "agent")}</span>
           <span class="badge">pid ${e.pid}</span>
+          ${foldChipHtml(e)}
           ${taskChipHtml(e)}
+          ${badgeChipsHtml(e)}
           ${gitChipHtml(e)}
+          ${peerChipHtml(e)}
           <span class="age">${age(e)}</span></div>
         ${e.title ? `<div class="rowtitle" title="${esc(e.title)}">${esc(e.title)}</div>` : ""}
         ${
@@ -3334,9 +4077,12 @@
         } catch {}
       }
 
-      // Match a stored/linked selection token against an entry: either the full
-      // composite key (room#pid) or a bare pid (?pid= deep links, legacy ay.sel).
-      const matchSel = (e, token) => e._key === token || String(e.pid) === String(token);
+      // Match a stored/linked selection token against an entry: the full composite
+      // key (`ay.sel` stores it verbatim), the `<room>#<pid>` deep-link form (the
+      // hash never names a machine — see the deep-link writer — so it resolves to
+      // whichever machine in the room owns that pid), or a bare pid (?pid= links).
+      const matchSel = (e, token) =>
+        e._key === token || e._room + "#" + e.pid === token || String(e.pid) === String(token);
 
       // Reconcile poll: refresh only the sources that aren't streaming (older
       // hosts, or ones whose stream hasn't delivered its first snapshot yet) and
@@ -3355,18 +4101,29 @@
       function mergeRender() {
         const srcs = [...sources.values()];
         entries = srcs.flatMap((s) => s.agents || []);
+        // Spot agents whose stdin just advanced (last_stdin_at bumped since we
+        // last saw them — someone typed, or `ay send` pushed input) and arm the
+        // pulse. Runs before renderList so the flashing rows render pulsing; the
+        // fast loop above stops them when the window lapses. Streamed deltas carry
+        // the new mtime, so a silent `ay send` still trips the flash within ~1s.
+        const until = Date.now() + STDIN_FLASH_MS;
+        for (const k of advanceStdinFlashes(entries, stdinSeen)) flashUntil.set(k, until);
         // Badge: total agents + how many rooms are live. Red only when nothing
         // at all is reachable (no source answered).
+        // Count ROOMS, not machines — a codehost room with three machines is still
+        // one room, and it can be connecting before any machine has appeared.
         const roomSrcs = srcs.filter((s) => s.id !== LOCAL);
-        const liveRooms = roomSrcs.filter((s) => s.live).length;
+        const liveRooms = new Set(roomSrcs.filter((s) => s.live).map((s) => s.room || s.id)).size;
         const anyLive = srcs.some((s) => s.live);
-        const connecting = roomSrcs.some((s) => !s.tried);
+        const connecting =
+          roomSrcs.some((s) => !s.tried) || [...chRooms.values()].some((r) => !r.tried);
+        const roomCount = roomSrcs.length || chRooms.size;
         const n = entries.length;
-        if (!srcs.length) {
+        if (!srcs.length && !chRooms.size) {
           setConn("● no fleet", "var(--muted)");
         } else if (!anyLive) {
           if (connecting) setConn("● connecting…", "var(--amber)");
-          else setConn(roomSrcs.length ? "● rooms offline" : "● ay serve down", "var(--red)");
+          else setConn(roomCount ? "● rooms offline" : "● ay serve down", "var(--red)");
         } else {
           const roomBit = liveRooms ? ` · ${liveRooms} room${liveRooms === 1 ? "" : "s"}` : "";
           setConn(`● ${n} agent${n === 1 ? "" : "s"}${roomBit}`, "var(--green)");
@@ -3452,6 +4209,13 @@
         // Mobile: flip the single-column layout to the terminal ("detail") pane.
         // Done BEFORE term.open below so xterm measures a visible container.
         document.querySelector(".app").classList.add("show-detail");
+        // Shared-view gating (host-enforced; this is UX):
+        //  • view-only (r)  → readonly-agent: hide composer/keybar + ALL agent actions.
+        //  • read-write (rw) → steer-agent: keep composer/keybar (can type), but hide
+        //    the admin actions (stop/restart/kill/share) a viewer isn't granted.
+        const _perm = sharePermOf(e);
+        document.querySelector(".app").classList.toggle("readonly-agent", isReadonlyEnt(e));
+        document.querySelector(".app").classList.toggle("steer-agent", _perm === "rw");
         $("rhead").style.display = "flex";
         $("rdot").className = "dot " + e.status;
         const rname = e.title || cliLabel(e) || ident(e) || "agent";
@@ -3493,24 +4257,14 @@
           /* addon CDN blocked — terminal still works, just without auto-links */
         }
         term.open(logEl);
-        // Right-click to copy the current selection (terminal convention): when
-        // text is selected, a context-menu click copies it to the clipboard and
-        // suppresses the browser menu, then clears the selection so the highlight
-        // doesn't linger. With nothing selected we leave the default menu alone
-        // (and a mouse-tracking TUI still gets its own right-click via xterm).
-        // The Clipboard API is undefined over plain HTTP and can reject on a
-        // permission denial — only suppress the menu when we can actually copy,
-        // clear the selection once the write resolves, and swallow a failure
-        // quietly (the highlight stays so the user can retry).
+        // Right-click opens our own menu (Copy / Paste / customizable quick
+        // commands like `/fork [selection]`) instead of copying outright. We
+        // always suppress the browser's native menu here so the custom one shows
+        // even with nothing selected (Copy just renders disabled). showTermMenu
+        // clamps itself into the viewport and dismisses on outside click / Esc.
         term.element?.addEventListener("contextmenu", (ev) => {
-          if (!term || !term.hasSelection()) return;
-          const text = term.getSelection();
-          if (!text || !navigator.clipboard) return;
-          ev.preventDefault();
-          navigator.clipboard.writeText(text).then(
-            () => term.clearSelection(),
-            () => {},
-          );
+          if (!term) return;
+          showTermMenu(ev, term);
         });
         // On a phone, auto-focusing yanks up the soft keyboard the moment you open
         // an agent — even when you only meant to read the tail. Skip it there; a tap
@@ -3546,6 +4300,12 @@
         let suppressPush = true;
         const pushSize = () => {
           if (term && sel === e._key && !suppressPush) {
+            // Read-only viewer: we can't drive the agent's PTY, so a pane resize
+            // just re-letterboxes the agent's fixed grid to fit — never a SIGWINCH.
+            if (isReadonlyEnt(e)) {
+              applyCanvasScale();
+              return;
+            }
             lastDroveAt = Date.now(); // we're driving the size now (lease the grid)
             tx.post("/api/resize/" + encodeURIComponent(pid), {
               cols: term.cols,
@@ -3587,6 +4347,16 @@
         const fitAndSync = (sz) => {
           if (sel !== selKey || !term) return;
           if (sz && sz.cols && sz.rows) agentSize = sz; // remember for the badge tooltip
+          // Read-only viewer: don't reflow the agent to our pane (we can't resize
+          // it, and shouldn't). Adopt the AGENT's own grid and CSS-scale it to fit,
+          // exactly like a shared-canvas watcher — otherwise the raw stream (emitted
+          // at the agent's width) wraps at the wrong column in our terminal.
+          if (isReadonlyEnt(e)) {
+            if (sz && sz.cols && sz.rows) followAgentSize(sz);
+            else applyCanvasScale();
+            suppressPush = false;
+            return;
+          }
           try {
             fit.fit();
           } catch {}
@@ -3606,7 +4376,18 @@
         // inside fitAndSync keeps an already-matching agent from a redundant SIGWINCH.
         // Returns the in-flight sync promise so the initial open can await it
         // before starting the tail (below); tab-reactivation callers ignore it.
-        resyncTerm = () => {
+        resyncTerm = async () => {
+          if (sel !== selKey || !term) return;
+          // Settle the source's read-only state first (bounded) so fitAndSync picks
+          // the right sizing path on the FIRST render: a read-only viewer must
+          // adopt the agent's grid, not fit-to-pane — the raw snapshot can't be
+          // re-wrapped later. Bounded so an older host without whoami never wedges.
+          const src = srcFor(e);
+          if (src?.whoamiReady) {
+            try {
+              await Promise.race([src.whoamiReady, new Promise((r) => setTimeout(r, 1500))]);
+            } catch {}
+          }
           if (sel !== selKey || !term) return;
           return tx
             .fetchJSON("/api/size/" + encodeURIComponent(pid))
@@ -3652,6 +4433,14 @@
       }
 
       $("list").addEventListener("click", (ev) => {
+        // Clicking a folded-subagent chip expands the trees instead of selecting
+        // the row, so the hidden children it summarizes become reachable.
+        if (ev.target.closest("[data-fold-chip]")) {
+          foldSubs = false;
+          localStorage.setItem("ay.foldSubs", "0");
+          renderList();
+          return;
+        }
         const row = ev.target.closest(".row");
         if (row) select(row.dataset.key);
       });
@@ -3711,6 +4500,12 @@
         localStorage.setItem("ay.compactList", compactList ? "1" : "0");
         renderList();
       });
+      // Fold / unfold every subagent tree (global toggle, persisted per device).
+      $("foldbtn").addEventListener("click", () => {
+        foldSubs = !foldSubs;
+        localStorage.setItem("ay.foldSubs", foldSubs ? "1" : "0");
+        renderList();
+      });
       // Cycle the sort order: state → created → identity → state.
       $("sortbtn").addEventListener("click", () => {
         sortMode = SORT_MODES[(SORT_MODES.indexOf(sortMode) + 1) % SORT_MODES.length];
@@ -3753,9 +4548,10 @@
       // renders. Clamps at the ends, scrolls the row into view.
       function stepSelection(dir) {
         const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
-        // Must match renderList's order; step only over agent rows (skip headers).
+        // Must match renderList's order; step only over agent rows (skip headers),
+        // and skip folded-away subagents so nav lands only on visible rows.
         const shown = layeredRows(orderedEntries(toks))
-          .filter((r) => r.kind === "agent")
+          .filter((r) => r.kind === "agent" && !(foldSubs && r.parentEntry))
           .map((r) => r.entry);
         if (!shown.length) return;
         const cur = shown.findIndex((e) => e._key === sel);
@@ -3861,6 +4657,66 @@
         return cur && cur.cwd && cur.git && cur.git.branch ? cur : null;
       }
 
+      // Slash commands that act on the OPEN agent (the omnibox anchor), mirroring the
+      // ⋯-menu recovery buttons. Typing "/" in the omnibox lists them; "/k" / "/r"
+      // narrows. Each runs the very same handler the dropdown button does, so the
+      // confirm prompt and server call are identical — /kill = Force-kill (SIGKILL),
+      // /restart = Restart (resume). "/fork [topic]" is also offered here (built in
+      // omniCommandRows, not this list, since it spawns rather than acts in place).
+      const OMNI_COMMANDS = [
+        {
+          cmd: "/restart",
+          icon: "↻",
+          title: "Restart (resume)",
+          desc: "stops it (if live) and relaunches resuming the session",
+          run: (e) => restartAgent(e),
+        },
+        {
+          cmd: "/kill",
+          icon: "✕",
+          title: "Force-kill (SIGKILL)",
+          desc: "terminates the process immediately",
+          danger: true,
+          run: (e) => stopAgent(true, e),
+        },
+      ];
+      // Build the command rows for a "/…"-prefixed query, targeting the anchor agent.
+      // Empty when nothing is open (a command with no agent to act on is a no-op) so
+      // the omnibox falls through to its normal search/spawn behaviour.
+      function omniCommandRows(q) {
+        const target = omniAnchor();
+        if (!target) return [];
+        // Match on the FIRST token so a command can carry args after it
+        // (e.g. "/fork fix the auth bug" → cmd "fork", topic "fix the auth bug").
+        const parts = q.slice(1).trim().split(/\s+/).filter(Boolean);
+        const cmdTerm = (parts[0] || "").toLowerCase(); // command token after "/"
+        const rows = OMNI_COMMANDS.filter((c) => c.cmd.slice(1).startsWith(cmdTerm)).map((c) => ({
+          kind: "cmd",
+          cmd: c,
+          target,
+        }));
+        // "/fork [topic]" — a slash alias for the fork spawn row so fork is reachable
+        // straight from the command palette (⌘K → "/fork"), not only via the row that
+        // auto-appends to a search. It's a spawn (kind:"fork"), not a kind:"cmd" that
+        // acts on an existing agent, so it's built here rather than in OMNI_COMMANDS —
+        // omniActivate's fork branch (branch prompt → /api/spawn {fork}) handles it.
+        // Needs a real fork source (the open agent with a live git branch); when the
+        // anchor has none, forking is meaningless so the row is omitted.
+        if ("fork".startsWith(cmdTerm)) {
+          const src = omniForkSource();
+          if (src)
+            rows.push({
+              kind: "fork",
+              branch: forkSlug(parts.slice(1).join(" "), src.git.branch),
+              srcBranch: src.git.branch,
+              fromCwd: src.cwd,
+              cli: src.cli,
+              src: src._src,
+            });
+        }
+        return rows;
+      }
+
       // Which agent the highlighted candidate should preview in the background: an
       // agent row → that agent; the spawn row / an empty list → the launch-time
       // agent (so the backdrop shows the spawn target's cwd).
@@ -3900,19 +4756,19 @@
       }
 
       // Auto-derive a branch name from the typed prompt for the Cmd+K fork action
-      // (editable at launch). Forks off a default branch get the flat `fork/`
-      // namespace, e.g. main + "fix the auth bug" → "fork/fix-the-auth-bug".
-      // Forks off any other branch dash-prefix the source to show lineage, so
-      // "def" forked from "feat-abc" reads as a stacked branch "feat-abc-def".
+      // (editable at launch). The new branch dash-prefixes the source branch to
+      // show lineage, e.g. main + "fix the auth bug" → "main-fix-the-auth-bug",
+      // and "def" forked from "feat-abc" reads as a stacked branch "feat-abc-def".
       // We dash-join (not slash-nest "feat-abc/def") on purpose: git stores refs
       // as files, so `feat-abc/def` can't be created while `feat-abc` still
       // exists (D/F conflict) — and the source branch is normally still live when
       // we fork from it. Any slashes in the source (e.g. a prior "fork/x") are
-      // flattened to dashes so the new ref stays a single node.
+      // flattened to dashes so the new ref stays a single node. Only when the
+      // source branch is unknown do we fall back to the flat `fork/` namespace.
       function forkSlug(q, srcBranch) {
         const topic = branchSlug(q) || "wip";
         const base = branchSlug(srcBranch);
-        if (!base || /^(main|master)$/.test((srcBranch || "").trim())) return "fork/" + topic;
+        if (!base) return "fork/" + topic;
         return base + "-" + topic;
       }
 
@@ -3947,6 +4803,16 @@
                   <div class="omni-sub">⏎ to choose a working dir &nbsp;·&nbsp; prompt: ${esc(q || "(empty)")}</div>
                 </div></div>`;
             }
+            if (r.kind === "cmd") {
+              const t = r.target;
+              const dz = r.cmd.danger ? " danger" : "";
+              return `<div class="omni-row omni-spawn${dz}${sc}" data-i="${i}">
+                <span class="dot ${esc(t.status)}"></span>
+                <div class="omni-main">
+                  <div class="omni-title">${r.cmd.icon} ${esc(r.cmd.title)} <span style="opacity:.55">${esc(r.cmd.cmd)}</span></div>
+                  <div class="omni-sub">pid ${esc(String(t.pid))} ${esc(cliLabel(t) || ident(t) || "")} &nbsp;·&nbsp; ${esc(r.cmd.desc)}</div>
+                </div></div>`;
+            }
             const e = r.entry;
             const snip = r.snippet ? `<div class="omni-snip">…${r.snippet}…</div>` : "";
             return `<div class="omni-row${sc}" data-i="${i}">
@@ -3965,6 +4831,18 @@
 
       function runOmni() {
         const q = $("omni-input").value.trim();
+        // A "/…" query is a slash command against the open agent, not a search —
+        // show the matching command rows and skip the agent/spawn/tail machinery.
+        if (q.startsWith("/")) {
+          const cmds = omniCommandRows(q);
+          if (cmds.length) {
+            if (omniTailTimer) clearTimeout(omniTailTimer);
+            omniRows = cmds;
+            omniIdx = 0;
+            renderOmni();
+            return;
+          }
+        }
         const toks = q.split(/\s+/).filter(Boolean);
         // Tier 1 — instant title/identity match, ranked title-first then by recency.
         const hits = entries
@@ -3988,7 +4866,7 @@
               srcBranch: forkSrc.git.branch,
               fromCwd: forkSrc.cwd,
               cli: forkSrc.cli,
-              room: forkSrc._room,
+              src: forkSrc._src,
             });
           omniRows.push({ kind: "spawncwd" });
         }
@@ -4057,12 +4935,19 @@
         const q = $("omni-input").value.trim();
         const row = omniRows[omniIdx];
         const anchor = omniAnchor();
+        // A slash command runs its ⋯-menu handler against the pinned target. Handled
+        // before the spawn fallthrough so ⌘⏎ on a "/kill" row can't spawn instead.
+        if (row && row.kind === "cmd") {
+          closeOmni(false);
+          await row.cmd.run(row.target);
+          return;
+        }
         // ⌘⏎ always = spawn-here (the fast default), regardless of the selected row.
         if (forceSpawn || (row && row.kind === "spawn")) {
           closeOmni(false); // committing — keep the bg as-is, spawnAndSelect takes over
           await spawnAndSelect(
             { cli: anchor?.cli || "claude", cwd: anchor?.cwd || undefined, prompt: q || undefined },
-            anchor?._room,
+            anchor?._src,
           );
           return;
         }
@@ -4081,7 +4966,7 @@
               prompt: q || undefined,
               fork: { fromCwd: row.fromCwd, branch: branch.trim() },
             },
-            row.room,
+            row.src,
           );
           return;
         }
@@ -4091,7 +4976,7 @@
           closeOmni(false);
           await spawnAndSelect(
             { cli: anchor?.cli || "claude", cwd: cwd.trim() || undefined, prompt: q || undefined },
-            anchor?._room,
+            anchor?._src,
           );
           return;
         }
@@ -4193,8 +5078,10 @@
         return "ch-" + (h >>> 0).toString(36).slice(0, 4).padStart(4, "0");
       }
 
-      function removeSource(room) {
-        const s = sources.get(room);
+      // Drop ONE machine from the fleet. A codehost machine shares its room's
+      // connection, so only the room may close it (see removeRoom).
+      function removeSource(id) {
+        const s = sources.get(id);
         if (!s) return;
         s.removed = true; // stop any pending exp-backoff reconnect (see below)
         clearTimeout(s.reconnectTimer);
@@ -4203,7 +5090,21 @@
           s.client?.close?.();
           s.client?.pc?.close?.();
         } catch {}
-        sources.delete(room);
+        sources.delete(id);
+      }
+
+      // Forget a whole room: every machine in it, plus the room's own connection.
+      function removeRoom(name) {
+        const ch = chRooms.get(name);
+        if (ch) {
+          chRooms.delete(name);
+          for (const peerId of ch.peers.keys()) removeSource(name + "/" + peerId);
+          try {
+            ch.close();
+          } catch {}
+          return;
+        }
+        removeSource(name); // an ay-share room IS its single machine
       }
 
       // Exponential-backoff reconnect for an agent-yes share room (the RTCClient
@@ -4256,15 +5157,36 @@
           // every machine's rows would be unlabelled. Ask the host who it is once
           // and tag this room's agents with it in listSource. Best-effort: an older
           // host with no /api/whoami just leaves rows device-less.
+          // Expose whoami as an awaitable so the terminal can settle the read-only
+          // state BEFORE it sizes/renders — otherwise a fast selection races the
+          // fetch and the initial raw snapshot lands on a fit-to-pane grid that a
+          // later resize can't un-wrap (a read-only viewer must render at the
+          // AGENT's grid). Re-created on every (re)connect.
+          let resolveWhoami;
+          s.whoamiReady = new Promise((r) => (resolveWhoami = r));
           try {
-            s.deviceLabel = (await s.tx.fetchJSON("/api/whoami"))?.host || "";
+            const who = await s.tx.fetchJSON("/api/whoami");
+            s.deviceLabel = who?.host || "";
+            // A single-agent view-only share advertises its capability here so the
+            // console enters read-only mode (hide + refuse writes). Wrap this
+            // source's tx so no write leaks through any call path; the host still
+            // enforces (403s writes) as the real boundary.
+            s.readonly = !!who?.share?.readonly;
+            s.sharePerm = who?.share?.perm || null; // "r" | "rw" | null(owner)
+            s.shareAgentId = who?.share?.agent_id || null;
+            if (s.readonly) s.tx = readonlyTx(s.tx);
             // whoami resolves after the first listSource may have already rendered
             // this room's rows device-less (and activity-gated polling might not
             // re-fire soon on a backgrounded tab). Re-render now so the host label
-            // lands immediately instead of lagging a poll.
-            if (s.deviceLabel) loadList();
+            // (and any read-only state) lands immediately instead of lagging a poll.
+            if (s.deviceLabel || s.readonly) loadList();
           } catch {
             s.deviceLabel = "";
+            // No whoami (older host / error): treat as writable, don't wedge the
+            // terminal — resolve so any awaiter proceeds immediately.
+            s.readonly = s.readonly || false;
+          } finally {
+            resolveWhoami();
           }
         } finally {
           s.reconnecting = false;
@@ -4304,11 +5226,29 @@
       async function addRoomSource(room, token, host) {
         host = host || SIG_DEFAULT;
         saveRoom(room, token, host); // cache so the badge can list & reconnect later
+        // A codehost room is a connection, not a machine: it contributes one source
+        // per machine as peers announce themselves (CodehostRoom.syncPeers).
+        if (host === CH_HOST) {
+          if (chRooms.has(room)) return;
+          const ch = new CodehostRoom(room, token);
+          chRooms.set(room, ch);
+          renderRoomsIfOpen();
+          try {
+            await ch.connect();
+          } catch {
+            ch.live = false;
+          }
+          ch.tried = true;
+          renderRoomsIfOpen();
+          loadList();
+          return;
+        }
         if (sources.has(room)) return;
         const s = {
           id: room,
+          room,
           host,
-          kind: host === CH_HOST ? "ch" : "rtc",
+          kind: "rtc",
           tx: null,
           client: null,
           live: false,
@@ -4319,25 +5259,12 @@
         sources.set(room, s);
         renderRoomsIfOpen();
         try {
-          if (host === CH_HOST) {
-            const c = new CodehostClient(token);
-            c.onstate = (st) => {
-              if (st === "closed") {
-                s.live = false;
-                renderRoomsIfOpen();
-              }
-            };
-            await c.connect();
-            s.client = c;
-            s.tx = c;
-          } else {
-            s.token = token;
-            await connectRtcSource(s);
-          }
+          s.token = token;
+          await connectRtcSource(s);
           s.live = true;
         } catch (e) {
           s.live = false;
-          if (s.kind === "rtc") scheduleRtcReconnect(s);
+          scheduleRtcReconnect(s);
         }
         s.tried = true;
         renderRoomsIfOpen();
@@ -4379,10 +5306,9 @@
       // in it right now". The signaling layer can't tell us the count until we've
       // connected, so we show the source's last-known serverCount.
       function roomStatus(n) {
-        const s = sources.get(n);
-        if (!s) return `<span class="rstat off">○</span>`;
-        if (!s.live) return `<span class="rstat off" title="offline">○</span>`;
-        const c = s.serverCount;
+        if (!sources.has(n) && !chRooms.has(n)) return `<span class="rstat off">○</span>`;
+        if (!roomLive(n)) return `<span class="rstat off" title="offline">○</span>`;
+        const c = roomSources(n).filter((s) => s.live).length;
         return `<span class="rstat on" title="${c} live ${c === 1 ? "server" : "servers"}">● ${c}</span>`;
       }
 
@@ -4392,7 +5318,7 @@
         const items = names.length
           ? names
               .map(
-                (n) => `<div class="ritem ${sources.get(n)?.live ? "cur" : ""}">
+                (n) => `<div class="ritem ${roomLive(n) ? "cur" : ""}">
           ${roomStatus(n)}
           <span class="rname" data-room="${esc(n)}">${esc(n)}</span>
           <span class="rhost">${esc(r[n].host)}</span>
@@ -4439,7 +5365,7 @@
         }
         const del = ev.target.closest(".rx");
         if (del) {
-          removeSource(del.dataset.del);
+          removeRoom(del.dataset.del);
           dropRoom(del.dataset.del);
           renderRooms();
           loadList();
@@ -4472,13 +5398,28 @@
       // The link carries only WHAT to run; the capability to run it is the viewer's
       // own connected fleet (cached room) + a y/N confirm on that host. So a public
       // launch link can never spawn on a machine the clicker doesn't already control.
-      function showLaunch(spec) {
+      // One button per MACHINE we can actually reach, so a codehost room with three
+      // machines offers three targets. A saved room with no live machine yet (boot
+      // race, or the room is down) still gets one button under its own name —
+      // launchOn connects it, and spawnTarget then resolves a machine inside it.
+      function fleetTargets() {
         const rooms = loadRooms();
-        const names = Object.keys(rooms).sort((a, b) => rooms[b].ts - rooms[a].ts);
+        return Object.keys(rooms)
+          .sort((a, b) => rooms[b].ts - rooms[a].ts)
+          .flatMap((n) => {
+            const live = roomSources(n).filter((s) => s.live);
+            return live.length
+              ? live.map((s) => ({ id: s.id, label: sourceLabel(s) }))
+              : [{ id: n, label: n }];
+          });
+      }
+
+      function showLaunch(spec) {
+        const names = fleetTargets();
         const cmd = "ay " + (spec.cli || "claude") + (spec.prompt ? ` -- "${spec.prompt}"` : "");
         const fleets = names.length
-          ? `<div class="lfleets">${names.map((n) => `<button class="lfleet" data-room="${esc(n)}">▷ ${esc(n)}</button>`).join("")}</div>
-         <div class="lhint">pick a fleet to run on</div>`
+          ? `<div class="lfleets">${names.map((t) => `<button class="lfleet" data-room="${esc(t.id)}">▷ ${esc(t.label)}</button>`).join("")}</div>
+         <div class="lhint">pick a machine to run on</div>`
           : `<div class="lwarn">No connected fleet on this device. Run <code>bunx agent-yes serve --share</code>, open its link once, then reopen this launch link.</div>`;
         $("launch").innerHTML = `<div class="lcard">
       <div class="ltitle">Launch agent</div>
@@ -4490,11 +5431,16 @@
         $("launch").style.display = "flex";
       }
 
-      // Pick the fleet to spawn on: an explicit roomId, else the selected agent's
-      // source, else local, else any live source.
-      function spawnTarget(roomId) {
+      // Pick the MACHINE to spawn on: an explicit source id, else any live machine
+      // in an explicitly named room (a launch link names a room, not a machine, and
+      // a machine that has since left the room degrades to its room), else the
+      // selected agent's machine, else local, else any live machine.
+      function spawnTarget(id) {
+        const room = id && id.includes("/") ? id.slice(0, id.indexOf("/")) : null;
         return (
-          sources.get(roomId) ||
+          sources.get(id) ||
+          (id && roomSources(id).find((s) => s.live)) ||
+          (room && roomSources(room).find((s) => s.live)) ||
           srcFor(entries.find((e) => e._key === sel)) ||
           sources.get(LOCAL) ||
           [...sources.values()].find((s) => s.live) ||
@@ -4515,7 +5461,7 @@
         }
         // Match by "newest agent that wasn't here before" ON THIS fleet — the
         // spawn returns the wrapper pid, but the agent registers under its own.
-        const before = new Set(entries.filter((e) => e._room === target.id).map((e) => e.pid));
+        const before = new Set(entries.filter((e) => e._src === target.id).map((e) => e.pid));
         const res = await target.tx.post("/api/spawn", {
           cli: spec.cli || "claude",
           from: spec.from || undefined,
@@ -4530,7 +5476,7 @@
         for (let i = 0; i < 14; i++) {
           await loadList();
           const fresh = entries
-            .filter((e) => e._room === target.id && !before.has(e.pid))
+            .filter((e) => e._src === target.id && !before.has(e.pid))
             .sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
           if (fresh.length) {
             select(fresh[0]._key);
@@ -4541,12 +5487,17 @@
         return true;
       }
 
-      async function launchOn(room, spec) {
-        const r = loadRooms()[room];
-        if (!r) return;
-        $("launch").style.display = "none";
-        await connectRoom(room, r.token, r.host);
-        await spawnAndSelect(spec, room);
+      // `id` is a machine (source id) once its room is connected, or a bare room
+      // name when the launch link was opened before the room came up.
+      async function launchOn(id, spec) {
+        if (!sources.has(id)) {
+          const name = id.split("/")[0];
+          const r = loadRooms()[name];
+          if (!r) return;
+          $("launch").style.display = "none";
+          await connectRoom(name, r.token, r.host);
+        } else $("launch").style.display = "none";
+        await spawnAndSelect(spec, id);
       }
 
       $("launch").addEventListener("click", (ev) => {
@@ -4558,18 +5509,32 @@
         if (ev.target.closest(".lcancel")) $("launch").style.display = "none";
       });
 
-      // ---- "+ New agent": a spawn form for the CURRENTLY connected fleet ----
+      // ---- "+ New agent": a spawn form for one machine in the fleet ----------
       // Click → fill (cli defaults to claude, cwd prefilled from the selected agent
-      // when there is one, prompt optional) → POST /api/spawn on this connection.
+      // when there is one, prompt optional) → POST /api/spawn on that machine.
       // Always allowed: the console already controls every running agent's stdin.
+      //
+      // The Host row appears only when the fleet holds more than one machine. It
+      // defaults to spawnTarget()'s pick — the selected agent's machine — so the
+      // common "spawn next to what I'm looking at" flow needs no interaction.
       function showNew() {
         const here = entries.find((x) => x._key === sel);
         const cwd = here?.cwd || "";
         const target = spawnTarget();
-        const where = target ? (target.id === LOCAL ? "local" : target.id) : "local";
+        const hosts = [...sources.values()].filter((s) => s.live || s.id === target?.id);
         $("newform").dataset.room = target ? target.id : "";
+        const hostRow =
+          hosts.length > 1
+            ? `<div class="nfield"><label>Host</label><select id="nf-host">${hosts
+                .map(
+                  (s) =>
+                    `<option value="${esc(s.id)}"${s.id === target?.id ? " selected" : ""}>${esc(sourceLabel(s))}</option>`,
+                )
+                .join("")}</select></div>`
+            : "";
         $("newform").innerHTML = `<div class="lcard">
-      <div class="ltitle">New agent · ${esc(where)}</div>
+      <div class="ltitle">New agent · ${esc(sourceLabel(target) || "local")}</div>
+      ${hostRow}
       <div class="nfield"><label>CLI</label><input id="nf-cli" value="claude" spellcheck="false" autocapitalize="off" /></div>
       <div class="nfield"><label>Spawn from — optional</label><input id="nf-from" placeholder="github URL / owner/repo@branch — provisions a worktree" spellcheck="false" autocapitalize="off" /></div>
       <div class="nfield"><label>Working dir</label><input id="nf-cwd" value="${esc(cwd)}" placeholder="(host default — ignored when Spawn from is set)" spellcheck="false" autocapitalize="off" /></div>
@@ -4579,24 +5544,38 @@
         <button class="lcancel" id="nf-cancel">cancel</button>
       </div>
       <div id="nf-hook" class="lhint" style="display:none"></div>
-      <div class="lhint">POST /api/spawn on this fleet. ${IS_MAC ? "⌘" : "Ctrl"}+Enter to launch.</div></div>`;
+      <div class="lhint">POST /api/spawn on this machine. ${IS_MAC ? "⌘" : "Ctrl"}+Enter to launch.</div></div>`;
         $("newform").style.display = "flex";
         setTimeout(() => $("nf-prompt")?.focus(), 0);
-        // Surface whether this host runs a spawn hook (a trusted local command run
-        // before every launch — provisions env/cwd; see ~/.agent-yes/config.json).
-        // Read-only: /api/spawn-config discloses only the boolean, never the body.
-        if (target?.tx?.fetchJSON) {
-          target.tx
-            .fetchJSON("/api/spawn-config")
-            .then((c) => {
-              const el = $("nf-hook");
-              if (el && c && c.hasSpawnHook) {
-                el.textContent = "⚙ this host runs a spawn hook before launch";
-                el.style.display = "";
-              }
-            })
-            .catch(() => {});
-        }
+        // Retarget the form when the user picks another machine — the spawn-hook
+        // hint below is per-machine, so it has to be re-read too.
+        $("nf-host")?.addEventListener("change", (ev) => {
+          $("newform").dataset.room = ev.target.value;
+          showHook(sources.get(ev.target.value));
+        });
+        showHook(target);
+      }
+
+      // Surface whether the target host runs a spawn hook (a trusted local command
+      // run before every launch — provisions env/cwd; see ~/.agent-yes/config.json).
+      // Read-only: /api/spawn-config discloses only the boolean, never the body.
+      function showHook(target) {
+        const el = $("nf-hook");
+        if (el) el.style.display = "none";
+        if (!target?.tx?.fetchJSON) return;
+        const forId = target.id;
+        target.tx
+          .fetchJSON("/api/spawn-config")
+          .then((c) => {
+            // A slow answer for a host the user has since switched away from must
+            // not paint the new host's hint.
+            if (!el || $("newform").dataset.room !== forId) return;
+            if (c && c.hasSpawnHook) {
+              el.textContent = "⚙ this host runs a spawn hook before launch";
+              el.style.display = "";
+            }
+          })
+          .catch(() => {});
       }
 
       async function submitNew() {
@@ -4618,7 +5597,7 @@
           const norm = (p) => (p || "").replace(/\/+$/, "");
           const busy = entries.some(
             (e) =>
-              (room ? e._room === room : true) &&
+              (room ? e._src === room : true) &&
               e.exit_code == null &&
               norm(e.cwd) === norm(spec.cwd),
           );
@@ -4775,7 +5754,7 @@
         if (!m) return;
         const [, room, pid] = m;
         const key = room + "#" + pid;
-        const e = entries.find((x) => x._key === key);
+        const e = entries.find((x) => matchSel(x, key));
         if (e) {
           if (sel !== e._key) select(e._key);
           return;
@@ -4785,7 +5764,7 @@
         autoPid = key;
         autoPidExplicit = true;
         const r = loadRooms()[room];
-        if (r && !sources.get(room)) connectRoom(room, r.token, r.host);
+        if (r && !sources.has(room) && !chRooms.has(room)) connectRoom(room, r.token, r.host);
       });
 
       // ---- activity-gated polling + auto-reload on new deploy ----------------

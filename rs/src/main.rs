@@ -47,6 +47,14 @@ fn detect_install_method() -> &'static str {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Delegate management subcommands (ls/send/restart/stop/serve/…) to the JS
+    // launcher. This binary is only the agent runner; without this, a leading
+    // subcommand word would be parsed by clap as prompt text and spawn an agent.
+    // Must run before parse_args(). See cli::maybe_delegate_subcommand.
+    if let Some(code) = cli::maybe_delegate_subcommand() {
+        std::process::exit(code);
+    }
+
     // Parse CLI arguments
     let args = cli::parse_args()?;
 
@@ -143,7 +151,12 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     // Build command arguments
     let mut cmd_args = args.cli_args.clone();
 
-    // Add prompt based on promptArg configuration
+    // Add prompt based on promptArg configuration.
+    //
+    // "typed" is the shell mode (bash/cmd/powershell): the prompt is NOT passed
+    // as an argv (that would run-and-exit, e.g. `bash -c`), it is typed into the
+    // interactive session after the shell prompt is ready — see `initial_input`
+    // below and its consumer in AgentContext::run_with_fifo.
     if let Some(ref prompt) = args.prompt {
         match cli_config.prompt_arg.as_str() {
             "first-arg" => {
@@ -152,6 +165,7 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             "last-arg" => {
                 cmd_args.push(prompt.clone());
             }
+            "typed" => {}
             flag if flag.starts_with("--") || flag.starts_with("-") => {
                 cmd_args.push(flag.to_string());
                 cmd_args.push(prompt.clone());
@@ -159,6 +173,14 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             _ => {}
         }
     }
+
+    // For "typed" (shell) CLIs, carry the prompt into the run loop so it is typed
+    // into the live session once ready; every other mode delivered it via argv.
+    let initial_input = if cli_config.prompt_arg == "typed" {
+        args.prompt.clone()
+    } else {
+        None
+    };
 
     // Add default args
     cmd_args.extend(cli_config.default_args.iter().cloned());
@@ -251,6 +273,7 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             term_rows,
             term_cols,
             render_plain,
+            initial_input.clone(),
         );
 
         // Create per-pid FIFO for `cy send <keyword> <msg>`. Best-effort —
@@ -302,6 +325,9 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
         if let Some(ref p) = fifo_path {
             fifo::cleanup_fifo(p);
         }
+        // Drop the typing-activity marker so a dead pid's stale timestamp can't
+        // linger and mislead `ay ls`/`ay send` after this agent is gone.
+        fifo::cleanup_stdin_activity(pid);
 
         // Render the full scrollback to <pid>.log and drop the now-redundant
         // raw byte log (kept only when the session used the alternate screen).

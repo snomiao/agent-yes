@@ -12,7 +12,7 @@ Three ways to produce the `cwd`, in precedence order:
 
 | Request body                | What happens                                                                                      | Backed by                                 |
 | --------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| `fork: { fromCwd, branch }` | Fork an existing worktree to a **new branch carrying its uncommitted work**, then spawn there     | `codehost/provision` `forkWorktree`       |
+| `fork: { fromCwd, branch }` | Fork an existing worktree to a **new branch (clean — committed work only)**, then spawn there      | `codehost/provision` `forkWorktree`       |
 | `from: "<source>"`          | Provision a GitHub source (clone / worktree / ff-pull) into `<root>/<owner>/<repo>/tree/<branch>` | `codehost/provision` `provision`          |
 | `cwd: "<dir>"` (or omitted) | Resolve against the workspace root and `mkdir -p` (a missing dir no longer ENOENTs into a 500)    | `ts/workspaceConfig.ts` `resolveSpawnCwd` |
 
@@ -62,11 +62,25 @@ so config lives per host, never synced between peers.
   `<owner>/<repo>`, or `*` (allow everything). Env
   `CODEHOST_PROVISION_ALLOWLIST` (comma-separated) overrides. See
   `isProvisionAllowed()`.
+- **`provisionHook`** — a host-local shell hook run **before** the `from`/`fork`
+  git op ("koho-style" provisioning), so it can **prepare the host** — most
+  usefully **select the git identity** for this repo before the clone/worktree +
+  `setup-repo.sh`. When set it is ALSO the **gate**: its exit code decides
+  admission (**0 = allow, non-zero = deny**), which **overrides
+  `provisionAllowlist`** (define one _or_ the other). The hook receives the
+  provisioning context as env: `KOHO_ACTION` (`fork`|`from`), `KOHO_OWNER`,
+  `KOHO_REPO`, `KOHO_BRANCH`, `KOHO_FROM_CWD` (fork only), `KOHO_SOURCE` (from
+  only), `KOHO_WS_ROOT`. Env `AGENT_YES_PROVISION_HOOK` overrides the config
+  form; `AGENT_YES_PROVISION_HOOK_TIMEOUT_MS` bounds it (default 60s). See
+  `getProvisionHook()`.
 
 ```jsonc
 {
   "provisionRoot": "/code",
   "provisionAllowlist": ["snomiao"],
+  // koho-style: pick the account per owner, then allow (exit 0). This REPLACES
+  // provisionAllowlist as the gate — a non-zero exit denies the provision.
+  "provisionHook": "case \"$KOHO_OWNER\" in symval) gh auth switch --user snomiao;; snomiao) gh auth switch --user snomiao;; *) echo \"unknown owner $KOHO_OWNER\"; exit 1;; esac",
 }
 ```
 
@@ -78,6 +92,14 @@ so config lives per host, never synced between peers.
   everything. The `/api/spawn` token is still the trust boundary (it already
   grants agent-RCE); the allowlist narrows the _new_ "clone an arbitrary repo and
   run its setup" surface.
+- **Or hook-gated (`provisionHook`).** When a `provisionHook` is configured it
+  runs first and **its exit code is the gate** (overriding the allowlist), so a
+  host can express dynamic policy — e.g. allow only owners it can `gh auth switch`
+  to, denying the rest with `exit 1`. Like `spawnHook` it is arbitrary local code
+  and is therefore **never network-writable**: the config-file form is ignored
+  unless `config.json` is a real file, owned by us, and not group/world-writable;
+  only the env form (`AGENT_YES_PROVISION_HOOK`, from the daemon's own env) skips
+  that guard.
 - **No injection.** The clone URL is hard-pinned to `https://github.com/<o>/<r>`,
   git runs via `execFile` (no shell), and every path segment is validated
   (`isSafeSegment`: non-empty, not `.`/`..`, no leading `-`, no separators or
@@ -104,9 +126,10 @@ implementation originated before being promoted into codehost).
 
 ## Related code
 
-- `ts/serve.ts` — `POST /api/spawn` (`from` / `fork` / `cwd` handling).
+- `ts/serve.ts` — `POST /api/spawn` (`from` / `fork` / `cwd` handling);
+  `runProvisionHook` (the koho-style gate) + `originOwnerRepo`.
 - `ts/workspaceConfig.ts` — `getProvisionRoot`, `getProvisionAllowlist`,
-  `isProvisionAllowed`, `resolveSpawnCwd`.
+  `isProvisionAllowed`, `getProvisionHook` / `hasProvisionHook`, `resolveSpawnCwd`.
 - `tsdown.config.ts` — externalizes `codehost/*`.
 - `lab/ui/index.html` — the "Spawn from" field + the Cmd+K fork / spawn-in-dir rows.
 - codehost `src/provision/` + its `docs/provisioning.md` — the standard.

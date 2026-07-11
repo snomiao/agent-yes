@@ -18,7 +18,12 @@ import { logger } from "./logger.ts";
 import { createFifoStream } from "./beta/fifo.ts";
 import { PidStore } from "./pidStore.ts";
 import { sendEnter, sendMessage } from "./core/messaging.ts";
-import { AUTO_RETRY_GIVE_UP_MS, autoRetryBackoffMs } from "./autoRetry.ts";
+import {
+  AUTO_RETRY_GIVE_UP_MS,
+  AUTO_RETRY_MIN_IDLE_MS,
+  autoRetryBackoffMs,
+  shouldFireRetry,
+} from "./autoRetry.ts";
 import {
   initializeLogPaths,
   setupDebugLogging,
@@ -60,7 +65,7 @@ export type AgentCliConfig = {
   working?: RegExp[]; // regex matcher for working status
   updateAvailable?: RegExp[]; // regex matcher for update available banners
   exitCommands?: string[]; // commands to exit the cli gracefully
-  promptArg?: (string & {}) | "first-arg" | "last-arg"; // argument name to pass the prompt, e.g. --prompt, or first-arg for positional arg
+  promptArg?: (string & {}) | "first-arg" | "last-arg" | "typed"; // argument name to pass the prompt, e.g. --prompt, first-arg for positional arg, or "typed" to type it into an interactive session after ready (shells)
 
   // handle special format
   noEOL?: boolean; // if true, do not split lines by \n when handling inputs, e.g. for codex, which uses cursor-move csi code instead of \n to move lines
@@ -356,6 +361,10 @@ export default async function agentYes({
     } else if (cliConf.promptArg.startsWith("--")) {
       cliArgs = [cliConf.promptArg, prompt, ...cliArgs];
       prompt = undefined; // clear prompt to avoid sending later
+    } else if (cliConf.promptArg === "typed") {
+      // Shell mode (bash/cmd/powershell): don't pass an argv (that would
+      // run-and-exit). Leave `prompt` set so it's typed into the interactive
+      // session at onStart, keeping the shell alive afterwards.
     } else {
       logger.warn(`Unknown promptArg format: ${cliConf.promptArg}`);
     }
@@ -805,8 +814,12 @@ export default async function agentYes({
         } else if (now >= retryNextAt) {
           const working = conf.working?.some((rx: RegExp) => rx.test(autoRetryScreen)) ?? false;
           const readyNow = conf.ready?.some((rx: RegExp) => rx.test(autoRetryScreen)) ?? false;
-          if (working || !readyNow) {
-            retryNextAt = now + 500; // busy / not at prompt — re-check shortly
+          // Also require a few quiet seconds on top of the backoff delay, so a
+          // scheduled retry doesn't collide with a line the user is actively
+          // typing into the prompt (see AUTO_RETRY_MIN_IDLE_MS).
+          const idleMs = ctx.idleWaiter.idleTimeMs();
+          if (!shouldFireRetry(working, readyNow, idleMs, AUTO_RETRY_MIN_IDLE_MS)) {
+            retryNextAt = now + 500; // busy / not at prompt / still active — re-check shortly
           } else {
             retryStreak += 1;
             logger.warn(`[${cli}-yes] auto-retry: typing 'retry' (attempt ${retryStreak})`);
@@ -887,7 +900,12 @@ export default async function agentYes({
       // Silently ignore heartbeat errors to avoid disrupting main flow
       logger.debug(`heartbeat|error: ${error}`);
     }
-  }, 800); // Run every 800ms
+  }, 100); // Run every 100ms — cheap when unchanged (see the rendered === lastHeartbeatRendered
+  // guard above): most ticks bail after one xtermProxy.tail(12) + string compare. A short
+  // interval matters for two things this heartbeat drives: no-EOL ready/fatal detection
+  // (CSI-redrawn output never fires the newline-driven consoleResponder path) and auto-retry
+  // backoff timing precision (AUTO_RETRY_MIN_IDLE_MS gating). Previously 800ms; still coarser
+  // than Rust's HEARTBEAT_INTERVAL_MS=50 (rs/src/context.rs) since Rust's per-tick cost is lower.
 
   // Clear heartbeat on exit
   const cleanupHeartbeat = () => clearInterval(heartbeatInterval);
@@ -1096,13 +1114,22 @@ export default async function agentYes({
         write: async (data) => {
           await ctx.stdinReady.wait();
           shell.write(data);
+          // Forwarded user input counts as activity too (mirrors the Rust
+          // runtime's ping on stdin forward) — the auto-retry idle gate below
+          // must not fire while the user is actively typing.
+          ctx.idleWaiter.ping();
         },
       }),
       readable: xtermProxy.readable,
     })
 
-    .forEach(() => {
-      ctx.idleWaiter.ping();
+    .forEach((chunk) => {
+      // Only ping activity if there's visible content (not just ANSI/cursor
+      // control sequences) — mirrors the Rust runtime's handle_output gate.
+      // Without this, periodic control-only chatter (e.g. cursor position
+      // queries) would keep resetting the auto-retry idle clock and the
+      // scheduled retry could defer indefinitely without ever firing.
+      if (removeControlCharacters(chunk).trim()) ctx.idleWaiter.ping();
       pidStore.updateStatus(shell.pid, "active").catch(() => null);
       ctx.nextStdout.ready();
     })
@@ -1294,14 +1321,18 @@ export default async function agentYes({
     await Promise.race([
       pendingExitCode.promise.then(() => (exited = true)), // resolve when shell exits
 
-      // if shell doesn't exit in 5 seconds, kill it
+      // if shell doesn't exit in 2 seconds, kill it. Rust's equivalent (rs/src/context.rs)
+      // doesn't wait for the child's own exit at all — it sends the exit command(s) and tears
+      // down immediately. 2s keeps a real grace window for a CLI to actually process `/exit`
+      // (flush session state, close connections) while still bounding the worst case — down
+      // from a previous 5s that mostly just delayed force-killing CLIs that never respond.
       new Promise<void>((resolve) =>
         setTimeout(() => {
           if (exited) return; // if shell already exited, do nothing
           shell.kill(); // kill the shell process if it doesn't exit in time
           resolve();
-        }, 5000),
-      ), // 5 seconds timeout
+        }, 2000),
+      ), // 2 seconds timeout
     ]);
   }
 

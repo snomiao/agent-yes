@@ -106,6 +106,16 @@ pub struct CliConfigOverride {
     /// treated as silently stalled. 0 disables. Omitted → built-in default.
     #[serde(default)]
     pub stall_timeout_secs: Option<u64>,
+    /// Wedge watchdog timeout (seconds): screen matches neither ready, working
+    /// nor needsInput and the PTY has been silent this long → recover via the
+    /// stall ladder. 0 (or absent) disables. See config.rs.
+    #[serde(default)]
+    pub wedge_timeout_secs: Option<u64>,
+    /// Needs-input menu patterns (agent parked on an interactive selection —
+    /// exempt from the wedge watchdog; also surfaced by the TS side as the
+    /// `needs_input` state).
+    #[serde(default)]
+    pub needs_input: Option<Vec<RegexSource>>,
     /// Liveness window: if we send stdin to the agent and it produces no PTY
     /// output within this many ms, mark it `unresponsive`. 0 (or absent)
     /// disables the check — appropriate for CLIs that don't animate a spinner.
@@ -211,6 +221,8 @@ impl CliConfigOverride {
             restart_without_continue_arg,
             auto_retry,
             stall_timeout_secs,
+            wedge_timeout_secs,
+            needs_input,
             unresponsive_timeout_ms,
         } = other;
 
@@ -301,6 +313,12 @@ impl CliConfigOverride {
         }
         if stall_timeout_secs.is_some() {
             self.stall_timeout_secs = stall_timeout_secs;
+        }
+        if wedge_timeout_secs.is_some() {
+            self.wedge_timeout_secs = wedge_timeout_secs;
+        }
+        if needs_input.is_some() {
+            self.needs_input = needs_input;
         }
         if unresponsive_timeout_ms.is_some() {
             self.unresponsive_timeout_ms = unresponsive_timeout_ms;
@@ -678,6 +696,8 @@ logsDir: /custom/logs
                 restart_without_continue_arg: Some(vec![pattern("old-restart")]),
                 auto_retry: Some(vec![pattern("old-auto-retry")]),
                 stall_timeout_secs: Some(111),
+                wedge_timeout_secs: Some(1111),
+                needs_input: Some(vec![pattern("old-needs-input")]),
                 unresponsive_timeout_ms: Some(1000),
             },
         );
@@ -718,6 +738,8 @@ logsDir: /custom/logs
                 restart_without_continue_arg: Some(vec![pattern("new-restart")]),
                 auto_retry: Some(vec![pattern("new-auto-retry")]),
                 stall_timeout_secs: Some(222),
+                wedge_timeout_secs: Some(2222),
+                needs_input: Some(vec![pattern("new-needs-input")]),
                 unresponsive_timeout_ms: Some(2000),
             },
         );
@@ -771,6 +793,8 @@ logsDir: /custom/logs
         );
         assert_eq!(t.auto_retry, Some(vec![pattern("new-auto-retry")]));
         assert_eq!(t.stall_timeout_secs, Some(222));
+        assert_eq!(t.wedge_timeout_secs, Some(2222));
+        assert_eq!(t.needs_input, Some(vec![pattern("new-needs-input")]));
         assert_eq!(t.unresponsive_timeout_ms, Some(2000));
         assert!(t.typing_respond.as_ref().unwrap().contains_key("y"));
         assert!(t.typing_respond.as_ref().unwrap().contains_key("1"));

@@ -45,6 +45,13 @@ async function openConsole(
     route.fulfill({ status: 200, contentType: "application/javascript", body });
   });
   const page = await ctx.newPage();
+  // Pin the platform so the suite is hermetic to the DEV machine's OS and matches
+  // CI (Linux). The agent-switch combo is platform-gated in the page (Cmd+Arrow on
+  // Mac, Alt+Arrow on Windows/Linux); without this, the Alt+Arrow test would no-op
+  // on a Mac dev box. CI already runs Linux, so this is a no-op there.
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "platform", { get: () => "Linux x86_64" });
+  });
   await page.goto(url);
   await page.waitForSelector(".list .row", { timeout: 10_000 });
   return { ctx, page };
@@ -176,9 +183,19 @@ describe("console DOM behaviour", () => {
   it("Alt+ArrowDown/ArrowUp cycles selection and is intercepted before xterm", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
-      // Select the first agent (builds the stubbed terminal + focuses it).
-      await page.click('.list .row[data-key="local#101"]');
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#101");
+      // The list is sorted for DISPLAY (default "state" mode = attention-first:
+      // active agents before idle ones), so nav follows the RENDERED order, not
+      // pid order — here [101, 103, 102] since 102 is idle. Drive the assertions
+      // off the actual rendered order so this stays correct if the sort changes.
+      const sel = () => page.locator(".row.sel").getAttribute("data-key");
+      const order = await page
+        .locator(".list .row")
+        .evaluateAll((rs) => rs.map((r) => r.getAttribute("data-key")));
+      expect(order.length).toBe(3);
+
+      // Select the first row (builds the stubbed terminal + focuses it).
+      await page.click(`.list .row[data-key="${order[0]}"]`);
+      await expect.poll(sel).toBe(order[0]);
 
       // Spy on document keydown in the BUBBLE phase: the page's capture-phase
       // handler calls stopPropagation, so these Alt+Arrow combos must never
@@ -195,13 +212,13 @@ describe("console DOM behaviour", () => {
       });
 
       await page.keyboard.press("Alt+ArrowDown");
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#102");
+      await expect.poll(sel).toBe(order[1]);
       await page.keyboard.press("Alt+ArrowDown");
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#103");
+      await expect.poll(sel).toBe(order[2]);
       await page.keyboard.press("Alt+ArrowDown"); // clamps at the bottom
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#103");
+      await expect.poll(sel).toBe(order[2]);
       await page.keyboard.press("Alt+ArrowUp");
-      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#102");
+      await expect.poll(sel).toBe(order[1]);
 
       // The combo was swallowed by the capture-phase intercept.
       expect(await page.evaluate(() => (window as any).__bubble)).toEqual([]);
@@ -235,6 +252,59 @@ describe("console DOM behaviour", () => {
       expect(typeof sends[0].keyword).toBe("string");
       expect(sends[0].keyword).toBe("102");
       expect(sends[0].msg).toBe("h");
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("Cmd+K /restart and /kill fire the open agent's recovery endpoints", async () => {
+    // The slash commands mirror the ⋯-menu Restart / Force-kill buttons: they act
+    // on the agent that was open when the palette launched (the anchor), and hit
+    // the very same POST /api/restart · /api/kill with a STRING keyword=pid.
+    const { ctx, page } = await openConsole(browser, url);
+    const posts: { path: string; body: any }[] = [];
+    page.on("request", (r) => {
+      const u = new URL(r.url());
+      if (r.method() === "POST" && (u.pathname === "/api/kill" || u.pathname === "/api/restart")) {
+        try {
+          posts.push({ path: u.pathname, body: r.postDataJSON() });
+        } catch {}
+      }
+    });
+    // The commands reuse the ⋯-menu confirm() gate — auto-accept it.
+    page.on("dialog", (d) => d.accept());
+    try {
+      // Open agent 101, then launch the palette so 101 is the anchor.
+      await page.click('.list .row[data-key="local#101"]');
+      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#101");
+      await page.keyboard.press("Control+k");
+      await expect.poll(() => page.locator("#omni").isVisible()).toBe(true);
+
+      // "/" lists the commands; both /restart and /kill are offered.
+      await page.fill("#omni-input", "/");
+      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(2);
+      const menu = (await page.locator("#omni-results").innerText()).toLowerCase();
+      expect(menu).toContain("restart");
+      expect(menu).toContain("kill");
+
+      // "/restart" narrows to one row; ⏎ fires POST /api/restart for pid 101.
+      await page.fill("#omni-input", "/restart");
+      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(1);
+      await page.keyboard.press("Enter");
+      await expect.poll(() => posts.filter((x) => x.path === "/api/restart").length).toBe(1);
+      const restart = posts.find((x) => x.path === "/api/restart")!;
+      expect(restart.body.keyword).toBe("101");
+      expect(typeof restart.body.keyword).toBe("string");
+
+      // Re-open and run "/kill" → POST /api/kill for the same agent.
+      await page.keyboard.press("Control+k");
+      await expect.poll(() => page.locator("#omni").isVisible()).toBe(true);
+      await page.fill("#omni-input", "/kill");
+      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(1);
+      await page.keyboard.press("Enter");
+      await expect.poll(() => posts.filter((x) => x.path === "/api/kill").length).toBe(1);
+      const kill = posts.find((x) => x.path === "/api/kill")!;
+      expect(kill.body.keyword).toBe("101");
     } finally {
       await ctx.close();
     }
@@ -423,6 +493,77 @@ describe("console DOM behaviour", () => {
       expect(await page.locator('.keybar [data-mod="ctrl"]').count()).toBe(1);
       expect(await page.locator('.keybar [data-mod="shift"]').count()).toBe(1);
       expect(await page.locator('.keybar [data-arrow="up"]').count()).toBe(1);
+    } finally {
+      await ctx.close();
+    }
+  });
+});
+
+// A nested fixture: root 201 with two subagents (202 active, 203 idle) and a
+// grandchild 204 under 202. All in one worktree so the parent_pid links drive
+// the forest. Exercises the fold toggle + summary chip, which the flat fixture
+// above (all roots) can't reach.
+describe("fold subagent trees", () => {
+  let browser: Browser;
+  let url: string;
+  let close: () => void;
+  const NESTED = [
+    { pid: 201, wrapper_pid: 201, cli: "claude", cwd: "/home/u/ws/o/r/tree/w", title: "root", status: "active", started_at: 1_700_000_000_000 },
+    { pid: 202, wrapper_pid: 202, parent_pid: 201, cli: "claude", cwd: "/home/u/ws/o/r/tree/w/a", title: "sub-a", status: "active", started_at: 1_700_000_000_000, last_active_at: 1_700_000_005_000 },
+    { pid: 203, wrapper_pid: 203, parent_pid: 201, cli: "claude", cwd: "/home/u/ws/o/r/tree/w/b", title: "sub-b", status: "idle", started_at: 1_700_000_000_000, last_active_at: 1_700_000_001_000 },
+    { pid: 204, wrapper_pid: 204, parent_pid: 202, cli: "claude", cwd: "/home/u/ws/o/r/tree/w/a/c", title: "grandchild", status: "active", started_at: 1_700_000_000_000, last_active_at: 1_700_000_003_000 },
+  ];
+
+  beforeAll(async () => {
+    ({ url, close } = await startServer(NESTED));
+    browser = await chromium.launch({ headless: true });
+  }, 60_000);
+
+  afterAll(async () => {
+    await browser?.close();
+    close?.();
+  });
+
+  it("folds by default, hiding subagents behind a working/total chip", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      // Only the root is visible; its three descendants are folded away.
+      await expect.poll(() => page.locator(".list .row").count()).toBe(1);
+      await expect
+        .poll(() => page.locator(".row[data-key='local#201'] .subs").innerText())
+        .toBe("⊞ 2/3");
+      // The recency the badge face omits lives in the tooltip.
+      expect(await page.locator(".row[data-key='local#201'] .subs").getAttribute("title")).toContain(
+        "last active",
+      );
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("the toolbar button unfolds every tree, and folds again", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      await expect.poll(() => page.locator(".list .row").count()).toBe(1);
+      await page.click("#foldbtn");
+      // All four agents (root + 3 descendants) now render; the chip is gone.
+      await expect.poll(() => page.locator(".list .row").count()).toBe(4);
+      expect(await page.locator(".subs").count()).toBe(0);
+      await page.click("#foldbtn");
+      await expect.poll(() => page.locator(".list .row").count()).toBe(1);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("clicking the summary chip expands the trees instead of selecting the row", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      await expect.poll(() => page.locator(".list .row").count()).toBe(1);
+      await page.click(".row[data-key='local#201'] .subs");
+      await expect.poll(() => page.locator(".list .row").count()).toBe(4);
+      // The click expanded rather than selecting the root row.
+      expect(await page.locator(".row.sel").count()).toBe(0);
     } finally {
       await ctx.close();
     }

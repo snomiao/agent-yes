@@ -59,6 +59,20 @@ describe("IdleWaiter", () => {
     expect(result).toBe(waiter);
   });
 
+  it("idleTimeMs reflects elapsed time since the last ping", async () => {
+    const waiter = new IdleWaiter();
+    waiter.ping();
+    expect(waiter.idleTimeMs()).toBeLessThan(20);
+
+    await new Promise((r) => setTimeout(r, 50));
+    // 45, not 50: setTimeout(50) can fire with the monotonic clock reading
+    // ~49ms on CI (timer coarseness), which flaked this exact assertion.
+    expect(waiter.idleTimeMs()).toBeGreaterThanOrEqual(45);
+
+    waiter.ping();
+    expect(waiter.idleTimeMs()).toBeLessThan(20);
+  });
+
   it("should wait until idle period has passed", async () => {
     const waiter = new IdleWaiter();
     waiter.checkInterval = 10;

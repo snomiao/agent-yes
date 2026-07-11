@@ -44,6 +44,72 @@ pub fn fifo_path(pid: u32) -> Option<PathBuf> {
     }
 }
 
+/// Path to the per-pid "last human stdin" activity marker — a tiny file whose
+/// only contents are the unix-ms timestamp of the most recent HUMAN keystroke
+/// forwarded into this agent's PTY. Deliberately excludes `ay send`/FIFO input
+/// (that arrives on a different reader), so it measures *the user typing at the
+/// terminal*, not injected input. `ay ls` reads it to light a "typing" chip and
+/// `ay send` reads it to back off while the user is mid-line. Lives under the
+/// global home root (mirrors `fifo_path`) so it's on a local fs and stable if
+/// the project dir moves. Windows uses a named pipe for the FIFO but this is a
+/// plain file on both platforms.
+pub fn stdin_activity_path(pid: u32) -> Option<PathBuf> {
+    crate::log_files::global_dir().map(|dir| dir.join("activity").join(format!("{}.stdin", pid)))
+}
+
+/// Record that a human just typed: overwrite the activity file with the current
+/// unix-ms. Best-effort — a dropped write only means a momentarily stale badge,
+/// never a correctness problem. Callers throttle this so a fast keystroke burst
+/// doesn't hammer the filesystem.
+pub fn touch_stdin_activity(pid: u32) {
+    let Some(path) = stdin_activity_path(pid) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let _ = std::fs::write(&path, now_ms.to_string());
+}
+
+/// Remove the activity marker on agent exit so a dead pid's stale timestamp
+/// can't linger and mislead a later reader.
+pub fn cleanup_stdin_activity(pid: u32) {
+    if let Some(path) = stdin_activity_path(pid) {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
+/// Defense-in-depth for the SIGKILL case: an agent hard-killed before running
+/// `cleanup_stdin_activity` leaves its marker behind. That's harmless on its own
+/// (a stale marker ages out of the typing window and stopped agents never render
+/// the chip), but the reaper prunes it so the `activity/` dir doesn't accumulate
+/// dead entries. Removes every `<pid>.stdin` whose pid `is_alive` reports dead.
+pub fn prune_stale_activity_markers(is_alive: impl Fn(u32) -> bool) {
+    let Some(dir) = crate::log_files::global_dir().map(|d| d.join("activity")) else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return; // no activity dir yet — nothing to prune
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name
+            .to_str()
+            .and_then(|n| n.strip_suffix(".stdin"))
+            .and_then(|p| p.parse::<u32>().ok())
+        else {
+            continue; // not a <pid>.stdin marker
+        };
+        if !is_alive(pid) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 /// Create the FIFO (idempotent — if it already exists from a stale run, unlink first).
 #[cfg(unix)]
 pub fn create_fifo(path: &Path) -> std::io::Result<()> {
@@ -287,6 +353,11 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
+    // Serializes tests that mutate the AGENT_YES_HOME env var — std::env::set_var
+    // is process-global, so two of them running in parallel clobber each other's
+    // root (Mutex::new is const, usable directly in a static).
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn test_create_and_round_trip() {
         let dir = tempfile::tempdir().unwrap();
@@ -349,6 +420,63 @@ mod tests {
         assert!(p.ends_with("fifo/42.stdin"));
         let parent = p.parent().unwrap();
         assert!(parent.ends_with("fifo"));
+    }
+
+    #[test]
+    fn test_stdin_activity_path_shape() {
+        let p = stdin_activity_path(42).expect("home dir resolves in test env");
+        assert!(p.ends_with("activity/42.stdin"));
+        assert!(p.parent().unwrap().ends_with("activity"));
+    }
+
+    #[test]
+    fn test_touch_and_cleanup_stdin_activity_roundtrip() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // Point the global home at a tempdir so we don't touch the real ~/.agent-yes.
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("AGENT_YES_HOME");
+        std::env::set_var("AGENT_YES_HOME", dir.path());
+
+        let path = stdin_activity_path(4242).unwrap();
+        assert!(!path.exists());
+
+        touch_stdin_activity(4242);
+        let raw = std::fs::read_to_string(&path).expect("activity file written");
+        let ms: u128 = raw.trim().parse().expect("contents are a unix-ms integer");
+        assert!(ms > 0, "timestamp should be a positive unix-ms value");
+
+        cleanup_stdin_activity(4242);
+        assert!(!path.exists(), "cleanup removes the marker");
+
+        match prev {
+            Some(v) => std::env::set_var("AGENT_YES_HOME", v),
+            None => std::env::remove_var("AGENT_YES_HOME"),
+        }
+    }
+
+    #[test]
+    fn test_prune_stale_activity_markers() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("AGENT_YES_HOME");
+        std::env::set_var("AGENT_YES_HOME", dir.path());
+
+        // Two markers: one "alive" pid, one "dead" pid.
+        touch_stdin_activity(111); // pretend-alive
+        touch_stdin_activity(222); // pretend-dead
+        let live = stdin_activity_path(111).unwrap();
+        let dead = stdin_activity_path(222).unwrap();
+        assert!(live.exists() && dead.exists());
+
+        // Only 111 is alive → 222's marker is pruned, 111's is kept.
+        prune_stale_activity_markers(|pid| pid == 111);
+        assert!(live.exists(), "live pid's marker kept");
+        assert!(!dead.exists(), "dead pid's marker pruned");
+
+        match prev {
+            Some(v) => std::env::set_var("AGENT_YES_HOME", v),
+            None => std::env::remove_var("AGENT_YES_HOME"),
+        }
     }
 
     #[test]

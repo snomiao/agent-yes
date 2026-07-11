@@ -439,4 +439,22 @@ describe("CLI argument parsing", () => {
     expect(afterCli.useStdinAppend).toBe(true);
     expect(afterCli.cliArgs).toContain("--no-stdpush");
   });
+
+  it("consumes --attach as an agent-yes flag before the CLI positional", () => {
+    const result = parseCliArgs(["node", "/path/to/ay", "--attach", "claude", "--", "task"]);
+    expect(result.attach).toBe(true);
+  });
+
+  it("defaults attach to false so fork-by-default stays enabled", () => {
+    const result = parseCliArgs(["node", "/path/to/ay", "claude"]);
+    expect(result.attach).toBe(false);
+  });
+
+  it("does NOT treat --attach after -- as an agent-yes flag (passthrough safety)", () => {
+    // Everything after `--` is prompt / CLI passthrough, never an agent-yes flag —
+    // so `ay claude -- --attach` sends --attach to the CLI and still forks.
+    const result = parseCliArgs(["node", "/path/to/ay", "claude", "--", "--attach"]);
+    expect(result.attach).toBe(false);
+    expect(result.prompt).toContain("--attach");
+  });
 });

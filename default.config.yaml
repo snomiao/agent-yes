@@ -18,6 +18,14 @@ clis:
     working:
       - esc to interrupt
       - to run in background
+    # Wedge watchdog: a frozen state that repaints no `working` marker at all
+    # (observed: claude wedged mid-"Compacting conversation…" at 0% CPU for
+    # days — screen matched neither ready, working nor needsInput). After this
+    # many seconds of total PTY silence in that no-marker state, recover via
+    # the same Esc → force-restart ladder as the spinner stall watchdog.
+    # Only enabled for CLIs whose ready markers reliably identify "parked at
+    # prompt"; 0/absent disables.
+    wedgeTimeoutSecs: 1800
     # needsInput: the agent is blocked on an interactive selection menu it did NOT
     # auto-resolve — an AskUserQuestion / a permission prompt whose options aren't
     # the auto-`enter`ed "Yes". The cursor `❯` sits on a numbered option. Surfaced
@@ -147,6 +155,9 @@ clis:
     working:
       - esc to interrupt
       - to run in background
+    # Same wedge watchdog as claude (this CLI runs the claude binary) — see
+    # the claude section for rationale.
+    wedgeTimeoutSecs: 1800
     needsInput:
       - pattern: '❯ ?\d+\.'
         flags: m
@@ -249,6 +260,9 @@ clis:
     working:
       - esc to interrupt
       - to run in background
+    # Same wedge watchdog as claude (this CLI runs the claude binary) — see
+    # the claude section for rationale.
+    wedgeTimeoutSecs: 1800
     needsInput:
       - pattern: '❯ ?\d+\.'
         flags: m
@@ -479,3 +493,48 @@ clis:
       npm: "npm i -g opencode-ai"
     enter: []
     ready: []
+
+  # Bare interactive shells. Unlike the agent CLIs above, these aren't AI tools
+  # — they're a plain login shell you can drive from the console and launch
+  # other agents inside (e.g. `ay bash 'claude'`). `promptArg: typed` means any
+  # initial command is TYPED into the shell after its prompt is ready (see the
+  # run loop), rather than passed as an argv — so `bash -c` never runs-and-exits
+  # and the session stays interactive. No `working`/`enter` markers: a shell has
+  # no spinner and no auto-acceptable menus. The `ready` regex anchors on the
+  # prompt suffix so the typed command lands at the prompt instead of waiting on
+  # the force-ready fallback; with no match it still force-readies after 10s.
+  bash:
+    promptArg: typed
+    ready:
+      - pattern: '[$#] $'
+        flags: m
+    working: []
+    enter: []
+    fatal: []
+    exitCommands:
+      - exit
+
+  # Windows only (cmd.exe is absent on macOS/Linux, so `ay cmd` there just
+  # reports command-not-found). Prompt looks like `C:\Users\me>`.
+  cmd:
+    promptArg: typed
+    ready:
+      - pattern: '^[A-Za-z]:\\.*>'
+        flags: m
+    working: []
+    enter: []
+    fatal: []
+    exitCommands:
+      - exit
+
+  # Windows only (Windows PowerShell 5.1). Prompt looks like `PS C:\Users\me>`.
+  powershell:
+    promptArg: typed
+    ready:
+      - pattern: '^PS .*>'
+        flags: m
+    working: []
+    enter: []
+    fatal: []
+    exitCommands:
+      - exit

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdir, mkdtemp, rm, utimes, writeFile } from "fs/promises";
+import { appendFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 
@@ -113,25 +114,134 @@ describe("subcommands.isSubcommand", () => {
 });
 
 describe("subcommands.cmdHelp", () => {
-  it("hides the manager-only `setup` line for cli-bound aliases", async () => {
+  const capture = async (managerCommands?: boolean) => {
     const { cmdHelp } = await loadModule();
-    const capture = (managerCommands?: boolean) => {
-      let out = "";
-      const spy = vi.spyOn(process.stdout, "write").mockImplementation((s: unknown) => {
-        out += String(s);
-        return true;
-      });
-      try {
-        cmdHelp(managerCommands);
-      } finally {
-        spy.mockRestore();
-      }
-      return out;
-    };
-    expect(capture(true)).toContain("ay setup"); // manager
-    expect(capture()).toContain("ay setup"); // default = manager
-    expect(capture(false)).not.toContain("ay setup"); // cli-bound alias (cy)
-    expect(capture(false)).toContain("ay ls"); // universal commands still shown
+    let out = "";
+    const spy = vi.spyOn(process.stdout, "write").mockImplementation((s: unknown) => {
+      out += String(s);
+      return true;
+    });
+    try {
+      await cmdHelp(managerCommands);
+    } finally {
+      spy.mockRestore();
+    }
+    return out;
+  };
+
+  it("hides the manager-only `setup` line for cli-bound aliases", async () => {
+    expect(await capture(true)).toContain("ay setup"); // manager
+    expect(await capture()).toContain("ay setup"); // default = manager
+    expect(await capture(false)).not.toContain("ay setup"); // cli-bound alias (cy)
+    expect(await capture(false)).toContain("ay ls"); // universal commands still shown
+  });
+
+  it("stays plain for a human shell (no AGENT_YES_PID)", async () => {
+    const out = await capture();
+    expect(out).not.toContain("You are running inside an agent");
+  });
+
+  it("prints self + parent identity and sub-agent guidance when nested in an agent", async () => {
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const parentWrapperPid = 555001;
+    const selfWrapperPid = 555002;
+    await appendGlobalPid({
+      pid: 900001,
+      cli: "codex",
+      prompt: "orchestrate the migration",
+      cwd: "/work/parent",
+      log_file: null,
+      fifo_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: parentWrapperPid,
+    });
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: "fix the failing test",
+      cwd: "/work/parent/child",
+      log_file: null,
+      fifo_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: selfWrapperPid,
+      parent_pid: parentWrapperPid,
+    });
+    const saved = process.env.AGENT_YES_PID;
+    process.env.AGENT_YES_PID = String(selfWrapperPid);
+    try {
+      const out = await capture();
+      expect(out).toContain("You are running inside an agent");
+      expect(out).toContain(`You are agent pid ${process.pid} (claude)`);
+      expect(out).toContain(`Spawned by agent pid 900001 (codex)`);
+      expect(out).toContain("Spawn a sub-agent");
+      expect(out).toContain(`ay ls --cwd /work/parent/child`);
+      expect(out).toContain(`ay ls --watch --cwd /work/parent/child`);
+    } finally {
+      if (saved === undefined) delete process.env.AGENT_YES_PID;
+      else process.env.AGENT_YES_PID = saved;
+    }
+  });
+
+  it("reports a nested-but-unresolved parent distinctly from top-level", async () => {
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const selfWrapperPid = 555004;
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: null,
+      cwd: process.cwd(),
+      log_file: null,
+      fifo_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: selfWrapperPid,
+      parent_pid: 999999999, // no record ever registered for this wrapper pid
+    });
+    const saved = process.env.AGENT_YES_PID;
+    process.env.AGENT_YES_PID = String(selfWrapperPid);
+    try {
+      const out = await capture();
+      expect(out).not.toContain("Top-level agent");
+      expect(out).toContain("Nested under a parent (wrapper pid 999999999)");
+    } finally {
+      if (saved === undefined) delete process.env.AGENT_YES_PID;
+      else process.env.AGENT_YES_PID = saved;
+    }
+  });
+
+  it("reports top-level (no parent) when parent_pid is absent", async () => {
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const selfWrapperPid = 555003;
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: null,
+      cwd: process.cwd(),
+      log_file: null,
+      fifo_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: selfWrapperPid,
+    });
+    const saved = process.env.AGENT_YES_PID;
+    process.env.AGENT_YES_PID = String(selfWrapperPid);
+    try {
+      const out = await capture();
+      expect(out).toContain("Top-level agent");
+    } finally {
+      if (saved === undefined) delete process.env.AGENT_YES_PID;
+      else process.env.AGENT_YES_PID = saved;
+    }
   });
 });
 
@@ -851,6 +961,368 @@ describe("subcommands.isExitRequest", () => {
       "",
     ]) {
       expect(isExitRequest(s)).toBe(false);
+    }
+  });
+});
+
+describe("subcommands.isSlashCommand", () => {
+  it("matches a body that starts with a slash command (so it is sent unprefixed)", async () => {
+    const { isSlashCommand } = await loadModule();
+    for (const s of ["/compact", "/clear", "/model sonnet", "/resume\nmore text"]) {
+      expect(isSlashCommand(s)).toBe(true);
+    }
+  });
+  it("does NOT match plain prose, or a slash not at column 0", async () => {
+    const { isSlashCommand } = await loadModule();
+    for (const s of [
+      "please run /compact",
+      " /compact", // leading space — the CLI won't parse it as a command either
+      "//two slashes... wait, no letter after first slash",
+      "/ ",
+      "hello",
+      "",
+    ]) {
+      expect(isSlashCommand(s)).toBe(false);
+    }
+  });
+});
+
+describe("subcommands.waitForLogQuiet", () => {
+  it("resolves once writes to the file stop for quietMs, with the final size", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-quiet-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "hello");
+      const { waitForLogQuiet } = await loadModule();
+      const size = await waitForLogQuiet(log, 50, 500);
+      expect(size).toBe(5);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("returns the last observed size when maxWaitMs elapses without ever going quiet", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-quiet-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "x");
+      const timer = setInterval(() => {
+        appendFileSync(log, "x");
+      }, 20);
+      try {
+        const { waitForLogQuiet } = await loadModule();
+        const start = Date.now();
+        const size = await waitForLogQuiet(log, 50, 200);
+        expect(Date.now() - start).toBeGreaterThanOrEqual(190); // hit the cap, not the quiet window
+        expect(size).toBeGreaterThan(0);
+      } finally {
+        clearInterval(timer);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("returns null when the file can't be stat'd", async () => {
+    const { waitForLogQuiet } = await loadModule();
+    expect(await waitForLogQuiet("/no/such/file/here", 50, 200)).toBeNull();
+  });
+});
+
+describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
+  // claude's shipped `working` busy marker — matches cliDefaults()["claude"].working.
+  const BUSY = "⏺ Cogitating…\r\nesc to interrupt · ← for agents\r\n";
+  const IDLE = "❯ some leftover unsent text\r\n"; // no busy marker, never changes
+
+  const rec = (over: any) => ({
+    pid: process.pid,
+    cli: "claude",
+    prompt: null,
+    cwd: "/tmp",
+    log_file: null,
+    fifo_file: null,
+    status: "active",
+    exit_code: null,
+    exit_reason: null,
+    started_at: 0,
+    ...over,
+  });
+
+  async function withFifo(fn: (fifo: string) => Promise<void>) {
+    const { spawnSync } = await import("child_process");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-"));
+    const fifo = path.join(dir, "test.fifo");
+    try {
+      const r = spawnSync("mkfifo", [fifo]);
+      if (r.status !== 0) return; // mkfifo unavailable — skip
+      const fs = await import("fs");
+      const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR); // keeps writes from blocking
+      try {
+        await fn(fifo);
+      } finally {
+        fs.closeSync(rdwrFd);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  }
+
+  it.skipIf(!itUnix)(
+    "confirms on the first attempt when the busy marker newly appears after sending",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, "❯ \r\n"); // idle — no busy marker yet
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo) => {
+          // The Enter kicks off work: the busy marker appears shortly after,
+          // well within the confirm window — a genuine idle→busy transition.
+          setTimeout(() => appendFileSync(log, BUSY), 100);
+          const { confirmed, screen } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          expect(confirmed).toBe(true);
+          expect(screen.join("\n")).toContain("esc to interrupt");
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "does NOT confirm from a busy marker that was already on screen before sending (false-positive guard)",
+    async () => {
+      // A screen already showing "esc to interrupt" (busy from whatever the agent
+      // was already doing) proves nothing about whether THIS Enter landed — e.g.
+      // it could be sitting queued, unsubmitted, behind an unrelated in-flight
+      // turn. Static and unchanging (no growth either), so this must NOT confirm.
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, BUSY);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo) => {
+          const { confirmed } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          expect(confirmed).toBe(false);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)("confirms via log growth even without a recognized busy marker", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "❯ \r\n");
+      const { submitAndConfirm } = await loadModule();
+      await withFifo(async (fifo) => {
+        // Simulate the CLI starting to respond shortly after Enter lands — well
+        // within the first attempt's confirm window.
+        setTimeout(() => appendFileSync(log, "some real response text appears here\r\n"), 100);
+        const { confirmed } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+        expect(confirmed).toBe(true);
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it.skipIf(!itUnix)(
+    "gives up after exhausting retries when the Enter is swallowed (screen never changes)",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, IDLE); // never touched again — nothing to confirm
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo) => {
+          const { confirmed, screen } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          expect(confirmed).toBe(false);
+          expect(screen.join("\n")).toContain("leftover unsent text");
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+});
+
+describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
+  const BUSY = "⏺ Cogitating…\r\nesc to interrupt · ← for agents\r\n";
+
+  // A background drain so cmdSend's writes to the FIFO never block, mirroring
+  // the "delivers a message to a real FIFO" setup above.
+  async function withDrainedFifo(fn: (fifo: string) => Promise<void>) {
+    const { spawnSync } = await import("child_process");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-"));
+    const fifo = path.join(dir, "test.fifo");
+    try {
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return; // mkfifo unavailable — skip
+      const fs = await import("fs");
+      // O_NONBLOCK is REQUIRED here: without it, readSync on an empty FIFO BLOCKS
+      // the whole event loop. An O_RDWR fd keeps a writer open, so the read waits
+      // for bytes that only arrive once fn() calls writeToIpc — but fn() can't make
+      // progress while the loop is blocked in readSync → deadlock. That froze the
+      // vitest worker so hard its 30s testTimeout couldn't even fire, wedging the CI
+      // job for the full 6h cap. The catch below expects EAGAIN, which only happens
+      // with O_NONBLOCK. The sibling drain in "writeToIpc reliable delivery" already
+      // opens O_NONBLOCK for exactly this reason.
+      const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
+      const drain = setInterval(() => {
+        try {
+          fs.readSync(rdwrFd, Buffer.alloc(4096), 0, 4096, null);
+        } catch {
+          /* EAGAIN or similar — nothing pending, ignore */
+        }
+      }, 20);
+      // Belt-and-suspenders: never let the drain timer alone keep the worker alive.
+      // If a future test's fn() hangs past testTimeout, the finally below won't run
+      // (the awaited fn stays pending), but an unref'd timer can't wedge process exit.
+      drain.unref();
+      try {
+        await fn(fifo);
+      } finally {
+        clearInterval(drain);
+        fs.closeSync(rdwrFd);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  }
+
+  async function send(fifo: string, log: string, body: string, extraArgs: string[] = []) {
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: null,
+      cwd: process.cwd(),
+      log_file: log,
+      fifo_file: fifo,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+    });
+    const stdout: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (s: any) => {
+      stdout.push(String(s));
+      return true;
+    };
+    const savedAyPid = process.env.AGENT_YES_PID;
+    delete process.env.AGENT_YES_PID; // isolate from the send-safety guard, as above
+    try {
+      const code = await runSubcommand([
+        "bun",
+        "cli.js",
+        "send",
+        String(process.pid),
+        body,
+        "--force",
+        ...extraArgs,
+      ]);
+      return { code, stdout: stdout.join("") };
+    } finally {
+      process.stdout.write = orig;
+      if (savedAyPid !== undefined) process.env.AGENT_YES_PID = savedAyPid;
+    }
+  }
+
+  it.skipIf(!itUnix)(
+    "exits 0 and reports 'sent' when a working marker appears after the Enter (genuine confirm)",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-log-"));
+      // A STATIC pre-existing busy marker cannot confirm — that's the #157
+      // wasAlreadyWorking guard (see the "already on screen before sending" test).
+      // Confirmation needs a real idle→working transition (or >=8 bytes of growth)
+      // AFTER the submit. Model that: the log is idle until we send, then a steady
+      // trickle of the working marker lands within submitAndConfirm's window, so it
+      // confirms deterministically without fragile single-shot timing.
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "❯ \r\n"); // idle until the submitted Enter lands
+      let working = false;
+      const respond = setInterval(() => {
+        if (working) appendFileSync(log, BUSY);
+      }, 40);
+      respond.unref();
+      try {
+        await withDrainedFifo(async (fifo) => {
+          working = true; // the submitted Enter kicks the agent into working
+          const { code, stdout } = await send(fifo, log, "hello");
+          expect(code).toBe(0);
+          expect(stdout).toMatch(/^sent to pid/);
+          expect(stdout).not.toMatch(/NOT confirmed/);
+        });
+      } finally {
+        clearInterval(respond);
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "exits non-zero and reports the leftover screen when submission can't be confirmed",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, "❯ \r\n"); // stays this way — nothing ever confirms
+        await withDrainedFifo(async (fifo) => {
+          const { code, stdout } = await send(fifo, log, "hello");
+          expect(code).toBe(1);
+          expect(stdout).toMatch(/NOT confirmed/);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)(
+    "applies submit-confirm for --code=cr too, not just the default --code=enter",
+    async () => {
+      // canConfirm gates on the resolved trailing byte, not the code NAME, so
+      // every alias that resolves to Enter must go through the same confirm
+      // path — regression test for that alias-vs-byte gap.
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, "❯ \r\n"); // never confirms — nothing ever changes
+        await withDrainedFifo(async (fifo) => {
+          const { code, stdout } = await send(fifo, log, "hello", ["--code=cr"]);
+          expect(code).toBe(1);
+          expect(stdout).toMatch(/NOT confirmed/);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)("--no-wait skips confirmation entirely and always exits 0", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-log-"));
+    try {
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "❯ \r\n"); // would fail to confirm if checked — but we opt out
+      await withDrainedFifo(async (fifo) => {
+        const start = Date.now();
+        const { code, stdout } = await send(fifo, log, "hello", ["--no-wait"]);
+        expect(code).toBe(0);
+        expect(stdout).not.toMatch(/NOT confirmed/);
+        expect(Date.now() - start).toBeLessThan(1000); // fast — no settle/confirm polling
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
     }
   });
 });

@@ -24,6 +24,7 @@ export async function sendEnter(context: MessageContext, waitms = 1000) {
   logger.debug(`sendEnter| idleWait took ${String(Date.now() - st)}ms`);
   context.nextStdout.unready();
   context.shell.write("\r");
+  context.idleWaiter.ping(); // mirrors sendMessage — a programmatic Enter is activity too
 
   // Retry Enter if no stdout received within escalating timeouts
   for (const ms of [1000, 3000]) {
@@ -31,7 +32,10 @@ export async function sendEnter(context: MessageContext, waitms = 1000) {
       context.nextStdout.wait(),
       new Promise<void>((resolve) =>
         setTimeout(() => {
-          if (!context.nextStdout.isReady) context.shell.write("\r");
+          if (!context.nextStdout.isReady) {
+            context.shell.write("\r");
+            context.idleWaiter.ping();
+          }
           resolve();
         }, ms),
       ),

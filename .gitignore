@@ -36,7 +36,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # bun core dump
 /core
 
-bin
+# prebuilt Rust binaries downloaded at runtime (rustBinary.ts getBinDir → ./bin).
+# Root-anchored so it does NOT swallow source dirs like rs/src/bin/.
+/bin/
 
 # .agent-yes cache files
 .agent-yes
@@ -54,3 +56,7 @@ lab/ui/cf/public/
 
 # agent-yes e2e scratch dir (ts/tests/shared-e2e.spec.ts)
 tmp-test-shared-e2e/
+
+# wrangler local cache (scripts/cf.ts) + rech/playwright scratch
+.wrangler/
+.playwright-cli-multi-tab/

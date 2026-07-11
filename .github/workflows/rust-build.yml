@@ -27,6 +27,9 @@ jobs:
   build:
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
+    # Generous cap for Rust LTO + cross/zig darwin builds, but far under the 6h
+    # default so a stuck compile/link can't run away.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -57,17 +60,20 @@ jobs:
             ext: ""
             cross: true
 
-          # macOS x64 (Intel) - cross-compile from ARM64
+          # macOS x64 (Intel) — cross-compiled from Linux via cargo-zigbuild
+          # (no macOS runner: the zigbuild Docker image bundles the macOS SDK).
           - target: x86_64-apple-darwin
-            os: macos-14
+            os: ubuntu-latest
             artifact: agent-yes-darwin-x64
             ext: ""
+            zig: true
 
-          # macOS ARM64 (Apple Silicon)
+          # macOS ARM64 (Apple Silicon) — cross-compiled from Linux via zigbuild
           - target: aarch64-apple-darwin
-            os: macos-14
+            os: ubuntu-latest
             artifact: agent-yes-darwin-arm64
             ext: ""
+            zig: true
 
           # Windows x64
           - target: x86_64-pc-windows-msvc
@@ -116,8 +122,24 @@ jobs:
         working-directory: rs
         run: cross build --release --target ${{ matrix.target }}
 
+      # Cross-compile the macOS binaries from Linux with cargo-zigbuild. The
+      # image ships zig + the macOS SDK, so no macOS runner is needed. build.rs
+      # takes its "CI cross-build" branch (rs/default.config.yaml already copied
+      # above, ../default.config.yaml absent inside the rs-only mount). Output
+      # lands in rs/target/<target>/release/agent-yes, same path the native
+      # build uses, so "Prepare artifact" below is unchanged.
+      - name: Build darwin with cargo-zigbuild (Docker)
+        if: matrix.zig
+        run: |
+          docker run --rm \
+            -v "${{ github.workspace }}/rs":/io \
+            -w /io \
+            -e CARGO_TERM_COLOR=always \
+            ghcr.io/rust-cross/cargo-zigbuild:latest \
+            bash -c "rustup target add ${{ matrix.target }} && cargo zigbuild --release --target ${{ matrix.target }} --bin agent-yes"
+
       - name: Build with cargo
-        if: "!matrix.cross"
+        if: "!matrix.cross && !matrix.zig"
         working-directory: rs
         run: cargo build --release --target ${{ matrix.target }}
 
@@ -127,12 +149,19 @@ jobs:
           mkdir -p artifacts
           cp rs/target/${{ matrix.target }}/release/agent-yes${{ matrix.ext }} artifacts/${{ matrix.artifact }}${{ matrix.ext }}
           chmod +x artifacts/${{ matrix.artifact }}${{ matrix.ext }} || true
+          # Windows also ships the ay-spawn-hidden launcher (a second [[bin]]).
+          # `ay serve install` interposes it so pm2/oxmgr don't flash a console
+          # window on each daemon (re)start. It rides along in the same zip and
+          # extracts beside the main binary in rustBinary.ts getBinDir().
+          if [ "${{ matrix.ext }}" = ".exe" ]; then
+            cp rs/target/${{ matrix.target }}/release/ay-spawn-hidden.exe artifacts/ay-spawn-hidden.exe
+          fi
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: artifacts/${{ matrix.artifact }}${{ matrix.ext }}
+          path: artifacts/
           if-no-files-found: error
 
   # Create a combined artifact with all binaries
@@ -140,6 +169,7 @@ jobs:
     name: Combine Artifacts
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -169,6 +199,7 @@ jobs:
       github.event_name == 'release' ||
       (github.event_name == 'workflow_dispatch' && inputs.upload_release == true)
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     permissions:
       contents: write
     steps:

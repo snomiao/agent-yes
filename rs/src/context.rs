@@ -18,6 +18,10 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 const HEARTBEAT_INTERVAL_MS: u64 = 50; // Check frequently for Enter timing and patterns
+// Min gap between "user is typing" activity-file writes. Small enough that the
+// badge/backoff sees typing within a fraction of a second, large enough that a
+// fast keystroke burst doesn't hammer the filesystem.
+const STDIN_ACTIVITY_THROTTLE_MS: u64 = 250;
 const FORCE_READY_TIMEOUT_MS: u64 = 10000;
 const ENTER_IDLE_WAIT_MS: u64 = 50; // Wait for 50ms idle before sending Enter (reduced from 1000 due to cursor control sequences)
 const ENTER_RETRY_1_MS: u64 = 500; // Retry after 500ms if no response
@@ -33,6 +37,22 @@ const RETRY_BASE_SECS: u64 = 8; // first backoff; doubles each consecutive failu
 /// screen (output → idle resets → stall clears) well within this window.
 const STALL_ESC_GRACE_SECS: u64 = 30;
 const RETRY_MAX_DELAY_SECS: u64 = 256; // cap per-retry backoff: 8,16,32,…,256 then hold
+
+/// Minimum quiet time (no PTY output, no forwarded stdin — see idle_waiter.ping()
+/// call sites) required before a scheduled auto-retry may actually fire, on top
+/// of the backoff delay above. The backoff schedule alone can elapse while the
+/// user is mid-typing into the prompt; typing "retry" + Enter over that would
+/// submit a mangled line. Deliberately short — this only debounces against
+/// active typing, not a real excuse to delay recovery.
+const RETRY_MIN_IDLE_MS: u64 = 5_000;
+
+// Rapid-Ctrl-C panic gesture: a human escape hatch for an agent wedged on a
+// silent stall that ignores forwarded Ctrl-C. Pressing Ctrl-C this many times
+// within the window is read as "get me out": the first completed gesture
+// Esc-cancels the in-flight request; a second while still stuck forces a restart
+// (exit 75 → a --robust parent resumes with --continue).
+const PANIC_CTRL_C_COUNT: usize = 5;
+const PANIC_CTRL_C_WINDOW_SECS: u64 = 2;
 const RETRY_GIVE_UP_SECS: u64 = 8 * 3600; // stop after 8h (claude's usage window is ~5h)
 
 /// What the no-output watchdog should do this tick. Pure decision so it can be
@@ -70,12 +90,68 @@ fn decide_stall_action(
     }
 }
 
+/// Whether the wedge detector trips. Complements the spinner-based stall
+/// detector above: some frozen states repaint no `working` marker at all
+/// (observed 2026-07: claude wedged mid-"Compacting conversation…" at 0% CPU
+/// for days, its screen matching neither `ready` nor `working` nor a
+/// needs-input menu). If the screen shows no ready prompt (parked/done), no
+/// working spinner (the stall detector's territory), and no interactive menu
+/// (a legitimate indefinite wait for a human), then `wedge_timeout_secs` of
+/// total PTY silence means the CLI is wedged. 0 disables — the default,
+/// enabled per-CLI in default.config.yaml only where the ready markers are
+/// trustworthy enough to tell "parked at prompt" from "frozen".
+fn is_wedged(
+    wedge_timeout_secs: u64,
+    working: bool,
+    ready: bool,
+    needs_input: bool,
+    idle_secs: u64,
+) -> bool {
+    wedge_timeout_secs > 0
+        && !working
+        && !ready
+        && !needs_input
+        && idle_secs >= wedge_timeout_secs
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum PanicAction {
+    /// Gesture incomplete: fewer than `threshold` presses in the window.
+    None,
+    /// Gesture complete, first time this stall: Esc-cancel the request.
+    Esc,
+    /// Gesture complete again while an Esc is still in flight (output hasn't
+    /// resumed): escalate to a forced restart.
+    ForceKill,
+}
+
+/// Decide the rapid-Ctrl-C panic action. `recent` is the number of Ctrl-C
+/// presses inside the trailing window; `esc_in_flight` is true once this gesture
+/// already sent an Esc that output hasn't recovered from yet.
+fn decide_panic_action(recent: usize, threshold: usize, esc_in_flight: bool) -> PanicAction {
+    if recent < threshold {
+        return PanicAction::None;
+    }
+    if esc_in_flight {
+        PanicAction::ForceKill
+    } else {
+        PanicAction::Esc
+    }
+}
+
 /// Exponential backoff (seconds) for the Nth consecutive auto-retry, capped.
 fn retry_backoff_secs(streak: u32) -> u64 {
     let shift = streak.min(20); // guard against shift overflow on pathological streaks
     RETRY_BASE_SECS
         .saturating_mul(1u64 << shift)
         .min(RETRY_MAX_DELAY_SECS)
+}
+
+/// Whether a scheduled auto-retry may actually fire: the agent must be sitting
+/// idle at a ready prompt (not mid-work) AND the terminal must have been quiet
+/// for at least `min_idle_ms` — see RETRY_MIN_IDLE_MS.
+fn should_fire_retry(working: bool, ready: bool, idle_ms: u64, min_idle_ms: u64) -> bool {
+    !working && ready && idle_ms >= min_idle_ms
 }
 
 /// Agent context - centralized session state
@@ -166,6 +242,14 @@ pub struct AgentContext {
     stall_esc_sent_at: Option<Instant>,
     pub stall_force_restart: bool,
 
+    // Rapid-Ctrl-C panic gesture (human escape hatch, see PANIC_CTRL_C_COUNT).
+    // `ctrl_c_times` holds recent Ctrl-C Instants trimmed to the trailing window;
+    // `panic_esc_sent_at` arms once the gesture Esc-cancels a wedged request and
+    // clears the moment visible output resumes, so a repeat gesture escalates to
+    // a forced restart rather than re-sending Esc.
+    ctrl_c_times: Vec<Instant>,
+    panic_esc_sent_at: Option<Instant>,
+
     // Our own pid — needed to update this agent's pid_store record (the
     // unresponsive flag) from inside the loop.
     pid: u32,
@@ -189,6 +273,12 @@ pub struct AgentContext {
     poke_unresponsive: bool,
     watchdog_stalled: bool,
     unresponsive: bool,
+
+    // Shell "typed" prompt (promptArg: typed — bash/cmd/powershell). When set,
+    // this command is typed into the interactive session once the shell prompt
+    // is first ready, then the session stays live. None for every other CLI
+    // (they receive the prompt via argv instead). See run_with_fifo.
+    initial_input: Option<String>,
 }
 
 impl AgentContext {
@@ -203,6 +293,7 @@ impl AgentContext {
         term_rows: u16,
         term_cols: u16,
         render_plain: bool,
+        initial_input: Option<String>,
     ) -> Self {
         Self {
             cli,
@@ -229,6 +320,8 @@ impl AgentContext {
             auto_retry_next_at: None,
             stall_esc_sent_at: None,
             stall_force_restart: false,
+            ctrl_c_times: Vec::new(),
+            panic_esc_sent_at: None,
             last_idle_scan_at: None,
             stdout_drop_count: 0,
             log_writer: LogWriter::new(pid, &cwd),
@@ -246,6 +339,7 @@ impl AgentContext {
             poke_unresponsive: false,
             watchdog_stalled: false,
             unresponsive: false,
+            initial_input,
         }
     }
 
@@ -316,6 +410,27 @@ impl AgentContext {
     ) -> Result<i32> {
         let writer = pty.get_writer();
 
+        // Shell "typed" prompt: once the shell prompt is first ready, type the
+        // initial command and leave the session interactive. This is how
+        // bash/cmd/powershell (promptArg: typed) receive an initial command
+        // without `-c`'s run-and-exit, so you can e.g. `ay bash 'claude'` and
+        // then keep launching things inside the same shell. Runs in its own
+        // task so it never blocks the main loop; writes exactly once.
+        if let Some(input) = self.initial_input.clone() {
+            let writer = writer.clone();
+            let mut first_ready = self.stdin_first_ready.clone();
+            tokio::spawn(async move {
+                first_ready.wait().await;
+                // Small settle so the command lands at the prompt, not mid-banner.
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                if let Ok(mut w) = writer.lock() {
+                    let _ = w.write_all(input.as_bytes());
+                    let _ = w.write_all(b"\r");
+                    let _ = w.flush();
+                }
+            });
+        }
+
         // Create message context
         let mut msg_ctx = MessageContext::new(
             writer.clone(),
@@ -351,12 +466,33 @@ impl AgentContext {
         let stdin_handle = tokio::spawn({
             let stdin_tx = stdin_tx.clone();
             async move {
+                // Only a human attached to a terminal "types"; a piped/headless
+                // run's stdin is the fed prompt, not interactive input, so don't
+                // let it light the typing badge. FIFO/`ay send` input arrives on
+                // a different reader and is never stamped here.
+                let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdin());
+                let my_pid = std::process::id();
+                let mut last_touch: Option<Instant> = None;
                 let mut stdin = tokio::io::stdin();
                 let mut buf = [0u8; 1024];
                 loop {
                     match stdin.read(&mut buf).await {
                         Ok(0) => break,
                         Ok(n) => {
+                            if is_tty {
+                                // Throttle: the first keystroke after a pause
+                                // stamps immediately (badge lights at once); a
+                                // fast burst coalesces to one write per window.
+                                let now = Instant::now();
+                                let due = last_touch.is_none_or(|t| {
+                                    now.duration_since(t)
+                                        >= Duration::from_millis(STDIN_ACTIVITY_THROTTLE_MS)
+                                });
+                                if due {
+                                    crate::fifo::touch_stdin_activity(my_pid);
+                                    last_touch = Some(now);
+                                }
+                            }
                             if stdin_tx.send(buf[..n].to_vec()).await.is_err() {
                                 break;
                             }
@@ -552,10 +688,56 @@ impl AgentContext {
                             exit_code = 130;
                             break;
                         } else {
-                            // Forward Ctrl+C to agent — a live TUI redraws (e.g.
-                            // an interrupt prompt), so treat it as a liveness poke.
-                            send_ctrl_c(&writer)?;
-                            self.mark_stdin_sent();
+                            // Record the press(es) and check the rapid-Ctrl-C
+                            // panic gesture — a human escape hatch for an agent
+                            // wedged on a silent stall that ignores forwarded
+                            // Ctrl-C. Count every 0x03 in the chunk: a fast burst
+                            // can arrive coalesced in a single read, and one
+                            // timestamp per chunk would never reach the threshold.
+                            let now = Instant::now();
+                            let presses = data.iter().filter(|&&b| b == 0x03).count().max(1);
+                            for _ in 0..presses {
+                                self.ctrl_c_times.push(now);
+                            }
+                            let window = Duration::from_secs(PANIC_CTRL_C_WINDOW_SECS);
+                            self.ctrl_c_times
+                                .retain(|t| now.duration_since(*t) <= window);
+                            match decide_panic_action(
+                                self.ctrl_c_times.len(),
+                                PANIC_CTRL_C_COUNT,
+                                self.panic_esc_sent_at.is_some(),
+                            ) {
+                                PanicAction::None => {
+                                    // Forward Ctrl+C to agent — a live TUI redraws
+                                    // (e.g. an interrupt prompt), so treat it as a
+                                    // liveness poke.
+                                    send_ctrl_c(&writer)?;
+                                    self.idle_waiter.ping();
+                                    self.mark_stdin_sent();
+                                }
+                                PanicAction::Esc => {
+                                    warn!(
+                                        "Panic gesture: {}x Ctrl-C in {}s — sending Esc to \
+                                         cancel a wedged request (repeat to force restart)",
+                                        PANIC_CTRL_C_COUNT, PANIC_CTRL_C_WINDOW_SECS
+                                    );
+                                    // send_esc (NOT send_text) so we don't reset the
+                                    // idle timer; mirrors the no-output watchdog. If
+                                    // output resumes, handle_output disarms this.
+                                    send_esc(&writer)?;
+                                    self.panic_esc_sent_at = Some(now);
+                                    self.ctrl_c_times.clear();
+                                }
+                                PanicAction::ForceKill => {
+                                    warn!(
+                                        "Panic gesture repeated while still stuck — forcing \
+                                         restart (a --robust run resumes with --continue)"
+                                    );
+                                    // Picked up next heartbeat → exit 75 → restart.
+                                    self.stall_force_restart = true;
+                                    self.ctrl_c_times.clear();
+                                }
+                            }
                         }
                     }
                     // Check for Ctrl+Y (toggle auto-yes)
@@ -796,6 +978,9 @@ impl AgentContext {
         let stripped = strip_ansi_escapes::strip_str(output);
         if !stripped.trim().is_empty() {
             self.idle_waiter.ping();
+            // Output resumed → a panic-Esc unstuck the stream. Disarm so the next
+            // gesture starts fresh at Esc rather than jumping to force-restart.
+            self.panic_esc_sent_at = None;
         }
 
         // Check patterns
@@ -824,13 +1009,31 @@ impl AgentContext {
         let working = self.cli_config.working.iter().any(|p| p.is_match(&screen));
         let idle_secs = self.idle_waiter.idle_time_ms() / 1000;
         let esc_elapsed = self.stall_esc_sent_at.map(|t| t.elapsed().as_secs());
-        let action = decide_stall_action(
-            timeout,
-            working,
-            idle_secs,
-            esc_elapsed,
-            STALL_ESC_GRACE_SECS,
-        );
+        // Wedge detector (see is_wedged): a frozen state that repaints no
+        // `working` marker. The extra ready/needs-input screen scans only run
+        // once the cheap conditions (enabled, spinner absent, long silence)
+        // already hold — never on a routine 50ms heartbeat.
+        let wedge_timeout = self.cli_config.wedge_timeout_secs;
+        let wedged = wedge_timeout > 0 && !working && idle_secs >= wedge_timeout && {
+            let ready = self.cli_config.ready.iter().any(|p| p.is_match(&screen));
+            let needs_input = self
+                .cli_config
+                .needs_input
+                .iter()
+                .any(|p| p.is_match(&screen));
+            is_wedged(wedge_timeout, working, ready, needs_input, idle_secs)
+        };
+        let action = if wedged {
+            // Reuse the stall ladder: `working: true` here just means "tripped".
+            decide_stall_action(wedge_timeout, true, idle_secs, esc_elapsed, STALL_ESC_GRACE_SECS)
+        } else {
+            decide_stall_action(timeout, working, idle_secs, esc_elapsed, STALL_ESC_GRACE_SECS)
+        };
+        let cause = if wedged {
+            "no ready prompt, no spinner, no menu"
+        } else {
+            "working spinner frozen"
+        };
         // Any non-Clear action means the "working" spinner is frozen → feed the
         // unified stuck flag. The stuck/recovered webhook is now emitted centrally
         // by update_unresponsive() (this used to fire its own "STUCK" notify); the
@@ -843,9 +1046,11 @@ impl AgentContext {
             }
             StallAction::SendEsc => {
                 warn!(
-                    "No-output watchdog: spinner up with no visible output for {}s (>= {}s) — \
+                    "No-output watchdog: {} with no visible output for {}s (>= {}s) — \
                      stream looks stalled, sending Esc to cancel",
-                    idle_secs, timeout
+                    cause,
+                    idle_secs,
+                    if wedged { wedge_timeout } else { timeout }
                 );
                 // Esc cancels claude's in-flight request; harmless to other CLIs.
                 // Use send_esc (NOT send_text) so we don't ping the idle timer —
@@ -857,9 +1062,9 @@ impl AgentContext {
             StallAction::Wait => {}
             StallAction::ForceRestart => {
                 warn!(
-                    "No-output watchdog: Esc did not recover the stream after {}s — forcing \
-                     restart (a --robust run resumes with --continue)",
-                    STALL_ESC_GRACE_SECS
+                    "No-output watchdog ({}): Esc did not recover the stream after {}s — \
+                     forcing restart (a --robust run resumes with --continue)",
+                    cause, STALL_ESC_GRACE_SECS
                 );
                 self.stall_force_restart = true;
             }
@@ -896,11 +1101,15 @@ impl AgentContext {
                 self.auto_retry_streak = 0;
             } else if now >= next_at {
                 // Re-render the screen to confirm the agent is idle at a prompt —
-                // never type "retry" while it's busy (e.g. the CLI's own retry).
+                // never type "retry" while it's busy (e.g. the CLI's own retry) —
+                // and require a few quiet seconds on top of the backoff delay, so
+                // a scheduled retry doesn't collide with a line the user is
+                // actively typing (see RETRY_MIN_IDLE_MS).
                 let screen = self.vterm.contents();
                 let working = self.cli_config.working.iter().any(|p| p.is_match(&screen));
                 let ready = self.cli_config.ready.iter().any(|p| p.is_match(&screen));
-                if working || !ready {
+                let idle_ms = self.idle_waiter.idle_time_ms();
+                if !should_fire_retry(working, ready, idle_ms, RETRY_MIN_IDLE_MS) {
                     self.auto_retry_next_at = Some(now + Duration::from_millis(500));
                 } else {
                     self.auto_retry_streak = self.auto_retry_streak.saturating_add(1);
@@ -1304,6 +1513,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_is_wedged_trips_only_in_the_no_marker_state() {
+        // The real wedge: no ready, no spinner, no menu, long silence.
+        assert!(is_wedged(1800, false, false, false, 1800));
+        assert!(is_wedged(1800, false, false, false, 9999));
+        // Not yet silent long enough.
+        assert!(!is_wedged(1800, false, false, false, 1799));
+        // Disabled (the default for CLIs without trustworthy ready markers).
+        assert!(!is_wedged(0, false, false, false, 99999));
+        // Working spinner on screen — the stall detector's territory.
+        assert!(!is_wedged(1800, true, false, false, 9999));
+        // Parked at a ready prompt (idle/done) — a legitimate forever-wait.
+        assert!(!is_wedged(1800, false, true, false, 9999));
+        // Blocked on an interactive menu — waiting for a human, not wedged.
+        assert!(!is_wedged(1800, false, false, true, 9999));
+    }
+
+    #[test]
     fn test_retry_backoff_secs_doubles_then_caps() {
         // 8, 16, 32, 64, 128, 256 …
         assert_eq!(retry_backoff_secs(0), 8);
@@ -1315,6 +1541,20 @@ mod tests {
         // capped at RETRY_MAX_DELAY_SECS, and no shift overflow for large streaks
         assert_eq!(retry_backoff_secs(6), 256);
         assert_eq!(retry_backoff_secs(50), 256);
+    }
+
+    #[test]
+    fn test_should_fire_retry_requires_ready_not_working_and_quiet() {
+        // Busy — never fire even if otherwise ready and quiet.
+        assert!(!should_fire_retry(true, true, 10_000, 5_000));
+        // Not at a recognized ready prompt — don't fire.
+        assert!(!should_fire_retry(false, false, 10_000, 5_000));
+        // Ready and idle, but the quiet window hasn't elapsed yet (user may
+        // still be mid-typing) — defer.
+        assert!(!should_fire_retry(false, true, 4_999, 5_000));
+        // Ready, idle, and past the quiet window — fire.
+        assert!(should_fire_retry(false, true, 5_000, 5_000));
+        assert!(should_fire_retry(false, true, 10_000, 5_000));
     }
 
     #[test]
@@ -1333,6 +1573,30 @@ mod tests {
             decide_stall_action(300, false, 9999, None, 30),
             StallAction::Clear
         );
+    }
+
+    #[test]
+    fn test_panic_below_threshold_is_none() {
+        // 4 presses in the window → gesture incomplete, forward as normal.
+        assert_eq!(decide_panic_action(4, 5, false), PanicAction::None);
+    }
+
+    #[test]
+    fn test_panic_at_threshold_sends_esc() {
+        // 5th press completes the gesture, no Esc yet → Esc-cancel.
+        assert_eq!(decide_panic_action(5, 5, false), PanicAction::Esc);
+    }
+
+    #[test]
+    fn test_panic_repeat_while_esc_in_flight_force_kills() {
+        // Gesture repeats while a prior Esc hasn't recovered → force restart.
+        assert_eq!(decide_panic_action(5, 5, true), PanicAction::ForceKill);
+    }
+
+    #[test]
+    fn test_panic_below_threshold_ignores_esc_state() {
+        // An armed Esc doesn't lower the bar: still need a full gesture.
+        assert_eq!(decide_panic_action(4, 5, true), PanicAction::None);
     }
 
     #[test]
