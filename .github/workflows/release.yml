@@ -20,6 +20,12 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0 # semantic-release needs full history to compute versions correctly
+          # Don't bake the workflow's GITHUB_TOKEN into git's http.extraheader:
+          # it overrides the RELEASE_TOKEN semantic-release embeds in the push
+          # URL, so the version-bump push authenticated as github-actions[bot]
+          # and was rejected by main's required checks (GH006, run 29158738669).
+          # The repo is public — the fetches below work unauthenticated.
+          persist-credentials: false
       - uses: actions/setup-node@v5
         with:
           node-version: "latest"
