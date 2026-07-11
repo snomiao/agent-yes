@@ -1685,6 +1685,9 @@
               <button id="foldbtn" class="viewbtn" title="fold subagent trees">⊞ subs</button>
               <button id="sortbtn" class="viewbtn" title="cycle sort order">⇅ state</button>
               <button id="viewbtn" class="viewbtn" title="toggle compact list">☰</button>
+              <button id="rguibtn" class="viewbtn" title="open the agent graph view (/r/) for this fleet">
+                ⌗ graph
+              </button>
               <button id="newbtn" class="newbtn" title="spawn a new agent on this fleet">
                 + New agent
               </button>
@@ -3962,6 +3965,10 @@
       }
 
       function renderList() {
+        // The graph view (/r/) only exists on the hosted origin — a local
+        // `ay serve --http` console (served at /) has no /r/ route, so the
+        // switcher would 404 there. Path-gate it to the hosted /w/ console.
+        $("rguibtn").hidden = !location.pathname.startsWith("/w");
         const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
         // Build the full signalling-server > rooms > peers > agents > subagents
         // tree. Single-node room/peer layers fold away; ≥2 become ├ └ │ branches.
@@ -4505,6 +4512,20 @@
         foldSubs = !foldSubs;
         localStorage.setItem("ay.foldSubs", foldSubs ? "1" : "0");
         renderList();
+      });
+      // View switcher: same fleet, semantic-zoom graph rendering (/r/ = rgui).
+      // Prefer the selected agent's room (carrying its pid as a deep link),
+      // else the first live WebRTC room. Only the room mnemonic travels — /r/
+      // reconnects from the shared ay.rooms cache, so no token enters the URL.
+      // A pure-local console (no rooms) opens the local /r/ on the same wire.
+      $("rguibtn").addEventListener("click", () => {
+        const [selRoom, selPid] = sel ? sel.split("#") : [null, null];
+        let room = selRoom && selRoom !== LOCAL && loadRooms()[selRoom] ? selRoom : null;
+        if (!room)
+          room = [...sources.values()].find((s) => s.kind === "rtc" && s.live)?.id ?? null;
+        const frag =
+          room ? "#" + encodeURIComponent(room) + (room === selRoom && selPid ? ":" + selPid : "") : "";
+        location.href = "/r/" + frag;
       });
       // Cycle the sort order: state → created → identity → state.
       $("sortbtn").addEventListener("click", () => {
