@@ -1821,7 +1821,11 @@ function focusNode(id: string, overlay = false) {
   const ch = canvas.clientHeight || innerHeight;
   const pad = 90;
   const k = Math.min((cw - 2 * pad) / n.w, (ch - 2 * pad) / h, 2.6); // fit node, cap zoom-in
-  viewer.setView({ k, x: cw / 2 - (n.x + n.w / 2) * k, y: ch / 2 - (n.y + h / 2) * k });
+  // glide, don't hard-switch — the camera travel keeps spatial context (taku)
+  viewer.setView(
+    { k, x: cw / 2 - (n.x + n.w / 2) * k, y: ch / 2 - (n.y + h / 2) * k },
+    { animate: true },
+  );
   viewer.setSelection([id]);
   if (!overlay) return;
   // the terminal spawns on settle (settle-gate) — poll for it, then focus it.
