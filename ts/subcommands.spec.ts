@@ -1165,7 +1165,15 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
     try {
       if (spawnSync("mkfifo", [fifo]).status !== 0) return; // mkfifo unavailable — skip
       const fs = await import("fs");
-      const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR);
+      // O_NONBLOCK is REQUIRED here: without it, readSync on an empty FIFO BLOCKS
+      // the whole event loop. An O_RDWR fd keeps a writer open, so the read waits
+      // for bytes that only arrive once fn() calls writeToIpc — but fn() can't make
+      // progress while the loop is blocked in readSync → deadlock. That froze the
+      // vitest worker so hard its 30s testTimeout couldn't even fire, wedging the CI
+      // job for the full 6h cap. The catch below expects EAGAIN, which only happens
+      // with O_NONBLOCK. The sibling drain in "writeToIpc reliable delivery" already
+      // opens O_NONBLOCK for exactly this reason.
+      const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
       const drain = setInterval(() => {
         try {
           fs.readSync(rdwrFd, Buffer.alloc(4096), 0, 4096, null);
@@ -1173,6 +1181,10 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
           /* EAGAIN or similar — nothing pending, ignore */
         }
       }, 20);
+      // Belt-and-suspenders: never let the drain timer alone keep the worker alive.
+      // If a future test's fn() hangs past testTimeout, the finally below won't run
+      // (the awaited fn stays pending), but an unref'd timer can't wedge process exit.
+      drain.unref();
       try {
         await fn(fifo);
       } finally {
@@ -1225,19 +1237,32 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
   }
 
   it.skipIf(!itUnix)(
-    "exits 0 and reports 'sent' when the busy marker confirms submission",
+    "exits 0 and reports 'sent' when a working marker appears after the Enter (genuine confirm)",
     async () => {
       const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-log-"));
+      // A STATIC pre-existing busy marker cannot confirm — that's the #157
+      // wasAlreadyWorking guard (see the "already on screen before sending" test).
+      // Confirmation needs a real idle→working transition (or >=8 bytes of growth)
+      // AFTER the submit. Model that: the log is idle until we send, then a steady
+      // trickle of the working marker lands within submitAndConfirm's window, so it
+      // confirms deterministically without fragile single-shot timing.
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "❯ \r\n"); // idle until the submitted Enter lands
+      let working = false;
+      const respond = setInterval(() => {
+        if (working) appendFileSync(log, BUSY);
+      }, 40);
+      respond.unref();
       try {
-        const log = path.join(dir, "a.log");
-        await writeFile(log, BUSY); // already showing "working" — settles + confirms immediately
         await withDrainedFifo(async (fifo) => {
+          working = true; // the submitted Enter kicks the agent into working
           const { code, stdout } = await send(fifo, log, "hello");
           expect(code).toBe(0);
           expect(stdout).toMatch(/^sent to pid/);
           expect(stdout).not.toMatch(/NOT confirmed/);
         });
       } finally {
+        clearInterval(respond);
         await rm(dir, { recursive: true, force: true }).catch(() => null);
       }
     },

@@ -909,7 +909,7 @@
           y: 6,
           status: "done",
           plane: "Reach surface",
-          desc: "The end-user surface. An installable PWA that renders a real terminal (xterm.js) for any agent and can list, tail, send keystrokes, resize and spawn. Reaches the host over the encrypted WebRTC channel, or directly over HTTP on a LAN/desktop.",
+          desc: "The end-user surface. An installable PWA that renders a real terminal (xterm.js) for any agent and can list, tail, send keystrokes, resize and spawn. Its left panel — the agent>subagent forest with live state, age, task/status badges and git tags — is the same view `ay ls` prints in the terminal (shared display model). Reaches the host over the encrypted WebRTC channel, or directly over HTTP on a LAN/desktop.",
           files: ["lab/ui/index.html", "lab/ui/room-client.js", "lab/ui/console-logic.js"],
         },
         {
@@ -1083,8 +1083,8 @@
           y: 70,
           status: "done",
           plane: "Local fabric",
-          desc: "The on-machine control plane over the fabric: list, render last lines, full read, append a prompt, interactively attach, or gracefully stop any running agent — regardless of which runtime spawned it.",
-          files: ["ts/subcommands.ts", "docs/cy-subcommands.md"],
+          desc: "The on-machine control plane over the fabric: list, render last lines, full read, append a prompt, interactively attach, or gracefully stop any running agent — regardless of which runtime spawned it. `ay ls` renders the SAME view as the browser console's left panel — the agent>subagent forest (parent_pid nesting), live state (idle / needs_input / stuck), staleness age (last_active_at), task badge (2/5), status-flag chips (goal / retry / limit) and the git dirty/sync tag (±3 ⑂2 ⊙1 ↑1 ↓2). Aggregates local + every configured remote into one fleet view.",
+          files: ["ts/subcommands.ts", "ts/agentTree.ts", "ts/badges.ts", "docs/cy-subcommands.md"],
         },
         // ① agent core
         {

@@ -20,8 +20,9 @@ use std::env;
 /// Management subcommands handled by the TypeScript CLI, not this runner.
 /// MUST mirror `SUBCOMMANDS` in ts/subcommands.ts — keep the two in sync.
 pub const SUBCOMMANDS: &[&str] = &[
-    "ls", "list", "ps", "status", "result", "read", "cat", "tail", "head", "send", "spawn",
-    "attach", "stop", "exit", "restart", "note", "serve", "schedule", "remote", "reap", "help",
+    "ls", "list", "ps", "status", "result", "notify", "notifyd", "read", "cat", "tail", "head",
+    "send", "spawn", "attach", "stop", "exit", "restart", "note", "serve", "schedule", "remote",
+    "reap", "help",
 ];
 
 /// Subcommands reserved for the generic manager entry (`ay`/`agent-yes`), not a
@@ -160,6 +161,9 @@ pub const SUPPORTED_CLIS: &[&str] = &[
     "auggie",
     "amp",
     "opencode",
+    "bash",
+    "cmd",
+    "powershell",
 ];
 
 // Most fields here are read elsewhere in the binary; the ones that aren't
@@ -700,7 +704,7 @@ mod tests {
 
     #[test]
     fn test_supported_clis_count() {
-        assert_eq!(SUPPORTED_CLIS.len(), 13);
+        assert_eq!(SUPPORTED_CLIS.len(), 16);
         // The claude-compatible providers (run the `claude` binary via env) must
         // be present, else their `*-yes` bins fail validation in the Rust runtime.
         for cli in ["glm", "openrouter", "pi"] {

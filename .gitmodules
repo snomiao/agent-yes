@@ -1,0 +1,3 @@
+[submodule "lib/rgui"]
+	path = lib/rgui
+	url = https://github.com/snomiao/rgui

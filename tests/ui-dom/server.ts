@@ -14,6 +14,8 @@
  *   GET  /api/tail/:pid?raw=1   → SSE; one JSON-encoded chunk then keep-alive
  *   POST /api/resize/:pid       → ok
  *   POST /api/send              → ok
+ *   POST /api/kill              → { ok: true }  (Cmd+K /kill, ⋯ Force-kill)
+ *   POST /api/restart           → { ok: true }  (Cmd+K /restart, ⋯ Restart)
  */
 import http from "http";
 import { readFileSync } from "fs";
@@ -64,7 +66,12 @@ function file(res: http.ServerResponse, path: string, type: string) {
   res.end(readFileSync(path));
 }
 
-export async function startServer(): Promise<{ url: string; close: () => void }> {
+// `agents` defaults to the flat AGENTS fixture; a test can pass its own set
+// (e.g. a nested parent+subagent tree) to exercise fold-specific wiring without
+// disturbing the shared fixture the other tests assert exact counts against.
+export async function startServer(
+  agents: unknown[] = AGENTS,
+): Promise<{ url: string; close: () => void }> {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || "/", "http://localhost");
     const p = url.pathname;
@@ -74,15 +81,22 @@ export async function startServer(): Promise<{ url: string; close: () => void }>
     if (req.method === "GET" && p === "/console-logic.js")
       return file(res, join(UI, "console-logic.js"), "text/javascript; charset=utf-8");
     // index.html statically imports ./e2e.js too; without it the whole page
-    // module fails to load and nothing renders (the list stays empty).
+    // module fails to load and nothing renders (the list stays empty). Same for
+    // ./rtc.js (the extracted ay-share WebRTC wire) — a 404 on a module import
+    // halts the whole graph, so every row test times out. qrcode.js is a classic
+    // <script> (its 404 is non-fatal) but we serve it so the console stays clean.
     if (req.method === "GET" && p === "/e2e.js")
       return file(res, join(UI, "e2e.js"), "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/room-client.js")
       return file(res, join(UI, "room-client.js"), "text/javascript; charset=utf-8");
+    if (req.method === "GET" && p === "/rtc.js")
+      return file(res, join(UI, "rtc.js"), "text/javascript; charset=utf-8");
+    if (req.method === "GET" && p === "/qrcode.js")
+      return file(res, join(UI, "qrcode.js"), "text/javascript; charset=utf-8");
 
     if (req.method === "GET" && p === "/api/ls") {
       res.writeHead(200, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify(AGENTS));
+      return res.end(JSON.stringify(agents));
     }
     if (req.method === "GET" && p.startsWith("/api/size/")) {
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -102,6 +116,13 @@ export async function startServer(): Promise<{ url: string; close: () => void }>
     if (req.method === "POST" && (p.startsWith("/api/resize/") || p === "/api/send")) {
       res.writeHead(200, { "Content-Type": "text/plain" });
       return res.end("ok");
+    }
+    // Recovery endpoints (Cmd+K /kill · /restart, and the ⋯-menu buttons). Ack ok
+    // so restartAgent()'s success path runs; the test asserts the target from the
+    // captured request body.
+    if (req.method === "POST" && (p === "/api/kill" || p === "/api/restart")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: true }));
     }
 
     res.writeHead(404);

@@ -89,6 +89,14 @@ export default defineConfig({
         // process-bound (same "oxmgr registration is integration-only" rationale
         // as schedule.ts); mocking the spawn would only test the mock.
         "ts/oxmgrService.ts",
+        // notifyd daemon runtime — the singleton run loop (runDaemon: an interval
+        // heartbeat that refreshes the owner lock, SIGINT/SIGTERM cleanup handlers,
+        // and a `while (running)` reconcile/sweep loop) plus ensureDaemon's process
+        // spawn are integration-only (need a live long-running process + real
+        // signals; same rationale as serve.ts/schedule.ts). The pure lock/status/
+        // reconcile helpers (acquireDaemonLock, daemonStatus, requestDaemonStop,
+        // reconcileFromInboxes) ARE unit-tested in notifyDaemon.spec.ts.
+        "ts/notifyDaemon.ts",
       ],
       thresholds: {
         lines: 90,

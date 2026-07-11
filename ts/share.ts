@@ -77,6 +77,13 @@ const STUN: IceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 // TURN) to enable; without them we use STUN only, exactly as before. Cached
 // until just before expiry; STUN-only fallback on any error so sharing never
 // breaks because TURN is misconfigured or unreachable.
+//
+// Exposure note: these short-lived (1h) relay credentials are handed to every
+// browser peer that joins a room (they ride in the offer, see startPeer), so any
+// holder of a valid share link can use them to relay for the credential's
+// lifetime. That is acceptable — joining a room already requires the share
+// secret — but it means a share link also grants ~1h of Cloudflare TURN relay
+// capacity. Keep the TTL short; do not widen it.
 let iceCache: { servers: IceServer[]; exp: number } | null = null;
 async function getIceServers(): Promise<IceServer[]> {
   const keyId = process.env.CF_TURN_KEY_ID;
@@ -146,7 +153,7 @@ export async function loadOrCreateShareRoom(sighost = DEFAULT_SIGHOST): Promise<
   } catch {
     /* not yet minted */
   }
-  const room = "r" + randomBytes(3).toString("hex");
+  const room = "r" + randomBytes(6).toString("hex");
   const s = randomBytes(32).toString("hex");
   const url = `webrtc://${room}:${MARKER}${s}@${sighost}`;
   await mkdir(path.dirname(shareRoomPath()), { recursive: true });
@@ -284,7 +291,7 @@ export async function startShare(
   const initial = opts.url
     ? parseShareUrl(opts.url)
     : {
-        room: "r" + randomBytes(3).toString("hex"),
+        room: "r" + randomBytes(6).toString("hex"),
         token: `${MARKER}${randomBytes(32).toString("hex")}`,
         host: sighost,
       };
@@ -322,7 +329,7 @@ export async function startShare(
   const rotate = async (): Promise<boolean> => {
     if (!opts.onRotate || closed || rotateCount >= 5) return false;
     rotateCount++;
-    room = "r" + randomBytes(3).toString("hex");
+    room = "r" + randomBytes(6).toString("hex");
     token = `${MARKER}${randomBytes(32).toString("hex")}`;
     S = parseSecret(token).s;
     authToken = await deriveAuthToken(S, room, host);

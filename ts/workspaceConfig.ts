@@ -26,6 +26,15 @@ interface Config {
    */
   spawnHook?: string;
   /**
+   * A trusted, HOST-LOCAL shell hook run before a `fork`/`from` provisioning git
+   * op ("koho-style" provisioning). See {@link getProvisionHook}. When set it is
+   * the provisioning GATE: exit 0 = allow (and it has prepared the environment,
+   * e.g. `gh auth switch` to the right account), non-zero = deny — it OVERRIDES
+   * {@link provisionAllowlist}. Like {@link spawnHook} it is arbitrary local code,
+   * so it is intentionally NOT settable over the network.
+   */
+  provisionHook?: string;
+  /**
    * Max number of concurrently-live agents the daemon will admit via
    * `/api/spawn`. `0`/unset = unlimited (current behavior). See {@link getMaxAgents}.
    */
@@ -129,8 +138,18 @@ export function isProvisionAllowed(owner: string, repo: string): boolean {
 export function getSpawnHook(): string | null {
   const env = process.env.AGENT_YES_SPAWN_HOOK;
   if (env && env.trim()) return env;
-  const h = readConfig().spawnHook;
-  if (!h || !h.trim()) return null;
+  return configHookIfTrusted(readConfig().spawnHook);
+}
+
+/**
+ * Return a config-file hook value only when the config file is safe to trust as
+ * a source of code to run: not a symlink (can't be swapped out from under us),
+ * owned by us, and not group/world-writable (no other user can rewrite it). The
+ * env-var forms of these hooks bypass this — they come from the daemon's own
+ * environment, which is already trusted. Returns null when unset or guarded out.
+ */
+function configHookIfTrusted(value: string | undefined): string | null {
+  if (!value || !value.trim()) return null;
   if (process.platform !== "win32") {
     try {
       if (lstatSync(configPath()).isSymbolicLink()) return null;
@@ -141,12 +160,36 @@ export function getSpawnHook(): string | null {
       return null;
     }
   }
-  return h;
+  return value;
 }
 
 /** Whether a usable {@link getSpawnHook} is configured (for read-only disclosure). */
 export function hasSpawnHook(): boolean {
   return getSpawnHook() !== null;
+}
+
+/**
+ * A trusted, HOST-LOCAL shell hook run BEFORE a `fork`/`from` provisioning git
+ * op — "koho-style" (codehost-style) provisioning. Env `AGENT_YES_PROVISION_HOOK`
+ * overrides the config `provisionHook`; the config form is subject to the same
+ * tamper guard as {@link getSpawnHook} ({@link configHookIfTrusted}).
+ *
+ * Its purpose is to prepare the host for provisioning — most usefully to select
+ * the right git identity (e.g. `gh auth switch --user <who>`, keyed on the
+ * `KOHO_OWNER`/`KOHO_REPO` env the caller exports) before the clone/worktree/
+ * setup runs. When configured it is ALSO the provisioning gate: its exit code
+ * decides admission (0 = allow, non-zero = deny), overriding
+ * {@link getProvisionAllowlist}. Returns null when unset/guarded.
+ */
+export function getProvisionHook(): string | null {
+  const env = process.env.AGENT_YES_PROVISION_HOOK;
+  if (env && env.trim()) return env;
+  return configHookIfTrusted(readConfig().provisionHook);
+}
+
+/** Whether a usable {@link getProvisionHook} is configured (for read-only disclosure). */
+export function hasProvisionHook(): boolean {
+  return getProvisionHook() !== null;
 }
 
 /**

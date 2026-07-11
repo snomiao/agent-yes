@@ -65,7 +65,7 @@ export type AgentCliConfig = {
   working?: RegExp[]; // regex matcher for working status
   updateAvailable?: RegExp[]; // regex matcher for update available banners
   exitCommands?: string[]; // commands to exit the cli gracefully
-  promptArg?: (string & {}) | "first-arg" | "last-arg"; // argument name to pass the prompt, e.g. --prompt, or first-arg for positional arg
+  promptArg?: (string & {}) | "first-arg" | "last-arg" | "typed"; // argument name to pass the prompt, e.g. --prompt, first-arg for positional arg, or "typed" to type it into an interactive session after ready (shells)
 
   // handle special format
   noEOL?: boolean; // if true, do not split lines by \n when handling inputs, e.g. for codex, which uses cursor-move csi code instead of \n to move lines
@@ -361,6 +361,10 @@ export default async function agentYes({
     } else if (cliConf.promptArg.startsWith("--")) {
       cliArgs = [cliConf.promptArg, prompt, ...cliArgs];
       prompt = undefined; // clear prompt to avoid sending later
+    } else if (cliConf.promptArg === "typed") {
+      // Shell mode (bash/cmd/powershell): don't pass an argv (that would
+      // run-and-exit). Leave `prompt` set so it's typed into the interactive
+      // session at onStart, keeping the shell alive afterwards.
     } else {
       logger.warn(`Unknown promptArg format: ${cliConf.promptArg}`);
     }

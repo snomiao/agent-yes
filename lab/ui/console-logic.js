@@ -191,6 +191,14 @@ export const BADGE_META = {
     label: "limit",
     title: "Usage session limit hit — waiting for the reset time shown on screen",
   },
+  retrying: {
+    label: "retry",
+    title: "Waiting for the API — the CLI is auto-retrying on its own backoff (no action needed)",
+  },
+  typing: {
+    label: "typing",
+    title: "The user is typing at this agent's terminal — ay send backs off until they pause",
+  },
 };
 
 // Status-flag chips ("badges") matched against the agent's screen — e.g. an
@@ -200,11 +208,16 @@ export function badgesFor(e) {
   return (e.badges || []).map((id) => ({ id, ...(BADGE_META[id] || { label: id, title: id }) }));
 }
 
-// Human age of an agent ("12s" / "5m" / "3h"). `now` is injectable so tests
-// don't depend on the wall clock; the browser calls age(e) and gets Date.now().
+// Time since the agent was last active ("12s" / "5m" / "3h") — measured from
+// its last stdout write (last_active_at, the log file's mtime), so a long-lived
+// but quiet agent reads as stale rather than "new". Falls back to started_at
+// when the server hasn't stamped a last-active time (e.g. freshly spawned, no
+// log yet). `now` is injectable so tests don't depend on the wall clock; the
+// browser calls age(e) and gets Date.now().
 export function age(e, now = Date.now()) {
-  if (!e.started_at) return "";
-  const s = Math.max(0, (now - e.started_at) / 1000);
+  const at = e.last_active_at ?? e.started_at;
+  if (!at) return "";
+  const s = Math.max(0, (now - at) / 1000);
   if (s < 60) return Math.floor(s) + "s";
   if (s < 3600) return Math.floor(s / 60) + "m";
   return Math.floor(s / 3600) + "h";
@@ -335,7 +348,7 @@ function agentForestNodes(list) {
 // flat entry list BEFORE layeredRows builds the room/peer/agent tree (which keeps
 // the given order for siblings and first-seen order for room/peer groups). So
 // sorting reorders roots and siblings without breaking the nesting.
-export const SORT_MODES = ["state", "created", "identity"];
+export const SORT_MODES = ["state", "active", "stdin", "created", "identity"];
 
 // Attention-first state ranking: someone scanning the fleet wants the agents that
 // need them (needs_input) up top, then the wedged ones (stuck), then live work,
@@ -362,19 +375,34 @@ function gitWeight(e) {
   return (g.changed || 0) + (g.ahead || 0) + (g.behind || 0) + (g.dirty ? 0.5 : 0);
 }
 
+// Last-active instant for an entry: its last stdout write (last_active_at),
+// falling back to started_at when the server hasn't stamped one yet.
+function lastActive(e) {
+  return e.last_active_at ?? e.started_at ?? 0;
+}
+
 // Return a NEW array sorted for display per `mode` (default "state"):
 //   - "state":    attention-first state, then git busyness, then newest.
+//   - "active":   most recently active first (last_active_at, i.e. stdout, desc).
+//   - "stdin":    most recently FED first (last_stdin_at desc) — which agent was
+//                 just driven/typed-into/`ay send`-ed. Agents never fed sort last.
 //   - "created":  newest first (started_at desc).
 //   - "identity": user@host:owner/repo/branch (alphabetical).
 // Every comparator falls back to newest-first so order is total & deterministic.
 export function sortEntries(entries, mode = "state") {
   const byNewest = (a, b) => (b.started_at || 0) - (a.started_at || 0);
+  const byActive = (a, b) => lastActive(b) - lastActive(a) || byNewest(a, b);
+  const byStdin = (a, b) => (b.last_stdin_at ?? 0) - (a.last_stdin_at ?? 0) || byNewest(a, b);
   const cmp =
-    mode === "created"
-      ? byNewest
-      : mode === "identity"
-        ? (a, b) => fullIdent(a).localeCompare(fullIdent(b)) || byNewest(a, b)
-        : (a, b) => stateRank(a) - stateRank(b) || gitWeight(b) - gitWeight(a) || byNewest(a, b);
+    mode === "active"
+      ? byActive
+      : mode === "stdin"
+        ? byStdin
+        : mode === "created"
+          ? byNewest
+          : mode === "identity"
+            ? (a, b) => fullIdent(a).localeCompare(fullIdent(b)) || byNewest(a, b)
+            : (a, b) => stateRank(a) - stateRank(b) || gitWeight(b) - gitWeight(a) || byNewest(a, b);
   return entries.slice().sort(cmp);
 }
 
@@ -469,6 +497,48 @@ function toAgentNode(n) {
   return { kind: "agent", entry: n.entry, children: n.children.map(toAgentNode) };
 }
 
+// When the subagent trees are folded away, each surviving root agent shows a
+// summary chip of the descendants hidden beneath it. Given the FULL layeredRows
+// output, returns a Map keyed by the root agent's `entry` →
+// { total, working, lastActive }:
+//   total      = alive (non-exited) descendant subagents, at every depth
+//   working    = those whose status is "active"
+//   lastActive = newest last_active_at (fallback started_at) among the alive
+//                descendants, or null when none is stamped
+// Descendants roll up to their nearest folded-away ancestor's root, so a folded
+// tree summarizes its whole subtree in one chip. Roots with no alive descendant
+// aren't in the map (no chip). Pure so tests can exercise it without a DOM.
+export function foldSummaries(rows) {
+  // Direct parent-agent entry → child agent entries (skip room/peer headers).
+  const kids = new Map();
+  for (const r of rows) {
+    if (r.kind !== "agent" || !r.parentEntry) continue;
+    const arr = kids.get(r.parentEntry) || [];
+    arr.push(r.entry);
+    kids.set(r.parentEntry, arr);
+  }
+  const summaries = new Map();
+  for (const r of rows) {
+    if (r.kind !== "agent" || r.parentEntry) continue; // roots only
+    const acc = { total: 0, working: 0, lastActive: null };
+    const stack = [...(kids.get(r.entry) || [])];
+    const seen = new Set();
+    while (stack.length) {
+      const e = stack.pop();
+      if (seen.has(e)) continue; // guard a pathological parent cycle
+      seen.add(e);
+      for (const c of kids.get(e) || []) stack.push(c);
+      if (e.status === "exited") continue;
+      acc.total++;
+      if (e.status === "active") acc.working++;
+      const at = e.last_active_at ?? e.started_at;
+      if (at != null && (acc.lastActive == null || at > acc.lastActive)) acc.lastActive = at;
+    }
+    if (acc.total > 0) summaries.set(r.entry, acc);
+  }
+  return summaries;
+}
+
 // Next selection index when stepping the list by `dir` (+1 down / -1 up).
 // No current selection (i<0) lands on the first (down) or last (up) row;
 // otherwise clamps at the ends. Returns -1 for an empty list.
@@ -483,6 +553,52 @@ export function nextIndex(len, i, dir) {
 // index.html keeps the DOM glue (measuring elements, applying transforms); the
 // coordinate math lives here so it's unit-testable without a browser.
 // ---------------------------------------------------------------------------
+
+// ---- collaborative presence: peer focus + stdin flash ----------------------
+// The left panel colour-codes who's on which agent: your own selection is blue
+// (the .sel bar), every OTHER human peer's focus is yellow (.peerfocus), and a
+// row pulses when its stdin was just written — independent of focus, since an
+// `ay send` feeds an agent no one is looking at. These pure helpers own the
+// bookkeeping so index.html only measures the DOM.
+
+// Detect agents whose stdin just advanced. `seen` maps _key -> the last
+// last_stdin_at we observed; given the current entries, return the _keys whose
+// last_stdin_at is NEWER than what we'd seen (someone typed / `ay send` pushed),
+// and fold the new values into `seen`. A key seen for the FIRST time never
+// flashes (else every agent would pulse on initial load) — only a later bump
+// does. Keys no longer present are pruned so `seen` can't grow without bound.
+export function advanceStdinFlashes(entries, seen) {
+  const fresh = [];
+  const alive = new Set();
+  for (const e of entries) {
+    const key = e._key;
+    if (!key) continue;
+    alive.add(key);
+    const at = e.last_stdin_at;
+    if (typeof at !== "number") continue;
+    const prev = seen.get(key);
+    if (prev !== undefined && at > prev) fresh.push(key);
+    if (prev === undefined || at > prev) seen.set(key, at);
+  }
+  for (const key of [...seen.keys()]) if (!alive.has(key)) seen.delete(key);
+  return fresh;
+}
+
+// Summarize fleet presence for the peers badge + per-row chips. `records` is one
+// entry per OTHER viewer currently watching an agent: { key, viewer } (key = the
+// composite _key of the agent they're on). Returns { total, byKey }: `total`
+// distinct viewers (the "N peers" badge), `byKey` a Map of _key -> how many
+// peers watch that agent (the yellow per-row chip + .peerfocus trigger).
+export function focusSummary(records) {
+  const viewers = new Set();
+  const byKey = new Map();
+  for (const r of records) {
+    if (!r || !r.key || !r.viewer) continue;
+    viewers.add(r.viewer);
+    byKey.set(r.key, (byKey.get(r.key) || 0) + 1);
+  }
+  return { total: viewers.size, byKey };
+}
 
 // Stable per-viewer hue (0..359) for colour-coding peers' selections.
 export function hashHue(s) {

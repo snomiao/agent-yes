@@ -65,7 +65,9 @@ describe("IdleWaiter", () => {
     expect(waiter.idleTimeMs()).toBeLessThan(20);
 
     await new Promise((r) => setTimeout(r, 50));
-    expect(waiter.idleTimeMs()).toBeGreaterThanOrEqual(50);
+    // 45, not 50: setTimeout(50) can fire with the monotonic clock reading
+    // ~49ms on CI (timer coarseness), which flaked this exact assertion.
+    expect(waiter.idleTimeMs()).toBeGreaterThanOrEqual(45);
 
     waiter.ping();
     expect(waiter.idleTimeMs()).toBeLessThan(20);

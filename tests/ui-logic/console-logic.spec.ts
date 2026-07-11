@@ -21,10 +21,13 @@ import {
   deviceCount,
   forestOrder,
   layeredRows,
+  foldSummaries,
   sortEntries,
   SORT_MODES,
   taskLabel,
   badgesFor,
+  advanceStdinFlashes,
+  focusSummary,
   hashHue,
   selFromBottom,
   parseSel,
@@ -239,6 +242,59 @@ describe("layeredRows parentEntry", () => {
   });
 });
 
+describe("foldSummaries (collapsed subagent roll-up)", () => {
+  // A root with two direct subagents and one grandchild, all in one worktree so
+  // parent_pid wiring drives the tree (see forestOrder tests above).
+  const tree = () => [
+    agent({ pid: 1, wrapper_pid: 1, cwd: "/x/o/r/tree/w", status: "active" }),
+    agent({
+      pid: 2,
+      wrapper_pid: 2,
+      parent_pid: 1,
+      cwd: "/x/o/r/tree/w/a",
+      status: "active",
+      last_active_at: 1000,
+    }),
+    agent({
+      pid: 3,
+      wrapper_pid: 3,
+      parent_pid: 1,
+      cwd: "/x/o/r/tree/w/b",
+      status: "idle",
+      last_active_at: 5000,
+    }),
+    agent({
+      pid: 4,
+      wrapper_pid: 4,
+      parent_pid: 2,
+      cwd: "/x/o/r/tree/w/a/c",
+      status: "active",
+      last_active_at: 3000,
+    }),
+  ];
+
+  it("rolls a root's whole subtree into working/total + newest last-active", () => {
+    const rows = layeredRows(tree());
+    const sum = foldSummaries(rows);
+    const root = rows.find((r) => r.entry?.pid === 1).entry;
+    expect(sum.get(root)).toEqual({ total: 3, working: 2, lastActive: 5000 });
+  });
+
+  it("excludes exited descendants from total, working and last-active", () => {
+    const list = tree();
+    list[2].status = "exited"; // pid 3 (had the newest last_active_at)
+    const rows = layeredRows(list);
+    const sum = foldSummaries(rows);
+    const root = rows.find((r) => r.entry?.pid === 1).entry;
+    expect(sum.get(root)).toEqual({ total: 2, working: 2, lastActive: 3000 });
+  });
+
+  it("omits roots with no (alive) subagents", () => {
+    const rows = layeredRows([agent({ pid: 1, wrapper_pid: 1 })]);
+    expect(foldSummaries(rows).size).toBe(0);
+  });
+});
+
 describe("fullIdent / hasIdent / deviceCount", () => {
   it("fullIdent is uncapped with device prefix only when present", () => {
     expect(fullIdent(agent({ _host: "sno@taka" }))).toBe("sno@taka:snomiao/agent-yes/main");
@@ -313,6 +369,14 @@ describe("age", () => {
   });
   it("clamps a future start time to 0s instead of going negative", () => {
     expect(age(agent({ started_at: now + 10_000 }), now)).toBe("0s");
+  });
+  it("prefers last_active_at (last stdout) over started_at when present", () => {
+    expect(
+      age(agent({ started_at: now - 3 * 3_600_000, last_active_at: now - 5_000 }), now),
+    ).toBe("5s");
+  });
+  it("falls back to started_at when last_active_at is absent", () => {
+    expect(age(agent({ started_at: now - 5 * 60_000, last_active_at: undefined }), now)).toBe("5m");
   });
 });
 
@@ -497,6 +561,77 @@ describe("badgesFor (status flag chips)", () => {
       "goal-active",
       "some-future-flag",
     ]);
+  });
+});
+
+describe("advanceStdinFlashes (stdin pulse detection)", () => {
+  it("never flashes an agent seen for the first time (no pulse on initial load)", () => {
+    const seen = new Map();
+    const fresh = advanceStdinFlashes(
+      [
+        { _key: "a", last_stdin_at: 1000 },
+        { _key: "b", last_stdin_at: 2000 },
+      ],
+      seen,
+    );
+    expect(fresh).toEqual([]);
+    expect(seen.get("a")).toBe(1000);
+    expect(seen.get("b")).toBe(2000);
+  });
+
+  it("flashes only the agents whose last_stdin_at advanced since last seen", () => {
+    const seen = new Map([
+      ["a", 1000],
+      ["b", 2000],
+    ]);
+    const fresh = advanceStdinFlashes(
+      [
+        { _key: "a", last_stdin_at: 1500 }, // bumped → flash
+        { _key: "b", last_stdin_at: 2000 }, // unchanged → no flash
+      ],
+      seen,
+    );
+    expect(fresh).toEqual(["a"]);
+    expect(seen.get("a")).toBe(1500);
+  });
+
+  it("ignores entries without a numeric last_stdin_at, and prunes gone keys", () => {
+    const seen = new Map([["gone", 1000]]);
+    const fresh = advanceStdinFlashes([{ _key: "x", last_stdin_at: null }, { _key: "y" }], seen);
+    expect(fresh).toEqual([]);
+    expect(seen.has("gone")).toBe(false); // pruned — not in the new entry list
+    expect(seen.has("x")).toBe(false); // null stdin → not tracked
+  });
+});
+
+describe("focusSummary (peers badge + per-row chips)", () => {
+  it("counts distinct viewers and groups counts by agent key", () => {
+    const { total, byKey } = focusSummary([
+      { key: "room#1", viewer: "h1:aaa" },
+      { key: "room#1", viewer: "h1:bbb" },
+      { key: "room#2", viewer: "h1:ccc" },
+    ]);
+    expect(total).toBe(3);
+    expect(byKey.get("room#1")).toBe(2);
+    expect(byKey.get("room#2")).toBe(1);
+  });
+
+  it("dedupes a viewer that somehow appears twice, and skips malformed records", () => {
+    const { total, byKey } = focusSummary([
+      { key: "k", viewer: "v" },
+      { key: "k", viewer: "v" }, // same viewer twice → still 1 distinct
+      { viewer: "no-key" },
+      { key: "no-viewer" },
+      null,
+    ]);
+    expect(total).toBe(1);
+    expect(byKey.get("k")).toBe(2); // per-key count still tallies both records
+  });
+
+  it("returns an empty summary for no records (solo case)", () => {
+    const { total, byKey } = focusSummary([]);
+    expect(total).toBe(0);
+    expect(byKey.size).toBe(0);
   });
 });
 
@@ -721,7 +856,7 @@ describe("sortEntries", () => {
   const keys = (arr, k = "_k") => arr.map((e) => e[k]);
 
   it("SORT_MODES is the documented cycle", () => {
-    expect(SORT_MODES).toEqual(["state", "created", "identity"]);
+    expect(SORT_MODES).toEqual(["state", "active", "stdin", "created", "identity"]);
   });
 
   it("returns a new array and does not mutate the input", () => {
@@ -769,6 +904,41 @@ describe("sortEntries", () => {
       a({ _k: "mid", started_at: 500 }),
     ];
     expect(keys(sortEntries(list, "created"))).toEqual(["new", "mid", "old"]);
+  });
+
+  it("active mode: most recently active (last_active_at) first", () => {
+    const list = [
+      a({ _k: "old", started_at: 900, last_active_at: 100 }),
+      a({ _k: "fresh", started_at: 100, last_active_at: 900 }),
+      a({ _k: "mid", started_at: 500, last_active_at: 500 }),
+    ];
+    expect(keys(sortEntries(list, "active"))).toEqual(["fresh", "mid", "old"]);
+  });
+
+  it("active mode: falls back to started_at when last_active_at is absent", () => {
+    const list = [
+      a({ _k: "old", started_at: 100 }),
+      a({ _k: "new", started_at: 900 }),
+    ];
+    expect(keys(sortEntries(list, "active"))).toEqual(["new", "old"]);
+  });
+
+  it("stdin mode: most recently fed (last_stdin_at) first, never-fed sort last", () => {
+    const list = [
+      a({ _k: "old", started_at: 900, last_stdin_at: 100 }),
+      a({ _k: "never", started_at: 800 }), // no last_stdin_at → sorts last
+      a({ _k: "fresh", started_at: 100, last_stdin_at: 900 }),
+      a({ _k: "mid", started_at: 500, last_stdin_at: 500 }),
+    ];
+    expect(keys(sortEntries(list, "stdin"))).toEqual(["fresh", "mid", "old", "never"]);
+  });
+
+  it("stdin mode: ties (same/absent last_stdin_at) fall back to newest started_at", () => {
+    const list = [
+      a({ _k: "olderNoStdin", started_at: 100 }),
+      a({ _k: "newerNoStdin", started_at: 900 }),
+    ];
+    expect(keys(sortEntries(list, "stdin"))).toEqual(["newerNoStdin", "olderNoStdin"]);
   });
 
   it("identity mode: alphabetical by full identity (user@host:owner/repo/branch)", () => {

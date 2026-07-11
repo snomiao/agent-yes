@@ -69,6 +69,9 @@ pub fn register(wrapper_pid: u32, pgid: i32) {
 /// SIGKILL the recorded process group of every agent whose wrapper has exited,
 /// and rewrite the registry keeping only still-running agents. Best-effort.
 pub fn sweep() {
+    // Independent of the registry below (an agent may leak an activity marker
+    // without being registered), so prune first — before the no-registry return.
+    crate::fifo::prune_stale_activity_markers(|pid| is_alive(pid as i32));
     let path = registry_path();
     let Ok(content) = fs::read_to_string(&path) else {
         return;

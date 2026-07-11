@@ -18,7 +18,8 @@ import path from "path";
 import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
-import { matchBadges } from "./badges.ts";
+import { agentYesHome } from "./agentYesHome.ts";
+import { badgeDef, matchBadges, TYPING_BADGE } from "./badges.ts";
 import {
   classifyNeedsInput,
   isWorkingScreen,
@@ -27,6 +28,15 @@ import {
   type NeedsInput,
 } from "./needsInput.ts";
 import { diffLsStates, type LiveState, type LsAgentState } from "./lsWatch.ts";
+import { filterSinceSeq, filterSinceTs, filterUnread, maxSeq, type NotifyEvent } from "./notifyInbox.ts";
+import {
+  clearWatcher,
+  getCursor,
+  heartbeatWatcher,
+  hostId,
+  readInbox,
+  setCursor,
+} from "./notifyStore.ts";
 import {
   buildStoredResult,
   normalizeEnvelope,
@@ -161,6 +171,29 @@ async function lastReadAt(by: string, target: number): Promise<number | null> {
   return map.get(`${by}${READS_KEY_SEP}${target}`) ?? null;
 }
 
+/** Recent agent→agent read/tail edges (skips "human" readers), for the /rgui
+ * relationship-wire view. `by`/`target` are pids. */
+export interface ReadEdge {
+  by: number;
+  target: number;
+  at: number;
+}
+export async function recentReadEdges(windowMs = READ_WINDOW_MS): Promise<ReadEdge[]> {
+  const now = Date.now();
+  const map = await readReads();
+  const out: ReadEdge[] = [];
+  for (const [key, at] of map) {
+    if (now - at > windowMs) continue;
+    const i = key.indexOf(READS_KEY_SEP);
+    const by = key.slice(0, i);
+    if (!by.startsWith("agent:")) continue; // agent→agent only
+    const byPid = Number(by.slice("agent:".length));
+    const target = Number(key.slice(i + 1));
+    if (byPid && target && byPid !== target) out.push({ by: byPid, target, at });
+  }
+  return out;
+}
+
 // Identify the sender. An agent launched by `ay` inherits AGENT_YES_PID=<wrapper
 // pid>; the registered agent record carries that same wrapper_pid, so we map the
 // env value back to the agent's own canonical record. Falls back to a direct pid
@@ -255,6 +288,8 @@ const SUBCOMMANDS = new Set([
   "ps",
   "status",
   "result",
+  "notify",
+  "notifyd",
   "read",
   "cat",
   "tail",
@@ -305,6 +340,12 @@ const SEND_CONFIRM_QUIET_MS = 400; // after Enter, no growth for this long → r
 const SEND_CONFIRM_MAX_MS = 1200; // cap per confirm attempt
 const SEND_CONFIRM_MIN_GROWTH_BYTES = 8; // filters out pure cursor-blink/frame noise
 const SEND_SUBMIT_MAX_RETRIES = 2; // total attempts = 1 + this
+// `ay send` typing-backoff: if the user is actively typing at the target's
+// terminal, injecting our body mid-line would fuse into their text and submit a
+// mangled line. Poll until they pause (activity older than TYPING_WINDOW_MS) or
+// we give up, then send anyway with a warning rather than dropping the message.
+const SEND_TYPING_POLL_MS = 200;
+const SEND_TYPING_MAX_WAIT_MS = 10_000;
 
 /**
  * Whether `name` is a subcommand. `managerCommands` (default true, for the
@@ -341,6 +382,10 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdStatus(rest);
       case "result":
         return await cmdResult(rest);
+      case "notify":
+        return await cmdNotify(rest);
+      case "notifyd":
+        return await cmdNotifyd(rest);
       case "read":
       case "cat":
         return await cmdRead(rest, { mode: "cat" });
@@ -1091,14 +1136,57 @@ async function runAllRemotesLs(opts: {
     ),
   ]);
 
-  type HostedRow = { host: string; rec: any };
-  const rows: HostedRow[] = [];
+  // Group by host in a stable order (local first, then each remote alias in
+  // config order), so the aggregated table reads top-down per machine.
+  const byHost: { host: string; records: any[] }[] = [];
+  // Shared per-invocation caches so local agents in the same repo spawn
+  // `git status` once (see gitStatusOnce).
+  const gitRootCache = new Map<string, string>();
+  const gitInfoCache = new Map<string, GitInfo | null>();
   if (localResult.status === "fulfilled") {
-    for (const r of localResult.value.records) rows.push({ host: "local", rec: r });
+    // Local records come from listRecords() RAW — unlike the remote /api/ls
+    // payload they carry no derived live-state, last_active_at, task counts,
+    // status badges, or git tag, so left alone they'd render a flat "active"
+    // with no age/badge/git. Enrich them to the same shape the API returns, so
+    // local agents get the same idle/needs_input/stuck status, staleness age,
+    // task badges, status-flag chips, and git dirty/sync tag.
+    const enriched = await Promise.all(
+      localResult.value.records.map(async (r) => {
+        const { state, question } = await deriveLiveState(r);
+        const alive = state !== "stopped";
+        const [tasks, badges, git, typing] = alive
+          ? await Promise.all([
+              r.log_file ? extractTaskCounts(r.log_file) : Promise.resolve(null),
+              r.log_file ? extractBadges(r.log_file) : Promise.resolve([]),
+              gitStatusOnce(r.cwd, gitRootCache, gitInfoCache),
+              isUserTyping(r.pid),
+            ])
+          : [null, [], null, false];
+        return {
+          ...r,
+          status: state,
+          question,
+          last_active_at: await deriveLastActiveAt(r),
+          tasks,
+          badges: typing ? [...(badges as string[]), TYPING_BADGE.id] : badges,
+          git,
+        };
+      }),
+    );
+    byHost.push({ host: "local", records: enriched });
   }
   for (const res of remoteResults) {
-    if (res.status === "fulfilled") {
-      for (const r of res.value.records) rows.push({ host: res.value.host, rec: r });
+    if (res.status === "fulfilled") byHost.push({ host: res.value.host, records: res.value.records });
+  }
+
+  // Flatten each host's records into its agent>subagent forest (parent_pid links),
+  // carrying the box-drawing tree prefix — the same nesting the console's left
+  // panel shows. Degrades to a flat newest-first list when there are no links.
+  type HostedRow = { host: string; rec: any; prefix: string };
+  const rows: HostedRow[] = [];
+  for (const { host, records } of byHost) {
+    for (const { record, prefix } of flattenForest(buildAgentForest(records))) {
+      rows.push({ host, rec: record, prefix });
     }
   }
 
@@ -1108,12 +1196,19 @@ async function runAllRemotesLs(opts: {
   }
 
   const termWidth = (process.stdout as any).columns ?? 120;
+  const now = Date.now();
+  const ageOf = (rec: any) => humanizeAge(now - (rec.last_active_at ?? rec.started_at));
+  const badgeOf = (rec: any) => (rec.tasks ? `${rec.tasks.done}/${rec.tasks.total} ` : "");
   const hostW = Math.max(4, ...rows.map((r) => r.host.length));
   const pidW = Math.max(3, ...rows.map((r) => String(r.rec.pid).length));
   const cliW = Math.max(3, ...rows.map((r) => String(r.rec.cli).length));
   const statusW = Math.max(6, ...rows.map((r) => String(r.rec.status).length));
+  const ageW = Math.max(3, ...rows.map((r) => ageOf(r.rec).length));
   const cwdW = Math.max(3, ...rows.map((r) => shortenPath(String(r.rec.cwd)).length));
-  const promptBudget = Math.max(20, termWidth - hostW - pidW - cliW - statusW - cwdW - 5 * 2 - 1);
+  const promptBudget = Math.max(
+    20,
+    termWidth - hostW - pidW - cliW - statusW - ageW - cwdW - 6 * 2 - 1,
+  );
 
   process.stdout.write(
     [
@@ -1121,18 +1216,33 @@ async function runAllRemotesLs(opts: {
       "PID".padEnd(pidW),
       "CLI".padEnd(cliW),
       "STATUS".padEnd(statusW),
+      "AGE".padEnd(ageW),
       "CWD".padEnd(cwdW),
       "PROMPT",
     ].join("  ") + "\n",
   );
-  for (const { host, rec } of rows) {
-    const label = rec.prompt ? truncate(`→ ${rec.prompt}`, promptBudget) : "";
+  for (const { host, rec, prefix } of rows) {
+    // The tree prefix + task badge + flag chips + git tag live inside the PROMPT
+    // column, so they eat into this row's text budget — same as the single-host
+    // table. Both local (enriched above) and remote (/api/ls) records carry
+    // `tasks`, `badges`, and `git` in the same shape.
+    const flagStr = badgeLabels(rec.badges);
+    const branchStr = branchLabel(rec.git);
+    const gitStr = gitLabel(rec.git);
+    const deco =
+      badgeOf(rec) +
+      (flagStr ? flagStr + " " : "") +
+      (branchStr ? branchStr + " " : "") +
+      (gitStr ? gitStr + " " : "");
+    const budget = Math.max(8, promptBudget - prefix.length - deco.length);
+    const label = prefix + deco + (rec.prompt ? truncate(`→ ${rec.prompt}`, budget) : "");
     process.stdout.write(
       [
         host.padEnd(hostW),
         String(rec.pid).padEnd(pidW),
         String(rec.cli).padEnd(cliW),
         String(rec.status).padEnd(statusW),
+        ageOf(rec).padEnd(ageW),
         shortenPath(String(rec.cwd)).padEnd(cwdW),
         label,
       ].join("  ") + "\n",
@@ -1171,7 +1281,7 @@ export async function deriveLiveStatus(r: GlobalPidRecord): Promise<"active" | "
  * consumer. Builds on the cheap deriveLiveStatus, then adds the menu (needs_input)
  * override, which DOES read the log tail.
  */
-async function deriveLiveState(
+export async function deriveLiveState(
   r: GlobalPidRecord,
 ): Promise<{ state: LiveState; question: string | null }> {
   const base = await deriveLiveStatus(r);
@@ -1189,6 +1299,155 @@ async function deriveLiveState(
     if (base === "idle" && (await isAgentStuck(r))) return { state: "stuck", question: null };
   }
   return { state: base, question: null };
+}
+
+/**
+ * When the agent last wrote stdout — the log file's mtime, falling back to
+ * started_at when there's no log yet (freshly spawned). Mirrors serve.ts's
+ * `last_active_at`, so the `ay ls` AGE column measures STALENESS (time since the
+ * agent last produced output) rather than lifetime — matching the console's
+ * left-panel age. A long-lived but quiet agent then reads as stale, not "new".
+ */
+async function deriveLastActiveAt(r: GlobalPidRecord): Promise<number> {
+  if (!r.log_file) return r.started_at;
+  return stat(r.log_file)
+    .then((s) => s.mtimeMs)
+    .catch(() => r.started_at);
+}
+
+// Git dirty/sync counts for one repo, in the shape serve.ts's /api/ls returns
+// (so `ay ls` can format LOCAL agents' git the same way it formats remote ones,
+// whose `git` field already arrives in this shape).
+interface GitInfo {
+  branch: string | null;
+  dirty: boolean;
+  changed: number; // real file changes (excludes submodule pin-bumps & internal dirt)
+  pins: number; // submodule gitlinks pointing at new commit(s) — pin-bump/drift
+  subDirty: number; // submodule has internal changes but its recorded pin is unchanged
+  ahead: number;
+  behind: number;
+}
+
+/**
+ * Format a GitInfo into the console's compact tag: "±3" changed files, "⑂2"
+ * submodule pin-bumps, "⊙1" submodule internal dirt, "↑1" ahead, "↓2" behind.
+ * Mirrors gitLabel() in lab/ui/console-logic.js so `ay ls` and the web panel's
+ * left rail read identically. "" when clean / in sync / not a repo.
+ */
+function gitLabel(g: GitInfo | null | undefined): string {
+  if (!g) return "";
+  const parts: string[] = [];
+  if (g.changed > 0) parts.push("±" + g.changed);
+  if (g.pins > 0) parts.push("⑂" + g.pins);
+  if (g.subDirty > 0) parts.push("⊙" + g.subDirty);
+  if (g.ahead > 0) parts.push("↑" + g.ahead);
+  if (g.behind > 0) parts.push("↓" + g.behind);
+  return parts.join(" ");
+}
+
+/**
+ * The checked-out branch as "⎇<name>" (⎇ = the branch/alt-key glyph). Shows the
+ * ACTUAL git branch, which can differ from the worktree folder in the cwd (a
+ * feature branch checked out in .../tree/main, a detached HEAD, etc.). "" when
+ * detached / not a repo. Kept separate from gitLabel so gitLabel stays a mirror
+ * of the web console's tag.
+ */
+function branchLabel(g: GitInfo | null | undefined): string {
+  return g?.branch ? "⎇" + g.branch : "";
+}
+
+/**
+ * Short status-flag chips ("goal", "retry", "limit") for a list of badge ids —
+ * the same flags the console shows, resolved to their labels via badges.ts.
+ * "" when none. (Remote records carry `badges` from /api/ls; local ones are
+ * matched here via extractBadges.)
+ */
+function badgeLabels(ids: string[] | null | undefined): string {
+  if (!ids || ids.length === 0) return "";
+  return ids.map((id) => badgeDef(id)?.label ?? id).join(" ");
+}
+
+// porcelain=v2 --branch parser — mirrors parseGitStatus in serve.ts (that copy
+// lives inside the serve closure and is watcher-driven, so it can't be shared
+// without a refactor; keep the two in sync). Submodule pin-bumps/internal dirt
+// are split out of `changed` so a submodule-heavy repo doesn't read as dirty.
+function parseGitStatus(out: string): GitInfo {
+  let branch: string | null = null;
+  let ahead = 0;
+  let behind = 0;
+  let changed = 0;
+  let pins = 0;
+  let subDirty = 0;
+  for (const line of out.split("\n")) {
+    if (line.length === 0) continue;
+    if (line[0] === "#") {
+      const head = /^# branch\.head (.+)$/.exec(line);
+      if (head) {
+        branch = head[1] === "(detached)" ? null : head[1]!;
+        continue;
+      }
+      const ab = /^# branch\.ab \+(\d+) -(\d+)/.exec(line);
+      if (ab) {
+        ahead = Number(ab[1]);
+        behind = Number(ab[2]);
+      }
+      continue;
+    }
+    const type = line[0];
+    if (type === "?" || type === "u") {
+      changed++;
+    } else if (type === "1" || type === "2") {
+      const sub = line.split(" ")[2] ?? "N...";
+      if (sub[0] === "S") {
+        if (sub[1] === "C") pins++;
+        else subDirty++;
+      } else {
+        changed++;
+      }
+    }
+  }
+  return { branch, dirty: changed > 0, changed, pins, subDirty, ahead, behind };
+}
+
+async function runGitCli(args: string[], cwd: string): Promise<string | null> {
+  try {
+    const proc = Bun.spawn(["git", ...args], {
+      cwd,
+      stdout: "pipe",
+      stderr: "ignore",
+      signal: AbortSignal.timeout(2000),
+    });
+    const out = await new Response(proc.stdout).text();
+    await proc.exited;
+    return proc.exitCode === 0 ? out : null;
+  } catch {
+    return null; // git missing, not a repo, or timed out
+  }
+}
+
+/**
+ * One-shot git status for the `ay ls` CLI. serve.ts keeps a per-repo watcher so
+ * its request path never spawns git; a one-shot CLI has no watcher, so it spawns
+ * `git status` directly — but deduped per repo root via the two caches, so N
+ * agents sharing a repo (or its submodules/subdirs) cost ONE `git status`.
+ */
+async function gitStatusOnce(
+  cwd: string | null | undefined,
+  rootCache: Map<string, string>,
+  infoCache: Map<string, GitInfo | null>,
+): Promise<GitInfo | null> {
+  if (!cwd) return null;
+  let root = rootCache.get(cwd);
+  if (root === undefined) {
+    root = ((await runGitCli(["rev-parse", "--show-toplevel"], cwd)) ?? "").trim();
+    rootCache.set(cwd, root);
+  }
+  if (!root) return null; // not a git repo
+  if (infoCache.has(root)) return infoCache.get(root)!;
+  const out = await runGitCli(["status", "--porcelain=v2", "--branch"], root);
+  const info = out != null ? parseGitStatus(out) : null;
+  infoCache.set(root, info);
+  return info;
 }
 
 async function cmdLs(rest: string[]): Promise<number> {
@@ -1350,12 +1609,21 @@ async function cmdLs(rest: string[]): Promise<number> {
   // context and users on narrow ones don't get an awkwardly-wrapped table.
   const termWidth = (process.stdout as any).columns ?? 120;
 
+  // AGE is time since last stdout (staleness), not lifetime — same signal the
+  // console's left panel shows. Precomputed here (one stat() per agent) so the
+  // width pass and the row pass agree without stat()ing twice.
+  const now = Date.now();
+  const lastActive = new Map<number, number>(
+    await Promise.all(records.map(async (r) => [r.pid, await deriveLastActiveAt(r)] as const)),
+  );
+  const ageOf = (r: GlobalPidRecord) => humanizeAge(now - (lastActive.get(r.pid) ?? r.started_at));
+
   const rawCwds = records.map((r) => shortenPath(r.cwd));
   const widths = {
     pid: Math.max(3, ...records.map((r) => String(r.pid).length)),
     cli: Math.max(3, ...records.map((r) => r.cli.length)),
     status: Math.max(6, ...records.map((r) => r.status.length)),
-    age: Math.max(3, ...records.map((r) => humanizeAge(Date.now() - r.started_at).length)),
+    age: Math.max(3, ...records.map((r) => ageOf(r).length)),
     cwd: Math.max(3, ...rawCwds.map((c) => c.length)),
   };
   const fixedWidth = widths.pid + widths.cli + widths.status + widths.age + widths.cwd + 5 * 2; // 5 separators of "  "
@@ -1368,38 +1636,60 @@ async function cmdLs(rest: string[]): Promise<number> {
   const forestRows = flattenForest(buildAgentForest(records));
 
   const notes = await readNotes();
+  // Shared per-invocation caches so agents in the same repo spawn `git status`
+  // once (see gitStatusOnce). One `ay ls` call, not one per agent.
+  const gitRootCache = new Map<string, string>();
+  const gitInfoCache = new Map<string, GitInfo | null>();
   const rows = await Promise.all(
     forestRows.map(async ({ record: r, prefix }) => {
       // Same live-state derivation as the --json path: stopped/idle/active, with
       // needs_input when the agent is parked on an unanswered menu.
       const displayStatus: string = (await deriveLiveState(r)).state;
+      const alive = displayStatus !== "stopped";
       const note = notes.get(r.pid);
-      // Task progress ("2/5") parsed from the rendered todo block — same source as
-      // the console badge. Omitted when no block is detected.
-      const tasks =
-        displayStatus !== "stopped" && r.log_file ? await extractTaskCounts(r.log_file) : null;
-      const badge = tasks ? `${tasks.done}/${tasks.total} ` : "";
-      // The tree branch prefix + badge sit inside the NOTE/PROMPT column, so they
-      // eat into this row's text budget.
-      const budget = Math.max(8, promptBudget - prefix.length - badge.length);
+      // Task progress ("2/5"), status-flag chips ("goal"/"retry"/"limit"), and the
+      // git dirty/sync tag ("±3 ⑂2 ↓1") — the same three decorations the console's
+      // left rail shows. Skipped for stopped agents (screen no longer live).
+      const [tasks, flags, git, typing] = alive
+        ? await Promise.all([
+            r.log_file ? extractTaskCounts(r.log_file) : Promise.resolve(null),
+            r.log_file ? extractBadges(r.log_file) : Promise.resolve([]),
+            gitStatusOnce(r.cwd, gitRootCache, gitInfoCache),
+            isUserTyping(r.pid),
+          ])
+        : [null, [], null, false];
+      const taskBadge = tasks ? `${tasks.done}/${tasks.total} ` : "";
+      const flagStr = badgeLabels(typing ? [...(flags as string[]), TYPING_BADGE.id] : flags);
+      const branchStr = branchLabel(git);
+      const gitStr = gitLabel(git);
+      // task badge, flag chips, then the git group (⎇branch + dirty/sync tag) —
+      // compact, single-spaced.
+      const deco =
+        taskBadge +
+        (flagStr ? flagStr + " " : "") +
+        (branchStr ? branchStr + " " : "") +
+        (gitStr ? gitStr + " " : "");
+      // The tree branch prefix + these decorations sit inside the NOTE/PROMPT
+      // column, so they eat into this row's text budget.
+      const budget = Math.max(8, promptBudget - prefix.length - deco.length);
       let label: string;
       let hasNote = false;
       if (note) {
         label = truncate(note, budget);
         hasNote = true;
-      } else if (r.log_file && displayStatus !== "stopped") {
+      } else if (r.log_file && alive) {
         const activity = await extractActivity(r.log_file);
         label = truncate(activity ?? (r.prompt ? `→ ${r.prompt}` : ""), budget);
       } else {
         label = truncate(r.prompt ? `→ ${r.prompt}` : "", budget);
       }
-      // Note marker + task badge sit after the branch prefix so the tree aligns.
-      label = prefix + (hasNote ? "* " : "") + badge + label;
+      // Note marker + decorations sit after the branch prefix so the tree aligns.
+      label = prefix + (hasNote ? "* " : "") + deco + label;
       return {
         pid: String(r.pid),
         cli: r.cli,
         status: displayStatus,
-        age: humanizeAge(Date.now() - r.started_at),
+        age: ageOf(r),
         cwd: shortenPath(r.cwd),
         label,
         hasNote,
@@ -2107,7 +2397,7 @@ function cliDefaults(): Promise<Record<string, AgentCliConfig>> {
  * null on any read/render error or an empty log. Shared by the needs_input and
  * stuck classifiers so they don't each re-implement the tail read.
  */
-async function renderLogTailLines(logPath: string, n = 40): Promise<string[] | null> {
+export async function renderLogTailLines(logPath: string, n = 40): Promise<string[] | null> {
   const TAIL_BYTES = 32 * 1024;
   let buf: Uint8Array;
   try {
@@ -2153,6 +2443,36 @@ export async function extractBadges(logPath: string): Promise<string[]> {
   const lines = await renderLogTailLines(logPath, 40);
   if (!lines) return [];
   return matchBadges(lines);
+}
+
+// Window within which a recorded human keystroke still counts as "the user is
+// typing" — lights the chip and makes `ay send` back off. Comfortably longer
+// than the Rust writer's throttle (STDIN_ACTIVITY_THROTTLE_MS) so continuous
+// typing never flickers off between writes.
+export const TYPING_WINDOW_MS = 3000;
+
+// Path to the Rust runner's per-pid stdin-activity marker — the tiny file it
+// stamps with the unix-ms of the user's last terminal keystroke (never `ay
+// send`/FIFO input). Mirrors rs/src/fifo.rs `stdin_activity_path`; a plain file
+// on all platforms (unlike the FIFO, which is a named pipe on Windows).
+export function stdinActivityPath(pid: number): string {
+  return path.resolve(agentYesHome(), "activity", `${pid}.stdin`);
+}
+
+// Epoch-ms of the user's most recent keystroke at this agent's terminal, or
+// null if never/at rest. A missing or unparseable marker just means "not
+// typing" — this is a best-effort liveness hint, never a hard signal.
+export async function lastStdinAt(pid: number): Promise<number | null> {
+  const raw = await readFile(stdinActivityPath(pid), "utf-8").catch(() => null);
+  if (raw === null) return null;
+  const ms = Number(raw.trim());
+  return Number.isFinite(ms) && ms > 0 ? ms : null;
+}
+
+// Whether the user typed at this agent's terminal within `windowMs`.
+export async function isUserTyping(pid: number, windowMs = TYPING_WINDOW_MS): Promise<boolean> {
+  const at = await lastStdinAt(pid);
+  return at !== null && Date.now() - at <= windowMs;
 }
 
 /**
@@ -2446,6 +2766,28 @@ export async function waitForLogQuiet(
 }
 
 /**
+ * Block while the user is typing at `pid`'s terminal, so `ay send` doesn't inject
+ * mid-line. Polls the stdin-activity marker every SEND_TYPING_POLL_MS until the
+ * user pauses (last keystroke older than the typing window) or `maxWaitMs`
+ * elapses. Returns `{ clear, waitedMs }`: `clear` is true if they paused, false
+ * if still typing at the deadline (caller sends anyway, with a warning).
+ */
+export async function backoffWhileTyping(
+  pid: number,
+  maxWaitMs: number,
+): Promise<{ clear: boolean; waitedMs: number }> {
+  const start = Date.now();
+  const deadline = start + maxWaitMs;
+  let waited = false;
+  while (Date.now() < deadline) {
+    if (!(await isUserTyping(pid))) return { clear: true, waitedMs: waited ? Date.now() - start : 0 };
+    waited = true;
+    await new Promise((r) => setTimeout(r, SEND_TYPING_POLL_MS));
+  }
+  return { clear: false, waitedMs: Date.now() - start };
+}
+
+/**
  * Send the trailing submit code and confirm the CLI actually acted on it —
  * either a `working` busy marker appears, or the log grows meaningfully. Retries
  * (re-sending just the trailing code) up to SEND_SUBMIT_MAX_RETRIES times when
@@ -2501,6 +2843,12 @@ async function waitForNeedsInputClear(
 
 async function cmdSend(rest: string[]): Promise<number> {
   const y = yargs(rest)
+    // Disable yargs' `--no-<flag>` negation: without this, `--no-wait` is parsed
+    // as negating a phantom `wait` option (argv.wait=false) instead of setting our
+    // explicitly-defined `no-wait`/`noWait` flag — so `--no-wait` silently did
+    // nothing and still ran the (blocking) submit-confirm. The `--async` alias
+    // masked this. No option here has a meaningful `--no-` form to lose.
+    .parserConfiguration({ "boolean-negation": false })
     .usage("Usage: ay send <keyword> <msg|-> [options]")
     .option("code", {
       type: "string",
@@ -2513,7 +2861,8 @@ async function cmdSend(rest: string[]): Promise<number> {
     .option("force", {
       type: "boolean",
       default: false,
-      description: "Skip the 'tailed recently' safety check (also: AGENT_YES_FORCE_SEND=1)",
+      description:
+        "Skip the 'tailed recently' safety check and the wait-while-user-typing backoff (also: AGENT_YES_FORCE_SEND=1)",
     })
     .option("no-wait", {
       type: "boolean",
@@ -2548,6 +2897,19 @@ async function cmdSend(rest: string[]): Promise<number> {
   const trailing = controlCodeFromName(codeName);
 
   const record = await resolveOne(keyword, opts);
+
+  // Misdelivery guard: when the keyword isn't a plain pid (an exact identity),
+  // it resolved by cwd/cli/prompt substring — which can silently land on an
+  // unintended session in another tree (resolveOne returns a lone fuzzy match
+  // with no prompt). Echo exactly where it resolved to stderr BEFORE injecting,
+  // so the sender can catch a wrong target instead of only finding out when the
+  // reply never comes. Numeric identity sends stay quiet.
+  if (!/^\d+$/.test(keyword)) {
+    process.stderr.write(
+      `ay send → pid ${record.pid} ${record.cli} @ ${shortenPath(record.cwd)}\n`,
+    );
+  }
+
   const fifoPath = record.fifo_file;
   if (!fifoPath) {
     throw new Error(
@@ -2584,18 +2946,44 @@ async function cmdSend(rest: string[]): Promise<number> {
   }
 
   // When an agent sends, prefix one line so the recipient knows who pinged it
-  // and exactly how to reply (to a resolvable pid — the sender's own). BUT a
-  // slash command is only recognized when `/` is the very first character of the
-  // submitted message; the prefix would bump it to line 2 and the CLI would type
-  // the command as plain text. So skip the prefix for a command body and send it
-  // verbatim — attribution is dropped for the command, but it actually runs.
+  // and exactly how to reply. Reply to the sender's stable agent_id, NOT its pid:
+  // a pid is invalidated the moment the sender restarts (new pid), silently
+  // breaking the reply route; the agent_id is preserved across restart (see
+  // cmdRestart's AGENT_YES_AGENT_ID injection), so the route survives. The `#pid`
+  // stays in the header for human readability. Fall back to the pid only for a
+  // legacy agent with no recorded agent_id. BUT a slash command is only
+  // recognized when `/` is the very first character of the submitted message; the
+  // prefix would bump it to line 2 and the CLI would type the command as plain
+  // text. So skip the prefix for a command body and send it verbatim —
+  // attribution is dropped for the command, but it actually runs.
+  const replyTarget = sender.agent?.agent_id || sender.agent?.pid;
   const prefix =
     sender.agent && !isSlashCommand(body)
-      ? `[from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${sender.agent.pid} "..."]\n`
+      ? `[from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${replyTarget} "..."]\n`
       : "";
 
   const fullBody = prefix + body;
   const noWait = Boolean(argv.noWait) || process.env.AGENT_YES_SEND_NO_WAIT === "1";
+
+  // Back off while the user is typing at the target's terminal — injecting our
+  // body mid-line fuses into their text and submits a mangled line. Only for a
+  // real text body; skipped for --force (caller means it), --no-wait
+  // (fire-and-forget), and empty bodies (a bare esc/ctrl-c interrupt is usually
+  // intentional and time-sensitive). Sends anyway after the deadline so a
+  // message is never silently dropped.
+  if (fullBody && !noWait && !force) {
+    const { clear, waitedMs } = await backoffWhileTyping(record.pid, SEND_TYPING_MAX_WAIT_MS);
+    if (!clear) {
+      process.stderr.write(
+        `warning: user still typing at pid ${record.pid} after ${Math.round(waitedMs / 1000)}s — ` +
+          `sending anyway (may interleave with their line). Use --force to skip this wait.\n`,
+      );
+    } else if (waitedMs > 0) {
+      process.stderr.write(
+        `waited ${Math.round(waitedMs / 1000)}s for the user to pause typing before sending.\n`,
+      );
+    }
+  }
   // Submit-confirm only applies to an actual submit (Enter/CR) with a body and a
   // log to watch — other trailing codes (esc/ctrl-c/tab/none) don't have a "did
   // it land" signal in the same sense, and retrying e.g. ctrl-c could
@@ -2637,7 +3025,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   }
 
   const replyHint = sender.agent
-    ? `  ay send ${sender.agent.pid} "..."              # reply to sender\n`
+    ? `  ay send ${replyTarget} "..."              # reply to sender\n`
     : "";
   process.stderr.write(
     `\n` +
@@ -2824,12 +3212,18 @@ export function stopTipForCli(cli: string, pid: number): string | null {
 ///   claude   — `/exit`
 ///   codex    — `/exit`
 ///   gemini   — `/quit`
+///   bash/cmd/powershell — `exit` (the shell builtin; closes the session at a
+///     bare prompt, far cleaner than Ctrl+C which would instead hit whatever
+///     app is running in the foreground).
 /// Other CLIs aren't in the table because their reliable graceful-exit
 /// command isn't well-known here; `ay stop` falls back to double Ctrl+C.
 export const GRACEFUL_EXIT_COMMANDS: Record<string, string> = {
   claude: "/exit",
   codex: "/exit",
   gemini: "/quit",
+  bash: "exit",
+  cmd: "exit",
+  powershell: "exit",
 };
 
 export function controlCodeFromName(name: string): string {
@@ -3533,10 +3927,21 @@ async function cmdRestart(rest: string[]): Promise<number> {
 
   // Detached launcher; we deliberately don't track its pid — see restartHintLines
   // for why the resumed agent's pid isn't reportable synchronously.
+  //
+  // Carry the old record's agent_id into the relaunch so the resumed agent keeps
+  // the SAME stable id (only the pid changes). Without this the wrapper mints a
+  // fresh id and any `ay send <agent_id>` reply route breaks across a restart —
+  // exactly the misdelivery that made a pinned-pid reply header no-match after
+  // the sender restarted. The Rust/TS wrapper adopts AGENT_YES_AGENT_ID for its
+  // own record and strips it from the wrapped CLI's env (pty_spawner.rs /
+  // index.ts), so subagents don't collide on the id.
   Bun.spawn(["agent-yes", "--cli=" + record.cli, ...resumeArgs], {
     cwd: record.cwd,
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],
+    env: record.agent_id
+      ? { ...process.env, AGENT_YES_AGENT_ID: record.agent_id }
+      : process.env,
   });
 
   const { out, err } = restartHintLines(record.cli, record.cwd, strategy);
@@ -4001,4 +4406,269 @@ async function cmdResultSet(rest: string[]): Promise<number> {
   await writeFile(resultPath(pid), JSON.stringify(stored) + "\n");
   process.stdout.write(`result envelope written for pid ${pid}\n`);
   return 0;
+}
+
+// ---------------------------------------------------------------------------
+// ay notify / ay notifyd — subagent→parent status-transition notifications.
+//
+// See docs/subagent-notify.md. `ay notifyd` is the detection engine (query-layer
+// watcher, runtime-agnostic); `ay notify` is the parent-facing inbox reader. A
+// parent typically runs ONE command in its Monitor loop:
+//
+//     ay notify watch --unread          # tail its inbox, ensure the daemon
+//
+// and gets every child's needs_input / sustained-idle / exited edge, each with a
+// payload (question / tail / git head) so it can act without tailing the child.
+// ---------------------------------------------------------------------------
+
+/** Resolve the parent pid a `ay notify` invocation is draining. */
+function resolveParentPid(explicit: number | undefined): number {
+  if (Number.isFinite(explicit) && (explicit as number) > 0) return explicit as number;
+  const self = Number(process.env.AGENT_YES_PID);
+  if (Number.isFinite(self) && self > 0) return self;
+  throw new Error(
+    "ay notify: not running inside an agent (no AGENT_YES_PID) — pass --parent <pid>",
+  );
+}
+
+function printNotifyEvents(events: NotifyEvent[], json: boolean): void {
+  if (json) {
+    for (const e of events) process.stdout.write(JSON.stringify(e) + "\n");
+    return;
+  }
+  for (const e of events) {
+    // Plain ASCII tag (no emoji): stays legible over the Rust/CLI path and old
+    // terminals, and is easy to grep for consumers that log-parse the stream.
+    const tag = `[${e.edge}]`;
+    const head = `[${e.seq}] ${tag} pid ${e.child_pid} (${e.cli}) ${e.cwd}`;
+    process.stdout.write(head + "\n");
+    if (e.git_head) process.stdout.write(`      HEAD ${e.git_head}\n`);
+    if (e.question) process.stdout.write(`      Q: ${e.question}\n`);
+    if (e.tail)
+      process.stdout.write(
+        e.tail
+          .split("\n")
+          .map((l) => `      | ${l}`)
+          .join("\n") + "\n",
+      );
+  }
+}
+
+async function cmdNotify(rest: string[]): Promise<number> {
+  const verb = rest[0];
+  const args = rest.slice(1);
+
+  if (verb === "cursor") return cmdNotifyCursor(args);
+  if (verb !== "read" && verb !== "watch") {
+    process.stderr.write(
+      "usage: ay notify <read|watch|cursor> [--parent <pid>] [--since <seq>] [--since-ts <ms>] [--unread] [--ack] [--json]\n",
+    );
+    return 1;
+  }
+
+  const y = yargs(args)
+    .option("parent", { type: "number", description: "Parent pid whose inbox to drain (default: $AGENT_YES_PID)" })
+    .option("since", { type: "number", description: "Only edges with seq greater than this" })
+    .option("since-ts", { type: "number", description: "Only edges at/after this epoch-ms" })
+    .option("unread", { type: "boolean", default: false, description: "Only edges past the saved cursor" })
+    .option("ack", { type: "boolean", default: false, description: "Advance the cursor past what's shown (at-least-once: off by default)" })
+    .option("json", { type: "boolean", default: false, description: "Emit raw NDJSON events" })
+    .option("consumer", { type: "string", default: "parent", description: "Cursor identity (for multiple readers)" })
+    .option("interval", { type: "number", default: 2, description: "Poll interval in seconds (watch)" })
+    .option("ensure-daemon", { type: "boolean", default: true, description: "Start the notifyd singleton if not running (watch)" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+  const argv = await y.parseAsync();
+
+  const parent = resolveParentPid(argv.parent as number | undefined);
+  const host = hostId();
+  const consumer = String(argv.consumer);
+  // The reader's own start time — used to reject inbox events addressed to a
+  // PRIOR incarnation of this pid (pid reuse). FAIL-CLOSED: if we can't resolve
+  // the parent's identity (no live registry record → started_at 0), we refuse to
+  // open the notification path at all rather than fail-open and risk delivering a
+  // recycled pid's inbox to an unrelated agent (or registering a 0-identity
+  // watcher). "If we don't know who the parent is, don't open the path."
+  const selfStartedAt = await resolveParentStartedAt(parent);
+  if (selfStartedAt <= 0)
+    throw new Error(
+      `cannot resolve identity for pid ${parent} (no live agent record) — ` +
+        `refusing to open the notification path (pass --parent for a live agent).`,
+    );
+
+  const drain = async (sinceSeqOverride?: number): Promise<number> => {
+    let events = await readInbox(host, parent);
+    // Parent pid-reuse guard (fail-safe): when we know our own start time, deliver
+    // ONLY events whose parent_started_at EXACTLY matches it — a mismatched OR
+    // missing parent identity is dropped, never fail-open-delivered to a possibly-
+    // recycled pid. The daemon always stamps parent_started_at from the watcher's
+    // heartbeat (the same value this reader resolves), so every legitimate event
+    // matches; only truly-legacy identity-less events fall out.
+    if (selfStartedAt > 0) events = events.filter((e) => e.parent_started_at === selfStartedAt);
+    if (argv.unread) {
+      const cursor = await getCursor(host, parent, consumer);
+      events = filterUnread(events, sinceSeqOverride ?? cursor);
+    } else {
+      if (sinceSeqOverride !== undefined) events = filterSinceSeq(events, sinceSeqOverride);
+      else if (Number.isFinite(argv.since)) events = filterSinceSeq(events, argv.since as number);
+      if (Number.isFinite(argv["since-ts"])) events = filterSinceTs(events, argv["since-ts"] as number);
+    }
+    printNotifyEvents(events, argv.json);
+    return maxSeq(events);
+  };
+
+  // Advance the cursor MONOTONICALLY — never below its current value, and never
+  // regressing on an empty batch. This is what makes `watch --ack` safe across a
+  // consumer restart: the high-water of what we've shown is always persisted.
+  const ackTo = async (seq: number) => {
+    const cur = await getCursor(host, parent, consumer);
+    if (seq > cur) await setCursor(host, parent, seq, consumer);
+  };
+
+  if (verb === "read") {
+    const top = await drain();
+    if (argv.ack && top > 0) await ackTo(top);
+    return 0;
+  }
+
+  // watch: tail -f the inbox. Default no-ack (at-least-once) so a consumer that
+  // crashes mid-handling re-reads on restart; pass --ack to advance the cursor.
+  const ensure = async () => {
+    if (!argv["ensure-daemon"]) return;
+    const { ensureDaemon } = await import("./notifyDaemon.ts");
+    await ensureDaemon().catch(() => null);
+  };
+  // Register this parent as a live watcher BEFORE the first poll and ensure a
+  // daemon exists — so a parent that watches *before* spawning any child (or
+  // across a fan-out gap) still has a running, correctly-scoped daemon.
+  await heartbeatWatcher(parent, selfStartedAt);
+  await ensure();
+  const intervalMs = Math.max(500, (Number.isFinite(argv.interval) ? argv.interval : 2) * 1000);
+  // Baseline: from the cursor (unread) or the caller's --since, else from now
+  // (only new edges). Track high-water seq in-memory between polls.
+  let lastSeq = argv.unread
+    ? await getCursor(host, parent, consumer)
+    : Number.isFinite(argv.since)
+      ? (argv.since as number)
+      : maxSeq(await readInbox(host, parent));
+  let acked = lastSeq; // high-water already persisted to the cursor
+  let stop = false;
+  // On signal: drop our heartbeat and exit promptly. (Even if this is missed on
+  // a hard kill, the watcher's TTL makes the stale heartbeat non-live, so the
+  // daemon's scope/self-exit stays correct — this is just prompt cleanup.)
+  const onSig = () => {
+    stop = true;
+    void clearWatcher(parent).finally(() => process.exit(0));
+  };
+  process.on("SIGINT", onSig);
+  process.on("SIGTERM", onSig);
+  try {
+    while (!stop) {
+      // Refresh our heartbeat and keep the daemon alive every tick — it self-
+      // exits after a grace window with no watchers, so a long watch must renew.
+      await heartbeatWatcher(parent, selfStartedAt);
+      await ensure();
+      const top = await drain(lastSeq);
+      if (top > lastSeq) lastSeq = top;
+      // Persist the high-water monotonically (only when it advanced), so a batch
+      // that showed events is acked even if the NEXT poll is empty — a restarted
+      // `watch --ack` then resumes past what it already delivered, not from the
+      // stale cursor.
+      if (argv.ack && lastSeq > acked) {
+        await ackTo(lastSeq);
+        acked = lastSeq;
+      }
+      await new Promise((r) => setTimeout(r, intervalMs));
+    }
+  } finally {
+    await clearWatcher(parent);
+  }
+  return 0;
+}
+
+/**
+ * Resolve the started_at of the LIVE agent whose wrapper pid is `parent`. Returns
+ * 0 (→ the caller fails closed) when there is no such record, when the matching
+ * record is stale (exited / pid not alive), or when the match is ambiguous
+ * (>1 live record) — so a leftover stale record can't make a recycled parent pid
+ * resolve to a PRIOR incarnation's start time and fail-open the identity guard.
+ */
+async function resolveParentStartedAt(parent: number): Promise<number> {
+  const records = await listRecords(undefined, {
+    all: true,
+    active: false,
+    json: false,
+    latest: false,
+    cwdScope: null,
+  }).catch(() => [] as GlobalPidRecord[]);
+  const live = records.filter(
+    (r) =>
+      (r.wrapper_pid === parent || r.pid === parent) &&
+      r.status !== "exited" &&
+      isPidAlive(r.pid),
+  );
+  // Exactly one live match, or fail closed.
+  if (live.length !== 1) return 0;
+  return live[0]!.started_at ?? 0;
+}
+
+async function cmdNotifyCursor(args: string[]): Promise<number> {
+  const action = args[0];
+  const y = yargs(args.slice(1))
+    .option("parent", { type: "number" })
+    .option("consumer", { type: "string", default: "parent" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+  const argv = await y.parseAsync();
+  const parent = resolveParentPid(argv.parent as number | undefined);
+  const host = hostId();
+  const consumer = String(argv.consumer);
+  if (action === "get") {
+    process.stdout.write(String(await getCursor(host, parent, consumer)) + "\n");
+    return 0;
+  }
+  if (action === "set") {
+    const seq = Number(argv._[0]);
+    if (!Number.isFinite(seq) || seq < 0) throw new Error("ay notify cursor set <seq>");
+    await setCursor(host, parent, seq, consumer);
+    return 0;
+  }
+  process.stderr.write("usage: ay notify cursor <get|set <seq>> [--parent <pid>]\n");
+  return 1;
+}
+
+async function cmdNotifyd(rest: string[]): Promise<number> {
+  const sub = rest[0] ?? "status";
+  const daemon = await import("./notifyDaemon.ts");
+  switch (sub) {
+    case "run":
+      return daemon.runDaemon();
+    case "once":
+      return daemon.runDaemon({ once: true });
+    case "start": {
+      const pid = await daemon.ensureDaemon();
+      process.stdout.write(pid ? `notifyd running (pid ${pid})\n` : "notifyd: failed to start\n");
+      return pid ? 0 : 1;
+    }
+    case "status": {
+      const pid = await daemon.daemonStatus();
+      process.stdout.write(pid ? `notifyd running (pid ${pid})\n` : "notifyd: not running\n");
+      return pid ? 0 : 1;
+    }
+    case "stop": {
+      // Cooperative, non-destructive stop: remove the daemon's lock and let it
+      // exit itself on the next tick — never SIGTERM a pid that may have been
+      // recycled onto an unrelated process.
+      const pid = await daemon.requestDaemonStop();
+      process.stdout.write(
+        pid ? `notifyd: stop requested (pid ${pid} will exit shortly)\n` : "notifyd: not running\n",
+      );
+      return 0;
+    }
+    default:
+      process.stderr.write("usage: ay notifyd <run|once|start|status|stop>\n");
+      return 1;
+  }
 }

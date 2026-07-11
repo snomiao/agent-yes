@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { badgeDef, BADGE_DEFS, matchBadges, type BadgeDef } from "./badges.ts";
+import { badgeDef, BADGE_DEFS, matchBadges, TYPING_BADGE, type BadgeDef } from "./badges.ts";
 
 describe("matchBadges", () => {
   it("matches goal-active when the /goal status line is on screen", () => {
@@ -56,6 +56,26 @@ describe("matchBadges", () => {
   it("does not match an unrelated 'limit' mention", () => {
     expect(matchBadges(["rate limit exceeded, please slow down"])).toEqual([]);
   });
+
+  it("matches retrying on claude's self-retry backoff banner", () => {
+    expect(
+      matchBadges(["✻ Waiting for API response · will retry in 2m 17s · check your network"]),
+    ).toEqual(["retrying"]);
+  });
+
+  it("matches retrying across a line-wrapped banner (joined text)", () => {
+    expect(
+      matchBadges(["✻ Waiting for API response ·", "will retry in 45s · check your network"]),
+    ).toEqual(["retrying"]);
+  });
+
+  it("does not light retrying for a normal in-flight wait (no 'will retry')", () => {
+    expect(matchBadges(["✻ Waiting for API response… (esc to interrupt)"])).toEqual([]);
+  });
+
+  it("does not light retrying for an agent merely discussing retries (anchored to the banner)", () => {
+    expect(matchBadges(["the client will retry in 5 seconds with backoff"])).toEqual([]);
+  });
 });
 
 describe("badgeDef", () => {
@@ -65,5 +85,20 @@ describe("badgeDef", () => {
 
   it("returns undefined for an unknown id", () => {
     expect(badgeDef("does-not-exist")).toBeUndefined();
+  });
+
+  it("resolves the time-derived typing badge even though it isn't in BADGE_DEFS", () => {
+    expect(badgeDef("typing")).toBe(TYPING_BADGE);
+    expect(BADGE_DEFS).not.toContain(TYPING_BADGE);
+  });
+});
+
+describe("TYPING_BADGE", () => {
+  it("is never produced by screen matching (its pattern can't match)", () => {
+    // Presence is derived from the stdin-activity marker, not the rendered
+    // screen — matchBadges must never surface it, even against text mentioning
+    // typing. A screen can't cause a false 'user is typing' chip.
+    expect(matchBadges(["the user is typing a lot right now", "typing typing typing"])).toEqual([]);
+    expect(TYPING_BADGE.pattern.test("typing")).toBe(false);
   });
 });

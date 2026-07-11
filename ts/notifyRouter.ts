@@ -1,0 +1,288 @@
+/**
+ * Pure edge-detection + debounce state machine for subagent→parent
+ * notifications. The heart of `ay notifyd`: given each tick's observed child
+ * states, decide which EDGES to push to which parent, exactly once per episode,
+ * without spamming on transient flicker.
+ *
+ * Design (frozen with codex + the two agents who hit the pain):
+ *  - Signal is the query-layer `deriveLiveState` state — NOT a bare no-output
+ *    timer. `idle` already means "idle prompt visible AND no working spinner",
+ *    so a long, silent tool call (a 2-minute test run) is classified `active`
+ *    and never produces a false idle edge. This is the load-bearing P1 guard.
+ *  - Three edges, child→parent only (never cascade a parent's own state):
+ *      needs_input : immediate; re-fire only when the COMPACT question changes.
+ *      exited      : immediate, once.
+ *      idle        : only after the child has been continuously `idle` for
+ *                    `idleConfirmMs` (hysteresis), once per idle episode.
+ *  - Edge, not level: a state that stays idle emits one edge, not one per tick.
+ *  - Reaped-child safety: a child that vanishes from the live set without our
+ *    seeing `stopped` gets a synthetic `exited` (mirrors `diffLsStates`).
+ *
+ * Pure + synchronous (no clock, no fs — the caller passes `now`) so it is
+ * trivially unit-testable, like `lsWatch.ts` / `needsInput.ts`. The poll loop,
+ * inbox writes, payload enrichment, and startup reconcile live in
+ * `subcommands.ts` (`cmdNotifyd`); persistence lives in `notifyInbox.ts`.
+ */
+
+import type { NotifyEdge } from "./notifyInbox.ts";
+
+/** One child's observed state this tick (from `deriveLiveState` + the registry). */
+export interface ChildObservation {
+  pid: number;
+  wrapper_pid?: number;
+  /** The child's own start time — carried into events for the pid-reuse guard. */
+  started_at?: number;
+  /** The parent this child links to (parent wrapper pid). Required to route. */
+  parent_pid: number;
+  /** The parent's start time — carried so a synthetic exited keeps the parent guard. */
+  parent_started_at?: number;
+  cli: string;
+  cwd: string;
+  /** `deriveLiveState` state: active | idle | stopped | needs_input | stuck. */
+  state: string;
+  /** Compact question when state === "needs_input", else null. */
+  question: string | null;
+}
+
+/** A decided notification, before the daemon enriches it (seq/ts/tail/git). */
+export interface PendingNotification {
+  parent_pid: number;
+  child_pid: number;
+  child_wrapper_pid?: number;
+  /** The child's start time (from the observation / carried state). */
+  child_started_at?: number;
+  /** The parent's start time (from the observation / carried state). */
+  parent_started_at?: number;
+  cli: string;
+  cwd: string;
+  edge: NotifyEdge;
+  prev_state: string | null;
+  state: string;
+  question: string | null;
+}
+
+/** Per-child debounce memory, carried across ticks. */
+export interface ChildRouterState {
+  parent_pid: number;
+  wrapper_pid?: number;
+  /** The child's start time — so a synthetic exited (child already gone) keeps it. */
+  started_at?: number;
+  /** The parent's start time — carried so a synthetic exited keeps the parent guard. */
+  parent_started_at?: number;
+  cli: string;
+  cwd: string;
+  /** Last observed state. */
+  state: string;
+  /** When the current idle episode began (ms), or null if not idle. */
+  idleSince: number | null;
+  /** Whether we already emitted the idle edge for the current episode. */
+  idleEmitted: boolean;
+  /** Whether we are inside a needs_input episode we've emitted at least once. */
+  inNeedsInput: boolean;
+  /** The compact question of the last emitted needs_input (for change re-fire). */
+  needsInputQuestion: string | null;
+  /** Whether we already emitted the exited edge for this child. */
+  exitedEmitted: boolean;
+}
+
+export type RouterState = Map<number, ChildRouterState>;
+
+export interface RouterConfig {
+  /** How long a child must stay continuously idle before we emit an idle edge. */
+  idleConfirmMs: number;
+  /**
+   * pid → started_at for every child ACTUALLY ALIVE right now (from the registry).
+   * A tracked child that drops out of this tick's observations is carried forward
+   * (not false-exited) ONLY when the live pid's start time still MATCHES the
+   * tracked one — i.e. it is the SAME child, merely unobserved (its parent's
+   * watcher lapsed). If the pid is alive but with a DIFFERENT start time, the old
+   * child died and its pid was reused during the lapse → synthesize its exited
+   * immediately (identity-aware, no waiting for the watcher to return). If the
+   * tracked start time is unknown (rare), fall back to liveness-only carry-forward
+   * to avoid a false exited. When omitted entirely, any unobserved tracked child
+   * is treated as exited (the caller has no liveness info).
+   */
+  aliveChildStartedAt?: Map<number, number>;
+}
+
+const DEFAULT_IDLE_CONFIRM_MS = 30_000;
+
+/**
+ * Advance the router by one tick. Returns the notifications to push plus the
+ * next RouterState. Only children with a numeric `parent_pid` are considered —
+ * the caller is responsible for including only opted-in children.
+ *
+ * First-observation (baseline / startup-reconcile) semantics: a child we've
+ * never seen that is ALREADY terminal emits immediately for `needs_input` /
+ * `stopped`, and starts its idle timer at `now` for `idle` (so a child parked
+ * idle when the daemon starts still notifies after the confirm window). To avoid
+ * re-emitting the same baseline on every daemon restart, the caller SEEDS the
+ * prior state from each inbox's already-written edges (see cmdNotifyd).
+ */
+export function stepRouter(
+  prev: RouterState,
+  observations: ChildObservation[],
+  now: number,
+  config: Partial<RouterConfig> = {},
+): { events: PendingNotification[]; next: RouterState } {
+  const idleConfirmMs = config.idleConfirmMs ?? DEFAULT_IDLE_CONFIRM_MS;
+  const events: PendingNotification[] = [];
+  const next: RouterState = new Map();
+  const seen = new Set<number>();
+
+  for (const obs of observations) {
+    if (typeof obs.parent_pid !== "number" || obs.parent_pid <= 0) continue;
+    seen.add(obs.pid);
+    let p = prev.get(obs.pid);
+    // Hot-path pid-reuse guard (mirrors the startup reconcile guard). Two cases,
+    // both fail-safe — an unverifiable identity is NEVER inherited:
+    //  1. CONFIRMED reuse: both start times known and different → the old child
+    //     is gone. `seen` marks the pid so the vanished-loop won't fire; emit its
+    //     synthetic exited here, then drop `p` so the new child rebuilds fresh.
+    //  2. UNVERIFIABLE: the observation has a start time but the tracked state has
+    //     none (e.g. seeded without one). We can't confirm it's the same child,
+    //     so we DON'T inherit its emitted-edge memory (a re-emit / duplicate is
+    //     safe; a suppressed first edge is not) — but we also DON'T synthesize an
+    //     exited, since it may well be the same child (avoid a false exited).
+    if (p && obs.started_at != null && p.started_at != null && p.started_at !== obs.started_at) {
+      if (!p.exitedEmitted) events.push(syntheticExited(p, obs.pid));
+      p = undefined;
+    } else if (p && obs.started_at != null && p.started_at == null) {
+      p = undefined; // unverifiable — rebuild fresh, no inherit, no synthetic exited
+    }
+    const cs: ChildRouterState = {
+      parent_pid: obs.parent_pid,
+      wrapper_pid: obs.wrapper_pid,
+      started_at: obs.started_at,
+      parent_started_at: obs.parent_started_at,
+      cli: obs.cli,
+      cwd: obs.cwd,
+      state: obs.state,
+      idleSince: p?.idleSince ?? null,
+      idleEmitted: p?.idleEmitted ?? false,
+      inNeedsInput: p?.inNeedsInput ?? false,
+      needsInputQuestion: p?.needsInputQuestion ?? null,
+      exitedEmitted: p?.exitedEmitted ?? false,
+    };
+    const prevState = p?.state ?? null;
+    const emit = (edge: NotifyEdge) =>
+      events.push({
+        parent_pid: obs.parent_pid,
+        child_pid: obs.pid,
+        child_wrapper_pid: obs.wrapper_pid,
+        child_started_at: obs.started_at,
+        parent_started_at: obs.parent_started_at,
+        cli: obs.cli,
+        cwd: obs.cwd,
+        edge,
+        prev_state: prevState,
+        state: obs.state,
+        question: edge === "needs_input" ? obs.question : null,
+      });
+
+    switch (obs.state) {
+      case "needs_input": {
+        // Leaving idle/other → reset those episodes.
+        cs.idleSince = null;
+        cs.idleEmitted = false;
+        // Fire on entry, or when the compact question changed (a NEW question).
+        // Compare the compact (chrome-stripped) question so a spinner/elapsed-
+        // seconds cosmetic redraw doesn't double-fire.
+        if (!cs.inNeedsInput || cs.needsInputQuestion !== obs.question) {
+          emit("needs_input");
+          cs.inNeedsInput = true;
+          cs.needsInputQuestion = obs.question;
+        }
+        break;
+      }
+      case "idle": {
+        cs.inNeedsInput = false;
+        cs.needsInputQuestion = null;
+        // Continue the episode if we were already idle; else start it now.
+        if (p?.state === "idle" && p.idleSince != null) {
+          cs.idleSince = p.idleSince;
+          cs.idleEmitted = p.idleEmitted;
+        } else {
+          cs.idleSince = now;
+          cs.idleEmitted = false;
+        }
+        if (!cs.idleEmitted && now - (cs.idleSince ?? now) >= idleConfirmMs) {
+          emit("idle");
+          cs.idleEmitted = true;
+        }
+        break;
+      }
+      case "stopped": {
+        cs.idleSince = null;
+        cs.idleEmitted = false;
+        cs.inNeedsInput = false;
+        cs.needsInputQuestion = null;
+        if (!cs.exitedEmitted) {
+          emit("exited");
+          cs.exitedEmitted = true;
+        }
+        break;
+      }
+      // "active", "stuck", or any unknown busy state: real work (or a wedge) is
+      // happening — reset the idle/needs_input episodes so a later idle counts
+      // as a fresh episode, and emit nothing.
+      default: {
+        cs.idleSince = null;
+        cs.idleEmitted = false;
+        cs.inNeedsInput = false;
+        cs.needsInputQuestion = null;
+        break;
+      }
+    }
+
+    next.set(obs.pid, cs);
+  }
+
+  // Reaped-child safety: a child we were tracking dropped out of the live set
+  // without our observing `stopped`. Synthesize one exited edge (once) so a
+  // "done" transition is never dropped, then forget it.
+  for (const [pid, cs] of prev) {
+    if (seen.has(pid)) continue;
+    // Distinguish "child died" from "child merely not observed this tick" (its
+    // parent's watcher lapsed, so it fell out of the observed scope) — and do it
+    // IDENTITY-AWARE, so a pid reused during the lapse doesn't masquerade as the
+    // same still-running child. Carry forward only when the SAME child is still
+    // alive (live start time matches, or the tracked start time is unknown —
+    // fail-safe against a false exited). Otherwise the child is gone (dead, or its
+    // pid now belongs to a different child) → synthesize its exited.
+    if (config.aliveChildStartedAt) {
+      const liveStart = config.aliveChildStartedAt.get(pid);
+      const sameChildAlive =
+        liveStart !== undefined && (cs.started_at == null || liveStart === cs.started_at);
+      if (sameChildAlive) {
+        next.set(pid, cs);
+        continue;
+      }
+    }
+    if (!cs.exitedEmitted) events.push(syntheticExited(cs, pid));
+    // Dead & gone (or pid reused) — drop from the tracked set.
+  }
+
+  return { events, next };
+}
+
+/**
+ * A synthetic `exited` for a child that left the live set without our observing
+ * its stop — either reaped between ticks, or displaced by a pid-reuse. Built from
+ * the last-known router state so it still carries the child's identity.
+ */
+function syntheticExited(cs: ChildRouterState, pid: number): PendingNotification {
+  return {
+    parent_pid: cs.parent_pid,
+    child_pid: pid,
+    child_wrapper_pid: cs.wrapper_pid,
+    child_started_at: cs.started_at,
+    parent_started_at: cs.parent_started_at,
+    cli: cs.cli,
+    cwd: cs.cwd,
+    edge: "exited",
+    prev_state: cs.state,
+    state: "stopped",
+    question: null,
+  };
+}
