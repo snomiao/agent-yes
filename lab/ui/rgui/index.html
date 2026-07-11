@@ -594,6 +594,9 @@
       ></textarea>
       <div class="ctx-foot">
         <span><b>⏎</b> send · <b>shift+⏎</b> newline · <b>esc</b> cancel</span>
+        <!-- environment nodes (host env / cwd / repo) double as launch targets:
+             the textarea becomes the new agent's initial prompt -->
+        <button id="ctx-spawn" hidden>▷ Spawn here</button>
         <button id="ctx-send">Send</button>
       </div>
       <div class="ctx-share" id="ctx-share" hidden>

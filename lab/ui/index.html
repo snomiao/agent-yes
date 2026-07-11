@@ -5531,16 +5531,56 @@
       });
 
       // ---- "+ New agent": a spawn form for one machine in the fleet ----------
-      // Click → fill (cli defaults to claude, cwd prefilled from the selected agent
-      // when there is one, prompt optional) → POST /api/spawn on that machine.
+      // Click → fill (cwd prefilled from the selected agent when there is one,
+      // prompt optional) → POST /api/spawn on that machine.
       // Always allowed: the console already controls every running agent's stdin.
       //
       // The Host row appears only when the fleet holds more than one machine. It
       // defaults to spawnTarget()'s pick — the selected agent's machine — so the
       // common "spawn next to what I'm looking at" flow needs no interaction.
+      // Working dir sits directly under Host (a cwd only means something on its
+      // machine) and autocompletes from that host's known agent cwds; CLI is a
+      // picker (options from /api/spawn-config `clis`), preselected from the
+      // chain: selected agent's cli → last used cli → explicit user pick.
+      const LAST_CLI_KEY = "ay.lastSpawnCli";
+      const CLI_FALLBACK = ["claude", "codex", "gemini", "copilot", "cursor-agent", "goose", "aider"];
+      function cliOptions(clis, preferred) {
+        const list = clis && clis.length ? clis : CLI_FALLBACK;
+        const has = preferred && list.includes(preferred);
+        return (
+          `<option value=""${has ? "" : " selected"} disabled>choose a CLI…</option>` +
+          list
+            .map((c) => `<option value="${esc(c)}"${c === preferred && has ? " selected" : ""}>${esc(c)}</option>`)
+            .join("")
+        );
+      }
+      // cwd suggestions: the target host's known agent cwds, live agents' first,
+      // deduped. Rendered into a <datalist> so the input stays free-text.
+      function cwdOptions(room) {
+        const seen = new Set();
+        const out = [];
+        const pool = entries
+          .filter((e) => (room ? e._src === room : true))
+          .sort((a, b) => (b.exit_code == null) - (a.exit_code == null));
+        for (const e of pool) {
+          const c = (e.cwd || "").replace(/\/+$/, "");
+          if (c && !seen.has(c)) {
+            seen.add(c);
+            out.push(`<option value="${esc(c)}"></option>`);
+          }
+        }
+        return out.join("");
+      }
       function showNew() {
         const here = entries.find((x) => x._key === sel);
         const cwd = here?.cwd || "";
+        // CLI preselect chain: current selected agent > last-used > none (forces
+        // an explicit pick — the Launch handler refuses an empty CLI).
+        let lastCli = "";
+        try {
+          lastCli = localStorage.getItem(LAST_CLI_KEY) || "";
+        } catch {}
+        const preferredCli = here?.cli || lastCli || "";
         const target = spawnTarget();
         const hosts = [...sources.values()].filter((s) => s.live || s.id === target?.id);
         $("newform").dataset.room = target ? target.id : "";
@@ -5556,9 +5596,9 @@
         $("newform").innerHTML = `<div class="lcard">
       <div class="ltitle">New agent · ${esc(sourceLabel(target) || "local")}</div>
       ${hostRow}
-      <div class="nfield"><label>CLI</label><input id="nf-cli" value="claude" spellcheck="false" autocapitalize="off" /></div>
+      <div class="nfield"><label>Working dir</label><input id="nf-cwd" list="nf-cwd-list" value="${esc(cwd)}" placeholder="(host default — ignored when Spawn from is set)" spellcheck="false" autocapitalize="off" /><datalist id="nf-cwd-list">${cwdOptions(target ? target.id : "")}</datalist></div>
+      <div class="nfield"><label>CLI</label><select id="nf-cli">${cliOptions(null, preferredCli)}</select></div>
       <div class="nfield"><label>Spawn from — optional</label><input id="nf-from" placeholder="github URL / owner/repo@branch — provisions a worktree" spellcheck="false" autocapitalize="off" /></div>
-      <div class="nfield"><label>Working dir</label><input id="nf-cwd" value="${esc(cwd)}" placeholder="(host default — ignored when Spawn from is set)" spellcheck="false" autocapitalize="off" /></div>
       <div class="nfield"><label>Prompt — optional</label><textarea id="nf-prompt" rows="3" placeholder="initial message to send the agent…"></textarea></div>
       <div class="lrow">
         <button class="lfleet" id="nf-go">▷ Launch</button>
@@ -5569,9 +5609,11 @@
         $("newform").style.display = "flex";
         setTimeout(() => $("nf-prompt")?.focus(), 0);
         // Retarget the form when the user picks another machine — the spawn-hook
-        // hint below is per-machine, so it has to be re-read too.
+        // hint and the cwd suggestions are per-machine, so both re-read.
         $("nf-host")?.addEventListener("change", (ev) => {
           $("newform").dataset.room = ev.target.value;
+          const dl = $("nf-cwd-list");
+          if (dl) dl.innerHTML = cwdOptions(ev.target.value);
           showHook(sources.get(ev.target.value));
         });
         showHook(target);
@@ -5590,10 +5632,17 @@
           .then((c) => {
             // A slow answer for a host the user has since switched away from must
             // not paint the new host's hint.
-            if (!el || $("newform").dataset.room !== forId) return;
-            if (c && c.hasSpawnHook) {
+            if ($("newform").dataset.room !== forId) return;
+            if (el && c && c.hasSpawnHook) {
               el.textContent = "⚙ this host runs a spawn hook before launch";
               el.style.display = "";
+            }
+            // spawn-config also discloses the CLIs this daemon accepts — swap
+            // the picker's options to the host's real list (keep the selection)
+            const cliSel = $("nf-cli");
+            if (cliSel && c && Array.isArray(c.clis) && c.clis.length) {
+              const cur = cliSel.value;
+              cliSel.innerHTML = cliOptions(c.clis, cur || null);
             }
           })
           .catch(() => {});
@@ -5602,8 +5651,18 @@
       async function submitNew() {
         const go = $("nf-go");
         if (!go || go.disabled) return;
+        const cli = ($("nf-cli").value || "").trim();
+        if (!cli) {
+          // no silent default — the user must pick a CLI (chain: selected agent's
+          // cli → last used → this explicit pick)
+          $("nf-cli").focus();
+          return;
+        }
+        try {
+          localStorage.setItem(LAST_CLI_KEY, cli);
+        } catch {}
         const spec = {
-          cli: ($("nf-cli").value || "claude").trim(),
+          cli,
           from: $("nf-from")?.value.trim() || "",
           cwd: $("nf-cwd").value.trim(),
           prompt: $("nf-prompt").value,
