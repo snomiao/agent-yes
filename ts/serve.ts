@@ -3,7 +3,7 @@ import { renameSync, watch, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
-import { homedir, hostname, userInfo } from "os";
+import { arch, cpus, freemem, homedir, hostname, loadavg, platform, totalmem, uptime, userInfo } from "os";
 import path from "path";
 import yargs from "yargs";
 import {
@@ -1706,6 +1706,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
         const ns = `ay://${origin}`;
         const textIn = { id: "text-in", label: "text", kind: "text" };
         const textOut = { id: "text-out", label: "text", kind: "text" };
+        // otoji environment-node adoption: agents also carry an `env` input fed
+        // by ONE host environment node (below) — "this fleet runs on this
+        // machine". Only the HOST is published as an environment; worktree envs
+        // stay local-only (their cwd paths are exactly what this route redacts).
+        const envIn = { id: "env", label: "env", kind: "environment" };
+        const envOut = { id: "env", label: "env", kind: "environment" };
+        const envNodeId = `${ns}/env-${hostname()}`;
         const byWrapper = new Map(records.map((r) => [r.wrapper_pid ?? r.pid, r.pid]));
         const nid = (pid: number) => `${ns}/${pid}`;
         // renderHints.preview: the REAL agent TUI tail (redacted in
@@ -1746,11 +1753,33 @@ export async function cmdServe(rest: string[]): Promise<number> {
             parent: r.parent_pid && byWrapper.has(r.parent_pid) ? nid(byWrapper.get(r.parent_pid)!) : undefined,
             pos: { x: (i % 8) * (NODE_W + 64), y: Math.floor(i / 8) * 480 },
             size: await sizeOf(r.pid),
-            inputs: [textIn],
+            inputs: [textIn, envIn],
             outputs: [textOut],
             renderHints: await hintsOf(r),
           })),
         );
+        // The host environment node: identity + capability flags only (no cwd,
+        // no load numbers — health telemetry stays behind /api/host).
+        nodes.push({
+          id: envNodeId,
+          app: "agent-yes",
+          type: "environment",
+          title: `env @ ${hostname()}`,
+          category: "environment",
+          owner: `agent-yes:${hostname()}`,
+          status: "active",
+          parent: undefined,
+          pos: { x: -NODE_W - 96, y: 0 },
+          size: { w: NODE_W, h: 160 },
+          inputs: [],
+          outputs: [envOut],
+          renderHints: undefined,
+          configPublic: {
+            scope: "native-device",
+            runtime: "native",
+            caps: { send: true, kill: true, spawn: true, spawnHook: hasSpawnHook(), provision: hasProvisionHook() },
+          },
+        } as unknown as (typeof nodes)[number]); // configPublic is envelope-legal but absent from the agent-node literal type
         const codex = records
           .filter((r) => r.cli === "codex")
           .sort((a, b) => (b.last_active_at ?? 0) - (a.last_active_at ?? 0))[0];
@@ -1765,12 +1794,17 @@ export async function cmdServe(rest: string[]): Promise<number> {
           parent: undefined,
           pos: { x: 0, y: -560 },
           size: codex ? await sizeOf(codex.pid) : { w: NODE_W, h: 260 },
-          inputs: [textIn],
+          inputs: [textIn, envIn],
           outputs: [textOut],
           renderHints: codex ? await hintsOf(codex) : undefined,
         });
         const present = new Set(nodes.map((n) => n.id));
-        const edges = (await recentReadEdges())
+        const edges: {
+          source: { node: string; port: string; type: string };
+          target: { node: string; port: string; type: string };
+          status: string;
+          label?: string;
+        }[] = (await recentReadEdges())
           .filter((e) => e.by !== e.target && present.has(nid(e.target)) && present.has(nid(e.by)))
           .map((e) => ({
             source: { node: nid(e.target), port: "text-out", type: "text" },
@@ -1778,6 +1812,16 @@ export async function cmdServe(rest: string[]): Promise<number> {
             status: "readonly",
             label: "reads",
           }));
+        // env wiring: host environment → each ROOT agent (children inherit the
+        // environment through containment — wiring every agent would be noise)
+        for (const n of nodes) {
+          if (n.id === envNodeId || n.parent) continue;
+          edges.push({
+            source: { node: envNodeId, port: "env", type: "environment" },
+            target: { node: n.id, port: "env", type: "environment" },
+            status: "readonly",
+          });
+        }
         return Response.json(
           {
             kind: "rgui-federated-graph",
@@ -1786,7 +1830,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
             revision: Date.now(),
             ts: Date.now(),
             graph: { nodes, edges },
-            capabilities: { nodeTypes: [...new Set(nodes.map((n) => n.type))], portTypes: ["text"] },
+            capabilities: { nodeTypes: [...new Set(nodes.map((n) => n.type))], portTypes: ["text", "environment"] },
           },
           { headers: { "Access-Control-Allow-Origin": "*" } },
         );
@@ -1842,6 +1886,33 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return Response.json({
         hasSpawnHook: hasSpawnHook(),
         hasProvisionHook: hasProvisionHook(),
+        // the CLIs /api/spawn accepts, so the console can render a picker
+        // instead of a free-text field (unknown values 400 anyway)
+        clis: SUPPORTED_CLIS,
+      });
+    }
+
+    // GET /api/host — this machine as an ENVIRONMENT: identity + live health
+    // (load, memory) + what the environment permits (capability flags, otoji
+    // environment-node style). The /rgui viewer renders it as the host env node
+    // every agent implicitly runs inside. Read-only, token-gated like the rest;
+    // loadavg is [0,0,0] on Windows — the viewer treats that as "n/a".
+    if (req.method === "GET" && p === "/api/host") {
+      return Response.json({
+        host: hostname(),
+        platform: platform(),
+        arch: arch(),
+        cpus: cpus().length,
+        loadavg: loadavg(),
+        mem: { total: totalmem(), free: freemem() },
+        uptime: uptime(),
+        caps: {
+          send: true, // the console can always drive agent stdin
+          kill: true,
+          spawn: true, // /api/spawn is always on; hooks below shape it
+          spawnHook: hasSpawnHook(),
+          provision: hasProvisionHook(),
+        },
       });
     }
 

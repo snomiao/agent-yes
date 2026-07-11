@@ -52,6 +52,51 @@ interface AgentRecord {
   badges?: string[];
 }
 
+// ── host environment (otoji environment-node adoption) ───────────────────────
+// GET /api/host describes the machine the fleet runs on: identity + live health
+// (loadavg/mem) + capability flags. The viewer renders it as ONE host env node
+// that every top-level group wires into via `environment` edges — the worktree
+// (cwd) and repo containers are the finer-grained environments nested inside it.
+// A daemon too old to expose /api/host just 404s → no env node, nothing breaks.
+interface HostInfo {
+  host: string;
+  platform: string;
+  arch: string;
+  cpus: number;
+  loadavg: number[];
+  mem: { total: number; free: number };
+  uptime: number;
+  caps?: Record<string, boolean>;
+}
+const ENV_HOST_ID = "env:host";
+let hostInfo: HostInfo | null = null;
+// host-env → top-level-root wires, rebuilt by buildGraph, drawn by applyEdges
+const envEdges: Edge[] = [];
+function hostEnvFields(): [string, string][] {
+  const h = hostInfo;
+  if (!h) return [];
+  const recs = [...recordsByPid.values()];
+  const live = recs.filter((r) => r.status !== "exited");
+  const stuck = live.filter((r) => r.status === "stuck").length;
+  const load1 = h.loadavg?.[0] ?? 0;
+  const hot = load1 > h.cpus; // 1-min load above core count = saturated host
+  const usedPct = h.mem.total ? Math.round(((h.mem.total - h.mem.free) / h.mem.total) * 100) : 0;
+  const fields: [string, string][] = [
+    ["scope", "native-device"],
+    ["os", `${h.platform}/${h.arch} · ${h.cpus} cpus`],
+  ];
+  // Windows reports loadavg [0,0,0] — skip the row rather than show a lie
+  if (h.loadavg?.some((n) => n > 0))
+    fields.push([hot ? "⚠ load" : "load", h.loadavg.map((n) => n.toFixed(1)).join(" ")]);
+  fields.push(["mem", `${usedPct}% of ${(h.mem.total / 2 ** 30).toFixed(0)}G`]);
+  fields.push(["agents", `${live.length} live${stuck ? ` · ⚠ ${stuck} stuck` : ""}`]);
+  if (h.caps) {
+    const on = Object.entries(h.caps).filter(([, v]) => v).map(([k]) => k);
+    if (on.length) fields.push(["caps", on.join(" · ")]);
+  }
+  return fields;
+}
+
 // ── data source: room · HTTP · sample ────────────────────────────────────────
 // The viewer reads from ONE of three wires, in priority order:
 //   1. a WebRTC room — when the URL hash is a share link (#room:token[@host] or
@@ -287,6 +332,9 @@ function portsOf(r: AgentRecord): { inputs: Port[]; outputs: Port[] } {
   const inputs: Port[] = [
     { id: "prompt", label: "prompt", kind: "ctl" },
     { id: "deps", label: "reads", kind: "text" },
+    // env input (otoji environment-node parity): which environment this agent
+    // runs in. Fed by the host env node / its cwd container, metadata-only.
+    { id: "env", label: "env", kind: "environment" },
   ];
   // status output: kind = the status string so the port dot is color-coded per
   // state (stable hashed color); the label (shown zoomed in) is the state text.
@@ -398,12 +446,11 @@ function buildGraph(records: AgentRecord[]): Graph {
         x: 0,
         y: 0,
         w: CARD_W,
-        inputs: [],
+        // the cwd container IS the worktree environment node — env in from the
+        // host, and (metadata-only) it provides the env its members run in
+        inputs: [{ id: "env", label: "env", kind: "environment" }],
         outputs: [],
-        fields: [
-          ["agents", String(cids.length)],
-          ["shared", st],
-        ],
+        fields: cwdFields(cids),
       });
       children.set(cwdId, cids);
       for (const id of cids) nodes.get(id)!.parent = cwdId;
@@ -421,7 +468,8 @@ function buildGraph(records: AgentRecord[]): Graph {
       x: 0,
       y: 0,
       w: CARD_W,
-      inputs: [],
+      // env in from the host env node (the repo's worktrees live on that machine)
+      inputs: [{ id: "env", label: "env", kind: "environment" }],
       outputs: [],
       fields: [["worktrees", String(byCwd.size)]],
     });
@@ -466,6 +514,35 @@ function buildGraph(records: AgentRecord[]): Graph {
     node.w = Math.max(CARD_W, maxRight - x + PAD);
     node.h = cy + rowH + PAD - y;
     return { w: node.w, h: node.h };
+  }
+
+  // The host environment node (otoji environment-node adoption): the machine
+  // every top-level group runs on — identity, live load/mem, capability flags
+  // (see hostEnvFields). Absent until /api/host answers (old daemon: never).
+  envEdges.length = 0;
+  if (hostInfo) {
+    nodes.set(ENV_HOST_ID, {
+      id: ENV_HOST_ID,
+      title: `⬢ ${hostInfo.host}`,
+      category: "environment",
+      x: 0,
+      y: 0,
+      w: CARD_W,
+      inputs: [],
+      outputs: [{ id: "env", label: "env", kind: "environment" }],
+      fields: hostEnvFields(),
+    });
+    children.set(ENV_HOST_ID, []);
+    // host env → each top-level root (repo/cwd containers + loose agents);
+    // members nested inside a container inherit its environment visually
+    for (const id of topLevel)
+      envEdges.push({
+        from: { node: ENV_HOST_ID, port: "env" },
+        to: { node: id, port: "env" },
+        dashed: true,
+        style: { color: "#805ad5", width: 1.5, dash: [3, 5] },
+      });
+    topLevel.unshift(ENV_HOST_ID);
   }
 
   // tile the top-level nodes (repo containers + loose agents) into bands
@@ -520,7 +597,12 @@ function buildGraph(records: AgentRecord[]): Graph {
   // leaf agent nodes render via our LOD draw hook (terminal snapshot / identity),
   // instead of rgui's default field card — see drawNode.
   for (const n of nodes.values()) {
-    if (!isContainer.has(n.id) && !n.id.startsWith("repo:") && !n.id.startsWith("info:")) {
+    if (
+      !isContainer.has(n.id) &&
+      !n.id.startsWith("repo:") &&
+      !n.id.startsWith("info:") &&
+      !n.id.startsWith("env:") // env node has no terminal — default field card
+    ) {
       n.draw = (ctx, r) => drawNode(n.id, ctx, r);
     }
   }
@@ -587,6 +669,19 @@ const STATE_RANK: AgentStatus[] = ["needs_input", "stuck", "active", "idle", "ex
 function aggStateOf(pids: string[]): AgentStatus {
   const s = new Set(pids.map((p) => recordsByPid.get(p)?.status).filter(Boolean));
   return STATE_RANK.find((x) => s.has(x)) ?? "idle";
+}
+
+// Body rows of a cwd (worktree environment) container. 2+ LIVE agents in one
+// worktree share its branch, git index and bun-link targets — a real hazard
+// (they silently commit onto each other's branch), so it gets a ⚠ row.
+function cwdFields(pids: string[]): [string, string][] {
+  const live = pids.filter((p) => recordsByPid.get(p)?.status !== "exited").length;
+  const fields: [string, string][] = [
+    ["agents", String(pids.length)],
+    ["shared", aggStateOf(pids)],
+  ];
+  if (live >= 2) fields.push(["⚠", `${live} live agents share this worktree`]);
+  return fields;
 }
 
 const MAX_TERMS = 6; // cap concurrent xterms/SSE streams — `ay serve --http` gets
@@ -1178,6 +1273,16 @@ function updateSysPanel(records: AgentRecord[], live: boolean) {
     items.push({ id: "repos", label: "repos", value: String(repos.size) });
     items.push({ id: "worktrees", label: "worktrees", value: String(cwds.size) });
   }
+  if (hostInfo?.loadavg?.some((n) => n > 0)) {
+    const load1 = hostInfo.loadavg[0]!;
+    items.push({
+      id: "load",
+      label: "host load",
+      value: load1.toFixed(1),
+      // saturated host (1-min load past the core count) = the wedged-fleet smell
+      color: load1 > hostInfo.cpus ? "#f85149" : undefined,
+    });
+  }
   items.push({
     id: "conn",
     label: live ? (usingRoom() ? "live · room" : "live · local") : "demo · no ay serve",
@@ -1214,7 +1319,9 @@ const viewer: Rgui = createRgui(canvas, {
   },
   onNodeContextMenu: (id, screen) => {
     // right-click → batch-send to the selection (or just this node); a selected
-    // container expands to its agent descendants.
+    // container expands to its agent descendants. Environment-ish nodes (host
+    // env / cwd / repo) additionally offer "spawn here" — the env node as a
+    // launch target (the textarea doubles as the new agent's prompt).
     const sel = viewer.selection;
     const base = sel.includes(id) && sel.length > 0 ? [...sel] : [id];
     if (!sel.includes(id)) viewer.setSelection(base);
@@ -1224,7 +1331,8 @@ const viewer: Rgui = createRgui(canvas, {
       else for (const d of agentDescendants(t)) set.add(d);
     }
     const targets = [...set];
-    if (targets.length) openBatchMenu(screen.x, screen.y, targets);
+    const spawn = spawnSpecOf(id);
+    if (targets.length || spawn) openBatchMenu(screen.x, screen.y, targets, spawn);
   },
   onSelectionChange: () => {
     updateNodeDebug();
@@ -1330,9 +1438,10 @@ function updateContent(records: AgentRecord[]) {
       n.outputs = fresh.outputs; // status/ask/result track live state (no relayout)
     } else if (cwdGroups.has(n.id)) {
       // same-cwd container: recompute the shared (loudest) state in place
-      const st = aggStateOf(cwdGroups.get(n.id)!);
-      n.category = `cwd-${st}`;
-      n.fields = [["agents", String(cwdGroups.get(n.id)!.length)], ["shared", st]];
+      n.category = `cwd-${aggStateOf(cwdGroups.get(n.id)!)}`;
+      n.fields = cwdFields(cwdGroups.get(n.id)!);
+    } else if (n.id === ENV_HOST_ID) {
+      n.fields = hostEnvFields(); // live/stuck counts track the fresh records
     }
   }
   for (const [pid, e] of terms) {
@@ -1517,7 +1626,13 @@ function applyEdges() {
         }))
     : [];
   viewer.graph.edges.length = 0;
-  viewer.graph.edges.push(...edges, ...fedEdges(present));
+  // env wires are structural (host → its top-level groups), not toggled with
+  // the read/tail wires — always drawn, and few (one per root)
+  viewer.graph.edges.push(
+    ...edges,
+    ...envEdges.filter((e) => present.has(e.from.node) && present.has(e.to.node)),
+    ...fedEdges(present),
+  );
   viewer.setView(viewer.view); // schedule a redraw without a relayout
 }
 
@@ -1529,6 +1644,28 @@ async function fetchEdges() {
     /* no /api/edges (static host / old daemon / room down) — leave wires empty */
   }
 }
+
+// Poll the host environment (identity + load/mem/caps) every 30s. The first
+// answer adds the env node to the forest (structure change → force a rebuild);
+// later answers only refresh its fields in place — same no-flash philosophy as
+// updateContent. A 404 (older daemon) just means no env node.
+async function fetchHost() {
+  try {
+    const h = await apiJSON<HostInfo>("/api/host");
+    const first = !hostInfo;
+    hostInfo = h;
+    if (first) {
+      lastStruct = ""; // env node joins the graph on the next apply()
+      void refresh();
+    } else {
+      const n = viewer.graph.nodes.find((x) => x.id === ENV_HOST_ID);
+      if (n) n.fields = hostEnvFields(); // picked up by the next natural frame
+    }
+  } catch {
+    /* /api/host unavailable (old daemon / static host / room down) */
+  }
+}
+setInterval(() => void fetchHost(), 30_000);
 
 async function refresh() {
   try {
@@ -1594,6 +1731,7 @@ if (roomInfo) {
       roomConnected = true;
       delay = RTC_MIN; // a healthy connect resets the backoff
       void refresh(); // pull the first snapshot over the room immediately
+      void fetchHost(); // and the host env (the 30s interval keeps it fresh)
     } catch {
       setRoomLabel("room disconnected");
       schedule();
@@ -1702,6 +1840,7 @@ if (embedMode) {
 } else {
   refresh();
   setInterval(refresh, 3000);
+  if (!usingRoom()) void fetchHost(); // room mode fetches on connect instead
 }
 // The whole page is configured from the hash (room / feeds / embed target / k=),
 // all read once at boot — a hash-only navigation (e.g. an iframe consumer
@@ -1943,14 +2082,33 @@ function agentDescendants(containerId: string): string[] {
 const ctxmenu = document.getElementById("ctxmenu")!;
 const ctxInput = document.getElementById("ctx-input") as HTMLTextAreaElement;
 let ctxTargets: string[] = [];
-function openBatchMenu(sx: number, sy: number, pids: string[]) {
+let ctxSpawn: { cwd: string | null; cli: string } | null = null;
+
+// What "spawn here" means for a right-clicked node: an environment-ish node
+// (host env / cwd container / repo container) is a launch TARGET — the cwd the
+// new agent starts in; a plain agent spawns a sibling next to itself. The cli
+// follows the neighbours (spawn what already runs there), falling back to claude.
+function spawnSpecOf(id: string): { cwd: string | null; cli: string } | null {
+  const cliOf = (pids: string[]) => recordsByPid.get(pids[0] ?? "")?.cli ?? "claude";
+  if (id === ENV_HOST_ID) return { cwd: null, cli: cliOf([...recordsByPid.keys()]) };
+  if (id.startsWith("cwd:")) return { cwd: id.slice(4), cli: cliOf(cwdGroups.get(id) ?? []) };
+  if (id.startsWith("repo:")) return { cwd: id.slice(5), cli: cliOf(agentDescendants(id)) };
+  const r = recordsByPid.get(id);
+  return r ? { cwd: r.cwd, cli: r.cli } : null;
+}
+
+function openBatchMenu(sx: number, sy: number, pids: string[], spawn: typeof ctxSpawn = null) {
   ctxTargets = pids;
+  ctxSpawn = spawn;
   // "share this node" — single agent only (a share scopes to exactly one agent)
   ctxSharePid = pids.length === 1 ? pids[0]! : null;
   ctxShare.hidden = !ctxSharePid || usingRoom(); // a room viewer can't mint shares
   ctxShareOut.hidden = true;
   document.getElementById("ctx-count")!.textContent = String(pids.length);
   document.getElementById("ctx-s")!.textContent = pids.length === 1 ? "" : "s";
+  const spawnBtn = document.getElementById("ctx-spawn") as HTMLButtonElement;
+  spawnBtn.hidden = !spawn;
+  if (spawn) spawnBtn.title = `POST /api/spawn · ${spawn.cli} in ${spawn.cwd ?? "(host default dir)"}`;
   ctxmenu.hidden = false;
   ctxmenu.style.left = `${Math.min(sx, innerWidth - 348)}px`;
   ctxmenu.style.top = `${Math.min(sy, innerHeight - 140)}px`;
@@ -1980,10 +2138,31 @@ async function sendBatch() {
     void refresh();
   }, 1500);
 }
+// Launch a new agent in the right-clicked environment (host env / cwd / repo
+// node) — the textarea's content becomes the initial prompt (may be empty).
+async function spawnHere() {
+  const spec = ctxSpawn;
+  if (!spec) return;
+  const prompt = ctxInput.value;
+  closeBatchMenu();
+  statusLabel.textContent = `▷ spawning ${spec.cli}…`;
+  const r = await apiPost("/api/spawn", {
+    cli: spec.cli,
+    ...(spec.cwd ? { cwd: spec.cwd } : {}),
+    prompt,
+  });
+  statusLabel.textContent = r.ok ? "▷ spawned" : `spawn failed: ${r.text.slice(0, 80)}`;
+  setTimeout(() => void refresh(), 1200);
+  setTimeout(() => void refresh(), 4000); // and again once the wrapper registered
+}
+
 ctxInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
     e.preventDefault();
-    void sendBatch();
+    // Enter = send to the targeted agents; on a pure environment node (no agent
+    // targets) there is nothing to send to, so Enter launches instead.
+    if (ctxTargets.length) void sendBatch();
+    else if (ctxSpawn) void spawnHere();
   } else if (e.key === "Escape") {
     e.preventDefault();
     closeBatchMenu();
@@ -1991,6 +2170,7 @@ ctxInput.addEventListener("keydown", (e) => {
   e.stopPropagation();
 });
 document.getElementById("ctx-send")!.addEventListener("click", () => void sendBatch());
+document.getElementById("ctx-spawn")!.addEventListener("click", () => void spawnHere());
 addEventListener("mousedown", (e) => {
   if (!ctxmenu.hidden && !ctxmenu.contains(e.target as Node)) closeBatchMenu();
 });
