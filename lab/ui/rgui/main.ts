@@ -84,15 +84,17 @@ function hostEnvFields(src: string): [string, string][] {
   const stuck = live.filter((r) => r.status === "stuck").length;
   const load1 = h.loadavg?.[0] ?? 0;
   const hot = load1 > h.cpus; // 1-min load above core count = saturated host
-  const usedPct = h.mem.total ? Math.round(((h.mem.total - h.mem.free) / h.mem.total) * 100) : 0;
-  const fields: [string, string][] = [
-    ["scope", "native-device"],
-    ["os", `${h.platform}/${h.arch} · ${h.cpus} cpus`],
-  ];
+  const fields: [string, string][] = [["scope", "native-device"]];
+  // rows below degrade gracefully for a whoami-only fallback (older daemon
+  // without /api/host — identity known, health/caps unknown)
+  if (h.platform) fields.push(["os", `${h.platform}/${h.arch} · ${h.cpus} cpus`]);
   // Windows reports loadavg [0,0,0] — skip the row rather than show a lie
   if (h.loadavg?.some((n) => n > 0))
     fields.push([hot ? "⚠ load" : "load", h.loadavg.map((n) => n.toFixed(1)).join(" ")]);
-  fields.push(["mem", `${usedPct}% of ${(h.mem.total / 2 ** 30).toFixed(0)}G`]);
+  if (h.mem?.total) {
+    const usedPct = Math.round(((h.mem.total - h.mem.free) / h.mem.total) * 100);
+    fields.push(["mem", `${usedPct}% of ${(h.mem.total / 2 ** 30).toFixed(0)}G`]);
+  }
   fields.push(["agents", `${live.length} live${stuck ? ` · ⚠ ${stuck} stuck` : ""}`]);
   if (h.caps) {
     const on = Object.entries(h.caps).filter(([, v]) => v).map(([k]) => k);
@@ -1747,13 +1749,29 @@ async function fetchHosts() {
   await Promise.allSettled(
     [...wires.values()].filter(wireReady).map(async (w) => {
       try {
-        const h = await apiJSON<HostInfo>("/api/host", w.id);
+        let h: HostInfo;
+        try {
+          h = await apiJSON<HostInfo>("/api/host", w.id);
+        } catch {
+          // older daemon without /api/host — fall back to /api/whoami (ancient)
+          // for a bare-identity env node: the machine still deserves its ⬢.
+          const who = await apiJSON<{ host: string }>("/api/whoami", w.id);
+          h = {
+            host: who.host,
+            platform: "",
+            arch: "",
+            cpus: 0,
+            loadavg: [],
+            mem: { total: 0, free: 0 },
+            uptime: 0,
+          };
+        }
         if (!w.hostInfo) firstArrival = true;
         w.hostInfo = h;
         const n = viewer.graph.nodes.find((x) => x.id === envIdOf(w.id));
         if (n) n.fields = hostEnvFields(w.id); // picked up by the next natural frame
       } catch {
-        /* /api/host unavailable (old daemon / static host / wire down) */
+        /* both unavailable (static host / wire down) */
       }
     }),
   );
