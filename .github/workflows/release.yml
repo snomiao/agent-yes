@@ -43,7 +43,12 @@ jobs:
       # After this, we explicitly dispatch rust-build.yml below.
       - run: bunx semantic-release
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # RELEASE_TOKEN (an admin PAT) instead of the default GITHUB_TOKEN:
+          # main now has required status checks, and @semantic-release/git's
+          # version-bump push would be rejected for the non-admin Actions token.
+          # Admin pushes bypass the checks (enforce_admins is off). Falls back
+          # to GITHUB_TOKEN if the secret is ever removed.
+          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           # Disable husky hooks so @semantic-release/git's commit doesn't trigger
           # pre-commit (fmt/build/test), which races the rust rebuild against
