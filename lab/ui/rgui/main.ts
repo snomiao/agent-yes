@@ -63,14 +63,59 @@ interface AgentRecord {
 // roomInfo is fixed at load from the hash. When a room IS configured we never
 // fall back to HTTP or the sample — you opened a share link, so we show that
 // room or its connection state.
-const roomInfo = parseRoomHash(location.hash) as
-  | { room: string; token: string; host: string }
-  | null;
+// "ay.rooms" is the console's saved-room credential cache (same origin, same
+// shape — see saveRoom in lab/ui/index.html). Sharing it makes /r/ ⇄ /w/
+// switching token-less: a share link opened on EITHER page caches the secret,
+// and after that a bare #<room> (or #<room>:<pid> deep link) reconnects on
+// both. Mirrors /w/'s SECURITY behavior: the token is eaten from the URL on
+// open so it never lingers in history/omnibox — only the room mnemonic stays.
+const ROOMS_KEY = "ay.rooms";
+function cachedRoom(name: string): { token: string; host: string } | null {
+  try {
+    const r = JSON.parse(localStorage.getItem(ROOMS_KEY) || "{}")[name];
+    return r?.token ? { token: r.token, host: r.host || "s.agent-yes.com" } : null;
+  } catch {
+    return null;
+  }
+}
+function saveRoom(name: string, token: string, host: string) {
+  try {
+    const r = JSON.parse(localStorage.getItem(ROOMS_KEY) || "{}");
+    r[name] = { token, host, ts: Date.now() };
+    localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
+  } catch {
+    /* private mode / quota — the session still works, just not cached */
+  }
+}
+function resolveRoom(hash: string): { room: string; token: string; host: string } | null {
+  const p = parseRoomHash(hash) as { room: string; token: string; host: string } | null;
+  if (p) {
+    saveRoom(p.room, p.token, p.host);
+    history.replaceState(
+      null,
+      document.title,
+      location.pathname + location.search + "#" + p.room,
+    );
+    return p;
+  }
+  // #<room> or #<room>:<pid> — token-less forms; reconnect from the cache.
+  // (parseRoomHash already rejected these: bare room, or numeric ≤7-digit id.)
+  const h = decodeURIComponent(String(hash || "").replace(/^#/, ""));
+  const m = /^([A-Za-z0-9_-]+)(?::\d{1,7})?$/.exec(h);
+  if (m) {
+    const c = cachedRoom(m[1]!);
+    if (c) return { room: m[1]!, ...c };
+  }
+  return null;
+}
+const roomInfo = resolveRoom(location.hash);
 // #k=<token>: same-origin HTTP auth for a serve-hosted /r page (the console's
 // #k= convention) — appended to every /api call. #node=<pid>&embed: render ONLY
 // that agent's live terminal, full-viewport — the federation embed leg
 // (renderHints.embed): consumers iframe this page over the node rect, with the
 // TUI-preview card as their LOD fallback. See rgui docs/federation.md.
+// (Read AFTER resolveRoom: a share-link hash never carries k=/node= parts, and
+// resolveRoom's token-eating rewrite doesn't touch these forms.)
 const hashParts = location.hash.slice(1).split("&");
 const httpToken = hashParts.find((s) => s.startsWith("k="))?.slice(2) ?? null;
 // canonical form #node=<pid>&embed; #embed=<pid> accepted as an alias
@@ -2035,3 +2080,17 @@ document.getElementById("theme")!.addEventListener("click", () => {
   viewer.setTheme(next);
   for (const e of terms.values()) e.term.options.theme = termTheme();
 });
+// View switcher: same fleet, terminal-console rendering. The bare #<room> is
+// enough — the console reconnects from the shared ay.rooms cache (no token in
+// the URL). Path-gated to the hosted origin: the local dev:rgui server has no
+// /w/ route, so the button would 404 there — hide it.
+{
+  const consoleBtn = document.getElementById("console") as HTMLButtonElement;
+  if (/^\/(r|rgui)(\/|$)/.test(location.pathname)) {
+    consoleBtn.addEventListener("click", () => {
+      location.href = roomInfo ? "/w/#" + encodeURIComponent(roomInfo.room) : "/w/";
+    });
+  } else {
+    consoleBtn.hidden = true;
+  }
+}
