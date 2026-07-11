@@ -497,6 +497,37 @@ describe("console DOM behaviour", () => {
       await ctx.close();
     }
   });
+
+  it("new-agent modal: Working dir sits under Host, autocompletes, CLI needs an explicit pick", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      await page.click("#newbtn");
+      await page.waitForSelector("#newform .lcard");
+      // Working dir leads (right under the Host row when one exists) — a cwd
+      // only means something on its machine; CLI and the rest follow.
+      const labels = await page.locator("#newform .nfield label").allTextContents();
+      const iCwd = labels.findIndex((l) => l.includes("Working dir"));
+      const iCli = labels.findIndex((l) => l.trim().startsWith("CLI"));
+      expect(iCwd).toBeGreaterThanOrEqual(0);
+      expect(iCli).toBeGreaterThan(iCwd);
+      // cwd autocompletes from the fleet's known agent cwds
+      expect(await page.locator("#nf-cwd").getAttribute("list")).toBe("nf-cwd-list");
+      expect(await page.locator("#nf-cwd-list option").count()).toBeGreaterThan(0);
+      // CLI is a picker (not free text) whose first option is a disabled
+      // "choose a CLI…" placeholder — no silent claude default.
+      expect(await page.locator("#nf-cli").evaluate((el) => el.tagName)).toBe("SELECT");
+      expect(await page.locator("#nf-cli option").first().getAttribute("disabled")).not.toBeNull();
+      // With no agent selected and no last-used cli, the value is empty and
+      // Launch refuses to submit (the form stays open, no /api/spawn fired).
+      if ((await page.locator("#nf-cli").inputValue()) === "") {
+        await page.click("#nf-go");
+        expect(await page.locator("#newform .lcard").count()).toBe(1);
+        expect(await page.locator("#nf-go").isDisabled()).toBe(false);
+      }
+    } finally {
+      await ctx.close();
+    }
+  });
 });
 
 // A nested fixture: root 201 with two subagents (202 active, 203 idle) and a
