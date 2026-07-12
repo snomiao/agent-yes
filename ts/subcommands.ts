@@ -11,6 +11,7 @@
  * to the normal agent-spawning flow.
  */
 
+import { randomBytes } from "crypto";
 import { appendFile, mkdir, open, readFile, stat, writeFile } from "fs/promises";
 import ms from "ms";
 import { homedir } from "os";
@@ -2653,7 +2654,7 @@ async function cmdSpawn(rest: string[]): Promise<number> {
  * (`send`, `key`, `select`): refuse a self-targeting loop, and require that THIS
  * sender actually looked at THIS target recently — an agent is blocked, an
  * interactive human is only warned — unless `force`. Returns the sender context
- * so a caller can reuse it (e.g. `send`'s `[from …]` prefix). Extracted from
+ * so a caller can reuse it (e.g. `send`'s `[ay-msg …]` header). Extracted from
  * cmdSend so the action commands enforce the identical guard.
  */
 async function enforceSendGuards(
@@ -2962,13 +2963,21 @@ async function cmdSend(rest: string[]): Promise<number> {
   // prefix would bump it to line 2 and the CLI would type the command as plain
   // text. So skip the prefix for a command body and send it verbatim —
   // attribution is dropped for the command, but it actually runs.
+  // The header/footer pair shares a random nonce so the recipient can trust the
+  // block's boundaries: text INSIDE the body can't forge a matching open/close
+  // marker (the nonce is generated here, after the body was authored), so a
+  // spoofed "[from …]" line or a premature "[/ay-msg]" embedded in a message
+  // can't impersonate another sender or truncate/extend the trusted region.
   const replyTarget = sender.agent?.agent_id || sender.agent?.pid;
-  const prefix =
-    sender.agent && !isSlashCommand(body)
-      ? `[from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${replyTarget} "..."]\n`
-      : "";
+  let prefix = "";
+  let suffix = "";
+  if (sender.agent && !isSlashCommand(body)) {
+    const nonce = randomBytes(4).toString("hex");
+    prefix = `[ay-msg ${nonce} from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${replyTarget} "..."]\n`;
+    suffix = `\n[/ay-msg ${nonce}]`;
+  }
 
-  const fullBody = prefix + body;
+  const fullBody = prefix + body + suffix;
   const noWait = Boolean(argv.noWait) || process.env.AGENT_YES_SEND_NO_WAIT === "1";
 
   // Back off while the user is typing at the target's terminal — injecting our
