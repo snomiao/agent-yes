@@ -77,6 +77,11 @@ export default defineConfig({
         // isWebrtcSpec) are unit-tested in webrtcRemote.spec.ts; the connection
         // and HTTP bridge are integration-only (same rationale as share.ts).
         "ts/webrtcRemote.ts",
+        // Port-exposure daemon — dials the edge relay over a WebSocket and runs
+        // the codehost/tunnel host; needs a live relay + local server. Proven
+        // e2e (wrangler dev + real HTTP/SSE/WS), not unit-testable (same
+        // rationale as share.ts / webrtcRemote.ts).
+        "ts/expose.ts",
         // Guided onboarding — the workspace-setting path is unit-tested
         // (setup.spec.ts); the TTY prompt and the daemon install it delegates to
         // are integration-only.

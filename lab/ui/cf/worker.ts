@@ -19,8 +19,16 @@
 
 export interface Env {
   ROOMS: DurableObjectNamespace;
+  EXPOSURES: DurableObjectNamespace;
   ASSETS: Fetcher;
 }
+
+export { Exposure } from "./exposure";
+
+// Exposure subdomains: <id>.agent-yes.com (wildcard route). Ids are generated
+// by `ay expose` and always start with "x", so they can never collide with
+// named subdomains (s., www., …). See exposure.ts for the relay itself.
+const EXPOSURE_HOST = /^(x[a-z0-9]{7,31})\.agent-yes\.com$/;
 
 const SUBPROTO = "ay-signal-1";
 
@@ -61,7 +69,31 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
 
+    // Route on the Host header (not url.hostname) so `wrangler dev` — where the
+    // URL is always localhost — still resolves via a spoofed Host; in
+    // production the two are identical.
+    const host = req.headers.get("host") ?? url.hostname;
+
+    // Visitor leg: EVERYTHING on an exposure subdomain belongs to its DO (so an
+    // exposed app owns its own /health, /_ay/*, etc.). The DO is addressed by a
+    // fixed internal /_visit path so a visitor can never reach the daemon leg
+    // (which the DO accepts only on the /_daemon path the Worker alone sets).
+    const exp = EXPOSURE_HOST.exec(host);
+    if (exp) {
+      const inner = new Request(new URL(`/_visit${url.pathname}${url.search}`, url), req);
+      return env.EXPOSURES.get(env.EXPOSURES.idFromName(exp[1]!)).fetch(inner);
+    }
+
     if (url.pathname === "/health") return new Response("ok\n");
+
+    // Daemon leg of a port exposure: `ay expose` dials this on the apex (the id
+    // rides the path). Reachable ONLY here — the DO trusts the /_daemon path,
+    // which the Worker sets exclusively for this route, never for a visitor.
+    const tun = /^\/_ay\/tunnel\/(x[a-z0-9]{7,31})$/.exec(url.pathname);
+    if (tun && req.headers.get("Upgrade") === "websocket") {
+      const inner = new Request(new URL("/_daemon", url), req);
+      return env.EXPOSURES.get(env.EXPOSURES.idFromName(tun[1]!)).fetch(inner);
+    }
 
     // WebSocket to /<room> → signaling DO (this is the s.agent-yes.com path).
     const m = /^\/([A-Za-z0-9_-]{1,64})$/.exec(url.pathname);

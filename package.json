@@ -150,7 +150,8 @@
     "tsdown": "^0.20.3",
     "vitest": "4.1.0",
     "ws": "^8.20.0",
-    "zod": "^3.23.0"
+    "zod": "^3.23.0",
+    "codehost": "^0.32.0"
   },
   "peerDependencies": {
     "node-pty": "latest",
