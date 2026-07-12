@@ -28,17 +28,34 @@
     "command": "mkdir -p ./public/w && cp ../index.html ../*.js ../manifest.webmanifest ../icon.svg ./public/w/ && cp ../landing.html ./public/index.html && cp ../architecture.html ./public/architecture.html && rm -rf ./public/blog && cp -R ../blog ./public/blog && cp ../setup.sh ../setup.ps1 ./public/ && cp _headers ./public/_headers && bun ../../../scripts/build-rgui.ts ./public/r && rm -rf ./public/rgui && cp -R ./public/r ./public/rgui",
   },
   // Static console UI (served for every non-WebSocket request).
-  "assets": { "directory": "./public", "binding": "ASSETS" },
+  // run_worker_first: the Worker must see the request BEFORE the asset server,
+  // otherwise a plain GET to an exposure subdomain (x*.agent-yes.com/) would be
+  // answered with the console's index.html asset and never reach the Exposure
+  // router. The Worker still delegates the main site to ASSETS.fetch, so
+  // agent-yes.com is unchanged (just always via the Worker now).
+  "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true },
   "durable_objects": {
-    "bindings": [{ "name": "ROOMS", "class_name": "Room" }],
+    "bindings": [
+      { "name": "ROOMS", "class_name": "Room" },
+      { "name": "EXPOSURES", "class_name": "Exposure" },
+    ],
   },
   // SQLite-backed DO classes (required on the free plan, fine on paid).
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Room"] },
+    { "tag": "v2", "new_sqlite_classes": ["Exposure"] },
+  ],
   // One Worker, two custom domains: the UI on agent-yes.com, signaling on
   // s.agent-yes.com. Custom domains auto-provision DNS in the zone.
+  // The wildcard ROUTE serves `ay expose` subdomains (x*.agent-yes.com →
+  // Exposure DO). Custom domains win on their exact hostnames, so this only
+  // catches the rest. It needs a proxied wildcard DNS record in the zone
+  // (`*.agent-yes.com` AAAA 100::) which the deploy token can't create —
+  // one-time manual step in the dashboard.
   "routes": [
     { "pattern": "agent-yes.com", "custom_domain": true },
     { "pattern": "s.agent-yes.com", "custom_domain": true },
+    { "pattern": "*.agent-yes.com/*", "zone_name": "agent-yes.com" },
   ],
   "observability": { "enabled": true },
 }

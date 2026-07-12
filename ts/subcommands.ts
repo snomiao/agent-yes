@@ -306,6 +306,7 @@ const SUBCOMMANDS = new Set([
   "serve",
   "schedule",
   "remote",
+  "expose",
   "reap",
   "help",
 ]);
@@ -427,6 +428,10 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         const { cmdRemote } = await import("./remotes.ts");
         return cmdRemote(rest);
       }
+      case "expose": {
+        const { cmdExpose } = await import("./expose.ts");
+        return cmdExpose(rest);
+      }
       case "reap": {
         const reaper = await import("./reaper.ts");
         await reaper.sweep();
@@ -546,6 +551,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay serve status                     show serve daemon/server status\n` +
       `  ay remote add <alias> http://<token>@<host>:<port>\n` +
       `  ay remote ls / rm <alias>           manage saved remotes\n` +
+      `  ay expose <port>                    share localhost:<port> at https://<id>.agent-yes.com (private link)\n` +
       `  ay ls   <token>@<host>:<port>       connect inline (no alias needed)\n` +
       `  ay send <token>@<host>:<port>:<kw> <msg>\n` +
       `\n` +
