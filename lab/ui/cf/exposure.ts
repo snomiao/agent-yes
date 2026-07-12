@@ -320,9 +320,16 @@ export class Exposure {
       }
       headers[k] = v;
     });
-    // Overwritten AFTER copying visitor headers, so a visitor can't spoof them.
-    headers["x-forwarded-host"] = hostname;
+    // Do NOT send x-forwarded-host: the daemon's TunnelHost uses it AS the
+    // upstream Host, and the public subdomain trips dev-server host allow-lists
+    // (Vite/webpack/Next/Storybook → "host not allowed"). Omitting it makes
+    // TunnelHost default Host to 127.0.0.1:<port>, which every dev server
+    // accepts. The public host still reaches the app via x-forwarded-proto +
+    // x-original-host (forwarded through untouched, unlike x-forwarded-host).
+    // Drop any client-sent copies first so a visitor can't spoof them.
+    delete headers["x-forwarded-host"];
     headers["x-forwarded-proto"] = "https";
+    headers["x-original-host"] = hostname;
 
     let body: Uint8Array | undefined;
     if (req.method !== "GET" && req.method !== "HEAD" && req.body) {
