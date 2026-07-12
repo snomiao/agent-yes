@@ -352,6 +352,46 @@
       .app.steer-agent #shareAgentRW {
         display: none !important;
       }
+      /* Expose modal — ports manager list rows. */
+      .exposeList {
+        margin: 10px 0;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-height: 40vh;
+        overflow-y: auto;
+      }
+      .exposerow {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 7px 9px;
+      }
+      .exposerow .exmeta {
+        flex: 1;
+        min-width: 0;
+      }
+      .exposerow .explabel {
+        font-weight: 600;
+      }
+      .exposerow .exurl {
+        font-size: 11px;
+        opacity: 0.7;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .exposerow .exhost {
+        font-size: 10px;
+        opacity: 0.55;
+      }
+      .exposePrompt {
+        border-bottom: 1px solid var(--line);
+        padding-bottom: 10px;
+        margin-bottom: 4px;
+      }
       /* Share modal — QR + link for a single-agent view-only share. */
       .modal-backdrop {
         position: fixed;
@@ -1685,6 +1725,9 @@
               <button id="foldbtn" class="viewbtn" title="fold subagent trees">⊞ subs</button>
               <button id="sortbtn" class="viewbtn" title="cycle sort order">⇅ state</button>
               <button id="viewbtn" class="viewbtn" title="toggle compact list">☰</button>
+              <button id="portsbtn" class="viewbtn" title="manage exposed localhost ports">
+                ⇄ ports
+              </button>
               <button id="rguibtn" class="viewbtn" title="open the agent graph view (/r/) for this fleet">
                 ⌗ graph
               </button>
@@ -1886,6 +1929,32 @@
         </div>
         <div class="srow" id="shareWarnClose" hidden>
           <button id="shareCloseAlt" type="button">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Expose modal: prompt to publish a clicked localhost:PORT through
+         agent-yes.com, plus the ports manager (list + revoke active exposures). -->
+    <div class="modal-backdrop" id="exposeModal" hidden>
+      <div class="sharebox" role="dialog" aria-modal="true" aria-label="Expose localhost port">
+        <h3 id="exposeTitle">Exposed ports</h3>
+        <div class="exposePrompt" id="exposePrompt" hidden>
+          <p class="sub" id="exposePromptSub">Publish this local server on the internet?</p>
+          <p class="note">
+            A private link on <strong>agent-yes.com</strong> will tunnel to this port on the agent's
+            machine. Only someone who opens the one-time claim link (which opens automatically for
+            you) can reach it. Revoke anytime below.
+          </p>
+          <div class="srow">
+            <button class="primary" id="exposeGo" type="button">Expose &amp; open</button>
+            <button id="exposeCancel" type="button">Cancel</button>
+          </div>
+        </div>
+        <div class="exposeList" id="exposeList">
+          <p class="sub" id="exposeEmpty">No ports are exposed right now.</p>
+        </div>
+        <div class="srow">
+          <button id="exposeClose" type="button">Close</button>
         </div>
       </div>
     </div>
@@ -3242,6 +3311,157 @@
         if (modal) modal.hidden = true;
         pendingRw = null; // a cancelled read-write flow never minted anything
       }
+
+      // ---- Port exposure: publish a clicked localhost:PORT through agent-yes.com ----
+
+      // Recognise a local-loopback URL and pull its port (default 80). Only these
+      // are offered for exposure — a real public URL just opens normally.
+      function localhostPort(uri) {
+        let u;
+        try {
+          u = new URL(uri);
+        } catch {
+          return null;
+        }
+        if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+        const h = u.hostname;
+        if (h !== "localhost" && h !== "127.0.0.1" && h !== "0.0.0.0" && h !== "::1") return null;
+        const port = Number(u.port) || (u.protocol === "https:" ? 443 : 80);
+        return port >= 1 && port <= 65535 ? port : null;
+      }
+
+      // The tx the expose prompt should call (the daemon whose terminal was clicked).
+      let exposePendingTx = null;
+      let exposePendingPort = 0;
+
+      // Called by the terminal link handler when a localhost URL is clicked.
+      function promptExpose(port, tx) {
+        exposePendingTx = tx || localTx;
+        exposePendingPort = port;
+        $("exposeTitle").textContent = "Expose localhost:" + port + "?";
+        $("exposePromptSub").textContent =
+          "Publish this local server (port " + port + ") on the internet via agent-yes.com?";
+        $("exposePrompt").hidden = false;
+        openExposeManager(false);
+      }
+
+      // Open the ports manager (list of active exposures across every host).
+      function openExposeManager(resetPrompt) {
+        if (resetPrompt !== false) {
+          $("exposePrompt").hidden = true;
+          $("exposeTitle").textContent = "Exposed ports";
+        }
+        const modal = $("exposeModal");
+        if (modal) modal.hidden = false;
+        refreshExposeList();
+      }
+      function closeExposeModal() {
+        const modal = $("exposeModal");
+        if (modal) modal.hidden = true;
+        exposePendingTx = null;
+        exposePendingPort = 0;
+      }
+
+      // Agree → mint the exposure on its host and open the claim link (which sets
+      // the 8h cookie and redirects to the app), then refresh the manager list.
+      async function doExpose() {
+        const tx = exposePendingTx || localTx;
+        const port = exposePendingPort;
+        $("exposePrompt").hidden = true;
+        if (!port) return;
+        let info = null;
+        try {
+          const r = await tx.post("/api/expose", { port });
+          if (r.ok) info = JSON.parse(r.text);
+        } catch {}
+        if (!info || !info.claim) {
+          $("exposeEmpty").hidden = false;
+          $("exposeEmpty").textContent = "Couldn't expose port " + port + " (is `ay serve` reachable?).";
+          return;
+        }
+        window.open(info.claim, "_blank", "noopener,noreferrer");
+        refreshExposeList();
+      }
+
+      // Gather active exposures from every live host and render the manager rows.
+      async function refreshExposeList() {
+        const list = $("exposeList");
+        if (!list) return;
+        const rows = [];
+        await Promise.all(
+          [...sources.values()].map(async (s) => {
+            const tx = s.tx || (s.id === "local" ? localTx : null);
+            if (!tx) return;
+            let arr;
+            try {
+              arr = await tx.fetchJSON("/api/exposes");
+            } catch {
+              return;
+            }
+            if (Array.isArray(arr))
+              for (const ex of arr) rows.push({ ...ex, _srcName: s.name || s.id, _tx: tx });
+          }),
+        );
+        list.textContent = "";
+        if (!rows.length) {
+          const p = document.createElement("p");
+          p.className = "sub";
+          p.id = "exposeEmpty";
+          p.textContent = "No ports are exposed right now.";
+          list.appendChild(p);
+          return;
+        }
+        rows.sort((a, b) => b.createdAt - a.createdAt);
+        for (const ex of rows) list.appendChild(renderExposeRow(ex));
+      }
+
+      function renderExposeRow(ex) {
+        const row = document.createElement("div");
+        row.className = "exposerow";
+        const meta = document.createElement("div");
+        meta.className = "exmeta";
+        const label = document.createElement("div");
+        label.className = "explabel";
+        label.textContent = "localhost:" + ex.port;
+        const url = document.createElement("div");
+        url.className = "exurl";
+        url.textContent = ex.url;
+        const host = document.createElement("div");
+        host.className = "exhost";
+        host.textContent = ex._srcName;
+        meta.appendChild(label);
+        meta.appendChild(url);
+        meta.appendChild(host);
+        row.appendChild(meta);
+
+        const openBtn = document.createElement("button");
+        openBtn.className = "primary";
+        openBtn.textContent = "Open";
+        // Re-mint a fresh claim so the owner (or a guest) gets a usable link.
+        openBtn.onclick = async () => {
+          try {
+            const r = await ex._tx.post("/api/expose", { port: ex.port });
+            const info = r.ok ? JSON.parse(r.text) : null;
+            window.open(info && info.claim ? info.claim : ex.url, "_blank", "noopener,noreferrer");
+          } catch {
+            window.open(ex.url, "_blank", "noopener,noreferrer");
+          }
+        };
+        row.appendChild(openBtn);
+
+        const revoke = document.createElement("button");
+        revoke.className = "danger";
+        revoke.textContent = "Revoke";
+        revoke.onclick = async () => {
+          revoke.disabled = true;
+          try {
+            await ex._tx.del("/api/expose/" + ex.port);
+          } catch {}
+          refreshExposeList();
+        };
+        row.appendChild(revoke);
+        return row;
+      }
       // Draw the QR onto a fresh canvas (white quiet-zone always, so it scans in
       // dark mode too). `qrcode` is the vendored global from qrcode.js.
       function renderQr(container, text) {
@@ -3291,6 +3511,18 @@
         currentShare = null;
         closeShareModal();
       }
+      (function exposeModalBoot() {
+        $("portsbtn")?.addEventListener("click", () => openExposeManager(true));
+        $("exposeGo")?.addEventListener("click", doExpose);
+        $("exposeCancel")?.addEventListener("click", () => {
+          $("exposePrompt").hidden = true;
+          $("exposeTitle").textContent = "Exposed ports";
+        });
+        $("exposeClose")?.addEventListener("click", closeExposeModal);
+        $("exposeModal")?.addEventListener("click", (e) => {
+          if (e.target === $("exposeModal")) closeExposeModal();
+        });
+      })();
       (function shareModalBoot() {
         $("shareClose")?.addEventListener("click", closeShareModal);
         $("shareCloseAlt")?.addEventListener("click", closeShareModal);
@@ -4256,9 +4488,13 @@
         // new tab (noopener so the page can't be tampered with via window.opener).
         try {
           term.loadAddon(
-            new WebLinksAddon.WebLinksAddon((e, uri) =>
-              window.open(uri, "_blank", "noopener,noreferrer"),
-            ),
+            new WebLinksAddon.WebLinksAddon((ev, uri) => {
+              // A localhost URL isn't reachable from the viewer's browser — offer
+              // to publish it through agent-yes.com (on THIS agent's host: txFor(e)).
+              const port = localhostPort(uri);
+              if (port) return promptExpose(port, txFor(e));
+              window.open(uri, "_blank", "noopener,noreferrer");
+            }),
           );
         } catch {
           /* addon CDN blocked — terminal still works, just without auto-links */
