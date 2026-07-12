@@ -3,9 +3,15 @@
 //
 // The daemon dials OUT (wss://<relay>/_ay/tunnel/<id>), so it works behind any
 // NAT, and runs the codehost tunnel protocol's host half against the local
-// port. Private by default: visitors need the single-use claim link printed
-// below (it swaps for an 8h HttpOnly cookie at the edge; unauthenticated
-// requests never reach this machine). See lab/ui/cf/exposure.ts for the edge.
+// port. Private by default: visitors need a single-use claim link (it swaps
+// for an 8h HttpOnly cookie at the edge; unauthenticated requests never reach
+// this machine). See lab/ui/cf/exposure.ts for the edge.
+//
+// Two front doors share one implementation:
+//   - the CLI (`cmdExpose`), which starts one exposure and blocks; and
+//   - the in-process manager (`ensureExposure` / `listExposures` /
+//     `stopExposure`), which `ay serve` drives from POST /api/expose so the web
+//     console can expose a clicked localhost port and revoke it later.
 
 import { randomBytes, createHash } from "node:crypto";
 import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -24,13 +30,41 @@ interface ExposureRecord {
   key: string;
 }
 
+/** Live handle for one exposed port. */
+export interface ExposureHandle {
+  /** Opaque exposure id (also the subdomain label). */
+  id: string;
+  /** Local loopback port being shared. */
+  port: number;
+  /** Public host, e.g. x….agent-yes.com (or the relay host for a dev relay). */
+  publicHost: string;
+  /** Public root URL. */
+  url: string;
+  /** Relay host this exposure is registered on. */
+  relayHost: string;
+  createdAt: number;
+  /** Mint a fresh single-use claim link and register it with the relay. The
+   *  visitor opening it gets an 8h session cookie for this exposure. */
+  mintClaim(): string;
+  /** Stop sharing (closes the relay socket; the URL then answers 502). */
+  stop(): void;
+}
+
+/** Serializable view of an active exposure (for the console's ports manager). */
+export interface ExposureInfo {
+  id: string;
+  port: number;
+  url: string;
+  createdAt: number;
+}
+
 function exposuresPath(): string {
   const home = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
   mkdirSync(home, { recursive: true });
   return path.join(home, "exposures.json");
 }
 
-/** Stable id+key per (relay, port): re-running `ay expose 5173` keeps its URL. */
+/** Stable id+key per (relay, port): re-exposing a port keeps its URL. */
 function loadOrCreateExposure(relayHost: string, port: number): ExposureRecord {
   const file = exposuresPath();
   let all: Record<string, ExposureRecord> = {};
@@ -79,6 +113,160 @@ function wsTransport(ws: WebSocket): TunnelTransport {
   };
 }
 
+/**
+ * Start (or fail) one exposure. Resolves once the relay has accepted the daemon
+ * and the tunnel is live; rejects if the relay refuses this exposure (bad key).
+ * Reconnects with backoff for the life of the handle.
+ */
+export function startExposure(opts: {
+  port: number;
+  relay?: string;
+  /** Log lifecycle transitions (CLI wants this; the manager stays quiet). */
+  log?: (msg: string) => void;
+}): Promise<ExposureHandle> {
+  const relay = opts.relay ?? DEFAULT_RELAY;
+  const port = opts.port;
+  const log = opts.log ?? (() => {});
+  const relayUrl = new URL(relay);
+  const rec = loadOrCreateExposure(relayUrl.host, port);
+  const wsProto = relayUrl.protocol === "http:" ? "ws:" : "wss:";
+  const tunnelUrl = `${wsProto}//${relayUrl.host}/_ay/tunnel/${rec.id}`;
+  // Public hostname: <id>.<zone> on the real relay; the relay host itself (with
+  // a Host-header spoof) when pointing at a dev relay (wrangler dev).
+  const publicHost = relayUrl.host === "agent-yes.com" ? `${rec.id}.agent-yes.com` : relayUrl.host;
+  const publicUrl = `https://${publicHost}/`;
+
+  let stopped = false;
+  let sock: WebSocket | null = null;
+  let ready = false;
+  let backoff = RECONNECT_MIN_MS;
+
+  const handle: ExposureHandle = {
+    id: rec.id,
+    port,
+    publicHost,
+    url: publicUrl,
+    relayHost: relayUrl.host,
+    createdAt: Date.now(),
+    mintClaim() {
+      const token = randomBytes(18).toString("base64url");
+      const hash = createHash("sha256").update(token).digest("hex");
+      if (sock && sock.readyState === WebSocket.OPEN) {
+        sock.send(JSON.stringify({ t: "claim", claims: [hash] }));
+      }
+      return `https://${publicHost}/_ay/claim?t=${token}`;
+    },
+    stop() {
+      stopped = true;
+      try {
+        sock?.close();
+      } catch {
+        /* ignore */
+      }
+    },
+  };
+
+  return new Promise<ExposureHandle>((resolve, reject) => {
+    const connect = () => {
+      if (stopped) return;
+      sock = new WebSocket(tunnelUrl);
+      sock.binaryType = "arraybuffer";
+      const ws = sock;
+      let ping: ReturnType<typeof setInterval> | null = null;
+
+      ws.addEventListener("open", () => {
+        ws.send(JSON.stringify({ t: "hello", key: rec.key, port, v: 1 }));
+      });
+      ws.addEventListener("message", (ev) => {
+        if (typeof ev.data !== "string") return; // binary frames belong to the TunnelHost
+        let msg: { t?: string };
+        try {
+          msg = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        if (msg.t === "ready") {
+          backoff = RECONNECT_MIN_MS;
+          new TunnelHost(wsTransport(ws), { port });
+          ping = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) ws.send("ping");
+          }, PING_MS);
+          if (!ready) {
+            ready = true;
+            log(`sharing 127.0.0.1:${port} at ${publicUrl}`);
+            resolve(handle);
+          } else {
+            log(`reconnected`);
+          }
+        }
+      });
+      ws.addEventListener("close", (ev) => {
+        if (ping) clearInterval(ping);
+        if (stopped) return;
+        if (ev.code === 1008) {
+          const err = new Error(`relay refused exposure (${ev.reason || "forbidden"})`);
+          if (!ready) return reject(err);
+          log(err.message);
+          return;
+        }
+        log(`connection lost, retrying in ${Math.round(backoff / 1000)}s…`);
+        setTimeout(connect, backoff);
+        backoff = Math.min(backoff * 2, RECONNECT_MAX_MS);
+      });
+      ws.addEventListener("error", () => {
+        /* close fires right after; retry there */
+      });
+    };
+    connect();
+  });
+}
+
+// ---- in-process manager (driven by `ay serve` POST /api/expose) ----
+
+const active = new Map<number, ExposureHandle>();
+/** In-flight starts, so concurrent POSTs for the same port share one dial. */
+const starting = new Map<number, Promise<ExposureHandle>>();
+
+/** Start an exposure for `port` (or reuse a running one). Idempotent per port. */
+export async function ensureExposure(port: number, relay?: string): Promise<ExposureHandle> {
+  const existing = active.get(port);
+  if (existing) return existing;
+  const inflight = starting.get(port);
+  if (inflight) return inflight;
+  const p = startExposure({ port, relay })
+    .then((h) => {
+      active.set(port, h);
+      starting.delete(port);
+      return h;
+    })
+    .catch((e) => {
+      starting.delete(port);
+      throw e;
+    });
+  starting.set(port, p);
+  return p;
+}
+
+export function listExposures(): ExposureInfo[] {
+  return [...active.values()]
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .map((h) => ({ id: h.id, port: h.port, url: h.url, createdAt: h.createdAt }));
+}
+
+export function stopExposure(port: number): boolean {
+  const h = active.get(port);
+  if (!h) return false;
+  h.stop();
+  active.delete(port);
+  return true;
+}
+
+export function stopAllExposures(): void {
+  for (const port of [...active.keys()]) stopExposure(port);
+}
+
+// ---- CLI ----
+
 export async function cmdExpose(args: string[]): Promise<number> {
   let relay = DEFAULT_RELAY;
   let port = 0;
@@ -102,83 +290,21 @@ export async function cmdExpose(args: string[]): Promise<number> {
     return 1;
   }
 
-  const relayUrl = new URL(relay);
-  const rec = loadOrCreateExposure(relayUrl.host, port);
-  const wsProto = relayUrl.protocol === "http:" ? "ws:" : "wss:";
-  const tunnelUrl = `${wsProto}//${relayUrl.host}/_ay/tunnel/${rec.id}`;
-  // Public hostname: <id>.<zone> on the real relay; the relay host itself (with
-  // a Host-header spoof) when pointing at wrangler dev.
-  const publicHost = relayUrl.host === "agent-yes.com" ? `${rec.id}.agent-yes.com` : relayUrl.host;
-
-  // Fresh single-use claim token every run; only its hash goes to the edge.
-  const claimToken = randomBytes(18).toString("base64url");
-  const claimHash = createHash("sha256").update(claimToken).digest("hex");
-
-  let stopped = false;
-  let ws: WebSocket | null = null;
-  let backoff = RECONNECT_MIN_MS;
-  let announced = false;
-
-  const connect = () => {
-    if (stopped) return;
-    ws = new WebSocket(tunnelUrl);
-    ws.binaryType = "arraybuffer";
-    const sock = ws;
-    let ping: ReturnType<typeof setInterval> | null = null;
-
-    sock.addEventListener("open", () => {
-      sock.send(JSON.stringify({ t: "hello", key: rec.key, port, claims: [claimHash], v: 1 }));
-    });
-    sock.addEventListener("message", (ev) => {
-      if (typeof ev.data !== "string") return; // binary frames belong to the TunnelHost
-      let msg: { t?: string };
-      try {
-        msg = JSON.parse(ev.data);
-      } catch {
-        return;
-      }
-      if (msg.t === "ready") {
-        backoff = RECONNECT_MIN_MS;
-        new TunnelHost(wsTransport(sock), { port });
-        ping = setInterval(() => {
-          if (sock.readyState === WebSocket.OPEN) sock.send("ping");
-        }, PING_MS);
-        if (!announced) {
-          announced = true;
-          console.log(`[ay expose] sharing 127.0.0.1:${port}`);
-          console.log(`  url:    https://${publicHost}/`);
-          console.log(`  claim:  https://${publicHost}/_ay/claim?t=${claimToken}`);
-          console.log(`          (one-time link — opens access for 8h in that browser)`);
-        } else {
-          console.log(`[ay expose] reconnected`);
-        }
-      }
-    });
-    sock.addEventListener("close", (ev) => {
-      if (ping) clearInterval(ping);
-      if (stopped) return;
-      if (ev.code === 1008) {
-        console.error(`[ay expose] relay refused this exposure (${ev.reason || "forbidden"}) — giving up`);
-        process.exit(1);
-      }
-      console.log(`[ay expose] connection lost, retrying in ${Math.round(backoff / 1000)}s…`);
-      setTimeout(connect, backoff);
-      backoff = Math.min(backoff * 2, RECONNECT_MAX_MS);
-    });
-    sock.addEventListener("error", () => {
-      /* close fires right after; retry there */
-    });
-  };
-  connect();
+  let handle: ExposureHandle;
+  try {
+    handle = await startExposure({ port, relay, log: (m) => console.log(`[ay expose] ${m}`) });
+  } catch (e) {
+    console.error(`[ay expose] ${(e as Error).message} — giving up`);
+    return 1;
+  }
+  const claimUrl = handle.mintClaim();
+  console.log(`  url:    ${handle.url}`);
+  console.log(`  claim:  ${claimUrl}`);
+  console.log(`          (one-time link — opens access for 8h in that browser)`);
 
   const shutdown = () => {
-    stopped = true;
     console.log("\n[ay expose] stopped — the URL now answers 502 until you expose again");
-    try {
-      ws?.close();
-    } catch {
-      /* ignore */
-    }
+    handle.stop();
     process.exit(0);
   };
   process.on("SIGINT", shutdown);

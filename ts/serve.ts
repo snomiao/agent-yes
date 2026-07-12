@@ -2729,6 +2729,42 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return new Response(ok ? "revoked" : "no such share", { status: ok ? 200 : 404 });
     }
 
+    // POST /api/expose  body {port}  → share 127.0.0.1:<port> through the edge
+    // relay and return {url, claim} (a fresh single-use claim link each call).
+    if (req.method === "POST" && p === "/api/expose") {
+      let body: { port?: number; relay?: string };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return new Response("invalid JSON body", { status: 400 });
+      }
+      const port = Number(body.port);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) {
+        return new Response("valid port required", { status: 400 });
+      }
+      try {
+        const { ensureExposure } = await import("./expose.ts");
+        const h = await ensureExposure(port, body.relay);
+        return Response.json({ id: h.id, port: h.port, url: h.url, claim: h.mintClaim(), createdAt: h.createdAt });
+      } catch (e) {
+        return new Response(`expose failed: ${(e as Error).message}`, { status: 502 });
+      }
+    }
+
+    // GET /api/exposes  → active port exposures (for the console's ports manager).
+    if (req.method === "GET" && p === "/api/exposes") {
+      const { listExposures } = await import("./expose.ts");
+      return Response.json(listExposures());
+    }
+
+    // DELETE /api/expose/:port  → revoke (the URL then answers 502).
+    const unexposeM = /^\/api\/expose\/(\d+)$/.exec(p);
+    if (req.method === "DELETE" && unexposeM) {
+      const { stopExposure } = await import("./expose.ts");
+      const ok = stopExposure(Number(unexposeM[1]));
+      return new Response(ok ? "revoked" : "no such exposure", { status: ok ? 200 : 404 });
+    }
+
     return new Response("Not Found", { status: 404 });
   };
 
@@ -2793,10 +2829,18 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return serveUiFile("room-client.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/console-logic.js")
       return serveUiFile("console-logic.js", "text/javascript; charset=utf-8");
+    // rtc.js is a STATIC import of the console module (import { RTCClient }) — a
+    // 401 here fails the whole module link and the console never boots.
+    if (req.method === "GET" && p === "/rtc.js")
+      return serveUiFile("rtc.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/e2e.js")
       return serveUiFile("e2e.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/qrcode.js")
       return serveUiFile("qrcode.js", "text/javascript; charset=utf-8");
+    if (req.method === "GET" && p === "/manifest.webmanifest")
+      return serveUiFile("manifest.webmanifest", "application/manifest+json");
+    if (req.method === "GET" && p === "/icon.svg")
+      return serveUiFile("icon.svg", "image/svg+xml");
     if (req.method === "GET" && p === "/favicon.ico") return new Response(null, { status: 204 });
     return apiFetch(req);
   };

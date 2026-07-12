@@ -76,6 +76,16 @@ interface HostInfo {
 const envIdOf = (src: string) => `env:${src}`;
 // host-env → top-level-root wires, rebuilt by buildGraph, drawn by applyEdges
 const envEdges: Edge[] = [];
+
+// Active port exposures per source (GET /api/exposes), polled with the host
+// info and rendered as an "exposed" field on that machine's ⬢ env node.
+interface ExposureInfo {
+  id: string;
+  port: number;
+  url: string;
+  createdAt: number;
+}
+const exposedBySrc = new Map<string, ExposureInfo[]>();
 function hostEnvFields(src: string): [string, string][] {
   const h = wires.get(src)?.hostInfo;
   if (!h) return [];
@@ -99,6 +109,10 @@ function hostEnvFields(src: string): [string, string][] {
   if (h.caps) {
     const on = Object.entries(h.caps).filter(([, v]) => v).map(([k]) => k);
     if (on.length) fields.push(["caps", on.join(" · ")]);
+  }
+  const exposed = exposedBySrc.get(src) ?? [];
+  if (exposed.length) {
+    fields.push(["⇄ exposed", exposed.map((e) => e.port).sort((a, b) => a - b).join(" · ")]);
   }
   return fields;
 }
@@ -245,6 +259,43 @@ async function apiPost(
     body: JSON.stringify(body),
   });
   return { ok: r.ok, text: await r.text() };
+}
+
+// A local-loopback URL clicked in a node terminal isn't reachable from the
+// viewer's browser — recognise it so we can offer to publish it instead.
+function localhostPort(uri: string): number | null {
+  let u: URL;
+  try {
+    u = new URL(uri);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+  const h = u.hostname;
+  if (h !== "localhost" && h !== "127.0.0.1" && h !== "0.0.0.0" && h !== "::1") return null;
+  const port = Number(u.port) || (u.protocol === "https:" ? 443 : 80);
+  return port >= 1 && port <= 65535 ? port : null;
+}
+
+// Ask, then publish 127.0.0.1:<port> on the clicked node's machine through
+// agent-yes.com and open the one-time claim link (sets the 8h cookie).
+async function exposeFromRgui(port: number, src: string): Promise<void> {
+  if (!confirm(`Expose localhost:${port} on agent-yes.com?\n\nA private link tunnels to this port on the agent's machine. Only someone with the one-time claim link (opens now) can reach it. Revoke from the /w/ console's ports manager.`))
+    return;
+  const r = await apiPost("/api/expose", { port }, src);
+  let info: ExposureInfo & { claim?: string };
+  try {
+    info = JSON.parse(r.text);
+  } catch {
+    alert(`Couldn't expose port ${port} — is the daemon reachable?`);
+    return;
+  }
+  if (r.ok && info.claim) {
+    window.open(info.claim, "_blank", "noopener,noreferrer");
+    void fetchHosts(); // refresh the env node's exposed row promptly
+  } else {
+    alert(`Couldn't expose port ${port}: ${r.text}`);
+  }
 }
 
 // Subscribe to an SSE-style stream over one wire. onData receives each parsed
@@ -898,6 +949,23 @@ function makeTerm(pid: string): TermEntry | null {
       (term as unknown as { loadAddon(a: unknown): void }).loadAddon(new CanvasAddon());
     } catch {
       /* addon unavailable — fall back to the DOM renderer */
+    }
+  }
+  // Clickable URLs. A localhost link offers to publish through agent-yes.com on
+  // THIS node's machine (src); any other URL just opens in a new tab.
+  const WebLinks = (window as unknown as { WebLinksAddon?: { WebLinksAddon: new (h: (e: MouseEvent, uri: string) => void) => unknown } })
+    .WebLinksAddon?.WebLinksAddon;
+  if (WebLinks) {
+    try {
+      (term as unknown as { loadAddon(a: unknown): void }).loadAddon(
+        new WebLinks((_e: MouseEvent, uri: string) => {
+          const port = localhostPort(uri);
+          if (port != null) void exposeFromRgui(port, src);
+          else window.open(uri, "_blank", "noopener,noreferrer");
+        }),
+      );
+    } catch {
+      /* addon CDN blocked — terminal still works, just without auto-links */
     }
   }
 
@@ -1768,6 +1836,13 @@ async function fetchHosts() {
         }
         if (!w.hostInfo) firstArrival = true;
         w.hostInfo = h;
+        // Best-effort: refresh this machine's active exposures for the env node.
+        try {
+          const ex = await apiJSON<ExposureInfo[]>("/api/exposes", w.id);
+          if (Array.isArray(ex)) exposedBySrc.set(w.id, ex);
+        } catch {
+          /* older daemon without /api/exposes — no exposed row */
+        }
         const n = viewer.graph.nodes.find((x) => x.id === envIdOf(w.id));
         if (n) n.fields = hostEnvFields(w.id); // picked up by the next natural frame
       } catch {

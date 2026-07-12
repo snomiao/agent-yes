@@ -176,18 +176,7 @@ export class Exposure {
       } else if (stored !== hello.key) {
         return ws.close(1008, "forbidden"); // key never echoed
       }
-      // Register fresh claim tokens (bounded: drop oldest beyond MAX_CLAIMS).
-      // claim: values are expiry timestamps, and TTL is constant, so ascending
-      // value == oldest-first — evict the truly oldest, not a random hash.
-      const claims = (hello.claims ?? []).filter((c) => /^[a-f0-9]{64}$/.test(c)).slice(0, MAX_CLAIMS);
-      if (claims.length) {
-        const existing = [...(await this.state.storage.list<number>({ prefix: "claim:" }))].sort((a, b) => a[1] - b[1]);
-        const excess = existing.length + claims.length - MAX_CLAIMS;
-        for (const [k] of existing.slice(0, Math.max(0, excess))) await this.state.storage.delete(k);
-        const expires = Date.now() + CLAIM_TTL_MS;
-        for (const c of claims) await this.state.storage.put(`claim:${c}`, expires);
-        await this.ensureSweep();
-      }
+      await this.registerClaims(hello.claims);
       // One daemon at a time: drop any previous socket.
       for (const other of this.state.getWebSockets()) {
         if (other !== ws) other.close(1012, "replaced");
@@ -200,7 +189,16 @@ export class Exposure {
     }
 
     if (typeof msg === "string") {
-      if (msg === PING) ws.send(PONG); // auto-response fallback
+      if (msg === PING) return void ws.send(PONG); // auto-response fallback
+      // A running daemon can register fresh claim tokens without reconnecting
+      // (the console mints one each time the owner re-opens an exposure).
+      let ctrl: { t?: string; claims?: string[] };
+      try {
+        ctrl = JSON.parse(msg);
+      } catch {
+        return;
+      }
+      if (ctrl.t === "claim") await this.registerClaims(ctrl.claims);
       return;
     }
     // Binary tunnel frame from the daemon → the in-memory client (if any).
@@ -258,6 +256,20 @@ export class Exposure {
       return false;
     }
     return true;
+  }
+
+  // Register fresh claim tokens (bounded: drop oldest beyond MAX_CLAIMS).
+  // claim: values are expiry timestamps, and TTL is constant, so ascending
+  // value == oldest-first — evict the truly oldest, not a random hash.
+  private async registerClaims(raw: string[] | undefined): Promise<void> {
+    const claims = (raw ?? []).filter((c) => /^[a-f0-9]{64}$/.test(c)).slice(0, MAX_CLAIMS);
+    if (!claims.length) return;
+    const existing = [...(await this.state.storage.list<number>({ prefix: "claim:" }))].sort((a, b) => a[1] - b[1]);
+    const excess = existing.length + claims.length - MAX_CLAIMS;
+    for (const [k] of existing.slice(0, Math.max(0, excess))) await this.state.storage.delete(k);
+    const expires = Date.now() + CLAIM_TTL_MS;
+    for (const c of claims) await this.state.storage.put(`claim:${c}`, expires);
+    await this.ensureSweep();
   }
 
   // Schedule the sweep alarm so expired sess:/claim: keys and stale unauthed
