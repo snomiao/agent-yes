@@ -1947,6 +1947,7 @@
           </p>
           <div class="srow">
             <button class="primary" id="exposeGo" type="button">Expose &amp; open</button>
+            <button id="exposeCopy" type="button">Copy link</button>
             <button id="exposeCancel" type="button">Cancel</button>
           </div>
         </div>
@@ -3364,11 +3365,9 @@
 
       // Agree → mint the exposure on its host and open the claim link (which sets
       // the 8h cookie and redirects to the app), then refresh the manager list.
-      async function doExpose() {
-        const tx = exposePendingTx || localTx;
-        const port = exposePendingPort;
-        $("exposePrompt").hidden = true;
-        if (!port) return;
+      // Create (or reuse) the exposure and mint a fresh single-use claim link.
+      // Returns the {url, claim, …} info, or null on failure (with a message).
+      async function exposeNow(port, tx) {
         let info = null;
         try {
           const r = await tx.post("/api/expose", { port });
@@ -3377,9 +3376,46 @@
         if (!info || !info.claim) {
           $("exposeEmpty").hidden = false;
           $("exposeEmpty").textContent = "Couldn't expose port " + port + " (is `ay serve` reachable?).";
-          return;
+          return null;
         }
+        return info;
+      }
+      async function copyText(s) {
+        try {
+          await navigator.clipboard.writeText(s);
+          return true;
+        } catch {
+          return false;
+        }
+      }
+      // Briefly show "Copied!" on a button, then restore its label.
+      function flashCopied(btn) {
+        if (!btn) return;
+        const orig = btn.textContent;
+        btn.textContent = "Copied!";
+        setTimeout(() => {
+          btn.textContent = orig;
+        }, 1200);
+      }
+      async function doExpose() {
+        const tx = exposePendingTx || localTx;
+        const port = exposePendingPort;
+        $("exposePrompt").hidden = true;
+        if (!port) return;
+        const info = await exposeNow(port, tx);
+        if (!info) return;
         window.open(info.claim, "_blank", "noopener,noreferrer");
+        refreshExposeList();
+      }
+      async function doExposeCopy() {
+        const tx = exposePendingTx || localTx;
+        const port = exposePendingPort;
+        if (!port) return;
+        const info = await exposeNow(port, tx);
+        if (!info) return;
+        await copyText(info.claim);
+        flashCopied($("exposeCopy"));
+        $("exposePrompt").hidden = true;
         refreshExposeList();
       }
 
@@ -3449,6 +3485,21 @@
         };
         row.appendChild(openBtn);
 
+        const copyBtn = document.createElement("button");
+        copyBtn.textContent = "Copy";
+        // Mint a fresh single-use claim link and copy it (to share access).
+        copyBtn.onclick = async () => {
+          let link = ex.url;
+          try {
+            const r = await ex._tx.post("/api/expose", { port: ex.port });
+            const info = r.ok ? JSON.parse(r.text) : null;
+            if (info && info.claim) link = info.claim;
+          } catch {}
+          await copyText(link);
+          flashCopied(copyBtn);
+        };
+        row.appendChild(copyBtn);
+
         const revoke = document.createElement("button");
         revoke.className = "danger";
         revoke.textContent = "Revoke";
@@ -3514,6 +3565,7 @@
       (function exposeModalBoot() {
         $("portsbtn")?.addEventListener("click", () => openExposeManager(true));
         $("exposeGo")?.addEventListener("click", doExpose);
+        $("exposeCopy")?.addEventListener("click", doExposeCopy);
         $("exposeCancel")?.addEventListener("click", () => {
           $("exposePrompt").hidden = true;
           $("exposeTitle").textContent = "Exposed ports";
