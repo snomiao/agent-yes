@@ -39,8 +39,9 @@ export interface MessageRecord {
   to: MailParty;
   /** What kind of stdin write this was. Omitted for a normal `ay send` text
    * message; "key" for raw keystrokes (`ay key`), "select" for a menu pick
-   * (`ay select`). For key/select the `body` holds the key names / choice. */
-  kind?: "key" | "select";
+   * (`ay select`), "auto-retry" for the wrapper's own recoverable-error nudge
+   * (from is null; `body` holds the paraphrased reason + backoff state). */
+  kind?: "key" | "select" | "auto-retry";
   /** The message body (without the `[ay-msg …]` wrapper), or — for a key/select
    * record — the keystroke names / chosen option. */
   body: string;
