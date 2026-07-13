@@ -20,6 +20,13 @@ import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./g
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
 import { agentYesHome } from "./agentYesHome.ts";
+import {
+  type MailParty,
+  type MessageRecord,
+  partyMatches,
+  readMailbox,
+  recordMessage,
+} from "./messageLog.ts";
 import { badgeDef, matchBadges, TYPING_BADGE } from "./badges.ts";
 import {
   classifyNeedsInput,
@@ -296,6 +303,7 @@ const SUBCOMMANDS = new Set([
   "tail",
   "head",
   "send",
+  "msgs",
   "key",
   "select",
   "spawn",
@@ -397,6 +405,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdRead(rest, { mode: "head" });
       case "send":
         return await cmdSend(rest);
+      case "msgs":
+        return await cmdMsgs(rest);
       case "key":
         return await cmdKey(rest);
       case "select":
@@ -534,6 +544,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay cat <keyword>                    full log\n` +
       `  ay head <keyword>                   first N lines\n` +
       `  ay send <keyword> <msg>             send a message\n` +
+      `  ay msgs [keyword] [--in|--out]      inter-agent message log (sent + received)\n` +
       `  ay key <keyword> <key...>           send raw keystrokes (down/up/enter/esc/…) — drives menus\n` +
       `  ay select <keyword> <N>             pick option N of a needs_input selection menu\n` +
       `  ay attach <keyword>                 interactive attach (detach: Ctrl-\\)\n` +
@@ -2975,8 +2986,9 @@ async function cmdSend(rest: string[]): Promise<number> {
   const replyTarget = sender.agent?.agent_id || sender.agent?.pid;
   let prefix = "";
   let suffix = "";
+  let nonce: string | undefined;
   if (sender.agent && !isSlashCommand(body)) {
-    const nonce = randomBytes(4).toString("hex");
+    nonce = randomBytes(4).toString("hex");
     prefix = `<ay-msg ${nonce} from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${replyTarget} "...">\n`;
     suffix = `\n</ay-msg ${nonce}>`;
   }
@@ -3031,6 +3043,35 @@ async function cmdSend(rest: string[]): Promise<number> {
   process.stdout.write(
     `${status} to pid ${record.pid} (${record.cli}): ${truncate(payload, 80)}\n`,
   );
+
+  // Persist a durable record of the exchange from both ends' point of view (the
+  // sender's outbox + the recipient's inbox). Only real message bodies are
+  // logged — a bare control code (esc/ctrl-c with no body) isn't a "message".
+  // Best-effort: recordMessage swallows its own errors so it never breaks send.
+  if (body) {
+    await recordMessage({
+      at: Date.now(),
+      nonce,
+      from: sender.agent
+        ? {
+            pid: sender.agent.pid,
+            cli: sender.agent.cli,
+            cwd: sender.agent.cwd,
+            agent_id: sender.agent.agent_id,
+          }
+        : null,
+      to: {
+        pid: record.pid,
+        cli: record.cli,
+        cwd: record.cwd,
+        agent_id: record.agent_id,
+      },
+      body,
+      code: trailing === "\r" ? undefined : codeName,
+      confirmed,
+      wrapped: Boolean(nonce),
+    });
+  }
   if (!confirmed) {
     process.stderr.write(
       `\nwarning: couldn't confirm the CLI acted on it after ${SEND_SUBMIT_MAX_RETRIES + 1} attempt(s) — ` +
@@ -3057,6 +3098,117 @@ async function cmdSend(rest: string[]): Promise<number> {
     if (tip) process.stderr.write(tip);
   }
   return confirmed ? 0 : 1;
+}
+
+// ---------------------------------------------------------------------------
+// ay msgs — read the durable inter-agent message log
+// ---------------------------------------------------------------------------
+
+/** A mailbox record annotated with the direction it takes from the owner's POV. */
+interface DirectedMessage {
+  dir: "in" | "out";
+  rec: MessageRecord;
+}
+
+/**
+ * `ay msgs [keyword]` — show the inter-agent messages an agent sent and
+ * received. With no keyword it uses THIS caller's context (the agent running
+ * `ay msgs`, or the human shell's cwd); with a keyword it resolves one agent and
+ * reads that agent's mailboxes. Newest last, like a chat log.
+ */
+async function cmdMsgs(rest: string[]): Promise<number> {
+  const y = yargs(rest)
+    .usage("Usage: ay msgs [keyword] [--in|--out] [-n N] [--json]")
+    .option("in", { type: "boolean", default: false, description: "Only received messages" })
+    .option("out", { type: "boolean", default: false, description: "Only sent messages" })
+    .option("n", { type: "number", description: "Show the last N messages (default 50)" })
+    .option("json", { type: "boolean", default: false, description: "Emit raw JSONL records" })
+    .option("all", { type: "boolean", default: false, description: "Include exited agents" })
+    .option("latest", {
+      type: "boolean",
+      default: false,
+      description: "Use most recent match when multiple match",
+    })
+    .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+
+  const argv = await y.parseAsync();
+  const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+
+  // Whose mailbox: an explicit keyword names a target agent; otherwise the
+  // calling agent (or, for a human shell, its own cwd with no agent filter).
+  let ownerCwd: string;
+  let ownerAgentId: string | null | undefined;
+  let ownerPid: number | null | undefined;
+  let ownerLabel: string;
+  if (keyword) {
+    const opts: CommonOpts = {
+      all: argv.all,
+      active: false,
+      json: false,
+      latest: argv.latest,
+      cwdScope: typeof argv.cwd === "string" ? path.resolve(argv.cwd) : null,
+    };
+    const record = await resolveOne(keyword, opts);
+    ownerCwd = record.cwd;
+    ownerAgentId = record.agent_id;
+    ownerPid = record.pid;
+    ownerLabel = `pid ${record.pid} (${record.cli})`;
+  } else {
+    const sender = await senderContext();
+    ownerCwd = sender.agent?.cwd ?? process.cwd();
+    ownerAgentId = sender.agent?.agent_id;
+    ownerPid = sender.agent?.pid;
+    ownerLabel = sender.agent ? `pid ${sender.agent.pid} (${sender.agent.cli})` : "this shell";
+  }
+
+  const isOwner = (party: MailParty | null): boolean =>
+    // A human shell (no agent context) owns only the messages it sent, which
+    // carry `from: null`; match those so `ay msgs` in a plain terminal works.
+    ownerAgentId || ownerPid ? partyMatches(party, ownerAgentId, ownerPid) : party === null;
+
+  const messages: DirectedMessage[] = [];
+  if (!argv.in) {
+    for (const rec of await readMailbox(ownerCwd, "outbox")) {
+      if (isOwner(rec.from)) messages.push({ dir: "out", rec });
+    }
+  }
+  if (!argv.out) {
+    for (const rec of await readMailbox(ownerCwd, "inbox")) {
+      if (isOwner(rec.to)) messages.push({ dir: "in", rec });
+    }
+  }
+  messages.sort((a, b) => a.rec.at - b.rec.at);
+
+  const limit =
+    argv.n !== undefined && Number.isFinite(argv.n) && argv.n! > 0 ? Math.floor(argv.n!) : 50;
+  const shown = messages.slice(-limit);
+
+  if (argv.json) {
+    for (const { dir, rec } of shown) {
+      process.stdout.write(JSON.stringify({ dir, ...rec }) + "\n");
+    }
+    return 0;
+  }
+
+  if (shown.length === 0) {
+    process.stderr.write(`no messages for ${ownerLabel}.\n`);
+    return 0;
+  }
+
+  for (const { dir, rec } of shown) {
+    const when = new Date(rec.at).toLocaleTimeString();
+    const peer =
+      dir === "out"
+        ? `→ ${rec.to.cli} #${rec.to.pid}`
+        : `← ${rec.from ? `${rec.from.cli} #${rec.from.pid}` : "human"}`;
+    const flag = rec.confirmed === false ? " (unconfirmed)" : "";
+    const line = truncate(rec.body.replace(/\s+/g, " "), 100);
+    process.stdout.write(`${when}  ${peer.padEnd(20)}${flag}  ${line}\n`);
+  }
+  return 0;
 }
 
 // Resolve a keyword to one agent and return it with a writable FIFO, or throw
