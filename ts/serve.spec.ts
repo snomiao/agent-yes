@@ -128,6 +128,12 @@ describe("isNoNodeExecError", () => {
     ).toBe(true);
   });
 
+  it("matches localized-then-normalized output (probe pins LC_ALL=C)", () => {
+    // managerProbe spawns with LC_ALL=C precisely so this English form is what
+    // we always see; this test documents the coupling.
+    expect(isNoNodeExecError("env: node: No such file or directory")).toBe(true);
+  });
+
   it("does not match a real native/glibc failure", () => {
     expect(
       isNoNodeExecError(
@@ -135,5 +141,26 @@ describe("isNoNodeExecError", () => {
       ),
     ).toBe(false);
     expect(isNoNodeExecError("")).toBe(false);
+  });
+});
+
+// Bun.spawn without an explicit `env` hands the child the environ captured at
+// process startup, NOT the live process.env — so ensureNodeRuntime's shim PATH
+// prepend never reached children spawned that way (`pm2 start` died with
+// `env: node: No such file or directory` right after the probe passed). Guard
+// the fix pattern: every spawn of a daemon-manager binary in serve.ts must pass
+// an explicit env.
+describe("manager spawns pass a live env snapshot", () => {
+  it("every Bun.spawn of mgr.bin/startArgv/installer carries an env option", async () => {
+    const src = await readFile(new URL("./serve.ts", import.meta.url), "utf-8");
+    // Grab each Bun.spawn(...) call whose argv mentions a manager binary.
+    // Capture from the call opening through the options object's closing `})`.
+    const calls = src.match(
+      /Bun\.spawn\((?:\[[^\]]*mgr\.bin[^\]]*\]|startArgv|installer),[\s\S]*?\}\)/g,
+    );
+    expect(calls?.length).toBeGreaterThanOrEqual(7);
+    for (const call of calls!) {
+      expect(call, `missing explicit env in: ${call.slice(0, 80)}`).toContain("env:");
+    }
   });
 });

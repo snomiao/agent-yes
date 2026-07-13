@@ -359,6 +359,7 @@ function oxmgrHasWindowsFix(bin: string): boolean {
       encoding: "utf-8",
       timeout: 3000,
       stdio: ["ignore", "pipe", "ignore"],
+      env: { ...process.env } as NodeJS.ProcessEnv,
     });
     oxmgrWinFixCache = oxmgrVersionHasWindowsFix(out);
   } catch {
@@ -454,6 +455,18 @@ export function isNoNodeExecError(stderr: string): boolean {
   );
 }
 
+// Snapshot of the CURRENT process.env for child spawns. Bun.spawn without an
+// explicit `env` hands the child the environ captured at PROCESS STARTUP — not
+// the live process.env — so post-startup mutations (ensureNodeRuntime's shim
+// PATH prepend, installAndVerify's global-bin-dir prepend) silently never reach
+// the child. That is exactly how `ay serve install` kept dying with
+// `env: node: No such file or directory` at the `pm2 start` spawn on a bun-only
+// box even though the probe (which passes env explicitly) had just succeeded.
+// Every spawn of a manager binary must pass `env: liveEnv()`.
+function liveEnv(): Record<string, string | undefined> {
+  return { ...process.env };
+}
+
 // Probe one manager binary with `--version`, capturing stderr so a failure can
 // be diagnosed (glibc mismatch vs missing node runtime vs anything else).
 // LC_ALL=C pins env(1)/libc error text to English so isNoNodeExecError's
@@ -463,7 +476,7 @@ async function managerProbe(mgr: DaemonManager): Promise<{ ok: boolean; stderr: 
     const p = Bun.spawn([mgr.bin, "--version"], {
       stdout: "ignore",
       stderr: "pipe",
-      env: { ...process.env, LC_ALL: "C" },
+      env: { ...liveEnv(), LC_ALL: "C" },
     });
     const [code, stderr] = await Promise.all([p.exited, new Response(p.stderr).text()]);
     return { ok: (code ?? 1) === 0, stderr };
@@ -517,7 +530,11 @@ async function installAndVerify(pkg: "oxmgr" | "pm2"): Promise<DaemonManager | n
   const installer = bun ? [bun, "add", "-g", pkg] : npm ? [npm, "install", "-g", pkg] : null;
   if (!installer) return null;
   process.stderr.write(`ay serve install: installing ${pkg}…\n`);
-  const code = (await Bun.spawn(installer, { stdio: ["ignore", "inherit", "inherit"] }).exited) ?? 1;
+  const code =
+    (await Bun.spawn(installer, {
+      stdio: ["ignore", "inherit", "inherit"],
+      env: liveEnv(),
+    }).exited) ?? 1;
   if (code !== 0) {
     process.stderr.write(`ay serve install: '${installer.join(" ")}' failed (exit ${code})\n`);
     return null;
@@ -662,7 +679,9 @@ async function ensureBootAutostart(mgr: DaemonManager): Promise<boolean> {
 
 async function spawnExit(cmd: string[]): Promise<number> {
   try {
-    return (await Bun.spawn(cmd, { stdio: ["ignore", "ignore", "ignore"] }).exited) ?? 1;
+    return (
+      (await Bun.spawn(cmd, { stdio: ["ignore", "ignore", "ignore"], env: liveEnv() }).exited) ?? 1
+    );
   } catch {
     return 1;
   }
@@ -675,7 +694,11 @@ async function spawnExit(cmd: string[]): Promise<number> {
 async function readDaemonServeArgs(mgr: DaemonManager): Promise<string[] | null> {
   try {
     if (mgr.id === "oxmgr") {
-      const p = Bun.spawn([mgr.bin, "status", DAEMON_NAME], { stdout: "pipe", stderr: "ignore" });
+      const p = Bun.spawn([mgr.bin, "status", DAEMON_NAME], {
+        stdout: "pipe",
+        stderr: "ignore",
+        env: liveEnv(),
+      });
       const out = await new Response(p.stdout).text();
       if ((await p.exited) !== 0) return null;
       const m = /Command:\s*(.+)/.exec(out);
@@ -683,7 +706,7 @@ async function readDaemonServeArgs(mgr: DaemonManager): Promise<string[] | null>
       const after = /\bserve\b\s*(.*)$/.exec(m[1]!.trim());
       return after ? after[1]!.split(/\s+/).filter(Boolean) : [];
     }
-    const p = Bun.spawn([mgr.bin, "jlist"], { stdout: "pipe", stderr: "ignore" });
+    const p = Bun.spawn([mgr.bin, "jlist"], { stdout: "pipe", stderr: "ignore", env: liveEnv() });
     const out = await new Response(p.stdout).text();
     if ((await p.exited) !== 0) return null;
     const list = JSON.parse(out) as Array<{ name?: string; pm2_env?: { args?: string[] } }>;
@@ -911,7 +934,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
             "--",
             ...managedArgv.slice(1),
           ];
-    const proc = Bun.spawn(startArgv, { stdio: ["ignore", "inherit", "inherit"] });
+    const proc = Bun.spawn(startArgv, { stdio: ["ignore", "inherit", "inherit"], env: liveEnv() });
     const code = await proc.exited;
     if (code === 0) {
       const onBoot = await ensureBootAutostart(mgr);
@@ -962,6 +985,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
   if (sub === "uninstall") {
     const proc = Bun.spawn([mgr.bin, "delete", DAEMON_NAME], {
       stdio: ["ignore", "inherit", "inherit"],
+      env: liveEnv(),
     });
     const code = (await proc.exited) ?? 1;
     if (mgr.id === "pm2" && code === 0) {
@@ -977,6 +1001,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
   if (sub === "logs") {
     const proc = Bun.spawn([mgr.bin, "logs", DAEMON_NAME, ...args], {
       stdio: ["ignore", "inherit", "inherit"],
+      env: liveEnv(),
     });
     return (await proc.exited) ?? 1;
   }
