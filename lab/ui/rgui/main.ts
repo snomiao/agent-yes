@@ -782,6 +782,49 @@ interface ReadEdge {
 let readEdges: ReadEdge[] = [];
 let showWires = true;
 
+// message wires: recent agent→agent SENDS (`ay send`/`key`/`select`, from
+// /api/edges `sends`). Unlike a read edge — a standing "X watches Y" relation —
+// a send is an EVENT: it flashes bright at delivery and fades out over
+// SEND_FADE_MS, so the forest shows message traffic as it happens rather than a
+// permanent wire. Same node-KEY mapping; `kind` distinguishes a keystroke/menu
+// pick from a text message.
+interface SendEdge {
+  by: string;
+  target: string;
+  at: number;
+  kind?: "key" | "select";
+}
+let sendEdges: SendEdge[] = [];
+/** A send wire is fully opaque at delivery and gone this long after. */
+const SEND_FADE_MS = 20_000;
+/** Repaint cadence while any send wire is still fading (smooth decay). */
+const SEND_FADE_TICK_MS = 250;
+let sendFadeTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Remaining life of a send edge, 1 at delivery → 0 once fully faded. */
+function sendAlpha(at: number): number {
+  return Math.max(0, Math.min(1, 1 - (Date.now() - at) / SEND_FADE_MS));
+}
+
+/**
+ * Keep repainting while any send wire is mid-fade, then stop. Without this the
+ * wires would only redraw on a structure change or the edge poll, so the decay
+ * would step coarsely instead of easing out.
+ */
+function ensureSendFadeTicker() {
+  const alive = sendEdges.some((e) => sendAlpha(e.at) > 0);
+  if (alive && !sendFadeTimer) {
+    sendFadeTimer = setInterval(() => {
+      if (!sendEdges.some((e) => sendAlpha(e.at) > 0)) {
+        sendEdges = [];
+        clearInterval(sendFadeTimer!);
+        sendFadeTimer = null;
+      }
+      applyEdges();
+    }, SEND_FADE_TICK_MS);
+  }
+}
+
 // same-cwd groups (cwdId → member pids); their container surfaces the group's
 // SHARED state (the loudest member), refreshed on every content poll.
 const cwdGroups = new Map<string, string[]>();
@@ -1781,30 +1824,83 @@ function applyEdges() {
           style: { color: "#58a6ff", width: 1.5, dash: [6, 4] },
         }))
     : [];
+
+  // Send wires point the way the MESSAGE travels: the sender drives the
+  // recipient's `prompt` input (the port that models "what you `ay send` it").
+  // Opposite direction from a read wire, which follows the information flowing
+  // BACK to the reader — so a two-way exchange reads as two arrows, not one.
+  // Alpha decays with age (see sendAlpha); a key/select event is styled apart
+  // from a text message since it's a keystroke, not a prompt.
+  const sends: Edge[] = showWires
+    ? sendEdges
+        .filter((e) => e.by !== e.target && present.has(e.by) && present.has(e.target))
+        .flatMap((e) => {
+          const a = sendAlpha(e.at);
+          if (a <= 0) return [];
+          const rgb = e.kind ? "245, 158, 11" : "63, 185, 80"; // amber = key/select, green = message
+          return [
+            {
+              from: { node: e.by, port: "status" },
+              to: { node: e.target, port: "prompt" },
+              dashed: true,
+              label: e.kind ?? "msg",
+              style: {
+                color: `rgba(${rgb}, ${(0.25 + 0.75 * a).toFixed(3)})`,
+                // fresh sends read as a thicker, brighter wire that thins as it fades
+                width: 1.5 + 2 * a,
+                dash: [2, 3],
+              },
+            } satisfies Edge,
+          ];
+        })
+    : [];
+
   viewer.graph.edges.length = 0;
   // env wires are structural (host → its top-level groups), not toggled with
   // the read/tail wires — always drawn, and few (one per root)
   viewer.graph.edges.push(
     ...edges,
+    ...sends,
     ...envEdges.filter((e) => present.has(e.from.node) && present.has(e.to.node)),
     ...fedEdges(present),
   );
   viewer.setView(viewer.view); // schedule a redraw without a relayout
 }
 
+type EdgesResponse = {
+  reads?: { by: number; target: number; at: number }[];
+  sends?: { by: number; target: number; at: number; kind?: "key" | "select" }[];
+};
+
 async function fetchEdges() {
   const results = await Promise.allSettled(
     [...wires.values()].filter(wireReady).map(async (w) => {
-      const raw =
-        (await apiJSON<{ reads?: { by: number; target: number; at: number }[] }>("/api/edges", w.id))
-          .reads ?? [];
-      return raw.map((e) => ({ by: `${w.id}#${e.by}`, target: `${w.id}#${e.target}`, at: e.at }));
+      const body = await apiJSON<EdgesResponse>("/api/edges", w.id);
+      const key = (pid: number) => `${w.id}#${pid}`;
+      return {
+        reads: (body.reads ?? []).map((e) => ({
+          by: key(e.by),
+          target: key(e.target),
+          at: e.at,
+        })),
+        // `sends` is absent on an older daemon — the send wires just stay empty.
+        sends: (body.sends ?? []).map((e) => ({
+          by: key(e.by),
+          target: key(e.target),
+          at: e.at,
+          kind: e.kind,
+        })),
+      };
     }),
   );
-  const merged = results.flatMap((p) => (p.status === "fulfilled" ? p.value : []));
-  if (merged.length || readEdges.length) {
-    readEdges = merged;
+  const ok = results.flatMap((p) => (p.status === "fulfilled" ? [p.value] : []));
+  const reads = ok.flatMap((r) => r.reads);
+  const sends = ok.flatMap((r) => r.sends);
+  if (reads.length || readEdges.length || sends.length || sendEdges.length) {
+    readEdges = reads;
+    sendEdges = sends;
     applyEdges();
+    ensureSendFadeTicker();
   }
 }
 

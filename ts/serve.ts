@@ -16,6 +16,7 @@ import {
   listRecords,
   readNotes,
   readPtysize,
+  recentMessageEdges,
   recentReadEdges,
   renderLogTailLines,
   renderRawLog,
@@ -1724,12 +1725,16 @@ export async function cmdServe(rest: string[]): Promise<number> {
       });
     }
 
-    // GET /api/edges — recent inter-agent relationship edges for the /rgui wire
-    // view. Currently the read/tail edges (agent `by` read agent `target` within
-    // the last minute, from ~/.agent-yes/reads.jsonl). Directional, ephemeral.
+    // GET /api/edges — recent inter-agent relationship edges for the /rgui + /w
+    // wire view. Two directional, ephemeral edge sets:
+    //   reads — agent `by` read/tailed agent `target` (from ~/.agent-yes/reads.jsonl)
+    //   sends — agent `by` sent `target` a message/key/select (from the per-cwd
+    //           outbox logs); carries the send `kind` so the UI can style it.
+    // Both are last-minute windows the client fades out by `at`.
     if (req.method === "GET" && p === "/api/edges") {
       try {
-        return Response.json({ reads: await recentReadEdges() });
+        const [reads, sends] = await Promise.all([recentReadEdges(), recentMessageEdges()]);
+        return Response.json({ reads, sends });
       } catch (e) {
         return new Response((e as Error).message, { status: 500 });
       }

@@ -203,6 +203,49 @@ export async function recentReadEdges(windowMs = READ_WINDOW_MS): Promise<ReadEd
   return out;
 }
 
+/** Recent agent→agent MESSAGE edges (a delivered `ay send`/`key`/`select`), for
+ * the /rgui + /w wire view. Like {@link ReadEdge} but sourced from the per-cwd
+ * outbox logs and carrying the send `kind`. `by`/`target` are the sender/recipient
+ * pids AT SEND TIME (a restarted agent keeps a new pid — matched best-effort). */
+export interface MessageEdge {
+  by: number;
+  target: number;
+  at: number;
+  kind?: "key" | "select";
+}
+
+/**
+ * Scan every live agent's outbox for sends within `windowMs` and return them as
+ * directional edges (newest `at` per by→target pair wins). Bounded by the number
+ * of distinct agent cwds — the outbox is per-cwd, so each dir is read once.
+ */
+export async function recentMessageEdges(windowMs = READ_WINDOW_MS): Promise<MessageEdge[]> {
+  const now = Date.now();
+  const records = await listRecords(undefined, {
+    all: true,
+    active: false,
+    json: false,
+    latest: false,
+    cwdScope: null,
+  });
+  const cwds = [...new Set(records.map((r) => r.cwd).filter(Boolean))];
+  const best = new Map<string, MessageEdge>();
+  await Promise.all(
+    cwds.map(async (cwd) => {
+      for (const rec of await readMailbox(cwd, "outbox")) {
+        if (now - rec.at > windowMs) continue;
+        const by = rec.from?.pid;
+        const target = rec.to?.pid;
+        if (!by || !target || by === target) continue; // agent→agent only
+        const key = `${by}\0${target}`;
+        const prev = best.get(key);
+        if (!prev || rec.at > prev.at) best.set(key, { by, target, at: rec.at, kind: rec.kind });
+      }
+    }),
+  );
+  return [...best.values()];
+}
+
 // Identify the sender. An agent launched by `ay` inherits AGENT_YES_PID=<wrapper
 // pid>; the registered agent record carries that same wrapper_pid, so we map the
 // env value back to the agent's own canonical record. Falls back to a direct pid
