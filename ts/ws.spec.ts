@@ -1,8 +1,33 @@
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
-import { isPathInside, resolveOperand, walkWorkspaces, WS_JSON_SCHEMA } from "./ws.ts";
+import { cmdWs, isPathInside, resolveOperand, walkWorkspaces, WS_JSON_SCHEMA } from "./ws.ts";
+
+// Mutable fake for codehost/provision — each test overrides what it needs.
+// ws.ts imports the module lazily; vitest's registry mock intercepts that too.
+const prov = vi.hoisted(() => ({
+  wsRoot: "",
+  parseSource: (input: string): { owner: string; repo: string; branch: string } | null => {
+    const m = input.match(/^([^/]+)\/([^/@]+)(?:@(.+))?$/);
+    return m ? { owner: m[1]!, repo: m[2]!, branch: m[3] ?? "main" } : null;
+  },
+  readStatus: vi.fn(),
+  provision: vi.fn(),
+  createBranch: vi.fn(),
+  forkWorktree: vi.fn(),
+}));
+
+vi.mock("codehost/provision", () => ({
+  resolveWsRoot: (w?: string) => w ?? prov.wsRoot,
+  folderFor: (spec: { owner: string; repo: string; branch: string }, wsRoot?: string) =>
+    path.join(wsRoot ?? prov.wsRoot, spec.owner, spec.repo, "tree", spec.branch),
+  parseSource: (input: string) => prov.parseSource(input),
+  readStatus: (dir: string) => prov.readStatus(dir),
+  provision: (spec: unknown, opts?: unknown) => prov.provision(spec, opts),
+  createBranch: (spec: unknown, opts?: unknown) => prov.createBranch(spec, opts),
+  forkWorktree: (opts: unknown) => prov.forkWorktree(opts),
+}));
 
 describe("isPathInside", () => {
   it("contains itself and descendants", () => {
@@ -146,5 +171,178 @@ describe("resolveOperand", () => {
 describe("json schema tag", () => {
   it("is versioned", () => {
     expect(WS_JSON_SCHEMA).toBe("ay-ws/v1");
+  });
+});
+
+describe("cmdWs (mocked provision)", () => {
+  let root: string;
+  let out: string[];
+  let err: string[];
+  let homeBackup: string | undefined;
+
+  const CLEAN = { branch: "main", head: "abc123", ahead: 0, behind: 0, dirty: false, hasUpstream: true };
+
+  beforeEach(() => {
+    root = mkdtempSync(path.join(os.tmpdir(), "ay-ws-cmd-"));
+    prov.wsRoot = root;
+    prov.readStatus.mockReset().mockResolvedValue(CLEAN);
+    prov.provision.mockReset();
+    prov.createBranch.mockReset();
+    prov.forkWorktree.mockReset();
+    out = [];
+    err = [];
+    vi.spyOn(process.stdout, "write").mockImplementation((s: any) => (out.push(String(s)), true));
+    vi.spyOn(process.stderr, "write").mockImplementation((s: any) => (err.push(String(s)), true));
+    // Isolate the agent registry so live-agent counts are deterministic (0).
+    homeBackup = process.env.AGENT_YES_HOME;
+    process.env.AGENT_YES_HOME = path.join(root, ".ay-home");
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (homeBackup === undefined) delete process.env.AGENT_YES_HOME;
+    else process.env.AGENT_YES_HOME = homeBackup;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const mkCheckout = (rel: string) => {
+    const dir = path.join(root, rel);
+    mkdirSync(path.join(dir, ".git"), { recursive: true });
+    return dir;
+  };
+
+  it("no args / unknown sub → help (0) and error (1)", async () => {
+    expect(await cmdWs([])).toBe(0);
+    expect(out.join("")).toContain("ay ws ls");
+    expect(await cmdWs(["nope"])).toBe(1);
+    expect(err.join("")).toContain('unknown subcommand "nope"');
+  });
+
+  it("ls: empty root note, then table with agent hint column", async () => {
+    expect(await cmdWs(["ls"])).toBe(0);
+    expect(err.join("")).toContain("no workspaces under");
+    mkCheckout("o/r/tree/main");
+    expect(await cmdWs(["ls"])).toBe(0);
+    const table = out.join("");
+    expect(table).toContain("WORKSPACE");
+    expect(table).toContain("o/r@main");
+  });
+
+  it("ls --json: versioned schema envelope", async () => {
+    const dir = mkCheckout("o/r/tree/feat/x");
+    expect(await cmdWs(["ls", "--json"])).toBe(0);
+    const doc = JSON.parse(out.join(""));
+    expect(doc.schema).toBe(WS_JSON_SCHEMA);
+    expect(doc.wsRoot).toBe(root);
+    expect(doc.workspaces).toEqual([
+      { owner: "o", repo: "r", branch: "feat/x", path: dir, agents: { live: 0 } },
+    ]);
+  });
+
+  it("ls --status: git summaries and the per-entry error fallback", async () => {
+    mkCheckout("o/r/tree/clean");
+    mkCheckout("o/r/tree/messy");
+    mkCheckout("o/r/tree/broken");
+    prov.readStatus.mockImplementation(async (dir: string) => {
+      if (dir.endsWith("broken")) throw new Error("boom");
+      if (dir.endsWith("messy"))
+        return { branch: "messy", head: "h", ahead: 2, behind: 1, dirty: true, hasUpstream: false };
+      return CLEAN;
+    });
+    expect(await cmdWs(["ls", "--status"])).toBe(0);
+    const table = out.join("");
+    expect(table).toContain("clean");
+    expect(table).toContain("dirty, ahead 2, behind 1, no-upstream");
+    expect(table).toContain("error: boom");
+  });
+
+  it("ls rejects positional args and unknown flags", async () => {
+    await expect(cmdWs(["ls", "stray"])).rejects.toThrow(/no positional/);
+    await expect(cmdWs(["ls", "--nope"])).rejects.toThrow(/unknown flag --nope/);
+    await expect(cmdWs(["ls", "--json=1"])).rejects.toThrow(/takes no value/);
+  });
+
+  it("status: layout spec + state text for a path target, --json shape", async () => {
+    const dir = mkCheckout("o/r/tree/feat/y");
+    expect(await cmdWs(["status", dir])).toBe(0);
+    const text = out.join("");
+    expect(text).toContain("spec:     o/r@feat/y");
+    expect(text).toContain("state:    clean");
+    out.length = 0;
+    expect(await cmdWs(["status", dir, "--json"])).toBe(0);
+    const doc = JSON.parse(out.join(""));
+    expect(doc.schema).toBe(WS_JSON_SCHEMA);
+    expect(doc.workspace.branch).toBe("feat/y");
+    expect(doc.workspace.git).toEqual(CLEAN);
+  });
+
+  it("status: a checkout outside the layout omits the spec line", async () => {
+    const outside = mkdtempSync(path.join(os.tmpdir(), "ay-ws-out-"));
+    try {
+      mkdirSync(path.join(outside, ".git"));
+      expect(await cmdWs(["status", outside])).toBe(0);
+      expect(out.join("")).not.toContain("spec:");
+    } finally {
+      rmSync(outside, { recursive: true, force: true });
+    }
+  });
+
+  it("status: --path and --spec are mutually exclusive; one target max", async () => {
+    await expect(cmdWs(["status", "--path", "--spec"])).rejects.toThrow(/mutually exclusive/);
+    await expect(cmdWs(["status", "a", "b"])).rejects.toThrow(/at most one/);
+  });
+
+  it("new: provisions and prints the action + folder", async () => {
+    prov.provision.mockResolvedValue({ ok: true, action: "cloned", folder: "/x" });
+    expect(await cmdWs(["new", "o/r@dev"])).toBe(0);
+    expect(prov.provision).toHaveBeenCalledWith(
+      { owner: "o", repo: "r", branch: "dev" },
+      { wsRoot: undefined },
+    );
+    expect(out.join("")).toContain("cloned  /x");
+  });
+
+  it("new: branch-not-found hints at --create, and --create falls back to createBranch", async () => {
+    prov.provision.mockResolvedValue({ ok: false, action: "error", reason: "branch-not-found", error: "nope" });
+    expect(await cmdWs(["new", "o/r@dev"])).toBe(1);
+    expect(err.join("")).toContain("--create");
+    expect(prov.createBranch).not.toHaveBeenCalled();
+
+    prov.createBranch.mockResolvedValue({ ok: true, action: "created", folder: "/y" });
+    expect(await cmdWs(["new", "o/r@dev", "--create"])).toBe(0);
+    expect(out.join("")).toContain("created  /y");
+  });
+
+  it("new: usage and parse errors", async () => {
+    await expect(cmdWs(["new"])).rejects.toThrow(/usage: ay ws new/);
+    await expect(cmdWs(["new", "///"])).rejects.toThrow(/cannot parse/);
+  });
+
+  it("fork: --from is resolved and passed through with --wip", async () => {
+    prov.forkWorktree.mockResolvedValue({ ok: true, action: "forked", folder: "/f" });
+    expect(await cmdWs(["fork", "nb", "--from", root, "--wip"])).toBe(0);
+    expect(prov.forkWorktree).toHaveBeenCalledWith({
+      fromCwd: path.resolve(root),
+      branch: "nb",
+      wsRoot: undefined,
+      wip: true,
+    });
+    expect(out.join("")).toContain("forked  /f");
+  });
+
+  it("fork: defaults --from to cwd (no agent env), surfaces failure", async () => {
+    const envBackup = process.env.AGENT_YES_PID;
+    delete process.env.AGENT_YES_PID;
+    try {
+      prov.forkWorktree.mockResolvedValue({ ok: false, error: "no origin" });
+      expect(await cmdWs(["fork", "nb"])).toBe(1);
+      expect(prov.forkWorktree).toHaveBeenCalledWith(
+        expect.objectContaining({ fromCwd: path.resolve(process.cwd()), wip: false }),
+      );
+      expect(err.join("")).toContain("fork failed: no origin");
+      await expect(cmdWs(["fork"])).rejects.toThrow(/usage: ay ws fork/);
+      await expect(cmdWs(["fork", "nb", "--from"])).rejects.toThrow(/requires a value/);
+    } finally {
+      if (envBackup !== undefined) process.env.AGENT_YES_PID = envBackup;
+    }
   });
 });
