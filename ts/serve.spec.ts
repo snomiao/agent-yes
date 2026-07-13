@@ -1,6 +1,6 @@
 import { readFile } from "fs/promises";
 import { describe, expect, it } from "vitest";
-import { isNoNodeExecError, oxmgrVersionHasWindowsFix } from "./serve.ts";
+import { installerArgv, isNoNodeExecError, oxmgrVersionHasWindowsFix } from "./serve.ts";
 
 // Guards the Windows daemon-manager selection: on Windows we only PREFER oxmgr
 // when the installed build carries the daemon-socket-inheritance fix. Stock
@@ -88,5 +88,33 @@ describe("manager spawns pass a live env snapshot", () => {
         /env: (?:\{\s*(?:\.\.\.)?)?liveEnv\(\)/,
       );
     }
+  });
+});
+
+// Guards the oxmgr bootstrap: bun blocks untrusted postinstalls, and oxmgr's
+// native binary only arrives via its postinstall — without --trust the install
+// "succeeds" but leaves a launcher that dies with "oxmgr binary is missing"
+// (the real reason bootstrap used to fall back to pm2 on fresh boxes).
+describe("installerArgv", () => {
+  it("trusts oxmgr's postinstall under bun", () => {
+    expect(installerArgv("oxmgr", "/x/bun", null)).toEqual([
+      "/x/bun",
+      "add",
+      "-g",
+      "--trust",
+      "oxmgr",
+    ]);
+  });
+
+  it("keeps pm2 untrusted under bun (pure JS, no required scripts)", () => {
+    expect(installerArgv("pm2", "/x/bun", "/x/npm")).toEqual(["/x/bun", "add", "-g", "pm2"]);
+  });
+
+  it("falls back to npm without a trust flag (npm runs scripts by default)", () => {
+    expect(installerArgv("oxmgr", null, "/x/npm")).toEqual(["/x/npm", "install", "-g", "oxmgr"]);
+  });
+
+  it("returns null with neither installer", () => {
+    expect(installerArgv("pm2", null, null)).toBeNull();
   });
 });

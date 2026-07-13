@@ -471,16 +471,37 @@ async function resolveActiveManager(): Promise<DaemonManager | null> {
   return firstRunnable ?? resolveDaemonManager();
 }
 
+// The install command for one PM package. oxmgr gets `--trust` under bun: its
+// native binary arrives via the package's postinstall (scripts/install.js
+// downloads the platform build), and bun BLOCKS lifecycle scripts of untrusted
+// packages by default — which leaves a JS launcher that dies with "oxmgr binary
+// is missing" and was the real reason bootstrap kept falling back to pm2 on
+// fresh boxes. Re-adding with --trust also heals such a blocked install. pm2 is
+// pure JS with no required scripts, so it stays untrusted. npm runs lifecycle
+// scripts by default — no flag needed.
+export function installerArgv(
+  pkg: "oxmgr" | "pm2",
+  bun: string | null,
+  npm: string | null,
+): string[] | null {
+  if (bun) return [bun, "add", "-g", ...(pkg === "oxmgr" ? ["--trust"] : []), pkg];
+  if (npm) return [npm, "install", "-g", pkg];
+  return null;
+}
+
 // Install one PM package globally via the SAME JS package manager that installed
 // `ay` (bun preferred, npm fallback — no Rust toolchain required, so a fresh
 // Linux box with only bun from setup.sh works), then confirm the resulting
 // binary actually execs. Returns a runnable manager, or null if the install
 // failed or the binary can't run here (caller then tries the next candidate).
 async function installAndVerify(pkg: "oxmgr" | "pm2"): Promise<DaemonManager | null> {
-  const bun = Bun.which("bun");
-  const npm = Bun.which("npm");
-  const installer = bun ? [bun, "add", "-g", pkg] : npm ? [npm, "install", "-g", pkg] : null;
+  const installer = installerArgv(pkg, Bun.which("bun"), Bun.which("npm"));
   if (!installer) return null;
+  // The node→bun shim must exist BEFORE the install, not just before the probe:
+  // oxmgr's postinstall itself runs `node scripts/install.js` to fetch the
+  // native binary, so on a bun-only box a missing shim silently skips the
+  // download even when the script is trusted.
+  await ensureNodeRuntime();
   process.stderr.write(`ay serve install: installing ${pkg}…\n`);
   const code =
     (await Bun.spawn(installer, {
