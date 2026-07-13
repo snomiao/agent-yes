@@ -1184,6 +1184,15 @@
         color: var(--peer);
         flex: none;
       }
+      .pinmark {
+        font-size: 10px;
+        line-height: 1;
+        flex: none;
+      }
+      /* Pinned rows: a subtle accent rail on the left edge (both list layouts). */
+      .row.pinned {
+        box-shadow: inset 2px 0 0 var(--accent);
+      }
       .r1 {
         display: flex;
         align-items: center;
@@ -4094,10 +4103,9 @@
           term && term.clearSelection && term.clearSelection();
         } catch {}
       }
-      function showTermMenu(ev, term) {
-        ev.preventDefault();
-        hideTermMenu();
-        const selText = term && term.hasSelection && term.hasSelection() ? term.getSelection() : "";
+      // Build an empty context-menu shell plus `addItem`/`addSep` helpers, shared
+      // by the terminal menu and the left-panel agent menu.
+      function ctxMenuShell() {
         const menu = document.createElement("div");
         menu.className = "ctxmenu";
         menu.setAttribute("role", "menu");
@@ -4127,6 +4135,28 @@
           s.className = "ctxmenu-sep";
           menu.appendChild(s);
         };
+        return { menu, addItem, addSep };
+      }
+      // Append a built menu at the pointer, clamp into the viewport, and wire the
+      // shared dismiss listeners (outside-click, Escape, blur, resize).
+      function openCtxMenu(menu, ev) {
+        document.body.appendChild(menu);
+        ctxMenuEl = menu;
+        const r = menu.getBoundingClientRect();
+        const x = Math.max(4, Math.min(ev.clientX, window.innerWidth - r.width - 4));
+        const y = Math.max(4, Math.min(ev.clientY, window.innerHeight - r.height - 4));
+        menu.style.left = x + "px";
+        menu.style.top = y + "px";
+        document.addEventListener("pointerdown", onCtxOutside, true);
+        document.addEventListener("keydown", onCtxKey, true);
+        window.addEventListener("blur", hideTermMenu);
+        window.addEventListener("resize", hideTermMenu);
+      }
+      function showTermMenu(ev, term) {
+        ev.preventDefault();
+        hideTermMenu();
+        const selText = term && term.hasSelection && term.hasSelection() ? term.getSelection() : "";
+        const { menu, addItem, addSep } = ctxMenuShell();
 
         // Copy: disabled with nothing selected (mirrors the old behavior, minus
         // the auto-copy — the user now chooses it explicitly).
@@ -4158,18 +4188,20 @@
         addSep();
         addItem("Edit quick commands…", {}, editQuickCmds);
 
-        document.body.appendChild(menu);
-        ctxMenuEl = menu;
-        // Clamp into the viewport so a right-click near an edge stays fully visible.
-        const r = menu.getBoundingClientRect();
-        const x = Math.max(4, Math.min(ev.clientX, window.innerWidth - r.width - 4));
-        const y = Math.max(4, Math.min(ev.clientY, window.innerHeight - r.height - 4));
-        menu.style.left = x + "px";
-        menu.style.top = y + "px";
-        document.addEventListener("pointerdown", onCtxOutside, true);
-        document.addEventListener("keydown", onCtxKey, true);
-        window.addEventListener("blur", hideTermMenu);
-        window.addEventListener("resize", hideTermMenu);
+        openCtxMenu(menu, ev);
+      }
+      // Right-click menu for a left-panel agent row: pin/unpin to the top of the
+      // list (a pin also surfaces the agent in /r/'s screen-fixed palette).
+      function showAgentMenu(ev, key) {
+        ev.preventDefault();
+        hideTermMenu();
+        const e = entries.find((x) => x._key === key);
+        if (!e) return;
+        const { menu, addItem } = ctxMenuShell();
+        const name = cliLabel(e) || ident(e) || "pid " + e.pid;
+        if (isPinned(key)) addItem("Unpin “" + name + "”", { hint: "📌" }, () => togglePin(key));
+        else addItem("Pin “" + name + "” to top", { hint: "📌" }, () => togglePin(key));
+        openCtxMenu(menu, ev);
       }
       // Lightweight editor: overlay + textarea of `Label | template` lines. Save
       // writes localStorage; Reset restores the built-in defaults.
@@ -4575,14 +4607,55 @@
       let sortMode = localStorage.getItem("ay.sortMode") || "state";
       if (!SORT_MODES.includes(sortMode)) sortMode = "state";
 
+      // Pinned agents: a set of agent _key values that float to the top of the
+      // list, shared (same localStorage key) with /r/, where they also surface in
+      // the screen-fixed palette. Kept in memory and re-synced on cross-tab writes.
+      const AY_PINNED_KEY = "ay.pinned";
+      function loadPinned() {
+        try {
+          const a = JSON.parse(localStorage.getItem(AY_PINNED_KEY) || "[]");
+          return new Set(Array.isArray(a) ? a : []);
+        } catch {
+          return new Set();
+        }
+      }
+      let pinned = loadPinned();
+      function isPinned(key) {
+        return pinned.has(key);
+      }
+      function togglePin(key) {
+        if (!key) return;
+        if (pinned.has(key)) pinned.delete(key);
+        else pinned.add(key);
+        try {
+          localStorage.setItem(AY_PINNED_KEY, JSON.stringify([...pinned]));
+        } catch {}
+        renderList();
+      }
+      // Cross-tab / cross-view sync: /r/ (or another /w/ tab) writing ay.pinned
+      // fires a storage event here; reload the set and re-render.
+      window.addEventListener("storage", (ev) => {
+        if (ev.key === AY_PINNED_KEY) {
+          pinned = loadPinned();
+          renderList();
+        }
+      });
+
       // The filtered + sorted entry list, in the SAME order the left panel renders
       // and the keyboard nav steps. Sorting runs before layeredRows builds the
       // room/peer/agent tree, so it reorders roots/siblings without breaking nesting.
+      // Pinned entries then float to the front of their sorted group (a pinned root
+      // rises to the top; a pinned subagent rises among its siblings).
       function orderedEntries(toks) {
-        return sortEntries(
+        const sorted = sortEntries(
           entries.filter((e) => matches(e, toks)),
           sortMode,
         );
+        if (!pinned.size) return sorted;
+        const hi = [],
+          lo = [];
+        for (const e of sorted) (pinned.has(e._key) ? hi : lo).push(e);
+        return hi.concat(lo);
       }
 
       // A small git chip (±changed ⑂pins ⊙sub-dirty ↑ahead ↓behind) for a row,
@@ -4672,8 +4745,15 @@
           (peers ? " peerfocus" : "") +
           (flash ? " stdinflash" : "") +
           (sent ? " sendflash" : "") +
-          (recv ? " recvflash" : "")
+          (recv ? " recvflash" : "") +
+          (pinned.has(e._key) ? " pinned" : "")
         );
+      }
+      // A small 📌 marker on a pinned row (right-click to unpin).
+      function pinMarkHtml(e) {
+        return pinned.has(e._key)
+          ? `<span class="pinmark" title="pinned — right-click to unpin">📌</span>`
+          : "";
       }
       // A yellow chip showing how many peers are watching this agent ("" if none).
       function peerChipHtml(e) {
@@ -4726,6 +4806,7 @@
                 const cli = cliLabel(e);
                 return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">
         ${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}
+        ${pinMarkHtml(e)}
         <span class="dot ${esc(e.status)}"></span>
         ${hasIdent(id) ? `<span class="cident" title="${esc(fullIdent(e))}">${esc(id)}</span>` : ""}
         ${cli ? `<span class="cname">${esc(cli)}</span>` : ""}
@@ -4756,7 +4837,7 @@
                 )
                 .join("");
               return `<div class="row ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">
-        <div class="r1">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}<span class="dot ${esc(e.status)}"></span>
+        <div class="r1">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}${pinMarkHtml(e)}<span class="dot ${esc(e.status)}"></span>
           <span class="name">${esc(cliLabel(e) || ident(e) || "agent")}</span>
           <span class="badge">pid ${e.pid}</span>
           ${foldChipHtml(e)}
@@ -5178,6 +5259,11 @@
         }
         const row = ev.target.closest(".row");
         if (row) select(row.dataset.key);
+      });
+      // Right-click an agent row → pin/unpin menu.
+      $("list").addEventListener("contextmenu", (ev) => {
+        const row = ev.target.closest(".row");
+        if (row && row.dataset.key) showAgentMenu(ev, row.dataset.key);
       });
       // Mobile back: return to the list pane. The tail keeps streaming in the
       // background (selection unchanged), so reopening the agent is instant.

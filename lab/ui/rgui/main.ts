@@ -1419,9 +1419,10 @@ function updateDocTitle() {
 // per-status breakdown (items). Drag its header and rgui snaps it to the
 // viewport edges / other panels; onPanelMove persists the anchor across reloads.
 const SYS_PANEL_KEY = "rgui-syspanel-anchor";
-function loadPanelAnchor(): Panel["anchor"] {
+const PIN_PANEL_KEY = "rgui-pinpanel-anchor";
+function loadPanelAnchor(key: string, dflt: Panel["anchor"]): Panel["anchor"] {
   try {
-    const raw = localStorage.getItem(SYS_PANEL_KEY);
+    const raw = localStorage.getItem(key);
     if (raw === "left" || raw === "right") return raw;
     if (raw) {
       const p = JSON.parse(raw);
@@ -1430,9 +1431,9 @@ function loadPanelAnchor(): Panel["anchor"] {
   } catch {
     /* corrupt stored anchor — fall through to the default edge */
   }
-  return "right";
+  return dflt;
 }
-const sysPanel: Panel = { id: "sys", title: "agents", anchor: loadPanelAnchor(), w: 200, items: [] };
+const sysPanel: Panel = { id: "sys", title: "agents", anchor: loadPanelAnchor(SYS_PANEL_KEY, "right"), w: 200, items: [] };
 const STATUS_ROWS: [AgentStatus, string][] = [
   ["active", "active"],
   ["needs_input", "waiting"],
@@ -1486,7 +1487,64 @@ function updateSysPanel(records: AgentRecord[], live: boolean) {
     color: live ? "#3fb950" : "#d29922",
   });
   sysPanel.items = items;
-  viewer.setPanels([sysPanel]);
+  applyPanels();
+}
+
+// ── pinned-agents palette (screen-fixed, shared with the /w/ console) ─────────
+// Pins live in the same localStorage set the console's left-panel pin uses
+// (ay.pinned, keyed by agent _key). Each pinned agent that's present in the
+// current fleet shows as a row in a screen-fixed palette; clicking a row glides
+// the camera to that node. Pin/unpin happens via a node's right-click menu (here)
+// or the console list (there) — a storage event keeps the two views in sync.
+const AY_PINNED_KEY = "ay.pinned";
+function loadPinnedKeys(): Set<string> {
+  try {
+    const a = JSON.parse(localStorage.getItem(AY_PINNED_KEY) || "[]");
+    return new Set(Array.isArray(a) ? a : []);
+  } catch {
+    return new Set();
+  }
+}
+let pinnedKeys = loadPinnedKeys();
+function isPinned(id: string): boolean {
+  return pinnedKeys.has(id);
+}
+function togglePin(id: string): void {
+  if (pinnedKeys.has(id)) pinnedKeys.delete(id);
+  else pinnedKeys.add(id);
+  try {
+    localStorage.setItem(AY_PINNED_KEY, JSON.stringify([...pinnedKeys]));
+  } catch {
+    /* storage unavailable — pin just won't persist / sync */
+  }
+  updatePinPanel();
+}
+const pinPanel: Panel = {
+  id: "pins",
+  title: "📌 pinned",
+  // Right edge (like sysPanel) — the top-left is occupied by the page's own
+  // toolbar/legend chrome, which would hide a left-anchored panel.
+  anchor: loadPanelAnchor(PIN_PANEL_KEY, "right"),
+  w: 200,
+  items: [],
+  onItemClick: (item) => focusNode(item.id),
+};
+// The pin palette is only shown when something is pinned; sysPanel is always on.
+function applyPanels(): void {
+  viewer.setPanels(pinnedKeys.size ? [pinPanel, sysPanel] : [sysPanel]);
+}
+// Rebuild the pin palette rows from the current fleet (skip pins whose agent
+// isn't in view — another machine, or exited-and-gone).
+function updatePinPanel(): void {
+  const items: PanelItem[] = [];
+  for (const id of pinnedKeys) {
+    const r = recordsByKey.get(id);
+    if (!r) continue;
+    items.push({ id, label: nodeTitle(r), value: String(r.pid), color: DOT_COLOR[r.status] });
+  }
+  pinPanel.items = items;
+  pinPanel.title = items.length ? `📌 pinned · ${items.length}` : "📌 pinned";
+  applyPanels();
 }
 
 // ── bootstrap ────────────────────────────────────────────────────────────────
@@ -1502,10 +1560,10 @@ const viewer: Rgui = createRgui(canvas, {
   theme: initialTheme,
   debug,
   panels: [sysPanel],
-  onPanelMove: (_p, anchor) => {
-    // persist the dragged/snapped anchor so the palette stays where the user left it
+  onPanelMove: (p, anchor) => {
+    // persist the dragged/snapped anchor so each palette stays where the user left it
     try {
-      localStorage.setItem(SYS_PANEL_KEY, JSON.stringify(anchor));
+      localStorage.setItem(p.id === "pins" ? PIN_PANEL_KEY : SYS_PANEL_KEY, JSON.stringify(anchor));
     } catch {
       /* storage unavailable — position just won't persist */
     }
@@ -1803,6 +1861,7 @@ function apply(records: AgentRecord[], live: boolean) {
     ? `live · ${n} agent${n === 1 ? "" : "s"}${liveW > 1 ? ` · ${liveW} sources` : usingRoom() ? " (room)" : ""}`
     : "demo · no local ay serve";
   updateSysPanel(records, live); // refresh the screen-fixed status palette
+  updatePinPanel(); // refresh the pinned-agents palette (fleet may have changed)
   updateDocTitle(); // keep the tab title's name/status/count fresh
 }
 
@@ -2370,6 +2429,12 @@ function persistSelection() {
   }
 }
 addEventListener("storage", (e) => {
+  // pins changed in the console (or another /r/ tab) → resync the palette
+  if (e.key === AY_PINNED_KEY) {
+    pinnedKeys = loadPinnedKeys();
+    updatePinPanel();
+    return;
+  }
   // live follow: the console (another tab, same origin) opened an agent
   if (e.key !== SEL_KEY) return;
   const key = normalizeSelKey(e.newValue);
@@ -2515,6 +2580,12 @@ function openBatchMenu(sx: number, sy: number, pids: string[], spawn: typeof ctx
   document.getElementById("ctx-s")!.textContent = pids.length === 1 ? "" : "s";
   const spawnBtn = document.getElementById("ctx-spawn") as HTMLButtonElement;
   spawnBtn.hidden = !spawn;
+  // Pin toggle: single real agent only (a pin targets one agent's node).
+  const pinPid = pids.length === 1 && recordsByKey.has(pids[0]!) ? pids[0]! : null;
+  const pinBtn = document.getElementById("ctx-pin") as HTMLButtonElement;
+  pinBtn.hidden = !pinPid;
+  pinBtn.dataset.pid = pinPid ?? "";
+  pinBtn.textContent = pinPid && isPinned(pinPid) ? "📌 Unpin" : "📌 Pin";
   if (spawn)
     spawnBtn.title =
       `POST /api/spawn on ${spawn.src === LOCAL ? "this machine" : spawn.src} · ` +
@@ -2585,6 +2656,11 @@ ctxInput.addEventListener("keydown", (e) => {
 });
 document.getElementById("ctx-send")!.addEventListener("click", () => void sendBatch());
 document.getElementById("ctx-spawn")!.addEventListener("click", () => void spawnHere());
+document.getElementById("ctx-pin")!.addEventListener("click", () => {
+  const pid = (document.getElementById("ctx-pin") as HTMLButtonElement).dataset.pid;
+  if (pid) togglePin(pid);
+  closeBatchMenu();
+});
 addEventListener("mousedown", (e) => {
   if (!ctxmenu.hidden && !ctxmenu.contains(e.target as Node)) closeBatchMenu();
 });
