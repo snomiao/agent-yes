@@ -16,6 +16,7 @@ import {
   listRecords,
   readNotes,
   readPtysize,
+  recentMessageEdges,
   recentReadEdges,
   renderLogTailLines,
   renderRawLog,
@@ -26,6 +27,7 @@ import {
 } from "./subcommands.ts";
 import { TYPING_BADGE } from "./badges.ts";
 import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
+import { type MailParty, recordInbox } from "./messageLog.ts";
 import { updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { spawnRejectionReason } from "./spawnGate.ts";
 import { findSpawnHiddenLauncher } from "./rustBinary.ts";
@@ -1723,12 +1725,16 @@ export async function cmdServe(rest: string[]): Promise<number> {
       });
     }
 
-    // GET /api/edges — recent inter-agent relationship edges for the /rgui wire
-    // view. Currently the read/tail edges (agent `by` read agent `target` within
-    // the last minute, from ~/.agent-yes/reads.jsonl). Directional, ephemeral.
+    // GET /api/edges — recent inter-agent relationship edges for the /rgui + /w
+    // wire view. Two directional, ephemeral edge sets:
+    //   reads — agent `by` read/tailed agent `target` (from ~/.agent-yes/reads.jsonl)
+    //   sends — agent `by` sent `target` a message/key/select (from the per-cwd
+    //           outbox logs); carries the send `kind` so the UI can style it.
+    // Both are last-minute windows the client fades out by `at`.
     if (req.method === "GET" && p === "/api/edges") {
       try {
-        return Response.json({ reads: await recentReadEdges() });
+        const [reads, sends] = await Promise.all([recentReadEdges(), recentMessageEdges()]);
+        return Response.json({ reads, sends });
       } catch (e) {
         return new Response((e as Error).message, { status: 500 });
       }
@@ -2199,15 +2205,20 @@ export async function cmdServe(rest: string[]): Promise<number> {
       }
     }
 
-    // POST /api/send  body: {keyword, msg, code?}
+    // POST /api/send  body: {keyword, msg, code?, from?}
     if (req.method === "POST" && p === "/api/send") {
-      let body: { keyword: string; msg: string; code?: string };
+      let body: {
+        keyword: string;
+        msg: string;
+        code?: string;
+        from?: MailParty | null;
+      };
       try {
         body = (await req.json()) as typeof body;
       } catch {
         return new Response("invalid JSON body", { status: 400 });
       }
-      const { keyword, msg = "", code = "enter" } = body;
+      const { keyword, msg = "", code = "enter", from = null } = body;
       if (!keyword || typeof keyword !== "string") {
         return new Response("missing keyword", { status: 400 });
       }
@@ -2228,7 +2239,43 @@ export async function cmdServe(rest: string[]): Promise<number> {
         // over this same wire) is protocol noise, not input — stamp anyDaemonWriteAt
         // but not the "meaningful" time, so a resize/redraw can't trip the flash.
         await noteStdinWrite(record.pid, record.fifo_file, !isTerminalReply(msg));
-        return Response.json({ ok: true, pid: record.pid });
+        // Record the recipient's inbox on THIS host (the sender records its own
+        // outbox on its host). The sender crossed the wire, so `from.cwd` names a
+        // path on another machine — mark it remote so the peer's cwd isn't misread
+        // as local. Only real message bodies are logged. Best-effort.
+        if (msg) {
+          const senderParty: MailParty | null =
+            from && typeof from === "object" && typeof from.pid === "number"
+              ? {
+                  pid: from.pid,
+                  cli: String(from.cli ?? "?"),
+                  cwd: String(from.cwd ?? ""),
+                  agent_id: from.agent_id ?? undefined,
+                }
+              : null;
+          await recordInbox({
+            at: Date.now(),
+            from: senderParty,
+            to: {
+              pid: record.pid,
+              cli: record.cli,
+              cwd: record.cwd,
+              agent_id: record.agent_id,
+            },
+            body: msg,
+            code: code.toLowerCase() === "enter" ? undefined : code.toLowerCase(),
+            confirmed: true,
+            wrapped: false,
+            remote: senderParty ? "wire" : undefined,
+          });
+        }
+        return Response.json({
+          ok: true,
+          pid: record.pid,
+          cli: record.cli,
+          cwd: record.cwd,
+          agentId: record.agent_id ?? undefined,
+        });
       } catch (e) {
         return new Response((e as Error).message, { status: 404 });
       }

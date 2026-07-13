@@ -20,6 +20,14 @@ import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./g
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
 import { agentYesHome } from "./agentYesHome.ts";
+import {
+  type MailParty,
+  type MessageRecord,
+  partyMatches,
+  readMailbox,
+  recordMessage,
+  recordOutbox,
+} from "./messageLog.ts";
 import { badgeDef, matchBadges, TYPING_BADGE } from "./badges.ts";
 import {
   classifyNeedsInput,
@@ -195,6 +203,49 @@ export async function recentReadEdges(windowMs = READ_WINDOW_MS): Promise<ReadEd
   return out;
 }
 
+/** Recent agent→agent MESSAGE edges (a delivered `ay send`/`key`/`select`), for
+ * the /rgui + /w wire view. Like {@link ReadEdge} but sourced from the per-cwd
+ * outbox logs and carrying the send `kind`. `by`/`target` are the sender/recipient
+ * pids AT SEND TIME (a restarted agent keeps a new pid — matched best-effort). */
+export interface MessageEdge {
+  by: number;
+  target: number;
+  at: number;
+  kind?: "key" | "select";
+}
+
+/**
+ * Scan every live agent's outbox for sends within `windowMs` and return them as
+ * directional edges (newest `at` per by→target pair wins). Bounded by the number
+ * of distinct agent cwds — the outbox is per-cwd, so each dir is read once.
+ */
+export async function recentMessageEdges(windowMs = READ_WINDOW_MS): Promise<MessageEdge[]> {
+  const now = Date.now();
+  const records = await listRecords(undefined, {
+    all: true,
+    active: false,
+    json: false,
+    latest: false,
+    cwdScope: null,
+  });
+  const cwds = [...new Set(records.map((r) => r.cwd).filter(Boolean))];
+  const best = new Map<string, MessageEdge>();
+  await Promise.all(
+    cwds.map(async (cwd) => {
+      for (const rec of await readMailbox(cwd, "outbox")) {
+        if (now - rec.at > windowMs) continue;
+        const by = rec.from?.pid;
+        const target = rec.to?.pid;
+        if (!by || !target || by === target) continue; // agent→agent only
+        const key = `${by}\0${target}`;
+        const prev = best.get(key);
+        if (!prev || rec.at > prev.at) best.set(key, { by, target, at: rec.at, kind: rec.kind });
+      }
+    }),
+  );
+  return [...best.values()];
+}
+
 // Identify the sender. An agent launched by `ay` inherits AGENT_YES_PID=<wrapper
 // pid>; the registered agent record carries that same wrapper_pid, so we map the
 // env value back to the agent's own canonical record. Falls back to a direct pid
@@ -296,6 +347,7 @@ const SUBCOMMANDS = new Set([
   "tail",
   "head",
   "send",
+  "msgs",
   "key",
   "select",
   "spawn",
@@ -397,6 +449,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdRead(rest, { mode: "head" });
       case "send":
         return await cmdSend(rest);
+      case "msgs":
+        return await cmdMsgs(rest);
       case "key":
         return await cmdKey(rest);
       case "select":
@@ -534,6 +588,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay cat <keyword>                    full log\n` +
       `  ay head <keyword>                   first N lines\n` +
       `  ay send <keyword> <msg>             send a message\n` +
+      `  ay msgs [keyword] [--in|--out]      inter-agent message log (sent + received)\n` +
       `  ay key <keyword> <key...>           send raw keystrokes (down/up/enter/esc/…) — drives menus\n` +
       `  ay select <keyword> <N>             pick option N of a needs_input selection menu\n` +
       `  ay attach <keyword>                 interactive attach (detach: Ctrl-\\)\n` +
@@ -979,13 +1034,48 @@ async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string):
     process.stderr.write("remote send requires a keyword (e.g. token@host:port:keyword)\n");
     return 1;
   }
-  const res = await remotePost(remote, "/api/send", { keyword, msg, code });
+  // Attribute the send so the remote can record its recipient's inbox with a real
+  // sender (not an anonymous cross-wire write). Human shell → no `from`.
+  const sender = await senderContext();
+  const from = sender.agent
+    ? {
+        pid: sender.agent.pid,
+        cli: sender.agent.cli,
+        cwd: sender.agent.cwd,
+        agent_id: sender.agent.agent_id,
+      }
+    : null;
+  const res = await remotePost(remote, "/api/send", { keyword, msg, code, from });
   if (!res.ok) {
     process.stderr.write(`remote error ${res.status}: ${await res.text()}\n`);
     return 1;
   }
-  const data = (await res.json()) as any;
+  const data = (await res.json()) as {
+    pid: number;
+    cli?: string;
+    cwd?: string;
+    agentId?: string;
+  };
   process.stdout.write(`sent to remote pid ${data.pid} (${remote.url}  ${keyword})\n`);
+  // Record the sender's half of the exchange locally (the recipient's inbox is
+  // recorded on the remote host by its /api/send handler). Only real bodies.
+  if (msg && msg !== "-") {
+    await recordOutbox({
+      at: Date.now(),
+      from,
+      to: {
+        pid: data.pid,
+        cli: data.cli ?? keyword,
+        cwd: data.cwd ?? "",
+        agent_id: data.agentId,
+      },
+      body: msg,
+      code: code.toLowerCase() === "enter" ? undefined : code.toLowerCase(),
+      confirmed: true,
+      wrapped: false,
+      remote: remote.url,
+    });
+  }
   return 0;
 }
 
@@ -2975,8 +3065,9 @@ async function cmdSend(rest: string[]): Promise<number> {
   const replyTarget = sender.agent?.agent_id || sender.agent?.pid;
   let prefix = "";
   let suffix = "";
+  let nonce: string | undefined;
   if (sender.agent && !isSlashCommand(body)) {
-    const nonce = randomBytes(4).toString("hex");
+    nonce = randomBytes(4).toString("hex");
     prefix = `<ay-msg ${nonce} from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${replyTarget} "...">\n`;
     suffix = `\n</ay-msg ${nonce}>`;
   }
@@ -3031,6 +3122,35 @@ async function cmdSend(rest: string[]): Promise<number> {
   process.stdout.write(
     `${status} to pid ${record.pid} (${record.cli}): ${truncate(payload, 80)}\n`,
   );
+
+  // Persist a durable record of the exchange from both ends' point of view (the
+  // sender's outbox + the recipient's inbox). Only real message bodies are
+  // logged — a bare control code (esc/ctrl-c with no body) isn't a "message".
+  // Best-effort: recordMessage swallows its own errors so it never breaks send.
+  if (body) {
+    await recordMessage({
+      at: Date.now(),
+      nonce,
+      from: sender.agent
+        ? {
+            pid: sender.agent.pid,
+            cli: sender.agent.cli,
+            cwd: sender.agent.cwd,
+            agent_id: sender.agent.agent_id,
+          }
+        : null,
+      to: {
+        pid: record.pid,
+        cli: record.cli,
+        cwd: record.cwd,
+        agent_id: record.agent_id,
+      },
+      body,
+      code: trailing === "\r" ? undefined : codeName,
+      confirmed,
+      wrapped: Boolean(nonce),
+    });
+  }
   if (!confirmed) {
     process.stderr.write(
       `\nwarning: couldn't confirm the CLI acted on it after ${SEND_SUBMIT_MAX_RETRIES + 1} attempt(s) — ` +
@@ -3059,6 +3179,119 @@ async function cmdSend(rest: string[]): Promise<number> {
   return confirmed ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------
+// ay msgs — read the durable inter-agent message log
+// ---------------------------------------------------------------------------
+
+/** A mailbox record annotated with the direction it takes from the owner's POV. */
+interface DirectedMessage {
+  dir: "in" | "out";
+  rec: MessageRecord;
+}
+
+/**
+ * `ay msgs [keyword]` — show the inter-agent messages an agent sent and
+ * received. With no keyword it uses THIS caller's context (the agent running
+ * `ay msgs`, or the human shell's cwd); with a keyword it resolves one agent and
+ * reads that agent's mailboxes. Newest last, like a chat log.
+ */
+async function cmdMsgs(rest: string[]): Promise<number> {
+  const y = yargs(rest)
+    .usage("Usage: ay msgs [keyword] [--in|--out] [-n N] [--json]")
+    .option("in", { type: "boolean", default: false, description: "Only received messages" })
+    .option("out", { type: "boolean", default: false, description: "Only sent messages" })
+    .option("n", { type: "number", description: "Show the last N messages (default 50)" })
+    .option("json", { type: "boolean", default: false, description: "Emit raw JSONL records" })
+    .option("all", { type: "boolean", default: false, description: "Include exited agents" })
+    .option("latest", {
+      type: "boolean",
+      default: false,
+      description: "Use most recent match when multiple match",
+    })
+    .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+
+  const argv = await y.parseAsync();
+  const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+
+  // Whose mailbox: an explicit keyword names a target agent; otherwise the
+  // calling agent (or, for a human shell, its own cwd with no agent filter).
+  let ownerCwd: string;
+  let ownerAgentId: string | null | undefined;
+  let ownerPid: number | null | undefined;
+  let ownerLabel: string;
+  if (keyword) {
+    const opts: CommonOpts = {
+      all: argv.all,
+      active: false,
+      json: false,
+      latest: argv.latest,
+      cwdScope: typeof argv.cwd === "string" ? path.resolve(argv.cwd) : null,
+    };
+    const record = await resolveOne(keyword, opts);
+    ownerCwd = record.cwd;
+    ownerAgentId = record.agent_id;
+    ownerPid = record.pid;
+    ownerLabel = `pid ${record.pid} (${record.cli})`;
+  } else {
+    const sender = await senderContext();
+    ownerCwd = sender.agent?.cwd ?? process.cwd();
+    ownerAgentId = sender.agent?.agent_id;
+    ownerPid = sender.agent?.pid;
+    ownerLabel = sender.agent ? `pid ${sender.agent.pid} (${sender.agent.cli})` : "this shell";
+  }
+
+  const isOwner = (party: MailParty | null): boolean =>
+    // A human shell (no agent context) owns only the messages it sent, which
+    // carry `from: null`; match those so `ay msgs` in a plain terminal works.
+    ownerAgentId || ownerPid ? partyMatches(party, ownerAgentId, ownerPid) : party === null;
+
+  const messages: DirectedMessage[] = [];
+  if (!argv.in) {
+    for (const rec of await readMailbox(ownerCwd, "outbox")) {
+      if (isOwner(rec.from)) messages.push({ dir: "out", rec });
+    }
+  }
+  if (!argv.out) {
+    for (const rec of await readMailbox(ownerCwd, "inbox")) {
+      if (isOwner(rec.to)) messages.push({ dir: "in", rec });
+    }
+  }
+  messages.sort((a, b) => a.rec.at - b.rec.at);
+
+  const limit =
+    argv.n !== undefined && Number.isFinite(argv.n) && argv.n! > 0 ? Math.floor(argv.n!) : 50;
+  const shown = messages.slice(-limit);
+
+  if (argv.json) {
+    for (const { dir, rec } of shown) {
+      process.stdout.write(JSON.stringify({ dir, ...rec }) + "\n");
+    }
+    return 0;
+  }
+
+  if (shown.length === 0) {
+    process.stderr.write(`no messages for ${ownerLabel}.\n`);
+    return 0;
+  }
+
+  for (const { dir, rec } of shown) {
+    const when = new Date(rec.at).toLocaleTimeString();
+    const peer =
+      dir === "out"
+        ? `→ ${rec.to.cli} #${rec.to.pid}`
+        : `← ${rec.from ? `${rec.from.cli} #${rec.from.pid}` : "human"}`;
+    const via = rec.remote ? ` (via ${rec.remote})` : "";
+    const flag = rec.confirmed === false ? " (unconfirmed)" : "";
+    const tag = rec.kind ? `[${rec.kind}] ` : "";
+    const line = tag + truncate(rec.body.replace(/\s+/g, " "), 100);
+    process.stdout.write(`${when}  ${peer.padEnd(20)}${via}${flag}  ${line}\n`);
+  }
+  return 0;
+}
+
 // Resolve a keyword to one agent and return it with a writable FIFO, or throw
 // with the same guidance cmdSend gives. Shared by `ay key` / `ay select`.
 async function resolveWritableAgent(keyword: string, opts: CommonOpts): Promise<GlobalPidRecord> {
@@ -3069,6 +3302,36 @@ async function resolveWritableAgent(keyword: string, opts: CommonOpts): Promise<
     );
   }
   return record;
+}
+
+/**
+ * Record an `ay key` / `ay select` stdin write in the message log, same as a
+ * text send but tagged with its `kind` (and `body` = the keystroke names /
+ * chosen option). Key/select are local-only (no remote wire), so both mailboxes
+ * are on this host — recordMessage writes both. Best-effort.
+ */
+async function recordKeyEvent(
+  sender: { agent: GlobalPidRecord | null },
+  record: GlobalPidRecord,
+  kind: "key" | "select",
+  body: string,
+): Promise<void> {
+  await recordMessage({
+    at: Date.now(),
+    from: sender.agent
+      ? {
+          pid: sender.agent.pid,
+          cli: sender.agent.cli,
+          cwd: sender.agent.cwd,
+          agent_id: sender.agent.agent_id,
+        }
+      : null,
+    to: { pid: record.pid, cli: record.cli, cwd: record.cwd, agent_id: record.agent_id },
+    kind,
+    body,
+    confirmed: true,
+    wrapped: false,
+  });
 }
 
 async function cmdKey(rest: string[]): Promise<number> {
@@ -3118,10 +3381,11 @@ async function cmdKey(rest: string[]): Promise<number> {
   };
   const record = await resolveWritableAgent(keyword, opts);
   const force = Boolean(argv.force) || process.env.AGENT_YES_FORCE_SEND === "1";
-  await enforceSendGuards(record, force);
+  const sender = await enforceSendGuards(record, force);
 
   await writeKeysPaced(record.fifo_file!, byteSeqs, Math.max(0, argv.pace));
   process.stdout.write(`sent to pid ${record.pid} (${record.cli}): ${keyNames.join(" ")}\n`);
+  await recordKeyEvent(sender, record, "key", keyNames.join(" "));
   return 0;
 }
 
@@ -3178,7 +3442,7 @@ async function cmdSelect(rest: string[]): Promise<number> {
     );
   }
   const force = Boolean(argv.force) || process.env.AGENT_YES_FORCE_SEND === "1";
-  await enforceSendGuards(record, force);
+  const sender = await enforceSendGuards(record, force);
 
   const menu = await extractMenu(record.log_file, record.cli);
   if (!menu) {
@@ -3202,6 +3466,7 @@ async function cmdSelect(rest: string[]): Promise<number> {
   process.stdout.write(
     `pid ${record.pid} (${record.cli}): selected option ${n} (${moved} + enter)\n`,
   );
+  await recordKeyEvent(sender, record, "select", `option ${n}`);
 
   if (argv.wait) {
     const ok = await waitForNeedsInputClear(record, Math.max(1, argv.timeout) * 1000);

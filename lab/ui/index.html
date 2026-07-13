@@ -1133,6 +1133,50 @@
           background-color: color-mix(in srgb, var(--peer) 24%, transparent);
         }
       }
+      /* An inter-agent message just travelled between two rows (`ay send`/`key`/
+         `select`, from /api/edges `sends`). Both ends pulse so the exchange reads
+         as a pair: green at the SENDER, amber at the RECIPIENT — the same hues the
+         /r/ forest uses for its send wire. Distinct from .stdinflash (which fires
+         for ANY stdin, including a human typing) so agent→agent traffic stands out. */
+      .row.sendflash {
+        animation: sendpulse 0.7s ease-in-out infinite;
+      }
+      .row.recvflash {
+        animation: recvpulse 0.7s ease-in-out infinite;
+      }
+      @keyframes sendpulse {
+        0%,
+        100% {
+          background-color: transparent;
+        }
+        50% {
+          background-color: color-mix(in srgb, var(--green) 22%, transparent);
+        }
+      }
+      @keyframes recvpulse {
+        0%,
+        100% {
+          background-color: transparent;
+        }
+        50% {
+          background-color: color-mix(in srgb, var(--amber) 22%, transparent);
+        }
+      }
+      /* The wire itself: an SVG laid over the (scrolling) list, drawn from the row
+         rects. Inside .list so it scrolls with the rows; pointer-events off so it
+         never eats a click meant for a row. */
+      .list {
+        position: relative;
+      }
+      .wire-overlay {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 100%;
+        pointer-events: none;
+        overflow: visible;
+        z-index: 3;
+      }
       /* Per-row chip: how many peers are watching THIS agent (yellow, mono). */
       .peerchip {
         font-family: var(--mono);
@@ -2101,6 +2145,16 @@
       const stdinSeen = new Map();
       const flashUntil = new Map();
       const STDIN_FLASH_MS = 1200;
+      // Inter-agent message traffic (from /api/edges `sends`). A send is an EVENT,
+      // not a standing relation: both ends pulse and the wire between them fades
+      // out over SEND_FADE_MS. `sendSeen` dedupes by (by,target,at) so re-polling
+      // the same still-in-window edge doesn't re-arm the flash forever.
+      const sendFlashUntil = new Map(); // sender key   → until (ms)
+      const recvFlashUntil = new Map(); // receiver key → until (ms)
+      const sendSeen = new Set();
+      let sendWires = []; // [{by, target, at, kind}] — live wires, keys are <src>#<pid>
+      const SEND_FLASH_MS = 2000;
+      const SEND_FADE_MS = 20000; // wire fully faded this long after delivery
       let es = null; // live-tail subscription closer
       let term = null; // xterm.js Terminal rendering the raw PTY stream
       let fit = null;
@@ -3169,6 +3223,131 @@
           el.classList.toggle("stdinflash", on);
         }
       }, 200);
+
+      // ── inter-agent message traffic: row pulses + the wire between them ───────
+
+      /** Remaining life of a send, 1 at delivery → 0 once fully faded. */
+      function sendAlpha(at) {
+        return Math.max(0, Math.min(1, 1 - (Date.now() - at) / SEND_FADE_MS));
+      }
+
+      // Poll every source's /api/edges and arm a pulse for each NEW send. Edge pids
+      // are mapped to the `<src>#<pid>` row keys the list already uses, so a wire
+      // never crosses sources (a daemon only ever sees its own agents). An older
+      // daemon has no `sends` field — the console then simply shows no traffic.
+      async function pollEdges() {
+        const srcs = [...sources.values()].filter((s) => s.tx && s.live);
+        const results = await Promise.allSettled(
+          srcs.map(async (s) => {
+            const body = await s.tx.fetchJSON("/api/edges");
+            return (body?.sends ?? []).map((e) => ({
+              by: `${s.id}#${e.by}`,
+              target: `${s.id}#${e.target}`,
+              at: e.at,
+              kind: e.kind,
+            }));
+          }),
+        );
+        const edges = results.flatMap((p) => (p.status === "fulfilled" ? p.value : []));
+        const now = Date.now();
+        for (const e of edges) {
+          const id = `${e.by} ${e.target} ${e.at}`;
+          if (sendSeen.has(id)) continue; // already pulsed for this exact send
+          sendSeen.add(id);
+          // Don't flash a send that's already older than its own flash window (e.g.
+          // the first poll after opening the console, which sees the whole minute).
+          if (now - e.at > SEND_FLASH_MS) continue;
+          sendFlashUntil.set(e.by, now + SEND_FLASH_MS);
+          recvFlashUntil.set(e.target, now + SEND_FLASH_MS);
+        }
+        // Keep only wires still worth drawing; bound sendSeen to the live set so it
+        // can't grow without limit over a long session.
+        sendWires = edges.filter((e) => sendAlpha(e.at) > 0);
+        if (sendSeen.size > 500) {
+          const live = new Set(sendWires.map((e) => `${e.by} ${e.target} ${e.at}`));
+          for (const id of [...sendSeen]) if (!live.has(id)) sendSeen.delete(id);
+        }
+        renderSendWires();
+      }
+      setInterval(() => void pollEdges(), 1500);
+
+      // Drive the send/recv row pulses on the stable list DOM (same trick as the
+      // stdin flash above), and keep the wire fading. No-op when nothing's in
+      // flight, so an idle console costs nothing.
+      setInterval(() => {
+        const now = Date.now();
+        for (const [k, until] of [...sendFlashUntil.entries()])
+          if (until <= now) sendFlashUntil.delete(k);
+        for (const [k, until] of [...recvFlashUntil.entries()])
+          if (until <= now) recvFlashUntil.delete(k);
+        const listEl = $("list");
+        if (listEl && (sendFlashUntil.size || recvFlashUntil.size)) {
+          for (const el of listEl.querySelectorAll(".row[data-key]")) {
+            const key = el.getAttribute("data-key");
+            el.classList.toggle("sendflash", (sendFlashUntil.get(key) || 0) > now);
+            el.classList.toggle("recvflash", (recvFlashUntil.get(key) || 0) > now);
+          }
+        }
+        if (sendWires.length) {
+          sendWires = sendWires.filter((e) => sendAlpha(e.at) > 0);
+          renderSendWires(); // redraw so the wire's opacity decays smoothly
+        }
+      }, 200);
+
+      /**
+       * Draw the live send wires over the list: an S-curve in the left gutter from
+       * the sender row's centre to the recipient's, opacity decaying with age.
+       *
+       * The SVG lives INSIDE #list (which scrolls), sized to scrollHeight, so the
+       * wires scroll with their rows instead of needing a scroll listener. An
+       * endpoint that isn't in the DOM right now — folded under a collapsed parent,
+       * or filtered out by the search box — simply drops its wire.
+       */
+      function renderSendWires() {
+        const listEl = $("list");
+        if (!listEl) return;
+        let svg = listEl.querySelector(".wire-overlay");
+        if (!sendWires.length) {
+          if (svg) svg.remove();
+          return;
+        }
+        if (!svg) {
+          svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+          svg.setAttribute("class", "wire-overlay");
+          listEl.appendChild(svg);
+        }
+        const base = listEl.getBoundingClientRect();
+        // Row centres in the list's own scrolled coordinate space.
+        const yOf = (key) => {
+          const el = listEl.querySelector(`.row[data-key="${CSS.escape(key)}"]`);
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return r.top - base.top + listEl.scrollTop + r.height / 2;
+        };
+        svg.setAttribute("height", String(listEl.scrollHeight));
+        svg.style.height = listEl.scrollHeight + "px";
+        const paths = [];
+        for (const e of sendWires) {
+          const y1 = yOf(e.by);
+          const y2 = yOf(e.target);
+          if (y1 == null || y2 == null || y1 === y2) continue;
+          const a = sendAlpha(e.at);
+          const color = e.kind ? "245, 158, 11" : "63, 185, 80"; // amber = key/select, green = msg
+          // Bulge left-to-right with the gap so a long hop is legible, capped so it
+          // stays inside the gutter.
+          const bulge = Math.min(34, 8 + Math.abs(y2 - y1) * 0.18);
+          const x = 8;
+          paths.push(
+            `<path d="M ${x},${y1} C ${x + bulge},${y1} ${x + bulge},${y2} ${x},${y2}" ` +
+              `fill="none" stroke="rgba(${color}, ${(0.2 + 0.8 * a).toFixed(3)})" ` +
+              `stroke-width="${(1 + 1.6 * a).toFixed(2)}" stroke-dasharray="3 3" />` +
+              // arrowhead at the recipient end — which way the message travelled
+              `<circle cx="${x}" cy="${y2}" r="${(2 + 1.5 * a).toFixed(2)}" ` +
+              `fill="rgba(${color}, ${(0.3 + 0.7 * a).toFixed(3)})" />`,
+          );
+        }
+        svg.innerHTML = paths.join("");
+      }
 
       // Peer-selection overlay. The coordinate math (parseSel / selSegments /
       // hashHue) lives in console-logic.js (unit-tested); here we just measure the
@@ -4386,9 +4565,19 @@
       // redundant — and it's the only row your own terminal's protocol replies
       // could ever nudge, so this also keeps a resize from blinking your own row.
       function rowFlags(e) {
+        const now = Date.now();
         const peers = focusByKey.get(e._key) || 0;
-        const flash = e._key !== sel && (flashUntil.get(e._key) || 0) > Date.now();
-        return (peers ? " peerfocus" : "") + (flash ? " stdinflash" : "");
+        const flash = e._key !== sel && (flashUntil.get(e._key) || 0) > now;
+        // Re-emit the message pulses too: renderList replaces rows wholesale, so a
+        // class the fast loop toggled on would be lost on the next render otherwise.
+        const sent = (sendFlashUntil.get(e._key) || 0) > now;
+        const recv = (recvFlashUntil.get(e._key) || 0) > now;
+        return (
+          (peers ? " peerfocus" : "") +
+          (flash ? " stdinflash" : "") +
+          (sent ? " sendflash" : "") +
+          (recv ? " recvflash" : "")
+        );
       }
       // A yellow chip showing how many peers are watching this agent ("" if none).
       function peerChipHtml(e) {
@@ -4453,6 +4642,7 @@
         <span class="age">${age(e)}</span></div>`;
               })
               .join("") || `<div class="empty">no match</div>`;
+          renderSendWires(); // rows were replaced — re-draw the overlay (see below)
           return;
         }
         $("list").innerHTML =
@@ -4491,6 +4681,10 @@
       </div>`;
             })
             .join("") || `<div class="empty">no match</div>`;
+        // The innerHTML above replaced every row — and with them the wire overlay
+        // (a child of #list). Re-draw it against the fresh rects, or an in-flight
+        // wire would vanish on the next list render.
+        renderSendWires();
       }
 
       // Restore the last filter so a refresh (incl. the auto-reload on a new
