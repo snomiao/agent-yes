@@ -69,7 +69,7 @@ interface Provision {
   }): Promise<ProvisionResult>;
 }
 
-async function loadProvision(): Promise<Provision> {
+export async function loadProvision(): Promise<Provision> {
   try {
     return (await import("codehost/provision")) as unknown as Provision;
   } catch (e) {
@@ -298,9 +298,14 @@ function parseFlags(
 // subcommands
 // ---------------------------------------------------------------------------
 
-async function cmdWsLs(args: string[]): Promise<number> {
-  const { flags, positional } = parseFlags(args, { status: "bool", json: "bool" });
-  if (positional.length > 0) throw new Error(`ws ls takes no positional args`);
+/**
+ * Data API shared by `ay ws ls` and serve's `GET /api/ws`: every workspace
+ * under the standard layout with its live-agent count, optionally joined with
+ * git status (bounded concurrency — readStatus can block on git's timeout).
+ */
+export async function collectWorkspaces(opts?: {
+  status?: boolean;
+}): Promise<{ wsRoot: string; workspaces: WsEntry[] }> {
   const prov = await loadProvision();
   const wsRoot = prov.resolveWsRoot(getProvisionRoot());
 
@@ -314,7 +319,7 @@ async function cmdWsLs(args: string[]): Promise<number> {
     agents: { live: liveAgentsIn(records, w.path).length },
   }));
 
-  if (flags.status) {
+  if (opts?.status) {
     entries = await mapBounded(entries, STATUS_CONCURRENCY, async (e) => {
       try {
         return { ...e, git: await prov.readStatus(e.path) };
@@ -323,6 +328,13 @@ async function cmdWsLs(args: string[]): Promise<number> {
       }
     });
   }
+  return { wsRoot, workspaces: entries };
+}
+
+async function cmdWsLs(args: string[]): Promise<number> {
+  const { flags, positional } = parseFlags(args, { status: "bool", json: "bool" });
+  if (positional.length > 0) throw new Error(`ws ls takes no positional args`);
+  const { wsRoot, workspaces: entries } = await collectWorkspaces({ status: !!flags.status });
 
   if (flags.json) {
     process.stdout.write(
@@ -366,22 +378,20 @@ function gitSummary(e: WsEntry): string {
   return parts.length ? parts.join(", ") : "clean";
 }
 
-async function cmdWsStatus(args: string[]): Promise<number> {
-  const { flags, positional } = parseFlags(args, { json: "bool", path: "bool", spec: "bool" });
-  if (flags.path && flags.spec) throw new Error("--path and --spec are mutually exclusive");
-  if (positional.length > 1) throw new Error("ws status takes at most one target");
+/**
+ * One workspace's WsEntry by checkout dir — git status + live-agent count, the
+ * owner/repo/branch back-derived from the layout when `spec` isn't provided.
+ * Shared by `ay ws status` and serve's `GET /api/ws/status`.
+ */
+export async function workspaceStatus(dir: string, spec?: RepoSpec | null): Promise<WsEntry> {
   const prov = await loadProvision();
-  const wsRoot = getProvisionRoot();
-  const operand = positional[0] ?? ".";
-  const mode = flags.path ? "path" : flags.spec ? "spec" : "auto";
-  const { dir, spec } = await resolveOperand(prov, operand, mode, wsRoot);
   const git = await prov.readStatus(dir);
 
   // Fill owner/repo/branch from the layout when addressed by path, best-effort.
   const layoutSpec =
     spec ??
     (() => {
-      const root = prov.resolveWsRoot(wsRoot);
+      const root = prov.resolveWsRoot(getProvisionRoot());
       if (!isPathInside(root, dir)) return null;
       const segs = path.relative(root, dir).split(path.sep);
       return segs.length >= 4 && segs[2] === "tree"
@@ -389,7 +399,7 @@ async function cmdWsStatus(args: string[]): Promise<number> {
         : null;
     })();
 
-  const entry: WsEntry = {
+  return {
     owner: layoutSpec?.owner ?? "",
     repo: layoutSpec?.repo ?? "",
     branch: layoutSpec?.branch ?? git.branch,
@@ -408,14 +418,27 @@ async function cmdWsStatus(args: string[]): Promise<number> {
     },
     git,
   };
+}
+
+async function cmdWsStatus(args: string[]): Promise<number> {
+  const { flags, positional } = parseFlags(args, { json: "bool", path: "bool", spec: "bool" });
+  if (flags.path && flags.spec) throw new Error("--path and --spec are mutually exclusive");
+  if (positional.length > 1) throw new Error("ws status takes at most one target");
+  const prov = await loadProvision();
+  const wsRoot = getProvisionRoot();
+  const operand = positional[0] ?? ".";
+  const mode = flags.path ? "path" : flags.spec ? "spec" : "auto";
+  const { dir, spec } = await resolveOperand(prov, operand, mode, wsRoot);
+  const entry = await workspaceStatus(dir, spec);
 
   if (flags.json) {
     process.stdout.write(JSON.stringify({ schema: WS_JSON_SCHEMA, workspace: entry }, null, 2) + "\n");
     return 0;
   }
+  const git = entry.git!;
   process.stdout.write(
     `${dir}\n` +
-      (layoutSpec ? `  spec:     ${layoutSpec.owner}/${layoutSpec.repo}@${layoutSpec.branch}\n` : "") +
+      (entry.owner ? `  spec:     ${entry.owner}/${entry.repo}@${entry.branch}\n` : "") +
       `  branch:   ${git.branch} @ ${git.head}\n` +
       `  state:    ${gitSummary(entry)}\n` +
       `  agents:   ${entry.agents.live} live\n`,

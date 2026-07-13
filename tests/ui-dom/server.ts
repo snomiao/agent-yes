@@ -16,6 +16,9 @@
  *   POST /api/send              → ok
  *   POST /api/kill              → { ok: true }  (Cmd+K /kill, ⋯ Force-kill)
  *   POST /api/restart           → { ok: true }  (Cmd+K /restart, ⋯ Restart)
+ *   GET  /api/ws                → WORKSPACES fixture  (Cmd+K /ws browser)
+ *   GET  /api/ws/status?path=   → one workspace + a fixed dirty git state
+ *   POST /api/spawn             → { ok: true }  (Enter on a /ws row)
  */
 import http from "http";
 import { readFileSync } from "fs";
@@ -58,6 +61,25 @@ export const AGENTS = [
     prompt: "",
     status: "active",
     started_at: T0,
+  },
+];
+
+// Workspace fixture for the Cmd+K /ws browser (GET /api/ws): one workspace with
+// a live agent in it and one idle checkout no agent list could ever surface.
+export const WORKSPACES = [
+  {
+    owner: "snomiao",
+    repo: "agent-yes",
+    branch: "main",
+    path: "/home/u/ws/snomiao/agent-yes/tree/main",
+    agents: { live: 1 },
+  },
+  {
+    owner: "acme",
+    repo: "widgets",
+    branch: "dev",
+    path: "/home/u/ws/acme/widgets/tree/dev",
+    agents: { live: 0 },
   },
 ];
 
@@ -123,6 +145,42 @@ export async function startServer(
     if (req.method === "POST" && (p === "/api/kill" || p === "/api/restart")) {
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify({ ok: true }));
+    }
+    // Cmd+K /ws browser: the workspace walk, one workspace's lazy git status,
+    // and the spawn the Enter action fires (the test asserts the request body).
+    if (req.method === "GET" && p === "/api/ws") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(
+        JSON.stringify({ schema: "ay-ws/v1", wsRoot: "/home/u/ws", workspaces: WORKSPACES }),
+      );
+    }
+    if (req.method === "GET" && p === "/api/ws/status") {
+      const target = WORKSPACES.find((w) => w.path === url.searchParams.get("path"));
+      if (!target) {
+        res.writeHead(404);
+        return res.end("not a workspace checkout");
+      }
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(
+        JSON.stringify({
+          schema: "ay-ws/v1",
+          workspace: {
+            ...target,
+            git: {
+              branch: target.branch,
+              head: "abc1234",
+              ahead: 2,
+              behind: 0,
+              dirty: true,
+              hasUpstream: true,
+            },
+          },
+        }),
+      );
+    }
+    if (req.method === "POST" && p === "/api/spawn") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: true, pid: 999 }));
     }
 
     res.writeHead(404);
