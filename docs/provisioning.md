@@ -12,7 +12,7 @@ Three ways to produce the `cwd`, in precedence order:
 
 | Request body                | What happens                                                                                      | Backed by                                 |
 | --------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| `fork: { fromCwd, branch }` | Fork an existing worktree to a **new branch (clean — committed work only)**, then spawn there      | `codehost/provision` `forkWorktree`       |
+| `fork: { fromCwd, branch }` | Fork an existing worktree to a **new branch (clean — committed work only)**, then spawn there     | `codehost/provision` `forkWorktree`       |
 | `from: "<source>"`          | Provision a GitHub source (clone / worktree / ff-pull) into `<root>/<owner>/<repo>/tree/<branch>` | `codehost/provision` `provision`          |
 | `cwd: "<dir>"` (or omitted) | Resolve against the workspace root and `mkdir -p` (a missing dir no longer ENOENTs into a 500)    | `ts/workspaceConfig.ts` `resolveSpawnCwd` |
 

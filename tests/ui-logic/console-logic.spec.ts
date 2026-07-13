@@ -371,9 +371,9 @@ describe("age", () => {
     expect(age(agent({ started_at: now + 10_000 }), now)).toBe("0s");
   });
   it("prefers last_active_at (last stdout) over started_at when present", () => {
-    expect(
-      age(agent({ started_at: now - 3 * 3_600_000, last_active_at: now - 5_000 }), now),
-    ).toBe("5s");
+    expect(age(agent({ started_at: now - 3 * 3_600_000, last_active_at: now - 5_000 }), now)).toBe(
+      "5s",
+    );
   });
   it("falls back to started_at when last_active_at is absent", () => {
     expect(age(agent({ started_at: now - 5 * 60_000, last_active_at: undefined }), now)).toBe("5m");
@@ -561,6 +561,31 @@ describe("badgesFor (status flag chips)", () => {
       "goal-active",
       "some-future-flag",
     ]);
+  });
+
+  it("renders a dynamic footer counter with the captured text as the label", () => {
+    const [chip] = badgesFor({ badges: ["shells:4 shells"] });
+    expect(chip.id).toBe("shells:4 shells");
+    expect(chip.label).toBe("4 shells");
+    expect(chip.title).toContain("4 shells");
+  });
+
+  it("keeps the CLI footer's singular wording", () => {
+    expect(badgesFor({ badges: ["shells:1 shell"] })[0].label).toBe("1 shell");
+    expect(badgesFor({ badges: ["monitors:1 monitor"] })[0].label).toBe("1 monitor");
+  });
+
+  it("renders the PR chip and the background-agents counter", () => {
+    expect(badgesFor({ badges: ["pr:PR #310"] })[0].label).toBe("PR #310");
+    expect(badgesFor({ badges: ["bg-agents:3 agents"] })[0].label).toBe("3 agents");
+  });
+
+  it("falls back to the raw value for an unknown dynamic id", () => {
+    expect(badgesFor({ badges: ["future:stuff"] })[0]).toEqual({
+      id: "future:stuff",
+      label: "future:stuff",
+      title: "future:stuff",
+    });
   });
 });
 
@@ -916,10 +941,7 @@ describe("sortEntries", () => {
   });
 
   it("active mode: falls back to started_at when last_active_at is absent", () => {
-    const list = [
-      a({ _k: "old", started_at: 100 }),
-      a({ _k: "new", started_at: 900 }),
-    ];
+    const list = [a({ _k: "old", started_at: 100 }), a({ _k: "new", started_at: 900 })];
     expect(keys(sortEntries(list, "active"))).toEqual(["new", "old"]);
   });
 

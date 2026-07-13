@@ -170,9 +170,9 @@ describe("resolveOperand", () => {
   });
 
   it("reports a precise parse error for garbage", async () => {
-    await expect(resolveOperand(fakeProv("/unused"), "not a spec", "spec", undefined)).rejects.toThrow(
-      /cannot parse "not a spec"/,
-    );
+    await expect(
+      resolveOperand(fakeProv("/unused"), "not a spec", "spec", undefined),
+    ).rejects.toThrow(/cannot parse "not a spec"/);
   });
 });
 
@@ -188,7 +188,14 @@ describe("cmdWs (mocked provision)", () => {
   let err: string[];
   let homeBackup: string | undefined;
 
-  const CLEAN = { branch: "main", head: "abc123", ahead: 0, behind: 0, dirty: false, hasUpstream: true };
+  const CLEAN = {
+    branch: "main",
+    head: "abc123",
+    ahead: 0,
+    behind: 0,
+    dirty: false,
+    hasUpstream: true,
+  };
 
   beforeEach(() => {
     // realpath: os.tmpdir() is a symlink on macOS (/var → /private/var), and
@@ -312,7 +319,12 @@ describe("cmdWs (mocked provision)", () => {
   });
 
   it("new: branch-not-found hints at --create, and --create falls back to createBranch", async () => {
-    prov.provision.mockResolvedValue({ ok: false, action: "error", reason: "branch-not-found", error: "nope" });
+    prov.provision.mockResolvedValue({
+      ok: false,
+      action: "error",
+      reason: "branch-not-found",
+      error: "nope",
+    });
     expect(await cmdWs(["new", "o/r@dev"])).toBe(1);
     expect(err.join("")).toContain("--create");
     expect(prov.createBranch).not.toHaveBeenCalled();
@@ -397,7 +409,12 @@ describe("cmdWs (mocked provision)", () => {
   });
 
   it("new: a non-branch failure reports without the --create hint", async () => {
-    prov.provision.mockResolvedValue({ ok: false, action: "error", reason: "repo-not-found", error: "gone" });
+    prov.provision.mockResolvedValue({
+      ok: false,
+      action: "error",
+      reason: "repo-not-found",
+      error: "gone",
+    });
     expect(await cmdWs(["new", "o/r"])).toBe(1);
     const msg = err.join("");
     expect(msg).toContain("repo-not-found");
@@ -453,7 +470,14 @@ describe("collectWorkspaces / workspaceStatus (mocked provision)", () => {
     prov.wsRoot = root;
     prov.readStatus
       .mockReset()
-      .mockResolvedValue({ branch: "main", head: "abc123", ahead: 1, behind: 0, dirty: true, hasUpstream: true });
+      .mockResolvedValue({
+        branch: "main",
+        head: "abc123",
+        ahead: 1,
+        behind: 0,
+        dirty: true,
+        hasUpstream: true,
+      });
     homeBackup = process.env.AGENT_YES_HOME;
     process.env.AGENT_YES_HOME = path.join(root, ".ay-home");
   });

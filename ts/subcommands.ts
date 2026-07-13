@@ -28,7 +28,7 @@ import {
   recordMessage,
   recordOutbox,
 } from "./messageLog.ts";
-import { badgeDef, matchBadges, TYPING_BADGE } from "./badges.ts";
+import { badgeLabel, matchBadges, TYPING_BADGE } from "./badges.ts";
 import {
   classifyNeedsInput,
   isWorkingScreen,
@@ -37,7 +37,13 @@ import {
   type NeedsInput,
 } from "./needsInput.ts";
 import { diffLsStates, type LiveState, type LsAgentState } from "./lsWatch.ts";
-import { filterSinceSeq, filterSinceTs, filterUnread, maxSeq, type NotifyEvent } from "./notifyInbox.ts";
+import {
+  filterSinceSeq,
+  filterSinceTs,
+  filterUnread,
+  maxSeq,
+  type NotifyEvent,
+} from "./notifyInbox.ts";
 import {
   clearWatcher,
   getCursor,
@@ -1283,7 +1289,8 @@ async function runAllRemotesLs(opts: {
     byHost.push({ host: "local", records: enriched });
   }
   for (const res of remoteResults) {
-    if (res.status === "fulfilled") byHost.push({ host: res.value.host, records: res.value.records });
+    if (res.status === "fulfilled")
+      byHost.push({ host: res.value.host, records: res.value.records });
   }
 
   // Flatten each host's records into its agent>subagent forest (parent_pid links),
@@ -1471,7 +1478,7 @@ function branchLabel(g: GitInfo | null | undefined): string {
  */
 function badgeLabels(ids: string[] | null | undefined): string {
   if (!ids || ids.length === 0) return "";
-  return ids.map((id) => badgeDef(id)?.label ?? id).join(" ");
+  return ids.map((id) => badgeLabel(id)).join(" ");
 }
 
 // porcelain=v2 --branch parser — mirrors parseGitStatus in serve.ts (that copy
@@ -2887,7 +2894,8 @@ export async function backoffWhileTyping(
   const deadline = start + maxWaitMs;
   let waited = false;
   while (Date.now() < deadline) {
-    if (!(await isUserTyping(pid))) return { clear: true, waitedMs: waited ? Date.now() - start : 0 };
+    if (!(await isUserTyping(pid)))
+      return { clear: true, waitedMs: waited ? Date.now() - start : 0 };
     waited = true;
     await new Promise((r) => setTimeout(r, SEND_TYPING_POLL_MS));
   }
@@ -4237,9 +4245,7 @@ async function cmdRestart(rest: string[]): Promise<number> {
     cwd: record.cwd,
     detached: true,
     stdio: ["ignore", "ignore", "ignore"],
-    env: record.agent_id
-      ? { ...process.env, AGENT_YES_AGENT_ID: record.agent_id }
-      : process.env,
+    env: record.agent_id ? { ...process.env, AGENT_YES_AGENT_ID: record.agent_id } : process.env,
   });
 
   const { out, err } = restartHintLines(record.cli, record.cwd, strategy);
@@ -4765,15 +4771,38 @@ async function cmdNotify(rest: string[]): Promise<number> {
   }
 
   const y = yargs(args)
-    .option("parent", { type: "number", description: "Parent pid whose inbox to drain (default: $AGENT_YES_PID)" })
+    .option("parent", {
+      type: "number",
+      description: "Parent pid whose inbox to drain (default: $AGENT_YES_PID)",
+    })
     .option("since", { type: "number", description: "Only edges with seq greater than this" })
     .option("since-ts", { type: "number", description: "Only edges at/after this epoch-ms" })
-    .option("unread", { type: "boolean", default: false, description: "Only edges past the saved cursor" })
-    .option("ack", { type: "boolean", default: false, description: "Advance the cursor past what's shown (at-least-once: off by default)" })
+    .option("unread", {
+      type: "boolean",
+      default: false,
+      description: "Only edges past the saved cursor",
+    })
+    .option("ack", {
+      type: "boolean",
+      default: false,
+      description: "Advance the cursor past what's shown (at-least-once: off by default)",
+    })
     .option("json", { type: "boolean", default: false, description: "Emit raw NDJSON events" })
-    .option("consumer", { type: "string", default: "parent", description: "Cursor identity (for multiple readers)" })
-    .option("interval", { type: "number", default: 2, description: "Poll interval in seconds (watch)" })
-    .option("ensure-daemon", { type: "boolean", default: true, description: "Start the notifyd singleton if not running (watch)" })
+    .option("consumer", {
+      type: "string",
+      default: "parent",
+      description: "Cursor identity (for multiple readers)",
+    })
+    .option("interval", {
+      type: "number",
+      default: 2,
+      description: "Poll interval in seconds (watch)",
+    })
+    .option("ensure-daemon", {
+      type: "boolean",
+      default: true,
+      description: "Start the notifyd singleton if not running (watch)",
+    })
     .help(false)
     .version(false)
     .exitProcess(false);
@@ -4810,7 +4839,8 @@ async function cmdNotify(rest: string[]): Promise<number> {
     } else {
       if (sinceSeqOverride !== undefined) events = filterSinceSeq(events, sinceSeqOverride);
       else if (Number.isFinite(argv.since)) events = filterSinceSeq(events, argv.since as number);
-      if (Number.isFinite(argv["since-ts"])) events = filterSinceTs(events, argv["since-ts"] as number);
+      if (Number.isFinite(argv["since-ts"]))
+        events = filterSinceTs(events, argv["since-ts"] as number);
     }
     printNotifyEvents(events, argv.json);
     return maxSeq(events);
@@ -4902,9 +4932,7 @@ async function resolveParentStartedAt(parent: number): Promise<number> {
   }).catch(() => [] as GlobalPidRecord[]);
   const live = records.filter(
     (r) =>
-      (r.wrapper_pid === parent || r.pid === parent) &&
-      r.status !== "exited" &&
-      isPidAlive(r.pid),
+      (r.wrapper_pid === parent || r.pid === parent) && r.status !== "exited" && isPidAlive(r.pid),
   );
   // Exactly one live match, or fail closed.
   if (live.length !== 1) return 0;

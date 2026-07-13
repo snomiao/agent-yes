@@ -13,7 +13,9 @@ const CACHE = "agent-yes-w-v3";
 // request to the controlling page (which does), streaming the response back.
 // Scope-relative so it works at both /w/ (agent-yes.com) and / (ay serve --http).
 const BASE = new URL("./", self.location.href).pathname; // "/w/" or "/"
-const PREVIEW = new RegExp("^" + BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "p/([^/]+)/(\\d{1,5})(/.*)?$");
+const PREVIEW = new RegExp(
+  "^" + BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "p/([^/]+)/(\\d{1,5})(/.*)?$",
+);
 
 async function pickClient() {
   const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
@@ -53,8 +55,10 @@ async function proxyPreview(request, src, port, rest, allowInject) {
         mc.port1.onmessage = (e2) => {
           const m2 = e2.data;
           if (m2.type === "body") chunks.push(new Uint8Array(m2.chunk));
-          else if (m2.type === "end") resolve(injectBootstrap(chunks, msg, headers, src, Number(port)));
-          else if (m2.type === "error") resolve(new Response("preview error: " + m2.message, { status: 502 }));
+          else if (m2.type === "end")
+            resolve(injectBootstrap(chunks, msg, headers, src, Number(port)));
+          else if (m2.type === "error")
+            resolve(new Response("preview error: " + m2.message, { status: 502 }));
         };
         return;
       }
@@ -71,7 +75,15 @@ async function proxyPreview(request, src, port, rest, allowInject) {
       resolve(new Response(stream, { status: msg.status, statusText: msg.statusText, headers }));
     };
     client.postMessage(
-      { type: "ay-preview-fetch", src, port: Number(port), method: request.method, path: rest, headers, body },
+      {
+        type: "ay-preview-fetch",
+        src,
+        port: Number(port),
+        method: request.method,
+        path: rest,
+        headers,
+        body,
+      },
       [mc.port2, ...(body ? [body.buffer] : [])],
     );
   });
@@ -99,9 +111,7 @@ function injectBootstrap(chunks, msg, headers, src, port) {
     JSON.stringify(port) +
     ");}catch(e){}})();</" +
     "script>";
-  const html = /<head[^>]*>/i.test(raw)
-    ? raw.replace(/<head[^>]*>/i, (m) => m + boot)
-    : boot + raw;
+  const html = /<head[^>]*>/i.test(raw) ? raw.replace(/<head[^>]*>/i, (m) => m + boot) : boot + raw;
   headers.delete("content-security-policy");
   headers.delete("content-security-policy-report-only");
   headers.delete("content-length");

@@ -45,9 +45,9 @@ describe("isNoNodeExecError", () => {
   });
 
   it("matches Windows cmd output", () => {
-    expect(
-      isNoNodeExecError("'node' is not recognized as an internal or external command"),
-    ).toBe(true);
+    expect(isNoNodeExecError("'node' is not recognized as an internal or external command")).toBe(
+      true,
+    );
   });
 
   it("matches localized-then-normalized output (probe pins LC_ALL=C)", () => {
@@ -58,9 +58,7 @@ describe("isNoNodeExecError", () => {
 
   it("does not match a real native/glibc failure", () => {
     expect(
-      isNoNodeExecError(
-        "oxmgr: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found",
-      ),
+      isNoNodeExecError("oxmgr: /lib/x86_64-linux-gnu/libc.so.6: version `GLIBC_2.39' not found"),
     ).toBe(false);
     expect(isNoNodeExecError("")).toBe(false);
   });

@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { classifyNeedsInput } from "./needsInput.ts";
-import {
-  type ChildObservation,
-  type RouterState,
-  stepRouter,
-} from "./notifyRouter.ts";
+import { type ChildObservation, type RouterState, stepRouter } from "./notifyRouter.ts";
 
 // Mirror the claude `needsInput`/`working` config (rs/default.config.yaml): the
 // menu cursor sits on a NUMBERED option, and a spinner marker means "working".
@@ -75,7 +71,11 @@ describe("notifyRouter — idle hysteresis (P1)", () => {
 
 describe("notifyRouter — needs_input", () => {
   it("emits immediately on entering needs_input, with the question", () => {
-    const r = step(new Map(), [child({ state: "needs_input", question: "Approve? 1.Yes 2.No" })], 0);
+    const r = step(
+      new Map(),
+      [child({ state: "needs_input", question: "Approve? 1.Yes 2.No" })],
+      0,
+    );
     expect(r.events).toHaveLength(1);
     expect(r.events[0]!.edge).toBe("needs_input");
     expect(r.events[0]!.question).toBe("Approve? 1.Yes 2.No");
@@ -167,11 +167,7 @@ describe("notifyRouter — idle-prompt fixture (P1 regression)", () => {
   });
 
   it("an ACTIVE menu (cursor on a number) still classifies as needs_input", () => {
-    const activeMenu = [
-      "  Do you want to proceed?",
-      "❯ 1. Yes",
-      "  2. No, keep planning",
-    ];
+    const activeMenu = ["  Do you want to proceed?", "❯ 1. Yes", "  2. No, keep planning"];
     expect(classifyNeedsInput(activeMenu, CFG)).not.toBeNull();
   });
 

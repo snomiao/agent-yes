@@ -121,7 +121,11 @@
         border: 1px solid var(--border);
         border-radius: 4px;
         color: var(--text);
-        font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        font:
+          11px/1.5 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
         white-space: pre;
         pointer-events: none;
         user-select: none;
@@ -145,7 +149,11 @@
         border: 1px solid var(--border);
         border-radius: 4px;
         color: var(--text);
-        font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        font:
+          11px/1.5 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
         white-space: pre;
         pointer-events: none;
         user-select: none;
@@ -374,7 +382,11 @@
         padding: 14px 16px;
         background: transparent;
         color: var(--text);
-        font: 15px ui-monospace, SFMono-Regular, Menlo, monospace;
+        font:
+          15px ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
         border-bottom: 1px solid var(--border);
       }
       #cmdk-input::placeholder {
@@ -491,7 +503,11 @@
         min-height: 44px;
         background: transparent;
         color: var(--text);
-        font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+        font:
+          13px/1.4 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
       }
       #ctxmenu textarea::placeholder {
         color: var(--text-muted);
@@ -576,7 +592,9 @@
       <span id="status"><span class="dot"></span><span class="label">connecting…</span></span>
       <button id="fit" title="Fit all agents to view">fit</button>
       <button id="wires" title="Toggle read/tail relationship wires">⇢ wires</button>
-      <button id="console" title="Open the terminal console view (/w/) for this fleet">☰ console</button>
+      <button id="console" title="Open the terminal console view (/w/) for this fleet">
+        ☰ console
+      </button>
       <button id="theme" title="Toggle light/dark">◐</button>
     </div>
 
@@ -631,7 +649,10 @@
         </div>
       </div>
     </div>
-    <div id="hint">⌘K = go to agent · drag = select · right-click = batch send · scroll = zoom · shift+drag corner = magnify</div>
+    <div id="hint">
+      ⌘K = go to agent · drag = select · right-click = batch send · scroll = zoom · shift+drag
+      corner = magnify
+    </div>
 
     <!-- xterm.js — SAME versions the console (agent-yes.com/w) uses, so each
          node's live terminal renders the raw PTY stream identically. -->

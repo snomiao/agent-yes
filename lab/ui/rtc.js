@@ -70,9 +70,7 @@ export class RTCClient {
     this._s = s;
     this._v2 = v2;
     if (!v2 && !ALLOW_LEGACY_PLAINTEXT)
-      throw new Error(
-        "this link uses the old unencrypted protocol — ask the host to upgrade",
-      );
+      throw new Error("this link uses the old unencrypted protocol — ask the host to upgrade");
     const authToken = v2 ? await deriveAuthToken(s, this.room, this.host) : this.token;
     return new Promise((resolve, reject) => {
       const ws = new WebSocket(`wss://${this.host}/${this.room}`, [SUB]);
@@ -172,13 +170,7 @@ export class RTCClient {
       if (!this.dc || this.dc.readyState !== "open" || !this._keyC2H || !this._tHash) return;
       let frame;
       try {
-        frame = await e2eSeal(
-          this._keyC2H,
-          this._send,
-          flags,
-          this._tHash,
-          packEnvelope(obj),
-        );
+        frame = await e2eSeal(this._keyC2H, this._send, flags, this._tHash, packEnvelope(obj));
       } catch {
         this.close();
         return;
