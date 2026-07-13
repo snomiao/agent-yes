@@ -413,6 +413,9 @@ async function globalBinDir(installer: string[]): Promise<string | null> {
 // `bun add -g node`: that package (node-bin-gen) lands a broken arch-specific
 // stub and `Bun.which("node")` still finds nothing. POSIX-only — on Windows the
 // npm .cmd shims invoke node.exe directly and an sh script can't stand in.
+// Called from managerRunnable, which read-only paths (`ay serve status`) also
+// reach: an up-to-date shim is left untouched there (a read, not a write), so
+// only the very first run on a node-less box materializes the file.
 // Returns the shim path when the shim is in effect, null when unneeded/impossible.
 export async function ensureNodeRuntime(
   which: (cmd: string) => string | null = Bun.which,
@@ -423,10 +426,15 @@ export async function ensureNodeRuntime(
   if (!bun) return null;
   const binDir = path.join(agentYesHome(), "bin");
   const shim = path.join(binDir, "node");
+  // Single-quote the bun path: inside sh double quotes `$`, backtick and `\`
+  // would still expand, corrupting the shim for a path containing them.
+  const body = `#!/bin/sh\nexec '${bun.replace(/'/g, `'\\''`)}' "$@"\n`;
   try {
-    await mkdir(binDir, { recursive: true });
-    await writeFile(shim, `#!/bin/sh\nexec "${bun}" "$@"\n`);
-    await chmod(shim, 0o755);
+    if ((await readFile(shim, "utf-8").catch(() => null)) !== body) {
+      await mkdir(binDir, { recursive: true });
+      await writeFile(shim, body);
+      await chmod(shim, 0o755);
+    }
     if (!(process.env.PATH ?? "").split(path.delimiter).includes(binDir)) {
       process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
     }
@@ -448,9 +456,15 @@ export function isNoNodeExecError(stderr: string): boolean {
 
 // Probe one manager binary with `--version`, capturing stderr so a failure can
 // be diagnosed (glibc mismatch vs missing node runtime vs anything else).
+// LC_ALL=C pins env(1)/libc error text to English so isNoNodeExecError's
+// patterns hold on localized systems.
 async function managerProbe(mgr: DaemonManager): Promise<{ ok: boolean; stderr: string }> {
   try {
-    const p = Bun.spawn([mgr.bin, "--version"], { stdout: "ignore", stderr: "pipe" });
+    const p = Bun.spawn([mgr.bin, "--version"], {
+      stdout: "ignore",
+      stderr: "pipe",
+      env: { ...process.env, LC_ALL: "C" },
+    });
     const [code, stderr] = await Promise.all([p.exited, new Response(p.stderr).text()]);
     return { ok: (code ?? 1) === 0, stderr };
   } catch (e) {
@@ -522,12 +536,16 @@ async function installAndVerify(pkg: "oxmgr" | "pm2"): Promise<DaemonManager | n
     // hits both managers identically (`env: node: No such file or directory` —
     // their bins are `#!/usr/bin/env node` scripts), and reporting that as a
     // "glibc mismatch" is nonsense on macOS where glibc doesn't exist. Only
-    // blame glibc for an oxmgr that got PAST the shebang and died natively.
+    // blame glibc for an oxmgr that got PAST the shebang and died natively;
+    // any other failure just gets the probe's own last stderr line — claiming
+    // "no node runtime" here would be false, ensureNodeRuntime just provided one.
+    const detailLine = probe.stderr.trim().split("\n").filter(Boolean).pop()?.slice(0, 160);
+    const detail = detailLine ? ` — ${detailLine}` : "";
     const why = isNoNodeExecError(probe.stderr)
       ? `${pkg} needs a Node.js runtime (its bin is a '#!/usr/bin/env node' script) and none was found`
       : pkg === "oxmgr"
-        ? "likely a native binary mismatch, e.g. glibc < 2.39 on Linux"
-        : "pm2 needs a Node.js runtime and none was found";
+        ? `likely a native binary mismatch, e.g. glibc < 2.39 on Linux${detail}`
+        : `exec probe failed${detail}`;
     process.stderr.write(
       `ay serve install: ${pkg} installed but can't exec here (${why})` +
         (pkg === "oxmgr" ? " — falling back to pm2\n" : "\n"),

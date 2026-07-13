@@ -65,7 +65,7 @@ describe("ensureNodeRuntime", () => {
       const shim = await ensureNodeRuntime(noNode);
       expect(shim).toBe(path.join(home, "bin", "node"));
       const body = await readFile(shim!, "utf-8");
-      expect(body).toBe('#!/bin/sh\nexec "/fake/bin/bun" "$@"\n');
+      expect(body).toBe("#!/bin/sh\nexec '/fake/bin/bun' \"$@\"\n");
       expect((await stat(shim!)).mode & 0o111).not.toBe(0); // executable
       expect(process.env.PATH!.split(path.delimiter)[0]).toBe(path.join(home, "bin"));
     },
@@ -78,6 +78,29 @@ describe("ensureNodeRuntime", () => {
     const hits = process.env.PATH!.split(path.delimiter).filter((p) => p === binDir);
     expect(hits).toHaveLength(1);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "leaves an up-to-date shim untouched on repeat calls (read-only paths stay read-only)",
+    async () => {
+      const shim = (await ensureNodeRuntime(noNode))!;
+      const before = await stat(shim);
+      await new Promise((r) => setTimeout(r, 20));
+      await ensureNodeRuntime(noNode);
+      const after = await stat(shim);
+      expect(after.mtimeMs).toBe(before.mtimeMs); // not rewritten
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "single-quotes a bun path containing sh-special characters",
+    async () => {
+      const shim = await ensureNodeRuntime((cmd) =>
+        cmd === "bun" ? "/opt/we$ird `dir'/bun" : null,
+      );
+      const body = await readFile(shim!, "utf-8");
+      expect(body).toBe("#!/bin/sh\nexec '/opt/we$ird `dir'\\''/bun' \"$@\"\n");
+    },
+  );
 
   it("is a no-op when a real node exists", async () => {
     expect(await ensureNodeRuntime(() => "/usr/bin/whatever")).toBeNull();
