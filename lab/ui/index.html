@@ -2306,6 +2306,10 @@
           previewFetch(port, method, path, init) {
             return chRoom.room.fetch(peerId, method, "/__codehost/port/" + port + path, init || {});
           },
+          // Open a WS to the previewed port over the tunnel (Vite HMR etc.).
+          previewWs(port, path, protocols, handlers) {
+            return chRoom.room.openWs(peerId, "/__codehost/port/" + port + path, protocols, handlers);
+          },
           async fetchJSON(path) {
             let res;
             try {
@@ -2599,6 +2603,98 @@
             .catch((err) => port.postMessage({ type: "error", message: String(err) }));
         });
       }
+
+      // A window.WebSocket replacement, bound to a preview source+port, that
+      // tunnels over the codehost DataChannel (previewWs → the daemon's port WS)
+      // instead of the network. The preview iframe's injected bootstrap installs
+      // it as window.WebSocket so a dev server's HMR socket goes P2P too.
+      // previewWs is async (it dials the peer), so sends before open are queued.
+      window.__ayMakeWS = function (src, port) {
+        return class PreviewWebSocket {
+          static CONNECTING = 0;
+          static OPEN = 1;
+          static CLOSING = 2;
+          static CLOSED = 3;
+          CONNECTING = 0;
+          OPEN = 1;
+          CLOSING = 2;
+          CLOSED = 3;
+          constructor(url, protocols) {
+            this.url = String(url);
+            this.readyState = 0; // CONNECTING
+            this.binaryType = "blob";
+            this.protocol = "";
+            this._listeners = {};
+            this._handle = null;
+            this._queue = [];
+            const tx = sources.get(src)?.tx;
+            const u = new URL(this.url, location.href);
+            const protoList = protocols ? (Array.isArray(protocols) ? protocols : [protocols]) : undefined;
+            if (!tx || !tx.previewWs) return void this._fail();
+            tx.previewWs(port, u.pathname + u.search, protoList, {
+              onOpenAck: (ok, proto) => {
+                if (!ok) return this._fail();
+                this.readyState = 1;
+                this.protocol = proto || "";
+                this._dispatch("open", {});
+                for (const m of this._queue) this._rawSend(m);
+                this._queue = [];
+              },
+              onText: (t) => this._dispatch("message", { data: t }),
+              onBin: (d) => this._dispatch("message", { data: this._wrap(d) }),
+              onClose: (code, reason) => {
+                this.readyState = 3;
+                this._dispatch("close", { code, reason, wasClean: code === 1000 });
+              },
+            })
+              .then((h) => {
+                this._handle = h;
+                if (this.readyState === 3 && this._closeReq) h.close(this._closeReq.code, this._closeReq.reason);
+              })
+              .catch(() => this._fail());
+          }
+          _wrap(d) {
+            return this.binaryType === "arraybuffer"
+              ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength)
+              : new Blob([d]);
+          }
+          _rawSend(data) {
+            const h = this._handle;
+            if (!h) return;
+            if (typeof data === "string") h.sendText(data);
+            else if (data instanceof Blob) data.arrayBuffer().then((b) => h.sendBin(new Uint8Array(b)));
+            else if (ArrayBuffer.isView(data)) h.sendBin(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+            else h.sendBin(new Uint8Array(data));
+          }
+          send(data) {
+            if (this.readyState === 0) this._queue.push(data);
+            else if (this.readyState === 1) this._rawSend(data);
+          }
+          close(code, reason) {
+            if (this.readyState === 3) return;
+            this.readyState = 3;
+            if (this._handle) this._handle.close(code, reason);
+            else this._closeReq = { code, reason };
+            this._dispatch("close", { code: code || 1000, reason: reason || "", wasClean: true });
+          }
+          _fail() {
+            this.readyState = 3;
+            this._dispatch("error", {});
+            this._dispatch("close", { code: 1006, reason: "tunnel open failed", wasClean: false });
+          }
+          addEventListener(t, l) {
+            (this._listeners[t] = this._listeners[t] || new Set()).add(l);
+          }
+          removeEventListener(t, l) {
+            this._listeners[t]?.delete(l);
+          }
+          _dispatch(t, init) {
+            const ev = { type: t, target: this, ...init };
+            this["on" + t]?.call(this, ev);
+            this._listeners[t]?.forEach((l) => l.call(this, ev));
+          }
+        };
+      };
       // Every machine belonging to a room (for an ay-share room, the room itself).
       const roomSources = (name) => [...sources.values()].filter((s) => (s.room || s.id) === name);
       const roomLive = (name) =>
