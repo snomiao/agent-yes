@@ -5516,20 +5516,31 @@
         },
       ];
       // Build the command rows for a "/…"-prefixed query, targeting the anchor agent.
-      // Empty when nothing is open (a command with no agent to act on is a no-op) so
-      // the omnibox falls through to its normal search/spawn behaviour.
+      // Agent-scoped commands are omitted when nothing is open (a command with no
+      // agent to act on is a no-op); global commands (/filter) are always offered,
+      // and with no rows at all the omnibox falls back to search/spawn behaviour.
       function omniCommandRows(q) {
         const target = omniAnchor();
-        if (!target) return [];
         // Match on the FIRST token so a command can carry args after it
         // (e.g. "/fork fix the auth bug" → cmd "fork", topic "fix the auth bug").
         const parts = q.slice(1).trim().split(/\s+/).filter(Boolean);
         const cmdTerm = (parts[0] || "").toLowerCase(); // command token after "/"
-        const rows = OMNI_COMMANDS.filter((c) => c.cmd.slice(1).startsWith(cmdTerm)).map((c) => ({
-          kind: "cmd",
-          cmd: c,
-          target,
-        }));
+        const rows = target
+          ? OMNI_COMMANDS.filter((c) => c.cmd.slice(1).startsWith(cmdTerm)).map((c) => ({
+              kind: "cmd",
+              cmd: c,
+              target,
+            }))
+          : [];
+        // "/filter [tokens…]" — global: sets the left panel's filter box (#q) to the
+        // arguments, same tokens the box itself takes (space = AND, repo:x tags).
+        // With no args it clears the filter. Needs no anchor agent — it acts on the
+        // list, not an agent — so it's offered even when nothing is open. Listed
+        // after the agent commands so bare "/" still defaults to /restart.
+        if ("filter".startsWith(cmdTerm)) {
+          rows.push({ kind: "filter", value: parts.slice(1).join(" ") });
+        }
+        if (!target) return rows;
         // "/fork [topic]" — a slash alias for the fork spawn row so fork is reachable
         // straight from the command palette (⌘K → "/fork"), not only via the row that
         // auto-appends to a search. It's a spawn (kind:"fork"), not a kind:"cmd" that
@@ -5636,6 +5647,20 @@
                 <div class="omni-main">
                   <div class="omni-title">⊕ Spawn new ${esc(anchor?.cli || "claude")} agent in a directory…</div>
                   <div class="omni-sub">⏎ to choose a working dir &nbsp;·&nbsp; prompt: ${esc(q || "(empty)")}</div>
+                </div></div>`;
+            }
+            if (r.kind === "filter") {
+              const cur = $("q").value.trim();
+              const title = r.value
+                ? `⌕ Filter list: <b>${esc(r.value)}</b> <span style="opacity:.55">/filter</span>`
+                : cur
+                  ? `⌕ Clear list filter <span style="opacity:.55">(now: ${esc(cur)})</span>`
+                  : `⌕ Filter list… <span style="opacity:.55">/filter repo:x claude</span>`;
+              return `<div class="omni-row omni-spawn${sc}" data-i="${i}">
+                <span class="dot idle"></span>
+                <div class="omni-main">
+                  <div class="omni-title">${title}</div>
+                  <div class="omni-sub">sets the left panel filter &nbsp;·&nbsp; space = AND, tags like repo:/wt:/cli:/host:</div>
                 </div></div>`;
             }
             if (r.kind === "cmd") {
@@ -5775,6 +5800,14 @@
         if (row && row.kind === "cmd") {
           closeOmni(false);
           await row.cmd.run(row.target);
+          return;
+        }
+        // "/filter …" sets the left panel's filter box; the input event does the
+        // rest (persists ay.filter + re-renders the list), exactly as if typed.
+        if (row && row.kind === "filter") {
+          closeOmni(false);
+          $("q").value = row.value;
+          $("q").dispatchEvent(new Event("input"));
           return;
         }
         // ⌘⏎ always = spawn-here (the fast default), regardless of the selected row.
