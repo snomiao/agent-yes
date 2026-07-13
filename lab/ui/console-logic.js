@@ -199,13 +199,42 @@ export const BADGE_META = {
     label: "typing",
     title: "The user is typing at this agent's terminal — ay send backs off until they pause",
   },
+  // Dynamic footer counters: the wire id carries the captured footer text
+  // after a ":" ("shells:4 shells") and "$1" below is substituted with it,
+  // so the chip reads exactly like the CLI footer ("1 shell", "PR #310").
+  shells: {
+    label: "$1",
+    title: "Background shells running in this session ($1 in the CLI footer)",
+  },
+  monitors: {
+    label: "$1",
+    title: "Active Monitor watchers in this session ($1 in the CLI footer)",
+  },
+  "bg-agents": {
+    label: "$1",
+    title: "Background subagents running in this session ($1 in the CLI footer)",
+  },
+  pr: {
+    label: "$1",
+    title: "This session is linked to a GitHub pull request ($1 in the CLI footer)",
+  },
 };
 
 // Status-flag chips ("badges") matched against the agent's screen — e.g. an
 // active /goal loop. [] when e.badges is missing/empty. Returns
 // { id, label, title } objects ready for the caller to render as chips.
+// Dynamic ids ("shells:4 shells") resolve their meta by the part before the
+// ":" and substitute the rest into "$1" in the label/title; the returned id
+// stays the raw wire value so chips key uniquely.
 export function badgesFor(e) {
-  return (e.badges || []).map((id) => ({ id, ...(BADGE_META[id] || { label: id, title: id }) }));
+  return (e.badges || []).map((raw) => {
+    const i = raw.indexOf(":");
+    const base = i === -1 ? raw : raw.slice(0, i);
+    const arg = i === -1 ? "" : raw.slice(i + 1);
+    const meta = BADGE_META[base] || { label: raw, title: raw };
+    const sub = (s) => (s.includes("$1") ? s.replace("$1", arg) : s);
+    return { id: raw, label: sub(meta.label), title: sub(meta.title) };
+  });
 }
 
 // Time since the agent was last active ("12s" / "5m" / "3h") — measured from
@@ -402,7 +431,8 @@ export function sortEntries(entries, mode = "state") {
           ? byNewest
           : mode === "identity"
             ? (a, b) => fullIdent(a).localeCompare(fullIdent(b)) || byNewest(a, b)
-            : (a, b) => stateRank(a) - stateRank(b) || gitWeight(b) - gitWeight(a) || byNewest(a, b);
+            : (a, b) =>
+                stateRank(a) - stateRank(b) || gitWeight(b) - gitWeight(a) || byNewest(a, b);
   return entries.slice().sort(cmp);
 }
 

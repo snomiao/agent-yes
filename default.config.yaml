@@ -109,7 +109,7 @@ clis:
       # list ("client ignores rate-limit drop") or an agent's own summary
       # (INGEST_RATE_LIMIT_PER_MIN) armed the loop and typed "retry" into a
       # perfectly healthy session.
-      - pattern: 'API Error.{0,4}429'
+      - pattern: "API Error.{0,4}429"
         flags: i
       - pattern: 'API Error[\s\S]{0,60}rate.?limit'
         flags: i
@@ -117,7 +117,7 @@ clis:
       - hit your usage limit
       # Session/5-hour limit banners keep the distinctive "… limit reached"
       # phrase; a bare "session limit" matched ordinary prose.
-      - pattern: '(session|5-hour) limit reached'
+      - pattern: "(session|5-hour) limit reached"
         flags: i
     restoreArgs:
       - --continue
@@ -221,7 +221,7 @@ clis:
       # list ("client ignores rate-limit drop") or an agent's own summary
       # (INGEST_RATE_LIMIT_PER_MIN) armed the loop and typed "retry" into a
       # perfectly healthy session.
-      - pattern: 'API Error.{0,4}429'
+      - pattern: "API Error.{0,4}429"
         flags: i
       - pattern: 'API Error[\s\S]{0,60}rate.?limit'
         flags: i
@@ -229,7 +229,7 @@ clis:
       - hit your usage limit
       # Session/5-hour limit banners keep the distinctive "… limit reached"
       # phrase; a bare "session limit" matched ordinary prose.
-      - pattern: '(session|5-hour) limit reached'
+      - pattern: "(session|5-hour) limit reached"
         flags: i
     restoreArgs:
       - --continue
@@ -338,7 +338,7 @@ clis:
       # list ("client ignores rate-limit drop") or an agent's own summary
       # (INGEST_RATE_LIMIT_PER_MIN) armed the loop and typed "retry" into a
       # perfectly healthy session.
-      - pattern: 'API Error.{0,4}429'
+      - pattern: "API Error.{0,4}429"
         flags: i
       - pattern: 'API Error[\s\S]{0,60}rate.?limit'
         flags: i
@@ -346,7 +346,7 @@ clis:
       - hit your usage limit
       # Session/5-hour limit banners keep the distinctive "… limit reached"
       # phrase; a bare "session limit" matched ordinary prose.
-      - pattern: '(session|5-hour) limit reached'
+      - pattern: "(session|5-hour) limit reached"
         flags: i
     restoreArgs:
       - --continue
@@ -545,7 +545,7 @@ clis:
   bash:
     promptArg: typed
     ready:
-      - pattern: '[$#] $'
+      - pattern: "[$#] $"
         flags: m
     working: []
     enter: []
@@ -570,7 +570,7 @@ clis:
   powershell:
     promptArg: typed
     ready:
-      - pattern: '^PS .*>'
+      - pattern: "^PS .*>"
         flags: m
     working: []
     enter: []

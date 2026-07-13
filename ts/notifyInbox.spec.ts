@@ -58,7 +58,8 @@ describe("notifyInbox — NDJSON round-trip + torn-line tolerance", () => {
   });
 
   it("skips a torn final line from a mid-append writer", () => {
-    const text = serializeEvent(ev({ seq: 1 })) + "\n" + serializeEvent(ev({ seq: 2 })) + "\n{ \"seq\": 3, \"ed";
+    const text =
+      serializeEvent(ev({ seq: 1 })) + "\n" + serializeEvent(ev({ seq: 2 })) + '\n{ "seq": 3, "ed';
     const got = parseInboxText(text);
     expect(got.map((e) => e.seq)).toEqual([1, 2]);
   });

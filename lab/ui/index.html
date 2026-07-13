@@ -1835,7 +1835,11 @@
               <button id="portsbtn" class="viewbtn" title="manage exposed localhost ports">
                 ⇄ ports
               </button>
-              <button id="rguibtn" class="viewbtn" title="open the agent graph view (/r/) for this fleet">
+              <button
+                id="rguibtn"
+                class="viewbtn"
+                title="open the agent graph view (/r/) for this fleet"
+              >
                 ⌗ graph
               </button>
               <button id="newbtn" class="newbtn" title="spawn a new agent on this fleet">
@@ -2071,7 +2075,11 @@
          WebRTC tunnel (Service Worker proxies /w/p/<src>/<port>/*, no relay). -->
     <div class="preview-overlay" id="previewOverlay" hidden>
       <div class="preview-bar">
-        <span class="preview-badge" title="served over a direct P2P WebRTC tunnel — traffic does not go through agent-yes.com">⚡ P2P · no relay</span>
+        <span
+          class="preview-badge"
+          title="served over a direct P2P WebRTC tunnel — traffic does not go through agent-yes.com"
+          >⚡ P2P · no relay</span
+        >
         <span class="preview-title" id="previewTitle"></span>
         <button id="previewReload" type="button" title="reload">↻</button>
         <button id="previewPop" type="button" title="open in a new tab">↗</button>
@@ -2086,7 +2094,7 @@
       <div class="omnibox">
         <input
           id="omni-input"
-          placeholder="Search agents by title, then output…  ·  &quot;/&quot; commands  ·  /ws workspaces"
+          placeholder='Search agents by title, then output…  ·  "/" commands  ·  /ws workspaces'
           spellcheck="false"
           autocapitalize="off"
           autocomplete="off"
@@ -2317,7 +2325,12 @@
           },
           // Open a WS to the previewed port over the tunnel (Vite HMR etc.).
           previewWs(port, path, protocols, handlers) {
-            return chRoom.room.openWs(peerId, "/__codehost/port/" + port + path, protocols, handlers);
+            return chRoom.room.openWs(
+              peerId,
+              "/__codehost/port/" + port + path,
+              protocols,
+              handlers,
+            );
           },
           async fetchJSON(path) {
             let res;
@@ -2597,13 +2610,21 @@
             .then(async (res) => {
               const headers = {};
               res.headers.forEach((v, k) => (headers[k] = v));
-              port.postMessage({ type: "head", status: res.status, statusText: res.statusText, headers });
+              port.postMessage({
+                type: "head",
+                status: res.status,
+                statusText: res.statusText,
+                headers,
+              });
               if (res.body) {
                 const reader = res.body.getReader();
                 for (;;) {
                   const { done, value } = await reader.read();
                   if (done) break;
-                  const buf = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+                  const buf = value.buffer.slice(
+                    value.byteOffset,
+                    value.byteOffset + value.byteLength,
+                  );
                   port.postMessage({ type: "body", chunk: buf }, [buf]);
                 }
               }
@@ -2638,7 +2659,11 @@
             this._queue = [];
             const tx = sources.get(src)?.tx;
             const u = new URL(this.url, location.href);
-            const protoList = protocols ? (Array.isArray(protocols) ? protocols : [protocols]) : undefined;
+            const protoList = protocols
+              ? Array.isArray(protocols)
+                ? protocols
+                : [protocols]
+              : undefined;
             if (!tx || !tx.previewWs) return void this._fail();
             tx.previewWs(port, u.pathname + u.search, protoList, {
               onOpenAck: (ok, proto) => {
@@ -2658,7 +2683,8 @@
             })
               .then((h) => {
                 this._handle = h;
-                if (this.readyState === 3 && this._closeReq) h.close(this._closeReq.code, this._closeReq.reason);
+                if (this.readyState === 3 && this._closeReq)
+                  h.close(this._closeReq.code, this._closeReq.reason);
               })
               .catch(() => this._fail());
           }
@@ -2671,8 +2697,10 @@
             const h = this._handle;
             if (!h) return;
             if (typeof data === "string") h.sendText(data);
-            else if (data instanceof Blob) data.arrayBuffer().then((b) => h.sendBin(new Uint8Array(b)));
-            else if (ArrayBuffer.isView(data)) h.sendBin(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+            else if (data instanceof Blob)
+              data.arrayBuffer().then((b) => h.sendBin(new Uint8Array(b)));
+            else if (ArrayBuffer.isView(data))
+              h.sendBin(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
             else h.sendBin(new Uint8Array(data));
           }
           send(data) {
@@ -3772,7 +3800,8 @@
         } catch {}
         if (!info || !info.claim) {
           $("exposeEmpty").hidden = false;
-          $("exposeEmpty").textContent = "Couldn't expose port " + port + " (is `ay serve` reachable?).";
+          $("exposeEmpty").textContent =
+            "Couldn't expose port " + port + " (is `ay serve` reachable?).";
           return null;
         }
         return info;
@@ -3798,7 +3827,8 @@
       // the Service Worker proxies over the machine's WebRTC tunnel (no relay).
       function openPreview(src, port) {
         // Scope-relative so it works at both /w/ (agent-yes.com) and / (ay serve).
-        const url = new URL("p/" + encodeURIComponent(src) + "/" + port + "/", location.href).pathname;
+        const url = new URL("p/" + encodeURIComponent(src) + "/" + port + "/", location.href)
+          .pathname;
         const frame = $("previewFrame");
         if (!frame) return window.open(url, "_blank");
         $("previewTitle").textContent = "localhost:" + port;
@@ -3849,7 +3879,8 @@
               return;
             }
             if (Array.isArray(arr))
-              for (const ex of arr) rows.push({ ...ex, _srcName: s.name || s.id, _src: s.id, _tx: tx });
+              for (const ex of arr)
+                rows.push({ ...ex, _srcName: s.name || s.id, _src: s.id, _tx: tx });
           }),
         );
         list.textContent = "";
@@ -5335,10 +5366,10 @@
       $("rguibtn").addEventListener("click", () => {
         const [selRoom, selPid] = sel ? sel.split("#") : [null, null];
         let room = selRoom && selRoom !== LOCAL && loadRooms()[selRoom] ? selRoom : null;
-        if (!room)
-          room = [...sources.values()].find((s) => s.kind === "rtc" && s.live)?.id ?? null;
-        const frag =
-          room ? "#" + encodeURIComponent(room) + (room === selRoom && selPid ? ":" + selPid : "") : "";
+        if (!room) room = [...sources.values()].find((s) => s.kind === "rtc" && s.live)?.id ?? null;
+        const frag = room
+          ? "#" + encodeURIComponent(room) + (room === selRoom && selPid ? ":" + selPid : "")
+          : "";
         location.href = "/r/" + frag;
       });
       // Cycle the sort order: state → created → identity → state.
@@ -5799,7 +5830,9 @@
                 <span class="dot ${live ? "active" : "exited"}"></span>
                 <div class="omni-main">
                   <div class="omni-title">▤ ${esc(wsSpecOf(r.ws))}${
-                    live ? ` <span style="opacity:.7">· ${live} agent${live > 1 ? "s" : ""}</span>` : ""
+                    live
+                      ? ` <span style="opacity:.7">· ${live} agent${live > 1 ? "s" : ""}</span>`
+                      : ""
                   }${multi ? ` <span style="opacity:.55">@ ${esc(r.host)}</span>` : ""}</div>
                   <div class="omni-sub">${esc(r.ws.path)}${st ? " &nbsp;·&nbsp; <b>" + esc(st) + "</b>" : ""} &nbsp;·&nbsp; ⏎ spawn agent here</div>
                 </div></div>`;
@@ -6569,14 +6602,25 @@
       // picker (options from /api/spawn-config `clis`), preselected from the
       // chain: selected agent's cli → last used cli → explicit user pick.
       const LAST_CLI_KEY = "ay.lastSpawnCli";
-      const CLI_FALLBACK = ["claude", "codex", "gemini", "copilot", "cursor-agent", "goose", "aider"];
+      const CLI_FALLBACK = [
+        "claude",
+        "codex",
+        "gemini",
+        "copilot",
+        "cursor-agent",
+        "goose",
+        "aider",
+      ];
       function cliOptions(clis, preferred) {
         const list = clis && clis.length ? clis : CLI_FALLBACK;
         const has = preferred && list.includes(preferred);
         return (
           `<option value=""${has ? "" : " selected"} disabled>choose a CLI…</option>` +
           list
-            .map((c) => `<option value="${esc(c)}"${c === preferred && has ? " selected" : ""}>${esc(c)}</option>`)
+            .map(
+              (c) =>
+                `<option value="${esc(c)}"${c === preferred && has ? " selected" : ""}>${esc(c)}</option>`,
+            )
             .join("")
         );
       }

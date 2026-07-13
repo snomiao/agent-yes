@@ -18,17 +18,8 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "fs/promises";
-import {
-  type ChildObservation,
-  type RouterState,
-  stepRouter,
-} from "./notifyRouter.ts";
-import {
-  type NotifyEvent,
-  daemonLockDir,
-  daemonLockOwnerPath,
-  notifyDir,
-} from "./notifyInbox.ts";
+import { type ChildObservation, type RouterState, stepRouter } from "./notifyRouter.ts";
+import { type NotifyEvent, daemonLockDir, daemonLockOwnerPath, notifyDir } from "./notifyInbox.ts";
 import {
   appendEvent,
   gcInboxes,
@@ -303,7 +294,12 @@ async function writeOwner(): Promise<boolean> {
   try {
     await writeFile(
       tmp,
-      JSON.stringify({ pid: process.pid, started_at: daemonStartedAt, ts: Date.now(), token: daemonToken }),
+      JSON.stringify({
+        pid: process.pid,
+        started_at: daemonStartedAt,
+        ts: Date.now(),
+        token: daemonToken,
+      }),
     );
     await rename(tmp, daemonLockOwnerPath());
     return true;
@@ -321,7 +317,9 @@ async function writeOwner(): Promise<boolean> {
  * mkdir→writeOwner window of another daemon coming up), so two concurrent starts
  * can't both "win". The liveness predicate is injectable for tests.
  */
-export async function acquireDaemonLock(isAlive: (pid: number) => boolean = isPidAlive): Promise<boolean> {
+export async function acquireDaemonLock(
+  isAlive: (pid: number) => boolean = isPidAlive,
+): Promise<boolean> {
   // The lock dir lives under notify/ — ensure that exists first, else mkdir of
   // the lock throws ENOENT which must NOT be mistaken for "someone holds it".
   await mkdir(notifyDir(), { recursive: true }).catch(() => {});
@@ -414,20 +412,23 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   // tick — many watched children, slow log I/O — can't let the heartbeat cross
   // OWNER_TTL and have another `watch` steal the lock as "stale" → double daemon.
   // Refresh well inside the TTL; cleared on shutdown.
-  const ownerBeat = setInterval(() => {
-    void (async () => {
-      // Refresh ONLY while the owner still carries OUR token. Any other value — a
-      // different token (superseded) OR null/absent (a new daemon's mkdir→write
-      // window) — means we no longer own it, so stop rather than clobber an
-      // unknown/absent owner. Atomic writeOwner means a null read is never our own
-      // write in flight.
-      if ((await readDaemonOwnerToken()) !== daemonToken) {
-        clearInterval(ownerBeat);
-        return;
-      }
-      await writeOwner();
-    })();
-  }, Math.max(1000, Math.floor(OWNER_TTL_MS / 3)));
+  const ownerBeat = setInterval(
+    () => {
+      void (async () => {
+        // Refresh ONLY while the owner still carries OUR token. Any other value — a
+        // different token (superseded) OR null/absent (a new daemon's mkdir→write
+        // window) — means we no longer own it, so stop rather than clobber an
+        // unknown/absent owner. Atomic writeOwner means a null read is never our own
+        // write in flight.
+        if ((await readDaemonOwnerToken()) !== daemonToken) {
+          clearInterval(ownerBeat);
+          return;
+        }
+        await writeOwner();
+      })();
+    },
+    Math.max(1000, Math.floor(OWNER_TTL_MS / 3)),
+  );
   if (typeof ownerBeat.unref === "function") ownerBeat.unref();
   const cleanup = async () => {
     running = false;
@@ -443,11 +444,7 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   // Seed the router from prior inbox state — scoped to currently-watched parents
   // and guarded against pid reuse by the current registry snapshot.
   const watchedAtStart = new Set((await liveWatchers()).keys());
-  let prev = await reconcileFromInboxes(
-    host,
-    await liveChildrenSnapshot(),
-    watchedAtStart,
-  );
+  let prev = await reconcileFromInboxes(host, await liveChildrenSnapshot(), watchedAtStart);
   let ticks = 0;
   let emptySince: number | null = null;
   // Durable across ticks: edges whose append failed, retried until they land.
@@ -556,7 +553,9 @@ async function tickState(
       pendingRetry.set(retryKey(stored), stored);
       logger.warn(`[notifyd] append failed for parent ${stored.parent_pid} — queued for retry`);
     } else {
-      logger.warn(`[notifyd] retry queue full (${RETRY_CAP}) — dropping edge for parent ${stored.parent_pid}`);
+      logger.warn(
+        `[notifyd] retry queue full (${RETRY_CAP}) — dropping edge for parent ${stored.parent_pid}`,
+      );
     }
   }
   return { next, watcherCount };

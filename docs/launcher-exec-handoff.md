@@ -13,11 +13,11 @@ child, 120–500 MB each) — see "Non-goals".
 
 Every agent currently runs as a 3-layer chain (measured 2026-07-01, macOS arm64):
 
-| Layer                            | Runtime | RSS         | Role                                              |
-| -------------------------------- | ------- | ----------- | ------------------------------------------------- |
-| bun launcher (`dist/agent-yes.js`) | TS/bun  | **~17 MB**  | resolves + spawns the rust binary, then **sleeps** |
-| rust wrapper (`agent-yes`)       | Rust    | ~7 MB       | PTY supervision, the real work                    |
-| `claude` child                   | node    | 120–500 MB  | the actual agent                                  |
+| Layer                              | Runtime | RSS        | Role                                               |
+| ---------------------------------- | ------- | ---------- | -------------------------------------------------- |
+| bun launcher (`dist/agent-yes.js`) | TS/bun  | **~17 MB** | resolves + spawns the rust binary, then **sleeps** |
+| rust wrapper (`agent-yes`)         | Rust    | ~7 MB      | PTY supervision, the real work                     |
+| `claude` child                     | node    | 120–500 MB | the actual agent                                   |
 
 The bun launcher does genuine **one-time** work (auto-update check, tray spawn, config
 resolution, rust-binary resolution/download, arg building) — but after that, in
@@ -26,7 +26,7 @@ resolution, rust-binary resolution/download, arg building) — but after that, i
 ```ts
 const child = spawn(rustBinary, rustArgs, { stdio: "inherit" });
 child.on("exit", (code, signal) => process.exit(/* mirror */));
-process.on("SIGINT",  () => child.kill("SIGINT"));
+process.on("SIGINT", () => child.kill("SIGINT"));
 process.on("SIGTERM", () => child.kill("SIGTERM"));
 await new Promise(() => {}); // never resolves — bun stays resident here
 ```
@@ -37,9 +37,9 @@ signals and mirror an exit code**. With N agents that is N × ~17 MB of pure ove
 ## Insight
 
 The bun/npm layer is worth keeping — it is the distribution and self-update mechanism.
-What is wasteful is that it *supervises* rather than *hands off*. On POSIX, `execvp(2)`
+What is wasteful is that it _supervises_ rather than _hands off_. On POSIX, `execvp(2)`
 **replaces the current process image**: same PID, same PPID, same open fds, same env,
-same cwd — but the bun heap is entirely freed and the process *becomes* the rust binary.
+same cwd — but the bun heap is entirely freed and the process _becomes_ the rust binary.
 `execvp` only returns on failure, which is exactly the fallback signal we want.
 
 ## Solution
@@ -64,12 +64,12 @@ export function execReplace(bin: string, args: string[]): void {
 
   // Build a NULL-terminated char *argv[]. argv[0] must be the binary path.
   const argv = [bin, ...args];
-  const cStrings = argv.map((s) => cString(s));           // keep refs alive until execv
+  const cStrings = argv.map((s) => cString(s)); // keep refs alive until execv
   const arr = new BigInt64Array(argv.length + 1);
   cStrings.forEach((c, i) => (arr[i] = BigInt(ptr(c))));
-  arr[argv.length] = 0n;                                   // NULL terminator
+  arr[argv.length] = 0n; // NULL terminator
 
-  symbols.execv(cString(bin), ptr(arr));                  // no return on success
+  symbols.execv(cString(bin), ptr(arr)); // no return on success
   // If we reach here, execv failed (errno set) — caller falls back.
 }
 ```
@@ -92,14 +92,20 @@ if (rustBinary) {
     if (existsSync(rustBinary)) {
       try {
         const { execReplace } = await import("./execReplace.ts");
-        execReplace(rustBinary, rustArgs);   // returns only on failure
-      } catch { /* fall through to spawn / TS fallback */ }
+        execReplace(rustBinary, rustArgs); // returns only on failure
+      } catch {
+        /* fall through to spawn / TS fallback */
+      }
     }
     // reaching here = exec failed → fall through to the spawn path below (or TS fallback)
   }
 
   // Existing spawn+wait path — retained for Windows and as the exec-failure fallback.
-  const child = spawn(rustBinary, rustArgs, { stdio: "inherit", env: process.env, cwd: process.cwd() });
+  const child = spawn(rustBinary, rustArgs, {
+    stdio: "inherit",
+    env: process.env,
+    cwd: process.cwd(),
+  });
   // ...unchanged exit/signal mirroring...
   await new Promise(() => {});
 }
@@ -112,15 +118,15 @@ Everything upstream (`getRustBinary()` resolution/download, update check at
 
 ## Why nothing breaks (what exec preserves)
 
-| Concern                          | Outcome after exec()                                                        |
-| -------------------------------- | --------------------------------------------------------------------------- |
-| `bun install -g` / npm packaging | **Unchanged** — the JS entry is still the installed command.                |
-| update check / tray / resolution | **Unchanged** — all run in bun *before* the handoff.                         |
-| stdio                            | Already `inherit`; fds survive exec, so the terminal stays wired.           |
-| exit code                        | rust *is* the process now → its exit code is the real one. No mirroring.     |
-| SIGINT / SIGTERM                 | Delivered natively to the (now-rust) process. No forwarding needed.          |
-| `AGENT_YES_PID` / subagent tree  | env survives exec → passes through unchanged.                                |
-| serve/other code targeting the launcher PID | PID is preserved by exec → still hits the same process.           |
+| Concern                                     | Outcome after exec()                                                     |
+| ------------------------------------------- | ------------------------------------------------------------------------ |
+| `bun install -g` / npm packaging            | **Unchanged** — the JS entry is still the installed command.             |
+| update check / tray / resolution            | **Unchanged** — all run in bun _before_ the handoff.                     |
+| stdio                                       | Already `inherit`; fds survive exec, so the terminal stays wired.        |
+| exit code                                   | rust _is_ the process now → its exit code is the real one. No mirroring. |
+| SIGINT / SIGTERM                            | Delivered natively to the (now-rust) process. No forwarding needed.      |
+| `AGENT_YES_PID` / subagent tree             | env survives exec → passes through unchanged.                            |
+| serve/other code targeting the launcher PID | PID is preserved by exec → still hits the same process.                  |
 
 ---
 
@@ -139,7 +145,7 @@ Everything upstream (`getRustBinary()` resolution/download, update check at
    which still has its ENOENT→TS fallback. Net: the fallback is preserved, just relocated.
 
 3. **Flatter pid tree may confuse `ay ls` / console rendering.** Today there are two
-   processes (bun parent + rust child); after exec there is one (bun PID *becomes* rust).
+   processes (bun parent + rust child); after exec there is one (bun PID _becomes_ rust).
    Code that assumes "launcher PID ≠ rust PID", or that walks parent/wrapper_pid for the
    subagent tree, must be re-verified. See `docs/` + the subagent-tree logic
    (`AGENT_YES_PID`, `pids.jsonl` `wrapper_pid`). **Low risk** (exec keeps PID/PPID) but

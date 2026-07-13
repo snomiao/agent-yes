@@ -330,12 +330,14 @@ describe("console DOM behaviour", () => {
       await page.keyboard.press("Control+k");
       await expect.poll(() => page.locator("#omni").isVisible()).toBe(true);
       await page.fill("#omni-input", "/filter");
-      await expect.poll(() =>
-        page
-          .locator("#omni-results")
-          .innerText()
-          .then((t) => t.toLowerCase().includes("clear list filter")),
-      ).toBe(true);
+      await expect
+        .poll(() =>
+          page
+            .locator("#omni-results")
+            .innerText()
+            .then((t) => t.toLowerCase().includes("clear list filter")),
+        )
+        .toBe(true);
       await page.keyboard.press("Enter");
       await expect.poll(() => page.locator("#q").inputValue()).toBe("");
       expect(await page.evaluate(() => localStorage.getItem("ay.filter"))).toBe("");
@@ -630,10 +632,48 @@ describe("fold subagent trees", () => {
   let url: string;
   let close: () => void;
   const NESTED = [
-    { pid: 201, wrapper_pid: 201, cli: "claude", cwd: "/home/u/ws/o/r/tree/w", title: "root", status: "active", started_at: 1_700_000_000_000 },
-    { pid: 202, wrapper_pid: 202, parent_pid: 201, cli: "claude", cwd: "/home/u/ws/o/r/tree/w/a", title: "sub-a", status: "active", started_at: 1_700_000_000_000, last_active_at: 1_700_000_005_000 },
-    { pid: 203, wrapper_pid: 203, parent_pid: 201, cli: "claude", cwd: "/home/u/ws/o/r/tree/w/b", title: "sub-b", status: "idle", started_at: 1_700_000_000_000, last_active_at: 1_700_000_001_000 },
-    { pid: 204, wrapper_pid: 204, parent_pid: 202, cli: "claude", cwd: "/home/u/ws/o/r/tree/w/a/c", title: "grandchild", status: "active", started_at: 1_700_000_000_000, last_active_at: 1_700_000_003_000 },
+    {
+      pid: 201,
+      wrapper_pid: 201,
+      cli: "claude",
+      cwd: "/home/u/ws/o/r/tree/w",
+      title: "root",
+      status: "active",
+      started_at: 1_700_000_000_000,
+    },
+    {
+      pid: 202,
+      wrapper_pid: 202,
+      parent_pid: 201,
+      cli: "claude",
+      cwd: "/home/u/ws/o/r/tree/w/a",
+      title: "sub-a",
+      status: "active",
+      started_at: 1_700_000_000_000,
+      last_active_at: 1_700_000_005_000,
+    },
+    {
+      pid: 203,
+      wrapper_pid: 203,
+      parent_pid: 201,
+      cli: "claude",
+      cwd: "/home/u/ws/o/r/tree/w/b",
+      title: "sub-b",
+      status: "idle",
+      started_at: 1_700_000_000_000,
+      last_active_at: 1_700_000_001_000,
+    },
+    {
+      pid: 204,
+      wrapper_pid: 204,
+      parent_pid: 202,
+      cli: "claude",
+      cwd: "/home/u/ws/o/r/tree/w/a/c",
+      title: "grandchild",
+      status: "active",
+      started_at: 1_700_000_000_000,
+      last_active_at: 1_700_000_003_000,
+    },
   ];
 
   beforeAll(async () => {
@@ -655,9 +695,9 @@ describe("fold subagent trees", () => {
         .poll(() => page.locator(".row[data-key='local#201'] .subs").innerText())
         .toBe("⊞ 2/3");
       // The recency the badge face omits lives in the tooltip.
-      expect(await page.locator(".row[data-key='local#201'] .subs").getAttribute("title")).toContain(
-        "last active",
-      );
+      expect(
+        await page.locator(".row[data-key='local#201'] .subs").getAttribute("title"),
+      ).toContain("last active");
     } finally {
       await ctx.close();
     }
