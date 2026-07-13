@@ -253,8 +253,10 @@ export function age(e, now = Date.now()) {
 }
 
 // Filter predicate: every space-separated token must match. A `key:value` token
-// matches against the mnemonic tags (repo/wt/cli/host); a bare token is a
-// case-insensitive substring search over title/prompt/cli/cwd/status.
+// matches against the mnemonic tags (repo/wt/cli/host) or the explicit keys
+// below; a bare token is a case-insensitive substring search over
+// title/prompt/cli/cwd/status plus the device label (user@host) and room, so
+// typing a hostname or username narrows without needing a tag.
 export function matches(e, toks) {
   const hay =
     (e.title || "") +
@@ -266,6 +268,10 @@ export function matches(e, toks) {
     (e.cwd || "") +
     " " +
     e.status +
+    " " +
+    (e._host || "") +
+    " " +
+    (e._room || "") +
     (e.git?.dirty ? " dirty" : "");
   return toks.every((tok) => {
     tok = tok.toLowerCase();
@@ -282,6 +288,9 @@ export function matches(e, toks) {
         return String(e._host || "")
           .toLowerCase()
           .includes(v);
+      // user: matches just the username half of the device label ("sno@taka"
+      // → "sno"), unlike host:/device: which match the whole label.
+      if (k === "user") return deviceParts(e._host).user.toLowerCase().includes(v);
       return tagsFor(e).some(([tk, tv]) => tk === k && tv.toLowerCase().includes(v));
     }
     return hay.toLowerCase().includes(tok);
