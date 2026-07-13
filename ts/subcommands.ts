@@ -2654,7 +2654,7 @@ async function cmdSpawn(rest: string[]): Promise<number> {
  * (`send`, `key`, `select`): refuse a self-targeting loop, and require that THIS
  * sender actually looked at THIS target recently — an agent is blocked, an
  * interactive human is only warned — unless `force`. Returns the sender context
- * so a caller can reuse it (e.g. `send`'s `[ay-msg …]` header). Extracted from
+ * so a caller can reuse it (e.g. `send`'s `<ay-msg …>` header). Extracted from
  * cmdSend so the action commands enforce the identical guard.
  */
 async function enforceSendGuards(
@@ -2966,15 +2966,19 @@ async function cmdSend(rest: string[]): Promise<number> {
   // The header/footer pair shares a random nonce so the recipient can trust the
   // block's boundaries: text INSIDE the body can't forge a matching open/close
   // marker (the nonce is generated here, after the body was authored), so a
-  // spoofed "[from …]" line or a premature "[/ay-msg]" embedded in a message
+  // spoofed "[from …]" line or a premature "</ay-msg …>" embedded in a message.
+  // XML-style tags (not [brackets]): LLM recipients pattern-match <tag>…</tag>
+  // pairs as structural containers far more reliably, and the closing tag keeps
+  // the nonce because nonce-match — not tag syntax — is what makes it forgery-
+  // proof, so strict-XML validity is deliberately sacrificed for that.
   // can't impersonate another sender or truncate/extend the trusted region.
   const replyTarget = sender.agent?.agent_id || sender.agent?.pid;
   let prefix = "";
   let suffix = "";
   if (sender.agent && !isSlashCommand(body)) {
     const nonce = randomBytes(4).toString("hex");
-    prefix = `[ay-msg ${nonce} from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${replyTarget} "..."]\n`;
-    suffix = `\n[/ay-msg ${nonce}]`;
+    prefix = `<ay-msg ${nonce} from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${replyTarget} "...">\n`;
+    suffix = `\n</ay-msg ${nonce}>`;
   }
 
   const fullBody = prefix + body + suffix;
