@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from "fs";
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, symlinkSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
 import { cmdWs, isPathInside, resolveOperand, walkWorkspaces, WS_JSON_SCHEMA } from "./ws.ts";
@@ -183,7 +183,9 @@ describe("cmdWs (mocked provision)", () => {
   const CLEAN = { branch: "main", head: "abc123", ahead: 0, behind: 0, dirty: false, hasUpstream: true };
 
   beforeEach(() => {
-    root = mkdtempSync(path.join(os.tmpdir(), "ay-ws-cmd-"));
+    // realpath: os.tmpdir() is a symlink on macOS (/var → /private/var), and
+    // process.chdir + cwd-derived paths come back resolved.
+    root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "ay-ws-cmd-")));
     prov.wsRoot = root;
     prov.readStatus.mockReset().mockResolvedValue(CLEAN);
     prov.provision.mockReset();
@@ -327,6 +329,91 @@ describe("cmdWs (mocked provision)", () => {
       wip: true,
     });
     expect(out.join("")).toContain("forked  /f");
+  });
+
+  it("help aliases and the list alias dispatch", async () => {
+    for (const h of ["help", "--help", "-h"]) {
+      out.length = 0;
+      expect(await cmdWs([h])).toBe(0);
+      expect(out.join("")).toContain("ay ws ls");
+    }
+    mkCheckout("o/r/tree/main");
+    out.length = 0;
+    expect(await cmdWs(["list"])).toBe(0);
+    expect(out.join("")).toContain("o/r@main");
+  });
+
+  it("ls/status: live agents from the registry produce counts and the ay-ls hint", async () => {
+    const dir = mkCheckout("o/r/tree/main");
+    const home = process.env.AGENT_YES_HOME!;
+    mkdirSync(home, { recursive: true });
+    writeFileSync(
+      path.join(home, "pids.jsonl"),
+      JSON.stringify({
+        pid: process.pid,
+        cli: "claude",
+        prompt: null,
+        cwd: path.join(dir, "sub"),
+        log_file: null,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: 1,
+      }) + "\n",
+    );
+    expect(await cmdWs(["ls"])).toBe(0);
+    expect(err.join("")).toContain("ay ls --cwd");
+    out.length = 0;
+    err.length = 0;
+    expect(await cmdWs(["status", dir])).toBe(0);
+    expect(out.join("")).toContain("agents:   1 live");
+    expect(err.join("")).toContain(`ay ls --cwd ${dir}`);
+  });
+
+  it("status: defaults to cwd, and honors --path / --spec modes", async () => {
+    const dir = mkCheckout("o/r/tree/main");
+    const prevCwd = process.cwd();
+    process.chdir(dir);
+    try {
+      expect(await cmdWs(["status"])).toBe(0);
+      expect(out.join("")).toContain("spec:     o/r@main");
+    } finally {
+      process.chdir(prevCwd);
+    }
+    out.length = 0;
+    expect(await cmdWs(["status", dir, "--path"])).toBe(0);
+    expect(out.join("")).toContain("branch:   main");
+    out.length = 0;
+    expect(await cmdWs(["status", "o/r@main", "--spec", "--json"])).toBe(0);
+    expect(JSON.parse(out.join("")).workspace.path).toBe(dir);
+  });
+
+  it("new: a non-branch failure reports without the --create hint", async () => {
+    prov.provision.mockResolvedValue({ ok: false, action: "error", reason: "repo-not-found", error: "gone" });
+    expect(await cmdWs(["new", "o/r"])).toBe(1);
+    const msg = err.join("");
+    expect(msg).toContain("repo-not-found");
+    expect(msg).not.toContain("--create");
+  });
+
+  it("fork: --from=<eq-form> and a stale AGENT_YES_PID both resolve", async () => {
+    prov.forkWorktree.mockResolvedValue({ ok: true, action: "forked", folder: "/f" });
+    expect(await cmdWs(["fork", "nb", `--from=${root}`])).toBe(0);
+    expect(prov.forkWorktree).toHaveBeenCalledWith(
+      expect.objectContaining({ fromCwd: path.resolve(root) }),
+    );
+    // An AGENT_YES_PID with no matching registry record falls back to cwd.
+    const envBackup = process.env.AGENT_YES_PID;
+    process.env.AGENT_YES_PID = "999999999";
+    try {
+      expect(await cmdWs(["fork", "nb2"])).toBe(0);
+      expect(prov.forkWorktree).toHaveBeenLastCalledWith(
+        expect.objectContaining({ fromCwd: path.resolve(process.cwd()) }),
+      );
+    } finally {
+      if (envBackup === undefined) delete process.env.AGENT_YES_PID;
+      else process.env.AGENT_YES_PID = envBackup;
+    }
   });
 
   it("fork: defaults --from to cwd (no agent env), surfaces failure", async () => {
