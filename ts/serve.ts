@@ -763,8 +763,12 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       removed++;
       process.stdout.write(`removed '${DAEMON_NAME}' from ${m.id}\n`);
       if (m.id === "pm2") {
-        // Drop it from the persisted pm2 list too, so `pm2 resurrect` won't revive it.
-        await spawnExit([m.bin, "save"]);
+        // Drop it from the persisted pm2 list too, so `pm2 resurrect` won't
+        // revive it. --force is required: with the process list now empty, a
+        // plain `pm2 save` REFUSES to overwrite the dump ("Nothing to save!
+        // Please use --force") and the deleted daemon stays in dump.pm2 —
+        // resurrect/startup would then boot it alongside the new manager's.
+        await spawnExit([m.bin, "save", "--force"]);
         // Remove the Windows login auto-start entry we added at install time.
         if (process.platform === "win32")
           await spawnExit(["reg", "delete", WIN_RUN_KEY, "/v", WIN_RUN_VALUE, "/f"]);
