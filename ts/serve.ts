@@ -2887,6 +2887,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return serveUiFile("e2e.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/qrcode.js")
       return serveUiFile("qrcode.js", "text/javascript; charset=utf-8");
+    // The PWA / preview Service Worker. Without it, --http never registers a SW
+    // (so the in-console P2P preview can't proxy). Served at the console root so
+    // its scope covers /p/<src>/<port>/*.
+    if (req.method === "GET" && p === "/sw.js")
+      return serveUiFile("sw.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/manifest.webmanifest")
       return serveUiFile("manifest.webmanifest", "application/manifest+json");
     if (req.method === "GET" && p === "/icon.svg")

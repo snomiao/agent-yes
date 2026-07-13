@@ -392,6 +392,60 @@
         padding-bottom: 10px;
         margin-bottom: 4px;
       }
+      /* P2P preview overlay — full-window iframe of the exposed app. */
+      .preview-overlay {
+        position: fixed;
+        inset: 0;
+        z-index: 70;
+        display: flex;
+        flex-direction: column;
+        background: var(--bg);
+      }
+      .preview-overlay[hidden] {
+        display: none;
+      }
+      .preview-bar {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 10px;
+        border-bottom: 1px solid var(--line);
+        background: var(--panel, var(--bg));
+        flex: 0 0 auto;
+      }
+      .preview-bar .preview-badge {
+        font-size: 11px;
+        font-weight: 600;
+        color: #3fb950;
+        border: 1px solid #3fb95055;
+        border-radius: 6px;
+        padding: 2px 7px;
+        white-space: nowrap;
+      }
+      .preview-bar .preview-title {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        opacity: 0.8;
+        font-size: 13px;
+      }
+      .preview-bar button {
+        border: 1px solid var(--line);
+        background: transparent;
+        color: var(--fg);
+        border-radius: 6px;
+        padding: 3px 9px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .preview-frame {
+        flex: 1 1 auto;
+        border: 0;
+        width: 100%;
+        background: #fff;
+      }
       /* Share modal — QR + link for a single-agent view-only share. */
       .modal-backdrop {
         position: fixed;
@@ -1960,6 +2014,19 @@
       </div>
     </div>
 
+    <!-- P2P preview: the exposed app rendered in-console over the machine's
+         WebRTC tunnel (Service Worker proxies /w/p/<src>/<port>/*, no relay). -->
+    <div class="preview-overlay" id="previewOverlay" hidden>
+      <div class="preview-bar">
+        <span class="preview-badge" title="served over a direct P2P WebRTC tunnel — traffic does not go through agent-yes.com">⚡ P2P · no relay</span>
+        <span class="preview-title" id="previewTitle"></span>
+        <button id="previewReload" type="button" title="reload">↻</button>
+        <button id="previewPop" type="button" title="open in a new tab">↗</button>
+        <button id="previewClose" type="button" title="close">✕</button>
+      </div>
+      <iframe class="preview-frame" id="previewFrame" title="preview"></iframe>
+    </div>
+
     <!-- Cmd/Ctrl+K omnibox: search agents by title (instant) then output (tail),
          or spawn a new agent in the highlighted agent's cwd with the typed prompt. -->
     <div class="omni" id="omni" style="display: none">
@@ -2176,6 +2243,15 @@
             started_at: a.startedAt,
           }));
         return {
+          // Marker + raw tunnel access for the P2P preview: only a codehost
+          // (`ch`) source can proxy a local port over its WebRTC DataChannel via
+          // the daemon's `preview` plugin (/__codehost/port/<PORT>/*), so the
+          // viewer's preview traffic stays peer-to-peer, off the edge relay.
+          ch: true,
+          peerId,
+          previewFetch(port, method, path, init) {
+            return chRoom.room.fetch(peerId, method, "/__codehost/port/" + port + path, init || {});
+          },
           async fetchJSON(path) {
             let res;
             try {
@@ -2432,6 +2508,43 @@
       const sources = new Map(); // id -> { id, room, host, kind, tx, client, live, devices, serverCount }
       const srcFor = (e) => (e && sources.get(e._src)) || sources.get(LOCAL) || null;
       const txFor = (e) => srcFor(e)?.tx || localTx;
+
+      // Preview bridge: the Service Worker (which can't own the RTCPeerConnection)
+      // forwards each /w/p/<src>/<port>/* request here; we run it over that
+      // source's codehost tunnel (previewFetch → the daemon's `preview` plugin →
+      // 127.0.0.1:<port>) and stream the response back through the message port.
+      // This keeps the viewer's preview traffic peer-to-peer, off the edge relay.
+      if ("serviceWorker" in navigator) {
+        navigator.serviceWorker.addEventListener("message", (event) => {
+          const msg = event.data;
+          if (!msg || msg.type !== "ay-preview-fetch") return;
+          const port = event.ports[0];
+          const tx = sources.get(msg.src)?.tx;
+          if (!tx || !tx.ch || !tx.previewFetch) {
+            port.postMessage({ type: "error", message: "no P2P preview for this machine" });
+            return;
+          }
+          const init = { headers: msg.headers };
+          if (msg.body) init.body = new Uint8Array(msg.body);
+          tx.previewFetch(msg.port, msg.method, msg.path, init)
+            .then(async (res) => {
+              const headers = {};
+              res.headers.forEach((v, k) => (headers[k] = v));
+              port.postMessage({ type: "head", status: res.status, statusText: res.statusText, headers });
+              if (res.body) {
+                const reader = res.body.getReader();
+                for (;;) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  const buf = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+                  port.postMessage({ type: "body", chunk: buf }, [buf]);
+                }
+              }
+              port.postMessage({ type: "end" });
+            })
+            .catch((err) => port.postMessage({ type: "error", message: String(err) }));
+        });
+      }
       // Every machine belonging to a room (for an ay-share room, the room itself).
       const roomSources = (name) => [...sources.values()].filter((s) => (s.room || s.id) === name);
       const roomLive = (name) =>
@@ -3397,6 +3510,23 @@
           btn.textContent = orig;
         }, 1200);
       }
+      // In-console P2P preview: an iframe served from /w/p/<src>/<port>/, which
+      // the Service Worker proxies over the machine's WebRTC tunnel (no relay).
+      function openPreview(src, port) {
+        // Scope-relative so it works at both /w/ (agent-yes.com) and / (ay serve).
+        const url = new URL("p/" + encodeURIComponent(src) + "/" + port + "/", location.href).pathname;
+        const frame = $("previewFrame");
+        if (!frame) return window.open(url, "_blank");
+        $("previewTitle").textContent = "localhost:" + port;
+        frame.src = url;
+        $("previewOverlay").hidden = false;
+      }
+      function closePreview() {
+        const ov = $("previewOverlay");
+        if (ov) ov.hidden = true;
+        const frame = $("previewFrame");
+        if (frame) frame.src = "about:blank"; // tear down the app + its tunnel
+      }
       async function doExpose() {
         const tx = exposePendingTx || localTx;
         const port = exposePendingPort;
@@ -3435,7 +3565,7 @@
               return;
             }
             if (Array.isArray(arr))
-              for (const ex of arr) rows.push({ ...ex, _srcName: s.name || s.id, _tx: tx });
+              for (const ex of arr) rows.push({ ...ex, _srcName: s.name || s.id, _src: s.id, _tx: tx });
           }),
         );
         list.textContent = "";
@@ -3470,8 +3600,19 @@
         meta.appendChild(host);
         row.appendChild(meta);
 
+        // Preview here: render the app P2P over this machine's WebRTC tunnel
+        // (no edge relay), in an in-console iframe. Only offered for a codehost
+        // (ch) source, which has the `preview` plugin.
+        if (ex._tx && ex._tx.ch) {
+          const preview = document.createElement("button");
+          preview.className = "primary";
+          preview.textContent = "Preview";
+          preview.title = "view in-console over a direct P2P tunnel (no relay)";
+          preview.onclick = () => openPreview(ex._src, ex.port);
+          row.appendChild(preview);
+        }
+
         const openBtn = document.createElement("button");
-        openBtn.className = "primary";
         openBtn.textContent = "Open";
         // Re-mint a fresh claim so the owner (or a guest) gets a usable link.
         openBtn.onclick = async () => {
@@ -3573,6 +3714,15 @@
         $("exposeClose")?.addEventListener("click", closeExposeModal);
         $("exposeModal")?.addEventListener("click", (e) => {
           if (e.target === $("exposeModal")) closeExposeModal();
+        });
+        $("previewClose")?.addEventListener("click", closePreview);
+        $("previewReload")?.addEventListener("click", () => {
+          const f = $("previewFrame");
+          if (f) f.src = f.src;
+        });
+        $("previewPop")?.addEventListener("click", () => {
+          const f = $("previewFrame");
+          if (f && f.src && f.src !== "about:blank") window.open(f.src, "_blank");
         });
       })();
       (function shareModalBoot() {
