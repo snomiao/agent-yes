@@ -1,3 +1,4 @@
+import { liveEnv } from "./nodeRuntime.ts";
 // Register oxmgr's daemon with the platform init system (launchd on macOS,
 // systemd on Linux, Task Scheduler on Windows) so managed processes survive a
 // *reboot*, not just a crash.
@@ -18,8 +19,12 @@ export async function ensureBootAutostart(oxmgrBin: string): Promise<boolean> {
   try {
     // Already registered with the init system? Then we're done — don't bounce
     // the daemon (and all its children) just to re-assert what's already true.
+    // env: liveEnv() so the node→bun shim's PATH prepend reaches oxmgr's
+    // `#!/usr/bin/env node` launcher (implicit inheritance uses the startup
+    // environ, missing post-startup mutations).
     const status = Bun.spawn([oxmgrBin, "service", "status"], {
       stdio: ["ignore", "ignore", "ignore"],
+      env: liveEnv(),
     });
     if ((await status.exited) === 0) return true;
 
@@ -28,6 +33,7 @@ export async function ensureBootAutostart(oxmgrBin: string): Promise<boolean> {
     // so passing it after `install` is rejected.
     const svc = Bun.spawn([oxmgrBin, "service", "install"], {
       stdio: ["ignore", "ignore", "ignore"],
+      env: liveEnv(),
     });
     return (await svc.exited) === 0;
   } catch {
