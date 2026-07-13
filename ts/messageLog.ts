@@ -45,6 +45,10 @@ export interface MessageRecord {
   confirmed?: boolean;
   /** Whether the body was wrapped in an `[ay-msg …]` attribution block. */
   wrapped: boolean;
+  /** The remote url/alias when this message crossed the wire (`ay send <remote>:<kw>`);
+   * absent for a same-host send. The two ends record their own mailbox on their
+   * own machine, so this marks that the peer's cwd is on another host. */
+  remote?: string;
 }
 
 /** Keep at most this many lines per mailbox; older entries are compacted away. */
@@ -83,23 +87,36 @@ async function appendCapped(filePath: string, record: MessageRecord): Promise<vo
 }
 
 /**
- * Record a delivered message in both mailboxes. Best-effort: any filesystem
- * error is logged and swallowed so a persistence failure never breaks a send.
- * The sender's outbox lives under `from.cwd`; a human sender (from === null)
- * writes its outbox under `process.cwd()`.
+ * Record the SENDER's view in its outbox. Best-effort — a filesystem error is
+ * logged and swallowed so persistence never breaks a send. The outbox lives
+ * under `from.cwd`; a human sender (from === null) writes under `process.cwd()`.
  */
-export async function recordMessage(record: MessageRecord): Promise<void> {
+export async function recordOutbox(record: MessageRecord): Promise<void> {
   const outCwd = record.from?.cwd ?? process.cwd();
   try {
     await appendCapped(mailboxPath(outCwd, "outbox"), record);
   } catch (err) {
     logger.debug(`[messageLog] outbox append failed: ${err}`);
   }
+}
+
+/** Record the RECIPIENT's view in its inbox (under `to.cwd`). Best-effort. */
+export async function recordInbox(record: MessageRecord): Promise<void> {
   try {
     await appendCapped(mailboxPath(record.to.cwd, "inbox"), record);
   } catch (err) {
     logger.debug(`[messageLog] inbox append failed: ${err}`);
   }
+}
+
+/**
+ * Record a same-host message in both mailboxes — the sender's outbox and the
+ * recipient's inbox both live on this machine. For a message that crossed the
+ * wire, each end calls `recordOutbox`/`recordInbox` on its own host instead.
+ */
+export async function recordMessage(record: MessageRecord): Promise<void> {
+  await recordOutbox(record);
+  await recordInbox(record);
 }
 
 /** Read and parse a cwd's mailbox, oldest first. Missing/corrupt lines skipped. */

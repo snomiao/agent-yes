@@ -26,6 +26,7 @@ import {
   partyMatches,
   readMailbox,
   recordMessage,
+  recordOutbox,
 } from "./messageLog.ts";
 import { badgeDef, matchBadges, TYPING_BADGE } from "./badges.ts";
 import {
@@ -990,13 +991,48 @@ async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string):
     process.stderr.write("remote send requires a keyword (e.g. token@host:port:keyword)\n");
     return 1;
   }
-  const res = await remotePost(remote, "/api/send", { keyword, msg, code });
+  // Attribute the send so the remote can record its recipient's inbox with a real
+  // sender (not an anonymous cross-wire write). Human shell → no `from`.
+  const sender = await senderContext();
+  const from = sender.agent
+    ? {
+        pid: sender.agent.pid,
+        cli: sender.agent.cli,
+        cwd: sender.agent.cwd,
+        agent_id: sender.agent.agent_id,
+      }
+    : null;
+  const res = await remotePost(remote, "/api/send", { keyword, msg, code, from });
   if (!res.ok) {
     process.stderr.write(`remote error ${res.status}: ${await res.text()}\n`);
     return 1;
   }
-  const data = (await res.json()) as any;
+  const data = (await res.json()) as {
+    pid: number;
+    cli?: string;
+    cwd?: string;
+    agentId?: string;
+  };
   process.stdout.write(`sent to remote pid ${data.pid} (${remote.url}  ${keyword})\n`);
+  // Record the sender's half of the exchange locally (the recipient's inbox is
+  // recorded on the remote host by its /api/send handler). Only real bodies.
+  if (msg && msg !== "-") {
+    await recordOutbox({
+      at: Date.now(),
+      from,
+      to: {
+        pid: data.pid,
+        cli: data.cli ?? keyword,
+        cwd: data.cwd ?? "",
+        agent_id: data.agentId,
+      },
+      body: msg,
+      code: code.toLowerCase() === "enter" ? undefined : code.toLowerCase(),
+      confirmed: true,
+      wrapped: false,
+      remote: remote.url,
+    });
+  }
   return 0;
 }
 
@@ -3204,9 +3240,10 @@ async function cmdMsgs(rest: string[]): Promise<number> {
       dir === "out"
         ? `→ ${rec.to.cli} #${rec.to.pid}`
         : `← ${rec.from ? `${rec.from.cli} #${rec.from.pid}` : "human"}`;
+    const via = rec.remote ? ` (via ${rec.remote})` : "";
     const flag = rec.confirmed === false ? " (unconfirmed)" : "";
     const line = truncate(rec.body.replace(/\s+/g, " "), 100);
-    process.stdout.write(`${when}  ${peer.padEnd(20)}${flag}  ${line}\n`);
+    process.stdout.write(`${when}  ${peer.padEnd(20)}${via}${flag}  ${line}\n`);
   }
   return 0;
 }

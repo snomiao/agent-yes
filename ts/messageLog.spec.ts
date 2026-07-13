@@ -6,7 +6,9 @@ import {
   mailboxPath,
   partyMatches,
   readMailbox,
+  recordInbox,
   recordMessage,
+  recordOutbox,
   type MessageRecord,
 } from "./messageLog.ts";
 
@@ -82,6 +84,38 @@ describe("messageLog", () => {
     await appendFile(p, "{ not json\n");
     expect(raw.trim().split("\n")).toHaveLength(1);
     expect(await readMailbox(from, "outbox")).toHaveLength(1);
+  });
+
+  it("recordOutbox writes only the sender's outbox (remote peer's cwd untouched)", async () => {
+    const from = path.join(dir, "local");
+    const to = path.join(dir, "remote");
+    await recordOutbox(
+      makeRecord({
+        from: { pid: 1, cli: "claude", cwd: from, agent_id: "A" },
+        to: { pid: 2, cli: "codex", cwd: to, agent_id: "B" },
+        remote: "http://host:8080",
+        wrapped: false,
+      }),
+    );
+    expect(await readMailbox(from, "outbox")).toHaveLength(1);
+    // The remote peer's cwd is on another host — nothing is written there.
+    expect(await readMailbox(to, "inbox")).toHaveLength(0);
+    expect((await readMailbox(from, "outbox"))[0]!.remote).toBe("http://host:8080");
+  });
+
+  it("recordInbox writes only the recipient's inbox (remote sender's cwd untouched)", async () => {
+    const from = path.join(dir, "remote-sender");
+    const to = path.join(dir, "local-recipient");
+    await recordInbox(
+      makeRecord({
+        from: { pid: 1, cli: "claude", cwd: from, agent_id: "A" },
+        to: { pid: 2, cli: "codex", cwd: to, agent_id: "B" },
+        remote: "wire",
+        wrapped: false,
+      }),
+    );
+    expect(await readMailbox(to, "inbox")).toHaveLength(1);
+    expect(await readMailbox(from, "outbox")).toHaveLength(0);
   });
 
   it("partyMatches prefers agent_id, falls back to pid", () => {
