@@ -26,6 +26,7 @@ import {
   type CommonOpts,
 } from "./subcommands.ts";
 import { TYPING_BADGE } from "./badges.ts";
+import { isTerminalReply } from "./terminalReply.ts";
 import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
 import { type MailParty, recordInbox } from "./messageLog.ts";
 import { updateGlobalPidStatus } from "./globalPidIndex.ts";
@@ -1565,11 +1566,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // resolveLastStdinAt below and the /api/send handler that stamps these.
   const meaningfulStdinAt = new Map<number, number>();
   const anyDaemonWriteAt = new Map<number, number>();
-  // A payload that is PURELY a terminal auto-reply (Cursor Position Report, Device
-  // Attributes, Device Status Report) — protocol chatter a TUI emits on redraw/resize,
-  // not a keystroke. Anchored so a chunk that also carries real input never matches;
-  // real typing (incl. arrow keys like `ESC[A`) never looks like one of these.
-  const isTerminalReply = (s: string) => /^\x1b\[(\d+;\d+R|\?[\d;]*c|>[\d;]*c|\d*n)$/.test(s);
+  // isTerminalReply (ts/terminalReply.ts) spots payloads that are purely such
+  // auto-replies — incl. the DECXCPR `ESC[?r;cR` form and bursts of several
+  // replies concatenated in one chunk — so they never count as meaningful.
   // Stamp both maps after a daemon FIFO write, keyed off the FIFO's post-write mtime
   // (so `anyDaemonWriteAt` is exactly our write's mtime — an external write bumps it
   // strictly higher, which is how resolveLastStdinAt tells them apart with no clock skew).
