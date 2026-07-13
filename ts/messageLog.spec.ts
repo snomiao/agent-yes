@@ -118,6 +118,23 @@ describe("messageLog", () => {
     expect(await readMailbox(from, "outbox")).toHaveLength(0);
   });
 
+  it("preserves the kind tag for key/select events", async () => {
+    const from = path.join(dir, "kfrom");
+    const to = path.join(dir, "kto");
+    await recordMessage(
+      makeRecord({
+        from: { pid: 1, cli: "bash", cwd: from, agent_id: "A" },
+        to: { pid: 2, cli: "bash", cwd: to, agent_id: "B" },
+        kind: "key",
+        body: "down down enter",
+        wrapped: false,
+      }),
+    );
+    const rec = (await readMailbox(to, "inbox"))[0]!;
+    expect(rec.kind).toBe("key");
+    expect(rec.body).toBe("down down enter");
+  });
+
   it("partyMatches prefers agent_id, falls back to pid", () => {
     const party = { pid: 5, cli: "c", cwd: "/x", agent_id: "stable" };
     expect(partyMatches(party, "stable", 999)).toBe(true); // agent_id wins across pid churn

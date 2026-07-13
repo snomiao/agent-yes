@@ -3242,7 +3242,8 @@ async function cmdMsgs(rest: string[]): Promise<number> {
         : `← ${rec.from ? `${rec.from.cli} #${rec.from.pid}` : "human"}`;
     const via = rec.remote ? ` (via ${rec.remote})` : "";
     const flag = rec.confirmed === false ? " (unconfirmed)" : "";
-    const line = truncate(rec.body.replace(/\s+/g, " "), 100);
+    const tag = rec.kind ? `[${rec.kind}] ` : "";
+    const line = tag + truncate(rec.body.replace(/\s+/g, " "), 100);
     process.stdout.write(`${when}  ${peer.padEnd(20)}${via}${flag}  ${line}\n`);
   }
   return 0;
@@ -3258,6 +3259,36 @@ async function resolveWritableAgent(keyword: string, opts: CommonOpts): Promise<
     );
   }
   return record;
+}
+
+/**
+ * Record an `ay key` / `ay select` stdin write in the message log, same as a
+ * text send but tagged with its `kind` (and `body` = the keystroke names /
+ * chosen option). Key/select are local-only (no remote wire), so both mailboxes
+ * are on this host — recordMessage writes both. Best-effort.
+ */
+async function recordKeyEvent(
+  sender: { agent: GlobalPidRecord | null },
+  record: GlobalPidRecord,
+  kind: "key" | "select",
+  body: string,
+): Promise<void> {
+  await recordMessage({
+    at: Date.now(),
+    from: sender.agent
+      ? {
+          pid: sender.agent.pid,
+          cli: sender.agent.cli,
+          cwd: sender.agent.cwd,
+          agent_id: sender.agent.agent_id,
+        }
+      : null,
+    to: { pid: record.pid, cli: record.cli, cwd: record.cwd, agent_id: record.agent_id },
+    kind,
+    body,
+    confirmed: true,
+    wrapped: false,
+  });
 }
 
 async function cmdKey(rest: string[]): Promise<number> {
@@ -3307,10 +3338,11 @@ async function cmdKey(rest: string[]): Promise<number> {
   };
   const record = await resolveWritableAgent(keyword, opts);
   const force = Boolean(argv.force) || process.env.AGENT_YES_FORCE_SEND === "1";
-  await enforceSendGuards(record, force);
+  const sender = await enforceSendGuards(record, force);
 
   await writeKeysPaced(record.fifo_file!, byteSeqs, Math.max(0, argv.pace));
   process.stdout.write(`sent to pid ${record.pid} (${record.cli}): ${keyNames.join(" ")}\n`);
+  await recordKeyEvent(sender, record, "key", keyNames.join(" "));
   return 0;
 }
 
@@ -3367,7 +3399,7 @@ async function cmdSelect(rest: string[]): Promise<number> {
     );
   }
   const force = Boolean(argv.force) || process.env.AGENT_YES_FORCE_SEND === "1";
-  await enforceSendGuards(record, force);
+  const sender = await enforceSendGuards(record, force);
 
   const menu = await extractMenu(record.log_file, record.cli);
   if (!menu) {
@@ -3391,6 +3423,7 @@ async function cmdSelect(rest: string[]): Promise<number> {
   process.stdout.write(
     `pid ${record.pid} (${record.cli}): selected option ${n} (${moved} + enter)\n`,
   );
+  await recordKeyEvent(sender, record, "select", `option ${n}`);
 
   if (argv.wait) {
     const ok = await waitForNeedsInputClear(record, Math.max(1, argv.timeout) * 1000);

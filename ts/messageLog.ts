@@ -37,7 +37,12 @@ export interface MessageRecord {
   from: MailParty | null;
   /** Recipient agent. */
   to: MailParty;
-  /** The message body (without the `[ay-msg …]` wrapper). */
+  /** What kind of stdin write this was. Omitted for a normal `ay send` text
+   * message; "key" for raw keystrokes (`ay key`), "select" for a menu pick
+   * (`ay select`). For key/select the `body` holds the key names / choice. */
+  kind?: "key" | "select";
+  /** The message body (without the `[ay-msg …]` wrapper), or — for a key/select
+   * record — the keystroke names / chosen option. */
   body: string;
   /** Trailing control code name (e.g. "enter", "ctrl-c") when not a plain submit. */
   code?: string;
