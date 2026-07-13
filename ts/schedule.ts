@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { resolveSpawnCwd } from "./workspaceConfig.ts";
 import { ensureBootAutostart } from "./oxmgrService.ts";
+import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
 
 // `ay schedule` — run an agent on a recurring schedule via oxmgr's cron support.
 // A scheduled job runs once immediately AND on every cron tick (with
@@ -33,16 +34,23 @@ function schedName(explicit: string | undefined, cli: string, key: string): stri
 }
 
 async function run(cmd: string[], capture = false): Promise<{ code: number; out: string }> {
+  // env: liveEnv() — oxmgr's global bin is a `#!/usr/bin/env node` script, and
+  // ensureNodeRuntime's shim PATH prepend only reaches children given the LIVE
+  // process.env (Bun.spawn's implicit inheritance uses the startup environ).
   const p = Bun.spawn(cmd, {
     stdin: "ignore",
     stdout: capture ? "pipe" : "inherit",
     stderr: capture ? "pipe" : "inherit",
+    env: liveEnv(),
   });
   const out = capture ? await new Response(p.stdout).text() : "";
   return { code: (await p.exited) ?? 1, out };
 }
 
 export async function cmdSchedule(rest: string[]): Promise<number> {
+  // On a bun-only box oxmgr's `#!/usr/bin/env node` launcher needs the node→bun
+  // shim before ANY oxmgr call below can exec (same fix as serve-install).
+  await ensureNodeRuntime();
   const oxmgrBin = Bun.which("oxmgr");
   if (!oxmgrBin) {
     process.stderr.write(

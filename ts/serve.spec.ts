@@ -160,7 +160,11 @@ describe("manager spawns pass a live env snapshot", () => {
     );
     expect(calls?.length).toBeGreaterThanOrEqual(7);
     for (const call of calls!) {
-      expect(call, `missing explicit env in: ${call.slice(0, 80)}`).toContain("env:");
+      // Require a real liveEnv() env option, not just the substring "env:"
+      // (which a comment inside the options object could satisfy).
+      expect(call, `missing explicit env in: ${call.slice(0, 80)}`).toMatch(
+        /env: (?:\{\s*(?:\.\.\.)?)?liveEnv\(\)/,
+      );
     }
   });
 });

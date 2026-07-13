@@ -1,4 +1,4 @@
-import { chmod, mkdir, open, readFile, stat, unlink, writeFile } from "fs/promises";
+import { mkdir, open, readFile, stat, unlink, writeFile } from "fs/promises";
 import { renameSync, watch, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -25,6 +25,8 @@ import {
   type CommonOpts,
 } from "./subcommands.ts";
 import { TYPING_BADGE } from "./badges.ts";
+import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
+export { ensureNodeRuntime } from "./nodeRuntime.ts";
 import { updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { spawnRejectionReason } from "./spawnGate.ts";
 import { findSpawnHiddenLauncher } from "./rustBinary.ts";
@@ -406,45 +408,6 @@ async function globalBinDir(installer: string[]): Promise<string | null> {
   return isBun ? out : path.join(out, "bin");
 }
 
-// Both oxmgr's and pm2's global bins are `#!/usr/bin/env node` JS scripts, so on
-// a bun-only box (setup.sh installs no node) exec dies with "env: node: No such
-// file or directory" — even though pm2 is pure JS and runs perfectly under bun.
-// When node is missing but bun exists, write a node→bun shim into ay's own bin
-// dir and prepend it to PATH so `env node` resolves. NOT solvable with
-// `bun add -g node`: that package (node-bin-gen) lands a broken arch-specific
-// stub and `Bun.which("node")` still finds nothing. POSIX-only — on Windows the
-// npm .cmd shims invoke node.exe directly and an sh script can't stand in.
-// Called from managerRunnable, which read-only paths (`ay serve status`) also
-// reach: an up-to-date shim is left untouched there (a read, not a write), so
-// only the very first run on a node-less box materializes the file.
-// Returns the shim path when the shim is in effect, null when unneeded/impossible.
-export async function ensureNodeRuntime(
-  which: (cmd: string) => string | null = Bun.which,
-): Promise<string | null> {
-  if (process.platform === "win32") return null;
-  if (which("node")) return null;
-  const bun = which("bun");
-  if (!bun) return null;
-  const binDir = path.join(agentYesHome(), "bin");
-  const shim = path.join(binDir, "node");
-  // Single-quote the bun path: inside sh double quotes `$`, backtick and `\`
-  // would still expand, corrupting the shim for a path containing them.
-  const body = `#!/bin/sh\nexec '${bun.replace(/'/g, `'\\''`)}' "$@"\n`;
-  try {
-    if ((await readFile(shim, "utf-8").catch(() => null)) !== body) {
-      await mkdir(binDir, { recursive: true });
-      await writeFile(shim, body);
-      await chmod(shim, 0o755);
-    }
-    if (!(process.env.PATH ?? "").split(path.delimiter).includes(binDir)) {
-      process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
-    }
-    return shim;
-  } catch {
-    return null; // best-effort: the exec probe will fail and name the reason
-  }
-}
-
 // Did an exec attempt die because `env` couldn't find a node runtime? macOS/BSD
 // env says `env: node: No such file or directory`, GNU coreutils quotes it
 // (`env: 'node': …`), Windows cmd says `'node' is not recognized`.
@@ -453,18 +416,6 @@ export function isNoNodeExecError(stderr: string): boolean {
     /env: '?node'?: No such file or directory/.test(stderr) ||
     /'node' is not recognized/.test(stderr)
   );
-}
-
-// Snapshot of the CURRENT process.env for child spawns. Bun.spawn without an
-// explicit `env` hands the child the environ captured at PROCESS STARTUP — not
-// the live process.env — so post-startup mutations (ensureNodeRuntime's shim
-// PATH prepend, installAndVerify's global-bin-dir prepend) silently never reach
-// the child. That is exactly how `ay serve install` kept dying with
-// `env: node: No such file or directory` at the `pm2 start` spawn on a bun-only
-// box even though the probe (which passes env explicitly) had just succeeded.
-// Every spawn of a manager binary must pass `env: liveEnv()`.
-function liveEnv(): Record<string, string | undefined> {
-  return { ...process.env };
 }
 
 // Probe one manager binary with `--version`, capturing stderr so a failure can
