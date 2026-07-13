@@ -732,6 +732,48 @@ async function fetchDaemonVersion(port: number, token: string): Promise<string |
 }
 
 async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
+  // Uninstall first, before any manager resolution/bootstrap: it must sweep
+  // EVERY present manager, not just the currently-preferred one. After a
+  // manager switch (pm2 → oxmgr via the --trust fix) the old manager still
+  // holds a live daemon, and asking only the new one leaves that orphan
+  // running — two processes then grab the same WebRTC room (seen on sym003).
+  // It also must never bootstrap-install a manager just to uninstall.
+  if (sub === "uninstall") {
+    const present: DaemonManager[] = [];
+    const oxmgrBin = Bun.which("oxmgr");
+    const pm2Bin = Bun.which("pm2");
+    if (oxmgrBin) present.push({ id: "oxmgr", bin: oxmgrBin });
+    if (pm2Bin) present.push({ id: "pm2", bin: pm2Bin });
+    let removed = 0;
+    let failed = 0;
+    for (const m of present) {
+      if (!(await managerRunnable(m))) continue;
+      if ((await readDaemonServeArgs(m)) === null) continue; // not registered here
+      const code =
+        (await Bun.spawn([m.bin, "delete", DAEMON_NAME], {
+          stdio: ["ignore", "inherit", "inherit"],
+          env: liveEnv(),
+        }).exited) ?? 1;
+      if (code !== 0) {
+        failed++;
+        process.stderr.write(`ay serve uninstall: ${m.id} delete failed (exit ${code})\n`);
+        continue;
+      }
+      removed++;
+      process.stdout.write(`removed '${DAEMON_NAME}' from ${m.id}\n`);
+      if (m.id === "pm2") {
+        // Drop it from the persisted pm2 list too, so `pm2 resurrect` won't revive it.
+        await spawnExit([m.bin, "save"]);
+        // Remove the Windows login auto-start entry we added at install time.
+        if (process.platform === "win32")
+          await spawnExit(["reg", "delete", WIN_RUN_KEY, "/v", WIN_RUN_VALUE, "/f"]);
+      }
+    }
+    if (removed === 0 && failed === 0)
+      process.stdout.write(`no '${DAEMON_NAME}' daemon registered with any manager\n`);
+    return failed ? 1 : 0;
+  }
+
   // Prefer an already-installed manager — but only if it actually execs. A
   // glibc-incompatible oxmgr (Debian 12: GLIBC_2.39 not found) can sit on PATH
   // yet be unusable; treat it as absent so we bootstrap a working one instead of
@@ -928,8 +970,12 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       else if (mgr.id === "oxmgr")
         process.stdout.write(
           onBoot
-            ? `start-on-boot: enabled (systemd --user + linger, starts at boot)\n`
-            : `start-on-boot: not registered — needs a user systemd session; run \`oxmgr service install\` to enable\n`,
+            ? process.platform === "darwin"
+              ? `start-on-boot: enabled (launchd user agent, starts at login)\n`
+              : `start-on-boot: enabled (systemd --user + linger, starts at boot)\n`
+            : process.platform === "darwin"
+              ? `start-on-boot: not registered — run \`oxmgr service install\` to enable\n`
+              : `start-on-boot: not registered — needs a user systemd session; run \`oxmgr service install\` to enable\n`,
         );
       else if (process.platform === "win32")
         process.stdout.write(
@@ -953,22 +999,6 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       await emitShareLink();
     }
     return code ?? 1;
-  }
-
-  if (sub === "uninstall") {
-    const proc = Bun.spawn([mgr.bin, "delete", DAEMON_NAME], {
-      stdio: ["ignore", "inherit", "inherit"],
-      env: liveEnv(),
-    });
-    const code = (await proc.exited) ?? 1;
-    if (mgr.id === "pm2" && code === 0) {
-      // Drop it from the persisted pm2 list too, so `pm2 resurrect` won't revive it.
-      await spawnExit([mgr.bin, "save"]);
-      // Remove the Windows login auto-start entry we added at install time.
-      if (process.platform === "win32")
-        await spawnExit(["reg", "delete", WIN_RUN_KEY, "/v", WIN_RUN_VALUE, "/f"]);
-    }
-    return code;
   }
 
   if (sub === "logs") {

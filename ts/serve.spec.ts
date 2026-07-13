@@ -78,7 +78,7 @@ describe("manager spawns pass a live env snapshot", () => {
     // Grab each Bun.spawn(...) call whose argv mentions a manager binary.
     // Capture from the call opening through the options object's closing `})`.
     const calls = src.match(
-      /Bun\.spawn\((?:\[[^\]]*mgr\.bin[^\]]*\]|startArgv|installer),[\s\S]*?\}\)/g,
+      /Bun\.spawn\((?:\[[^\]]*\bm(?:gr)?\.bin[^\]]*\]|startArgv|installer),[\s\S]*?\}\)/g,
     );
     expect(calls?.length).toBeGreaterThanOrEqual(7);
     for (const call of calls!) {
