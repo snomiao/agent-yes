@@ -71,7 +71,13 @@ clis:
     autoRetry:
       - pattern: "API Error.*Overloaded"
         flags: i
-      - Overloaded
+      # The CLI's transient status toast is a line that is ONLY "Overloaded"
+      # (optionally a leading bullet/mark). Whole-line anchored: a task title or
+      # prose merely mentioning Overloaded must not arm a spurious retry —
+      # rendered task lists / summaries sit on screen next to a ready prompt,
+      # which is exactly the arm condition.
+      - pattern: '^\s*[·•●⎿✗×]?\s*Overloaded\.?\s*$'
+        flags: m
       # "API Error: Response stalled mid-stream. The response above may be
       # incomplete." — the streamed response wedged and the client aborted
       # mid-token. Transient + server-side like Overloaded, so retry with
@@ -98,11 +104,20 @@ clis:
       # a stray "529"/"500" in normal output can't trigger a spurious retry.
       - pattern: 'API Error.{0,4}5\d\d'
         flags: i
+      # 429 / rate-limit: anchored to the "API Error" chrome. A bare
+      # `rate.?limit` here caused real spurious retries — an on-screen task
+      # list ("client ignores rate-limit drop") or an agent's own summary
+      # (INGEST_RATE_LIMIT_PER_MIN) armed the loop and typed "retry" into a
+      # perfectly healthy session.
+      - pattern: 'API Error.{0,4}429'
+        flags: i
+      - pattern: 'API Error[\s\S]{0,60}rate.?limit'
+        flags: i
       - Claude usage limit reached
       - hit your usage limit
-      - pattern: "rate.?limit"
-        flags: i
-      - pattern: "session limit"
+      # Session/5-hour limit banners keep the distinctive "… limit reached"
+      # phrase; a bare "session limit" matched ordinary prose.
+      - pattern: '(session|5-hour) limit reached'
         flags: i
     restoreArgs:
       - --continue
@@ -195,14 +210,26 @@ clis:
     autoRetry:
       - pattern: "API Error.*Overloaded"
         flags: i
-      - Overloaded
+      # Whole-line-only toast match — see the claude group for why a bare
+      # `Overloaded` substring is dangerous (task lists / prose arm retries).
+      - pattern: '^\s*[·•●⎿✗×]?\s*Overloaded\.?\s*$'
+        flags: m
       - pattern: 'API Error.{0,4}5\d\d'
+        flags: i
+      # 429 / rate-limit: anchored to the "API Error" chrome. A bare
+      # `rate.?limit` here caused real spurious retries — an on-screen task
+      # list ("client ignores rate-limit drop") or an agent's own summary
+      # (INGEST_RATE_LIMIT_PER_MIN) armed the loop and typed "retry" into a
+      # perfectly healthy session.
+      - pattern: 'API Error.{0,4}429'
+        flags: i
+      - pattern: 'API Error[\s\S]{0,60}rate.?limit'
         flags: i
       - Claude usage limit reached
       - hit your usage limit
-      - pattern: "rate.?limit"
-        flags: i
-      - pattern: "session limit"
+      # Session/5-hour limit banners keep the distinctive "… limit reached"
+      # phrase; a bare "session limit" matched ordinary prose.
+      - pattern: '(session|5-hour) limit reached'
         flags: i
     restoreArgs:
       - --continue
@@ -300,14 +327,26 @@ clis:
     autoRetry:
       - pattern: "API Error.*Overloaded"
         flags: i
-      - Overloaded
+      # Whole-line-only toast match — see the claude group for why a bare
+      # `Overloaded` substring is dangerous (task lists / prose arm retries).
+      - pattern: '^\s*[·•●⎿✗×]?\s*Overloaded\.?\s*$'
+        flags: m
       - pattern: 'API Error.{0,4}5\d\d'
+        flags: i
+      # 429 / rate-limit: anchored to the "API Error" chrome. A bare
+      # `rate.?limit` here caused real spurious retries — an on-screen task
+      # list ("client ignores rate-limit drop") or an agent's own summary
+      # (INGEST_RATE_LIMIT_PER_MIN) armed the loop and typed "retry" into a
+      # perfectly healthy session.
+      - pattern: 'API Error.{0,4}429'
+        flags: i
+      - pattern: 'API Error[\s\S]{0,60}rate.?limit'
         flags: i
       - Claude usage limit reached
       - hit your usage limit
-      - pattern: "rate.?limit"
-        flags: i
-      - pattern: "session limit"
+      # Session/5-hour limit banners keep the distinctive "… limit reached"
+      # phrase; a bare "session limit" matched ordinary prose.
+      - pattern: '(session|5-hour) limit reached'
         flags: i
     restoreArgs:
       - --continue

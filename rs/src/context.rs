@@ -154,6 +154,89 @@ fn should_fire_retry(working: bool, ready: bool, idle_ms: u64, min_idle_ms: u64)
     !working && ready && idle_ms >= min_idle_ms
 }
 
+/// Fallback reason when no autoRetry match was captured before firing.
+pub(crate) const RETRY_REASON_FALLBACK: &str = "a transient server-side error";
+
+/// All reason strings `classify_retry_reason` can produce — used by the
+/// self-trigger guard test in config.rs to prove every possible typed message
+/// is inert against every CLI's screen-scrape patterns.
+pub(crate) const RETRY_REASONS: [&str; 6] = [
+    "the model backend reported it is temporarily busy",
+    "the response stream stalled mid-way",
+    "the connection dropped mid-response",
+    "a usage cap was reached (it may need time to reset)",
+    "requests are being throttled by the server",
+    RETRY_REASON_FALLBACK,
+];
+
+/// Paraphrase the matched recoverable-error banner into a short reason.
+///
+/// Deliberately NEVER echoes the raw banner wording ("API Error", "Overloaded",
+/// "rate limit", …): the built message is typed into the PTY and stays visible
+/// in the transcript, where raw wording would re-match the autoRetry patterns —
+/// keeping `err` true forever, which blocks the streak reset on recovery. The
+/// guard test in config.rs asserts every produced message stays pattern-inert.
+pub(crate) fn classify_retry_reason(screen: &str) -> &'static str {
+    let s = screen.to_lowercase();
+    if s.contains("overload") {
+        RETRY_REASONS[0]
+    } else if s.contains("stalled") {
+        RETRY_REASONS[1]
+    } else if s.contains("connection closed") {
+        RETRY_REASONS[2]
+    } else if s.contains("usage limit") || s.contains("session limit") {
+        RETRY_REASONS[3]
+    } else if s.contains("rate") && s.contains("limit") {
+        RETRY_REASONS[4]
+    } else {
+        RETRY_REASON_FALLBACK
+    }
+}
+
+/// Human-readable duration: "45s", "3m20s", "1h04m", "8h".
+pub(crate) fn fmt_dur_secs(total: u64) -> String {
+    if total < 60 {
+        format!("{}s", total)
+    } else if total < 3600 {
+        let (m, s) = (total / 60, total % 60);
+        if s == 0 {
+            format!("{}m", m)
+        } else {
+            format!("{}m{:02}s", m, s)
+        }
+    } else {
+        let (h, m) = (total / 3600, (total % 3600) / 60);
+        if m == 0 {
+            format!("{}h", h)
+        } else {
+            format!("{}h{:02}m", h, m)
+        }
+    }
+}
+
+/// The single line typed into the agent's prompt instead of a bare "retry":
+/// says WHO is nudging (agent-yes, automated), WHY (paraphrased reason), and
+/// the backoff state (attempt #, elapsed, next delay, give-up horizon), plus
+/// an explicit "ignore if nothing failed" clause so an agent that already
+/// recovered — or is mid-question — doesn't burn a turn asking what "retry"
+/// refers to. Must stay one line (it is submitted with a single "\r").
+pub(crate) fn build_retry_message(
+    attempt: u32,
+    reason: &str,
+    since_first_secs: u64,
+    next_backoff_secs: u64,
+) -> String {
+    format!(
+        "retry [auto-retry #{attempt} by agent-yes: {reason}; first seen {since} ago; \
+         if this attempt fails too, the next nudge comes in {next} (giving up after {give_up}). \
+         This is an automated recovery nudge - if no request actually failed, ignore it and \
+         simply continue your previous task.]",
+        since = fmt_dur_secs(since_first_secs),
+        next = fmt_dur_secs(next_backoff_secs),
+        give_up = fmt_dur_secs(RETRY_GIVE_UP_SECS),
+    )
+}
+
 /// Agent context - centralized session state
 pub struct AgentContext {
     pub cli: String,
@@ -206,6 +289,9 @@ pub struct AgentContext {
     auto_retry_streak: u32,
     auto_retry_started_at: Option<Instant>,
     auto_retry_next_at: Option<Instant>,
+    // Paraphrased reason captured when the error banner was matched — folded
+    // into the typed retry message so the agent knows why it is being nudged.
+    auto_retry_reason: Option<&'static str>,
 
     // Idle screen scanner - re-checks enter patterns after prolonged idle
     last_idle_scan_at: Option<Instant>,
@@ -318,6 +404,7 @@ impl AgentContext {
             auto_retry_streak: 0,
             auto_retry_started_at: None,
             auto_retry_next_at: None,
+            auto_retry_reason: None,
             stall_esc_sent_at: None,
             stall_force_restart: false,
             ctrl_c_times: Vec::new(),
@@ -1113,16 +1200,24 @@ impl AgentContext {
                     self.auto_retry_next_at = Some(now + Duration::from_millis(500));
                 } else {
                     self.auto_retry_streak = self.auto_retry_streak.saturating_add(1);
-                    warn!(
-                        "Auto-retry: typing 'retry' (attempt {})",
-                        self.auto_retry_streak
-                    );
-                    self.do_send_retry(msg_ctx)?;
                     // Self-schedule the next retry with escalated backoff. Leaving
                     // this None and re-arming from check_patterns would tight-loop
                     // while the error banner stays on screen. check_patterns resets
                     // the streak (cancelling this) once the agent recovers.
                     let next = retry_backoff_secs(self.auto_retry_streak);
+                    let reason = self.auto_retry_reason.unwrap_or(RETRY_REASON_FALLBACK);
+                    let since = self
+                        .auto_retry_started_at
+                        .map(|t| t.elapsed().as_secs())
+                        .unwrap_or(0);
+                    let line =
+                        build_retry_message(self.auto_retry_streak, reason, since, next);
+                    warn!(
+                        "Auto-retry: typing retry nudge (attempt {}, reason: {})",
+                        self.auto_retry_streak, reason
+                    );
+                    self.do_send_retry(msg_ctx, &line)?;
+                    self.record_auto_retry_inbox(reason, self.auto_retry_streak, next);
                     self.auto_retry_next_at = Some(now + Duration::from_secs(next));
                 }
             }
@@ -1243,19 +1338,57 @@ impl AgentContext {
     }
 
     /// Type "retry" + Enter — the auto-retry response to a recoverable API error.
-    fn do_send_retry(&mut self, msg_ctx: &MessageContext) -> Result<()> {
+    fn do_send_retry(&mut self, msg_ctx: &MessageContext, line: &str) -> Result<()> {
         {
             let mut writer = msg_ctx
                 .writer
                 .lock()
                 .map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
-            writer.write_all(b"retry")?;
+            writer.write_all(line.as_bytes())?;
             writer.write_all(b"\r")?;
             writer.flush()?;
         }
         self.idle_waiter.ping();
         self.mark_stdin_sent();
         Ok(())
+    }
+
+    /// Best-effort structured record of the nudge into this agent's own
+    /// `<cwd>/.agent-yes/inbox.jsonl` (schema mirrors ts/messageLog.ts
+    /// MessageRecord, kind "auto-retry"), so `ay msgs` / the console can show
+    /// why and how often an agent got poked. Never fails or blocks the send;
+    /// compaction is left to the TS appenders (these entries are rare —
+    /// bounded by the backoff ladder and the 8h give-up window).
+    fn record_auto_retry_inbox(&self, reason: &str, attempt: u32, next_backoff_secs: u64) {
+        let dir = std::path::Path::new(&self.cwd).join(".agent-yes");
+        if std::fs::create_dir_all(&dir).is_err() {
+            return;
+        }
+        let at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let record = serde_json::json!({
+            "at": at,
+            "from": serde_json::Value::Null,
+            "to": { "pid": std::process::id(), "cli": self.cli, "cwd": self.cwd },
+            "kind": "auto-retry",
+            "body": format!(
+                "{} (attempt {}, next backoff {})",
+                reason,
+                attempt,
+                fmt_dur_secs(next_backoff_secs)
+            ),
+            "wrapped": false,
+        });
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(dir.join("inbox.jsonl"))
+        {
+            use std::io::Write as _;
+            let _ = writeln!(f, "{}", record);
+        }
     }
 
     /// Stamp the last-stdin time — marks a "poke" whose response (any PTY
@@ -1345,6 +1478,10 @@ impl AgentContext {
                 .any(|p| p.is_match(&buffer));
             let ready_now = self.cli_config.ready.iter().any(|p| p.is_match(&buffer));
             if err && ready_now {
+                // Remember WHY (paraphrased — see classify_retry_reason) so the
+                // typed message can explain itself. Refresh on every match: the
+                // banner may change across attempts (e.g. overload → 5xx).
+                self.auto_retry_reason = Some(classify_retry_reason(&buffer));
                 // Error banner is up AND the agent is back at its prompt: schedule
                 // the next retry unless one is already counting down.
                 if self.auto_retry_next_at.is_none() {
@@ -1541,6 +1678,54 @@ mod tests {
         // capped at RETRY_MAX_DELAY_SECS, and no shift overflow for large streaks
         assert_eq!(retry_backoff_secs(6), 256);
         assert_eq!(retry_backoff_secs(50), 256);
+    }
+
+    #[test]
+    fn test_classify_retry_reason_maps_banners_to_inert_paraphrases() {
+        assert_eq!(
+            classify_retry_reason("● API Error: 529 Overloaded"),
+            RETRY_REASONS[0]
+        );
+        assert_eq!(
+            classify_retry_reason("API Error: Response stalled mid-stream."),
+            RETRY_REASONS[1]
+        );
+        assert_eq!(
+            classify_retry_reason("API Error: Connection closed mid-response."),
+            RETRY_REASONS[2]
+        );
+        assert_eq!(
+            classify_retry_reason("Claude usage limit reached"),
+            RETRY_REASONS[3]
+        );
+        assert_eq!(classify_retry_reason("You are being rate-limited"), RETRY_REASONS[4]);
+        assert_eq!(
+            classify_retry_reason("API Error: 503 Service Unavailable"),
+            RETRY_REASON_FALLBACK
+        );
+    }
+
+    #[test]
+    fn test_fmt_dur_secs() {
+        assert_eq!(fmt_dur_secs(0), "0s");
+        assert_eq!(fmt_dur_secs(45), "45s");
+        assert_eq!(fmt_dur_secs(60), "1m");
+        assert_eq!(fmt_dur_secs(200), "3m20s");
+        assert_eq!(fmt_dur_secs(3600), "1h");
+        assert_eq!(fmt_dur_secs(3900), "1h05m");
+        assert_eq!(fmt_dur_secs(8 * 3600), "8h");
+    }
+
+    #[test]
+    fn test_build_retry_message_is_one_line_with_context() {
+        let msg = build_retry_message(3, RETRY_REASONS[0], 45, 64);
+        assert!(!msg.contains('\n'), "must be a single line: {msg}");
+        assert!(msg.starts_with("retry ["), "keeps the imperative first: {msg}");
+        assert!(msg.contains("#3"));
+        assert!(msg.contains("45s ago"));
+        assert!(msg.contains("in 1m04s"));
+        assert!(msg.contains("giving up after 8h"));
+        assert!(msg.contains("ignore it"), "needs the ignore-if-recovered clause");
     }
 
     #[test]

@@ -21,9 +21,14 @@ import { sendEnter, sendMessage } from "./core/messaging.ts";
 import {
   AUTO_RETRY_GIVE_UP_MS,
   AUTO_RETRY_MIN_IDLE_MS,
+  AUTO_RETRY_REASON_FALLBACK,
   autoRetryBackoffMs,
+  buildAutoRetryMessage,
+  classifyAutoRetryReason,
+  formatDurationSecs,
   shouldFireRetry,
 } from "./autoRetry.ts";
+import { recordInbox } from "./messageLog.ts";
 import {
   initializeLogPaths,
   setupDebugLogging,
@@ -794,6 +799,9 @@ export default async function agentYes({
   let retryStartedAt: number | null = null;
   let retryNextAt: number | null = null;
   let autoRetryScreen = "";
+  // Paraphrased reason captured when the error banner was matched — folded
+  // into the typed retry message so the agent knows why it is being nudged.
+  let retryReason: string | null = null;
   const heartbeatInterval = setInterval(async () => {
     try {
       const rendered = removeControlCharacters(xtermProxy.tail(12));
@@ -822,15 +830,36 @@ export default async function agentYes({
             retryNextAt = now + 500; // busy / not at prompt / still active — re-check shortly
           } else {
             retryStreak += 1;
-            logger.warn(`[${cli}-yes] auto-retry: typing 'retry' (attempt ${retryStreak})`);
-            // Write "retry" + Enter atomically (mirrors rs do_send_retry); using
+            const nextBackoffMs = autoRetryBackoffMs(retryStreak);
+            const reason = retryReason ?? AUTO_RETRY_REASON_FALLBACK;
+            const sinceFirstSecs = retryStartedAt === null ? 0 : (now - retryStartedAt) / 1000;
+            const line = buildAutoRetryMessage(
+              retryStreak,
+              reason,
+              sinceFirstSecs,
+              nextBackoffMs / 1000,
+            );
+            logger.warn(
+              `[${cli}-yes] auto-retry: typing retry nudge (attempt ${retryStreak}, reason: ${reason})`,
+            );
+            // Write the nudge + Enter atomically (mirrors rs do_send_retry); using
             // sendMessage would split text/Enter across the fast heartbeat ticks.
-            ctx.messageContext.shell.write("retry\r");
+            ctx.messageContext.shell.write(line + "\r");
             ctx.idleWaiter.ping();
+            // Structured trace for `ay msgs` / the console (mirrors the Rust
+            // runtime's record_auto_retry_inbox) — best-effort, never blocks.
+            void recordInbox({
+              at: now,
+              from: null,
+              to: { pid: process.pid, cli, cwd: workingDir },
+              kind: "auto-retry",
+              body: `${reason} (attempt ${retryStreak}, next backoff ${formatDurationSecs(nextBackoffMs / 1000)})`,
+              wrapped: false,
+            });
             // Self-schedule the next retry with escalated backoff. (Leaving nextAt
             // null and re-arming from the stdout pipeline would tight-loop while the
             // error banner stays on screen.) Reset on recovery cancels this.
-            retryNextAt = now + autoRetryBackoffMs(retryStreak);
+            retryNextAt = now + nextBackoffMs;
           }
         }
       }
@@ -1185,6 +1214,10 @@ export default async function agentYes({
               const errVisible = conf.autoRetry.some((rx: RegExp) => rx.test(rendered));
               const readyVisible = conf.ready?.some((rx: RegExp) => rx.test(rendered)) ?? false;
               if (errVisible && readyVisible) {
+                // Remember WHY (paraphrased — see classifyAutoRetryReason) so
+                // the typed message can explain itself. Refresh on every match:
+                // the banner may change across attempts (e.g. overload → 5xx).
+                retryReason = classifyAutoRetryReason(rendered);
                 if (retryNextAt === null) {
                   if (retryStartedAt === null) retryStartedAt = Date.now();
                   const delayMs = autoRetryBackoffMs(retryStreak);

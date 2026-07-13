@@ -298,6 +298,51 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Self-trigger guard: the informative auto-retry message is typed into the
+    /// PTY and stays visible in the transcript, so if it ever matched a CLI's
+    /// own screen-scrape patterns it would re-arm the retry loop (autoRetry),
+    /// block the streak reset, kill the session (fatal), or fake a state
+    /// (working/enter/needsInput/typingRespond). Assert every producible
+    /// message is inert against every CLI's patterns.
+    #[test]
+    fn test_auto_retry_message_is_inert_against_all_cli_patterns() {
+        use crate::context::{build_retry_message, RETRY_REASONS};
+        let configs = load_builtin_cli_configs().unwrap();
+        assert!(!configs.is_empty());
+        for (cli, config) in &configs {
+            for reason in RETRY_REASONS {
+                for (attempt, since, next) in
+                    [(1u32, 0u64, 8u64), (5, 500, 128), (12, 30_000, 256)]
+                {
+                    let msg = build_retry_message(attempt, reason, since, next);
+                    let groups: [(&str, &Vec<Regex>); 5] = [
+                        ("autoRetry", &config.auto_retry),
+                        ("fatal", &config.fatal),
+                        ("enter", &config.enter),
+                        ("working", &config.working),
+                        ("needsInput", &config.needs_input),
+                    ];
+                    for (kind, patterns) in groups {
+                        for rx in patterns {
+                            assert!(
+                                !rx.is_match(&msg),
+                                "retry message must not match {cli}.{kind} /{rx}/: {msg}"
+                            );
+                        }
+                    }
+                    for (send, patterns) in &config.typing_respond {
+                        for rx in patterns {
+                            assert!(
+                                !rx.is_match(&msg),
+                                "retry message must not match {cli}.typingRespond[{send}] /{rx}/: {msg}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn test_claude_patterns() {
         let config = get_cli_config("claude").unwrap();
@@ -379,6 +424,41 @@ mod tests {
             .auto_retry
             .iter()
             .any(|rx| rx.is_match("processed 529 files in 500ms")));
+        // Rate-limit is anchored to the API Error chrome: real 429 banners retry…
+        assert!(config.auto_retry.iter().any(|rx| rx.is_match(
+            r#"API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}"#
+        )));
+        // …but ordinary screen content that merely mentions rate limits must
+        // NOT — a rendered task list ("client ignores rate-limit drop") and an
+        // agent's own summary (INGEST_RATE_LIMIT_PER_MIN) both armed spurious
+        // retries on perfectly healthy sessions.
+        assert!(!config.auto_retry.iter().any(|rx| rx.is_match(
+            "P1: client ignores rate-limit drop → customer events permanently lost (#215)"
+        )));
+        assert!(!config
+            .auto_retry
+            .iter()
+            .any(|rx| rx.is_match("set INGEST_RATE_LIMIT_PER_MIN below the batch cap")));
+        // The transient "Overloaded" toast still matches as a whole line…
+        assert!(config
+            .auto_retry
+            .iter()
+            .any(|rx| rx.is_match("  ⎿ Overloaded\n? for shortcuts")));
+        assert!(config.auto_retry.iter().any(|rx| rx.is_match("Overloaded")));
+        // …but not embedded in prose / commit titles / task lists.
+        assert!(!config
+            .auto_retry
+            .iter()
+            .any(|rx| rx.is_match("fix: treat Overloaded banners as recoverable")));
+        // Session/5-hour limit banners need the full "… limit reached" phrase.
+        assert!(config
+            .auto_retry
+            .iter()
+            .any(|rx| rx.is_match("5-hour limit reached ∙ resets 3am")));
+        assert!(!config
+            .auto_retry
+            .iter()
+            .any(|rx| rx.is_match("bump the session limit for QA runs")));
         assert!(!config.typing_respond.is_empty());
         assert!(config.typing_respond.contains_key("1\n"));
         assert_eq!(config.restore_args, vec!["--continue"]);

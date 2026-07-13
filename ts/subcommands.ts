@@ -211,7 +211,7 @@ export interface MessageEdge {
   by: number;
   target: number;
   at: number;
-  kind?: "key" | "select";
+  kind?: "key" | "select" | "auto-retry";
 }
 
 /**
@@ -3279,10 +3279,14 @@ async function cmdMsgs(rest: string[]): Promise<number> {
 
   for (const { dir, rec } of shown) {
     const when = new Date(rec.at).toLocaleTimeString();
-    const peer =
-      dir === "out"
-        ? `→ ${rec.to.cli} #${rec.to.pid}`
-        : `← ${rec.from ? `${rec.from.cli} #${rec.from.pid}` : "human"}`;
+    // auto-retry nudges are written by the agent's own wrapper (from is null
+    // there too) — label them as agent-yes, not a human send.
+    const fromLabel = rec.from
+      ? `${rec.from.cli} #${rec.from.pid}`
+      : rec.kind === "auto-retry"
+        ? "agent-yes"
+        : "human";
+    const peer = dir === "out" ? `→ ${rec.to.cli} #${rec.to.pid}` : `← ${fromLabel}`;
     const via = rec.remote ? ` (via ${rec.remote})` : "";
     const flag = rec.confirmed === false ? " (unconfirmed)" : "";
     const tag = rec.kind ? `[${rec.kind}] ` : "";
