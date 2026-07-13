@@ -2086,7 +2086,7 @@
       <div class="omnibox">
         <input
           id="omni-input"
-          placeholder="Search agents by title, then output…"
+          placeholder="Search agents by title, then output…  ·  &quot;/&quot; commands  ·  /ws workspaces"
           spellcheck="false"
           autocapitalize="off"
           autocomplete="off"
@@ -5525,22 +5525,15 @@
         // (e.g. "/fork fix the auth bug" → cmd "fork", topic "fix the auth bug").
         const parts = q.slice(1).trim().split(/\s+/).filter(Boolean);
         const cmdTerm = (parts[0] || "").toLowerCase(); // command token after "/"
-        const rows = target
-          ? OMNI_COMMANDS.filter((c) => c.cmd.slice(1).startsWith(cmdTerm)).map((c) => ({
+        // Agent-targeted commands need an open agent to act on; /ws and /filter
+        // (below) don't, so the target check gates only these rows, not the builder.
+        const rows = !target
+          ? []
+          : OMNI_COMMANDS.filter((c) => c.cmd.slice(1).startsWith(cmdTerm)).map((c) => ({
               kind: "cmd",
               cmd: c,
               target,
-            }))
-          : [];
-        // "/filter [tokens…]" — global: sets the left panel's filter box (#q) to the
-        // arguments, same tokens the box itself takes (space = AND, repo:x tags).
-        // With no args it clears the filter. Needs no anchor agent — it acts on the
-        // list, not an agent — so it's offered even when nothing is open. Listed
-        // after the agent commands so bare "/" still defaults to /restart.
-        if ("filter".startsWith(cmdTerm)) {
-          rows.push({ kind: "filter", value: parts.slice(1).join(" ") });
-        }
-        if (!target) return rows;
+            }));
         // "/fork [topic]" — a slash alias for the fork spawn row so fork is reachable
         // straight from the command palette (⌘K → "/fork"), not only via the row that
         // auto-appends to a search. It's a spawn (kind:"fork"), not a kind:"cmd" that
@@ -5560,7 +5553,130 @@
               src: src._src,
             });
         }
+        // "/ws" discoverability — typing "/" (or "/w") lists the workspace
+        // browser next to the agent commands; a full "/ws…" query is intercepted
+        // in runOmni before this builder runs. Needs no anchor: workspaces exist
+        // independently of any open agent.
+        if ("ws".startsWith(cmdTerm)) rows.push({ kind: "wshint" });
+        // "/filter [tokens…]" — global: sets the left panel's filter box (#q) to the
+        // arguments, same tokens the box itself takes (space = AND, repo:x tags).
+        // With no args it clears the filter. Needs no anchor agent — it acts on the
+        // list, not an agent — so it's offered even when nothing is open. Listed
+        // last so bare "/" still defaults to /restart.
+        if ("filter".startsWith(cmdTerm)) {
+          rows.push({ kind: "filter", value: parts.slice(1).join(" ") });
+        }
         return rows;
+      }
+
+      // ---- "/ws" — workspace browser (⌘K → /ws) ------------------------------
+      // Lists every workspace under each connected host's codehost layout
+      // (<wsRoot>/<owner>/<repo>/tree/<branch>) via GET /api/ws — including ones
+      // with NO live agents, which the agent list can never show. Enter spawns a
+      // new agent in the highlighted workspace; a "/ws owner/repo[@branch]" query
+      // that parses as a source adds a provision row (POST /api/spawn {from},
+      // gated server-side by the provision hook/allowlist). Fetched at most once
+      // per TTL from every writable host; hosts without the endpoint (older
+      // daemon) or without codehost (501) just drop out of the merge.
+      const OMNI_WS_TTL = 30_000;
+      let omniWsCache = null; // { at, items: [{ ws, srcId, host }] }
+      let omniWsFetchSeq = 0;
+      let omniWsFetching = false;
+      function omniWsFetch() {
+        const seq = ++omniWsFetchSeq;
+        omniWsFetching = true;
+        const srcs = [...sources.values()].filter((s) => s.tx?.fetchJSON && s.live && !s.readonly);
+        Promise.all(
+          srcs.map(async (s) => {
+            try {
+              const r = await s.tx.fetchJSON("/api/ws");
+              const host = s.deviceLabel || (s.id === LOCAL ? "local" : s.room || s.id);
+              return (r?.workspaces || []).map((ws) => ({ ws, srcId: s.id, host }));
+            } catch {
+              return []; // 404 (older daemon) / 501 (no codehost) / transport error
+            }
+          }),
+        ).then((all) => {
+          if (seq !== omniWsFetchSeq) return; // superseded by a newer fetch
+          omniWsFetching = false;
+          omniWsCache = { at: Date.now(), items: all.flat() };
+          // Repaint only if the user is still looking at a /ws view.
+          if (omniOpen() && /^\/ws(\s|$)/i.test($("omni-input").value.trim())) runOmni();
+        });
+      }
+      const wsSpecOf = (w) => `${w.owner}/${w.repo}@${w.branch}`;
+      // JS twin of ts/ws.ts gitSummary — keep the vocabulary identical.
+      function wsGitSummary(ws) {
+        if (ws.gitError) return "error: " + ws.gitError;
+        const g = ws.git;
+        if (!g) return "";
+        const parts = [];
+        if (g.dirty) parts.push("dirty");
+        if (g.ahead > 0) parts.push("ahead " + g.ahead);
+        if (g.behind > 0) parts.push("behind " + g.behind);
+        if (!g.hasUpstream) parts.push("no-upstream");
+        return parts.length ? parts.join(", ") : "clean";
+      }
+      function omniWsRows(q) {
+        const arg = q.replace(/^\/ws\s*/i, "").trim();
+        if (!omniWsCache) {
+          if (!omniWsFetching) omniWsFetch();
+          return [{ kind: "wsinfo", text: "loading workspaces…" }];
+        }
+        // Stale cache: refresh behind the (still rendered) cached view.
+        if (Date.now() - omniWsCache.at > OMNI_WS_TTL && !omniWsFetching) omniWsFetch();
+        const toks = arg.toLowerCase().split(/\s+/).filter(Boolean);
+        const rows = omniWsCache.items
+          .filter((it) =>
+            toks.every((t) =>
+              (wsSpecOf(it.ws) + " " + it.ws.path + " " + it.host).toLowerCase().includes(t),
+            ),
+          )
+          .sort(
+            (a, b) =>
+              (b.ws.agents?.live || 0) - (a.ws.agents?.live || 0) ||
+              wsSpecOf(a.ws).localeCompare(wsSpecOf(b.ws)),
+          )
+          .slice(0, 30)
+          .map((it) => ({ kind: "ws", ws: it.ws, srcId: it.srcId, host: it.host }));
+        // A single owner/repo[@branch] token that parses as a source gets a
+        // provision row even when similar workspaces exist (the user may want a
+        // branch that isn't checked out yet).
+        if (/^[\w.-]+\/[\w.-]+(@[\w./-]+)?$/.test(arg)) rows.push({ kind: "wsnew", spec: arg });
+        if (!rows.length)
+          rows.push({
+            kind: "wsinfo",
+            text: omniWsCache.items.length
+              ? "no workspaces match — /ws owner/repo@branch provisions a new one"
+              : "no workspaces on any connected host (layout <wsRoot>/<owner>/<repo>/tree/<branch>)",
+          });
+        return rows;
+      }
+      // Lazy git status for the HIGHLIGHTED workspace only — a full-status join
+      // is O(workspaces × git status) and measured in seconds, so state loads
+      // per-row on selection, debounced like the terminal preview. Results land
+      // on the CACHED ws object, so they survive re-filtering keystrokes.
+      let omniWsStatusTimer = null;
+      function omniWsStatusPeek() {
+        const row = omniRows[omniIdx];
+        if (!row || row.kind !== "ws" || row.ws.git !== undefined || row.ws._st) return;
+        if (omniWsStatusTimer) clearTimeout(omniWsStatusTimer);
+        omniWsStatusTimer = setTimeout(async () => {
+          if (!omniOpen()) return;
+          row.ws._st = 1;
+          const s = sources.get(row.srcId);
+          if (!s?.tx?.fetchJSON) return;
+          try {
+            const r = await s.tx.fetchJSON(
+              "/api/ws/status?path=" + encodeURIComponent(row.ws.path),
+            );
+            if (r?.workspace) Object.assign(row.ws, r.workspace);
+            else row.ws.git = null;
+          } catch {
+            row.ws.git = null; // no status chip — the row stays useful without it
+          }
+          if (omniOpen() && omniRows.includes(row)) renderOmni();
+        }, 150);
       }
 
       // Which agent the highlighted candidate should preview in the background: an
@@ -5663,6 +5779,39 @@
                   <div class="omni-sub">sets the left panel filter &nbsp;·&nbsp; space = AND, tags like repo:/wt:/cli:/host:</div>
                 </div></div>`;
             }
+            if (r.kind === "wshint") {
+              return `<div class="omni-row omni-spawn${sc}" data-i="${i}">
+                <span class="dot active"></span>
+                <div class="omni-main">
+                  <div class="omni-title">▤ Workspaces <span style="opacity:.55">/ws</span></div>
+                  <div class="omni-sub">browse every workspace on the fleet — spawn into idle checkouts &nbsp;·&nbsp; ⏎ to open</div>
+                </div></div>`;
+            }
+            if (r.kind === "wsinfo") {
+              return `<div class="omni-row${sc}" data-i="${i}">
+                <div class="omni-main"><div class="omni-sub">${esc(r.text)}</div></div></div>`;
+            }
+            if (r.kind === "ws") {
+              const live = r.ws.agents?.live || 0;
+              const st = wsGitSummary(r.ws);
+              const multi = sources.size > 1;
+              return `<div class="omni-row omni-spawn${sc}" data-i="${i}">
+                <span class="dot ${live ? "active" : "exited"}"></span>
+                <div class="omni-main">
+                  <div class="omni-title">▤ ${esc(wsSpecOf(r.ws))}${
+                    live ? ` <span style="opacity:.7">· ${live} agent${live > 1 ? "s" : ""}</span>` : ""
+                  }${multi ? ` <span style="opacity:.55">@ ${esc(r.host)}</span>` : ""}</div>
+                  <div class="omni-sub">${esc(r.ws.path)}${st ? " &nbsp;·&nbsp; <b>" + esc(st) + "</b>" : ""} &nbsp;·&nbsp; ⏎ spawn agent here</div>
+                </div></div>`;
+            }
+            if (r.kind === "wsnew") {
+              return `<div class="omni-row omni-spawn${sc}" data-i="${i}">
+                <span class="dot active"></span>
+                <div class="omni-main">
+                  <div class="omni-title">⊕ Provision workspace <b>${esc(r.spec)}</b> &amp; spawn ${esc(anchor?.cli || "claude")}</div>
+                  <div class="omni-sub">clone/refresh via codehost — gated by the host's provision hook/allowlist</div>
+                </div></div>`;
+            }
             if (r.kind === "cmd") {
               const t = r.target;
               const dz = r.cmd.danger ? " danger" : "";
@@ -5687,6 +5836,7 @@
         $("omni-results").innerHTML = html || `<div class="omni-empty">no matches</div>`;
         const selrow = $("omni-results").querySelector(".omni-row.sel");
         if (selrow) selrow.scrollIntoView({ block: "nearest" });
+        omniWsStatusPeek(); // lazy git state for a highlighted /ws row (no-op otherwise)
       }
 
       function runOmni() {
@@ -5694,6 +5844,16 @@
         // A "/…" query is a slash command against the open agent, not a search —
         // show the matching command rows and skip the agent/spawn/tail machinery.
         if (q.startsWith("/")) {
+          // "/ws …" opens the workspace browser — its rows come from /api/ws,
+          // not the agent list, and it must never fall through to agent search
+          // (the query is a workspace filter, not a spawn prompt).
+          if (/^\/ws(\s|$)/i.test(q)) {
+            if (omniTailTimer) clearTimeout(omniTailTimer);
+            omniRows = omniWsRows(q);
+            omniIdx = 0;
+            renderOmni();
+            return;
+          }
           const cmds = omniCommandRows(q);
           if (cmds.length) {
             if (omniTailTimer) clearTimeout(omniTailTimer);
@@ -5808,6 +5968,25 @@
           closeOmni(false);
           $("q").value = row.value;
           $("q").dispatchEvent(new Event("input"));
+          return;
+        }
+        // /ws rows — handled BEFORE the ⌘⏎ spawn-here fallthrough: in the
+        // workspace browser the typed text is a filter, not a prompt, so
+        // "spawn here with this prompt" is never the right reading of it.
+        if (row && row.kind === "wshint") {
+          $("omni-input").value = "/ws ";
+          runOmni();
+          return; // stays open — the browser replaces the command list
+        }
+        if (row && row.kind === "wsinfo") return; // informational, not activatable
+        if (row && row.kind === "ws") {
+          closeOmni(false);
+          await spawnAndSelect({ cli: anchor?.cli || "claude", cwd: row.ws.path }, row.srcId);
+          return;
+        }
+        if (row && row.kind === "wsnew") {
+          closeOmni(false);
+          await spawnAndSelect({ cli: anchor?.cli || "claude", from: row.spec }, anchor?._src);
           return;
         }
         // ⌘⏎ always = spawn-here (the fast default), regardless of the selected row.
