@@ -27,7 +27,7 @@ pub const SUBCOMMANDS: &[&str] = &[
 
 /// Subcommands reserved for the generic manager entry (`ay`/`agent-yes`), not a
 /// cli-bound alias like `cy`. Mirrors `MANAGER_SUBCOMMANDS` in ts/subcommands.ts.
-pub const MANAGER_SUBCOMMANDS: &[&str] = &["setup"];
+pub const MANAGER_SUBCOMMANDS: &[&str] = &["setup", "ws"];
 
 /// Whether `name` is a management subcommand. `manager_commands` (true for the
 /// generic `ay`/`agent-yes` entry) additionally admits manager-only commands

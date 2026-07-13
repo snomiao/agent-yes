@@ -368,7 +368,7 @@ const SUBCOMMANDS = new Set([
 // alias like `cy` (= claude-yes = "agent-yes claude") must NOT treat these as
 // subcommands — `cy setup …` should run claude with that text, not manage the
 // host. Kept separate from SUBCOMMANDS so a runner alias falls straight through.
-const MANAGER_SUBCOMMANDS = new Set(["setup"]);
+const MANAGER_SUBCOMMANDS = new Set(["setup", "ws"]);
 
 const IDLE_THRESHOLD_MS = 60 * 1000;
 
@@ -475,6 +475,10 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         const { cmdSetup } = await import("./setup.ts");
         return cmdSetup(rest);
       }
+      case "ws": {
+        const { cmdWs } = await import("./ws.ts");
+        return cmdWs(rest);
+      }
       case "schedule": {
         const { cmdSchedule } = await import("./schedule.ts");
         return cmdSchedule(rest);
@@ -572,6 +576,11 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
   const setupLine = managerCommands
     ? `  ay setup                            guided setup: pick a workspace, share to agent-yes.com\n`
     : ``;
+  // `ws` is manager-only for the same reason as `setup`.
+  const wsLines = managerCommands
+    ? `  ay ws ls [--status]                 list <owner>/<repo>/tree/<branch> workspaces\n` +
+      `  ay ws new <owner>/<repo>[@branch]   clone/refresh a workspace (ay ws help for more)\n`
+    : ``;
   // Only agents carry AGENT_YES_PID — a human shell never sets it — so this
   // section is skipped entirely (no async work at all) for interactive use.
   const self = process.env.AGENT_YES_PID ? await resolveSender() : null;
@@ -599,6 +608,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay result <keyword> [--wait]        pull an agent's structured result envelope\n` +
       `  ay result set '<json>'              (inside an agent) deposit your result envelope\n` +
       `  ay reap                             kill process groups leaked by dead agents\n` +
+      wsLines +
       `\n` +
       `Remote:\n` +
       setupLine +
