@@ -26,7 +26,6 @@ import {
 } from "./subcommands.ts";
 import { TYPING_BADGE } from "./badges.ts";
 import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
-export { ensureNodeRuntime } from "./nodeRuntime.ts";
 import { updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { spawnRejectionReason } from "./spawnGate.ts";
 import { findSpawnHiddenLauncher } from "./rustBinary.ts";
