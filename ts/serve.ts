@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, stat, unlink, writeFile } from "fs/promises";
+import { chmod, mkdir, open, readFile, stat, unlink, writeFile } from "fs/promises";
 import { renameSync, watch, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -405,18 +405,69 @@ async function globalBinDir(installer: string[]): Promise<string | null> {
   return isBun ? out : path.join(out, "bin");
 }
 
+// Both oxmgr's and pm2's global bins are `#!/usr/bin/env node` JS scripts, so on
+// a bun-only box (setup.sh installs no node) exec dies with "env: node: No such
+// file or directory" — even though pm2 is pure JS and runs perfectly under bun.
+// When node is missing but bun exists, write a node→bun shim into ay's own bin
+// dir and prepend it to PATH so `env node` resolves. NOT solvable with
+// `bun add -g node`: that package (node-bin-gen) lands a broken arch-specific
+// stub and `Bun.which("node")` still finds nothing. POSIX-only — on Windows the
+// npm .cmd shims invoke node.exe directly and an sh script can't stand in.
+// Returns the shim path when the shim is in effect, null when unneeded/impossible.
+export async function ensureNodeRuntime(
+  which: (cmd: string) => string | null = Bun.which,
+): Promise<string | null> {
+  if (process.platform === "win32") return null;
+  if (which("node")) return null;
+  const bun = which("bun");
+  if (!bun) return null;
+  const binDir = path.join(agentYesHome(), "bin");
+  const shim = path.join(binDir, "node");
+  try {
+    await mkdir(binDir, { recursive: true });
+    await writeFile(shim, `#!/bin/sh\nexec "${bun}" "$@"\n`);
+    await chmod(shim, 0o755);
+    if (!(process.env.PATH ?? "").split(path.delimiter).includes(binDir)) {
+      process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
+    }
+    return shim;
+  } catch {
+    return null; // best-effort: the exec probe will fail and name the reason
+  }
+}
+
+// Did an exec attempt die because `env` couldn't find a node runtime? macOS/BSD
+// env says `env: node: No such file or directory`, GNU coreutils quotes it
+// (`env: 'node': …`), Windows cmd says `'node' is not recognized`.
+export function isNoNodeExecError(stderr: string): boolean {
+  return (
+    /env: '?node'?: No such file or directory/.test(stderr) ||
+    /'node' is not recognized/.test(stderr)
+  );
+}
+
+// Probe one manager binary with `--version`, capturing stderr so a failure can
+// be diagnosed (glibc mismatch vs missing node runtime vs anything else).
+async function managerProbe(mgr: DaemonManager): Promise<{ ok: boolean; stderr: string }> {
+  try {
+    const p = Bun.spawn([mgr.bin, "--version"], { stdout: "ignore", stderr: "pipe" });
+    const [code, stderr] = await Promise.all([p.exited, new Response(p.stderr).text()]);
+    return { ok: (code ?? 1) === 0, stderr };
+  } catch (e) {
+    return { ok: false, stderr: String(e) };
+  }
+}
+
 // Does this manager's binary actually execute? A `bun add -g oxmgr` can succeed
 // yet leave a binary that can't run: oxmgr vendors a native binary requiring
 // GLIBC_2.39, which a box like Debian 12 (glibc 2.36) lacks, so exec dies with
-// "GLIBC_2.39 not found". Probe with `--version`: exit 0 means runnable; a
-// non-zero exit or spawn failure means the shim is on PATH but unusable.
+// "GLIBC_2.39 not found"; and on a node-less box the `env node` shebang itself
+// fails (see ensureNodeRuntime, applied here so every probe self-heals). Probe
+// with `--version`: exit 0 means runnable; a non-zero exit or spawn failure
+// means the shim is on PATH but unusable.
 async function managerRunnable(mgr: DaemonManager): Promise<boolean> {
-  try {
-    const p = Bun.spawn([mgr.bin, "--version"], { stdout: "ignore", stderr: "ignore" });
-    return ((await p.exited) ?? 1) === 0;
-  } catch {
-    return false;
-  }
+  await ensureNodeRuntime();
+  return (await managerProbe(mgr)).ok;
 }
 
 // Which manager is ACTUALLY running our daemon? `resolveDaemonManager` picks by
@@ -464,13 +515,18 @@ async function installAndVerify(pkg: "oxmgr" | "pm2"): Promise<DaemonManager | n
   const bin = Bun.which(pkg);
   if (!bin) return null;
   const mgr: DaemonManager = { id: pkg, bin };
-  if (!(await managerRunnable(mgr))) {
-    // Name the actual reason: oxmgr ships a native binary (glibc), pm2 is a
-    // Node.js app that needs `node` on PATH — a bun-only box has neither by
-    // default, so a generic "glibc mismatch" would mislead for pm2.
-    const why =
-      pkg === "oxmgr"
-        ? "a native/glibc mismatch, e.g. glibc < 2.39"
+  await ensureNodeRuntime();
+  const probe = await managerProbe(mgr);
+  if (!probe.ok) {
+    // Name the ACTUAL reason from the probe's stderr. A missing node runtime
+    // hits both managers identically (`env: node: No such file or directory` —
+    // their bins are `#!/usr/bin/env node` scripts), and reporting that as a
+    // "glibc mismatch" is nonsense on macOS where glibc doesn't exist. Only
+    // blame glibc for an oxmgr that got PAST the shebang and died natively.
+    const why = isNoNodeExecError(probe.stderr)
+      ? `${pkg} needs a Node.js runtime (its bin is a '#!/usr/bin/env node' script) and none was found`
+      : pkg === "oxmgr"
+        ? "likely a native binary mismatch, e.g. glibc < 2.39 on Linux"
         : "pm2 needs a Node.js runtime and none was found";
     process.stderr.write(
       `ay serve install: ${pkg} installed but can't exec here (${why})` +
@@ -670,7 +726,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
   let mgr = resolveDaemonManager();
   if (mgr && !(await managerRunnable(mgr))) {
     process.stderr.write(
-      `ay serve install: ${mgr.id} is on PATH but can't exec here (likely a native/glibc mismatch) — bootstrapping a working manager…\n`,
+      `ay serve install: ${mgr.id} is on PATH but can't exec here — bootstrapping a working manager…\n`,
     );
     mgr = null;
   }
@@ -679,8 +735,9 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     process.stderr.write(
       "ay serve install: no usable process manager (need oxmgr or pm2)\n" +
         "  - oxmgr: bun add -g oxmgr   (native binary; needs glibc ≥ 2.39 on Linux)\n" +
-        "  - pm2:   bun add -g pm2     (needs a Node.js runtime on PATH)\n" +
-        "  On a minimal bun-only box, install node (for pm2) or a newer glibc (for oxmgr).\n",
+        "  - pm2:   bun add -g pm2     (pure JS; needs a node runtime — on a bun-only box\n" +
+        "           ay auto-writes a node→bun shim into ~/.agent-yes/bin, so if you still\n" +
+        "           see this, check that dir is writable or install node)\n",
     );
     return 1;
   }
