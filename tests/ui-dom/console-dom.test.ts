@@ -280,13 +280,15 @@ describe("console DOM behaviour", () => {
       await page.keyboard.press("Control+k");
       await expect.poll(() => page.locator("#omni").isVisible()).toBe(true);
 
-      // "/" lists the commands; /restart, /kill and the /ws browser are offered.
+      // "/" lists the commands; /restart, /kill, the /ws browser and the global
+      // /filter are all offered.
       await page.fill("#omni-input", "/");
-      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(3);
+      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(4);
       const menu = (await page.locator("#omni-results").innerText()).toLowerCase();
       expect(menu).toContain("restart");
       expect(menu).toContain("kill");
       expect(menu).toContain("workspaces");
+      expect(menu).toContain("filter");
 
       // "/restart" narrows to one row; ⏎ fires POST /api/restart for pid 101.
       await page.fill("#omni-input", "/restart");
@@ -306,6 +308,37 @@ describe("console DOM behaviour", () => {
       await expect.poll(() => posts.filter((x) => x.path === "/api/kill").length).toBe(1);
       const kill = posts.find((x) => x.path === "/api/kill")!;
       expect(kill.body.keyword).toBe("101");
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("Cmd+K /filter sets and clears the left panel filter box", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      // "/filter claude" applies the tokens to #q (persisted via its input path).
+      await page.keyboard.press("Control+k");
+      await expect.poll(() => page.locator("#omni").isVisible()).toBe(true);
+      await page.fill("#omni-input", "/filter claude");
+      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(1);
+      await page.keyboard.press("Enter");
+      await expect.poll(() => page.locator("#q").inputValue()).toBe("claude");
+      await expect.poll(() => page.locator("#omni").isVisible()).toBe(false);
+      expect(await page.evaluate(() => localStorage.getItem("ay.filter"))).toBe("claude");
+
+      // Bare "/filter" clears it again.
+      await page.keyboard.press("Control+k");
+      await expect.poll(() => page.locator("#omni").isVisible()).toBe(true);
+      await page.fill("#omni-input", "/filter");
+      await expect.poll(() =>
+        page
+          .locator("#omni-results")
+          .innerText()
+          .then((t) => t.toLowerCase().includes("clear list filter")),
+      ).toBe(true);
+      await page.keyboard.press("Enter");
+      await expect.poll(() => page.locator("#q").inputValue()).toBe("");
+      expect(await page.evaluate(() => localStorage.getItem("ay.filter"))).toBe("");
     } finally {
       await ctx.close();
     }

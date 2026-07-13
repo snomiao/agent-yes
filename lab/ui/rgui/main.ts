@@ -1433,7 +1433,17 @@ function loadPanelAnchor(key: string, dflt: Panel["anchor"]): Panel["anchor"] {
   }
   return dflt;
 }
-const sysPanel: Panel = { id: "sys", title: "agents", anchor: loadPanelAnchor(SYS_PANEL_KEY, "right"), w: 200, items: [] };
+const sysPanel: Panel = {
+  id: "sys",
+  title: "agents",
+  anchor: loadPanelAnchor(SYS_PANEL_KEY, "right"),
+  w: 200,
+  items: [],
+  // Only the filter chip is clickable — clicking it clears the graph filter.
+  onItemClick: (item) => {
+    if (item.id === "filter") setRguiFilter("");
+  },
+};
 const STATUS_ROWS: [AgentStatus, string][] = [
   ["active", "active"],
   ["needs_input", "waiting"],
@@ -1457,6 +1467,8 @@ function updateSysPanel(records: AgentRecord[], live: boolean) {
   // label on the left, count right-aligned via PanelItem.value (rgui renders the
   // value column and clips the label so it never runs under the number).
   const items: PanelItem[] = [];
+  // Active graph filter chip (⌘K "/filter …") — click clears it (onItemClick).
+  if (rguiFilter) items.push({ id: "filter", label: `⌕ ${rguiFilter}`, value: "✕", color: "#d29922" });
   for (const [st, label] of STATUS_ROWS) {
     const n = counts.get(st) ?? 0;
     if (n) items.push({ id: st, label, value: String(n), color: DOT_COLOR[st] });
@@ -1675,6 +1687,42 @@ let liveKnown = false;
 let lastStruct = "";
 let lastContent = "";
 
+// ── graph filter (⌘K "/filter …" + the sys-panel chip) ───────────────────────
+// Narrows which agents the forest RENDERS — recordsByKey stays complete, so the
+// ⌘K agent list, pins, and terminals still see the whole fleet. Persisted like
+// the /w/ console's ay.filter so a reload keeps the narrowed view.
+const RGUI_FILTER_KEY = "rgui-filter";
+let rguiFilter = ((): string => {
+  try {
+    return localStorage.getItem(RGUI_FILTER_KEY) ?? "";
+  } catch {
+    return "";
+  }
+})();
+let lastRawRecords: AgentRecord[] = [];
+// Space-separated tokens AND-match (case-insensitive substrings) over the same
+// fields the ⌘K rows show: title, cwd, cli, status, branch, source.
+function matchesFilter(r: AgentRecord): boolean {
+  if (!rguiFilter) return true;
+  const hay =
+    `${nodeTitle(r)} ${r.cwd} ${r.cli} ${r.status} ${r.git?.branch ?? ""} ${r._src}`.toLowerCase();
+  return rguiFilter
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean)
+    .every((t) => hay.includes(t));
+}
+function setRguiFilter(v: string): void {
+  rguiFilter = v.trim();
+  try {
+    localStorage.setItem(RGUI_FILTER_KEY, rguiFilter);
+  } catch {
+    /* storage unavailable — filter just won't persist */
+  }
+  lastStruct = ""; // force the graph rebuild even though the fleet didn't change
+  apply(lastRawRecords, liveKnown);
+}
+
 // Refresh title/category/fields on the existing nodes (+ terminal title bars)
 // in place. We deliberately DON'T force a redraw here: a `setGraph` per poll
 // re-renders the whole canvas AND kicks rgui's frame-animation loop, which
@@ -1831,8 +1879,12 @@ if (fedFeeds.length) {
 }
 
 function apply(records: AgentRecord[], live: boolean) {
+  lastRawRecords = records;
   recordsByKey.clear();
   for (const r of records) recordsByKey.set(r._key, r);
+  // The graph (and the sig-based change detection driving it) renders only the
+  // filtered view; recordsByKey above deliberately keeps the full fleet.
+  if (rguiFilter) records = records.filter(matchesFilter);
   const struct = structureSig(records);
   const content = contentSig(records);
   if (struct !== lastStruct) {
@@ -1857,9 +1909,10 @@ function apply(records: AgentRecord[], live: boolean) {
   statusEl.className = live ? "live" : "demo";
   const n = records.length;
   const liveW = [...wires.values()].filter(wireReady).length;
-  statusLabel.textContent = live
-    ? `live · ${n} agent${n === 1 ? "" : "s"}${liveW > 1 ? ` · ${liveW} sources` : usingRoom() ? " (room)" : ""}`
-    : "demo · no local ay serve";
+  statusLabel.textContent =
+    (live
+      ? `live · ${n} agent${n === 1 ? "" : "s"}${liveW > 1 ? ` · ${liveW} sources` : usingRoom() ? " (room)" : ""}`
+      : "demo · no local ay serve") + (rguiFilter ? ` · ⌕ ${rguiFilter}` : "");
   updateSysPanel(records, live); // refresh the screen-fixed status palette
   updatePinPanel(); // refresh the pinned-agents palette (fleet may have changed)
   updateDocTitle(); // keep the tab title's name/status/count fresh
@@ -2448,7 +2501,34 @@ const cmdkList = document.getElementById("cmdk-list")!;
 const escHtml = (s: string) =>
   s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 let cmdkSel = 0;
-let cmdkRows: { id: string; title: string; status: string; sub: string }[] = [];
+// A row is either an agent (id = record key, Enter focuses it) or a slash
+// command (has `action`, Enter runs it — e.g. "/filter …").
+let cmdkRows: { id: string; title: string; status: string; sub: string; action?: () => void }[] =
+  [];
+
+// "/…"-prefixed queries turn the palette into a command list instead of an
+// agent search. Only /filter for now: sets the graph filter (same one the
+// sys-panel chip shows; empty args clear it).
+function cmdkCommandRows(q: string): typeof cmdkRows {
+  const parts = q.slice(1).trim().split(/\s+/).filter(Boolean);
+  const cmdTerm = (parts[0] ?? "").toLowerCase();
+  const rows: typeof cmdkRows = [];
+  if ("filter".startsWith(cmdTerm)) {
+    const args = parts.slice(1).join(" ");
+    rows.push({
+      id: "/filter",
+      status: "idle",
+      title: args
+        ? `⌕ filter: ${args}`
+        : rguiFilter
+          ? `⌕ clear filter (now: ${rguiFilter})`
+          : "⌕ filter…",
+      sub: "narrows the graph · space = AND · matches title/cwd/cli/status/branch",
+      action: () => setRguiFilter(args),
+    });
+  }
+  return rows;
+}
 
 function cmdkData() {
   const rows = [...recordsByKey.values()].map((r) => ({
@@ -2464,10 +2544,13 @@ function cmdkData() {
   return rows;
 }
 function cmdkRender() {
-  const q = cmdkInput.value.trim().toLowerCase();
-  cmdkRows = cmdkData().filter(
-    (r) => !q || `${r.title} ${r.id} ${r.sub} ${r.status}`.toLowerCase().includes(q),
-  );
+  const raw = cmdkInput.value.trim();
+  const q = raw.toLowerCase();
+  cmdkRows = raw.startsWith("/")
+    ? cmdkCommandRows(raw)
+    : cmdkData().filter(
+        (r) => !q || `${r.title} ${r.id} ${r.sub} ${r.status}`.toLowerCase().includes(q),
+      );
   if (cmdkSel >= cmdkRows.length) cmdkSel = Math.max(0, cmdkRows.length - 1);
   cmdkList.innerHTML = cmdkRows
     .map(
@@ -2479,7 +2562,8 @@ function cmdkRender() {
         `<span class="cmdk-dim">${escHtml(r.sub)}</span></div>`,
     )
     .join("");
-  cmdkRows[cmdkSel] && viewer.setSelection([cmdkRows[cmdkSel]!.id]); // preview highlight
+  const cur = cmdkRows[cmdkSel];
+  if (cur && !cur.action) viewer.setSelection([cur.id]); // preview highlight (agents only)
   cmdkList.querySelector(".cmdk-row.sel")?.scrollIntoView({ block: "nearest" });
 }
 function cmdkOpen() {
@@ -2494,7 +2578,8 @@ function cmdkClose() {
 }
 function cmdkGo(overlay: boolean) {
   const r = cmdkRows[cmdkSel];
-  if (r) focusNode(r.id, overlay);
+  if (r?.action) r.action();
+  else if (r) focusNode(r.id, overlay);
   cmdkClose();
 }
 addEventListener("keydown", (e) => {
