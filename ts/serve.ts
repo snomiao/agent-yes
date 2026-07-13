@@ -1,5 +1,5 @@
 import { mkdir, open, readFile, stat, unlink, writeFile } from "fs/promises";
-import { renameSync, watch, writeFileSync } from "node:fs";
+import { existsSync, renameSync, watch, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
@@ -2024,6 +2024,57 @@ export async function cmdServe(rest: string[]): Promise<number> {
           provision: hasProvisionHook(),
         },
       });
+    }
+
+    // GET /api/ws — every workspace under the codehost layout
+    // (<wsRoot>/<owner>/<repo>/tree/<branch>) with live-agent counts. This is
+    // what the console's ⌘K "/ws" browser renders: unlike /api/ls it also shows
+    // workspaces with NO agents in them, so you can spawn into an idle checkout.
+    // Read-only and cheap (a directory walk, no git); per-workspace git state is
+    // fetched lazily via /api/ws/status below. 501 mirrors the fork path when
+    // codehost/provision isn't installed on this host.
+    if (req.method === "GET" && p === "/api/ws") {
+      const ws = await import("./ws.ts");
+      try {
+        await ws.loadProvision();
+      } catch (e) {
+        return new Response((e as Error).message, { status: 501 });
+      }
+      try {
+        const { wsRoot, workspaces } = await ws.collectWorkspaces();
+        return Response.json({ schema: ws.WS_JSON_SCHEMA, wsRoot, workspaces });
+      } catch (e) {
+        return new Response(`workspace walk failed: ${(e as Error).message}`, { status: 500 });
+      }
+    }
+
+    // GET /api/ws/status?path=<dir> — one workspace's git state (dirty / ahead /
+    // behind / no-upstream) + live-agent count. The path must sit inside the
+    // workspace root: this endpoint runs `git status` on the directory, and a
+    // console client with the share token is not necessarily a host admin, so it
+    // must not be able to probe arbitrary host paths.
+    if (req.method === "GET" && p === "/api/ws/status") {
+      const dirRaw = url.searchParams.get("path");
+      if (!dirRaw) return new Response("missing ?path=<workspace dir>", { status: 400 });
+      const ws = await import("./ws.ts");
+      let prov: Awaited<ReturnType<typeof ws.loadProvision>>;
+      try {
+        prov = await ws.loadProvision();
+      } catch (e) {
+        return new Response((e as Error).message, { status: 501 });
+      }
+      const wsRoot = prov.resolveWsRoot(getProvisionRoot());
+      const dir = path.resolve(dirRaw);
+      if (!ws.isPathInside(wsRoot, dir))
+        return new Response(`path is outside the workspace root ${wsRoot}`, { status: 400 });
+      if (!existsSync(path.join(dir, ".git")))
+        return new Response(`not a workspace checkout (no .git): ${dir}`, { status: 404 });
+      try {
+        const workspace = await ws.workspaceStatus(dir);
+        return Response.json({ schema: ws.WS_JSON_SCHEMA, workspace });
+      } catch (e) {
+        return new Response(`git status failed: ${(e as Error).message}`, { status: 502 });
+      }
     }
 
     // GET /api/notes

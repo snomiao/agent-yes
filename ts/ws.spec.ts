@@ -2,7 +2,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, symlinkSync, rmSync } from "fs";
 import os from "os";
 import path from "path";
-import { cmdWs, isPathInside, resolveOperand, walkWorkspaces, WS_JSON_SCHEMA } from "./ws.ts";
+import {
+  cmdWs,
+  collectWorkspaces,
+  isPathInside,
+  resolveOperand,
+  walkWorkspaces,
+  workspaceStatus,
+  WS_JSON_SCHEMA,
+} from "./ws.ts";
 
 // Mutable fake for codehost/provision — each test overrides what it needs.
 // ws.ts imports the module lazily; vitest's registry mock intercepts that too.
@@ -431,5 +439,68 @@ describe("cmdWs (mocked provision)", () => {
     } finally {
       if (envBackup !== undefined) process.env.AGENT_YES_PID = envBackup;
     }
+  });
+});
+
+// Data API consumed by serve's GET /api/ws and /api/ws/status (the console's
+// ⌘K /ws browser) — same mocked provision, no stdout involved.
+describe("collectWorkspaces / workspaceStatus (mocked provision)", () => {
+  let root: string;
+  let homeBackup: string | undefined;
+
+  beforeEach(() => {
+    root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "ay-ws-api-")));
+    prov.wsRoot = root;
+    prov.readStatus
+      .mockReset()
+      .mockResolvedValue({ branch: "main", head: "abc123", ahead: 1, behind: 0, dirty: true, hasUpstream: true });
+    homeBackup = process.env.AGENT_YES_HOME;
+    process.env.AGENT_YES_HOME = path.join(root, ".ay-home");
+  });
+  afterEach(() => {
+    if (homeBackup === undefined) delete process.env.AGENT_YES_HOME;
+    else process.env.AGENT_YES_HOME = homeBackup;
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  const mkCheckout = (rel: string) => {
+    const dir = path.join(root, rel);
+    mkdirSync(path.join(dir, ".git"), { recursive: true });
+    return dir;
+  };
+
+  it("collectWorkspaces: entries without git by default, joined when status:true", async () => {
+    const dir = mkCheckout("o/r/tree/main");
+    const bare = await collectWorkspaces();
+    expect(bare.wsRoot).toBe(root);
+    expect(bare.workspaces).toEqual([
+      { owner: "o", repo: "r", branch: "main", path: dir, agents: { live: 0 } },
+    ]);
+    expect(prov.readStatus).not.toHaveBeenCalled();
+
+    const withStatus = await collectWorkspaces({ status: true });
+    expect(withStatus.workspaces[0]!.git).toMatchObject({ dirty: true, ahead: 1 });
+  });
+
+  it("workspaceStatus: back-derives the layout spec (slash branch) and counts agents", async () => {
+    const dir = mkCheckout("o/r/tree/feat/x");
+    const entry = await workspaceStatus(dir);
+    expect(entry).toMatchObject({
+      owner: "o",
+      repo: "r",
+      branch: "feat/x",
+      path: dir,
+      agents: { live: 0 },
+    });
+    expect(entry.git).toMatchObject({ dirty: true });
+  });
+
+  it("workspaceStatus: a dir outside the layout keeps git's branch, no spec", async () => {
+    const dir = path.join(root, "elsewhere");
+    mkdirSync(path.join(dir, ".git"), { recursive: true });
+    prov.wsRoot = path.join(root, "not-here");
+    const entry = await workspaceStatus(dir);
+    expect(entry.owner).toBe("");
+    expect(entry.branch).toBe("main"); // from readStatus, not the layout
   });
 });

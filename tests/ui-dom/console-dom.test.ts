@@ -280,12 +280,13 @@ describe("console DOM behaviour", () => {
       await page.keyboard.press("Control+k");
       await expect.poll(() => page.locator("#omni").isVisible()).toBe(true);
 
-      // "/" lists the commands; both /restart and /kill are offered.
+      // "/" lists the commands; /restart, /kill and the /ws browser are offered.
       await page.fill("#omni-input", "/");
-      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(2);
+      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(3);
       const menu = (await page.locator("#omni-results").innerText()).toLowerCase();
       expect(menu).toContain("restart");
       expect(menu).toContain("kill");
+      expect(menu).toContain("workspaces");
 
       // "/restart" narrows to one row; ⏎ fires POST /api/restart for pid 101.
       await page.fill("#omni-input", "/restart");
@@ -305,6 +306,63 @@ describe("console DOM behaviour", () => {
       await expect.poll(() => posts.filter((x) => x.path === "/api/kill").length).toBe(1);
       const kill = posts.find((x) => x.path === "/api/kill")!;
       expect(kill.body.keyword).toBe("101");
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("Cmd+K /ws browses workspaces, lazy-loads git state, and spawns into one", async () => {
+    // The /ws browser lists GET /api/ws results (including the idle acme/widgets
+    // checkout no agent row could surface), fetches the highlighted row's git
+    // state lazily via /api/ws/status, and Enter fires POST /api/spawn with the
+    // workspace path as cwd. A source-looking query offers a provision row that
+    // spawns with {from} instead.
+    const { ctx, page } = await openConsole(browser, url);
+    const spawns: any[] = [];
+    page.on("request", (r) => {
+      if (r.method() === "POST" && new URL(r.url()).pathname === "/api/spawn") {
+        try {
+          spawns.push(r.postDataJSON());
+        } catch {}
+      }
+    });
+    try {
+      await page.keyboard.press("Control+k");
+      await expect.poll(() => page.locator("#omni").isVisible()).toBe(true);
+
+      // "/ws" lists both fixture workspaces, live-agent one first.
+      await page.fill("#omni-input", "/ws");
+      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(2);
+      const rows = await page.locator("#omni-results").innerText();
+      expect(rows).toContain("snomiao/agent-yes@main");
+      expect(rows).toContain("acme/widgets@dev");
+      expect(rows.indexOf("agent-yes")).toBeLessThan(rows.indexOf("widgets"));
+
+      // The highlighted (first) row lazily pulls /api/ws/status → "dirty, ahead 2".
+      await expect
+        .poll(() => page.locator("#omni-results").innerText())
+        .toContain("dirty, ahead 2");
+
+      // Filter to the idle workspace and Enter → spawn with its path as cwd.
+      await page.fill("#omni-input", "/ws widgets");
+      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(1);
+      await page.keyboard.press("Enter");
+      await expect.poll(() => spawns.length).toBe(1);
+      expect(spawns[0].cwd).toBe("/home/u/ws/acme/widgets/tree/dev");
+      expect(spawns[0].from).toBeUndefined();
+
+      // A source-looking query that matches nothing offers the provision row;
+      // Enter spawns with {from} so the host clones it behind its gate.
+      await page.keyboard.press("Control+k");
+      await expect.poll(() => page.locator("#omni").isVisible()).toBe(true);
+      await page.fill("#omni-input", "/ws acme/newrepo@dev");
+      await expect
+        .poll(() => page.locator("#omni-results").innerText())
+        .toContain("Provision workspace");
+      await page.keyboard.press("Enter");
+      await expect.poll(() => spawns.length).toBe(2);
+      expect(spawns[1].from).toBe("acme/newrepo@dev");
+      expect(spawns[1].cwd).toBeUndefined();
     } finally {
       await ctx.close();
     }
