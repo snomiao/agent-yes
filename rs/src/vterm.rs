@@ -39,13 +39,22 @@ impl vt100_ctt::Callbacks for ResponseCollector {
         params: &[&[u16]],
         c: char,
     ) {
-        // Only respond to plain (no private/intermediate marker) primary
-        // DA/DSR queries. CSI '?' n / CSI '>' c etc. are private or
-        // secondary forms that expect different (or no) replies.
+        let param = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
+        // Private/intermediate-marker forms mostly expect different (or no)
+        // replies than their plain counterparts — except DECXCPR (ESC[?6n),
+        // which some TUIs (Claude Code) poll on every render. Left unanswered
+        // the child re-asks forever, and a console viewer's xterm would answer
+        // in our place — turning protocol chatter into what looks like user
+        // input on the FIFO. Answer it here so the query dies at the source.
         if intermediates.is_some() {
+            if intermediates == Some(b'?') && c == 'n' && param == 6 {
+                let (row, col) = screen.cursor_position();
+                let response = format!("\x1b[?{};{}R", row + 1, col + 1);
+                debug!("vterm|DECXCPR cursor response: {:?}", response);
+                self.push_response(response.into_bytes());
+            }
             return;
         }
-        let param = params.first().and_then(|p| p.first()).copied().unwrap_or(0);
         match c {
             // DSR - Device Status Report
             'n' => match param {
@@ -302,10 +311,22 @@ mod tests {
     }
 
     #[test]
-    fn test_private_dsr_not_answered() {
-        // ESC[?6n → DEC private DSR, must NOT respond as plain CPR
+    fn test_private_dsr_cursor_answered_as_decxcpr() {
+        // ESC[?6n → DECXCPR: answered with the ?-prefixed CPR form, never the
+        // plain one. Claude Code polls this per render; unanswered it re-asks
+        // forever and console viewers' xterms answer instead (stdin-flash loop).
         let mut vt = VTermProxy::new(24, 80);
-        vt.process(b"\x1b[?6n");
+        vt.process(b"\x1b[5;10H\x1b[?6n");
+        let responses = vt.take_responses();
+        assert_eq!(responses.len(), 1);
+        assert_eq!(responses[0], b"\x1b[?5;10R");
+    }
+
+    #[test]
+    fn test_other_private_dsr_not_answered() {
+        // ESC[?5n (private status) has no plain-CPR answer — stays silent
+        let mut vt = VTermProxy::new(24, 80);
+        vt.process(b"\x1b[?5n");
         assert!(vt.take_responses().is_empty());
     }
 
