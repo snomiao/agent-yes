@@ -94,9 +94,14 @@ export async function acquireWebrtcHostLock(opts?: {
   takeover?: boolean;
   graceMs?: number;
   staleMs?: number;
+  /** Heartbeat cadence override — tests only. */
+  beatMs?: number;
+  /** SIGTERM→SIGKILL escalation wait for --takeover — tests only. */
+  takeoverWaitMs?: number;
 }): Promise<ServeLockResult> {
   const graceMs = opts?.graceMs ?? SERVE_LOCK_GRACE_MS;
   const staleMs = opts?.staleMs ?? SERVE_LOCK_STALE_MS;
+  const beatMs = opts?.beatMs ?? SERVE_LOCK_BEAT_MS;
   const startedAt = Date.now();
   const deadline = startedAt + graceMs;
   let tookOver = false;
@@ -117,7 +122,7 @@ export async function acquireWebrtcHostLock(opts?: {
           }
           await stampOwner(startedAt);
         })();
-      }, SERVE_LOCK_BEAT_MS);
+      }, beatMs);
       if (typeof beat.unref === "function") beat.unref();
       return {
         ok: true,
@@ -149,7 +154,7 @@ export async function acquireWebrtcHostLock(opts?: {
         }
         // Give it a moment to shut down cleanly (it releases the lock), then
         // escalate; the loop's stale check mops up whatever remains.
-        await new Promise((r) => setTimeout(r, 2_000));
+        await new Promise((r) => setTimeout(r, opts?.takeoverWaitMs ?? 2_000));
         if (pidAlive(owner.pid)) {
           try {
             process.kill(owner.pid, "SIGKILL");

@@ -117,3 +117,96 @@ describe("isOwnerStale", () => {
     expect(isOwnerStale(owner(SERVE_LOCK_STALE_MS + 1), now, () => true)).toBe(true);
   });
 });
+
+// Coverage for the held-lock lifecycle: heartbeat refresh, thief detection,
+// live-owner takeover, and the bounded grace wait.
+describe("acquireWebrtcHostLock — held-lock lifecycle", () => {
+  let home: string;
+  let savedHome: string | undefined;
+  const releases: Array<() => Promise<void>> = [];
+
+  beforeEach(async () => {
+    home = await mkdtemp(path.join(tmpdir(), "ay-serve-lock2-"));
+    savedHome = process.env.AGENT_YES_HOME;
+    process.env.AGENT_YES_HOME = home;
+  });
+
+  afterEach(async () => {
+    for (const r of releases.splice(0)) await r().catch(() => {});
+    if (savedHome === undefined) delete process.env.AGENT_YES_HOME;
+    else process.env.AGENT_YES_HOME = savedHome;
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const ownerFile = () => path.join(home, "webrtc-host.lock", "owner.json");
+  const readOwnerFile = async () => JSON.parse(await readFile(ownerFile(), "utf-8")) as ServeLockOwner;
+
+  it("heartbeats refresh beat_at while held", async () => {
+    const got = await acquireWebrtcHostLock({ graceMs: 0, beatMs: 40 });
+    expect(got.ok).toBe(true);
+    if (got.ok) releases.push(got.release);
+    const before = (await readOwnerFile()).beat_at;
+    await new Promise((r) => setTimeout(r, 150));
+    const after = (await readOwnerFile()).beat_at;
+    expect(after).toBeGreaterThan(before);
+  });
+
+  it("heartbeat stops itself once a thief owns the file (never clobbers the thief)", async () => {
+    const got = await acquireWebrtcHostLock({ graceMs: 0, beatMs: 40 });
+    expect(got.ok).toBe(true);
+    if (got.ok) releases.push(got.release);
+    const { writeFile: wf } = await import("fs/promises");
+    const thief: ServeLockOwner = { pid: process.pid + 1, started_at: Date.now(), beat_at: 42 };
+    await wf(ownerFile(), JSON.stringify(thief));
+    await new Promise((r) => setTimeout(r, 150));
+    expect((await readOwnerFile()).pid).toBe(thief.pid); // our beat backed off
+    expect((await readOwnerFile()).beat_at).toBe(42);
+  });
+
+  it("takeover stops a live owner and takes the room", async () => {
+    const { spawn } = await import("node:child_process");
+    const victim = spawn("/bin/sh", ["-c", "sleep 30"], { stdio: "ignore" });
+    const victimPid = victim.pid!;
+    const { mkdir: mkd, writeFile: wf } = await import("fs/promises");
+    await mkd(path.join(home, "webrtc-host.lock"), { recursive: true });
+    await wf(
+      ownerFile(),
+      JSON.stringify({ pid: victimPid, started_at: Date.now(), beat_at: Date.now() }),
+    );
+
+    const got = await acquireWebrtcHostLock({ takeover: true, graceMs: 0, takeoverWaitMs: 100 });
+    expect(got.ok).toBe(true);
+    if (got.ok) releases.push(got.release);
+    expect((await readOwnerFile()).pid).toBe(process.pid);
+    // The victim was killed (SIGTERM or the escalation SIGKILL).
+    await new Promise((r) => setTimeout(r, 100));
+    expect(victim.exitCode !== null || victim.signalCode !== null).toBe(true);
+  });
+
+  it("escalates to SIGKILL when the owner ignores SIGTERM", async () => {
+    const { spawn } = await import("node:child_process");
+    const stubborn = spawn("/bin/sh", ["-c", "trap '' TERM; sleep 30"], { stdio: "ignore" });
+    const pid = stubborn.pid!;
+    await new Promise((r) => setTimeout(r, 100)); // let the trap install
+    const { mkdir: mkd, writeFile: wf } = await import("fs/promises");
+    await mkd(path.join(home, "webrtc-host.lock"), { recursive: true });
+    await wf(ownerFile(), JSON.stringify({ pid, started_at: Date.now(), beat_at: Date.now() }));
+
+    const got = await acquireWebrtcHostLock({ takeover: true, graceMs: 0, takeoverWaitMs: 200 });
+    expect(got.ok).toBe(true);
+    if (got.ok) releases.push(got.release);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(stubborn.signalCode).toBe("SIGKILL");
+  });
+
+  it("waits out the grace window against a live owner, then reports it", async () => {
+    const holder = await acquireWebrtcHostLock({ graceMs: 0 });
+    expect(holder.ok).toBe(true);
+    if (holder.ok) releases.push(holder.release);
+    const t0 = Date.now();
+    const got = await acquireWebrtcHostLock({ graceMs: 300 });
+    expect(got.ok).toBe(false);
+    if (!got.ok) expect(got.owner?.pid).toBe(process.pid);
+    expect(Date.now() - t0).toBeGreaterThanOrEqual(250); // actually waited a beat
+  });
+});
