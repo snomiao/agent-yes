@@ -75,10 +75,11 @@ describe("acquireWebrtcHostLock", () => {
   });
 
   it("steals a lock whose owner pid is dead", async () => {
-    // A freshly-exited child pid is reliably dead. node:child_process (not
-    // Bun.spawn) — these specs also run under the node vitest matrix.
+    // A freshly-exited child pid is reliably dead. Spawn the current runtime
+    // (bun or node — both take -e) so this also runs on Windows, via
+    // node:child_process (not Bun.spawn) for the node vitest matrix.
     const { spawnSync } = await import("node:child_process");
-    const deadPid = spawnSync("/bin/sh", ["-c", "exit 0"]).pid!;
+    const deadPid = spawnSync(process.execPath, ["-e", "0"]).pid!;
 
     const lockDir = path.join(home, "webrtc-host.lock");
     const { mkdir, writeFile } = await import("fs/promises");
@@ -165,7 +166,10 @@ describe("acquireWebrtcHostLock — held-lock lifecycle", () => {
 
   it("takeover stops a live owner and takes the room", async () => {
     const { spawn } = await import("node:child_process");
-    const victim = spawn("/bin/sh", ["-c", "sleep 30"], { stdio: "ignore" });
+    // Long-lived victim via the current runtime — /bin/sh doesn't exist on win32.
+    const victim = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], {
+      stdio: "ignore",
+    });
     const victimPid = victim.pid!;
     const { mkdir: mkd, writeFile: wf } = await import("fs/promises");
     await mkd(path.join(home, "webrtc-host.lock"), { recursive: true });
@@ -183,7 +187,9 @@ describe("acquireWebrtcHostLock — held-lock lifecycle", () => {
     expect(victim.exitCode !== null || victim.signalCode !== null).toBe(true);
   });
 
-  it("escalates to SIGKILL when the owner ignores SIGTERM", async () => {
+  it.skipIf(process.platform === "win32")(
+    "escalates to SIGKILL when the owner ignores SIGTERM",
+    async () => {
     const { spawn } = await import("node:child_process");
     const stubborn = spawn("/bin/sh", ["-c", "trap '' TERM; sleep 30"], { stdio: "ignore" });
     const pid = stubborn.pid!;
@@ -197,7 +203,8 @@ describe("acquireWebrtcHostLock — held-lock lifecycle", () => {
     if (got.ok) releases.push(got.release);
     await new Promise((r) => setTimeout(r, 100));
     expect(stubborn.signalCode).toBe("SIGKILL");
-  });
+    },
+  );
 
   it("waits out the grace window against a live owner, then reports it", async () => {
     const holder = await acquireWebrtcHostLock({ graceMs: 0 });
