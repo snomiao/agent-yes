@@ -138,6 +138,24 @@ async function atomicWrite(file: string, data: string): Promise<boolean> {
  * deliberately NO wall-clock backstop: elapsed wait time alone never steals, so a
  * live holder is inviolable.
  */
+// Is this mkdir failure just lock contention in disguise? EEXIST always is.
+// On Windows, mkdir racing a concurrent rm of the SAME dir (another contender
+// stealing a stale lock, or a holder releasing) can surface as a transient
+// EPERM/EBUSY/ENOTEMPTY/EACCES instead — a real Windows-ism, seen as a flaky
+// EPERM in the concurrent-GC spec on windows-latest. Only win32 gets that
+// leniency: on POSIX those codes mean a genuine permission problem and must
+// throw immediately.
+export function isTransientLockMkdirError(
+  code: string | undefined,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (code === "EEXIST") return true;
+  return (
+    platform === "win32" &&
+    (code === "EPERM" || code === "EBUSY" || code === "ENOTEMPTY" || code === "EACCES")
+  );
+}
+
 export async function acquireLock(lockDir: string, staleMs = 30_000): Promise<() => Promise<void>> {
   const ownerFile = path.join(lockDir, "owner");
   // A fencing token unique to THIS acquisition. Everything we do to the lock is
@@ -173,6 +191,7 @@ export async function acquireLock(lockDir: string, staleMs = 30_000): Promise<()
       .catch(() => Date.now());
     return Date.now() - m;
   };
+  let transientErrors = 0;
   for (;;) {
     try {
       await mkdir(lockDir, { recursive: false });
@@ -212,7 +231,17 @@ export async function acquireLock(lockDir: string, staleMs = 30_000): Promise<()
           await rm(lockDir, { recursive: true, force: true }).catch(() => {});
       };
     } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
+      const code = (e as NodeJS.ErrnoException).code;
+      if (!isTransientLockMkdirError(code)) throw e;
+      if (code !== "EEXIST") {
+        // Windows race-with-rm: the dir is mid-delete, not held — the steal
+        // logic below would misread it. Just retry; bounded so a PERSISTENT
+        // EPERM (a genuine permission problem) still surfaces instead of
+        // spinning forever.
+        if (++transientErrors > 200) throw e;
+        await new Promise((r) => setTimeout(r, 15));
+        continue;
+      }
       const raw = await readFile(ownerFile, "utf8").catch(() => "");
       if (
         shouldStealLock(raw, Date.now(), {

@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, stat, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
 import {
+  isTransientLockMkdirError,
   acquireLock,
   appendEvent,
   clearWatcher,
@@ -307,5 +308,29 @@ describe("notifyStore — seq self-heal + cursor defaults", () => {
     // so an inbox nobody reads is never trimmed.
     await appendEvent(999, baseEvent("idle"));
     expect(await minConsumerCursor(host, 999)).toBe(0);
+  });
+});
+
+// Windows mkdir-vs-rm race: a lock-dir mkdir colliding with a concurrent rm
+// (steal/release mid-delete) surfaces as EPERM/EBUSY/ENOTEMPTY/EACCES on
+// win32 — contention, not a real permission problem. POSIX keeps throwing.
+describe("isTransientLockMkdirError", () => {
+  it("treats EEXIST as contention on every platform", () => {
+    expect(isTransientLockMkdirError("EEXIST", "linux")).toBe(true);
+    expect(isTransientLockMkdirError("EEXIST", "win32")).toBe(true);
+    expect(isTransientLockMkdirError("EEXIST", "darwin")).toBe(true);
+  });
+
+  it("treats the rm-race codes as contention only on win32", () => {
+    for (const code of ["EPERM", "EBUSY", "ENOTEMPTY", "EACCES"]) {
+      expect(isTransientLockMkdirError(code, "win32")).toBe(true);
+      expect(isTransientLockMkdirError(code, "linux")).toBe(false);
+      expect(isTransientLockMkdirError(code, "darwin")).toBe(false);
+    }
+  });
+
+  it("never masks unrelated errors", () => {
+    expect(isTransientLockMkdirError("ENOSPC", "win32")).toBe(false);
+    expect(isTransientLockMkdirError(undefined, "win32")).toBe(false);
   });
 });
