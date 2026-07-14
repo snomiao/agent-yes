@@ -39,6 +39,7 @@ import {
 import { TYPING_BADGE } from "./badges.ts";
 import { isTerminalReply } from "./terminalReply.ts";
 import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
+import { acquireWebrtcHostLock, type ServeLockOwner } from "./serveLock.ts";
 import { type MailParty, recordInbox } from "./messageLog.ts";
 import { updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { spawnRejectionReason } from "./spawnGate.ts";
@@ -1207,6 +1208,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
       default: false,
       description: "Deprecated no-op — the console can always spawn agents",
     })
+    .option("takeover", {
+      type: "boolean",
+      default: false,
+      description: "If another ay serve already hosts this home's WebRTC room, stop it and take the room",
+    })
     .help(false)
     .version(false)
     .exitProcess(false);
@@ -1258,6 +1264,31 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // meaning (HTTP + WebRTC) for existing invocations.
   const wantWebrtc = argv.webrtc !== undefined || argv.share !== undefined;
   const wantHttp = argv.http === true || argv.share !== undefined || argv.webrtc === undefined;
+
+  // Singleton WebRTC host per ~/.agent-yes: a second host joining the SAME
+  // persisted room (~/.agent-yes/.share-room) fights the first over every
+  // viewer connection — seen live as an unloadable share link plus the managed
+  // daemon crash-looping under the health watchdog while an orphaned manual
+  // `ay serve --webrtc` held the room. Fail fast with a pointer to the owner
+  // instead of contending. HTTP-only serves skip this (port collisions already
+  // fail naturally with EADDRINUSE). AGENT_YES_NO_SERVE_LOCK=1 opts out for
+  // exotic multi-room setups (explicit webrtc:// URLs to different rooms).
+  let releaseHostLock: (() => Promise<void>) | null = null;
+  if (wantWebrtc && process.env.AGENT_YES_NO_SERVE_LOCK !== "1") {
+    const lock = await acquireWebrtcHostLock({ takeover: argv.takeover === true });
+    if (!lock.ok) {
+      const o: ServeLockOwner | null = lock.owner;
+      const since = o ? new Date(o.started_at).toLocaleString() : "unknown";
+      process.stderr.write(
+        `ay serve: another instance${o ? ` (pid ${o.pid}, started ${since})` : ""} already hosts this home's WebRTC room\n` +
+          `  ay serve status              # inspect it\n` +
+          `  ay serve --webrtc --takeover # stop it and take the room\n` +
+          `  AGENT_YES_NO_SERVE_LOCK=1    # opt out (multi-room setups only)\n`,
+      );
+      return 1;
+    }
+    releaseHostLock = lock.release;
+  }
 
   if (wantHttp && host !== "127.0.0.1" && host !== "localhost") {
     process.stderr.write(
@@ -3243,7 +3274,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
       await announce(room, link, false);
     } catch (e) {
       process.stderr.write(`ay serve --webrtc failed: ${(e as Error).message}\n`);
-      if (!wantHttp) return 1; // nothing else is running
+      if (!wantHttp) {
+        // Release promptly so the manager's instant respawn doesn't have to
+        // wait out the stale window to reclaim the host lock.
+        await releaseHostLock?.().catch(() => {});
+        return 1; // nothing else is running
+      }
     }
   }
 
@@ -3275,7 +3311,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
     // Close any scoped single-agent share rooms so viewers get an immediate drop.
     void import("./agentShare.ts").then((m) => m.revokeAllShares()).catch(() => {});
     server?.stop();
-    resolve();
+    // Gate exit on the lock release: resolve() ends cmdServe and the process,
+    // and an un-awaited rm would race that exit — leaving a lock the next host
+    // (a manager's instant respawn) must wait a full stale window to steal.
+    void Promise.resolve(releaseHostLock?.())
+      .catch(() => {})
+      .then(resolve);
   };
   await new Promise<void>((resolve) => {
     process.on("SIGINT", () => shutdown(resolve));
