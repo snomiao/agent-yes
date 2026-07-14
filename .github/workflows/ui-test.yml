@@ -78,7 +78,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      # submodules: `cf.ts deploy` runs `wrangler deploy`, whose build step
+      # (wrangler.jsonc → scripts/build-rgui.ts) bundles the /rgui page from the
+      # lib/rgui submodule. Without this the deploy fails "rgui source not found".
       - uses: actions/checkout@v5
+        with:
+          submodules: recursive
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest

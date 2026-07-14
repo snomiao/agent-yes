@@ -34,6 +34,28 @@ jobs:
           submodules: recursive
       # bun runs scripts/build-rgui.ts inside wrangler's build step.
       - uses: oven-sh/setup-bun@v2
+      # Cache bun's global module store so codehost@^0.32 (and the rest) don't
+      # cold-download every deploy. Keyed on the lockfile — a dep change busts it.
+      - uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: bun-deploy-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-deploy-${{ runner.os }}-
+      # The Worker bundle (worker.ts) imports npm deps like `codehost/tunnel`, so
+      # node_modules must exist before wrangler bundles — the deploy has no other
+      # install step. Without this, wrangler fails with "Could not resolve
+      # codehost/tunnel" AFTER build-rgui already ran, masking the real cause.
+      - run: bun install --frozen-lockfile
+      # Fail loudly, and at the right line, if a build input is missing: the npm
+      # deps (bun install) and the rgui source (submodule checkout). Either one
+      # absent otherwise surfaces as a cryptic bundler/`build-rgui` error further
+      # down, pointing at the wrong thing.
+      - name: Verify build inputs present
+        run: |
+          test -f node_modules/codehost/package.json \
+            || { echo "::error::node_modules/codehost missing — 'bun install' did not run or failed."; exit 1; }
+          test -f lib/rgui/src/index.ts \
+            || { echo "::error::lib/rgui/src/index.ts missing — the rgui submodule was not checked out (need submodules: recursive)."; exit 1; }
       - name: Deploy worker + synced UI to Cloudflare
         working-directory: lab/ui/cf
         env:
