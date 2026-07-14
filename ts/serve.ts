@@ -26,6 +26,7 @@ import {
   isUserTyping,
   listRecords,
   readNotes,
+  readLogForRender,
   readPtysize,
   recentReadEdges,
   renderLogTailLines,
@@ -2050,7 +2051,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         const record = await resolveOne(keyword, defaultOpts());
         if (!record.log_file)
           return new Response(`pid ${record.pid}: no log_file`, { status: 404 });
-        const buf = await readFile(record.log_file);
+        const buf = await readLogForRender(record.log_file);
         const size = await readPtysize(record.pid);
         const text = await renderRawLog(buf, { mode, n, cols: size?.cols, rows: size?.rows });
         return new Response(text, { headers: { "Content-Type": "text/plain; charset=utf-8" } });

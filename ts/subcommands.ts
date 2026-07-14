@@ -1898,7 +1898,7 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
     throw new Error(`pid ${record.pid}: log path is not a file: ${logPath}`);
   }
 
-  const buf = await readFile(logPath);
+  const buf = await readLogForRender(logPath);
   const size = await readPtysize(record.pid);
   const notes = await readNotes();
   const noteLabel = notes.get(record.pid);
@@ -1916,7 +1916,12 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
     // `ay tail -f` doesn't "expire" past the send window mid-watch.
     const refresh = setInterval(() => void recordRead(reader.key, record.pid), 30_000);
     refresh.unref?.();
-    return plain ? followPlainLocal(logPath, buf) : followRawLocal(logPath, buf);
+    // Seed the follow from the log's REAL byte frontier (`stats.size`), not
+    // `buf.length` — `buf` may be a capped tail window, so its length is not the
+    // file offset. `buf` still seeds the terminal render (identical final state).
+    return plain
+      ? followPlainLocal(logPath, buf, stats.size)
+      : followRawLocal(logPath, buf, stats.size);
   }
 
   // Static read: render the full log once, then window into the rendered lines
@@ -2055,7 +2060,11 @@ async function watchAppend(
  * sequences stripped. Mirrors the historical behaviour, plus prompt signal /
  * pipe-close handling.
  */
-async function followRawLocal(logPath: string, buf: Uint8Array): Promise<number> {
+async function followRawLocal(
+  logPath: string,
+  buf: Uint8Array,
+  startOffset = buf.length,
+): Promise<number> {
   process.stderr.write(`following... (Ctrl-C to stop)\n`);
   // oxlint-disable-next-line no-control-regex -- intentional: strip ANSI/control
   const ansiRe = /\x1b\[[0-?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[@-Z\\-_]/g;
@@ -2063,7 +2072,7 @@ async function followRawLocal(logPath: string, buf: Uint8Array): Promise<number>
   const ctrlRe = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
   await watchAppend(
     logPath,
-    buf.length,
+    startOffset,
     (chunk) => {
       const text = new TextDecoder().decode(chunk).replace(ansiRe, "").replace(ctrlRe, "");
       if (text.trim()) process.stdout.write(text.trimStart());
@@ -2117,7 +2126,11 @@ export function finalizedLines(term: PlainTermView, fromAbs: number): string[] {
  * settled, so the output is clean, newline-terminated, line-buffered text a
  * script can read. On stop, flush the line the cursor is still sitting on.
  */
-async function followPlainLocal(logPath: string, buf: Uint8Array): Promise<number> {
+async function followPlainLocal(
+  logPath: string,
+  buf: Uint8Array,
+  startOffset = buf.length,
+): Promise<number> {
   process.stderr.write(`following... (plain; Ctrl-C / SIGTERM to stop)\n`);
   const { Terminal } = await import("@xterm/headless");
   const term = new Terminal({ cols: 200, rows: 50, scrollback: 50000, allowProposedApi: true });
@@ -2141,7 +2154,7 @@ async function followPlainLocal(logPath: string, buf: Uint8Array): Promise<numbe
 
   await watchAppend(
     logPath,
-    buf.length,
+    startOffset,
     async (chunk) => {
       await feed(chunk);
       flushCommitted();
@@ -2182,6 +2195,50 @@ export async function readPtysize(pid: number): Promise<{ cols: number; rows: nu
     /* no ptysize sidecar */
   }
   return null;
+}
+
+/**
+ * Cap on how many trailing bytes of a raw PTY log we read before rendering.
+ *
+ * `renderRawLogLines` replays the bytes through an xterm with a fixed 50000-line
+ * scrollback, so output older than the last ~50k lines is evicted from the result
+ * no matter how much we read. A runaway CLI/TUI capture can reach ~1GB; slurping
+ * the whole file only to throw ~all of it away is a large memory + CPU spike (a
+ * ~1GB Buffer plus a full-stream vterm replay per request). 64 MiB comfortably
+ * overflows the scrollback for any realistic terminal stream, so an oversized log
+ * renders to the SAME lines while the allocation stays bounded.
+ */
+export const MAX_RENDER_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Read a raw PTY log for full-buffer rendering, capped to the trailing
+ * MAX_RENDER_BYTES. Files at or below the cap are read whole (byte-identical to a
+ * plain readFile); larger files return only their tail window. This is the same
+ * tail-window tradeoff `renderLogTailLines` already makes at 32KB, just larger —
+ * the window's first line may be a partial (garbled) render, but it sits at the
+ * scrollback-eviction boundary, ~50k lines above any tail/head/normal view.
+ *
+ * NOTE: the returned buffer is a rendering substrate only; its length is NOT the
+ * file's byte length. Follow/watch callers must seek from the real file size
+ * (`stat().size`), never from this buffer's length.
+ */
+export async function readLogForRender(
+  logPath: string,
+  maxBytes = MAX_RENDER_BYTES,
+): Promise<Uint8Array> {
+  const fh = await open(logPath, "r");
+  try {
+    const { size } = await fh.stat();
+    if (size <= maxBytes) {
+      const data = await fh.readFile();
+      return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+    }
+    const tmp = Buffer.allocUnsafe(maxBytes);
+    const { bytesRead } = await fh.read(tmp, 0, maxBytes, size - maxBytes);
+    return new Uint8Array(tmp.buffer, tmp.byteOffset, bytesRead);
+  } finally {
+    await fh.close();
+  }
 }
 
 /**
