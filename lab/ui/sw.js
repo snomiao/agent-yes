@@ -13,7 +13,9 @@ const CACHE = "agent-yes-w-v3";
 // request to the controlling page (which does), streaming the response back.
 // Scope-relative so it works at both /w/ (agent-yes.com) and / (ay serve --http).
 const BASE = new URL("./", self.location.href).pathname; // "/w/" or "/"
-const PREVIEW = new RegExp("^" + BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "p/([^/]+)/(\\d{1,5})(/.*)?$");
+const PREVIEW = new RegExp(
+  "^" + BASE.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + "p/([^/]+)/(\\d{1,5})(/.*)?$",
+);
 
 async function pickClient() {
   const all = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
@@ -21,7 +23,7 @@ async function pickClient() {
   return all.find((c) => !new URL(c.url).pathname.startsWith(BASE + "p/")) || all[0] || null;
 }
 
-async function proxyPreview(request, src, port, rest) {
+async function proxyPreview(request, src, port, rest, allowInject) {
   const client = await pickClient();
   if (!client) return new Response("open the agent-yes console to preview", { status: 502 });
   const headers = {};
@@ -35,29 +37,85 @@ async function proxyPreview(request, src, port, rest) {
     let resolved = false;
     mc.port1.onmessage = (ev) => {
       const msg = ev.data;
-      if (msg.type === "head") {
-        const stream = new ReadableStream({
-          start(controller) {
-            mc.port1.onmessage = (e2) => {
-              const m2 = e2.data;
-              if (m2.type === "body") controller.enqueue(new Uint8Array(m2.chunk));
-              else if (m2.type === "end") controller.close();
-              else if (m2.type === "error") controller.error(new Error(m2.message));
-            };
-          },
-        });
-        resolved = true;
-        resolve(new Response(stream, { status: msg.status, statusText: msg.statusText, headers: msg.headers }));
-      } else if (msg.type === "error" && !resolved) {
-        resolved = true;
-        resolve(new Response("preview tunnel error: " + msg.message, { status: 502 }));
+      if (msg.type !== "head") {
+        if (msg.type === "error" && !resolved) {
+          resolved = true;
+          resolve(new Response("preview tunnel error: " + msg.message, { status: 502 }));
+        }
+        return;
       }
+      resolved = true;
+      const headers = new Headers(msg.headers);
+      const ct = headers.get("content-type") || "";
+      // HTML document navigations (the /p/ path itself, not app subresources):
+      // buffer, strip CSP, and inject a window.WebSocket shim so the app's own
+      // sockets (Vite HMR) also ride the P2P tunnel. Everything else streams.
+      if (allowInject && ct.includes("text/html")) {
+        const chunks = [];
+        mc.port1.onmessage = (e2) => {
+          const m2 = e2.data;
+          if (m2.type === "body") chunks.push(new Uint8Array(m2.chunk));
+          else if (m2.type === "end")
+            resolve(injectBootstrap(chunks, msg, headers, src, Number(port)));
+          else if (m2.type === "error")
+            resolve(new Response("preview error: " + m2.message, { status: 502 }));
+        };
+        return;
+      }
+      const stream = new ReadableStream({
+        start(controller) {
+          mc.port1.onmessage = (e2) => {
+            const m2 = e2.data;
+            if (m2.type === "body") controller.enqueue(new Uint8Array(m2.chunk));
+            else if (m2.type === "end") controller.close();
+            else if (m2.type === "error") controller.error(new Error(m2.message));
+          };
+        },
+      });
+      resolve(new Response(stream, { status: msg.status, statusText: msg.statusText, headers }));
     };
     client.postMessage(
-      { type: "ay-preview-fetch", src, port: Number(port), method: request.method, path: rest, headers, body },
+      {
+        type: "ay-preview-fetch",
+        src,
+        port: Number(port),
+        method: request.method,
+        path: rest,
+        headers,
+        body,
+      },
       [mc.port2, ...(body ? [body.buffer] : [])],
     );
   });
+}
+
+// Concatenate the buffered HTML chunks, strip CSP, and inject a bootstrap
+// <script> that replaces window.WebSocket with the parent console's tunneled
+// shim — so a dev server's own sockets (Vite HMR) ride the P2P tunnel too. Runs
+// first (right after <head>) so the override is in place before app scripts.
+function injectBootstrap(chunks, msg, headers, src, port) {
+  let total = 0;
+  for (const c of chunks) total += c.byteLength;
+  const all = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    all.set(c, off);
+    off += c.byteLength;
+  }
+  const raw = new TextDecoder().decode(all);
+  const boot =
+    "<script>(function(){try{var mk=window.parent&&window.parent.__ayMakeWS;" +
+    "if(mk)window.WebSocket=mk(" +
+    JSON.stringify(src) +
+    "," +
+    JSON.stringify(port) +
+    ");}catch(e){}})();</" +
+    "script>";
+  const html = /<head[^>]*>/i.test(raw) ? raw.replace(/<head[^>]*>/i, (m) => m + boot) : boot + raw;
+  headers.delete("content-security-policy");
+  headers.delete("content-security-policy-report-only");
+  headers.delete("content-length");
+  return new Response(html, { status: msg.status, statusText: msg.statusText, headers });
 }
 
 const SHELL = [
@@ -98,7 +156,9 @@ self.addEventListener("fetch", (e) => {
   const own = PREVIEW.exec(url.pathname);
   if (own) {
     const rest = (own[3] || "/") + url.search;
-    e.respondWith(proxyPreview(req, decodeURIComponent(own[1]), own[2], rest));
+    // Navigations to the /p/ root/route may be an HTML doc → allow WS-shim
+    // injection; app subresources (below) never inject.
+    e.respondWith(proxyPreview(req, decodeURIComponent(own[1]), own[2], rest, true));
     return;
   }
   e.respondWith(maybePreviewFromClient(e, req, url));
@@ -112,7 +172,9 @@ async function maybePreviewFromClient(e, req, url) {
     const client = await self.clients.get(clientId).catch(() => null);
     const cm = client && PREVIEW.exec(new URL(client.url).pathname);
     if (cm) {
-      return proxyPreview(req, decodeURIComponent(cm[1]), cm[2], url.pathname + url.search);
+      // Subresources (Vite's /@vite/client, module chunks, etc.) never get the
+      // WS shim injected — only the top-level /p/ navigation does.
+      return proxyPreview(req, decodeURIComponent(cm[1]), cm[2], url.pathname + url.search, false);
     }
   }
   return shellFetch(req, url);

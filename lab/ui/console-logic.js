@@ -7,7 +7,7 @@
 // `now` so age() is deterministic under test.
 
 // An agent entry as surfaced by /api/ls (the fields this module reads):
-//   { cli, cwd, title, prompt, status, started_at, pid, _host }
+//   { cli, cwd, title, status_text, prompt, status, started_at, pid, _host }
 
 // claude is the default CLI — show the cli name only when it differs, so the
 // common case stays uncluttered and the identity (repo/branch) leads instead.
@@ -230,6 +230,8 @@ export function matches(e, toks) {
   const hay =
     (e.title || "") +
     " " +
+    (e.status_text || "") +
+    " " +
     (e.prompt || "") +
     " " +
     e.cli +
@@ -402,7 +404,8 @@ export function sortEntries(entries, mode = "state") {
           ? byNewest
           : mode === "identity"
             ? (a, b) => fullIdent(a).localeCompare(fullIdent(b)) || byNewest(a, b)
-            : (a, b) => stateRank(a) - stateRank(b) || gitWeight(b) - gitWeight(a) || byNewest(a, b);
+            : (a, b) =>
+                stateRank(a) - stateRank(b) || gitWeight(b) - gitWeight(a) || byNewest(a, b);
   return entries.slice().sort(cmp);
 }
 

@@ -3,7 +3,18 @@ import { renameSync, watch, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
-import { arch, cpus, freemem, homedir, hostname, loadavg, platform, totalmem, uptime, userInfo } from "os";
+import {
+  arch,
+  cpus,
+  freemem,
+  homedir,
+  hostname,
+  loadavg,
+  platform,
+  totalmem,
+  uptime,
+  userInfo,
+} from "os";
 import path from "path";
 import yargs from "yargs";
 import {
@@ -25,6 +36,7 @@ import {
   type CommonOpts,
 } from "./subcommands.ts";
 import { TYPING_BADGE } from "./badges.ts";
+import { parseStatusText } from "./statusText.ts";
 import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
 import { updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { spawnRejectionReason } from "./spawnGate.ts";
@@ -397,9 +409,7 @@ function resolveDaemonManager(): DaemonManager | null {
 //   - npm: `npm prefix -g` prints the prefix; the bin lives at <prefix>/bin.
 async function globalBinDir(installer: string[]): Promise<string | null> {
   const isBun = installer[1] === "add";
-  const query = isBun
-    ? [installer[0]!, "pm", "bin", "-g"]
-    : [installer[0]!, "prefix", "-g"];
+  const query = isBun ? [installer[0]!, "pm", "bin", "-g"] : [installer[0]!, "prefix", "-g"];
   const p = Bun.spawn(query, { stdout: "pipe", stderr: "ignore" });
   if ((await p.exited) !== 0) return null;
   const out = (await new Response(p.stdout).text()).trim();
@@ -1234,7 +1244,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
         // by the console's HTML escaper.
         if (title) {
           // eslint-disable-next-line no-control-regex
-          title = title.replace(/[\x00-\x1f\x7f-\x9f]/g, "").slice(0, 256).trim() || null;
+          title =
+            title
+              .replace(/[\x00-\x1f\x7f-\x9f]/g, "")
+              .slice(0, 256)
+              .trim() || null;
         }
         titleCache.set(logFile, { size, mtimeMs, title });
         return title;
@@ -1253,7 +1267,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // the SOURCE: secret-shaped lines are dropped to "···" and long credential-ish
   // blobs masked — the feed is token-gated, but tails travel to other rgui hosts.
   const previewCache = new Map<string, { size: number; mtimeMs: number; lines: string[] | null }>();
-  const SECRETISH = /(api[-_]?key|secret|token|password|passwd|bearer|authorization|private[-_]?key)\s*[=:]/i;
+  const SECRETISH =
+    /(api[-_]?key|secret|token|password|passwd|bearer|authorization|private[-_]?key)\s*[=:]/i;
   const logPreviewLines = async (logFile: string | null | undefined): Promise<string[] | null> => {
     if (!logFile) return null;
     try {
@@ -1315,6 +1330,28 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return badges;
     } catch {
       return [];
+    }
+  };
+
+  // Per-agent live status description from the rendered screen. Claude Code
+  // paints a spinner/status line while working; surfacing it lets the left panel
+  // show "what it's doing" without opening the terminal.
+  const statusTextCache = new Map<
+    string,
+    { size: number; mtimeMs: number; statusText: string | null }
+  >();
+  const logStatusText = async (logFile: string | null | undefined): Promise<string | null> => {
+    if (!logFile) return null;
+    try {
+      const { size, mtimeMs } = await stat(logFile);
+      const hit = statusTextCache.get(logFile);
+      if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.statusText;
+      const lines = await renderLogTailLines(logFile, 40);
+      const statusText = lines ? parseStatusText(lines) : null;
+      statusTextCache.set(logFile, { size, mtimeMs, statusText });
+      return statusText;
+    } catch {
+      return null;
     }
   };
 
@@ -1586,6 +1623,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       // WHAT the agent is waiting on. Null otherwise.
       question,
       title: await logTitle(r.log_file),
+      status_text: status === "exited" ? null : await logStatusText(r.log_file),
       git: status === "exited" ? null : await gitStatus(r.cwd),
       // Task progress from the rendered todo block (null when none detected → no
       // badge). Skipped for exited agents — their screen is no longer live.
@@ -1800,7 +1838,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
             category: "agent-yes",
             owner: `agent-yes:${hostname()}`,
             status: r.status,
-            parent: r.parent_pid && byWrapper.has(r.parent_pid) ? nid(byWrapper.get(r.parent_pid)!) : undefined,
+            parent:
+              r.parent_pid && byWrapper.has(r.parent_pid)
+                ? nid(byWrapper.get(r.parent_pid)!)
+                : undefined,
             pos: { x: (i % 8) * (NODE_W + 64), y: Math.floor(i / 8) * 480 },
             size: await sizeOf(r.pid),
             inputs: [textIn, envIn],
@@ -1827,7 +1868,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
           configPublic: {
             scope: "native-device",
             runtime: "native",
-            caps: { send: true, kill: true, spawn: true, spawnHook: hasSpawnHook(), provision: hasProvisionHook() },
+            caps: {
+              send: true,
+              kill: true,
+              spawn: true,
+              spawnHook: hasSpawnHook(),
+              provision: hasProvisionHook(),
+            },
           },
         } as unknown as (typeof nodes)[number]); // configPublic is envelope-legal but absent from the agent-node literal type
         const codex = records
@@ -1876,11 +1923,19 @@ export async function cmdServe(rest: string[]): Promise<number> {
           {
             kind: "rgui-federated-graph",
             schema: "org.rgui.graph.v1",
-            producer: { app: "ay", origin, deviceId: hostname(), label: `agent-yes fleet @ ${hostname()}` },
+            producer: {
+              app: "ay",
+              origin,
+              deviceId: hostname(),
+              label: `agent-yes fleet @ ${hostname()}`,
+            },
             revision: Date.now(),
             ts: Date.now(),
             graph: { nodes, edges },
-            capabilities: { nodeTypes: [...new Set(nodes.map((n) => n.type))], portTypes: ["text", "environment"] },
+            capabilities: {
+              nodeTypes: [...new Set(nodes.map((n) => n.type))],
+              portTypes: ["text", "environment"],
+            },
           },
           { headers: { "Access-Control-Allow-Origin": "*" } },
         );
@@ -2094,7 +2149,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
                   // verify before demoting: give it 100ms to fire, and only
                   // then demote this stream to the fast poll it would have used
                   // had watch() failed outright.
-                  if (viaPoll && watcher && !demoteCheck && Date.now() - lastWatcherFireAt > POLL_WATCHED - 50) {
+                  if (
+                    viaPoll &&
+                    watcher &&
+                    !demoteCheck &&
+                    Date.now() - lastWatcherFireAt > POLL_WATCHED - 50
+                  ) {
                     const suspectAt = Date.now();
                     demoteCheck = setTimeout(() => {
                       demoteCheck = null;
@@ -2521,7 +2581,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
         // Allowlist gate — only when a provision hook did NOT already gate this
         // (a configured hook overrides the allowlist). The fork runs setup-repo.sh
         // (code exec), the same risk surface as `from`.
-        if (!forkHook.ran && result.spec && !isProvisionAllowed(result.spec.owner, result.spec.repo))
+        if (
+          !forkHook.ran &&
+          result.spec &&
+          !isProvisionAllowed(result.spec.owner, result.spec.repo)
+        )
           return new Response(
             `forking '${result.spec.owner}/${result.spec.repo}' is not allowed — add the owner ` +
               `to provisionAllowlist in ~/.agent-yes/config.json (or "*" to allow all), ` +
@@ -2760,7 +2824,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
         return Response.json(share);
       } catch (e) {
         const msg = (e as Error).message;
-        const status = /too many active shares/.test(msg) ? 409 : /no agent matched|no stable/.test(msg) ? 404 : 500;
+        const status = /too many active shares/.test(msg)
+          ? 409
+          : /no agent matched|no stable/.test(msg)
+            ? 404
+            : 500;
         return new Response(msg, { status });
       }
     }
@@ -2795,7 +2863,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
       try {
         const { ensureExposure } = await import("./expose.ts");
         const h = await ensureExposure(port, body.relay);
-        return Response.json({ id: h.id, port: h.port, url: h.url, claim: h.mintClaim(), createdAt: h.createdAt });
+        return Response.json({
+          id: h.id,
+          port: h.port,
+          url: h.url,
+          claim: h.mintClaim(),
+          createdAt: h.createdAt,
+        });
       } catch (e) {
         return new Response(`expose failed: ${(e as Error).message}`, { status: 502 });
       }
@@ -2848,7 +2922,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
   const RGUI_CSP = CONSOLE_CSP.replace("frame-ancestors 'none'", "frame-ancestors *")
     // #feed= mirrors fetch OTHER rgui hosts' envelopes (federation consumers):
     // otoji.org in prod, localhost/loopback for wrangler-dev feeds
-    .replace("connect-src 'self'", "connect-src 'self' https://otoji.org http://127.0.0.1:* http://localhost:*");
+    .replace(
+      "connect-src 'self'",
+      "connect-src 'self' https://otoji.org http://127.0.0.1:* http://localhost:*",
+    );
   const serveUiFile = async (name: string, type: string, csp = CONSOLE_CSP): Promise<Response> => {
     try {
       const buf = await readFile(path.join(uiDir, name));
@@ -2894,8 +2971,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return serveUiFile("sw.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/manifest.webmanifest")
       return serveUiFile("manifest.webmanifest", "application/manifest+json");
-    if (req.method === "GET" && p === "/icon.svg")
-      return serveUiFile("icon.svg", "image/svg+xml");
+    if (req.method === "GET" && p === "/icon.svg") return serveUiFile("icon.svg", "image/svg+xml");
     if (req.method === "GET" && p === "/favicon.ico") return new Response(null, { status: 204 });
     return apiFetch(req);
   };

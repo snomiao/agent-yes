@@ -107,12 +107,20 @@ function hostEnvFields(src: string): [string, string][] {
   }
   fields.push(["agents", `${live.length} live${stuck ? ` · ⚠ ${stuck} stuck` : ""}`]);
   if (h.caps) {
-    const on = Object.entries(h.caps).filter(([, v]) => v).map(([k]) => k);
+    const on = Object.entries(h.caps)
+      .filter(([, v]) => v)
+      .map(([k]) => k);
     if (on.length) fields.push(["caps", on.join(" · ")]);
   }
   const exposed = exposedBySrc.get(src) ?? [];
   if (exposed.length) {
-    fields.push(["⇄ exposed", exposed.map((e) => e.port).sort((a, b) => a - b).join(" · ")]);
+    fields.push([
+      "⇄ exposed",
+      exposed
+        .map((e) => e.port)
+        .sort((a, b) => a - b)
+        .join(" · "),
+    ]);
   }
   return fields;
 }
@@ -158,11 +166,7 @@ function resolveRoom(hash: string): { room: string; token: string; host: string 
   const p = parseRoomHash(hash) as { room: string; token: string; host: string } | null;
   if (p) {
     saveRoom(p.room, p.token, p.host);
-    history.replaceState(
-      null,
-      document.title,
-      location.pathname + location.search + "#" + p.room,
-    );
+    history.replaceState(null, document.title, location.pathname + location.search + "#" + p.room);
     return p;
   }
   // #<room> or #<room>:<pid> — token-less forms; reconnect from the cache.
@@ -206,7 +210,9 @@ const embedPid =
   null;
 const embedMode = !!embedPid && hashParts.some((s) => s === "embed" || s.startsWith("embed="));
 const withTok = (path: string) =>
-  httpToken ? `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(httpToken)}` : path;
+  httpToken
+    ? `${path}${path.includes("?") ? "&" : "?"}token=${encodeURIComponent(httpToken)}`
+    : path;
 
 // ── wires: one transport per source, console-compatible ids ─────────────────
 // "local" (same-origin HTTP) + one RTC client per known room. Mirrors the
@@ -280,7 +286,11 @@ function localhostPort(uri: string): number | null {
 // Ask, then publish 127.0.0.1:<port> on the clicked node's machine through
 // agent-yes.com and open the one-time claim link (sets the 8h cookie).
 async function exposeFromRgui(port: number, src: string): Promise<void> {
-  if (!confirm(`Expose localhost:${port} on agent-yes.com?\n\nA private link tunnels to this port on the agent's machine. Only someone with the one-time claim link (opens now) can reach it. Revoke from the /w/ console's ports manager.`))
+  if (
+    !confirm(
+      `Expose localhost:${port} on agent-yes.com?\n\nA private link tunnels to this port on the agent's machine. Only someone with the one-time claim link (opens now) can reach it. Revoke from the /w/ console's ports manager.`,
+    )
+  )
     return;
   const r = await apiPost("/api/expose", { port }, src);
   let info: ExposureInfo & { claim?: string };
@@ -435,7 +445,8 @@ function portsOf(r: AgentRecord): { inputs: Port[]; outputs: Port[] } {
   // state (stable hashed color); the label (shown zoomed in) is the state text.
   const outputs: Port[] = [{ id: "status", label: r.status, kind: r.status }];
   if (r.question) outputs.push({ id: "ask", label: "needs input", kind: "ctl" });
-  if (branch) outputs.push({ id: "result", label: (r.git?.dirty ? "±" : "") + branch, kind: "text" });
+  if (branch)
+    outputs.push({ id: "result", label: (r.git?.dirty ? "±" : "") + branch, kind: "text" });
   return { inputs, outputs };
 }
 
@@ -750,14 +761,53 @@ function sampleRecords(): AgentRecord[] {
     ...extra,
   });
   return [
-    mk(1001, "claude", "active", "~/ws/acme/agent-yes/tree/rgui", "rgui", "impl /rgui + ship to pages", { wrapper_pid: 1001 }),
-    mk(1002, "claude", "idle", "~/ws/acme/rgui/tree/main", "main", "rgui heavy dev — org-chart containers", { wrapper_pid: 1002 }),
+    mk(
+      1001,
+      "claude",
+      "active",
+      "~/ws/acme/agent-yes/tree/rgui",
+      "rgui",
+      "impl /rgui + ship to pages",
+      { wrapper_pid: 1001 },
+    ),
+    mk(
+      1002,
+      "claude",
+      "idle",
+      "~/ws/acme/rgui/tree/main",
+      "main",
+      "rgui heavy dev — org-chart containers",
+      { wrapper_pid: 1002 },
+    ),
     // a parent agent (wrapper 1003) with two subagents nested inside it
-    mk(1003, "claude", "active", "~/ws/acme/api/tree/main", "chore/pin-bump", "goal: pin bump wave", { wrapper_pid: 1003 }),
-    mk(1004, "claude", "idle", "~/ws/acme/api/tree/proxy", "proxy", "proxy work", { wrapper_pid: 1004, parent_pid: 1003 }),
-    mk(1005, "claude", "needs_input", "~/ws/acme/api/tree/main/lib/edge", "feat/force-h1", "force h1 land — awaiting review", { wrapper_pid: 1005, parent_pid: 1003, question: "Proceed with merge?" }),
-    mk(1006, "claude", "idle", "~/ws/acme/tools/tree/main", "main", "tooling", { wrapper_pid: 1006 }),
-    mk(1007, "claude", "stuck", "~/ws/acme/web/tree/main", "main", "resume web build", { wrapper_pid: 1007 }),
+    mk(
+      1003,
+      "claude",
+      "active",
+      "~/ws/acme/api/tree/main",
+      "chore/pin-bump",
+      "goal: pin bump wave",
+      { wrapper_pid: 1003 },
+    ),
+    mk(1004, "claude", "idle", "~/ws/acme/api/tree/proxy", "proxy", "proxy work", {
+      wrapper_pid: 1004,
+      parent_pid: 1003,
+    }),
+    mk(
+      1005,
+      "claude",
+      "needs_input",
+      "~/ws/acme/api/tree/main/lib/edge",
+      "feat/force-h1",
+      "force h1 land — awaiting review",
+      { wrapper_pid: 1005, parent_pid: 1003, question: "Proceed with merge?" },
+    ),
+    mk(1006, "claude", "idle", "~/ws/acme/tools/tree/main", "main", "tooling", {
+      wrapper_pid: 1006,
+    }),
+    mk(1007, "claude", "stuck", "~/ws/acme/web/tree/main", "main", "resume web build", {
+      wrapper_pid: 1007,
+    }),
   ];
 }
 
@@ -825,16 +875,34 @@ const XTermCtor = (window as unknown as { Terminal?: new (o: unknown) => Xterm }
 // console's GitHub dark/light terminal palettes (kept legible on a white bg)
 const prefersLight = matchMedia("(prefers-color-scheme: light)");
 function isLight() {
-  return (document.documentElement.dataset.theme ?? (prefersLight.matches ? "light" : "dark")) === "light";
+  return (
+    (document.documentElement.dataset.theme ?? (prefersLight.matches ? "light" : "dark")) ===
+    "light"
+  );
 }
 function termTheme() {
   return isLight()
     ? {
-        background: "#ffffff", foreground: "#1f2328", cursor: "#1f2328",
-        selectionBackground: "#b6d6ff", black: "#24292e", red: "#cf222e", green: "#116329",
-        yellow: "#4d2d00", blue: "#0969da", magenta: "#8250df", cyan: "#1b7c83", white: "#6e7781",
-        brightBlack: "#57606a", brightRed: "#a40e26", brightGreen: "#1a7f37", brightYellow: "#633c01",
-        brightBlue: "#218bff", brightMagenta: "#a475f9", brightCyan: "#3192aa", brightWhite: "#1f2328",
+        background: "#ffffff",
+        foreground: "#1f2328",
+        cursor: "#1f2328",
+        selectionBackground: "#b6d6ff",
+        black: "#24292e",
+        red: "#cf222e",
+        green: "#116329",
+        yellow: "#4d2d00",
+        blue: "#0969da",
+        magenta: "#8250df",
+        cyan: "#1b7c83",
+        white: "#6e7781",
+        brightBlack: "#57606a",
+        brightRed: "#a40e26",
+        brightGreen: "#1a7f37",
+        brightYellow: "#633c01",
+        brightBlue: "#218bff",
+        brightMagenta: "#a475f9",
+        brightCyan: "#3192aa",
+        brightWhite: "#1f2328",
       }
     : { background: "#0d1117", foreground: "#c9d1d9", cursor: "#0d1117" };
 }
@@ -953,8 +1021,11 @@ function makeTerm(pid: string): TermEntry | null {
   }
   // Clickable URLs. A localhost link offers to publish through agent-yes.com on
   // THIS node's machine (src); any other URL just opens in a new tab.
-  const WebLinks = (window as unknown as { WebLinksAddon?: { WebLinksAddon: new (h: (e: MouseEvent, uri: string) => void) => unknown } })
-    .WebLinksAddon?.WebLinksAddon;
+  const WebLinks = (
+    window as unknown as {
+      WebLinksAddon?: { WebLinksAddon: new (h: (e: MouseEvent, uri: string) => void) => unknown };
+    }
+  ).WebLinksAddon?.WebLinksAddon;
   if (WebLinks) {
     try {
       (term as unknown as { loadAddon(a: unknown): void }).loadAddon(
@@ -1305,10 +1376,11 @@ function syncTerminals(view: { x: number; y: number; k: number }) {
   cand.sort((a, b) => b.area - a.area);
   const wanted = new Set(cand.slice(0, MAX_TERMS).map((c) => c.id));
 
-  for (const id of wanted) if (!terms.has(id)) {
-    const e = makeTerm(id);
-    if (e) terms.set(id, e);
-  }
+  for (const id of wanted)
+    if (!terms.has(id)) {
+      const e = makeTerm(id);
+      if (e) terms.set(id, e);
+    }
   for (const [id, e] of terms) {
     if (wanted.has(id)) e.miss = 0;
     else if (++e.miss >= TERM_DROP_TICKS) dropTerm(id);
@@ -1376,9 +1448,10 @@ function updateDocTitle() {
 // per-status breakdown (items). Drag its header and rgui snaps it to the
 // viewport edges / other panels; onPanelMove persists the anchor across reloads.
 const SYS_PANEL_KEY = "rgui-syspanel-anchor";
-function loadPanelAnchor(): Panel["anchor"] {
+const PIN_PANEL_KEY = "rgui-pinpanel-anchor";
+function loadPanelAnchor(key: string, dflt: Panel["anchor"]): Panel["anchor"] {
   try {
-    const raw = localStorage.getItem(SYS_PANEL_KEY);
+    const raw = localStorage.getItem(key);
     if (raw === "left" || raw === "right") return raw;
     if (raw) {
       const p = JSON.parse(raw);
@@ -1387,9 +1460,15 @@ function loadPanelAnchor(): Panel["anchor"] {
   } catch {
     /* corrupt stored anchor — fall through to the default edge */
   }
-  return "right";
+  return dflt;
 }
-const sysPanel: Panel = { id: "sys", title: "agents", anchor: loadPanelAnchor(), w: 200, items: [] };
+const sysPanel: Panel = {
+  id: "sys",
+  title: "agents",
+  anchor: loadPanelAnchor(SYS_PANEL_KEY, "right"),
+  w: 200,
+  items: [],
+};
 const STATUS_ROWS: [AgentStatus, string][] = [
   ["active", "active"],
   ["needs_input", "waiting"],
@@ -1443,7 +1522,64 @@ function updateSysPanel(records: AgentRecord[], live: boolean) {
     color: live ? "#3fb950" : "#d29922",
   });
   sysPanel.items = items;
-  viewer.setPanels([sysPanel]);
+  applyPanels();
+}
+
+// ── pinned-agents palette (screen-fixed, shared with the /w/ console) ─────────
+// Pins live in the same localStorage set the console's left-panel pin uses
+// (ay.pinned, keyed by agent _key). Each pinned agent that's present in the
+// current fleet shows as a row in a screen-fixed palette; clicking a row glides
+// the camera to that node. Pin/unpin happens via a node's right-click menu (here)
+// or the console list (there) — a storage event keeps the two views in sync.
+const AY_PINNED_KEY = "ay.pinned";
+function loadPinnedKeys(): Set<string> {
+  try {
+    const a = JSON.parse(localStorage.getItem(AY_PINNED_KEY) || "[]");
+    return new Set(Array.isArray(a) ? a : []);
+  } catch {
+    return new Set();
+  }
+}
+let pinnedKeys = loadPinnedKeys();
+function isPinned(id: string): boolean {
+  return pinnedKeys.has(id);
+}
+function togglePin(id: string): void {
+  if (pinnedKeys.has(id)) pinnedKeys.delete(id);
+  else pinnedKeys.add(id);
+  try {
+    localStorage.setItem(AY_PINNED_KEY, JSON.stringify([...pinnedKeys]));
+  } catch {
+    /* storage unavailable — pin just won't persist / sync */
+  }
+  updatePinPanel();
+}
+const pinPanel: Panel = {
+  id: "pins",
+  title: "📌 pinned",
+  // Right edge (like sysPanel) — the top-left is occupied by the page's own
+  // toolbar/legend chrome, which would hide a left-anchored panel.
+  anchor: loadPanelAnchor(PIN_PANEL_KEY, "right"),
+  w: 200,
+  items: [],
+  onItemClick: (item) => focusNode(item.id),
+};
+// The pin palette is only shown when something is pinned; sysPanel is always on.
+function applyPanels(): void {
+  viewer.setPanels(pinnedKeys.size ? [pinPanel, sysPanel] : [sysPanel]);
+}
+// Rebuild the pin palette rows from the current fleet (skip pins whose agent
+// isn't in view — another machine, or exited-and-gone).
+function updatePinPanel(): void {
+  const items: PanelItem[] = [];
+  for (const id of pinnedKeys) {
+    const r = recordsByKey.get(id);
+    if (!r) continue;
+    items.push({ id, label: nodeTitle(r), value: String(r.pid), color: DOT_COLOR[r.status] });
+  }
+  pinPanel.items = items;
+  pinPanel.title = items.length ? `📌 pinned · ${items.length}` : "📌 pinned";
+  applyPanels();
 }
 
 // ── bootstrap ────────────────────────────────────────────────────────────────
@@ -1459,10 +1595,10 @@ const viewer: Rgui = createRgui(canvas, {
   theme: initialTheme,
   debug,
   panels: [sysPanel],
-  onPanelMove: (_p, anchor) => {
-    // persist the dragged/snapped anchor so the palette stays where the user left it
+  onPanelMove: (p, anchor) => {
+    // persist the dragged/snapped anchor so each palette stays where the user left it
     try {
-      localStorage.setItem(SYS_PANEL_KEY, JSON.stringify(anchor));
+      localStorage.setItem(p.id === "pins" ? PIN_PANEL_KEY : SYS_PANEL_KEY, JSON.stringify(anchor));
     } catch {
       /* storage unavailable — position just won't persist */
     }
@@ -1662,7 +1798,9 @@ function mergeFederated(local: Graph): Graph {
     // land when the authoritative feed provides the real node — so a hostile
     // feed can't paint content as somebody else's agent.
     const ns = entry.ns;
-    const g = ns ? { ...entry.g, nodes: entry.g.nodes.filter((n) => n.id.startsWith(ns)) } : entry.g;
+    const g = ns
+      ? { ...entry.g, nodes: entry.g.nodes.filter((n) => n.id.startsWith(ns)) }
+      : entry.g;
     if (!g.nodes.length) continue;
     const minX = Math.min(...g.nodes.map((n) => n.x));
     const minY = Math.min(...g.nodes.map((n) => n.y));
@@ -1722,7 +1860,10 @@ if (fedDemo) {
   // diff → filter → translate → tts) from rgui itself, no feed server needed
   // the baked demo chain intentionally spans all three namespaces — it ships in
   // the bundle (rgui source), not from a network feed, so it merges unenforced
-  fedGraphs.set("demo", { g: federatedGraphToRgui(federatedDemoChain(), { container: true }), ns: null });
+  fedGraphs.set("demo", {
+    g: federatedGraphToRgui(federatedDemoChain(), { container: true }),
+    ns: null,
+  });
 }
 if (fedFeeds.length) {
   void pollFeeds();
@@ -1760,6 +1901,7 @@ function apply(records: AgentRecord[], live: boolean) {
     ? `live · ${n} agent${n === 1 ? "" : "s"}${liveW > 1 ? ` · ${liveW} sources` : usingRoom() ? " (room)" : ""}`
     : "demo · no local ay serve";
   updateSysPanel(records, live); // refresh the screen-fixed status palette
+  updatePinPanel(); // refresh the pinned-agents palette (fleet may have changed)
   updateDocTitle(); // keep the tab title's name/status/count fresh
 }
 
@@ -1796,8 +1938,12 @@ async function fetchEdges() {
   const results = await Promise.allSettled(
     [...wires.values()].filter(wireReady).map(async (w) => {
       const raw =
-        (await apiJSON<{ reads?: { by: number; target: number; at: number }[] }>("/api/edges", w.id))
-          .reads ?? [];
+        (
+          await apiJSON<{ reads?: { by: number; target: number; at: number }[] }>(
+            "/api/edges",
+            w.id,
+          )
+        ).reads ?? [];
       return raw.map((e) => ({ by: `${w.id}#${e.by}`, target: `${w.id}#${e.target}`, at: e.at }));
     }),
   );
@@ -2091,7 +2237,9 @@ addEventListener("hashchange", () => location.reload());
 if (location.hash.startsWith("#qa")) {
   setTimeout(() => {
     const parents = new Set(viewer.graph.nodes.map((n) => n.parent).filter(Boolean));
-    const leaf = viewer.graph.nodes.filter((n) => !parents.has(n.id) && !n.id.startsWith("repo:"))[6];
+    const leaf = viewer.graph.nodes.filter(
+      (n) => !parents.has(n.id) && !n.id.startsWith("repo:"),
+    )[6];
     if (!leaf) return;
     const cx = leaf.x + leaf.w / 2;
     const cy = leaf.y + (leaf.h ?? CARD_H) / 2;
@@ -2113,11 +2261,15 @@ if (location.hash.startsWith("#qa")) {
             xtermMutWhileMoving++;
             const el = (t.nodeType === 3 ? t.parentElement : t) as Element;
             if (mutSample.size < 8)
-              mutSample.add(`${m.type}:${el?.tagName?.toLowerCase()}.${(el?.className || "").toString().slice(0, 24)}`);
+              mutSample.add(
+                `${m.type}:${el?.tagName?.toLowerCase()}.${(el?.className || "").toString().slice(0, 24)}`,
+              );
           }
         } else if (m.type === "childList") {
-          for (const n of m.addedNodes) if ((n as Element).classList?.contains("ay-term")) termChurn++;
-          for (const n of m.removedNodes) if ((n as Element).classList?.contains("ay-term")) termChurn++;
+          for (const n of m.addedNodes)
+            if ((n as Element).classList?.contains("ay-term")) termChurn++;
+          for (const n of m.removedNodes)
+            if ((n as Element).classList?.contains("ay-term")) termChurn++;
         } else if (m.type === "attributes" && m.attributeName === "style") {
           const el = m.target as HTMLElement;
           const d = el.style.display;
@@ -2274,6 +2426,12 @@ function persistSelection() {
   }
 }
 addEventListener("storage", (e) => {
+  // pins changed in the console (or another /r/ tab) → resync the palette
+  if (e.key === AY_PINNED_KEY) {
+    pinnedKeys = loadPinnedKeys();
+    updatePinPanel();
+    return;
+  }
   // live follow: the console (another tab, same origin) opened an agent
   if (e.key !== SEL_KEY) return;
   const key = normalizeSelKey(e.newValue);
@@ -2344,8 +2502,10 @@ addEventListener("keydown", (e) => {
   }
   if (cmdk.hidden) return;
   if (e.key === "Escape") (e.preventDefault(), cmdkClose());
-  else if (e.key === "ArrowDown") (e.preventDefault(), (cmdkSel = Math.min(cmdkRows.length - 1, cmdkSel + 1)), cmdkRender());
-  else if (e.key === "ArrowUp") (e.preventDefault(), (cmdkSel = Math.max(0, cmdkSel - 1)), cmdkRender());
+  else if (e.key === "ArrowDown")
+    (e.preventDefault(), (cmdkSel = Math.min(cmdkRows.length - 1, cmdkSel + 1)), cmdkRender());
+  else if (e.key === "ArrowUp")
+    (e.preventDefault(), (cmdkSel = Math.max(0, cmdkSel - 1)), cmdkRender());
   else if (e.key === "Enter") (e.preventDefault(), cmdkGo(e.metaKey || e.ctrlKey));
 });
 cmdkInput.addEventListener("input", () => ((cmdkSel = 0), cmdkRender()));
@@ -2393,7 +2553,11 @@ function spawnSpecOf(id: string): { src: string; cwd: string | null; cli: string
   const cliOf = (keys: string[]) => recordsByKey.get(keys[0] ?? "")?.cli ?? "claude";
   if (id.startsWith("env:")) {
     const src = id.slice(4);
-    return { src, cwd: null, cli: cliOf([...recordsByKey.values()].filter((r) => r._src === src).map((r) => r._key)) };
+    return {
+      src,
+      cwd: null,
+      cli: cliOf([...recordsByKey.values()].filter((r) => r._src === src).map((r) => r._key)),
+    };
   }
   if (id.startsWith("cwd:") || id.startsWith("repo:")) {
     const rest = id.slice(id.indexOf(":") + 1);
@@ -2419,6 +2583,12 @@ function openBatchMenu(sx: number, sy: number, pids: string[], spawn: typeof ctx
   document.getElementById("ctx-s")!.textContent = pids.length === 1 ? "" : "s";
   const spawnBtn = document.getElementById("ctx-spawn") as HTMLButtonElement;
   spawnBtn.hidden = !spawn;
+  // Pin toggle: single real agent only (a pin targets one agent's node).
+  const pinPid = pids.length === 1 && recordsByKey.has(pids[0]!) ? pids[0]! : null;
+  const pinBtn = document.getElementById("ctx-pin") as HTMLButtonElement;
+  pinBtn.hidden = !pinPid;
+  pinBtn.dataset.pid = pinPid ?? "";
+  pinBtn.textContent = pinPid && isPinned(pinPid) ? "📌 Unpin" : "📌 Pin";
   if (spawn)
     spawnBtn.title =
       `POST /api/spawn on ${spawn.src === LOCAL ? "this machine" : spawn.src} · ` +
@@ -2489,6 +2659,11 @@ ctxInput.addEventListener("keydown", (e) => {
 });
 document.getElementById("ctx-send")!.addEventListener("click", () => void sendBatch());
 document.getElementById("ctx-spawn")!.addEventListener("click", () => void spawnHere());
+document.getElementById("ctx-pin")!.addEventListener("click", () => {
+  const pid = (document.getElementById("ctx-pin") as HTMLButtonElement).dataset.pid;
+  if (pid) togglePin(pid);
+  closeBatchMenu();
+});
 addEventListener("mousedown", (e) => {
   if (!ctxmenu.hidden && !ctxmenu.contains(e.target as Node)) closeBatchMenu();
 });
@@ -2524,9 +2699,13 @@ async function fetchShares() {
   // shares are minted per daemon — collect active ones from every live wire so
   // the outbound halo shows no matter which machine the shared agent runs on
   const results = await Promise.allSettled(
-    [...wires.values()].filter(wireReady).map((w) => apiJSON<{ agentId: string }[]>("/api/shares", w.id)),
+    [...wires.values()]
+      .filter(wireReady)
+      .map((w) => apiJSON<{ agentId: string }[]>("/api/shares", w.id)),
   );
-  const ids = results.flatMap((p) => (p.status === "fulfilled" ? p.value.map((x) => x.agentId) : []));
+  const ids = results.flatMap((p) =>
+    p.status === "fulfilled" ? p.value.map((x) => x.agentId) : [],
+  );
   if (ids.length || sharedIds.size) {
     sharedIds = new Set(ids);
     markShared();

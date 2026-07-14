@@ -1140,6 +1140,15 @@
         color: var(--peer);
         flex: none;
       }
+      .pinmark {
+        font-size: 10px;
+        line-height: 1;
+        flex: none;
+      }
+      /* Pinned rows: a subtle accent rail on the left edge (both list layouts). */
+      .row.pinned {
+        box-shadow: inset 2px 0 0 var(--accent);
+      }
       .r1 {
         display: flex;
         align-items: center;
@@ -1266,6 +1275,14 @@
       }
       .rowtitle {
         color: var(--fg);
+        font-size: 12.5px;
+        margin-top: 4px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .statusline {
+        color: var(--muted);
         font-size: 12.5px;
         margin-top: 4px;
         overflow: hidden;
@@ -1782,7 +1799,11 @@
               <button id="portsbtn" class="viewbtn" title="manage exposed localhost ports">
                 ⇄ ports
               </button>
-              <button id="rguibtn" class="viewbtn" title="open the agent graph view (/r/) for this fleet">
+              <button
+                id="rguibtn"
+                class="viewbtn"
+                title="open the agent graph view (/r/) for this fleet"
+              >
                 ⌗ graph
               </button>
               <button id="newbtn" class="newbtn" title="spawn a new agent on this fleet">
@@ -2018,7 +2039,11 @@
          WebRTC tunnel (Service Worker proxies /w/p/<src>/<port>/*, no relay). -->
     <div class="preview-overlay" id="previewOverlay" hidden>
       <div class="preview-bar">
-        <span class="preview-badge" title="served over a direct P2P WebRTC tunnel — traffic does not go through agent-yes.com">⚡ P2P · no relay</span>
+        <span
+          class="preview-badge"
+          title="served over a direct P2P WebRTC tunnel — traffic does not go through agent-yes.com"
+          >⚡ P2P · no relay</span
+        >
         <span class="preview-title" id="previewTitle"></span>
         <button id="previewReload" type="button" title="reload">↻</button>
         <button id="previewPop" type="button" title="open in a new tab">↗</button>
@@ -2251,6 +2276,15 @@
           peerId,
           previewFetch(port, method, path, init) {
             return chRoom.room.fetch(peerId, method, "/__codehost/port/" + port + path, init || {});
+          },
+          // Open a WS to the previewed port over the tunnel (Vite HMR etc.).
+          previewWs(port, path, protocols, handlers) {
+            return chRoom.room.openWs(
+              peerId,
+              "/__codehost/port/" + port + path,
+              protocols,
+              handlers,
+            );
           },
           async fetchJSON(path) {
             let res;
@@ -2530,13 +2564,21 @@
             .then(async (res) => {
               const headers = {};
               res.headers.forEach((v, k) => (headers[k] = v));
-              port.postMessage({ type: "head", status: res.status, statusText: res.statusText, headers });
+              port.postMessage({
+                type: "head",
+                status: res.status,
+                statusText: res.statusText,
+                headers,
+              });
               if (res.body) {
                 const reader = res.body.getReader();
                 for (;;) {
                   const { done, value } = await reader.read();
                   if (done) break;
-                  const buf = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+                  const buf = value.buffer.slice(
+                    value.byteOffset,
+                    value.byteOffset + value.byteLength,
+                  );
                   port.postMessage({ type: "body", chunk: buf }, [buf]);
                 }
               }
@@ -2545,6 +2587,105 @@
             .catch((err) => port.postMessage({ type: "error", message: String(err) }));
         });
       }
+
+      // A window.WebSocket replacement, bound to a preview source+port, that
+      // tunnels over the codehost DataChannel (previewWs → the daemon's port WS)
+      // instead of the network. The preview iframe's injected bootstrap installs
+      // it as window.WebSocket so a dev server's HMR socket goes P2P too.
+      // previewWs is async (it dials the peer), so sends before open are queued.
+      window.__ayMakeWS = function (src, port) {
+        return class PreviewWebSocket {
+          static CONNECTING = 0;
+          static OPEN = 1;
+          static CLOSING = 2;
+          static CLOSED = 3;
+          CONNECTING = 0;
+          OPEN = 1;
+          CLOSING = 2;
+          CLOSED = 3;
+          constructor(url, protocols) {
+            this.url = String(url);
+            this.readyState = 0; // CONNECTING
+            this.binaryType = "blob";
+            this.protocol = "";
+            this._listeners = {};
+            this._handle = null;
+            this._queue = [];
+            const tx = sources.get(src)?.tx;
+            const u = new URL(this.url, location.href);
+            const protoList = protocols
+              ? Array.isArray(protocols)
+                ? protocols
+                : [protocols]
+              : undefined;
+            if (!tx || !tx.previewWs) return void this._fail();
+            tx.previewWs(port, u.pathname + u.search, protoList, {
+              onOpenAck: (ok, proto) => {
+                if (!ok) return this._fail();
+                this.readyState = 1;
+                this.protocol = proto || "";
+                this._dispatch("open", {});
+                for (const m of this._queue) this._rawSend(m);
+                this._queue = [];
+              },
+              onText: (t) => this._dispatch("message", { data: t }),
+              onBin: (d) => this._dispatch("message", { data: this._wrap(d) }),
+              onClose: (code, reason) => {
+                this.readyState = 3;
+                this._dispatch("close", { code, reason, wasClean: code === 1000 });
+              },
+            })
+              .then((h) => {
+                this._handle = h;
+                if (this.readyState === 3 && this._closeReq)
+                  h.close(this._closeReq.code, this._closeReq.reason);
+              })
+              .catch(() => this._fail());
+          }
+          _wrap(d) {
+            return this.binaryType === "arraybuffer"
+              ? d.buffer.slice(d.byteOffset, d.byteOffset + d.byteLength)
+              : new Blob([d]);
+          }
+          _rawSend(data) {
+            const h = this._handle;
+            if (!h) return;
+            if (typeof data === "string") h.sendText(data);
+            else if (data instanceof Blob)
+              data.arrayBuffer().then((b) => h.sendBin(new Uint8Array(b)));
+            else if (ArrayBuffer.isView(data))
+              h.sendBin(new Uint8Array(data.buffer, data.byteOffset, data.byteLength));
+            else h.sendBin(new Uint8Array(data));
+          }
+          send(data) {
+            if (this.readyState === 0) this._queue.push(data);
+            else if (this.readyState === 1) this._rawSend(data);
+          }
+          close(code, reason) {
+            if (this.readyState === 3) return;
+            this.readyState = 3;
+            if (this._handle) this._handle.close(code, reason);
+            else this._closeReq = { code, reason };
+            this._dispatch("close", { code: code || 1000, reason: reason || "", wasClean: true });
+          }
+          _fail() {
+            this.readyState = 3;
+            this._dispatch("error", {});
+            this._dispatch("close", { code: 1006, reason: "tunnel open failed", wasClean: false });
+          }
+          addEventListener(t, l) {
+            (this._listeners[t] = this._listeners[t] || new Set()).add(l);
+          }
+          removeEventListener(t, l) {
+            this._listeners[t]?.delete(l);
+          }
+          _dispatch(t, init) {
+            const ev = { type: t, target: this, ...init };
+            this["on" + t]?.call(this, ev);
+            this._listeners[t]?.forEach((l) => l.call(this, ev));
+          }
+        };
+      };
       // Every machine belonging to a room (for an ay-share room, the room itself).
       const roomSources = (name) => [...sources.values()].filter((s) => (s.room || s.id) === name);
       const roomLive = (name) =>
@@ -3488,7 +3629,8 @@
         } catch {}
         if (!info || !info.claim) {
           $("exposeEmpty").hidden = false;
-          $("exposeEmpty").textContent = "Couldn't expose port " + port + " (is `ay serve` reachable?).";
+          $("exposeEmpty").textContent =
+            "Couldn't expose port " + port + " (is `ay serve` reachable?).";
           return null;
         }
         return info;
@@ -3514,7 +3656,8 @@
       // the Service Worker proxies over the machine's WebRTC tunnel (no relay).
       function openPreview(src, port) {
         // Scope-relative so it works at both /w/ (agent-yes.com) and / (ay serve).
-        const url = new URL("p/" + encodeURIComponent(src) + "/" + port + "/", location.href).pathname;
+        const url = new URL("p/" + encodeURIComponent(src) + "/" + port + "/", location.href)
+          .pathname;
         const frame = $("previewFrame");
         if (!frame) return window.open(url, "_blank");
         $("previewTitle").textContent = "localhost:" + port;
@@ -3565,7 +3708,8 @@
               return;
             }
             if (Array.isArray(arr))
-              for (const ex of arr) rows.push({ ...ex, _srcName: s.name || s.id, _src: s.id, _tx: tx });
+              for (const ex of arr)
+                rows.push({ ...ex, _srcName: s.name || s.id, _src: s.id, _tx: tx });
           }),
         );
         list.textContent = "";
@@ -3819,10 +3963,9 @@
           term && term.clearSelection && term.clearSelection();
         } catch {}
       }
-      function showTermMenu(ev, term) {
-        ev.preventDefault();
-        hideTermMenu();
-        const selText = term && term.hasSelection && term.hasSelection() ? term.getSelection() : "";
+      // Build an empty context-menu shell plus `addItem`/`addSep` helpers, shared
+      // by the terminal menu and the left-panel agent menu.
+      function ctxMenuShell() {
         const menu = document.createElement("div");
         menu.className = "ctxmenu";
         menu.setAttribute("role", "menu");
@@ -3852,6 +3995,28 @@
           s.className = "ctxmenu-sep";
           menu.appendChild(s);
         };
+        return { menu, addItem, addSep };
+      }
+      // Append a built menu at the pointer, clamp into the viewport, and wire the
+      // shared dismiss listeners (outside-click, Escape, blur, resize).
+      function openCtxMenu(menu, ev) {
+        document.body.appendChild(menu);
+        ctxMenuEl = menu;
+        const r = menu.getBoundingClientRect();
+        const x = Math.max(4, Math.min(ev.clientX, window.innerWidth - r.width - 4));
+        const y = Math.max(4, Math.min(ev.clientY, window.innerHeight - r.height - 4));
+        menu.style.left = x + "px";
+        menu.style.top = y + "px";
+        document.addEventListener("pointerdown", onCtxOutside, true);
+        document.addEventListener("keydown", onCtxKey, true);
+        window.addEventListener("blur", hideTermMenu);
+        window.addEventListener("resize", hideTermMenu);
+      }
+      function showTermMenu(ev, term) {
+        ev.preventDefault();
+        hideTermMenu();
+        const selText = term && term.hasSelection && term.hasSelection() ? term.getSelection() : "";
+        const { menu, addItem, addSep } = ctxMenuShell();
 
         // Copy: disabled with nothing selected (mirrors the old behavior, minus
         // the auto-copy — the user now chooses it explicitly).
@@ -3883,18 +4048,20 @@
         addSep();
         addItem("Edit quick commands…", {}, editQuickCmds);
 
-        document.body.appendChild(menu);
-        ctxMenuEl = menu;
-        // Clamp into the viewport so a right-click near an edge stays fully visible.
-        const r = menu.getBoundingClientRect();
-        const x = Math.max(4, Math.min(ev.clientX, window.innerWidth - r.width - 4));
-        const y = Math.max(4, Math.min(ev.clientY, window.innerHeight - r.height - 4));
-        menu.style.left = x + "px";
-        menu.style.top = y + "px";
-        document.addEventListener("pointerdown", onCtxOutside, true);
-        document.addEventListener("keydown", onCtxKey, true);
-        window.addEventListener("blur", hideTermMenu);
-        window.addEventListener("resize", hideTermMenu);
+        openCtxMenu(menu, ev);
+      }
+      // Right-click menu for a left-panel agent row: pin/unpin to the top of the
+      // list (a pin also surfaces the agent in /r/'s screen-fixed palette).
+      function showAgentMenu(ev, key) {
+        ev.preventDefault();
+        hideTermMenu();
+        const e = entries.find((x) => x._key === key);
+        if (!e) return;
+        const { menu, addItem } = ctxMenuShell();
+        const name = cliLabel(e) || ident(e) || "pid " + e.pid;
+        if (isPinned(key)) addItem("Unpin “" + name + "”", { hint: "📌" }, () => togglePin(key));
+        else addItem("Pin “" + name + "” to top", { hint: "📌" }, () => togglePin(key));
+        openCtxMenu(menu, ev);
       }
       // Lightweight editor: overlay + textarea of `Label | template` lines. Save
       // writes localStorage; Reset restores the built-in defaults.
@@ -4300,14 +4467,55 @@
       let sortMode = localStorage.getItem("ay.sortMode") || "state";
       if (!SORT_MODES.includes(sortMode)) sortMode = "state";
 
+      // Pinned agents: a set of agent _key values that float to the top of the
+      // list, shared (same localStorage key) with /r/, where they also surface in
+      // the screen-fixed palette. Kept in memory and re-synced on cross-tab writes.
+      const AY_PINNED_KEY = "ay.pinned";
+      function loadPinned() {
+        try {
+          const a = JSON.parse(localStorage.getItem(AY_PINNED_KEY) || "[]");
+          return new Set(Array.isArray(a) ? a : []);
+        } catch {
+          return new Set();
+        }
+      }
+      let pinned = loadPinned();
+      function isPinned(key) {
+        return pinned.has(key);
+      }
+      function togglePin(key) {
+        if (!key) return;
+        if (pinned.has(key)) pinned.delete(key);
+        else pinned.add(key);
+        try {
+          localStorage.setItem(AY_PINNED_KEY, JSON.stringify([...pinned]));
+        } catch {}
+        renderList();
+      }
+      // Cross-tab / cross-view sync: /r/ (or another /w/ tab) writing ay.pinned
+      // fires a storage event here; reload the set and re-render.
+      window.addEventListener("storage", (ev) => {
+        if (ev.key === AY_PINNED_KEY) {
+          pinned = loadPinned();
+          renderList();
+        }
+      });
+
       // The filtered + sorted entry list, in the SAME order the left panel renders
       // and the keyboard nav steps. Sorting runs before layeredRows builds the
       // room/peer/agent tree, so it reorders roots/siblings without breaking nesting.
+      // Pinned entries then float to the front of their sorted group (a pinned root
+      // rises to the top; a pinned subagent rises among its siblings).
       function orderedEntries(toks) {
-        return sortEntries(
+        const sorted = sortEntries(
           entries.filter((e) => matches(e, toks)),
           sortMode,
         );
+        if (!pinned.size) return sorted;
+        const hi = [],
+          lo = [];
+        for (const e of sorted) (pinned.has(e._key) ? hi : lo).push(e);
+        return hi.concat(lo);
       }
 
       // A small git chip (±changed ⑂pins ⊙sub-dirty ↑ahead ↓behind) for a row,
@@ -4388,7 +4596,17 @@
       function rowFlags(e) {
         const peers = focusByKey.get(e._key) || 0;
         const flash = e._key !== sel && (flashUntil.get(e._key) || 0) > Date.now();
-        return (peers ? " peerfocus" : "") + (flash ? " stdinflash" : "");
+        return (
+          (peers ? " peerfocus" : "") +
+          (flash ? " stdinflash" : "") +
+          (pinned.has(e._key) ? " pinned" : "")
+        );
+      }
+      // A small 📌 marker on a pinned row (right-click to unpin).
+      function pinMarkHtml(e) {
+        return pinned.has(e._key)
+          ? `<span class="pinmark" title="pinned — right-click to unpin">📌</span>`
+          : "";
       }
       // A yellow chip showing how many peers are watching this agent ("" if none).
       function peerChipHtml(e) {
@@ -4436,11 +4654,12 @@
               .map((r) => {
                 if (r.kind !== "agent") return headerHtml(r);
                 const e = r.entry;
-                const t = e.title || e.prompt || "";
+                const t = e.title || e.status_text || e.prompt || "";
                 const id = compactIdent(e, ctx, 3, r.parentEntry);
                 const cli = cliLabel(e);
                 return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">
         ${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}
+        ${pinMarkHtml(e)}
         <span class="dot ${esc(e.status)}"></span>
         ${hasIdent(id) ? `<span class="cident" title="${esc(fullIdent(e))}">${esc(id)}</span>` : ""}
         ${cli ? `<span class="cname">${esc(cli)}</span>` : ""}
@@ -4470,16 +4689,17 @@
                 )
                 .join("");
               return `<div class="row ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">
-        <div class="r1">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}<span class="dot ${esc(e.status)}"></span>
+        <div class="r1">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}${pinMarkHtml(e)}<span class="dot ${esc(e.status)}"></span>
           <span class="name">${esc(cliLabel(e) || ident(e) || "agent")}</span>
           <span class="badge">pid ${e.pid}</span>
           ${foldChipHtml(e)}
           ${taskChipHtml(e)}
           ${badgeChipsHtml(e)}
           ${gitChipHtml(e)}
-          ${peerChipHtml(e)}
-          <span class="age">${age(e)}</span></div>
+        ${peerChipHtml(e)}
+        <span class="age">${age(e)}</span></div>
         ${e.title ? `<div class="rowtitle" title="${esc(e.title)}">${esc(e.title)}</div>` : ""}
+        ${e.status_text ? `<div class="statusline" title="${esc(e.status_text)}">${esc(e.status_text)}</div>` : ""}
         ${
           e.status === "needs_input" && e.question
             ? `<div class="detail ask" title="${esc(e.question)}">⌨ ${esc(e.question)}</div>`
@@ -4889,6 +5109,11 @@
         const row = ev.target.closest(".row");
         if (row) select(row.dataset.key);
       });
+      // Right-click an agent row → pin/unpin menu.
+      $("list").addEventListener("contextmenu", (ev) => {
+        const row = ev.target.closest(".row");
+        if (row && row.dataset.key) showAgentMenu(ev, row.dataset.key);
+      });
       // Mobile back: return to the list pane. The tail keeps streaming in the
       // background (selection unchanged), so reopening the agent is instant.
       const goBack = () => document.querySelector(".app").classList.remove("show-detail");
@@ -4959,10 +5184,10 @@
       $("rguibtn").addEventListener("click", () => {
         const [selRoom, selPid] = sel ? sel.split("#") : [null, null];
         let room = selRoom && selRoom !== LOCAL && loadRooms()[selRoom] ? selRoom : null;
-        if (!room)
-          room = [...sources.values()].find((s) => s.kind === "rtc" && s.live)?.id ?? null;
-        const frag =
-          room ? "#" + encodeURIComponent(room) + (room === selRoom && selPid ? ":" + selPid : "") : "";
+        if (!room) room = [...sources.values()].find((s) => s.kind === "rtc" && s.live)?.id ?? null;
+        const frag = room
+          ? "#" + encodeURIComponent(room) + (room === selRoom && selPid ? ":" + selPid : "")
+          : "";
         location.href = "/r/" + frag;
       });
       // Cycle the sort order: state → created → identity → state.
@@ -5981,14 +6206,25 @@
       // picker (options from /api/spawn-config `clis`), preselected from the
       // chain: selected agent's cli → last used cli → explicit user pick.
       const LAST_CLI_KEY = "ay.lastSpawnCli";
-      const CLI_FALLBACK = ["claude", "codex", "gemini", "copilot", "cursor-agent", "goose", "aider"];
+      const CLI_FALLBACK = [
+        "claude",
+        "codex",
+        "gemini",
+        "copilot",
+        "cursor-agent",
+        "goose",
+        "aider",
+      ];
       function cliOptions(clis, preferred) {
         const list = clis && clis.length ? clis : CLI_FALLBACK;
         const has = preferred && list.includes(preferred);
         return (
           `<option value=""${has ? "" : " selected"} disabled>choose a CLI…</option>` +
           list
-            .map((c) => `<option value="${esc(c)}"${c === preferred && has ? " selected" : ""}>${esc(c)}</option>`)
+            .map(
+              (c) =>
+                `<option value="${esc(c)}"${c === preferred && has ? " selected" : ""}>${esc(c)}</option>`,
+            )
             .join("")
         );
       }
