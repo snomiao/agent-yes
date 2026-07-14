@@ -59,7 +59,56 @@ import {
   resolveSpawnCwd,
 } from "./workspaceConfig.ts";
 
-const DEFAULT_PORT = 7432;
+const DEFAULT_PORT = 0;
+const PORTLESS_APP_NAME = "agent-yes";
+const PORTLESS_CHILD_ENV = "AGENT_YES_PORTLESS_CHILD";
+
+export function portlessConsoleUrl(token?: string): string {
+  return portlessConsoleUrlForOrigin(
+    process.env.PORTLESS_URL?.replace(/\/$/, "") || `https://${PORTLESS_APP_NAME}.localhost`,
+    token,
+  );
+}
+
+function portlessConsoleUrlForOrigin(origin: string, token?: string): string {
+  const fragment = token ? `/#k=${encodeURIComponent(token)}` : "/";
+  return `${origin}${fragment}`;
+}
+
+async function resolvedPortlessConsoleUrl(token?: string): Promise<string> {
+  if (process.env.PORTLESS_URL) return portlessConsoleUrl(token);
+  try {
+    const port = Number(
+      (await readFile(path.join(homedir(), ".portless", "proxy.port"), "utf-8")).trim(),
+    );
+    if (Number.isInteger(port) && port > 0)
+      return portlessConsoleUrlForOrigin(
+        `https://${PORTLESS_APP_NAME}.localhost${port === 443 ? "" : `:${port}`}`,
+        token,
+      );
+  } catch {
+    /* Portless has not created state yet. */
+  }
+  return portlessConsoleUrl(token);
+}
+
+async function runWithPortless(rest: string[]): Promise<number> {
+  const portless = Bun.which("portless");
+  if (!portless) {
+    process.stderr.write(
+      "ay serve: Portless is required for local HTTPS. Install it with: npm install -g portless\n",
+    );
+    return 1;
+  }
+  const script = process.argv[1];
+  const self =
+    script && /\.[cm]?[jt]s$/.test(script) ? [process.execPath, script] : [process.execPath];
+  const proc = Bun.spawn([portless, PORTLESS_APP_NAME, ...self, "serve", ...rest], {
+    stdio: ["inherit", "inherit", "inherit"],
+    env: { ...liveEnv(), [PORTLESS_CHILD_ENV]: "1" },
+  });
+  return (await proc.exited) ?? 1;
+}
 
 /**
  * Normalize a user-supplied GitHub-ish source into the standard
@@ -705,9 +754,28 @@ async function readDaemonServeArgs(mgr: DaemonManager): Promise<string[] | null>
   }
 }
 
-function portFromArgs(args: string[]): number {
+function portFromArgs(args: string[]): number | null {
   const m = /--port[=\s](\d+)/.exec(args.join(" "));
-  return m ? Number(m[1]) : DEFAULT_PORT;
+  return m ? Number(m[1]) : null;
+}
+
+function argsUsePortless(args: string[]): boolean {
+  const wantsHttp =
+    args.some((a) => a.startsWith("--http") || a.startsWith("--share")) ||
+    !args.some((a) => a.startsWith("--webrtc"));
+  return wantsHttp && portFromArgs(args) === null;
+}
+
+async function portlessAppPort(): Promise<number | null> {
+  try {
+    const routes = JSON.parse(
+      await readFile(path.join(homedir(), ".portless", "routes.json"), "utf-8"),
+    ) as { hostname?: string; port?: number }[];
+    const route = routes.find((r) => r.hostname === `${PORTLESS_APP_NAME}.localhost`);
+    return typeof route?.port === "number" ? route.port : null;
+  } catch {
+    return null;
+  }
 }
 
 async function warnStrayServeProcesses(): Promise<void> {
@@ -742,7 +810,8 @@ function explicitWebrtcUrl(args: string[]): string | undefined {
 // Ask the live daemon its version over the local HTTP API. null if it's not
 // listening (webrtc-only) or too old to expose /api/version — both of which we
 // treat as "outdated" so a re-install rolls it forward.
-async function fetchDaemonVersion(port: number, token: string): Promise<string | null> {
+async function fetchDaemonVersion(port: number | null, token: string): Promise<string | null> {
+  if (port === null) return null;
   try {
     const r = await fetch(`http://127.0.0.1:${port}/api/version`, {
       headers: { Authorization: `Bearer ${token}` },
@@ -890,7 +959,8 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       // share link for a WebRTC bridge that isn't actually running. A bare re-run
       // passes no args, so effArgs === priorArgs and this stays a no-op as before.
       const sameConfig = JSON.stringify(effArgs) === JSON.stringify(priorArgs);
-      const runningVer = await fetchDaemonVersion(portFromArgs(effArgs), token);
+      const daemonPort = argsUsePortless(effArgs) ? await portlessAppPort() : portFromArgs(effArgs);
+      const runningVer = await fetchDaemonVersion(daemonPort, token);
       if (runningVer === current && sameConfig) {
         await ensureBootAutostart(mgr);
         process.stdout.write(`'${DAEMON_NAME}' already running v${current} (up to date)\n`);
@@ -983,7 +1053,8 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     const code = await proc.exited;
     if (code === 0) {
       const onBoot = await ensureBootAutostart(mgr);
-      const port = portFromArgs(effArgs);
+      const port = argsUsePortless(effArgs) ? await portlessAppPort() : portFromArgs(effArgs);
+      const localUrl = argsUsePortless(effArgs) ? await resolvedPortlessConsoleUrl(token) : null;
       // Mirror cmdServe's mode resolution: webrtc-only daemons open no HTTP port.
       const httpish =
         effArgs.some((a) => a.startsWith("--http") || a.startsWith("--share")) ||
@@ -1021,8 +1092,12 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
         );
       process.stdout.write(`token: ${token}\n\n`);
       if (httpish) {
-        process.stdout.write(`  ay ls   ${token}@<host>:${port}\n`);
-        process.stdout.write(`  ay remote add <alias> http://${token}@<host>:${port}\n`);
+        if (argsUsePortless(effArgs)) {
+          process.stdout.write(`  web console: ${localUrl}\n`);
+        } else if (port !== null) {
+          process.stdout.write(`  ay ls   ${token}@<host>:${port}\n`);
+          process.stdout.write(`  ay remote add <alias> http://${token}@<host>:${port}\n`);
+        }
       }
       process.stdout.write(`  ay serve logs                # view server logs\n`);
       process.stdout.write(`  ay serve uninstall           # remove daemon\n`);
@@ -1055,7 +1130,9 @@ async function cmdServeStatus(args: string[]): Promise<number> {
   const daemonArgs = mgr ? await readDaemonServeArgs(mgr) : null;
   const installed = daemonArgs !== null;
   const a = daemonArgs ?? [];
-  const port = portFromArgs(a);
+  const local = argsUsePortless(a);
+  const port = local ? await portlessAppPort() : portFromArgs(a);
+  const localUrl = local ? await resolvedPortlessConsoleUrl(token ?? undefined) : null;
   // Mirror cmdServe/install mode resolution: webrtc when --webrtc/--share; http
   // when --http/--share OR no --webrtc at all (http is the implicit default).
   const webrtcish = a.some((x) => x.startsWith("--webrtc") || x.startsWith("--share"));
@@ -1077,6 +1154,7 @@ async function cmdServeStatus(args: string[]): Promise<number> {
           installed,
           mode,
           port: httpish ? port : null,
+          localUrl: httpish ? localUrl : null,
           reachable: runningVersion !== null,
           runningVersion,
           currentVersion: current,
@@ -1097,25 +1175,32 @@ async function cmdServeStatus(args: string[]): Promise<number> {
   w(`manager:      ${mgr ? mgr.id : "none — install pm2 or oxmgr to daemonize"}`);
   if (installed) {
     w(`installed:    yes (via ${mgr!.id})`);
-    w(`mode:         ${mode}${httpish ? `  (port ${port})` : ""}`);
+    w(`mode:         ${mode}${httpish ? (local ? `  (${localUrl})` : `  (port ${port})`) : ""}`);
     if (a.length) w(`args:         ${a.join(" ")}`);
   } else {
     w(`installed:    no — start a daemon with:  ay serve install [--share]`);
   }
   if (runningVersion !== null) {
     const tag = runningVersion === current ? "up to date" : `outdated (current v${current})`;
-    w(`http api:     reachable on 127.0.0.1:${port} — v${runningVersion} (${tag})`);
+    w(
+      `http api:     reachable ${local ? `via ${localUrl}` : `on 127.0.0.1:${port}`} — v${runningVersion} (${tag})`,
+    );
   } else if (mode === "webrtc") {
     w(`http api:     none (webrtc-only)`);
   } else {
-    w(`http api:     not reachable on 127.0.0.1:${port} (not running)`);
+    w(
+      `http api:     not reachable ${local ? `via ${localUrl}` : `on 127.0.0.1:${port}`} (not running)`,
+    );
   }
   w(`token:        ${token ?? "(none yet — created on first serve)"}`);
   if (shareLink) w(`share link:   ${shareLink}`);
   if (token && httpish) {
     w();
-    w(`connect:  ay ls   ${token}@<host>:${port}`);
-    w(`          ay remote add <alias> http://${token}@<host>:${port}`);
+    if (local) w(`console:  ${localUrl}`);
+    else if (port !== null) {
+      w(`connect:  ay ls   ${token}@<host>:${port}`);
+      w(`          ay remote add <alias> http://${token}@<host>:${port}`);
+    }
   }
   return 0;
 }
@@ -1139,11 +1224,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `                    (stable link across restarts; delete the file to rotate).\n` +
         `  --share [URL]     Legacy alias for --http --webrtc\n\n` +
         `Options:\n` +
-        `  --port N          Port to listen on (default: ${DEFAULT_PORT})\n` +
+        `  --port N          Bypass Portless and listen on a fixed HTTP port\n` +
         `  --host HOST       Interface to bind (default: 127.0.0.1; use 0.0.0.0 to expose)\n` +
         `  --token TOKEN     Auth token (auto-generated and saved if omitted)\n` +
         `  -d, --daemon      Install these flags as a background daemon (pm2/oxmgr)\n` +
         `                    (same as: ay serve install <flags>)\n` +
+        `  --local           Explicitly use Portless (the default for HTTP mode)\n` +
+        `                    ${portlessConsoleUrl()}\n` +
         `  --allow-spawn     Deprecated no-op — the console can always spawn agents\n` +
         `  --tls-cert FILE   TLS certificate PEM\n` +
         `  --tls-key  FILE   TLS private key PEM\n\n` +
@@ -1153,8 +1240,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  ay serve uninstall  remove daemon\n` +
         `  ay serve logs       view daemon logs\n\n` +
         `Once running, connect from another machine:\n` +
-        `  ay ls   <token>@<host>:${DEFAULT_PORT}\n` +
-        `  ay remote add <alias> http://<token>@<host>:${DEFAULT_PORT}\n`,
+        `  ay ls   <token>@<host>:<port>\n` +
+        `  ay remote add <alias> http://<token>@<host>:<port>\n`,
     );
     return 0;
   }
@@ -1190,7 +1277,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
 
   const y = yargs(rest)
     .usage("Usage: ay serve [options]")
-    .option("port", { type: "number", default: DEFAULT_PORT, description: "Port to listen on" })
+    .option("port", { type: "number", description: "Bypass Portless and listen on a fixed port" })
     .option("host", {
       type: "string",
       default: "127.0.0.1",
@@ -1218,6 +1305,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
       default: false,
       description: "Install as a background daemon (same as: ay serve install <flags>)",
     })
+    .option("local", {
+      type: "boolean",
+      default: false,
+      description: `Use Portless at ${portlessConsoleUrl()} (default for HTTP mode)`,
+    })
     .option("allow-spawn", {
       type: "boolean",
       default: false,
@@ -1226,7 +1318,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
     .option("takeover", {
       type: "boolean",
       default: false,
-      description: "If another ay serve already hosts this home's WebRTC room, stop it and take the room",
+      description:
+        "If another ay serve already hosts this home's WebRTC room, stop it and take the room",
     })
     .help(false)
     .version(false)
@@ -1239,6 +1332,18 @@ export async function cmdServe(rest: string[]): Promise<number> {
   if (argv.daemon) {
     const fwd = rest.filter((a) => a !== "--daemon" && a !== "-d");
     return cmdServeDaemon("install", fwd);
+  }
+
+  const wantWebrtc = argv.webrtc !== undefined || argv.share !== undefined;
+  const wantHttp = argv.http === true || argv.share !== undefined || argv.webrtc === undefined;
+  const fixedPort = typeof argv.port === "number";
+  const usePortless = wantHttp && !fixedPort;
+  if (argv.local === true && fixedPort) {
+    process.stderr.write("ay serve: --local and --port cannot be used together\n");
+    return 1;
+  }
+  if (usePortless && process.env[PORTLESS_CHILD_ENV] !== "1" && process.env.PORTLESS !== "0") {
+    return runWithPortless(rest);
   }
 
   // `ay serve` takes only flags (plus the install/uninstall/logs subcommands
@@ -1261,7 +1366,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // top-level agents regardless of the spawn path.
   delete process.env.AGENT_YES_PID;
 
-  const port = (argv.port as number) ?? DEFAULT_PORT;
+  const port = (argv.port as number | undefined) ?? (Number(process.env.PORT) || DEFAULT_PORT);
   const host = (argv.host as string) ?? "127.0.0.1";
   const tokenFlag = typeof argv.token === "string" ? argv.token : undefined;
   const certPath = typeof argv["tls-cert"] === "string" ? argv["tls-cert"] : undefined;
@@ -1277,8 +1382,6 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // Modes: --http (HTTP listener + web console), --webrtc (port-free WebRTC
   // share), or both. Bare `ay serve` stays HTTP-only; --share keeps its old
   // meaning (HTTP + WebRTC) for existing invocations.
-  const wantWebrtc = argv.webrtc !== undefined || argv.share !== undefined;
-  const wantHttp = argv.http === true || argv.share !== undefined || argv.webrtc === undefined;
 
   // Singleton WebRTC host per ~/.agent-yes: a second host joining the SAME
   // persisted room (~/.agent-yes/.share-room) fights the first over every
@@ -3232,17 +3335,20 @@ export async function cmdServe(rest: string[]): Promise<number> {
     // server is null only when we degraded to WebRTC-only above (port wedged);
     // skip the HTTP connection banner since nothing is listening on the port.
     if (server) {
+      const listenPort = server.port;
       const uiHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-      process.stdout.write(`ay serve  ${scheme}://${host}:${port}\n`);
+      process.stdout.write(`ay serve  ${scheme}://${host}:${listenPort}\n`);
       process.stdout.write(`token:    ${token}\n\n`);
       process.stdout.write(`web console (token in the # is eaten on open):\n`);
-      process.stdout.write(`  ${scheme}://${uiHost}:${port}/#k=${token}\n\n`);
+      process.stdout.write(
+        `  ${usePortless ? portlessConsoleUrl(token) : `${scheme}://${uiHost}:${listenPort}/#k=${token}`}\n\n`,
+      );
       process.stdout.write(`connect from another machine:\n`);
-      process.stdout.write(`  ay ls   ${token}@<host>:${port}\n`);
-      process.stdout.write(`  ay tail ${token}@<host>:${port}:<keyword>\n`);
-      process.stdout.write(`  ay send ${token}@<host>:${port}:<keyword> "message"\n\n`);
+      process.stdout.write(`  ay ls   ${token}@<host>:${listenPort}\n`);
+      process.stdout.write(`  ay tail ${token}@<host>:${listenPort}:<keyword>\n`);
+      process.stdout.write(`  ay send ${token}@<host>:${listenPort}:<keyword> "message"\n\n`);
       process.stdout.write(`save as alias:\n`);
-      process.stdout.write(`  ay remote add <alias> ${scheme}://${token}@<host>:${port}\n\n`);
+      process.stdout.write(`  ay remote add <alias> ${scheme}://${token}@<host>:${listenPort}\n\n`);
       if (!useHttps) {
         process.stdout.write(
           `for HTTPS: ay serve --tls-cert cert.pem --tls-key key.pem\n` +
