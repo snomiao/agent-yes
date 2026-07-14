@@ -46,6 +46,7 @@ import { findSpawnHiddenLauncher } from "./rustBinary.ts";
 import { pgidForWrapper } from "./reaper.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
+import { listStrayServeProcesses } from "./strayServe.ts";
 import {
   getProvisionHook,
   getProvisionRoot,
@@ -707,6 +708,17 @@ function portFromArgs(args: string[]): number {
   return m ? Number(m[1]) : DEFAULT_PORT;
 }
 
+async function warnStrayServeProcesses(): Promise<void> {
+  const stray = await listStrayServeProcesses();
+  if (stray.length === 0) return;
+  const pids = stray.map((p) => p.pid);
+  process.stderr.write(
+    `warning: ${stray.length} unmanaged ay serve process(es) running (pid ${pids.join(
+      ", ",
+    )}) — they will fight the daemon for the WebRTC room; stop them: kill ${pids.join(" ")}\n`,
+  );
+}
+
 // An explicit webrtc:// URL passed to --webrtc/--share in the daemon's serve args,
 // or undefined for a bare flag (which mints a persisted room instead). Mirrors how
 // cmdServe resolves argv.webrtc/argv.share, but over the raw arg list install holds
@@ -785,6 +797,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     }
     if (removed === 0 && failed === 0)
       process.stdout.write(`no '${DAEMON_NAME}' daemon registered with any manager\n`);
+    await warnStrayServeProcesses();
     return failed ? 1 : 0;
   }
 
@@ -893,6 +906,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       await spawnExit([mgr.bin, "stop", DAEMON_NAME]);
       await spawnExit([mgr.bin, "delete", DAEMON_NAME]);
     }
+    await warnStrayServeProcesses();
 
     // oxmgr takes the command as one string; pm2 takes the binary plus its
     // args after `--`. Both auto-restart on crash by default (pm2) / via the
