@@ -684,9 +684,12 @@ export function selSegments(sel, myLast, vy, myRows, peerCols, myCols) {
   const from = Math.max(rA, vy),
     to = Math.min(rB, vy + myRows - 1);
   for (let r = from; r <= to; r++) {
-    const a = r === rA ? cA : 0;
-    const b = r === rB ? cB : myCols;
-    segs.push({ row: r, a: Math.min(mapC(a), mapC(b)), b: Math.max(mapC(a), mapC(b)) });
+    // cA/cB are the PEER's columns, so they go through mapC; 0 and myCols are the
+    // row's own edges, already in OUR space — mapping them would rescale our own
+    // right edge (and could even invert the span when the peer is wider).
+    const a = r === rA ? mapC(cA) : 0;
+    const b = r === rB ? mapC(cB) : myCols;
+    segs.push({ row: r, a: Math.min(a, b), b: Math.max(a, b) });
   }
   return segs;
 }

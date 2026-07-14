@@ -817,6 +817,27 @@ describe("selSegments", () => {
     expect(seg).toEqual({ row: 0, a: 20, b: 40 }); // 10/80*160=20, 20/80*160=40
   });
 
+  // The row-edge sentinel is OUR right edge (myCols), already in our coordinate
+  // space — only the peer's own columns (cA/cB) go through the peer→us mapping.
+  it("ends a multi-row selection at OUR right edge when the peer is NARROWER", () => {
+    // peer 80 wide, we are 160. Two rows: top starts at peer col 70, bottom ends at 5.
+    const s = parseSel("1,70-0,5")!; // myLast 10 → top row 9, bottom row 10
+    expect(selSegments(s, 10, 0, 24, 80, 160)).toEqual([
+      { row: 9, a: 140, b: 160 }, // top: 70/80*160=140 → our edge (160), NOT 320
+      { row: 10, a: 0, b: 10 }, // bottom: 0 → 5/80*160=10
+    ]);
+  });
+
+  it("keeps middle rows FULL width when the peer is WIDER", () => {
+    // peer 160 wide, we are 80. Three rows: top from peer col 100, bottom to col 20.
+    const s = parseSel("2,100-0,20")!; // myLast 10 → rows 8,9,10
+    expect(selSegments(s, 10, 0, 24, 160, 80)).toEqual([
+      { row: 8, a: 50, b: 80 }, // top: 100/160*80=50 → our edge (80)
+      { row: 9, a: 0, b: 80 }, // middle: full width of OUR 80 cols, not 40
+      { row: 10, a: 0, b: 10 }, // bottom: 0 → 20/160*80=10
+    ]);
+  });
+
   it("returns [] for null", () => {
     expect(selSegments(null, 59, 0, 54, 80, 80)).toEqual([]);
   });
