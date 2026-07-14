@@ -1774,11 +1774,14 @@ let rguiFilter = ((): string => {
 })();
 let lastRawRecords: AgentRecord[] = [];
 // Space-separated tokens AND-match (case-insensitive substrings) over the same
-// fields the ⌘K rows show: title, cwd, cli, status, branch, source.
+// fields the ⌘K rows show — title, cwd, cli, status, branch, source — plus the
+// source machine's hostname (from its /api/host env info), so "taka" narrows to
+// one machine even when the wire id is a room name.
 function matchesFilter(r: AgentRecord): boolean {
   if (!rguiFilter) return true;
+  const host = wires.get(r._src)?.hostInfo?.host ?? "";
   const hay =
-    `${nodeTitle(r)} ${r.cwd} ${r.cli} ${r.status} ${r.git?.branch ?? ""} ${r._src}`.toLowerCase();
+    `${nodeTitle(r)} ${r.cwd} ${r.cli} ${r.status} ${r.git?.branch ?? ""} ${r._src} ${host}`.toLowerCase();
   return rguiFilter
     .toLowerCase()
     .split(/\s+/)

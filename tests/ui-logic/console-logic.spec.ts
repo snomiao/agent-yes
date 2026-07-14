@@ -399,6 +399,26 @@ describe("matches", () => {
     // default claude has no cli tag, so a cli: filter must not match it
     expect(matches(agent({ cli: "claude" }), ["cli:claude"])).toBe(false);
   });
+  it("matches a bare token against the device label (user@host) and room", () => {
+    const a = agent({ _host: "sno@taka", _room: "office" });
+    expect(matches(a, ["taka"])).toBe(true);
+    expect(matches(a, ["sno"])).toBe(true);
+    expect(matches(a, ["office"])).toBe(true);
+    expect(matches(agent(), ["taka"])).toBe(false);
+  });
+  it("user: matches only the username half of the device label", () => {
+    const a = agent({ _host: "sno@taka" });
+    expect(matches(a, ["user:sno"])).toBe(true);
+    expect(matches(a, ["user:taka"])).toBe(false);
+    // host-only label ("taka", no @) has no user part
+    expect(matches(agent({ _host: "taka" }), ["user:taka"])).toBe(false);
+    expect(matches(agent(), ["user:sno"])).toBe(false);
+  });
+  it("host: still matches the whole device label", () => {
+    const a = agent({ _host: "sno@taka" });
+    expect(matches(a, ["host:taka"])).toBe(true);
+    expect(matches(a, ["host:sno"])).toBe(true);
+  });
 });
 
 describe("nextIndex", () => {
