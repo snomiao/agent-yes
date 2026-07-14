@@ -1,6 +1,6 @@
 import { execaCommandSync, parseCommandString } from "execa";
 import { fromWritable } from "from-node-stream";
-import { mkdir, open, readFile, rename, stat, unlink, writeFile } from "fs/promises";
+import { mkdir, open, readFile, stat, unlink, writeFile } from "fs/promises";
 import path from "path";
 import DIE from "phpdie";
 import sflow from "sflow";
@@ -50,26 +50,26 @@ export { AgentContext };
 const RAW_LOG_KEEP_BYTES = 80 * 1024 * 1024;
 const RAW_LOG_TRIGGER_BYTES = 160 * 1024 * 1024;
 
-/** Shrink a raw log to its trailing `keepBytes`, returning the new length. The
- * tail is staged in a temp file and renamed over the original so a crash mid-way
- * leaves the old log intact. The TS writer reopens per append (flag:"a"), so no
- * stale fd survives the rename. */
+/** Shrink a raw log to its trailing `keepBytes` **in place** (rewrite tail→front
+ * + truncate), returning the new length. Deliberately NOT temp-file+rename:
+ * rename swaps the inode, freezing any live follower (`ay serve` `/api/tail`,
+ * incl. the agent-yes.com viewer over WebRTC) whose fd is bound to the old inode.
+ * Rewriting the same inode lets serve's `if (size < offset) offset = size`
+ * "truncated/rotated" guard resume the stream. Mirrors rs/src/log_files.rs. */
 async function compactRawLogTail(logPath: string, keepBytes = RAW_LOG_KEEP_BYTES): Promise<number> {
-  const fh = await open(logPath, "r");
-  let buf: Buffer;
+  const fh = await open(logPath, "r+");
   try {
     const { size } = await fh.stat();
     if (size <= keepBytes) return size;
-    const tmp = Buffer.allocUnsafe(keepBytes);
-    const { bytesRead } = await fh.read(tmp, 0, keepBytes, size - keepBytes);
-    buf = tmp.subarray(0, bytesRead);
+    // Read the tail fully before overwriting the front so it can't be clobbered.
+    const buf = Buffer.allocUnsafe(keepBytes);
+    const { bytesRead } = await fh.read(buf, 0, keepBytes, size - keepBytes);
+    await fh.write(buf, 0, bytesRead, 0);
+    await fh.truncate(bytesRead);
+    return bytesRead;
   } finally {
     await fh.close();
   }
-  const tmpPath = logPath + ".compacting";
-  await writeFile(tmpPath, buf);
-  await rename(tmpPath, logPath);
-  return buf.length;
 }
 
 export type AgentCliConfig = {

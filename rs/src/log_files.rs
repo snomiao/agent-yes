@@ -79,10 +79,10 @@ impl LogWriter {
         if g.written > COMPACT_TRIGGER_BYTES {
             if let Some(path) = self.raw_log_path.clone() {
                 match compact_tail(&path, COMPACT_KEEP_BYTES) {
-                    Ok((file, len)) => {
-                        g.file = Some(file);
-                        g.written = len;
-                    }
+                    // In-place truncation keeps the same inode, so the append fd
+                    // in `g.file` stays valid — its next O_APPEND write lands at
+                    // the new EOF. No handle swap needed.
+                    Ok(len) => g.written = len,
                     Err(e) => warn!("raw log compaction failed for {:?}: {}", path, e),
                 }
             }
@@ -90,34 +90,37 @@ impl LogWriter {
     }
 }
 
-/// Shrink `path` to its trailing `keep` bytes and return a fresh append handle
-/// positioned at the (new) end, plus the resulting length. The tail is written
-/// to a sibling temp file and renamed over the original so a crash mid-compaction
-/// leaves the old log intact rather than a half-written one. The caller's stale
-/// handle to the pre-rename inode is discarded in favour of the returned one.
-fn compact_tail(path: &Path, keep: u64) -> std::io::Result<(fs::File, u64)> {
+/// Shrink `path` to its trailing `keep` bytes **in place** and return the new
+/// length. Deliberately NOT a temp-file+rename: rename swaps the inode, which
+/// would freeze any live follower (`ay serve`'s `/api/tail`, incl. the
+/// agent-yes.com viewer over WebRTC) whose fd is bound to the old inode — it
+/// would keep reading the unlinked file and never see new appends. Rewriting the
+/// same inode instead lets serve's `if (size < offset) offset = size`
+/// "truncated/rotated" guard resume the stream from the live frontier. The trade
+/// is crash-atomicity: a kill mid-rewrite can leave a duplicated-then-stale tail,
+/// which is harmless for an ephemeral render log (deleted on clean exit; resume
+/// falls back to `--continue`) and self-heals on the next compaction.
+fn compact_tail(path: &Path, keep: u64) -> std::io::Result<u64> {
     let len = fs::metadata(path)?.len();
     if len <= keep {
-        let f = fs::OpenOptions::new().create(true).append(true).open(path)?;
-        return Ok((f, len));
+        return Ok(len);
     }
-    let mut rf = fs::File::open(path)?;
-    rf.seek(SeekFrom::Start(len - keep))?;
-    let mut buf = Vec::with_capacity(keep as usize);
-    rf.take(keep).read_to_end(&mut buf)?;
-
-    let mut tmp = path.as_os_str().to_owned();
-    tmp.push(".compacting");
-    let tmp = PathBuf::from(tmp);
+    // Read the trailing `keep` bytes fully into memory before overwriting the
+    // front, so the source bytes can't be clobbered mid-move.
+    let mut buf = vec![0u8; keep as usize];
     {
-        let mut wf = fs::File::create(&tmp)?;
-        wf.write_all(&buf)?;
-        wf.sync_all()?;
+        let mut rf = fs::File::open(path)?;
+        rf.seek(SeekFrom::Start(len - keep))?;
+        rf.read_exact(&mut buf)?;
     }
-    fs::rename(&tmp, path)?;
-
-    let f = fs::OpenOptions::new().create(true).append(true).open(path)?;
-    Ok((f, buf.len() as u64))
+    // Overwrite from offset 0 with a non-append handle (O_APPEND ignores seeks),
+    // then drop everything past the tail.
+    let mut wf = fs::OpenOptions::new().write(true).open(path)?;
+    wf.seek(SeekFrom::Start(0))?;
+    wf.write_all(&buf)?;
+    wf.set_len(keep)?;
+    wf.sync_all()?;
+    Ok(keep)
 }
 
 pub fn global_dir() -> Option<PathBuf> {
@@ -171,7 +174,8 @@ mod tests {
     }
 
     #[test]
-    fn test_compact_tail_keeps_trailing_bytes() {
+    fn test_compact_tail_keeps_trailing_bytes_in_place() {
+        use std::os::unix::fs::MetadataExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("big.raw.log");
         // 300 KiB of distinct lines; compact to the last 64 KiB.
@@ -179,15 +183,16 @@ mod tests {
             .flat_map(|i| format!("{:015}\n", i).into_bytes())
             .collect();
         fs::write(&path, &body).unwrap();
+        let ino_before = fs::metadata(&path).unwrap().ino();
         let keep = 64 * 1024;
-        let (_f, len) = compact_tail(&path, keep).unwrap();
+        let len = compact_tail(&path, keep).unwrap();
         assert_eq!(len, keep);
         let on_disk = fs::read(&path).unwrap();
         assert_eq!(on_disk.len() as u64, keep);
         // The kept bytes are the file's true tail.
         assert_eq!(&on_disk[..], &body[body.len() - keep as usize..]);
-        // No temp file left behind.
-        assert!(!dir.path().join("big.raw.log.compacting").exists());
+        // Same inode — in-place, so live-tail followers keep their fd valid.
+        assert_eq!(fs::metadata(&path).unwrap().ino(), ino_before);
     }
 
     #[test]
@@ -220,7 +225,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("small.raw.log");
         fs::write(&path, b"just a little\n").unwrap();
-        let (_f, len) = compact_tail(&path, 1024).unwrap();
+        let len = compact_tail(&path, 1024).unwrap();
         assert_eq!(len, 14);
         assert_eq!(fs::read(&path).unwrap(), b"just a little\n");
     }
