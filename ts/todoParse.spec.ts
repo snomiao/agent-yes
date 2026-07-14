@@ -65,4 +65,34 @@ describe("parseTaskCounts", () => {
     expect(parseTaskCounts([])).toBeNull();
     expect(parseTaskCounts(lines("just some logs\nnothing here"))).toBeNull();
   });
+
+  // The CLI branches EVERY tool result under the same ⎿ glyph, not just todo
+  // blocks — and ✓ is an ordinary success glyph in program output. So a ⎿ line
+  // that carries its own content is a tool-result header, not a todo anchor;
+  // only a BARE ⎿ anchors the markers below it.
+  it("does not invent a badge from a test run's ✓ output (⎿ tool-result header)", () => {
+    const out = parseTaskCounts(
+      lines(
+        [
+          "⏺ Bash(bun run test)",
+          "  ⎿  RUN  v3.2.4 /repo",
+          "     ✓ ts/badges.spec.ts (18 tests) 12ms",
+          "     ✓ ts/needsInput.spec.ts (12 tests) 9ms",
+          "     ✓ ts/autoRetry.spec.ts (7 tests) 4ms",
+        ].join("\n"),
+      ),
+    );
+    expect(out).toBeNull();
+  });
+
+  it("does not invent a badge from ✓ prose under a ⎿ result header", () => {
+    const out = parseTaskCounts(
+      lines(
+        ["  ⎿  Read 120 lines (ctrl+o to expand)", "     ✓ Tests pass", "     ✓ Lint clean"].join(
+          "\n",
+        ),
+      ),
+    );
+    expect(out).toBeNull();
+  });
 });
