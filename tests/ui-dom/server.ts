@@ -40,6 +40,7 @@ export const AGENTS = [
     cli: "claude",
     cwd: "/home/u/ws/snomiao/agent-yes/tree/main",
     title: "first agent",
+    status_text: "✶ Verifying calendar meetings with real data… (6m 30s · ↓ 19.5k tokens)",
     prompt: "",
     status: "active",
     started_at: T0,

@@ -38,6 +38,7 @@ import {
 } from "./subcommands.ts";
 import { TYPING_BADGE } from "./badges.ts";
 import { isTerminalReply } from "./terminalReply.ts";
+import { parseStatusText } from "./statusText.ts";
 import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
 import { acquireWebrtcHostLock, type ServeLockOwner } from "./serveLock.ts";
 import { type MailParty, recordInbox } from "./messageLog.ts";
@@ -1435,6 +1436,28 @@ export async function cmdServe(rest: string[]): Promise<number> {
     }
   };
 
+  // Per-agent live status description from the rendered screen. Claude Code
+  // paints a spinner/status line while working; surfacing it lets the left panel
+  // show "what it's doing" without opening the terminal.
+  const statusTextCache = new Map<
+    string,
+    { size: number; mtimeMs: number; statusText: string | null }
+  >();
+  const logStatusText = async (logFile: string | null | undefined): Promise<string | null> => {
+    if (!logFile) return null;
+    try {
+      const { size, mtimeMs } = await stat(logFile);
+      const hit = statusTextCache.get(logFile);
+      if (hit && hit.size === size && hit.mtimeMs === mtimeMs) return hit.statusText;
+      const lines = await renderLogTailLines(logFile, 40);
+      const statusText = lines ? parseStatusText(lines) : null;
+      statusTextCache.set(logFile, { size, mtimeMs, statusText });
+      return statusText;
+    } catch {
+      return null;
+    }
+  };
+
   // Per-agent "waiting on you" detection: the agent is parked on an interactive
   // menu it did NOT auto-resolve (config `needsInput` patterns). Same source and
   // classifier as `ay ls` / `ay status`, so the console's dot matches the CLI's
@@ -1701,6 +1724,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       // WHAT the agent is waiting on. Null otherwise.
       question,
       title: await logTitle(r.log_file),
+      status_text: status === "exited" ? null : await logStatusText(r.log_file),
       git: status === "exited" ? null : await gitStatus(r.cwd),
       // Task progress from the rendered todo block (null when none detected → no
       // badge). Skipped for exited agents — their screen is no longer live.

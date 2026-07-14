@@ -66,9 +66,27 @@ const MAX_PEER_JOIN_QUEUE = 50;
 const IDLE_RESTART_UPTIME_MS = 25 * 60_000;
 const HARD_RESTART_UPTIME_MS = 45 * 60_000;
 const IDLE_RESTART_CHECK_MS = 60_000;
+const PERF_SLOW_MS = Number(process.env.AGENT_YES_WEBRTC_PERF_SLOW_MS) || 750;
+const PERF_BUFFERED_BYTES = Number(process.env.AGENT_YES_WEBRTC_PERF_BUFFERED_BYTES) || 1_000_000;
+const PERF_VERBOSE = process.env.AGENT_YES_WEBRTC_PERF === "1";
 
 type IceServer = { urls: string | string[]; username?: string; credential?: string };
 const STUN: IceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
+
+function perfLog(event: string, data: Record<string, unknown>, force = false) {
+  if (!force && !PERF_VERBOSE) return;
+  process.stderr.write(`[share:perf] ${JSON.stringify({ t: Date.now(), event, ...data })}\n`);
+}
+
+function maybeSlow(event: string, startedAt: number, data: Record<string, unknown> = {}) {
+  const ms = Math.round(performance.now() - startedAt);
+  perfLog(event, { ms, ...data }, ms >= PERF_SLOW_MS);
+}
+
+function dcBufferedAmount(dc: any): number {
+  const n = Number(dc?.bufferedAmount ?? 0);
+  return Number.isFinite(n) ? n : 0;
+}
 
 // Short-lived Cloudflare TURN credentials, minted from a long-term TURN key, so
 // browsers can RELAY when a direct P2P path is impossible (symmetric NAT /
@@ -428,6 +446,7 @@ export async function startShare(
     if (closed) return; // a reconnect timer queued before close() must not revive it
     const ws = new WebSocket(`${wsScheme}://${host}/${room}`, [SUB]);
     currentWs = ws;
+    const signalStartedAt = performance.now();
     let ready = false;
     let lastRecv = Date.now();
     let hb: ReturnType<typeof setInterval> | undefined;
@@ -443,6 +462,7 @@ export async function startShare(
       }
     };
     ws.onopen = () => {
+      maybeSlow("signal.open", signalStartedAt, { room, host });
       ws.send(JSON.stringify({ type: "hello", role: "host", v: 2, token: authToken }));
       ready = true;
       lastRecv = Date.now();
@@ -480,6 +500,12 @@ export async function startShare(
       const m = JSON.parse(ev.data as string);
       if (m.type === "pong") return; // heartbeat ack — liveness already recorded
       if (m.type === "peer-join") {
+        perfLog("peer.join", {
+          room,
+          peer: String(m.peer),
+          queue: peerJoinQueue.length,
+          peers: peers.size,
+        });
         // Serialized in drainPeerJoins() to avoid a storm. Skip dupes (already
         // queued or already an active peer) and cap the queue so a pathological
         // burst can't grow it unboundedly — dropped joins retry via the browser.
@@ -554,6 +580,7 @@ export async function startShare(
   };
 
   async function startPeer(ws: WebSocket, peerId: string) {
+    const startedAt = performance.now();
     const iceServers = await getIceServers();
     const pc = new RTCPeerConnection({ iceServers });
     let resolveKeys!: () => void;
@@ -584,6 +611,11 @@ export async function startShare(
     dc.binaryType = "arraybuffer";
     dc.onopen = async () => {
       try {
+        maybeSlow("peer.dc_open", startedAt, {
+          room,
+          peer: peerId,
+          buffered: dcBufferedAmount(dc),
+        });
         await peer.keysReady; // keys derived in the answer handler
         // Open the mandatory bidirectional key-confirmation handshake. Nothing
         // the peer sends is acted on until BOTH directions confirm (see onFrame).
@@ -624,6 +656,7 @@ export async function startShare(
     ws.send(
       JSON.stringify({ type: "offer", to: peerId, sdp: pc.localDescription.sdp, iceServers }),
     );
+    maybeSlow("peer.offer", startedAt, { room, peer: peerId, iceServers: iceServers.length });
   }
 
   function closePeer(peerId: string) {
@@ -642,8 +675,10 @@ export async function startShare(
   // Seal an envelope and send it, serialized per peer so the wire order matches
   // the nonce-counter order (so the receiver's monotonic check never trips).
   function enqueueSeal(peerId: string, dc: any, peer: Peer, flags: number, obj: object) {
+    const queuedAt = performance.now();
     peer.sendChain = peer.sendChain.then(async () => {
       if (dc.readyState !== "open" || !peer.keyH2C || !peer.th) return;
+      const queuedMs = Math.round(performance.now() - queuedAt);
       let frame: ArrayBuffer;
       try {
         frame = await e2eSeal(peer.keyH2C, peer.send, flags, peer.th, packEnvelope(obj));
@@ -653,6 +688,19 @@ export async function startShare(
       }
       try {
         dc.send(frame);
+        const buffered = dcBufferedAmount(dc);
+        perfLog(
+          "send",
+          {
+            room,
+            peer: peerId,
+            kind: (obj as any)?.t,
+            queuedMs,
+            buffered,
+            bytes: frame.byteLength,
+          },
+          queuedMs >= PERF_SLOW_MS || buffered >= PERF_BUFFERED_BYTES,
+        );
       } catch {
         /* peer vanished mid-send; dropping the frame is correct */
       }
@@ -703,6 +751,8 @@ export async function startShare(
     }
     if (req.t !== "req") return;
     const { id, method, path: p, body } = req;
+    const startedAt = performance.now();
+    perfLog("req.start", { room, peer: peerId, id, method, path: p });
     const ac = new AbortController();
     peer.aborts.set(id, ac);
     try {
@@ -718,6 +768,14 @@ export async function startShare(
           signal: ac.signal,
         }),
       );
+      maybeSlow("req.head", startedAt, {
+        room,
+        peer: peerId,
+        id,
+        method,
+        path: p,
+        status: res.status,
+      });
       enqueueSeal(peerId, dc, peer, 0, {
         t: "res",
         id,
@@ -727,9 +785,11 @@ export async function startShare(
       const reader = res.body!.getReader();
       const dec = new TextDecoder();
       let seq = 0;
+      let bytes = 0;
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
+        bytes += value.byteLength;
         const text = dec.decode(value, { stream: true });
         // Slice on UTF-16 boundaries: JSON round-trips lone surrogates as \uXXXX,
         // so the receiver reassembles the exact text by concatenating in seq order.
@@ -742,13 +802,32 @@ export async function startShare(
           });
       }
       enqueueSeal(peerId, dc, peer, 0, { t: "end", id, seq });
+      maybeSlow("req.end", startedAt, {
+        room,
+        peer: peerId,
+        id,
+        method,
+        path: p,
+        status: res.status,
+        chunks: seq,
+        bytes,
+      });
     } catch (e) {
-      if ((e as Error).name !== "AbortError")
+      if ((e as Error).name !== "AbortError") {
+        maybeSlow("req.error", startedAt, {
+          room,
+          peer: peerId,
+          id,
+          method,
+          path: p,
+          error: String((e as Error).message ?? e),
+        });
         enqueueSeal(peerId, dc, peer, 0, {
           t: "end",
           id,
           error: String((e as Error).message ?? e),
         });
+      }
     } finally {
       peer.aborts.delete(id);
     }

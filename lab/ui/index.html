@@ -1325,6 +1325,14 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      .statusline {
+        color: var(--muted);
+        font-size: 12.5px;
+        margin-top: 4px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       /* compact view: one line per agent — dot + cli + live title (or prompt), age */
       .row.crow {
         display: flex;
@@ -4832,7 +4840,7 @@
               .map((r) => {
                 if (r.kind !== "agent") return headerHtml(r);
                 const e = r.entry;
-                const t = e.title || e.prompt || "";
+                const t = e.title || e.status_text || e.prompt || "";
                 const id = compactIdent(e, ctx, 3, r.parentEntry);
                 const cli = cliLabel(e);
                 return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">
@@ -4875,9 +4883,10 @@
           ${taskChipHtml(e)}
           ${badgeChipsHtml(e)}
           ${gitChipHtml(e)}
-          ${peerChipHtml(e)}
-          <span class="age">${age(e)}</span></div>
+        ${peerChipHtml(e)}
+        <span class="age">${age(e)}</span></div>
         ${e.title ? `<div class="rowtitle" title="${esc(e.title)}">${esc(e.title)}</div>` : ""}
+        ${e.status_text ? `<div class="statusline" title="${esc(e.status_text)}">${esc(e.status_text)}</div>` : ""}
         ${
           e.status === "needs_input" && e.question
             ? `<div class="detail ask" title="${esc(e.question)}">⌨ ${esc(e.question)}</div>`
