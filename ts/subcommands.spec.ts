@@ -28,6 +28,32 @@ async function loadModule() {
   return await import("./subcommands.ts");
 }
 
+describe("subcommands.readLogForRender", () => {
+  it("reads a small file whole (byte-identical)", async () => {
+    const { readLogForRender } = await loadModule();
+    const p = path.join(testHome, "small.log");
+    const body = Buffer.from("hello\nworld\n".repeat(100));
+    await writeFile(p, body);
+    const got = await readLogForRender(p);
+    expect(Buffer.from(got)).toEqual(body);
+  });
+
+  it("caps an oversized file to its trailing window", async () => {
+    const { readLogForRender } = await loadModule();
+    const p = path.join(testHome, "big.log");
+    // 300 KiB of distinct 16-byte lines; cap the read at 64 KiB.
+    const lines: string[] = [];
+    for (let i = 0; i < 300 * 64; i++) lines.push(String(i).padStart(15, "0"));
+    const body = Buffer.from(lines.join("\n") + "\n");
+    await writeFile(p, body);
+    const cap = 64 * 1024;
+    const got = await readLogForRender(p, cap);
+    expect(got.byteLength).toBe(cap);
+    // The window is the tail: it ends with the file's final bytes.
+    expect(Buffer.from(got).subarray(-16)).toEqual(body.subarray(-16));
+  });
+});
+
 describe("subcommands.controlCodeFromName", () => {
   it("maps named codes to the right control bytes", async () => {
     const { controlCodeFromName } = await loadModule();
