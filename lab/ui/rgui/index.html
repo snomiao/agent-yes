@@ -111,6 +111,21 @@
         border-color: var(--accent);
         color: var(--accent);
       }
+      /* Narrow / touch viewports: grow the toolbar buttons to a 44px min tap
+         target so a phone user can hit them reliably (WCAG 2.5.5). Gated on the
+         720px mobile breakpoint (matching the console) OR a coarse pointer, so a
+         tablet with a fat finger but a wide screen still gets big targets. The
+         desktop mouse on a wide screen keeps the compact chrome. */
+      @media (max-width: 720px), (pointer: coarse) {
+        #bar button {
+          min-height: 44px;
+          min-width: 44px;
+          padding: 8px 12px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }
+      }
       #debug {
         position: fixed;
         bottom: 8px;
@@ -585,17 +600,40 @@
     </style>
   </head>
   <body>
-    <canvas id="viewer"></canvas>
+    <!-- The forest is a pure-visual canvas render; screen readers get a name
+         here and are pointed at the console (/w/), which is the accessible,
+         list-based view of the same fleet. -->
+    <canvas
+      id="viewer"
+      role="img"
+      aria-label="Agent forest — live map of running agents. Open the console view for a screen-reader-friendly list."
+    ></canvas>
 
     <div id="bar">
       <span class="brand">agent-yes · <b>rgui</b></span>
-      <span id="status"><span class="dot"></span><span class="label">connecting…</span></span>
-      <button id="fit" title="Fit all agents to view">fit</button>
-      <button id="wires" title="Toggle read/tail relationship wires">⇢ wires</button>
-      <button id="console" title="Open the terminal console view (/w/) for this fleet">
+      <span id="status" role="status" aria-live="polite"
+        ><span class="dot"></span><span class="label">connecting…</span></span
+      >
+      <button id="fit" title="Fit all agents to view" aria-label="Fit all agents to view">
+        fit
+      </button>
+      <button
+        id="wires"
+        title="Toggle read/tail relationship wires"
+        aria-label="Toggle read/tail relationship wires"
+      >
+        ⇢ wires
+      </button>
+      <button
+        id="console"
+        title="Open the terminal console view (/w/) for this fleet"
+        aria-label="Open the terminal console view for this fleet"
+      >
         ☰ console
       </button>
-      <button id="theme" title="Toggle light/dark">◐</button>
+      <button id="theme" title="Toggle light/dark" aria-label="Toggle light or dark theme">
+        ◐
+      </button>
     </div>
 
     <div id="debug"></div>
