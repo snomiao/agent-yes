@@ -83,6 +83,9 @@ describe("console DOM behaviour", () => {
       expect(list).not.toMatch(/\bclaude\b/); // the word "claude" never appears
       // repo/wt mnemonic tags are derived from the cwd
       expect(list).toContain("snomiao/agent-yes");
+      expect(await page.locator('.list .row[data-key="local#101"] .statusline').innerText()).toBe(
+        "✶ Verifying calendar meetings with real data… (6m 30s · ↓ 19.5k tokens)",
+      );
     } finally {
       await ctx.close();
     }

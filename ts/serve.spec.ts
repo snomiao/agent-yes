@@ -1,6 +1,18 @@
 import { readFile } from "fs/promises";
 import { describe, expect, it } from "vitest";
-import { installerArgv, isNoNodeExecError, oxmgrVersionHasWindowsFix } from "./serve.ts";
+import {
+  installerArgv,
+  isNoNodeExecError,
+  oxmgrVersionHasWindowsFix,
+  portlessConsoleUrl,
+} from "./serve.ts";
+
+describe("portlessConsoleUrl", () => {
+  it("uses the stable local HTTPS hostname and keeps auth in the fragment", () => {
+    expect(portlessConsoleUrl()).toBe("https://agent-yes.localhost/");
+    expect(portlessConsoleUrl("a b")).toBe("https://agent-yes.localhost/#k=a%20b");
+  });
+});
 
 // Guards the Windows daemon-manager selection: on Windows we only PREFER oxmgr
 // when the installed build carries the daemon-socket-inheritance fix. Stock

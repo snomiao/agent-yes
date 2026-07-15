@@ -1325,6 +1325,14 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      .statusline {
+        color: var(--muted);
+        font-size: 12.5px;
+        margin-top: 4px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
       /* compact view: one line per agent — dot + cli + live title (or prompt), age */
       .row.crow {
         display: flex;
@@ -1682,11 +1690,28 @@
         h1 {
           font-size: 17px;
         }
-        /* roomier tap targets for the header controls */
+        /* roomier tap targets for the header controls — min 44px square so
+           touch users can hit them (WCAG 2.5.5). inline-flex keeps the glyph
+           centered once min-height stretches the box past its text. */
         .newbtn,
         .viewbtn {
           padding: 7px 12px;
           font-size: 12.5px;
+          min-height: 44px;
+          min-width: 44px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+        }
+        /* the filter box is the primary control — give it a full-height touch
+           target too, not the 38px it collapses to from text metrics alone.
+           Stretch the input itself to the box height so a tap anywhere in the
+           box lands on the field, not just its 17px text line. */
+        .ibox {
+          min-height: 44px;
+        }
+        #q {
+          align-self: stretch;
         }
         .meta {
           align-items: center;
@@ -1819,6 +1844,7 @@
             <input
               id="q"
               placeholder="filter…  repo:agent-yes  claude  (space = AND)"
+              aria-label="Filter agents by repo, CLI, or title"
               autocomplete="off"
               autofocus
             />
@@ -1831,7 +1857,14 @@
             <span class="metaright">
               <button id="foldbtn" class="viewbtn" title="fold subagent trees">⊞ subs</button>
               <button id="sortbtn" class="viewbtn" title="cycle sort order">⇅ state</button>
-              <button id="viewbtn" class="viewbtn" title="toggle compact list">☰</button>
+              <button
+                id="viewbtn"
+                class="viewbtn"
+                title="toggle compact list"
+                aria-label="Toggle compact list view"
+              >
+                ☰
+              </button>
               <button id="portsbtn" class="viewbtn" title="manage exposed localhost ports">
                 ⇄ ports
               </button>
@@ -4832,7 +4865,7 @@
               .map((r) => {
                 if (r.kind !== "agent") return headerHtml(r);
                 const e = r.entry;
-                const t = e.title || e.prompt || "";
+                const t = e.title || e.status_text || e.prompt || "";
                 const id = compactIdent(e, ctx, 3, r.parentEntry);
                 const cli = cliLabel(e);
                 return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">
@@ -4875,9 +4908,10 @@
           ${taskChipHtml(e)}
           ${badgeChipsHtml(e)}
           ${gitChipHtml(e)}
-          ${peerChipHtml(e)}
-          <span class="age">${age(e)}</span></div>
+        ${peerChipHtml(e)}
+        <span class="age">${age(e)}</span></div>
         ${e.title ? `<div class="rowtitle" title="${esc(e.title)}">${esc(e.title)}</div>` : ""}
+        ${e.status_text ? `<div class="statusline" title="${esc(e.status_text)}">${esc(e.status_text)}</div>` : ""}
         ${
           e.status === "needs_input" && e.question
             ? `<div class="detail ask" title="${esc(e.question)}">⌨ ${esc(e.question)}</div>`
