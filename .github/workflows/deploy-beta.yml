@@ -1,0 +1,54 @@
+name: Deploy beta.agent-yes.pages.dev
+
+# Every UI-touching push to main goes STRAIGHT to the beta site — static assets
+# on the `agent-yes` Cloudflare Pages project, branch alias `beta` →
+# https://beta.agent-yes.pages.dev. This is the phone-testable preview of the
+# console (/w/) and the rgui forest (/r/): signaling is the origin-independent
+# constant s.agent-yes.com, so the beta UI drives real fleets over WebRTC rooms
+# just like prod. Prod (the agent-yes.com Worker) trails by ≥1 hour via the
+# release branch — see promote-release.yml / deploy-agent-yes.yml.
+#
+# NOTE: Pages hosts assets only. worker.ts / Durable Object changes are NOT
+# exercised by beta — they ship with the prod Worker deploy. If this job fails
+# with "Authentication error [code: 10000]", the CLOUDFLARE_API_TOKEN repo
+# secret needs Cloudflare Pages:Edit added (SNOLAB account).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "lab/ui/**"
+      - "scripts/build-rgui.ts"
+      - ".github/workflows/deploy-beta.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-beta
+  cancel-in-progress: true
+
+jobs:
+  deploy-beta:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # build-rgui bundles from the lib/rgui submodule
+      - uses: oven-sh/setup-bun@v2
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      # Same asset sync the prod worker deploy runs (wrangler build.command) —
+      # one script, two consumers, zero drift.
+      - name: Build site assets
+        working-directory: lab/ui/cf
+        run: sh ./build-assets.sh
+      - name: Deploy to Pages (beta branch alias)
+        working-directory: lab/ui/cf
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          # Pages commands don't read wrangler.jsonc's account_id — pin SNOLAB
+          # explicitly or wrangler may resolve a different membership.
+          CLOUDFLARE_ACCOUNT_ID: 0beef4cd2d2da6befa47d8d149d6e157
+        run: >
+          npx --yes wrangler@4 pages deploy ./public
+          --project-name agent-yes --branch beta --commit-dirty=true

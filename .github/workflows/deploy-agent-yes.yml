@@ -1,17 +1,22 @@
-name: Deploy agent-yes.com
+name: Deploy agent-yes.com (prod)
 
 # agent-yes.com + s.agent-yes.com run on the `agent-yes-signal` Cloudflare Worker
-# (SNOLAB account). Deploying from CI keeps the live console in lockstep with
-# lab/ui/* — wrangler's build step (lab/ui/cf/wrangler.jsonc) re-syncs the UI into
-# ./public on every deploy, so the deployed assets can't drift like they did when
-# deploys were manual (the console went ~1400 lines stale that way).
+# (SNOLAB account). PROD deploys from the `release` branch — a batch pointer that
+# promote-release.yml fast-forwards to main-as-of-1-hour-ago every hour. The
+# 1-hour soak means every change is live on beta.agent-yes.pages.dev (deployed
+# from main by deploy-beta.yml) before it reaches prod, and a bad merge can be
+# stopped by setting the repo variable HOLD_PROD=1 before the train departs.
+#
+# Rollback: workflow_dispatch this workflow from any older release-branch SHA,
+# or push release back to a known-good commit (promote-release.yml only ever
+# fast-forwards, so a manual reset holds until main moves past it again).
 #
 # Requires repo secret CLOUDFLARE_API_TOKEN — a token with Workers Scripts:Edit
 # (+ Workers Routes:Edit for the custom domains) on the SNOLAB account.
 
 on:
   push:
-    branches: [main]
+    branches: [release]
     paths:
       - "lab/ui/**"
       - "scripts/build-rgui.ts"
@@ -34,6 +39,12 @@ jobs:
           submodules: recursive
       # bun runs scripts/build-rgui.ts inside wrangler's build step.
       - uses: oven-sh/setup-bun@v2
+      # worker.ts imports `codehost/tunnel` (a root-package npm dep) — without
+      # this install wrangler's bundler fails with "Could not resolve
+      # 'codehost/tunnel'" (the failure mode that kept this workflow red and
+      # forced manual deploys for weeks).
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
       - name: Deploy worker + synced UI to Cloudflare
         working-directory: lab/ui/cf
         env:

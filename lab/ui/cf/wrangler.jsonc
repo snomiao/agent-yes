@@ -25,7 +25,9 @@
     // The rgui variant of agent-yes (lab/ui/rgui) is bundled from the @snomiao/rgui
     // submodule source (scripts/build-rgui.ts) into ./public/r — served at
     // agent-yes.com/r/ (the rgui counterpart of the console at /w/), mirrored to /rgui.
-    "command": "mkdir -p ./public/w && cp ../index.html ../*.js ../manifest.webmanifest ../icon.svg ./public/w/ && cp ../landing.html ./public/index.html && cp ../architecture.html ./public/architecture.html && rm -rf ./public/blog && cp -R ../blog ./public/blog && cp ../setup.sh ../setup.ps1 ./public/ && cp _headers ./public/_headers && bun ../../../scripts/build-rgui.ts ./public/r && rm -rf ./public/rgui && cp -R ./public/r ./public/rgui",
+    // The command body lives in build-assets.sh so the beta Pages workflow
+    // (deploy-beta.yml) reuses the exact same sync — keep it there, not here.
+    "command": "sh ./build-assets.sh",
   },
   // Static console UI (served for every non-WebSocket request).
   // run_worker_first: the Worker must see the request BEFORE the asset server,
