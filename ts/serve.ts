@@ -48,6 +48,7 @@ import { findSpawnHiddenLauncher } from "./rustBinary.ts";
 import { pgidForWrapper } from "./reaper.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
+import { negotiateSize, sanitizeCap, type SizeCap } from "./sizeNego.ts";
 import { listStrayServeProcesses } from "./strayServe.ts";
 import {
   getProvisionHook,
@@ -1850,9 +1851,86 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // never a security surface — viewers self-report. Pruned by TTL on read.
   const presence = new Map<
     string,
-    { viewer: string; agent: string; cols: number; rows: number; sel: string | null; ts: number }
+    {
+      viewer: string;
+      agent: string;
+      cols: number;
+      rows: number;
+      sel: string | null;
+      cap: SizeCap | null;
+      ts: number;
+    }
   >();
   const PRESENCE_TTL_MS = 12_000;
+
+  // ── PTY size negotiation — tmux's "smallest client wins" ──────────────────
+  // Writable viewers report their readable capacity (`cap`) alongside their
+  // presence; we resize the agent's PTY to the elementwise min across live caps
+  // (see sizeNego.ts), so a phone gets a grid it can read while wider viewers
+  // letterbox the shared canvas. Uses the same winsize-file + SIGWINCH path as
+  // POST /api/resize. When the last cap leaves (viewer switched agent, tab
+  // died → TTL), the size is withdrawn: the file is deleted ONLY if its content
+  // is still our own last write (so `ay attach`'s pushed size is never
+  // clobbered) and the wrapper falls back to the real tty size.
+  const negoApplied = new Map<number, { cols: number; rows: number; content: string }>();
+  const negoTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  const NEGO_DEBOUNCE_MS = 350;
+  const winsizePathFor = (pid: number) =>
+    path.join(process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes"), "winsize", String(pid));
+  const liveCapsFor = (pid: number): SizeCap[] => {
+    const now = Date.now();
+    const caps: SizeCap[] = [];
+    for (const v of presence.values())
+      if (now - v.ts <= PRESENCE_TTL_MS && String(v.agent) === String(pid) && v.cap)
+        caps.push(v.cap);
+    return caps;
+  };
+  const applyNego = async (pid: number) => {
+    negoTimers.delete(pid);
+    const eff = negotiateSize(liveCapsFor(pid));
+    const file = winsizePathFor(pid);
+    const prev = negoApplied.get(pid);
+    try {
+      if (eff) {
+        if (prev && prev.cols === eff.cols && prev.rows === eff.rows) return;
+        const content = `${eff.cols} ${eff.rows} ${Date.now()}\n`;
+        await mkdir(path.dirname(file), { recursive: true });
+        await writeFile(file, content);
+        negoApplied.set(pid, { ...eff, content });
+      } else {
+        if (!prev) return;
+        negoApplied.delete(pid);
+        try {
+          // withdraw only what we wrote — a different content means ay attach
+          // (or a direct /api/resize) owns the size now; leave it alone.
+          if ((await readFile(file, "utf-8")) !== prev.content) return;
+          await unlink(file);
+        } catch {
+          return; // already gone — nothing to signal
+        }
+      }
+      try {
+        process.kill(pid, "SIGWINCH");
+      } catch {
+        /* agent gone */
+      }
+    } catch {
+      /* best-effort: a failed write just leaves the previous size in place */
+    }
+  };
+  const scheduleNego = (pid: number) => {
+    if (!Number.isFinite(pid) || pid <= 0 || negoTimers.has(pid)) return;
+    negoTimers.set(
+      pid,
+      setTimeout(() => void applyNego(pid), NEGO_DEBOUNCE_MS),
+    );
+  };
+  // TTL grow-back sweep: a viewer that vanished without clearing its presence
+  // (tab killed, phone locked) stops refreshing; once its entry expires the
+  // negotiated size must be recomputed even though no presence POST arrives.
+  setInterval(() => {
+    for (const pid of negoApplied.keys()) scheduleNego(pid);
+  }, 5_000);
 
   // The whole API as a plain handler: served over HTTP by Bun.serve (--http)
   // and called in-process by the WebRTC bridge (--webrtc) — the latter needs
@@ -2330,6 +2408,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
           pid: record.pid,
           cols: size?.cols ?? null,
           rows: size?.rows ?? null,
+          // This host negotiates the PTY size from viewer capacities (presence
+          // `cap`) — a capable console should report its cap instead of pushing
+          // /api/resize directly, so viewers stop fighting last-writer-wins.
+          nego: true,
         });
       } catch (e) {
         return new Response((e as Error).message, { status: 404 });
@@ -2735,6 +2817,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         cols?: number;
         rows?: number;
         sel?: string;
+        cap?: { cols?: number; rows?: number };
       };
       try {
         b = (await req.json()) as typeof b;
@@ -2743,6 +2826,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
       }
       const viewer = String(b.viewer ?? "").slice(0, 64);
       if (!viewer) return new Response("missing viewer", { status: 400 });
+      // The agent this viewer WAS on — if the entry moves (agent switch) or
+      // clears, that agent's negotiated size must be recomputed (grow-back).
+      const prevAgent = presence.get(viewer)?.agent;
       if (b.agent == null) presence.delete(viewer);
       else
         presence.set(viewer, {
@@ -2751,8 +2837,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
           cols: Math.max(0, Math.floor(Number(b.cols) || 0)),
           rows: Math.max(0, Math.floor(Number(b.rows) || 0)),
           sel: typeof b.sel === "string" ? b.sel.slice(0, 200) : null,
+          cap: sanitizeCap(b.cap),
           ts: Date.now(),
         });
+      if (b.agent != null) scheduleNego(Number(b.agent));
+      if (prevAgent != null && String(prevAgent) !== String(b.agent ?? ""))
+        scheduleNego(Number(prevAgent));
       return new Response(null, { status: 204 });
     }
     // GET /api/presence — all live viewers (TTL-pruned), for "who's watching".

@@ -2148,7 +2148,7 @@
         selFromBottom,
         parseSel,
         selSegments,
-        fitTransform,
+        fitTransformCentered,
         docTitle,
         omniScore,
       } from "./console-logic.js";
@@ -2205,7 +2205,15 @@
         } catch {}
         if (term) {
           term.options.fontSize = termFontSize;
-          if (fit)
+          // Negotiating host: the grid is canonical (host-owned) — a font change
+          // here only alters our glyph px, so re-letterbox and report the new
+          // capacity; the host reflows the PTY if our readable cols/rows moved.
+          // This is what makes font size a ZOOM control on mobile: bigger font →
+          // fewer readable cells → the PTY itself shrinks → bigger crisp text.
+          if (negoActive) {
+            applyCanvasScale();
+            sendPresence();
+          } else if (fit)
             try {
               fit.fit();
             } catch {}
@@ -3107,6 +3115,13 @@
       // short lease after that, the heartbeat won't follow/override — so our own
       // push isn't fought while the agent's /api/size is still catching up.
       let lastDroveAt = 0;
+      // The selected agent's host negotiates the PTY size from viewer
+      // capacities (its /api/size responses carry nego:true). On such hosts we
+      // never push /api/resize — we report our readable capacity in presence
+      // (sendPresence cap) and follow the negotiated canonical grid, so a phone
+      // and a desktop watching the same agent converge on the smallest
+      // viewer's readable size instead of fighting last-writer-wins.
+      let negoActive = false;
 
       function isDarkColor(c) {
         try {
@@ -3252,6 +3267,18 @@
           const s = term.getSelectionPosition && term.getSelectionPosition();
           selR = selFromBottom(s, term.buffer.active.length);
         } catch {}
+        // Our readable capacity: the grid our pane fits at the current font —
+        // measured from the container (transform-independent), NOT term.cols
+        // (which may be a foreign canonical grid we're letterboxing). The host
+        // negotiates the PTY to the min cap across viewers; read-only viewers
+        // report none (they can't influence the PTY). Older hosts ignore it.
+        let cap = null;
+        try {
+          if (!isReadonlyEnt(cur.e) && fit) {
+            const d = fit.proposeDimensions();
+            if (d && d.cols > 0 && d.rows > 0) cap = { cols: d.cols, rows: d.rows };
+          }
+        } catch {}
         cur.tx
           .post("/api/presence", {
             viewer: myViewerId,
@@ -3259,6 +3286,7 @@
             cols: term.cols,
             rows: term.rows,
             sel: selR,
+            cap,
           })
           .catch(() => {});
       }
@@ -3575,14 +3603,36 @@
           const cs = getComputedStyle(logEl);
           const pw = logEl.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
           const ph = logEl.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
-          // fitTransform (console-logic.js) decides none-vs-scale (unit-tested).
-          xt.style.transform = fitTransform(gw, gh, pw, ph);
+          // fitTransformCentered (console-logic.js, unit-tested) decides
+          // none-vs-scale and centers the letterboxed grid in the pane (fit
+          // width → vertically centered, fit height → horizontally). The peer
+          // overlay reads the transformed screen rect back via
+          // getBoundingClientRect, so the translate needs no extra bookkeeping.
+          xt.style.transform = fitTransformCentered(gw, gh, pw, ph).transform;
         } catch {}
+      }
+      // Pane geometry changed (window resize, splitter drag, soft keyboard, tab
+      // refocus): on legacy hosts re-fit the grid to the pane (the size push
+      // rides term.onResize → pushSize); on negotiating hosts the grid is
+      // canonical — never reflow it locally, just re-letterbox and report the
+      // new capacity so the host can move the min if needed.
+      function refitPane() {
+        if (!term) return;
+        if (negoActive) {
+          applyCanvasScale();
+          sendPresence();
+          return;
+        }
+        if (fit)
+          try {
+            fit.fit();
+          } catch {}
       }
       // Follow the canonical grid: resize our xterm to the agent's size (set by the
       // active driver / local owner) WITHOUT reflowing to our pane, then scale to
       // fit. No-op when we already match (we're the driver, or sizes agree).
       function followAgentSize(sz) {
+        if (sz && sz.nego != null) negoActive = !!sz.nego;
         if (!term || !sz || !sz.cols || !sz.rows) return;
         // While our own recent push is still settling, don't fight it.
         if (Date.now() - lastDroveAt < 6000) {
@@ -5162,6 +5212,14 @@
               applyCanvasScale();
               return;
             }
+            // Negotiating host: the PTY size is the host's min over viewer
+            // capacities, not ours to push. Re-letterbox and refresh our cap
+            // (the pane may have changed) — the host resizes if the min moved.
+            if (negoActive) {
+              applyCanvasScale();
+              sendPresence();
+              return;
+            }
             lastDroveAt = Date.now(); // we're driving the size now (lease the grid)
             tx.post("/api/resize/" + encodeURIComponent(pid), {
               cols: term.cols,
@@ -5202,6 +5260,7 @@
         const selKey = e._key;
         const fitAndSync = (sz) => {
           if (sel !== selKey || !term) return;
+          negoActive = !!(sz && sz.nego);
           if (sz && sz.cols && sz.rows) agentSize = sz; // remember for the badge tooltip
           // Read-only viewer: don't reflow the agent to our pane (we can't resize
           // it, and shouldn't). Adopt the AGENT's own grid and CSS-scale it to fit,
@@ -5211,6 +5270,22 @@
             if (sz && sz.cols && sz.rows) followAgentSize(sz);
             else applyCanvasScale();
             suppressPush = false;
+            return;
+          }
+          // Negotiating host: adopt the canonical (negotiated) grid like a
+          // watcher and report our capacity via presence — the host takes the
+          // min over all viewers and resizes the PTY itself. No direct push, so
+          // two viewers can't fight over the size.
+          if (negoActive) {
+            if (sz.cols && sz.rows) followAgentSize(sz);
+            else {
+              // agent has no size on record yet — seed from our own fit
+              try {
+                fit.fit();
+              } catch {}
+            }
+            suppressPush = false;
+            sendPresence(); // cap → host negotiates → size event brings the grid
             return;
           }
           try {
@@ -5388,13 +5463,9 @@
         renderList();
       });
       window.addEventListener("resize", () => {
-        // Resizing our window is strong intent → re-fit to our pane (we become the
-        // size driver; the push rides term.onResize). applyCanvasScale then clears
-        // the transform since our grid now matches our pane.
-        if (fit)
-          try {
-            fit.fit();
-          } catch {}
+        // Resizing our window is strong intent → re-fit / re-report capacity
+        // (refitPane picks the legacy-push vs negotiate path).
+        refitPane();
         applyCanvasScale();
         renderPeerSelections(); // cell size changed → reposition peer-selection overlays
       });
@@ -5409,15 +5480,76 @@
         const onVV = () => {
           const kb = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
           document.documentElement.style.setProperty("--kb", kb + "px");
-          if (fit)
-            try {
-              fit.fit();
-            } catch {}
+          refitPane();
         };
         vv.addEventListener("resize", onVV);
         vv.addEventListener("scroll", onVV);
         onVV();
       }
+      // ── mobile pinch on the terminal = terminal zoom, not page zoom ─────────
+      // Two fingers over the log pane adjust the terminal FONT SIZE. On a
+      // negotiating host that reflows the PTY itself (bigger font → fewer
+      // readable cells → the host shrinks the grid → bigger crisp text; smaller
+      // font → more rows/cols), which is what a phone user actually means by
+      // pinch: "show me more / make it readable", with the surrounding UI
+      // staying put. Only 2-touch gestures over .log are intercepted — 1-finger
+      // scroll/selection passes to xterm, and the page keeps its native
+      // pinch-zoom everywhere else (an a11y requirement, WCAG 1.4.4).
+      (function () {
+        const logEl = $("log");
+        if (!logEl) return;
+        let startDist = 0; // 0 = no pinch in flight
+        let startFont = 0;
+        let lastRatio = 1;
+        let baseTransform = "";
+        const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+        logEl.addEventListener(
+          "touchstart",
+          (ev) => {
+            if (ev.touches.length !== 2) return;
+            ev.preventDefault(); // this gesture is ours — no page zoom
+            startDist = dist(ev.touches);
+            startFont = termFontSize;
+            lastRatio = 1;
+            const xt = logEl.querySelector(".xterm");
+            baseTransform = xt ? xt.style.transform || "none" : "none";
+          },
+          { passive: false },
+        );
+        logEl.addEventListener(
+          "touchmove",
+          (ev) => {
+            if (ev.touches.length !== 2 || !startDist) return;
+            ev.preventDefault();
+            lastRatio = dist(ev.touches) / startDist;
+            // Live preview: compose the pinch onto the fitted transform. The
+            // grid truly reflows only when the negotiated size lands after the
+            // gesture commits — a brief settle, traded for zero SIGWINCH storm
+            // while the fingers are still moving.
+            const xt = logEl.querySelector(".xterm");
+            if (xt)
+              xt.style.transform =
+                `scale(${lastRatio.toFixed(3)})` +
+                (baseTransform === "none" ? "" : " " + baseTransform);
+          },
+          { passive: false },
+        );
+        const endPinch = () => {
+          if (!startDist) return;
+          const target = Math.round(startFont * lastRatio);
+          startDist = 0;
+          if (target !== termFontSize) setTermFontSize(target); // nego: cap → host reflows
+          applyCanvasScale(); // clear the preview; re-letterbox at the real grid
+        };
+        logEl.addEventListener("touchend", (ev) => {
+          if (ev.touches.length < 2) endPinch();
+        });
+        logEl.addEventListener("touchcancel", () => endPinch());
+        // Safari's proprietary gesture events fire for pinch regardless of
+        // touch-action; swallow them over the terminal so the page never zooms.
+        for (const t of ["gesturestart", "gesturechange", "gestureend"])
+          logEl.addEventListener(t, (ev) => ev.preventDefault());
+      })();
 
       // Step the selection up/down the (filtered) list — same order the left panel
       // renders. Clamps at the ends, scrolls the row into view.
@@ -6958,11 +7090,7 @@
             // terminal of a different size) that re-push fights the local terminal
             // and reflows the stream on every tab switch — the glitch the eager
             // per-focus resync introduced. The one-shot adopt still runs on select.
-            if (term && fit) {
-              try {
-                fit.fit();
-              } catch {}
-            }
+            refitPane();
           }
         });
         watchVersion();
@@ -7014,10 +7142,7 @@
           if (!dragging) return;
           const w = Math.min(Math.max(e.clientX, 280), window.innerWidth - 360);
           app.style.setProperty("--leftw", w + "px");
-          if (fit)
-            try {
-              fit.fit();
-            } catch {}
+          refitPane();
         });
         const end = (e) => {
           if (!dragging) return;
