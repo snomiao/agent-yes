@@ -98,6 +98,14 @@ clis:
       # `\s+`/`\s*` tolerate wraps inside the phrase.
       - pattern: 'API Error:[\s\S]{0,40}Connection\s+closed\s+mid-\s*response'
         flags: i
+      # "API Error: Stream idle timeout - no chunks received." — the streamed
+      # response went idle (no chunks arrived within the client's window) and the
+      # client gave up. Same transient/server-side class as the stalled/closed
+      # cases above, so retry with backoff. Same "API Error:" chrome anchor keeps
+      # an agent merely *discussing* it from self-triggering; `[\s\S]{0,40}` spans
+      # the prefix→phrase gap across a line-wrap and `\s+` tolerates wraps.
+      - pattern: 'API Error:[\s\S]{0,40}Stream\s+idle\s+timeout'
+        flags: i
       # Any 5xx API error (e.g. "API Error: 529 Overloaded", "API Error: 503 …",
       # or a 529 rendered as a raw JSON error blob) is server-side + transient —
       # retry with backoff regardless of the wording. Anchored to "API Error" so
