@@ -701,23 +701,30 @@ export function fitTransform(gridW, gridH, paneW, paneH) {
   return s > 0.985 && s < 1.04 ? "none" : "scale(" + s.toFixed(4) + ")";
 }
 
-// Centered variant: same scale selection as fitTransform, plus a translate that
-// centers the scaled grid in the pane (fit-width → vertically centered,
-// fit-height → horizontally centered). transform-origin stays top-left, so the
-// translate is in pane px and consumers mapping grid→screen coords (peer
-// overlays) can read the offset back off this same object. "none" (the crisp
-// driver path) never gets a translate — grid ≈ pane, nothing to center.
-export function fitTransformCentered(gridW, gridH, paneW, paneH) {
-  const t = fitTransform(gridW, gridH, paneW, paneH);
-  if (t === "none") return { transform: "none", scale: 1, dx: 0, dy: 0 };
+// Fit-by-FONT: the render font size that makes a gridW×gridH-px grid fill the
+// pane. CSS transform:scale() breaks xterm's mouse→cell mapping (events arrive
+// in visual px but xterm divides by the UNSCALED cell metrics, so drag
+// selection lands 1/s off) — so the shared-canvas letterbox scales the font
+// instead: layout, hit-testing, selection, and peer-overlay math all stay
+// native, and glyphs render crisp at their real size rather than as shrunken
+// canvas bitmaps. Returns the new font (fractional px is fine for xterm) or
+// null when the current font already fits snugly — same 0.985–1.04 dead band
+// as fitTransform, so the crisp driver path never churns. Callers re-measure
+// after applying (cell metrics round per-font) and iterate to convergence.
+export function fitFontSize(gridW, gridH, paneW, paneH, currentFont, min = 6, max = 64) {
+  if (!gridW || !gridH || paneW <= 0 || paneH <= 0 || !(currentFont > 0)) return null;
   const s = Math.min(paneW / gridW, paneH / gridH);
-  const dx = Math.max(0, (paneW - gridW * s) / 2);
-  const dy = Math.max(0, (paneH - gridH * s) / 2);
+  if (s > 0.985 && s < 1.04) return null;
+  return Math.min(max, Math.max(min, currentFont * s));
+}
+
+// Residual centering after a font fit: translate-only, in whole px. Unlike a
+// scale, a translate moves the element's rect with it, so xterm's
+// event-coordinate math is unaffected (coords are taken relative to the rect).
+export function centerOffset(gridW, gridH, paneW, paneH) {
   return {
-    transform: `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px) ` + t,
-    scale: s,
-    dx,
-    dy,
+    dx: Math.max(0, Math.round((paneW - gridW) / 2)),
+    dy: Math.max(0, Math.round((paneH - gridH) / 2)),
   };
 }
 
