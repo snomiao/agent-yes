@@ -1,4 +1,5 @@
 name: Build Rust Binaries
+run-name: Build Rust Binaries ${{ inputs.tag || github.ref_name }}
 
 on:
   # PR builds for testing (no release upload)
@@ -93,6 +94,19 @@ jobs:
         run: |
           echo "Building from tag: ${{ inputs.tag }}"
           echo "RELEASE_TAG=${{ inputs.tag }}" >> $GITHUB_ENV
+
+      # Automated npm beta tags point at the tested main commit instead of a
+      # version-bump commit. Stamp Cargo.toml in the ephemeral runner so the
+      # binary reports the exact prerelease version used by agent-yes@beta.
+      - name: Stamp prerelease version
+        if: github.event_name == 'workflow_dispatch' && contains(inputs.tag, '-beta.')
+        shell: bash
+        run: |
+          VERSION="${{ inputs.tag }}"
+          VERSION="${VERSION#v}"
+          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" rs/Cargo.toml
+          rm -f rs/Cargo.toml.bak
+          grep -m1 '^version = ' rs/Cargo.toml
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

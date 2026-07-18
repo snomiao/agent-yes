@@ -1837,10 +1837,10 @@
           </div>
           <div class="install" title="click to copy">
             install:
-            <code class="copy">curl -fsSL https://agent-yes.com/setup.sh | sh</code>
+            <code class="copy" id="setup-sh">curl -fsSL https://agent-yes.com/setup.sh | sh</code>
             <span class="winhint"
               >·&nbsp;Windows:
-              <code class="copy"
+              <code class="copy" id="setup-ps"
                 >powershell -c "irm https://agent-yes.com/setup.ps1 | iex"</code
               ></span
             >
@@ -2291,6 +2291,13 @@
       });
 
       const $ = (id) => document.getElementById(id);
+      const BETA_ORIGINS = new Set(["beta.agent-yes.pages.dev", "beta.agent-yes.com"]);
+      const installOrigin = location.origin;
+      const installPackage = BETA_ORIGINS.has(location.hostname) ? "agent-yes@beta" : "agent-yes";
+      $("setup-sh").textContent = `curl -fsSL ${installOrigin}/setup.sh | sh`;
+      $("setup-sh").title = `installs ${installPackage}`;
+      $("setup-ps").textContent = `powershell -c "irm ${installOrigin}/setup.ps1 | iex"`;
+      $("setup-ps").title = `installs ${installPackage}`;
       // Escape for HTML — including BOTH quote styles, because esc() is
       // interpolated into double-quoted attribute values (title="${esc(...)}",
       // data-key="${esc(...)}", …), not just element text. A remote host controls

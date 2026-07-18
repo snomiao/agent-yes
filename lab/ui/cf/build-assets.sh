@@ -19,6 +19,19 @@ cp ../architecture.html ./public/architecture.html
 rm -rf ./public/blog
 cp -R ../blog ./public/blog
 cp ../setup.sh ../setup.ps1 ./public/
+
+# Build a channel-specific installer without forking the canonical scripts.
+# Production leaves the defaults untouched. Beta Pages passes both variables,
+# so curl/PowerShell installs agent-yes@beta and prints the actual beta origin.
+if [ "${AGENT_YES_CHANNEL:-stable}" = "beta" ]; then
+  origin=${AGENT_YES_ORIGIN:-https://beta.agent-yes.pages.dev}
+  sed 's|AY_PACKAGE="agent-yes"|AY_PACKAGE="agent-yes@beta"|; s|AY_CONSOLE_ORIGIN="https://agent-yes.com"|AY_CONSOLE_ORIGIN="'"$origin"'"|' \
+    ./public/setup.sh > ./public/setup.sh.tmp
+  mv ./public/setup.sh.tmp ./public/setup.sh
+  sed "s|\$Package = 'agent-yes'|\$Package = 'agent-yes@beta'|; s|\$ConsoleOrigin = 'https://agent-yes.com'|\$ConsoleOrigin = '$origin'|" \
+    ./public/setup.ps1 > ./public/setup.ps1.tmp
+  mv ./public/setup.ps1.tmp ./public/setup.ps1
+fi
 cp _headers ./public/_headers
 bun ../../../scripts/build-rgui.ts ./public/r
 rm -rf ./public/rgui
