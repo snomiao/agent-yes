@@ -701,6 +701,26 @@ export function fitTransform(gridW, gridH, paneW, paneH) {
   return s > 0.985 && s < 1.04 ? "none" : "scale(" + s.toFixed(4) + ")";
 }
 
+// Centered variant: same scale selection as fitTransform, plus a translate that
+// centers the scaled grid in the pane (fit-width → vertically centered,
+// fit-height → horizontally centered). transform-origin stays top-left, so the
+// translate is in pane px and consumers mapping grid→screen coords (peer
+// overlays) can read the offset back off this same object. "none" (the crisp
+// driver path) never gets a translate — grid ≈ pane, nothing to center.
+export function fitTransformCentered(gridW, gridH, paneW, paneH) {
+  const t = fitTransform(gridW, gridH, paneW, paneH);
+  if (t === "none") return { transform: "none", scale: 1, dx: 0, dy: 0 };
+  const s = Math.min(paneW / gridW, paneH / gridH);
+  const dx = Math.max(0, (paneW - gridW * s) / 2);
+  const dy = Math.max(0, (paneH - gridH * s) / 2);
+  return {
+    transform: `translate(${dx.toFixed(1)}px, ${dy.toFixed(1)}px) ` + t,
+    scale: s,
+    dx,
+    dy,
+  };
+}
+
 // Browser-tab title: "<glyph> <selected agent title> - agent-yes", or the bare
 // console title when nothing is selected (blank/whitespace name). The leading
 // glyph mirrors the agent's status dot — ⌨ needs_input ("your turn"), ⚠ stuck,

@@ -33,6 +33,7 @@ import {
   parseSel,
   selSegments,
   fitTransform,
+  fitTransformCentered,
   docTitle,
   statusGlyph,
   omniScore,
@@ -834,6 +835,35 @@ describe("fitTransform", () => {
   it("guards bad dimensions", () => {
     expect(fitTransform(0, 480, 800, 480)).toBe("none");
     expect(fitTransform(800, 480, 0, 480)).toBe("none");
+  });
+});
+
+describe("fitTransformCentered", () => {
+  it("driver path stays crisp: none, no offset", () => {
+    expect(fitTransformCentered(800, 480, 800, 480)).toEqual({
+      transform: "none",
+      scale: 1,
+      dx: 0,
+      dy: 0,
+    });
+  });
+  it("fit-width (phone letterboxing a wide grid) centers vertically", () => {
+    // grid 2x wider than pane, same aspect pane taller → s=0.5, dy centers
+    const r = fitTransformCentered(1600, 480, 800, 480);
+    expect(r.transform).toBe("translate(0.0px, 120.0px) scale(0.5000)");
+    expect(r.scale).toBe(0.5);
+    expect(r.dx).toBe(0);
+    expect(r.dy).toBe(120);
+  });
+  it("fit-height (tall grid in a wide pane) centers horizontally", () => {
+    // s = min(800/400, 480/960) = 0.5 → scaled 200×480 → dx = (800-200)/2
+    const r = fitTransformCentered(400, 960, 800, 480);
+    expect(r.transform).toBe("translate(300.0px, 0.0px) scale(0.5000)");
+    expect(r.dx).toBe(300);
+    expect(r.dy).toBe(0);
+  });
+  it("guards bad dimensions like fitTransform", () => {
+    expect(fitTransformCentered(0, 480, 800, 480).transform).toBe("none");
   });
 });
 
