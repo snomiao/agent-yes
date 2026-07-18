@@ -32,6 +32,10 @@ jobs:
           registry-url: https://registry.npmjs.org
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
+      # Validate the checked-in stable version first. Several version-contract
+      # tests intentionally reject prerelease semver; the stamp below exists
+      # only for the publish artifact and its matching native binaries.
+      - run: bun run test
 
       - name: Set unique beta version
         id: version
@@ -48,7 +52,6 @@ jobs:
           echo "Publishing ${TAG} from ${GITHUB_SHA}"
 
       - run: bun run build
-      - run: bun run test
 
       - name: Create GitHub prerelease
         env:
