@@ -1,0 +1,63 @@
+name: Promote main → release (1h soak)
+
+# The release train: every hour, fast-forward the `release` branch to where
+# main stood ONE HOUR AGO. Everything on main is already CI-gated pre-merge and
+# live on beta.agent-yes.pages.dev (deploy-beta.yml) the moment it lands, so the
+# hour is a soak window — time for a human or an agent to notice a bad change on
+# beta and stop the train before prod. The push to `release` then triggers
+# deploy-agent-yes.yml (prod Worker deploy), path-filtered so ts/-only batches
+# move the branch without redeploying the site.
+#
+# Stop the train:  gh variable set HOLD_PROD --body 1     (resume: --body 0)
+# Roll prod back:  git push origin <good-sha>:release --force
+#                  (this workflow only fast-forwards, so the reset holds until
+#                  main history moves past it and HOLD_PROD is clear)
+#
+# The push uses RELEASE_TOKEN (admin PAT, same as release.yml) — pushes made
+# with the default GITHUB_TOKEN would NOT trigger the deploy workflow.
+
+on:
+  schedule:
+    - cron: "7 * * * *" # hourly; :07 avoids the top-of-hour Actions rush
+  workflow_dispatch:
+
+concurrency:
+  group: promote-release
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need history to resolve "main as of 1 hour ago"
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+      - name: Fast-forward release to main@{1 hour ago}
+        env:
+          HOLD_PROD: ${{ vars.HOLD_PROD }}
+        run: |
+          set -euo pipefail
+          if [ "${HOLD_PROD:-0}" = "1" ]; then
+            echo "HOLD_PROD=1 — train held, not promoting."
+            exit 0
+          fi
+          TARGET=$(git rev-list -1 --before="1 hour ago" origin/main)
+          if [ -z "$TARGET" ]; then
+            echo "No main commit older than 1h — nothing to promote."
+            exit 0
+          fi
+          CURRENT=$(git rev-parse -q --verify origin/release || true)
+          if [ "$TARGET" = "$CURRENT" ]; then
+            echo "release already at $TARGET — up to date."
+            exit 0
+          fi
+          # Fast-forward only: if release isn't an ancestor of the target (a
+          # manual rollback reset), leave it alone until main moves past it.
+          if [ -n "$CURRENT" ] && ! git merge-base --is-ancestor "$CURRENT" "$TARGET"; then
+            echo "release ($CURRENT) is not behind target ($TARGET) — manual state, skipping."
+            exit 0
+          fi
+          echo "Promoting release: ${CURRENT:-<new>} → $TARGET"
+          git push origin "$TARGET:refs/heads/release"
