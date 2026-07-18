@@ -370,6 +370,7 @@ const SUBCOMMANDS = new Set([
   "widget",
   "mint",
   "serve",
+  "tray",
   "schedule",
   "remote",
   "expose",
@@ -524,6 +525,10 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
       case "serve": {
         const { cmdServe } = await import("./serve.ts");
         return cmdServe(rest);
+      }
+      case "tray": {
+        const { cmdTray } = await import("./trayApp.ts");
+        return cmdTray(rest);
       }
       case "setup": {
         const { cmdSetup } = await import("./setup.ts");

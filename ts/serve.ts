@@ -53,6 +53,7 @@ import { type MailParty, recordInbox } from "./messageLog.ts";
 import { updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { spawnRejectionReason } from "./spawnGate.ts";
 import { findSpawnHiddenLauncher } from "./rustBinary.ts";
+import { launchTray } from "./trayApp.ts";
 import { pgidForWrapper } from "./reaper.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
@@ -959,6 +960,32 @@ async function readDaemonServeArgs(mgr: DaemonManager): Promise<string[] | null>
   }
 }
 
+// Whether the daemon PROCESS is currently online per the manager. Distinct from
+// `readDaemonServeArgs` (registered?) and from the HTTP probe (reachable?) — a
+// webrtc-only daemon opens no port, so the manager's own view is the only way to
+// know it's up. oxmgr: `status <name>` → "Status: running"; pm2: jlist status.
+async function readDaemonRunning(mgr: DaemonManager): Promise<boolean> {
+  try {
+    if (mgr.id === "oxmgr") {
+      const p = Bun.spawn([mgr.bin, "status", DAEMON_NAME], {
+        stdout: "pipe",
+        stderr: "ignore",
+        env: liveEnv(),
+      });
+      const out = await new Response(p.stdout).text();
+      if ((await p.exited) !== 0) return false;
+      return /^\s*Status:\s*running\b/im.test(out);
+    }
+    const p = Bun.spawn([mgr.bin, "jlist"], { stdout: "pipe", stderr: "ignore", env: liveEnv() });
+    const out = await new Response(p.stdout).text();
+    if ((await p.exited) !== 0) return false;
+    const list = JSON.parse(out) as Array<{ name?: string; pm2_env?: { status?: string } }>;
+    return list.find((x) => x.name === DAEMON_NAME)?.pm2_env?.status === "online";
+  } catch {
+    return false;
+  }
+}
+
 function portFromArgs(args: string[]): number | null {
   const m = /--port[=\s](\d+)/.exec(args.join(" "));
   return m ? Number(m[1]) : null;
@@ -1062,6 +1089,38 @@ async function fetchDaemonVersion(port: number | null, token: string): Promise<s
   } catch {
     return null;
   }
+}
+
+// ay serve start | stop — control the ALREADY-INSTALLED daemon's run state via
+// the manager. Used by the tray's toggle and available on the CLI. Starting an
+// unregistered daemon is a no-op with a hint to `install`.
+async function cmdServeStartStop(sub: "start" | "stop"): Promise<number> {
+  const mgr = resolveDaemonManager();
+  if (!mgr) {
+    process.stderr.write("ay serve " + sub + ": no process manager found (need pm2 or oxmgr)\n");
+    return 1;
+  }
+  if ((await readDaemonServeArgs(mgr)) === null) {
+    process.stderr.write(
+      `ay serve ${sub}: '${DAEMON_NAME}' is not installed — run 'ay serve install' first\n`,
+    );
+    return 1;
+  }
+  // pm2 restarts a stopped named proc with `start <name>`; oxmgr's `start` takes a
+  // command, so an existing app is (re)started via `restart <name>`.
+  const argv =
+    sub === "stop"
+      ? [mgr.bin, "stop", DAEMON_NAME]
+      : mgr.id === "oxmgr"
+        ? [mgr.bin, "restart", DAEMON_NAME]
+        : [mgr.bin, "start", DAEMON_NAME];
+  const code = await spawnExit(argv);
+  process.stdout.write(
+    code === 0
+      ? `${sub === "stop" ? "stopped" : "started"} '${DAEMON_NAME}' (via ${mgr.id})\n`
+      : `ay serve ${sub}: manager command failed (exit ${code})\n`,
+  );
+  return code;
 }
 
 async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
@@ -1293,6 +1352,10 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     const code = await proc.exited;
     if (code === 0) {
       const onBoot = await ensureBootAutostart(mgr);
+      // Desktop companion: bring up the tray icon (best-effort; no-op on headless
+      // sessions, when the tray binary is absent, or when the user ran `ay tray
+      // hide`). The tray self-gates on serve being installed.
+      const trayShown = launchTray();
       const port = argsUsePortless(effArgs) ? await portlessAppPort() : portFromArgs(effArgs);
       const localUrl = argsUsePortless(effArgs) ? await resolvedPortlessConsoleUrl(token) : null;
       // Mirror cmdServe's mode resolution: webrtc-only daemons open no HTTP port.
@@ -1302,6 +1365,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       process.stdout.write(
         `\n${priorArgs !== null ? `rolled '${DAEMON_NAME}' forward to` : `installed '${DAEMON_NAME}' as a daemon via ${mgr.id} —`} v${current}\n`,
       );
+      if (trayShown) process.stdout.write(`tray:         shown (hide it with \`ay tray hide\`)\n`);
       if (mgr.id === "oxmgr" && process.platform === "win32")
         process.stdout.write(
           onBoot
@@ -1369,6 +1433,8 @@ async function cmdServeStatus(args: string[]): Promise<number> {
   // A non-null arg list means the daemon is registered with the manager.
   const daemonArgs = mgr ? await readDaemonServeArgs(mgr) : null;
   const installed = daemonArgs !== null;
+  // Manager-reported process state — the only up/down signal for webrtc daemons.
+  const running = installed ? await readDaemonRunning(mgr!) : false;
   const a = daemonArgs ?? [];
   const local = argsUsePortless(a);
   const port = local ? await portlessAppPort() : portFromArgs(a);
@@ -1392,6 +1458,7 @@ async function cmdServeStatus(args: string[]): Promise<number> {
         {
           manager: mgr?.id ?? null,
           installed,
+          running,
           mode,
           port: httpish ? port : null,
           localUrl: httpish ? localUrl : null,
@@ -1415,6 +1482,7 @@ async function cmdServeStatus(args: string[]): Promise<number> {
   w(`manager:      ${mgr ? mgr.id : "none — install pm2 or oxmgr to daemonize"}`);
   if (installed) {
     w(`installed:    yes (via ${mgr!.id})`);
+    w(`running:      ${running ? "yes" : "no (stopped)"}`);
     w(`mode:         ${mode}${httpish ? (local ? `  (${localUrl})` : `  (port ${port})`) : ""}`);
     if (a.length) w(`args:         ${a.join(" ")}`);
   } else {
@@ -1489,6 +1557,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // Daemon subcommands
   const sub = rest[0];
   if (sub === "status") return cmdServeStatus(rest.slice(1));
+  if (sub === "start" || sub === "stop") return cmdServeStartStop(sub);
   if (sub === "healthcheck") {
     // oxmgr --health-cmd liveness probe. Exit non-zero only when the heartbeat is
     // demonstrably stale (event loop wedged), so the manager restarts us. A
@@ -3562,7 +3631,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
           process.platform === "win32" && ayBin.toLowerCase().endsWith(".exe")
             ? [ayBin]
             : [process.execPath, ayBin];
-        const child = Bun.spawn([...ayCmd, ...args], {
+        // On Windows, interpose the window-less launcher so this detached spawn
+        // doesn't flash a console window that steals focus. Same shim the daemon
+        // install uses; undefined off Windows / when not installed → raw command.
+        const spawnHidden = findSpawnHiddenLauncher();
+        const restartArgv = [...ayCmd, ...args];
+        const child = Bun.spawn(spawnHidden ? [spawnHidden, ...restartArgv] : restartArgv, {
           cwd: record.cwd,
           detached: true,
           stdio: ["ignore", "ignore", "ignore"],
@@ -4003,6 +4077,14 @@ export async function cmdServe(rest: string[]): Promise<number> {
       // subagents don't inherit and collide. The caller can then address the agent
       // immediately: `ay <verb> <remote>:<agentId>`.
       const agentId = randomBytes(6).toString("hex");
+      // On Windows, interpose the window-less launcher (GUI-subsystem shim) so the
+      // detached agent spawn below doesn't flash a console window that grabs focus
+      // — the exact annoyance when spawning an agent from the web console. Mirrors
+      // the daemon-install path; undefined off Windows / when the launcher isn't
+      // installed → fall back to the raw argv. NOTE: when interposed, `child.pid`
+      // is the launcher's pid (a faithful shim that lives exactly as long as the
+      // agent); `agentId` remains the stable handle the console addresses by.
+      const spawnHidden = findSpawnHiddenLauncher();
       // Detach the agent into its OWN session (setsid). When `ay serve` runs WITH a
       // controlling terminal (started in a shell rather than as a headless daemon),
       // an undetached child inherits the daemon's session + controlling tty and lands
@@ -4029,7 +4111,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
           );
           // File-backed stderr never blocks the child (a pipe we stop draining
           // after exec would), and bounds our read to the first few KB.
-          const child = Bun.spawn([shell, "-c", script, "ay-spawn", ...agentArgv], {
+          const hookArgv = [shell, "-c", script, "ay-spawn", ...agentArgv];
+          const child = Bun.spawn(spawnHidden ? [spawnHidden, ...hookArgv] : hookArgv, {
             cwd,
             detached: true,
             env: {
@@ -4081,7 +4164,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
             ...(provisioned ? { provisioned } : {}),
           });
         }
-        const child = Bun.spawn(agentArgv, {
+        const child = Bun.spawn(spawnHidden ? [spawnHidden, ...agentArgv] : agentArgv, {
           cwd,
           detached: true,
           env: { ...agentEnv, AGENT_YES_AGENT_ID: agentId },

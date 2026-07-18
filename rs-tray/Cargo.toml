@@ -1,0 +1,32 @@
+# agent-yes-tray — a lightweight, standalone system-tray app for agent-yes.
+#
+# Kept as its OWN crate (not a bin in ../rs) on purpose: the tray pulls in GUI
+# stacks (tao/tray-icon → Win32 / Cocoa / GTK+AppIndicator) that the CLI must not
+# carry. Windows-first today; the code is written cross-platform so macOS/Linux
+# are a CI-matrix flip, not a rewrite.
+[package]
+name = "agent-yes-tray"
+version = "0.1.0"
+edition = "2021"
+description = "System-tray companion for agent-yes (open console, manage serve)"
+authors = ["snomiao"]
+license = "MIT"
+
+[[bin]]
+name = "agent-yes-tray"
+path = "src/main.rs"
+
+[dependencies]
+# Cross-platform tray icon + menus (the Tauri stack). tray-icon re-exports its
+# menu module (muda), so we don't depend on muda directly.
+tray-icon = "0.19"
+# Event loop that drives the OS message pump the tray needs. tao (Tauri's fork of
+# winit) has a steadier API than winit's latest and pairs cleanly with tray-icon.
+tao = "0.30"
+# Open URLs in the user's default browser, cross-platform.
+open = "5"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true

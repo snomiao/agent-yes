@@ -132,6 +132,28 @@ export function findSpawnHiddenLauncher(): string | undefined {
 }
 
 /**
+ * Locate the `agent-yes-tray` binary (the system-tray companion). Returns
+ * undefined when it isn't present (not built / not shipped for this platform —
+ * Windows-first today). Unlike the spawn-hidden launcher this is NOT gated to
+ * Windows, so macOS/Linux builds are found once they exist. Lives in its OWN
+ * crate (rs-tray), so it sits under rs-tray/target rather than rs/target.
+ */
+export function findTrayLauncher(): string | undefined {
+  const exe = process.platform === "win32" ? "agent-yes-tray.exe" : "agent-yes-tray";
+  const dir = import.meta.dirname ?? import.meta.dir;
+  const searchPaths = [
+    path.resolve(dir, `../rs-tray/target/release/${exe}`),
+    path.resolve(dir, `../rs-tray/target/debug/${exe}`),
+    path.join(getBinDir(), exe),
+    Bun.which("agent-yes-tray") ?? "",
+  ];
+  for (const p of searchPaths) {
+    if (p && existsSync(p)) return p;
+  }
+  return undefined;
+}
+
+/**
  * Get GitHub release download URL for the binary
  */
 export function getDownloadUrl(version = "latest"): string {

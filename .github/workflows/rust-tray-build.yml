@@ -1,0 +1,205 @@
+name: Build Tray
+
+# CI for the agent-yes-tray crate (rs-tray/). Unlike the headless CLI in rs/
+# (which cross-compiles darwin from Linux with cargo-zigbuild), the tray links
+# real GUI stacks — Win32 on Windows, Cocoa on macOS, GTK3 + AppIndicator on
+# Linux — so it must build on NATIVE runners, not a cross image.
+#
+# Cost shape (multipliers bill on PRIVATE repos; standard runners are FREE on
+# this public repo): Linux 1x, Windows 2x, macOS 10x. So the cheap targets run
+# on every tray PR, and the pricey macOS job is skipped on PRs (no runner spins)
+# — it only builds on a release or a manual dispatch.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "rs-tray/**"
+      - ".github/workflows/rust-tray-build.yml"
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to build (e.g., v1.46.5)"
+        required: false
+        type: string
+      upload_release:
+        description: "Upload to GitHub release"
+        required: false
+        default: "true"
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Cheap targets — Windows (2x) + Linux (1x). Native builds; run on every tray
+  # PR plus release/dispatch.
+  build:
+    name: Build ${{ matrix.artifact }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            artifact: agent-yes-tray-win32-x64
+            ext: ".exe"
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: agent-yes-tray-linux-x64
+            ext: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Linux tray links GTK3 + the Ayatana AppIndicator dev libs at build time
+      # (users also need the matching runtime libs). tray-icon rasterizes the
+      # RGBA icon to a PNG and hands it to libappindicator.
+      - name: Install GTK + AppIndicator (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libayatana-appindicator3-dev
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rs-tray
+
+      - name: Build
+        run: cargo build --release --manifest-path rs-tray/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Prepare artifact
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp "rs-tray/target/${{ matrix.target }}/release/agent-yes-tray${{ matrix.ext }}" \
+            "artifacts/${{ matrix.artifact }}${{ matrix.ext }}"
+          chmod +x "artifacts/${{ matrix.artifact }}${{ matrix.ext }}" || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/
+          if-no-files-found: error
+
+  # macOS — 10x on private repos, FREE here. Skipped on PRs (job-level `if`, so
+  # NO mac runner spins for routine changes); builds only on release/dispatch.
+  # macos-latest is Apple Silicon; we also add the x86_64 target so one runner
+  # produces both Intel and ARM halves.
+  build-macos:
+    name: Build ${{ matrix.artifact }}
+    if: github.event_name != 'pull_request'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            artifact: agent-yes-tray-darwin-arm64
+          - target: x86_64-apple-darwin
+            artifact: agent-yes-tray-darwin-x64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rs-tray
+
+      - name: Build
+        run: cargo build --release --manifest-path rs-tray/Cargo.toml --target ${{ matrix.target }}
+
+      - name: Prepare artifact
+        run: |
+          mkdir -p artifacts
+          cp "rs-tray/target/${{ matrix.target }}/release/agent-yes-tray" \
+            "artifacts/${{ matrix.artifact }}"
+          chmod +x "artifacts/${{ matrix.artifact }}" || true
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: artifacts/
+          if-no-files-found: error
+
+  # Attach binaries to the GitHub release (release/dispatch only), mirroring
+  # rust-build.yml: win → .zip, unix → .tar.gz. `always()` so a skipped macOS
+  # job (shouldn't happen here, since this job also gates off non-PR) doesn't
+  # cancel the release; the download step just collects whatever was produced.
+  release:
+    name: Upload to Release
+    needs: [build, build-macos]
+    if: |
+      always() && (
+        github.event_name == 'release' ||
+        (github.event_name == 'workflow_dispatch' && inputs.upload_release == true)
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+
+      - name: Create release archives
+        run: |
+          cd binaries
+          for dir in agent-yes-tray-*/; do
+            name="${dir%/}"
+            if [[ "$name" == *"win32"* ]]; then
+              zip -j "../${name}.zip" "$dir"*
+            else
+              tar -czvf "../${name}.tar.gz" -C "$dir" .
+            fi
+          done
+          cd ..
+          ls -la ./*.tar.gz ./*.zip 2>/dev/null || true
+
+      - name: Get release tag
+        id: get_tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ -n "${{ inputs.tag }}" ]; then
+            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "release" ]; then
+            echo "tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload release assets
+        if: steps.get_tag.outputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            *.tar.gz
+            *.zip
+          tag_name: ${{ steps.get_tag.outputs.tag }}
+          draft: false
+          prerelease: ${{ contains(steps.get_tag.outputs.tag, 'beta') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
