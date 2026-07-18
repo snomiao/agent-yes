@@ -33,7 +33,8 @@ import {
   parseSel,
   selSegments,
   fitTransform,
-  fitTransformCentered,
+  fitFontSize,
+  centerOffset,
   docTitle,
   statusGlyph,
   omniScore,
@@ -838,32 +839,35 @@ describe("fitTransform", () => {
   });
 });
 
-describe("fitTransformCentered", () => {
-  it("driver path stays crisp: none, no offset", () => {
-    expect(fitTransformCentered(800, 480, 800, 480)).toEqual({
-      transform: "none",
-      scale: 1,
-      dx: 0,
-      dy: 0,
-    });
+describe("fitFontSize (letterbox by font, not transform — keeps mouse mapping)", () => {
+  it("returns null inside the dead band (crisp driver path, no churn)", () => {
+    expect(fitFontSize(800, 480, 800, 480, 12)).toBeNull();
+    expect(fitFontSize(800, 480, 810, 490, 12)).toBeNull(); // fit rounding slack
   });
-  it("fit-width (phone letterboxing a wide grid) centers vertically", () => {
-    // grid 2x wider than pane, same aspect pane taller → s=0.5, dy centers
-    const r = fitTransformCentered(1600, 480, 800, 480);
-    expect(r.transform).toBe("translate(0.0px, 120.0px) scale(0.5000)");
-    expect(r.scale).toBe(0.5);
-    expect(r.dx).toBe(0);
-    expect(r.dy).toBe(120);
+  it("shrinks the font for a grid wider than the pane", () => {
+    // s = 0.5 → 12px renders the same grid at half the px width
+    expect(fitFontSize(1600, 480, 800, 480, 12)).toBe(6);
   });
-  it("fit-height (tall grid in a wide pane) centers horizontally", () => {
-    // s = min(800/400, 480/960) = 0.5 → scaled 200×480 → dx = (800-200)/2
-    const r = fitTransformCentered(400, 960, 800, 480);
-    expect(r.transform).toBe("translate(300.0px, 0.0px) scale(0.5000)");
-    expect(r.dx).toBe(300);
-    expect(r.dy).toBe(0);
+  it("grows the font for a small grid in a big pane", () => {
+    expect(fitFontSize(400, 240, 800, 480, 12)).toBe(24);
   });
-  it("guards bad dimensions like fitTransform", () => {
-    expect(fitTransformCentered(0, 480, 800, 480).transform).toBe("none");
+  it("clamps to the min/max font bounds", () => {
+    expect(fitFontSize(4000, 480, 800, 480, 12)).toBe(6); // s=0.2 → 2.4 → clamped
+    expect(fitFontSize(100, 60, 800, 480, 12)).toBe(64); // s=8 → 96 → clamped
+  });
+  it("guards bad dimensions and fonts", () => {
+    expect(fitFontSize(0, 480, 800, 480, 12)).toBeNull();
+    expect(fitFontSize(800, 480, 0, 480, 12)).toBeNull();
+    expect(fitFontSize(800, 480, 800, 480, 0)).toBeNull();
+  });
+});
+
+describe("centerOffset (translate-only letterbox centering)", () => {
+  it("centers the residual gap on both axes, whole px", () => {
+    expect(centerOffset(790, 470, 800, 480)).toEqual({ dx: 5, dy: 5 });
+  });
+  it("never goes negative when the grid overflows", () => {
+    expect(centerOffset(900, 500, 800, 480)).toEqual({ dx: 0, dy: 0 });
   });
 });
 

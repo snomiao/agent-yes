@@ -72,19 +72,23 @@ describe("console DOM behaviour", () => {
     close?.();
   });
 
-  it("renders one row per agent, leads with repo/branch identity, omits default claude", async () => {
+  it("renders one compact row per agent; identity capped to 3, default claude omitted", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
-      expect(await page.locator(".list .row").count()).toBe(3);
+      // Since #268 the compact list is the ONLY view — every row is a .crow.
+      expect(await page.locator(".list .row.crow").count()).toBe(3);
+      // All local (no devices) → path-only identity owner/repo/branch, each ≤3 chars.
+      const idents = await page.locator(".crow .cident").allInnerTexts();
+      expect(idents).toContain("sno/age/mai"); // snomiao/agent-yes/main
+      expect(idents).toContain("acm/wid/dev"); // acme/widgets/dev
+      // codex row shows its cli; default-claude rows never say "claude"
+      const names = await page.locator(".crow .cname").allInnerTexts();
+      expect(names).toEqual(["codex"]);
       const list = (await page.locator("#list").innerText()).toLowerCase();
-      // default-claude rows show identity as the name, not "claude"
-      expect(list).toContain("agent-yes/main");
-      expect(list).toContain("codex"); // non-default cli is shown
-      expect(list).not.toMatch(/\bclaude\b/); // the word "claude" never appears
-      // repo/wt mnemonic tags are derived from the cwd
-      expect(list).toContain("snomiao/agent-yes");
-      expect(await page.locator('.list .row[data-key="local#101"] .statusline').innerText()).toBe(
-        "✶ Verifying calendar meetings with real data… (6m 30s · ↓ 19.5k tokens)",
+      expect(list).not.toMatch(/\bclaude\b/);
+      // the compact row's one-line title (title || status_text || prompt)
+      expect(await page.locator('.list .row[data-key="local#101"] .ctitle').innerText()).toBe(
+        "first agent",
       );
     } finally {
       await ctx.close();
@@ -166,18 +170,16 @@ describe("console DOM behaviour", () => {
     }
   });
 
-  it("compact toggle collapses rows; identity is owner/repo/branch capped to 3", async () => {
+  it("compact is the only view — the old ☰ toggle is gone (#268)", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
-      await page.click("#viewbtn");
       await page.waitForSelector(".list .row.crow");
-      // All local (no devices) → path-only identity owner/repo/branch, each ≤3 chars.
-      const idents = await page.locator(".crow .cident").allInnerTexts();
-      expect(idents).toContain("sno/age/mai"); // snomiao/agent-yes/main
-      expect(idents).toContain("acm/wid/dev"); // acme/widgets/dev
-      // codex row shows its cli; claude rows don't
-      const names = await page.locator(".crow .cname").allInnerTexts();
-      expect(names).toEqual(["codex"]);
+      expect(await page.locator("#viewbtn").count()).toBe(0);
+      // the full identity survives as the hover title on the capped chip
+      const titles = await page
+        .locator(".crow .cident")
+        .evaluateAll((els) => els.map((e) => e.getAttribute("title")));
+      expect(titles).toContain("snomiao/agent-yes/main");
     } finally {
       await ctx.close();
     }

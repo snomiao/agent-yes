@@ -2170,7 +2170,8 @@
         selFromBottom,
         parseSel,
         selSegments,
-        fitTransformCentered,
+        fitFontSize,
+        centerOffset,
         docTitle,
         omniScore,
       } from "./console-logic.js";
@@ -2227,6 +2228,10 @@
           localStorage.setItem("ay.fontSize", String(termFontSize));
         } catch {}
         if (term) {
+          // The user changed their DESIRED size — drop any fit-derived render
+          // font and restart the fit from the new desire (applyCanvasScale
+          // converges it; for the driver / min viewer it lands exactly here).
+          renderFontSize = 0;
           term.options.fontSize = termFontSize;
           // Negotiating host: the grid is canonical (host-owned) — a font change
           // here only alters our glyph px, so re-letterbox and report the new
@@ -3299,7 +3304,19 @@
         try {
           if (!isReadonlyEnt(cur.e) && fit) {
             const d = fit.proposeDimensions();
-            if (d && d.cols > 0 && d.rows > 0) cap = { cols: d.cols, rows: d.rows };
+            if (d && d.cols > 0 && d.rows > 0) {
+              // proposeDimensions measures at the RENDER font, which may be the
+              // fit-derived letterbox size — but capacity is defined at the
+              // user's DESIRED font (termFontSize). Rescale by the font ratio
+              // (cell px ∝ font px), else a letterboxed viewer's grown render
+              // font would shrink its reported cap and feed back into the
+              // negotiation as a death spiral.
+              const k = (renderFontSize || termFontSize) / termFontSize;
+              cap = {
+                cols: Math.max(1, Math.floor(d.cols * k)),
+                rows: Math.max(1, Math.floor(d.rows * k)),
+              };
+            }
           }
         } catch {}
         cur.tx
@@ -3611,18 +3628,29 @@
         ov.innerHTML = html.join("");
       }
 
-      // ---- shared canvas: scale (don't reflow) the grid to fit our pane --------
+      // ---- shared canvas: fit the grid to our pane BY FONT SIZE ---------------
       // When we render at the canonical (driver/agent) grid size and it doesn't
-      // match our pane, CSS-scale the whole .xterm to fit — so every viewer shows
-      // identical content and selections/overlays line up. For the driver / single
-      // viewer the grid already fits the pane (scale ≈ 1) → no transform, so the
-      // common path is byte-for-byte unchanged. Best-effort + guarded.
-      function applyCanvasScale() {
+      // match our pane, adjust the render FONT so the grid fills the pane —
+      // never a CSS transform:scale(). A scale breaks xterm's mouse→cell
+      // mapping (events arrive in visual px, xterm divides by the unscaled cell
+      // metrics → drag selection lands 1/s off); a font change keeps layout,
+      // hit-testing, and the peer overlay all native, and glyphs render crisp
+      // at their real size. The residual letterbox (cell rounding) is centered
+      // with a translate-only transform, which moves the rect and therefore
+      // does NOT disturb the coordinate math.
+      //
+      // renderFontSize is the fit-derived size actually rendered; termFontSize
+      // stays the USER's desired size — the pinch/menu zoom control and the
+      // capacity (presence cap) basis. For the driver / min viewer the grid
+      // matches the pane at the desired font (dead band) → renderFontSize
+      // converges back to termFontSize and no transform is applied, so the
+      // common path stays byte-for-byte crisp. Best-effort + guarded.
+      let renderFontSize = 0; // 0 = following termFontSize (no fit override)
+      function applyCanvasScale(depth = 0) {
         try {
           const logEl = $("log");
           const xt = logEl && logEl.querySelector(".xterm");
-          if (!xt) return;
-          xt.style.transform = "none"; // measure the natural (unscaled) grid
+          if (!xt || !term) return;
           const screen = xt.querySelector(".xterm-screen");
           if (!screen) return;
           const gw = screen.offsetWidth,
@@ -3631,12 +3659,18 @@
           const cs = getComputedStyle(logEl);
           const pw = logEl.clientWidth - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
           const ph = logEl.clientHeight - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom);
-          // fitTransformCentered (console-logic.js, unit-tested) decides
-          // none-vs-scale and centers the letterboxed grid in the pane (fit
-          // width → vertically centered, fit height → horizontally). The peer
-          // overlay reads the transformed screen rect back via
-          // getBoundingClientRect, so the translate needs no extra bookkeeping.
-          xt.style.transform = fitTransformCentered(gw, gh, pw, ph).transform;
+          const cur = renderFontSize || termFontSize;
+          const nf = fitFontSize(gw, gh, pw, ph, cur);
+          // Cell metrics round per font size, so one analytic step may land a
+          // hair off — re-measure and iterate (bounded) until inside the band.
+          if (nf != null && Math.abs(nf - cur) >= 0.25 && depth < 3) {
+            renderFontSize = nf;
+            term.options.fontSize = nf;
+            requestAnimationFrame(() => applyCanvasScale(depth + 1));
+            return;
+          }
+          const { dx, dy } = centerOffset(gw, gh, pw, ph);
+          xt.style.transform = dx || dy ? `translate(${dx}px, ${dy}px)` : "none";
         } catch {}
       }
       // Pane geometry changed (window resize, splitter drag, soft keyboard, tab
@@ -5159,6 +5193,7 @@
         }
         const logEl = $("log");
         logEl.innerHTML = "";
+        renderFontSize = 0; // fresh terminal starts at the desired font (no fit override)
         term = new Terminal({
           convertEol: false,
           disableStdin: false,
