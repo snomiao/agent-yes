@@ -373,8 +373,9 @@ const WRAP_W = 3400; // wrap top-level subtrees to a new band past this x
 const INFO_ID = "info:card";
 const INFO_W = 560;
 const INFO_H = 320;
-const SETUP_SH = "curl -fsSL https://agent-yes.com/setup.sh | sh";
-const SETUP_PS = 'powershell -c "irm https://agent-yes.com/setup.ps1 | iex"';
+const INSTALL_ORIGIN = location.origin;
+const SETUP_SH = `curl -fsSL ${INSTALL_ORIGIN}/setup.sh | sh`;
+const SETUP_PS = `powershell -c "irm ${INSTALL_ORIGIN}/setup.ps1 | iex"`;
 
 // User-set per-node magnify (rgui contentScale via shift+drag on the corner
 // grip), remembered by node id so a manual "magnify this agent to watch it"

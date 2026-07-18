@@ -1,10 +1,16 @@
 #!/bin/sh
-# agent-yes installer — curl -fsSL https://agent-yes.com/setup.sh | sh
+# agent-yes installer — curl -fsSL <site-origin>/setup.sh | sh
 #
 # Installs the agent-yes CLI (ay / cy / claude-yes / …) globally. agent-yes is a
 # JS package, so it needs a JS runtime + package manager: we use whichever of
 # bun / npm you already have, and install bun if you have neither.
 set -eu
+
+# The canonical source installs stable. Beta site builds rewrite these defaults
+# in build-assets.sh so the exact same installer installs the beta npm channel
+# and points its next-step links back to the origin it was downloaded from.
+AY_PACKAGE="agent-yes"
+AY_CONSOLE_ORIGIN="https://agent-yes.com"
 
 say() { printf '\033[36m▸\033[0m %s\n' "$1"; }
 err() { printf '\033[31m✘ %s\033[0m\n' "$1" >&2; }
@@ -70,9 +76,9 @@ else
 fi
 
 # --- install ----------------------------------------------------------------
-say "Installing agent-yes with ${RT}…"
+say "Installing ${AY_PACKAGE} with ${RT}…"
 # shellcheck disable=SC2086
-$PM agent-yes
+$PM "$AY_PACKAGE"
 
 # bun blocks dependency postinstalls by default, which skips node-datachannel's
 # native build — the addon that powers `ay serve --webrtc` / `ay serve share`.
@@ -89,7 +95,7 @@ else
   say "Installed. If 'ay' isn't found, open a new shell (the package bin dir was just added to PATH)."
 fi
 
-cat <<'EOF'
+cat <<EOF
 
   agent-yes is ready. Quick start:
 
@@ -97,7 +103,7 @@ cat <<'EOF'
     ay serve --share     # start the web console + a shareable link
     ay ls                # list running agents
 
-  Console & docs: https://agent-yes.com
+  Console & docs: ${AY_CONSOLE_ORIGIN}
 EOF
 
 # --- offer to start sharing right away --------------------------------------

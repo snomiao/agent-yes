@@ -219,10 +219,10 @@
         </div>
         <div class="install">
           <pre><code># macOS / Linux
-curl -fsSL https://agent-yes.com/setup.sh | sh
+<span id="setup-sh">curl -fsSL https://agent-yes.com/setup.sh | sh</span>
 
 # Windows (PowerShell)
-powershell -c "irm https://agent-yes.com/setup.ps1 | iex"</code></pre>
+<span id="setup-ps">powershell -c "irm https://agent-yes.com/setup.ps1 | iex"</span></code></pre>
           <div class="clis">
             Wrappers: <b>claude-yes</b> · <b>codex-yes</b> · <b>gemini-yes</b> ·
             <b>copilot-yes</b> · <b>cursor-yes</b> · <b>qwen-yes</b> · <b>grok-yes</b> — or just
@@ -278,6 +278,14 @@ powershell -c "irm https://agent-yes.com/setup.ps1 | iex"</code></pre>
       // straight on it. `autofocus` on <a> isn't honored everywhere, so back it
       // up here — but skip on touch devices where focusing scroll-jumps the page.
       (function () {
+        var beta = /^(beta\.agent-yes\.pages\.dev|beta\.agent-yes\.com)$/.test(location.hostname);
+        var pkg = beta ? "agent-yes@beta" : "agent-yes";
+        document.getElementById("setup-sh").textContent =
+          "curl -fsSL " + location.origin + "/setup.sh | sh";
+        document.getElementById("setup-sh").title = "installs " + pkg;
+        document.getElementById("setup-ps").textContent =
+          'powershell -c "irm ' + location.origin + '/setup.ps1 | iex"';
+        document.getElementById("setup-ps").title = "installs " + pkg;
         if (matchMedia("(hover: none)").matches) return;
         var cta = document.querySelector(".hero .cta a.btn");
         if (cta) cta.focus({ preventScroll: true });

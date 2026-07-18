@@ -549,8 +549,9 @@ describe("console DOM behaviour", () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
       const install = (await page.locator(".install").innerText()).toLowerCase();
-      expect(install).toContain("curl -fssl https://agent-yes.com/setup.sh | sh");
-      expect(install).toContain('powershell -c "irm https://agent-yes.com/setup.ps1 | iex"');
+      const origin = new URL(url).origin.toLowerCase();
+      expect(install).toContain(`curl -fssl ${origin}/setup.sh | sh`);
+      expect(install).toContain(`powershell -c "irm ${origin}/setup.ps1 | iex"`);
     } finally {
       await ctx.close();
     }

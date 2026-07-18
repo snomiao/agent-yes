@@ -41,6 +41,9 @@ jobs:
       # one script, two consumers, zero drift.
       - name: Build site assets
         working-directory: lab/ui/cf
+        env:
+          AGENT_YES_CHANNEL: beta
+          AGENT_YES_ORIGIN: https://beta.agent-yes.pages.dev
         run: sh ./build-assets.sh
       - name: Deploy to Pages (beta branch alias)
         working-directory: lab/ui/cf

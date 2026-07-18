@@ -4,7 +4,7 @@ name: UI Test
 # Matrix Test suite. THIS workflow covers the rendered console, triggered by
 # changes to the UI or EITHER UI test suite (lab/ui, tests/ui-dom, tests/ui-test):
 #   - ui-dom: a deterministic, hermetic Playwright DOM test of the real console
-#     (blocking — the deploy job gates on it). tests/ui-dom/** must be in the
+#     (blocking — required before merge). tests/ui-dom/** must be in the
 #     trigger paths, else a change to the test or its stub server can silently
 #     rot without ever running (this is exactly how the /e2e.js stub gap slipped in).
 #   - ui-render: the heavier xterm.js render test — Playwright screenshots judged
@@ -68,41 +68,3 @@ jobs:
           name: ui-screenshots
           path: tests/ui-test/screenshots/
           if-no-files-found: ignore
-
-  # Deploy the console to agent-yes.com (Cloudflare Worker) — only on push to
-  # main, and only after the deterministic DOM test passes. Uses the
-  # CLOUDFLARE_API_TOKEN secret; scripts/cf.ts pins the SNOLAB account.
-  deploy:
-    needs: [ui-dom]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v5
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: latest
-      - run: bun install
-      - name: Stage console assets
-        run: |
-          mkdir -p lab/ui/cf/public
-          cp lab/ui/index.html lab/ui/room-client.js lab/ui/console-logic.js \
-             lab/ui/setup.sh lab/ui/setup.ps1 lab/ui/cf/public/
-      # The SNOLAB token (`agent-yes-snolab`) lacks Workers Routes / User-Details
-      # read, so wrangler prints an "Authentication error [code: 10000]" and
-      # exits non-zero AFTER the Worker version + assets have already uploaded —
-      # harmless (the custom domains already exist). Gate success on the upload
-      # line instead of the exit code, else every deploy reports a false failure.
-      - name: Deploy Worker (agent-yes.com)
-        working-directory: lab/ui/cf
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-        run: |
-          set -o pipefail
-          bun ../../../scripts/cf.ts deploy 2>&1 | tee deploy.log || true
-          if grep -Eq "Uploaded agent-yes-signal|Deployed agent-yes-signal|Current Version ID" deploy.log; then
-            echo "::notice::Worker uploaded — route/auth tail-error is harmless (token lacks Routes/User-Details read)."
-          else
-            echo "::error::Wrangler did not upload the Worker."
-            exit 1
-          fi
