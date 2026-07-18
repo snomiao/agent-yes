@@ -1885,7 +1885,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
   const negoTimers = new Map<number, ReturnType<typeof setTimeout>>();
   const NEGO_DEBOUNCE_MS = 350;
   const winsizePathFor = (pid: number) =>
-    path.join(process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes"), "winsize", String(pid));
+    path.join(
+      process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes"),
+      "winsize",
+      String(pid),
+    );
   const liveCapsFor = (pid: number): SizeCap[] => {
     const now = Date.now();
     const caps: SizeCap[] = [];

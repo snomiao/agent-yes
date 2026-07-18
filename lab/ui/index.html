@@ -695,14 +695,14 @@
         align-items: center;
         gap: 8px;
       }
-      /* Peers badge beside the agent counter — how many other humans are in the
-         fleet right now. Yellow ("here") when a peer shares the agent you have
-         open, muted otherwise. Hidden entirely when you're alone. */
-      .peers {
-        color: var(--muted);
+      /* The single consolidated fleet summary: "N/M agents · R rooms · 👤 P".
+         Rooms/peers segments appear only when there's more than one room / any
+         peer, so a solo fleet just reads "N/M agents". Turns yellow ("here") when
+         another peer is watching the agent you have open. */
+      .count {
         cursor: default;
       }
-      .peers.here {
+      .count.here {
         color: var(--peer);
       }
       .connbadge {
@@ -1851,20 +1851,11 @@
           </div>
           <div class="meta">
             <span class="metaleft">
-              <span id="count"></span>
-              <span id="peers" class="peers" hidden></span>
+              <span id="count" class="count"></span>
             </span>
             <span class="metaright">
               <button id="foldbtn" class="viewbtn" title="fold subagent trees">⊞ subs</button>
               <button id="sortbtn" class="viewbtn" title="cycle sort order">⇅ state</button>
-              <button
-                id="viewbtn"
-                class="viewbtn"
-                title="toggle compact list"
-                aria-label="Toggle compact list view"
-              >
-                ☰
-              </button>
               <button id="portsbtn" class="viewbtn" title="manage exposed localhost ports">
                 ⇄ ports
               </button>
@@ -2192,6 +2183,7 @@
       // row keeps pulsing to. See advanceStdinFlashes/focusSummary (console-logic).
       let focusByKey = new Map();
       let peerTotal = 0;
+      let shownAgentCount = 0; // agents matching the current filter (for the summary badge)
       const stdinSeen = new Map();
       const flashUntil = new Map();
       const STDIN_FLASH_MS = 1200;
@@ -3361,29 +3353,34 @@
         const sum = focusSummary(recs);
         focusByKey = sum.byKey;
         peerTotal = sum.total;
-        paintPeersBadge();
+        updateSummary();
         renderList();
       }
-      // "N peers" badge beside the agent counter. Yellow when a peer shares the
-      // agent you have open ("same agent"); its tooltip breaks the count down by
-      // agent so you can see who's where. Hidden when you're the only one here.
-      function paintPeersBadge() {
-        const el = $("peers");
+      // The ONE consolidated fleet summary in the header, replacing the separate
+      // agent-count and "N peers" badges: "<shown>/<total> agents" plus, only when
+      // relevant, "· R rooms" (multi-room fleets) and "· 👤 P" (other humans here).
+      // Yellow ("here") when a peer shares the agent you have open; the tooltip
+      // breaks the peer count down by agent so you can see who's where. Called both
+      // from renderList (agent list changed) and on presence updates (peers).
+      function updateSummary() {
+        const el = $("count");
         if (!el) return;
-        if (!peerTotal) {
-          el.hidden = true;
-          el.removeAttribute("title");
-          return;
-        }
-        el.hidden = false;
-        el.textContent = `👤 ${peerTotal} peer${peerTotal === 1 ? "" : "s"}`;
+        const rooms = new Set(entries.filter((e) => e._room).map((e) => e._room)).size;
+        let s = `${shownAgentCount} / ${entries.length} agents`;
+        if (rooms > 1) s += ` · ${rooms} rooms`;
+        if (peerTotal > 0) s += ` · 👤 ${peerTotal}`;
+        el.textContent = s;
         el.classList.toggle("here", !!(sel && focusByKey.get(sel)));
-        const lines = [...focusByKey.entries()].map(([k, n]) => {
-          const e = entries.find((x) => x._key === k);
-          const name = e ? e.title || cliLabel(e) || ident(e) || `pid ${e.pid}` : k;
-          return `  ${n} on ${name}`;
-        });
-        el.title = "peers watching agents in this fleet:\n" + lines.join("\n");
+        if (peerTotal > 0) {
+          const lines = [...focusByKey.entries()].map(([k, n]) => {
+            const e = entries.find((x) => x._key === k);
+            const name = e ? e.title || cliLabel(e) || ident(e) || `pid ${e.pid}` : k;
+            return `  ${n} on ${name}`;
+          });
+          el.title = "peers watching agents in this fleet:\n" + lines.join("\n");
+        } else {
+          el.removeAttribute("title");
+        }
       }
       // 3s heartbeat (< the host's 12s TTL): refresh our presence + read others',
       // and follow the canonical grid size (resize+scale, never reflow) so all
@@ -4704,8 +4701,9 @@
         s.streaming = false;
       }
 
-      // Compact list: one line per agent (dot + cli + title), persisted per device.
-      let compactList = localStorage.getItem("ay.compactList") === "1";
+      // Compact list is now the ONLY list view (one line per agent: dot + cli +
+      // title). The toggle button was removed — compact is always on.
+      const compactList = true;
 
       // Fold subagent trees: hide nested (sub)agent rows and roll each root's
       // hidden descendants into a summary chip. Folded BY DEFAULT (only "0" opts
@@ -4894,11 +4892,10 @@
         const rows = foldSubs
           ? fullRows.filter((r) => !(r.kind === "agent" && r.parentEntry))
           : fullRows;
-        $("count").textContent = `${agentRows.length} / ${entries.length} agents`;
-        paintPeersBadge(); // keep the peers badge in step with sel / the entry list
+        shownAgentCount = agentRows.length;
+        updateSummary(); // one consolidated "agents · rooms · peers" badge
         $("foldbtn").textContent = foldSubs ? "⊞ subs" : "⊟ subs";
         $("foldbtn").classList.toggle("on", !foldSubs);
-        $("viewbtn").classList.toggle("on", compactList);
         // Show the active sort mode on the button so it's self-documenting; the
         // default ("state") is also highlighted to hint it's the implicit order.
         $("sortbtn").textContent = `⇅ ${sortMode}`;
@@ -5035,25 +5032,22 @@
         // the new mtime, so a silent `ay send` still trips the flash within ~1s.
         const until = Date.now() + STDIN_FLASH_MS;
         for (const k of advanceStdinFlashes(entries, stdinSeen)) flashUntil.set(k, until);
-        // Badge: total agents + how many rooms are live. Red only when nothing
-        // at all is reachable (no source answered).
-        // Count ROOMS, not machines — a codehost room with three machines is still
-        // one room, and it can be connecting before any machine has appeared.
+        // Connection-status badge ONLY (dot + state). The agent/room/peer COUNTS
+        // live in one place now — the #count summary on the left — so this badge no
+        // longer repeats them; it just shows liveness and stays the rooms-manager
+        // click target (see its title). Red only when nothing is reachable.
         const roomSrcs = srcs.filter((s) => s.id !== LOCAL);
-        const liveRooms = new Set(roomSrcs.filter((s) => s.live).map((s) => s.room || s.id)).size;
         const anyLive = srcs.some((s) => s.live);
         const connecting =
           roomSrcs.some((s) => !s.tried) || [...chRooms.values()].some((r) => !r.tried);
         const roomCount = roomSrcs.length || chRooms.size;
-        const n = entries.length;
         if (!srcs.length && !chRooms.size) {
           setConn("● no fleet", "var(--muted)");
         } else if (!anyLive) {
           if (connecting) setConn("● connecting…", "var(--amber)");
           else setConn(roomCount ? "● rooms offline" : "● ay serve down", "var(--red)");
         } else {
-          const roomBit = liveRooms ? ` · ${liveRooms} room${liveRooms === 1 ? "" : "s"}` : "";
-          setConn(`● ${n} agent${n === 1 ? "" : "s"}${roomBit}`, "var(--green)");
+          setConn("● live", "var(--green)");
         }
         renderRoomsIfOpen();
         renderList();
@@ -5454,11 +5448,6 @@
         try {
           localStorage.setItem("ay.filter", $("q").value);
         } catch {}
-        renderList();
-      });
-      $("viewbtn").addEventListener("click", () => {
-        compactList = !compactList;
-        localStorage.setItem("ay.compactList", compactList ? "1" : "0");
         renderList();
       });
       // Fold / unfold every subagent tree (global toggle, persisted per device).
