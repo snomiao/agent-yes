@@ -140,7 +140,8 @@ describe("acquireWebrtcHostLock — held-lock lifecycle", () => {
   });
 
   const ownerFile = () => path.join(home, "webrtc-host.lock", "owner.json");
-  const readOwnerFile = async () => JSON.parse(await readFile(ownerFile(), "utf-8")) as ServeLockOwner;
+  const readOwnerFile = async () =>
+    JSON.parse(await readFile(ownerFile(), "utf-8")) as ServeLockOwner;
 
   it("heartbeats refresh beat_at while held", async () => {
     const got = await acquireWebrtcHostLock({ graceMs: 0, beatMs: 40 });
@@ -190,19 +191,19 @@ describe("acquireWebrtcHostLock — held-lock lifecycle", () => {
   it.skipIf(process.platform === "win32")(
     "escalates to SIGKILL when the owner ignores SIGTERM",
     async () => {
-    const { spawn } = await import("node:child_process");
-    const stubborn = spawn("/bin/sh", ["-c", "trap '' TERM; sleep 30"], { stdio: "ignore" });
-    const pid = stubborn.pid!;
-    await new Promise((r) => setTimeout(r, 100)); // let the trap install
-    const { mkdir: mkd, writeFile: wf } = await import("fs/promises");
-    await mkd(path.join(home, "webrtc-host.lock"), { recursive: true });
-    await wf(ownerFile(), JSON.stringify({ pid, started_at: Date.now(), beat_at: Date.now() }));
+      const { spawn } = await import("node:child_process");
+      const stubborn = spawn("/bin/sh", ["-c", "trap '' TERM; sleep 30"], { stdio: "ignore" });
+      const pid = stubborn.pid!;
+      await new Promise((r) => setTimeout(r, 100)); // let the trap install
+      const { mkdir: mkd, writeFile: wf } = await import("fs/promises");
+      await mkd(path.join(home, "webrtc-host.lock"), { recursive: true });
+      await wf(ownerFile(), JSON.stringify({ pid, started_at: Date.now(), beat_at: Date.now() }));
 
-    const got = await acquireWebrtcHostLock({ takeover: true, graceMs: 0, takeoverWaitMs: 200 });
-    expect(got.ok).toBe(true);
-    if (got.ok) releases.push(got.release);
-    await new Promise((r) => setTimeout(r, 100));
-    expect(stubborn.signalCode).toBe("SIGKILL");
+      const got = await acquireWebrtcHostLock({ takeover: true, graceMs: 0, takeoverWaitMs: 200 });
+      expect(got.ok).toBe(true);
+      if (got.ok) releases.push(got.release);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(stubborn.signalCode).toBe("SIGKILL");
     },
   );
 
