@@ -124,3 +124,111 @@ jobs:
           npm pkg set name=agent-yes
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # npm Trusted Publishing is bound to this workflow filename. Keep the beta
+  # channel here as a parallel job so it receives the same OIDC trust as stable,
+  # while retaining an independent prerelease and native-binary pipeline.
+  publish-beta:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      actions: write
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "latest"
+          registry-url: https://registry.npmjs.org
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      # Validate the checked-in stable version first. Several version-contract
+      # tests intentionally reject prerelease semver; the stamp below exists
+      # only for the publish artifact and its matching native binaries.
+      - run: bun run test
+
+      - name: Set unique beta version
+        id: version
+        shell: bash
+        run: |
+          BASE=$(node -p "require('./package.json').version.split('-')[0]")
+          VERSION="${BASE}-beta.${GITHUB_RUN_NUMBER}.${GITHUB_RUN_ATTEMPT}"
+          TAG="v${VERSION}"
+          npm pkg set version="${VERSION}"
+          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" rs/Cargo.toml
+          rm -f rs/Cargo.toml.bak
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "Publishing ${TAG} from ${GITHUB_SHA}"
+
+      - run: bun run build
+
+      - name: Create GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$TAG" \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --title "agent-yes ${VERSION} (beta)" \
+            --notes "Automated beta build from main at ${GITHUB_SHA}. Install with: npm install -g agent-yes@beta"
+
+      - name: Trigger matching native binary build
+        id: rust
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          BEFORE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          gh workflow run rust-build.yml --ref main --field tag="$TAG" --field upload_release=true
+          for attempt in $(seq 1 24); do
+            sleep 5
+            WANT="Build Rust Binaries $TAG"
+            RUN_ID=$(gh run list --workflow=rust-build.yml --event workflow_dispatch --limit=10 \
+              --json databaseId,createdAt,displayTitle \
+              -q ".[] | select(.createdAt >= \"$BEFORE\" and .displayTitle == \"$WANT\") | .databaseId" | head -1)
+            if [ -n "$RUN_ID" ]; then
+              echo "run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "Waiting for $WANT to appear... ($((attempt * 5))s elapsed)"
+          done
+          echo "Native binary workflow did not start within two minutes." >&2
+          exit 1
+
+      - name: Wait for native binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh run watch "${{ steps.rust.outputs.run_id }}" --exit-status
+
+      - name: Verify prerelease assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        shell: bash
+        run: |
+          COUNT=$(gh release view "$TAG" --json assets --jq '.assets | length')
+          if [ "$COUNT" -lt 7 ]; then
+            echo "Expected at least 7 native archives on $TAG; found $COUNT." >&2
+            exit 1
+          fi
+
+      - name: Publish agent-yes@beta
+        run: npm publish --access public --tag beta --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish claude-yes@beta alias
+        shell: bash
+        run: |
+          npm pkg set name=claude-yes
+          npm publish --access public --tag beta --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
