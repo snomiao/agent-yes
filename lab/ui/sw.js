@@ -123,6 +123,7 @@ const SHELL = [
   "./index.html",
   "./room-client.js",
   "./console-logic.js",
+  "./rtc.js",
   "./e2e.js",
   "./qrcode.js",
   "./manifest.webmanifest",

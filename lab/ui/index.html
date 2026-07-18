@@ -1801,6 +1801,12 @@
         background: var(--line);
       }
     </style>
+    <!-- Fetch the critical console modules while the browser is still parsing the
+         document. Without these hints they are discovered near the end of <body>,
+         adding a serial network step before the first room can connect. -->
+    <link rel="modulepreload" href="./console-logic.js" />
+    <link rel="modulepreload" href="./rtc.js" />
+    <link rel="modulepreload" href="./e2e.js" />
     <link
       rel="stylesheet"
       href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"
@@ -6507,10 +6513,14 @@
         loadList();
       }
 
-      // Connect to every saved room at once (called on boot).
-      function connectAllRooms() {
+      // Connect to every saved room at once (called on boot). A room already
+      // started from the URL/hash can be skipped so it gets a brief uncontended
+      // head start before the rest of the fleet performs crypto + ICE setup.
+      function connectAllRooms(exceptRoom = null) {
         const r = loadRooms();
-        for (const name of Object.keys(r)) addRoomSource(name, r[name].token, r[name].host);
+        for (const name of Object.keys(r)) {
+          if (name !== exceptRoom) addRoomSource(name, r[name].token, r[name].host);
+        }
       }
 
       // Back-compat alias: a freshly pasted/linked room is added like any other.
@@ -7041,8 +7051,15 @@
         // saved room in the BACKGROUND so a dead/slow room never blanks the page,
         // and they all stream their agents into one list at once.
         startPolling();
-        if (pending) connectRoom(pending.room, pending.token, pending.host);
-        connectAllRooms();
+        if (pending) {
+          connectRoom(pending.room, pending.token, pending.host);
+          // On a returning console, several simultaneous WebRTC handshakes compete
+          // with the selected room for CPU and network setup. Let that room start
+          // first, then fan out quickly enough that the fleet still feels instant.
+          setTimeout(() => connectAllRooms(pending.room), 150);
+        } else {
+          connectAllRooms();
+        }
       }
 
       // Deep-link navigation in an ALREADY-OPEN console. boot() only processes the
