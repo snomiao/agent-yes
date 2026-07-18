@@ -1,10 +1,5 @@
 import { describe, expect, it } from "vitest";
-import {
-  NEGO_FLOOR_COLS,
-  NEGO_FLOOR_ROWS,
-  negotiateSize,
-  sanitizeCap,
-} from "./sizeNego.ts";
+import { NEGO_FLOOR_COLS, NEGO_FLOOR_ROWS, negotiateSize, sanitizeCap } from "./sizeNego.ts";
 
 describe("sanitizeCap", () => {
   it("accepts a normal viewer capacity", () => {
