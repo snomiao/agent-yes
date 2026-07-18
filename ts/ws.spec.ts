@@ -468,16 +468,14 @@ describe("collectWorkspaces / workspaceStatus (mocked provision)", () => {
   beforeEach(() => {
     root = realpathSync(mkdtempSync(path.join(os.tmpdir(), "ay-ws-api-")));
     prov.wsRoot = root;
-    prov.readStatus
-      .mockReset()
-      .mockResolvedValue({
-        branch: "main",
-        head: "abc123",
-        ahead: 1,
-        behind: 0,
-        dirty: true,
-        hasUpstream: true,
-      });
+    prov.readStatus.mockReset().mockResolvedValue({
+      branch: "main",
+      head: "abc123",
+      ahead: 1,
+      behind: 0,
+      dirty: true,
+      hasUpstream: true,
+    });
     homeBackup = process.env.AGENT_YES_HOME;
     process.env.AGENT_YES_HOME = path.join(root, ".ay-home");
   });

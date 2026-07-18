@@ -236,10 +236,19 @@ const SESSION_PIN_ENV = new Set([
 // ~/.bun/bin, ~/.cargo/bin, Homebrew, nvm shims, etc. A console-spawned agent
 // that inherits that env can't find `bun`/`bunx`/etc. (the user reported "bunx:
 // command not found" when spawning a new agent from the web UI). We recover the
-// real environment by running the user's interactive login shell and dumping its
-// env, exactly as a fresh terminal would have it. Returns null on Windows (no
-// rc-file model — the process env is already the right one) or on any failure, so
-// callers fall back to process.env.
+// real environment by running the user's LOGIN shell and dumping its env.
+//
+// IMPORTANT: NON-interactive (`-lc`, not `-ilc`). An interactive shell (`-i`)
+// HANGS indefinitely when the daemon has no controlling TTY — exactly the case
+// under any process manager (oxmgr/systemd/launchd/pm2) — and Bun's `spawnSync`
+// `timeout` does NOT kill the hung interactive shell. Because this runs
+// synchronously on the event loop from the /api/spawn handler, the interactive
+// variant PERMANENTLY WEDGED the daemon on the first console spawn (heartbeat
+// froze → healthcheck restart → cache lost → next spawn wedged again), making
+// console spawns impossible on a headless daemon. `-l` still sources the profile
+// chain (`~/.profile`/`~/.bash_profile` → `~/.bashrc`), so the tool PATHs are
+// still recovered. Returns null on Windows (no rc-file model — the process env is
+// already the right one) or on any failure, so callers fall back to process.env.
 let loginShellEnvCache: Record<string, string> | null | undefined;
 function loginShellEnv(): Record<string, string> | null {
   if (loginShellEnvCache !== undefined) return loginShellEnvCache;
@@ -251,7 +260,7 @@ function loginShellEnv(): Record<string, string> | null {
     // print to stdout; `env -0` is NUL-separated so values with newlines survive.
     const delim = "_AY_SHELL_ENV_DELIM_";
     const res = Bun.spawnSync(
-      [shell, "-ilc", `printf %s "${delim}"; env -0; printf %s "${delim}"`],
+      [shell, "-lc", `printf %s "${delim}"; env -0; printf %s "${delim}"`],
       {
         stdin: "ignore",
         stderr: "ignore",
