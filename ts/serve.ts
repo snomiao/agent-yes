@@ -1881,9 +1881,36 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // died → TTL), the size is withdrawn: the file is deleted ONLY if its content
   // is still our own last write (so `ay attach`'s pushed size is never
   // clobbered) and the wrapper falls back to the real tty size.
+  //
+  // Two guards keep the withdraw from CAUSING the churn it exists to undo:
+  //  • grace: quick switch-away-and-back (⌘↑/⌘↓ cycling) must not reflow the
+  //    TUI twice, so the last negotiated size lingers NEGO_WITHDRAW_GRACE_MS
+  //    after the final cap leaves before the file is removed.
+  //  • headless agents (console-spawned, `ps -o tty=` says "??") have NO real
+  //    terminal to yield to — withdrawing would drop the wrapper to its 80×24
+  //    default and visibly shrink every future open. For them the negotiated
+  //    size persists until the next viewer arrives.
   const negoApplied = new Map<number, { cols: number; rows: number; content: string }>();
   const negoTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  const negoCapsGoneAt = new Map<number, number>(); // pid → when the last cap left
   const NEGO_DEBOUNCE_MS = 350;
+  const NEGO_WITHDRAW_GRACE_MS = 30_000;
+  // Does the agent have a real controlling terminal? Darwin/Linux `ps` prints
+  // "??"/"?" for none. Errors (ps missing, pid gone) and Windows report
+  // "no tty" — the safe side, since withdrawing is what needs a tty to exist.
+  const hasRealTty = (pid: number): boolean => {
+    if (process.platform === "win32") return false;
+    try {
+      const out = execFileSync("ps", ["-o", "tty=", "-p", String(pid)], {
+        timeout: 2000,
+      })
+        .toString()
+        .trim();
+      return out !== "" && !out.includes("?");
+    } catch {
+      return false;
+    }
+  };
   const winsizePathFor = (pid: number) =>
     path.join(
       process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes"),
@@ -1905,14 +1932,31 @@ export async function cmdServe(rest: string[]): Promise<number> {
     const prev = negoApplied.get(pid);
     try {
       if (eff) {
-        if (prev && prev.cols === eff.cols && prev.rows === eff.rows) return;
+        negoCapsGoneAt.delete(pid); // caps are back — cancel any pending withdraw
+        // ±1-cell dead band: a viewer's reported capacity jitters by a row/col
+        // between visits (open-time layout vs steady state), and a 1-cell
+        // SIGWINCH reflow on every re-visit is exactly the churn users notice.
+        if (prev && Math.abs(prev.cols - eff.cols) <= 1 && Math.abs(prev.rows - eff.rows) <= 1)
+          return;
         const content = `${eff.cols} ${eff.rows} ${Date.now()}\n`;
         await mkdir(path.dirname(file), { recursive: true });
         await writeFile(file, content);
         negoApplied.set(pid, { ...eff, content });
       } else {
         if (!prev) return;
+        // Headless agent: nothing to yield to — keep the negotiated size until
+        // the next viewer shows up (the wrapper would otherwise snap to 80×24).
+        if (!hasRealTty(pid)) return;
+        // Grace: hold the size briefly so ⌘-cycling away and back doesn't
+        // reflow the TUI twice. The 5s sweep re-runs this until it expires.
+        const gone = negoCapsGoneAt.get(pid);
+        if (!gone) {
+          negoCapsGoneAt.set(pid, Date.now());
+          return;
+        }
+        if (Date.now() - gone < NEGO_WITHDRAW_GRACE_MS) return;
         negoApplied.delete(pid);
+        negoCapsGoneAt.delete(pid);
         try {
           // withdraw only what we wrote — a different content means ay attach
           // (or a direct /api/resize) owns the size now; leave it alone.
