@@ -25,6 +25,10 @@ concurrency:
   group: promote-release
   cancel-in-progress: false
 
+permissions:
+  contents: write # push the release branch
+  actions: write # dispatch the deploy workflow after a promote
+
 jobs:
   promote:
     runs-on: ubuntu-latest
@@ -37,6 +41,7 @@ jobs:
       - name: Fast-forward release to main@{1 hour ago}
         env:
           HOLD_PROD: ${{ vars.HOLD_PROD }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [ "${HOLD_PROD:-0}" = "1" ]; then
@@ -61,3 +66,16 @@ jobs:
           fi
           echo "Promoting release: ${CURRENT:-<new>} → $TARGET"
           git push origin "$TARGET:refs/heads/release"
+          # The push above cannot be relied on to trigger the deploy workflow
+          # (in practice the #271 batch moved release without any deploy run —
+          # PAT trigger chains are fragile, and new-branch pushes never match
+          # path filters). Dispatch it explicitly when the promoted batch
+          # touches the site; deploy-agent-yes.yml is idempotent so a spurious
+          # dispatch is merely a ~40s no-op redeploy.
+          if [ -z "$CURRENT" ] || ! git diff --quiet "$CURRENT" "$TARGET" -- \
+              lab/ui scripts/build-rgui.ts .github/workflows/deploy-agent-yes.yml; then
+            echo "Batch touches site paths — dispatching prod deploy."
+            gh workflow run deploy-agent-yes.yml --ref release
+          else
+            echo "No site-path changes in this batch — deploy not needed."
+          fi
