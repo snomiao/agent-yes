@@ -1862,6 +1862,7 @@
     <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-clipboard@0.1.0/lib/addon-clipboard.min.js"></script>
     <!-- QR generator (MIT, Kazuhiko Arase) — vendored locally so single-agent
          share QR codes render offline under `ay serve --http`. Classic script:
          defines the global `qrcode`. -->
@@ -5429,7 +5430,105 @@
         } catch {
           /* addon CDN blocked — terminal still works, just without auto-links */
         }
+        // OSC 52 → clipboard: a mouse-tracking TUI (claude) that does its own
+        // drag-selection copies the result with an OSC 52 write — without this
+        // addon that escape is silently dropped and touch selection (below)
+        // would "work" but never land anything on the clipboard.
+        try {
+          term.loadAddon(new ClipboardAddon.ClipboardAddon());
+        } catch {
+          /* addon CDN blocked — selection still works, copy falls back to menus */
+        }
         term.open(logEl);
+        // ── touch text selection ────────────────────────────────────────────
+        // xterm gives touch no selection path at all — a drag only scrolled.
+        // New scheme: ONE finger drags SELECT (scrolling moved to two-finger
+        // pan — see the pinch/pan block). The drag is replayed to xterm as
+        // synthetic mouse events, so both worlds work with one mechanism: a
+        // mouse-tracking TUI (claude) receives the drag and runs its own
+        // selection (copying via OSC 52 → addon above), while a plain buffer
+        // gets xterm's local selection, auto-copied on release. A stationary
+        // long-press still raises the browser's contextmenu → our terminal
+        // menu, and a plain tap stays a click (links, focus) — we only take
+        // over once the finger has clearly moved.
+        (function touchSelBoot(t) {
+          const el = t.element;
+          if (!el) return;
+          let sx = 0,
+            sy = 0,
+            tracking = false, // 1-finger gesture in flight
+            selecting = false; // …and past the slop → we own it
+          const screen = () => el.querySelector(".xterm-screen") || el;
+          const fire = (type, x, y, buttons) =>
+            screen().dispatchEvent(
+              new MouseEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                clientX: x,
+                clientY: y,
+                button: 0,
+                buttons,
+                // xterm's SelectionService starts a selection only for
+                // event.detail === 1 (single click) — synthetic events
+                // default to 0 and are silently ignored without this.
+                detail: 1,
+              }),
+            );
+          el.addEventListener(
+            "touchstart",
+            (ev) => {
+              if (ev.touches.length !== 1) {
+                // second finger → this became a pan/pinch; abandon selection
+                if (selecting) fire("mouseup", sx, sy, 0);
+                tracking = selecting = false;
+                return;
+              }
+              tracking = true;
+              selecting = false;
+              sx = ev.touches[0].clientX;
+              sy = ev.touches[0].clientY;
+            },
+            { passive: true },
+          );
+          el.addEventListener(
+            "touchmove",
+            (ev) => {
+              if (!tracking || ev.touches.length !== 1) return;
+              // preventDefault from the FIRST move: once the browser commits
+              // to a native scroll, later preventDefault calls are ignored —
+              // single-finger drags must never scroll under the selection.
+              ev.preventDefault();
+              const x = ev.touches[0].clientX,
+                y = ev.touches[0].clientY;
+              if (!selecting) {
+                if (Math.hypot(x - sx, y - sy) <= 10) return; // tap / long-press slop
+                selecting = true;
+                fire("mousedown", sx, sy, 1); // anchor at the touch ORIGIN
+              }
+              fire("mousemove", x, y, 1);
+            },
+            { passive: false },
+          );
+          const end = (ev) => {
+            const was = selecting;
+            tracking = selecting = false;
+            if (!was) return;
+            const p = (ev.changedTouches && ev.changedTouches[0]) || { clientX: sx, clientY: sy };
+            fire("mouseup", p.clientX, p.clientY, 0);
+            const mt = t.modes && t.modes.mouseTrackingMode;
+            if (mt && mt !== "none") return; // the TUI owns selection + OSC 52 copy
+            if (t.hasSelection()) {
+              copyText(t.getSelection());
+              const pill = document.createElement("div");
+              pill.className = "updatebar";
+              pill.textContent = "copied";
+              document.body.appendChild(pill);
+              setTimeout(() => pill.remove(), 900);
+            }
+          };
+          el.addEventListener("touchend", end);
+          el.addEventListener("touchcancel", end);
+        })(term);
         // Right-click opens our own menu (Copy / Paste / customizable quick
         // commands like `/fork [selection]`) instead of copying outright. We
         // always suppress the browser's native menu here so the custom one shows
@@ -5779,23 +5878,38 @@
         vv.addEventListener("scroll", onVV);
         onVV();
       }
-      // ── mobile pinch on the terminal = terminal zoom, not page zoom ─────────
-      // Two fingers over the log pane adjust the terminal FONT SIZE. On a
-      // negotiating host that reflows the PTY itself (bigger font → fewer
-      // readable cells → the host shrinks the grid → bigger crisp text; smaller
-      // font → more rows/cols), which is what a phone user actually means by
-      // pinch: "show me more / make it readable", with the surrounding UI
-      // staying put. Only 2-touch gestures over .log are intercepted — 1-finger
-      // scroll/selection passes to xterm, and the page keeps its native
+      // ── mobile two-finger gestures on the terminal: pan = scroll, pinch = zoom ──
+      // One finger now SELECTS (see touchSelBoot), so scrolling moves to two
+      // fingers. The two are discriminated by what actually changes once the
+      // gesture clears the slop: finger DISTANCE dominating → pinch (terminal
+      // FONT SIZE, as before — on a negotiating host the PTY itself reflows),
+      // centroid MOVEMENT dominating → pan, replayed to xterm as WheelEvents
+      // (viewport scroll in a normal buffer; arrow/CSI wheel in an alt-screen
+      // TUI, so claude's chat scrolls too). The page keeps its native
       // pinch-zoom everywhere else (an a11y requirement, WCAG 1.4.4).
       (function () {
         const logEl = $("log");
         if (!logEl) return;
-        let startDist = 0; // 0 = no pinch in flight
+        let startDist = 0; // 0 = no 2-finger gesture in flight
         let startFont = 0;
         let lastRatio = 1;
         let baseTransform = "";
+        let mode = ""; // "" undecided | "zoom" | "scroll"
+        let startCentY = 0;
+        let lastCentY = 0;
         const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+        const centY = (t) => (t[0].clientY + t[1].clientY) / 2;
+        const wheel = (dy, t) =>
+          (logEl.querySelector(".xterm-screen") || logEl).dispatchEvent(
+            new WheelEvent("wheel", {
+              bubbles: true,
+              cancelable: true,
+              deltaY: dy,
+              deltaMode: 0,
+              clientX: (t[0].clientX + t[1].clientX) / 2,
+              clientY: centY(t),
+            }),
+          );
         logEl.addEventListener(
           "touchstart",
           (ev) => {
@@ -5804,6 +5918,8 @@
             startDist = dist(ev.touches);
             startFont = termFontSize;
             lastRatio = 1;
+            mode = "";
+            startCentY = lastCentY = centY(ev.touches);
             const xt = logEl.querySelector(".xterm");
             baseTransform = xt ? xt.style.transform || "none" : "none";
           },
@@ -5814,7 +5930,22 @@
           (ev) => {
             if (ev.touches.length !== 2 || !startDist) return;
             ev.preventDefault();
-            lastRatio = dist(ev.touches) / startDist;
+            const d = dist(ev.touches);
+            const cy = centY(ev.touches);
+            if (!mode) {
+              // decide once the gesture clears the slop: what moved more?
+              const dd = Math.abs(d - startDist);
+              const dc = Math.abs(cy - startCentY);
+              if (Math.max(dd, dc) < 14) return;
+              mode = dd > dc ? "zoom" : "scroll";
+            }
+            if (mode === "scroll") {
+              const dy = cy - lastCentY;
+              lastCentY = cy;
+              if (dy) wheel(-dy, ev.touches); // finger down → content follows (scroll up)
+              return;
+            }
+            lastRatio = d / startDist;
             // Live preview: compose the pinch onto the fitted transform. The
             // grid truly reflows only when the negotiated size lands after the
             // gesture commits — a brief settle, traded for zero SIGWINCH storm
@@ -5829,8 +5960,11 @@
         );
         const endPinch = () => {
           if (!startDist) return;
+          const wasZoom = mode === "zoom";
           const target = Math.round(startFont * lastRatio);
           startDist = 0;
+          mode = "";
+          if (!wasZoom) return; // a pan commits nothing — the wheels already landed
           if (target !== termFontSize) setTermFontSize(target); // nego: cap → host reflows
           applyCanvasScale(); // clear the preview; re-letterbox at the real grid
         };
