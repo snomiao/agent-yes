@@ -5574,14 +5574,24 @@
       // openPreview()/select() push the entries this handler consumes.
       let suppressHash = false;
       window.addEventListener("popstate", () => {
+        // popstate ALSO fires on a plain location.hash assignment (a hash
+        // write is a same-document navigation), not just on back/forward — so
+        // only act, and only eat the paired hashchange, when there is actually
+        // a screen to close. Unconditional suppression here swallowed pasted
+        // #room:pid deep links into an open console (the ui-dom regression).
+        const ov = $("previewOverlay");
+        const preview = ov && !ov.hidden;
+        const detail =
+          window.innerWidth <= 720 &&
+          document.querySelector(".app").classList.contains("show-detail");
+        if (!preview && !detail) return; // nothing stacked — a real hash navigation
         // The back press may also rewind the #room:pid hash (select() rewrites
         // it in place). That press meant "close this screen", not "jump to the
         // previously-hashed agent" — eat the hashchange it triggers.
         suppressHash = true;
         setTimeout(() => (suppressHash = false), 0);
-        const ov = $("previewOverlay");
-        if (ov && !ov.hidden) return closePreviewNow();
-        if (window.innerWidth <= 720) goBackNow();
+        if (preview) return closePreviewNow();
+        goBackNow();
       });
       $("rback").addEventListener("click", goBack);
       // Swipe-right-from-the-left-edge → back, an alternative to the ‹ button.
