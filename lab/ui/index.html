@@ -15,6 +15,13 @@
     <link rel="icon" href="./icon.svg" />
     <link rel="apple-touch-icon" href="./icon.svg" />
     <script>
+      // Deploy stamp: build-assets.sh replaces the placeholder with the short
+      // commit SHA at deploy time; `ay serve` ships this file raw, so a
+      // surviving placeholder means a local/dev copy. Answers "which frontend
+      // am I actually running?" — including an offline-cached PWA shell —
+      // from the devtools console or the left-panel header.
+      window.AY_BUILD = /^__/.test("__AY_BUILD__") ? "dev" : "__AY_BUILD__";
+      console.log("agent-yes console build:", window.AY_BUILD);
       if ("serviceWorker" in navigator) {
         addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
       }
@@ -154,6 +161,15 @@
       }
       h1 .tag {
         color: var(--accent);
+      }
+      /* Frontend build stamp (AY_BUILD) — the quick "am I on the new deploy?"
+         check, readable even on an offline-cached PWA shell. */
+      h1 .build {
+        font-size: 10px;
+        font-weight: 400;
+        color: var(--muted);
+        vertical-align: middle;
+        user-select: all; /* one tap selects the whole SHA for copy */
       }
       /* Connection-path pill in the header: at a glance, is the terminal you're
          watching on the fast local/lan path or the slow relayed path? */
@@ -1831,7 +1847,10 @@
     <div class="app">
       <div class="left">
         <div class="head">
-          <h1><span class="tag">agent-yes</span> · console</h1>
+          <h1>
+            <span class="tag">agent-yes</span> · console
+            <span class="build" id="buildtag" title="frontend build (deploy commit)"></span>
+          </h1>
           <div class="sub">
             Live <code>ay ls</code> + per-agent tail &amp; send. Backed by <code>ay serve</code>.
           </div>
@@ -2295,6 +2314,7 @@
       const installOrigin = location.origin;
       const installPackage = BETA_ORIGINS.has(location.hostname) ? "agent-yes@beta" : "agent-yes";
       $("setup-sh").textContent = `curl -fsSL ${installOrigin}/setup.sh | sh`;
+      $("buildtag").textContent = window.AY_BUILD; // deploy stamp (see <head>)
       $("setup-sh").title = `installs ${installPackage}`;
       $("setup-ps").textContent = `powershell -c "irm ${installOrigin}/setup.ps1 | iex"`;
       $("setup-ps").title = `installs ${installPackage}`;
@@ -3685,17 +3705,53 @@
       // rides term.onResize → pushSize); on negotiating hosts the grid is
       // canonical — never reflow it locally, just re-letterbox and report the
       // new capacity so the host can move the min if needed.
+      // Mobile IME toggles resize ONLY the height (the width never moves), and
+      // TUIs keep what matters — the input box, the status line — at the
+      // BOTTOM. After a height-only pane change, snap the viewport to the
+      // bottom so the keyboard open/close storm can't leave it stranded
+      // mid-scrollback. Compares PANE pixels, not the grid: on a negotiating
+      // host the local grid is canonical and never regrids on a keyboard
+      // toggle — only the letterbox rescales — so grid deltas would miss it.
+      // Width changes (rotation, splitter drag) keep the reading position, and
+      // desktop is untouched. Alt-screen TUIs have no scrollback → no-op.
+      // The memo is the PREVIOUS stable pane size: by the time the resize
+      // event fires the layout already has the new dimensions, so a same-call
+      // before/after would always compare equal. select() seeds it (next
+      // frame, once the pane flip has laid out) — without the seed, the very
+      // first keyboard-open after picking an agent would be spent priming the
+      // memo instead of snapping.
+      let lastPaneDims = null;
+      function seedPaneDims() {
+        requestAnimationFrame(() => {
+          const el = $("log");
+          lastPaneDims = el ? { w: el.clientWidth, h: el.clientHeight } : null;
+        });
+      }
+      function snapIfHeightOnly() {
+        const el = $("log");
+        const now = el ? { w: el.clientWidth, h: el.clientHeight } : null;
+        const prev = lastPaneDims;
+        lastPaneDims = now;
+        if (!term || !prev || !now || window.innerWidth > 720) return;
+        if (now.w === prev.w && now.h !== prev.h) {
+          try {
+            term.scrollToBottom();
+          } catch {}
+        }
+      }
       function refitPane() {
         if (!term) return;
         if (negoActive) {
           applyCanvasScale();
           sendPresence();
+          snapIfHeightOnly();
           return;
         }
         if (fit)
           try {
             fit.fit();
           } catch {}
+        snapIfHeightOnly();
       }
       // Follow the canonical grid: resize our xterm to the agent's size (set by the
       // active driver / local owner) WITHOUT reflowing to our pane, then scale to
@@ -3710,9 +3766,18 @@
         }
         if (sz.cols !== term.cols || sz.rows !== term.rows) {
           agentSize = sz;
+          // Grid-level twin of snapIfHeightOnly: the host regrids rows-only in
+          // response to our keyboard-shrunk capacity report — keep the bottom
+          // (TUI input box + status) in view through that reflow too.
+          const rowsOnly = window.innerWidth <= 720 && sz.cols === term.cols;
           try {
             term.resize(sz.cols, sz.rows);
           } catch {}
+          if (rowsOnly) {
+            try {
+              term.scrollToBottom();
+            } catch {}
+          }
         }
         applyCanvasScale();
       }
@@ -5223,6 +5288,7 @@
           } catch {}
         }
         app.classList.add("show-detail");
+        seedPaneDims(); // arm the IME height-only snap for this pane
         // Shared-view gating (host-enforced; this is UX):
         //  • view-only (r)  → readonly-agent: hide composer/keybar + ALL agent actions.
         //  • read-write (rw) → steer-agent: keep composer/keybar (can type), but hide

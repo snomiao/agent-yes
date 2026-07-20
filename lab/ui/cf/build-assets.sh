@@ -20,6 +20,14 @@ rm -rf ./public/blog
 cp -R ../blog ./public/blog
 cp ../setup.sh ../setup.ps1 ./public/
 
+# Stamp the console with the deploying commit (index.html's AY_BUILD
+# placeholder; "dev" fallback when served raw by `ay serve`). Lets anyone —
+# and any agent — verify which frontend a browser is actually running, even
+# an offline-cached PWA shell. sed-into-tmp keeps this POSIX (BSD/GNU) safe.
+build=$(git rev-parse --short HEAD 2>/dev/null || echo unknown)
+sed "s/__AY_BUILD__/$build/g" ./public/w/index.html > ./public/w/index.html.tmp
+mv ./public/w/index.html.tmp ./public/w/index.html
+
 # Build a channel-specific installer without forking the canonical scripts.
 # Production leaves the defaults untouched. Beta Pages passes both variables,
 # so curl/PowerShell installs agent-yes@beta and prints the actual beta origin.
