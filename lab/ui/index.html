@@ -3952,6 +3952,12 @@
       }
       // In-console P2P preview: an iframe served from /w/p/<src>/<port>/, which
       // the Service Worker proxies over the machine's WebRTC tunnel (no relay).
+      // The iframe navigates via location.replace(), NEVER src assignment — an
+      // src= write on an already-loaded iframe pushes a TOP-LEVEL history entry,
+      // so each preview open/close silently stacked entries the back key then
+      // chewed through invisibly (URL never changes). previewUrl mirrors what
+      // the frame shows, since the src attribute stays stale with replace().
+      let previewUrl = "";
       function openPreview(src, port) {
         // Scope-relative so it works at both /w/ (agent-yes.com) and / (ay serve).
         const url = new URL("p/" + encodeURIComponent(src) + "/" + port + "/", location.href)
@@ -3959,14 +3965,42 @@
         const frame = $("previewFrame");
         if (!frame) return window.open(url, "_blank");
         $("previewTitle").textContent = "localhost:" + port;
-        frame.src = url;
-        $("previewOverlay").hidden = false;
+        previewUrl = url;
+        try {
+          frame.contentWindow.location.replace(url);
+        } catch {
+          frame.src = url;
+        }
+        const ov = $("previewOverlay");
+        if (ov.hidden) {
+          ov.hidden = false;
+          // The overlay is a "screen": give it a history entry so the hardware
+          // back key closes it (via popstate) instead of leaving the console.
+          try {
+            history.pushState({ ayPreview: 1 }, "", location.href);
+          } catch {}
+        }
       }
+      // UI close (✕ button): unwind our history entry so depth stays in sync
+      // with what's on screen; the popstate handler does the actual teardown.
+      // If the entry is already gone (user arrived here via back), close direct.
       function closePreview() {
+        if (history.state && history.state.ayPreview) history.back();
+        else closePreviewNow();
+      }
+      function closePreviewNow() {
         const ov = $("previewOverlay");
         if (ov) ov.hidden = true;
+        previewUrl = "";
         const frame = $("previewFrame");
-        if (frame) frame.src = "about:blank"; // tear down the app + its tunnel
+        if (frame) {
+          // replace(), not src= (see above); also tears down the app + tunnel.
+          try {
+            frame.contentWindow.location.replace("about:blank");
+          } catch {
+            frame.src = "about:blank";
+          }
+        }
       }
       async function doExpose() {
         const tx = exposePendingTx || localTx;
@@ -4159,12 +4193,14 @@
         });
         $("previewClose")?.addEventListener("click", closePreview);
         $("previewReload")?.addEventListener("click", () => {
-          const f = $("previewFrame");
-          if (f) f.src = f.src;
+          // reload(), not src re-assignment — src= would push a history entry.
+          try {
+            $("previewFrame")?.contentWindow.location.reload();
+          } catch {}
         });
         $("previewPop")?.addEventListener("click", () => {
-          const f = $("previewFrame");
-          if (f && f.src && f.src !== "about:blank") window.open(f.src, "_blank");
+          // frame.src stays stale with location.replace() — use the mirror.
+          if (previewUrl) window.open(previewUrl, "_blank");
         });
       })();
       (function shareModalBoot() {
@@ -5176,7 +5212,17 @@
         renderList();
         // Mobile: flip the single-column layout to the terminal ("detail") pane.
         // Done BEFORE term.open below so xterm measures a visible container.
-        document.querySelector(".app").classList.add("show-detail");
+        // Entering detail FROM the list gets a history entry, so the hardware
+        // back key / edge-swipe returns to the list (via popstate → goBackNow)
+        // instead of leaving the site — which showed a blank page in the
+        // installed PWA, whose history starts at the console itself.
+        const app = document.querySelector(".app");
+        if (window.innerWidth <= 720 && !app.classList.contains("show-detail")) {
+          try {
+            history.pushState({ ayDetail: 1 }, "", location.href);
+          } catch {}
+        }
+        app.classList.add("show-detail");
         // Shared-view gating (host-enforced; this is UX):
         //  • view-only (r)  → readonly-agent: hide composer/keybar + ALL agent actions.
         //  • read-write (rw) → steer-agent: keep composer/keybar (can type), but hide
@@ -5449,7 +5495,28 @@
       });
       // Mobile back: return to the list pane. The tail keeps streaming in the
       // background (selection unchanged), so reopening the agent is instant.
-      const goBack = () => document.querySelector(".app").classList.remove("show-detail");
+      const goBackNow = () => document.querySelector(".app").classList.remove("show-detail");
+      // ‹ button / swipe: unwind the detail history entry select() pushed (the
+      // popstate handler below does the flip), so history depth stays in sync
+      // with what's on screen. Without the entry (desktop), flip directly.
+      const goBack = () => {
+        if (history.state && history.state.ayDetail) history.back();
+        else goBackNow();
+      };
+      // Hardware/gesture back: peel the stacked "screens" (preview overlay,
+      // mobile detail pane) off one at a time instead of leaving the site.
+      // openPreview()/select() push the entries this handler consumes.
+      let suppressHash = false;
+      window.addEventListener("popstate", () => {
+        // The back press may also rewind the #room:pid hash (select() rewrites
+        // it in place). That press meant "close this screen", not "jump to the
+        // previously-hashed agent" — eat the hashchange it triggers.
+        suppressHash = true;
+        setTimeout(() => (suppressHash = false), 0);
+        const ov = $("previewOverlay");
+        if (ov && !ov.hidden) return closePreviewNow();
+        if (window.innerWidth <= 720) goBackNow();
+      });
       $("rback").addEventListener("click", goBack);
       // Swipe-right-from-the-left-edge → back, an alternative to the ‹ button.
       // Passive/read-only so it never fights xterm's own scroll or text
@@ -7110,6 +7177,12 @@
       // on hashchange and jump to that agent. select() writes the hash via
       // history.replaceState (which does NOT fire hashchange), so this never loops.
       window.addEventListener("hashchange", () => {
+        // Back-key screen-close (popstate above) may rewind the hash too; that
+        // navigation is not a deep-link jump — swallow exactly one event.
+        if (suppressHash) {
+          suppressHash = false;
+          return;
+        }
         const h = decodeURIComponent(location.hash.replace(/^#/, ""));
         // Only the #room:pid agent-deep-link form (pid = digits, ≤7 — same bound
         // boot() uses to tell a pid from a numeric token). Other forms (#room,
