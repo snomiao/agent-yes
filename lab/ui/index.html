@@ -4468,6 +4468,19 @@
         };
         return { menu, addItem, addSep };
       }
+      // Mobile: a tap on a URL in a busy TUI mistargets easily, and xterm
+      // links fire on a bare tap — so instead of navigating away outright,
+      // confirm with a small menu (the URL shown as a disabled header line).
+      // Desktop keeps the direct click-to-open behavior.
+      function showLinkMenu(ev, uri) {
+        const { menu, addItem, addSep } = ctxMenuShell();
+        const short = uri.length > 48 ? uri.slice(0, 45) + "…" : uri;
+        addItem(short, { disabled: true }, () => {});
+        addSep();
+        addItem("Open link", {}, () => window.open(uri, "_blank", "noopener,noreferrer"));
+        addItem("Copy URL", {}, () => copyText(uri));
+        openCtxMenu(menu, ev);
+      }
       // Append a built menu at the pointer, clamp into the viewport, and wire the
       // shared dismiss listeners (outside-click, Escape, blur, resize).
       function openCtxMenu(menu, ev) {
@@ -5407,6 +5420,9 @@
               // to publish it through agent-yes.com (on THIS agent's host: txFor(e)).
               const port = localhostPort(uri);
               if (port) return promptExpose(port, txFor(e));
+              // Mobile: confirm via the copy/open menu instead of navigating
+              // straight away (see showLinkMenu).
+              if (window.innerWidth <= 720) return showLinkMenu(ev, uri);
               window.open(uri, "_blank", "noopener,noreferrer");
             }),
           );
