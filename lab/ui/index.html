@@ -2369,7 +2369,21 @@
           sw.addEventListener("click", (e) => {
             e.preventDefault();
             const host = beta ? "agent-yes.com" : "beta.agent-yes.com";
-            location.href = "https://" + host + "/w/" + location.hash;
+            // Carry the saved-rooms cache (room→token) across the hop, since
+            // tokens live in per-origin localStorage — the other side's boot()
+            // imports it from #xfer= and scrubs the URL. Rides the FRAGMENT,
+            // never sent to any server (same trust model as #room:token
+            // deep links). p.h re-lands the console on the current agent.
+            let dest = "https://" + host + "/w/" + location.hash;
+            try {
+              const json = JSON.stringify({ r: loadRooms(), h: location.hash.slice(1) });
+              const b64 = btoa(unescape(encodeURIComponent(json)))
+                .replace(/\+/g, "-")
+                .replace(/\//g, "_")
+                .replace(/=+$/, "");
+              dest = "https://" + host + "/w/#xfer=" + b64;
+            } catch {}
+            location.href = dest;
           });
         }
       }
@@ -7198,6 +7212,37 @@
       // eat the token); a bare #room reconnects from the cached token; else local.
       async function boot() {
         ensureLocalSource();
+        // #xfer=<b64url JSON> — the prod ⇄ beta hop (envswitch) carrying the
+        // saved-rooms cache across origins, since room tokens live in
+        // per-origin localStorage and would otherwise be lost on the switch.
+        // Same trust model as the existing #room:token / #k= deep links: the
+        // fragment is never sent to any server, and it's scrubbed from the
+        // URL (replaceState) before anything else runs. Import merges — a
+        // newer ts wins, so a fresher token on THIS origin isn't clobbered —
+        // then the original #room:pid deep link (p.h) is restored so the
+        // console lands on the same agent it left.
+        if (location.hash.startsWith("#xfer=")) {
+          let carried = "";
+          try {
+            const b64 = location.hash.slice(6).replace(/-/g, "+").replace(/_/g, "/");
+            const p = JSON.parse(decodeURIComponent(escape(atob(b64))));
+            const mine = loadRooms();
+            let changed = false;
+            for (const [room, v] of Object.entries(p.r || {})) {
+              if (v && v.token && (!mine[room] || (v.ts || 0) > (mine[room].ts || 0))) {
+                mine[room] = v;
+                changed = true;
+              }
+            }
+            if (changed) localStorage.setItem(ROOMS_KEY, JSON.stringify(mine));
+            if (typeof p.h === "string") carried = p.h;
+          } catch {}
+          history.replaceState(
+            null,
+            document.title,
+            location.pathname + location.search + (carried ? "#" + carried : ""),
+          );
+        }
         const raw = location.hash.replace(/^#/, "");
         if (raw.startsWith("launch=")) {
           let spec = null;
