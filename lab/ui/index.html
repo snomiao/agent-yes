@@ -171,6 +171,38 @@
         vertical-align: middle;
         user-select: all; /* one tap selects the whole SHA for copy */
       }
+      /* prod ⇄ beta hop, next to the build stamp. Same channel styling as the
+         stamp but clickable; padded to a comfortable tap target on mobile. */
+      h1 .envswitch {
+        font-size: 10px;
+        font-weight: 600;
+        color: var(--accent);
+        vertical-align: middle;
+        text-decoration: none;
+        padding: 2px 6px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        margin-left: 2px;
+      }
+      /* "New deploy" pill (watchVersion): floats above the composer, tap =
+         reload. Replaces the old silent auto-reload, which could yank the
+         page mid-typing. Rides --kb so the soft keyboard can't cover it. */
+      .updatebar {
+        position: fixed;
+        left: 50%;
+        transform: translateX(-50%);
+        bottom: calc(18px + var(--sab, 0px) + var(--kb, 0px));
+        z-index: 80;
+        background: var(--panel2);
+        color: var(--fg);
+        border: 1px solid var(--accent);
+        border-radius: 999px;
+        padding: 8px 14px;
+        font: 12px var(--mono);
+        cursor: pointer;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+        white-space: nowrap;
+      }
       /* Connection-path pill in the header: at a glance, is the terminal you're
          watching on the fast local/lan path or the slow relayed path? */
       /* Per-peer connection-type pill in the terminal header — describes how this
@@ -1850,6 +1882,7 @@
           <h1>
             <span class="tag">agent-yes</span> · console
             <span class="build" id="buildtag" title="frontend build (deploy commit)"></span>
+            <a class="envswitch" id="envswitch" hidden></a>
           </h1>
           <div class="sub">
             Live <code>ay ls</code> + per-agent tail &amp; send. Backed by <code>ay serve</code>.
@@ -2315,6 +2348,31 @@
       const installPackage = BETA_ORIGINS.has(location.hostname) ? "agent-yes@beta" : "agent-yes";
       $("setup-sh").textContent = `curl -fsSL ${installOrigin}/setup.sh | sh`;
       $("buildtag").textContent = window.AY_BUILD; // deploy stamp (see <head>)
+      // prod ⇄ beta hop: both consoles speak to the SAME signaling
+      // (s.agent-yes.com is hardcoded — see SIG_DEFAULT) and the same rooms,
+      // only the frontend channel differs (beta = newest main, prod = release
+      // train). The href is minted at click time so the CURRENT #room:pid
+      // deep link rides along. Hidden on any other origin (ay serve /
+      // localhost), where a channel hop is meaningless. Room tokens live in
+      // per-origin localStorage, so the first hop into a private room may ask
+      // to re-auth — the deep link itself still resolves.
+      {
+        const sw = $("envswitch");
+        const beta = BETA_ORIGINS.has(location.hostname);
+        if (beta || location.hostname === "agent-yes.com") {
+          sw.hidden = false;
+          sw.textContent = beta ? "⇄ prod" : "⇄ beta";
+          sw.title = beta
+            ? "switch to the production console (agent-yes.com)"
+            : "switch to the beta console (newest main build)";
+          sw.href = "#";
+          sw.addEventListener("click", (e) => {
+            e.preventDefault();
+            const host = beta ? "agent-yes.com" : "beta.agent-yes.com";
+            location.href = "https://" + host + "/w/" + location.hash;
+          });
+        }
+      }
       $("setup-sh").title = `installs ${installPackage}`;
       $("setup-ps").textContent = `powershell -c "irm ${installOrigin}/setup.ps1 | iex"`;
       $("setup-ps").title = `installs ${installPackage}`;
@@ -7327,6 +7385,23 @@
       // ignores failures (e.g. remote rooms / cross-origin).
       function watchVersion() {
         let seen = null;
+        // A new deploy no longer hard-reloads on the spot (that could yank the
+        // page mid-typing) — it raises a tap-to-reload pill instead. The
+        // incoming AY_BUILD stamp is scraped from the fetched body so the pill
+        // can say WHICH build is waiting; selection + filter are restored
+        // across the reload so the update itself stays seamless.
+        const offerUpdate = (body) => {
+          if ($("updatebar")) return; // already offered
+          const m = /"dev" : "([^"]+)"/.exec(body);
+          const sha = m && m[1] !== "__AY_BUILD__" ? m[1] : "";
+          const bar = document.createElement("button");
+          bar.id = "updatebar";
+          bar.className = "updatebar";
+          bar.textContent = "console updated" + (sha ? " → " + sha : "") + " — tap to reload";
+          bar.title = "a new frontend build was deployed; reload to run it";
+          bar.addEventListener("click", () => location.reload());
+          document.body.appendChild(bar);
+        };
         const check = async () => {
           if (!isActive()) return;
           try {
@@ -7337,7 +7412,7 @@
               h = Math.imul(h, 0x01000193);
             }
             const tag = h >>> 0;
-            if (seen !== null && seen !== tag) return location.reload();
+            if (seen !== null && seen !== tag) return offerUpdate(body);
             seen = tag;
           } catch {}
         };
