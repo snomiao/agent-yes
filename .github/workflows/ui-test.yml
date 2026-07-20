@@ -1,12 +1,17 @@
 name: UI Test
 
 # The console's pure logic (lab/ui/console-logic.js) is unit-tested in the main
-# Matrix Test suite. THIS workflow covers the rendered console, triggered by
-# changes to the UI or EITHER UI test suite (lab/ui, tests/ui-dom, tests/ui-test):
+# Matrix Test suite. THIS workflow covers the rendered console:
 #   - ui-dom: a deterministic, hermetic Playwright DOM test of the real console
-#     (blocking — required before merge). tests/ui-dom/** must be in the
-#     trigger paths, else a change to the test or its stub server can silently
-#     rot without ever running (this is exactly how the /e2e.js stub gap slipped in).
+#     — a REQUIRED status check. Required checks must report on EVERY PR, so
+#     the pull_request trigger has NO paths filter; instead each job detects
+#     whether UI files changed and skip-passes in seconds when they didn't.
+#     (Path-filtering the trigger would leave the required check permanently
+#     "expected" on non-UI PRs, blocking their merge. And #277/#278 showed the
+#     inverse failure: as a non-required check, a red ui-dom was merged over.)
+#     tests/ui-dom/** must be in the detection globs, else a change to the test
+#     or its stub server can silently rot without ever running (this is exactly
+#     how the /e2e.js stub gap slipped in).
 #   - ui-render: the heavier xterm.js render test — Playwright screenshots judged
 #     by Gemini Vision — non-blocking (continue-on-error), since the judge is
 #     non-deterministic and needs GEMINI_API_KEY (without it the test self-skips).
@@ -23,25 +28,47 @@ on:
       - ".github/workflows/ui-test.yml"
   pull_request:
     branches: [main]
-    paths:
-      - "lab/ui/**"
-      - "tests/ui-dom/**"
-      - "tests/ui-test/**"
 
 jobs:
-  # Deterministic, hermetic DOM test of the real console — blocking.
+  # Deterministic, hermetic DOM test of the real console — blocking (required).
   ui-dom:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0 # need the base commit to diff against
+      # Required checks must report on every PR — so instead of a paths filter
+      # on the trigger, decide here: no UI-relevant changes → skip the heavy
+      # steps and let the job pass in seconds.
+      - name: Detect UI changes
+        id: diff
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            if git diff --name-only "$base"...HEAD -- \
+                 'lab/ui' 'tests/ui-dom' 'tests/ui-test' '.github/workflows/ui-test.yml' \
+                 | grep -q .; then
+              echo "changed=1" >> "$GITHUB_OUTPUT"
+            else
+              echo "changed=0" >> "$GITHUB_OUTPUT"
+              echo "no UI changes — skip-passing"
+            fi
+          else
+            echo "changed=1" >> "$GITHUB_OUTPUT"
+          fi
       - uses: oven-sh/setup-bun@v2
+        if: steps.diff.outputs.changed == '1'
         with:
           bun-version: latest
       - run: bun install
+        if: steps.diff.outputs.changed == '1'
       - name: Install Playwright Chromium
+        if: steps.diff.outputs.changed == '1'
         run: bunx playwright install --with-deps chromium
       - name: Run deterministic console DOM test
+        if: steps.diff.outputs.changed == '1'
         run: bun run test:ui-dom
 
   # Heavier xterm render fidelity test (Gemini Vision) — non-blocking.
@@ -50,13 +77,38 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # Same gate as ui-dom: don't burn Playwright + Gemini quota on PRs that
+      # never touched the UI.
+      - name: Detect UI changes
+        id: diff
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="${{ github.event.pull_request.base.sha }}"
+            if git diff --name-only "$base"...HEAD -- \
+                 'lab/ui' 'tests/ui-dom' 'tests/ui-test' '.github/workflows/ui-test.yml' \
+                 | grep -q .; then
+              echo "changed=1" >> "$GITHUB_OUTPUT"
+            else
+              echo "changed=0" >> "$GITHUB_OUTPUT"
+              echo "no UI changes — skip-passing"
+            fi
+          else
+            echo "changed=1" >> "$GITHUB_OUTPUT"
+          fi
       - uses: oven-sh/setup-bun@v2
+        if: steps.diff.outputs.changed == '1'
         with:
           bun-version: latest
       - run: bun install
+        if: steps.diff.outputs.changed == '1'
       - name: Install Playwright Chromium
+        if: steps.diff.outputs.changed == '1'
         run: bunx playwright install --with-deps chromium
       - name: Run UI render test (xterm.js → Gemini Vision judge)
+        if: steps.diff.outputs.changed == '1'
         continue-on-error: true
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
