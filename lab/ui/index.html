@@ -6819,6 +6819,14 @@ my.translate = async (text, lang) => {
         // Tier 2 — debounced output (tail) search for alive agents not already shown.
         if (omniTailTimer) clearTimeout(omniTailTimer);
         if (q.length >= 2) omniTailTimer = setTimeout(() => omniTailSearch(q), 320);
+        // Tier 3 — debounced CHAT-HISTORY search (server-side /api/search over
+        // each agent's rendered log tail; covers exited agents and scrollback
+        // the live-tail tier never sees). Fired just BEFORE tier 2's ~20
+        // parallel /api/read calls: on HTTP/1.1 the browser caps same-origin
+        // connections at ~6, so the single search request must enter the pool
+        // first or it queues behind every tail read (measured: seconds).
+        if (omniHistTimer) clearTimeout(omniHistTimer);
+        if (q.length >= 2) omniHistTimer = setTimeout(() => omniHistorySearch(q), 300);
       }
 
       async function omniTailSearch(q) {
@@ -6867,6 +6875,55 @@ my.translate = async (text, lang) => {
           }),
         );
         if (seq === omniTailSeq) renderOmni();
+      }
+
+      // Tier 3 — chat-history hits from GET /api/search on every writable live
+      // source (fleet fan-out, same shape as /api/ws). The server renders each
+      // agent's raw-log tail through headless xterm and caches it by
+      // (size, mtime), so repeat queries are cheap; partial:true responses
+      // (time budget hit while the cache warms) are simply what we show now —
+      // the next keystroke re-queries a warmer cache. Hits map back to list
+      // entries by (source, pid); agents already shown by tier 1/2 are skipped.
+      let omniHistSeq = 0;
+      let omniHistTimer = null;
+      async function omniHistorySearch(q) {
+        const seq = ++omniHistSeq;
+        const srcs = [...sources.values()].filter((s) => s.tx?.fetchJSON && s.live && !s.readonly);
+        const results = await Promise.all(
+          srcs.map(async (s) => {
+            try {
+              const r = await s.tx.fetchJSON("/api/search?q=" + encodeURIComponent(q));
+              return (r?.hits || []).map((h) => ({ h, srcId: s.id }));
+            } catch {
+              return []; // older daemon (404) / transport error — skip source
+            }
+          }),
+        );
+        if (seq !== omniHistSeq || !omniOpen()) return;
+        const ql = q.toLowerCase();
+        for (const { h, srcId } of results.flat()) {
+          const key = srcId + "#" + h.pid;
+          if (omniRows.some((r) => r.kind === "agent" && r.entry._key === key)) continue;
+          const e = entries.find((x) => x._key === key);
+          if (!e) continue; // hit for an agent the list doesn't know (raced away)
+          const raw = String(h.snippet || "");
+          const li = raw.toLowerCase().indexOf(ql);
+          const snippet =
+            li >= 0
+              ? esc(raw.slice(0, li)) +
+                "<b>" +
+                esc(raw.slice(li, li + q.length)) +
+                "</b>" +
+                esc(raw.slice(li + q.length))
+              : esc(raw);
+          const at = omniRows.findIndex((r) => r.kind === "spawn");
+          const row = { kind: "agent", entry: e, snippet };
+          if (at >= 0) {
+            omniRows.splice(at, 0, row);
+            if (at <= omniIdx) omniIdx++; // keep the highlight on the same row
+          } else omniRows.push(row);
+        }
+        renderOmni();
       }
 
       function omniMove(d) {

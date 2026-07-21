@@ -31,6 +31,7 @@ import {
   recentReadEdges,
   renderLogTailLines,
   renderRawLog,
+  renderRawLogLines,
   resolveOne,
   snapshotStatus,
   writeToIpc,
@@ -152,6 +153,14 @@ function tokenPath(): string {
 function heartbeatPath(): string {
   return path.join(agentYesHome(), ".serve-heartbeat");
 }
+// /api/search — chat-history search (v1). Per-agent rendered-tail cache, keyed
+// on the log's (size, mtime): the expensive part is the headless-xterm replay,
+// so an unchanged log never re-renders. Map insertion order doubles as LRU.
+const SEARCH_TAIL_BYTES = 256 * 1024;
+const SEARCH_MAX_HITS = 20;
+const SEARCH_CACHE_MAX = 300;
+const searchTextCache = new Map<string, { size: number; mtimeMs: number; text: string }>();
+
 const HEARTBEAT_WRITE_MS = 5_000;
 const HEARTBEAT_STALE_MS = 15_000; // event loop is wedged if no stamp this long (3 missed)
 
@@ -2010,6 +2019,99 @@ export async function cmdServe(rest: string[]): Promise<number> {
       try {
         const records = await listRecords(keyword, opts);
         return Response.json(await Promise.all(records.map(withMeta)));
+      } catch (e) {
+        return new Response((e as Error).message, { status: 500 });
+      }
+    }
+
+    // GET /api/search?q= — chat-history search across every agent's log.
+    // v1 ("simple" scope, by design): no sidecar index yet — each agent's raw
+    // log TAIL (SEARCH_TAIL_BYTES) is rendered through the same headless-xterm
+    // path the reader uses (so TUI redraw spam collapses into real transcript
+    // lines) and cached by (size, mtime); only agents whose log moved re-render.
+    // Requests scan newest-first under a time budget and return partial:true
+    // when the budget ran out before the fleet was covered — the console just
+    // re-queries and hits the now-warm cache. Upgrade path: an incremental
+    // transcript sidecar + full-history index (see the /api/ws pattern).
+    if (req.method === "GET" && p === "/api/search") {
+      const q = (url.searchParams.get("q") || "").trim();
+      if (q.length < 2) return Response.json({ hits: [], scanned: 0, total: 0, partial: false });
+      const ql = q.toLowerCase();
+      const budget = Math.min(3000, Number(url.searchParams.get("budget_ms")) || 900);
+      const t0 = Date.now();
+      try {
+        const records = await listRecords(undefined, defaultOpts({ all: true }));
+        // newest activity first — the log mtime is the stop/activity clock.
+        const stats = await Promise.all(
+          records.map(async (r) => ({
+            r,
+            st: r.log_file ? await stat(r.log_file).catch(() => null) : null,
+          })),
+        );
+        const live = stats
+          .filter((x) => x.st)
+          .sort((a, b) => (b.st!.mtimeMs || 0) - (a.st!.mtimeMs || 0));
+        const hits: unknown[] = [];
+        let scanned = 0;
+        let partial = false;
+        for (const { r, st } of live) {
+          if (hits.length >= SEARCH_MAX_HITS) break;
+          if (Date.now() - t0 > budget) {
+            partial = true;
+            break;
+          }
+          const key = String(r.pid);
+          let ent = searchTextCache.get(key);
+          if (!ent || ent.size !== st!.size || ent.mtimeMs !== st!.mtimeMs) {
+            try {
+              const fh = await open(r.log_file!, "r");
+              let buf: Uint8Array;
+              try {
+                if (st!.size <= SEARCH_TAIL_BYTES) {
+                  const data = await fh.readFile();
+                  buf = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+                } else {
+                  const tmp = Buffer.alloc(SEARCH_TAIL_BYTES);
+                  const { bytesRead } = await fh.read(
+                    tmp,
+                    0,
+                    SEARCH_TAIL_BYTES,
+                    st!.size - SEARCH_TAIL_BYTES,
+                  );
+                  buf = new Uint8Array(tmp.buffer, 0, bytesRead);
+                }
+              } finally {
+                await fh.close();
+              }
+              const geom = (await readPtysize(r.pid).catch(() => null)) ?? undefined;
+              const lines = await renderRawLogLines(buf, geom ?? undefined);
+              ent = { size: st!.size, mtimeMs: st!.mtimeMs, text: lines.join("\n") };
+              searchTextCache.set(key, ent);
+              // bound the cache: drop the oldest entries past the cap
+              if (searchTextCache.size > SEARCH_CACHE_MAX) {
+                const k = searchTextCache.keys().next().value;
+                if (k !== undefined) searchTextCache.delete(k);
+              }
+            } catch {
+              continue; // unreadable log — skip this agent
+            }
+          } else {
+            // refresh LRU position
+            searchTextCache.delete(key);
+            searchTextCache.set(key, ent);
+          }
+          scanned++;
+          const tl = ent.text.toLowerCase();
+          const idx = tl.lastIndexOf(ql); // latest occurrence reads most relevant
+          if (idx < 0) continue;
+          const from = Math.max(0, idx - 60);
+          const snippet = ent.text
+            .slice(from, idx + ql.length + 60)
+            .replace(/\s+/g, " ")
+            .trim();
+          hits.push({ pid: r.pid, cli: r.cli, cwd: r.cwd, snippet, match_at: idx });
+        }
+        return Response.json({ hits, scanned, total: live.length, partial });
       } catch (e) {
         return new Response((e as Error).message, { status: 500 });
       }
