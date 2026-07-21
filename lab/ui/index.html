@@ -3224,6 +3224,63 @@
       // and can change (relay fallback); a light poll keeps every pill honest.
       setInterval(refreshConnKinds, 2500);
 
+      // ---- perf beacon: measured slowness reports itself to the daemon -------
+      // Counterpart of serve.ts /api/perf-beacon. Every minute, summarize the
+      // perf ring rows newer than the last beacon per SOURCE (rtc rows carry
+      // .room); a window with connect.fails or p95(req.end) at/over the slow
+      // threshold POSTs its summary to that source over whatever transport is
+      // already up (local fetch / mux / the room's WebRTC channel). The daemon
+      // appends to ~/.agent-yes/perf-beacons.jsonl — purely local — so a
+      // headless watcher (an agent tailing the file, a cron) learns about a
+      // slow phone or tab WITHOUT driving any browser. Quiet windows send
+      // nothing; older daemons 404 and are ignored.
+      const PERF_BEACON_MS = 60_000;
+      let perfBeaconCursor = Date.now();
+      setInterval(() => {
+        try {
+          const rows = (window.__ayPerf || []).filter((r) => r.t > perfBeaconCursor);
+          if (!rows.length) return;
+          perfBeaconCursor = rows[rows.length - 1].t;
+          const slowMs =
+            (window.__ayPerfReport && window.__ayPerfReport().slowMs) || 300;
+          const byRoom = new Map();
+          for (const r of rows) {
+            const k = r.room || "";
+            if (!byRoom.has(k)) byRoom.set(k, []);
+            byRoom.get(k).push(r);
+          }
+          for (const [room, rs] of byRoom) {
+            const fails = rs.filter((r) => /fail/.test(r.event || "")).length;
+            const ends = rs
+              .filter((r) => r.event === "req.end" && typeof r.ms === "number")
+              .map((r) => r.ms)
+              .sort((a, b) => a - b);
+            const pick = (q) => (ends.length ? ends[Math.floor((ends.length - 1) * q)] : 0);
+            const p95 = pick(0.95);
+            if (!fails && p95 < slowMs) continue; // healthy window — no beacon
+            const s = sources.get(room) || sources.get(LOCAL);
+            if (!s?.tx?.post || s.readonly) continue;
+            s.tx
+              .post("/api/perf-beacon", {
+                room,
+                viewer: myViewerId,
+                build: window.AY_BUILD || "",
+                ua: navigator.userAgent.slice(0, 120),
+                summary: {
+                  windowMs: PERF_BEACON_MS,
+                  rows: rs.length,
+                  fails,
+                  reqEnd: { n: ends.length, p50: pick(0.5), p95, max: ends[ends.length - 1] || 0 },
+                  slowMs,
+                },
+              })
+              .catch(() => {});
+          }
+        } catch {
+          /* beaconing must never break the console */
+        }
+      }, PERF_BEACON_MS);
+
       // ---- live performance HUD (opt-in via the ⋯ menu, hidden by default) -----
       // Surfaces the metrics that actually move when the console feels laggy: render
       // fps, keystroke throughput (xterm onData), agent output rate (term.write),
