@@ -1,4 +1,4 @@
-import { mkdir, open, readFile, stat, unlink, writeFile } from "fs/promises";
+import { appendFile, mkdir, open, readFile, stat, unlink, writeFile } from "fs/promises";
 import { existsSync, renameSync, watch, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -2983,6 +2983,47 @@ export async function cmdServe(rest: string[]): Promise<number> {
 
     // POST /api/presence  body {viewer, agent, cols, rows, sel?} — a viewer
     // self-reports which agent it's watching + its viewport (agent=null clears).
+    // POST /api/perf-beacon — a viewer that MEASURED slowness reports it here.
+    // The console beacons (60s cadence, only when its window saw connect.fail
+    // or p95 ≥ its slow threshold) over whatever transport it already has —
+    // local fetch, /api/mux, or the room's WebRTC channel — so a slow PHONE
+    // lands in the same place as a slow same-PC tab. Rows append to
+    // <AGENT_YES_HOME>/perf-beacons.jsonl: purely local (no cloud/telemetry
+    // service), and anything headless — an agent tailing the file, a cron —
+    // can watch for slowness without driving a browser. Size-capped by
+    // truncate-to-recent so it can't grow unbounded.
+    if (req.method === "POST" && p === "/api/perf-beacon") {
+      let b: { summary?: unknown; build?: string; ua?: string; room?: string; viewer?: string };
+      try {
+        b = (await req.json()) as typeof b;
+      } catch {
+        return new Response("invalid JSON body", { status: 400 });
+      }
+      try {
+        const home = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
+        const file = path.join(home, "perf-beacons.jsonl");
+        const line = JSON.stringify({
+          t: Date.now(),
+          room: String(b.room ?? "").slice(0, 64),
+          viewer: String(b.viewer ?? "").slice(0, 64),
+          build: String(b.build ?? "").slice(0, 16),
+          ua: String(b.ua ?? "").slice(0, 120),
+          summary: b.summary ?? null,
+        });
+        await mkdir(home, { recursive: true });
+        await appendFile(file, line + "\n");
+        // cap: keep the newest half once the file passes 4MB
+        const st = await stat(file).catch(() => null);
+        if (st && st.size > 4 * 1024 * 1024) {
+          const txt = await readFile(file, "utf-8");
+          await writeFile(file, txt.slice(Math.floor(txt.length / 2)).replace(/^[^\n]*\n/, ""));
+        }
+      } catch {
+        /* best-effort — a failed beacon write must never error the viewer */
+      }
+      return new Response(null, { status: 204 });
+    }
+
     if (req.method === "POST" && p === "/api/presence") {
       let b: {
         viewer?: string;
