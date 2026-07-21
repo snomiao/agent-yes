@@ -7225,7 +7225,16 @@ my.translate = async (text, lang) => {
       // left the room dead until a manual reload. Retry with jittered backoff
       // until the room is forgotten.
       const RTC_BACKOFF_MIN = 1000,
-        RTC_BACKOFF_MAX = 30000;
+        RTC_BACKOFF_MAX = 30000,
+        // A room that keeps failing (its daemon is gone, not restarting) backs
+        // off much further: 5 dead saved rooms at the 30s cap meant an 8s
+        // connect attempt was in flight almost continuously — a permanent
+        // signaling + ICE storm that measurably slowed the LIVE rooms and
+        // flooded the console with [ay-perf] connect.fail logs. After
+        // RTC_DEAD_AFTER consecutive failures the cap grows to 5 minutes; one
+        // healthy connect resets everything.
+        RTC_BACKOFF_DEAD_MAX = 300000,
+        RTC_DEAD_AFTER = 5;
       async function connectRtcSource(s) {
         s.reconnecting = true; // block overlapping attempts while this one is in flight
         try {
@@ -7262,6 +7271,7 @@ my.translate = async (text, lang) => {
           s.client = c;
           s.tx = rtcTx(c);
           s.reconnectDelay = RTC_BACKOFF_MIN; // a healthy connect resets the backoff
+          s.failCount = 0; // …and the dead-room escalation (see RTC_BACKOFF_DEAD_MAX)
           clearTimeout(s.reconnectTimer); // cancel any reconnect queued during replace
           s.reconnectTimer = null;
           subscribeSource(s); // re-establish the live delta stream over the new wire
@@ -7309,7 +7319,8 @@ my.translate = async (text, lang) => {
         if (s.removed || s.reconnectTimer || s.reconnecting) return;
         const base = s.reconnectDelay || RTC_BACKOFF_MIN;
         const delay = Math.round(base * (0.75 + Math.random() * 0.5)); // jitter
-        s.reconnectDelay = Math.min(base * 2, RTC_BACKOFF_MAX);
+        const cap = (s.failCount || 0) >= RTC_DEAD_AFTER ? RTC_BACKOFF_DEAD_MAX : RTC_BACKOFF_MAX;
+        s.reconnectDelay = Math.min(base * 2, cap);
         s.reconnectTimer = setTimeout(async () => {
           s.reconnectTimer = null;
           if (s.removed || s.reconnecting) return;
@@ -7326,6 +7337,7 @@ my.translate = async (text, lang) => {
             if (sel && sel.startsWith(s.id + "#")) select(sel);
           } catch {
             s.live = false;
+            s.failCount = (s.failCount || 0) + 1; // dead-room escalation counter
             scheduleRtcReconnect(s); // keep trying
           }
         }, delay);
@@ -7376,6 +7388,7 @@ my.translate = async (text, lang) => {
           s.live = true;
         } catch (e) {
           s.live = false;
+          s.failCount = (s.failCount || 0) + 1; // dead-room escalation counter
           scheduleRtcReconnect(s);
         }
         s.tried = true;

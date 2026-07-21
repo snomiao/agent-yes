@@ -42,7 +42,13 @@ jobs:
 
       - name: Install dependencies (Node)
         if: matrix.runtime == 'node'
-        run: npm install
+        # npm 10 (bundled with node 20/22) crashes on some freshly-published
+        # peer metadata ("Cannot read properties of null (reading 'edgesOut')"
+        # in arborist's #loadPeerSet — hit live 2026-07-21 via a dep's peer
+        # set; npm 11 and bun resolve the same tree fine). Pin npm ≥11.
+        run: |
+          npm install -g npm@^11
+          npm install
 
       - name: Install dependencies (Bun)
         if: matrix.runtime == 'bun'
