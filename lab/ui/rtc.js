@@ -31,7 +31,18 @@ const SUB = "ay-signal-1";
 export { SIG_DEFAULT };
 
 const PERF_KEY = "ay.perf";
-const PERF_SLOW_MS = 750;
+// Force-log ("this was slow") threshold. 750ms hid everything a LAN user
+// would call slow — on a local network a 300ms round-trip is already an
+// incident. Overridable per browser: localStorage["ay.perfSlowMs"] = "150"
+// for strict LAN monitoring, or a bigger number on a high-latency link.
+const PERF_SLOW_MS = (() => {
+  try {
+    const v = Number(localStorage.getItem("ay.perfSlowMs"));
+    return Number.isFinite(v) && v > 0 ? v : 300;
+  } catch {
+    return 300;
+  }
+})();
 const perfNow = () => Math.round(performance.now());
 function perfEnabled() {
   try {
@@ -50,14 +61,26 @@ function perfLog(scope, event, data = {}, force = false) {
       const byEvent = {};
       for (const r of rows) {
         const k = `${r.scope}:${r.event}`;
-        const b = (byEvent[k] ||= { count: 0, maxMs: 0, lastMs: 0 });
+        const b = (byEvent[k] ||= { count: 0, maxMs: 0, lastMs: 0, _ms: [] });
         b.count++;
         if (typeof r.ms === "number") {
           b.lastMs = r.ms;
           b.maxMs = Math.max(b.maxMs, r.ms);
+          b._ms.push(r.ms);
         }
       }
-      return { count: rows.length, byEvent, last: rows.slice(-40) };
+      // Percentiles beat max/last for "is this link actually slow": the ring
+      // buffer already holds every request, so slowness analysis shouldn't
+      // depend on what crossed the console-print threshold.
+      for (const b of Object.values(byEvent)) {
+        const ms = b._ms.sort((a, z) => a - z);
+        delete b._ms;
+        if (ms.length) {
+          b.p50 = ms[Math.floor((ms.length - 1) * 0.5)];
+          b.p95 = ms[Math.floor((ms.length - 1) * 0.95)];
+        }
+      }
+      return { count: rows.length, slowMs: PERF_SLOW_MS, byEvent, last: rows.slice(-40) };
     };
   if (!w.__ayPerfClear) w.__ayPerfClear = () => (w.__ayPerf = []);
   buf.push(rec);
