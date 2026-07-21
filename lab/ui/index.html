@@ -2177,7 +2177,7 @@
       <div class="omnibox">
         <input
           id="omni-input"
-          placeholder='Search agents by title, then output…  ·  "/" commands  ·  /ws workspaces'
+          placeholder='Search agents &amp; workspaces, then output…  ·  "/" commands  ·  /ws workspaces'
           spellcheck="false"
           autocapitalize="off"
           autocomplete="off"
@@ -6312,8 +6312,9 @@
           if (seq !== omniWsFetchSeq) return; // superseded by a newer fetch
           omniWsFetching = false;
           omniWsCache = { at: Date.now(), items: all.flat() };
-          // Repaint only if the user is still looking at a /ws view.
-          if (omniOpen() && /^\/ws(\s|$)/i.test($("omni-input").value.trim())) runOmni();
+          // Repaint if the palette still shows anything workspace-flavored: the
+          // /ws view OR a plain query (which mixes ws rows in — see runOmni).
+          if (omniOpen() && $("omni-input").value.trim()) runOmni();
         });
       }
       const wsSpecOf = (w) => `${w.owner}/${w.repo}@${w.branch}`;
@@ -6363,6 +6364,33 @@
               : "no workspaces on any connected host (layout <wsRoot>/<owner>/<repo>/tree/<branch>)",
           });
         return rows;
+      }
+      // Plain-query twin of omniWsRows (`ay ws ls` parity in the palette): the
+      // same cache and match, but no /ws chrome — a capped slice of workspace
+      // rows mixed under the agent hits, so a repo/branch name finds its
+      // checkout without the /ws prefix. Empty until the cache warms (the
+      // fetch's repaint re-runs the query once items land).
+      function omniWsSearchRows(toks, cap) {
+        if (!omniWsCache) {
+          if (!omniWsFetching) omniWsFetch();
+          return [];
+        }
+        if (Date.now() - omniWsCache.at > OMNI_WS_TTL && !omniWsFetching) omniWsFetch();
+        return omniWsCache.items
+          .filter((it) =>
+            toks.every((t) =>
+              (wsSpecOf(it.ws) + " " + it.ws.path + " " + it.host)
+                .toLowerCase()
+                .includes(t.toLowerCase()),
+            ),
+          )
+          .sort(
+            (a, b) =>
+              (b.ws.agents?.live || 0) - (a.ws.agents?.live || 0) ||
+              wsSpecOf(a.ws).localeCompare(wsSpecOf(b.ws)),
+          )
+          .slice(0, cap)
+          .map((it) => ({ kind: "ws", ws: it.ws, srcId: it.srcId, host: it.host }));
       }
       // Lazy git status for the HIGHLIGHTED workspace only — a full-status join
       // is O(workspaces × git status) and measured in seconds, so state loads
@@ -6587,6 +6615,11 @@
           )
           .slice(0, 30);
         omniRows = hits.map((entry) => ({ kind: "agent", entry }));
+        // Workspaces answer the SAME query (`ay ws ls` parity): a repo/branch
+        // name surfaces its checkouts right under the agents — spawn into an
+        // idle workspace without the /ws prefix. Capped so agents keep the
+        // front of the list; ⏎ on a ws row behaves exactly as in /ws.
+        if (toks.length) omniRows.push(...omniWsSearchRows(toks, 6));
         if (q) {
           omniRows.push({ kind: "spawn" });
           // Fork is pinned to the open agent (omniForkSource), and the row carries
