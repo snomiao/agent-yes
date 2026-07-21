@@ -4382,55 +4382,70 @@
       const QUICKCMD_KEY = "ay.quickCmds";
       // Two command flavors share the template field:
       //   plain  — text sent to the agent's stdin ([selection] filled in)
-      //   js:…   — a pure-frontend JS function body, run with (text, ay) where
-      //            text = the selection and ay = the helper surface below.
-      //            The translate entries are the demo: duplicate a line in the
-      //            editor, change the language code, done — all localStorage.
+      //   js:…   — a pure-frontend JS function body, run as (text, ay, my):
+      //            text = the selection, ay = the tiny built-in surface below,
+      //            my = YOUR function library from the user-scripts editor.
       const DEFAULT_QUICKCMDS = [
         { label: "Fork with selection", template: "/fork [selection]" },
-        { label: "Translate → English", template: 'js: return ay.translate(text, "en")' },
-        { label: "Translate → 中文", template: 'js: return ay.translate(text, "zh")' },
-      ];
-      // Helper surface handed to `js:` quick commands as `ay`.
-      const quickCmdApi = {
-        // Chrome's built-in Translator API (138+, on-device model) when
-        // available; otherwise fall back to a Google Translate tab. Returns ""
-        // when the fallback tab was opened (nothing to show inline).
-        translate: async (text, lang) => {
-          // Never end silently: every path returns something the result
-          // overlay will show — an empty selection, the translation, or what
-          // the fallback did. (The first ship ended silently on mobile, where
-          // Android Chrome has NO Translator API and the fallback tab could be
-          // popup-blocked after the awaits consumed the tap's activation.)
-          if (!String(text || "").trim()) return "nothing selected — drag-select some text first";
-          try {
-            if (window.Translator && window.LanguageDetector) {
-              const det = await LanguageDetector.create();
-              const d = await det.detect(String(text).slice(0, 1000));
-              const src = (d && d[0] && d[0].detectedLanguage) || "en";
-              if (src === lang) return text;
-              const tr = await Translator.create({ sourceLanguage: src, targetLanguage: lang });
-              return await tr.translate(text);
-            }
-          } catch {
-            /* model unavailable / language pair unsupported → tab fallback */
-          }
-          const url =
-            "https://translate.google.com/?sl=auto&tl=" +
-            encodeURIComponent(lang) +
-            "&op=translate&text=" +
-            encodeURIComponent(String(text).slice(0, 5000));
-          const win = quickCmdApi.open(url);
-          // Popup blocked (window.open after an await has no activation left):
-          // surface the URL itself — the overlay text is selectable/copyable.
-          if (!win) return "on-device Translator unavailable and the popup was blocked — open manually:\n" + url;
-          return "no on-device Translator here — opened Google Translate in a new tab";
+        // selection when there is one, else the visible screen — so a bare
+        // right-click → Translate reads the terminal you're looking at.
+        {
+          label: "Translate → English",
+          template: 'js: return my.translate(text.trim() || viewport, "en")',
         },
+        {
+          label: "Translate → 中文",
+          template: 'js: return my.translate(text.trim() || viewport, "zh")',
+        },
+      ];
+      // Helper surface handed to `js:` quick commands as `ay` — deliberately
+      // tiny (console plumbing only); everything else is the open web platform.
+      const quickCmdApi = {
         copy: (t) => copyText(String(t)),
         open: (u) => window.open(u, "_blank", "noopener,noreferrer"),
         send: (t) => sendToSelected(String(t)),
         show: (t) => showQuickCmdResult(String(t)),
       };
+      // ---- user scripts: the `my.*` library ---------------------------------
+      // A single user-editable JS source ("Edit user scripts…" in the terminal
+      // menu) that populates `my` — the personal function library every js:
+      // quick command receives. The default ships my.translate as the demo,
+      // calling the browser's Translator / LanguageDetector APIs directly
+      // (https://developer.mozilla.org/docs/Web/API/Translator) — plain web
+      // platform, no console magic — so duplicating and editing it teaches the
+      // real API. Cached per source text; recompiled after a save.
+      const USER_SCRIPTS_KEY = "ay.userScripts";
+      const DEFAULT_USER_SCRIPTS = `// User scripts — define helpers on \`my\`; every js: quick command runs as
+// (text, ay, my). Plain web platform: await works, and ay = {copy, open,
+// send, show} is the only console-provided surface.
+
+my.translate = async (text, lang) => {
+  if (!text.trim()) return "nothing selected — drag-select some text first";
+  if (!window.Translator || !window.LanguageDetector)
+    return "Translator API unavailable in this browser (needs Chrome 138+ desktop)";
+  const [d] = await (await LanguageDetector.create()).detect(text);
+  const tr = await Translator.create({
+    sourceLanguage: d?.detectedLanguage || "en",
+    targetLanguage: lang,
+  });
+  return await tr.translate(text);
+};
+`;
+      const loadUserScripts = () => {
+        const v = localStorage.getItem(USER_SCRIPTS_KEY);
+        return typeof v === "string" && v.trim() ? v : DEFAULT_USER_SCRIPTS;
+      };
+      let myApiCache = null; // { src, my }
+      // Compile the user scripts into the `my` object. Throws on a source
+      // error — callers surface it in the result overlay / save dialog.
+      function buildMyApi() {
+        const src = loadUserScripts();
+        if (myApiCache && myApiCache.src === src) return myApiCache.my;
+        const my = {};
+        new Function("my", "ay", '"use strict";\n' + src)(my, quickCmdApi);
+        myApiCache = { src, my };
+        return my;
+      }
       // Result overlay for js: commands — monospace text + Copy, Esc/backdrop
       // closes. Kept dumb on purpose: a command that wants richer output can
       // ay.open() its own tab.
@@ -4476,17 +4491,35 @@
         overlay.focus();
       }
       // Compile-and-run a `js:` command body. Async-wrapped so bodies can await
-      // (ay.translate is async); a returned non-empty string is shown in the
+      // (the Translator demo awaits); a returned non-empty string is shown in the
       // result overlay. Requires 'unsafe-eval' in the CSP — granted for exactly
       // this: user-authored, user-stored commands running in their own browser.
+      // Plain text of what the terminal currently SHOWS (the viewport rows) —
+      // the js-command fallback input when nothing is selected.
+      function termViewportText(t) {
+        try {
+          const b = t.buffer.active;
+          const out = [];
+          for (let i = 0; i < t.rows; i++) {
+            const line = b.getLine(b.viewportY + i);
+            out.push(line ? line.translateToString(false).trimEnd() : "");
+          }
+          return out.join("\n").trim();
+        } catch {
+          return "";
+        }
+      }
       async function runJsQuickCmd(body, selText, term) {
         try {
+          const my = buildMyApi(); // user scripts — may throw on a source error
           const fn = new Function(
             "text",
             "ay",
+            "my",
+            "viewport",
             '"use strict"; return (async () => { ' + body + " })()",
           );
-          const out = await fn(selText, quickCmdApi);
+          const out = await fn(selText, quickCmdApi, my, term ? termViewportText(term) : "");
           if (typeof out === "string" && out) showQuickCmdResult(out);
         } catch (err) {
           showQuickCmdResult("quick command error: " + (err && err.message ? err.message : err));
@@ -4671,6 +4704,7 @@
         }
         addSep();
         addItem("Edit quick commands…", {}, editQuickCmds);
+        addItem("Edit user scripts…", { hint: "my.*" }, editUserScripts);
 
         openCtxMenu(menu, ev);
       }
@@ -4701,9 +4735,12 @@
         box.innerHTML =
           '<div style="color:var(--fg);font-size:14px;margin-bottom:6px">Quick commands</div>' +
           '<div style="color:var(--muted);font-size:12px;margin-bottom:10px">One per line: <code>Label | template</code>. Use <code>[selection]</code> for the highlighted text, e.g. <code>/fork [selection]</code>.<br>' +
-          "A template starting with <code>js:</code> runs as a frontend function body with <code>(text, ay)</code> — " +
-          "<code>text</code> is the selection, <code>ay</code> = {translate(text, lang), copy(t), open(url), send(t), show(t)}. " +
-          'Duplicate the translate line and change the language code to make your own, e.g. <code>Translate → 日本語 | js: return ay.translate(text, "ja")</code>.</div>';
+          "A template starting with <code>js:</code> runs as a frontend function body with <code>(text, ay, my, viewport)</code> — " +
+          "<code>text</code> = the selection, <code>viewport</code> = the visible screen text, " +
+          "<code>ay</code> = {copy(t), open(url), send(t), show(t)}, and " +
+          "<code>my.*</code> is your own function library from “Edit user scripts…” " +
+          "(the default defines <code>my.translate(text, lang)</code> on the browser's Translator API — " +
+          'duplicate a Translate line and change the language code, e.g. <code>js: return my.translate(text.trim() || viewport, "ja")</code>).</div>';
         const ta = document.createElement("textarea");
         ta.value = quickCmdsToText(loadQuickCmds());
         ta.spellcheck = false;
@@ -4731,6 +4768,74 @@
         mkBtn("Cancel", false).addEventListener("click", close);
         mkBtn("Save", true).addEventListener("click", () => {
           saveQuickCmds(textToQuickCmds(ta.value));
+          close();
+        });
+        box.appendChild(row);
+        overlay.appendChild(box);
+        overlay.addEventListener("pointerdown", (ev) => {
+          if (ev.target === overlay) close();
+        });
+        overlay.addEventListener("keydown", (ev) => {
+          if (ev.key === "Escape") close();
+        });
+        document.body.appendChild(overlay);
+        ta.focus();
+      }
+      // Editor for the `my.*` user-script library (see USER_SCRIPTS_KEY). Save
+      // COMPILES the source first — a syntax/runtime error in the top-level
+      // definitions stays in the dialog instead of breaking every js: command.
+      function editUserScripts() {
+        hideTermMenu();
+        const overlay = document.createElement("div");
+        overlay.className = "launchoverlay";
+        overlay.style.zIndex = "41";
+        const box = document.createElement("div");
+        box.className = "omnibox";
+        box.style.padding = "16px";
+        box.style.width = "min(680px, 94vw)";
+        box.innerHTML =
+          '<div style="color:var(--fg);font-size:14px;margin-bottom:6px">User scripts — <code>my.*</code></div>' +
+          '<div style="color:var(--muted);font-size:12px;margin-bottom:10px">Define functions on <code>my</code>; every <code>js:</code> quick command runs as <code>(text, ay, my, viewport)</code>. ' +
+          "Plain web platform — <code>await</code> works, <code>ay</code> = {copy, open, send, show}. " +
+          "Stored in this browser (localStorage) only.</div>";
+        const ta = document.createElement("textarea");
+        ta.value = loadUserScripts();
+        ta.spellcheck = false;
+        ta.style.cssText =
+          "width:100%;box-sizing:border-box;height:300px;resize:vertical;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:10px;font:13px var(--mono);outline:none";
+        box.appendChild(ta);
+        const err = document.createElement("div");
+        err.style.cssText = "color:var(--red);font:12px var(--mono);margin-top:8px;white-space:pre-wrap";
+        box.appendChild(err);
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;gap:8px;justify-content:flex-end;margin-top:12px";
+        const mkBtn = (label, primary) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = label;
+          b.style.cssText =
+            "padding:7px 14px;border-radius:6px;font:13px var(--mono);cursor:pointer;border:1px solid var(--line);" +
+            (primary
+              ? "background:var(--accent);color:#fff;border-color:var(--accent)"
+              : "background:var(--panel2);color:var(--fg)");
+          row.appendChild(b);
+          return b;
+        };
+        const close = () => overlay.remove();
+        mkBtn("Reset", false).addEventListener("click", () => {
+          ta.value = DEFAULT_USER_SCRIPTS;
+          err.textContent = "";
+        });
+        mkBtn("Cancel", false).addEventListener("click", close);
+        mkBtn("Save", true).addEventListener("click", () => {
+          try {
+            new Function("my", "ay", '"use strict";\n' + ta.value)({}, quickCmdApi);
+          } catch (e) {
+            err.textContent = "won't save — script error: " + (e && e.message ? e.message : e);
+            return;
+          }
+          localStorage.setItem(USER_SCRIPTS_KEY, ta.value);
+          myApiCache = null; // recompile on next use
           close();
         });
         box.appendChild(row);
