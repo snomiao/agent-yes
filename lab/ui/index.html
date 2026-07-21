@@ -2667,24 +2667,108 @@
       // ---- transports: a uniform { fetchJSON, post, subscribe } over each wire ----
       // local (same-origin ay serve), an ay-share RTCClient, or a codehost room.
       // A codehost room builds one of these per machine in it (see chPeerTx).
+      //
+      // Local requests ride ONE multiplexed WebSocket (/api/mux) when the
+      // daemon offers it: HTTP/1.1 gives the origin ~6 concurrent connections
+      // and no multiplexing, so console bursts (a palette query fans out ~20
+      // tail reads + a history search) queued behind each other for seconds —
+      // the same trick the WebRTC / codehost transports already play. Plain
+      // fetch remains the fallback while the socket is down or the daemon
+      // predates /api/mux; subscribe() stays on EventSource (streams don't
+      // fit req/res frames — the server refuses them over the mux).
+      const localMux = {
+        ws: null,
+        state: "idle", // idle | connecting | open | dead (fallback until retryAt)
+        pend: new Map(), // id → {resolve, reject}
+        seq: 0,
+        retryAt: 0,
+        ensure() {
+          if (this.state === "open" || this.state === "connecting") return;
+          if (this.state === "dead" && Date.now() < this.retryAt) return;
+          this.state = "connecting";
+          try {
+            const proto = location.protocol === "https:" ? "wss://" : "ws://";
+            const ws = new WebSocket(proto + location.host + withTok("/api/mux"));
+            this.ws = ws;
+            ws.onopen = () => {
+              if (this.ws === ws) this.state = "open";
+            };
+            ws.onmessage = (ev) => {
+              let m;
+              try {
+                m = JSON.parse(ev.data);
+              } catch {
+                return;
+              }
+              const p = this.pend.get(m.id);
+              if (!p) return;
+              this.pend.delete(m.id);
+              p.resolve(m);
+            };
+            const drop = () => {
+              if (this.ws !== ws) return;
+              this.ws = null;
+              this.state = "dead";
+              this.retryAt = Date.now() + 5000; // plain-fetch fallback, retry soon
+              for (const [, p] of this.pend) p.reject(new Error("mux closed"));
+              this.pend.clear();
+            };
+            ws.onclose = drop;
+            ws.onerror = drop;
+          } catch {
+            this.state = "dead";
+            this.retryAt = Date.now() + 5000;
+          }
+        },
+        req(method, path, body) {
+          const id = ++this.seq;
+          return new Promise((resolve, reject) => {
+            this.pend.set(id, { resolve, reject });
+            try {
+              this.ws.send(JSON.stringify({ id, method, path, body }));
+            } catch (e) {
+              this.pend.delete(id);
+              reject(e);
+            }
+          });
+        },
+      };
+      // One request, mux-first: {status, text} from the socket when it's open
+      // (a mid-flight drop falls through), plain fetch otherwise.
+      async function localReq(method, path, bodyObj) {
+        localMux.ensure();
+        if (localMux.state === "open") {
+          try {
+            return await localMux.req(method, path, bodyObj);
+          } catch {
+            /* socket died mid-flight — fall through to plain fetch */
+          }
+        }
+        const opts =
+          method === "GET"
+            ? undefined
+            : {
+                method,
+                headers: bodyObj != null ? { "Content-Type": "application/json" } : undefined,
+                body: bodyObj != null ? JSON.stringify(bodyObj) : undefined,
+              };
+        const r = await fetch(withTok(path), opts);
+        return { status: r.status, text: await r.text() };
+      }
       const localTx = {
         async fetchJSON(path) {
-          return (await fetch(withTok(path))).json();
+          return JSON.parse((await localReq("GET", path)).text);
         },
         async fetchText(path) {
-          return (await fetch(withTok(path))).text();
+          return (await localReq("GET", path)).text;
         },
         async post(path, bodyObj) {
-          const r = await fetch(withTok(path), {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(bodyObj),
-          });
-          return { ok: r.ok, text: await r.text() };
+          const r = await localReq("POST", path, bodyObj ?? {});
+          return { ok: r.status >= 200 && r.status < 300, text: r.text };
         },
         async del(path) {
-          const r = await fetch(withTok(path), { method: "DELETE" });
-          return { ok: r.ok, text: await r.text() };
+          const r = await localReq("DELETE", path);
+          return { ok: r.status >= 200 && r.status < 300, text: r.text };
         },
         subscribe(path, onText, onOpen, onError) {
           const ev = new EventSource(withTok(path));
