@@ -4371,7 +4371,112 @@
       // e.g. `/fork [selection]`. Templates live in localStorage so they survive
       // reloads and can be edited from the menu itself.
       const QUICKCMD_KEY = "ay.quickCmds";
-      const DEFAULT_QUICKCMDS = [{ label: "Fork with selection", template: "/fork [selection]" }];
+      // Two command flavors share the template field:
+      //   plain  — text sent to the agent's stdin ([selection] filled in)
+      //   js:…   — a pure-frontend JS function body, run with (text, ay) where
+      //            text = the selection and ay = the helper surface below.
+      //            The translate entries are the demo: duplicate a line in the
+      //            editor, change the language code, done — all localStorage.
+      const DEFAULT_QUICKCMDS = [
+        { label: "Fork with selection", template: "/fork [selection]" },
+        { label: "Translate → English", template: 'js: return ay.translate(text, "en")' },
+        { label: "Translate → 中文", template: 'js: return ay.translate(text, "zh")' },
+      ];
+      // Helper surface handed to `js:` quick commands as `ay`.
+      const quickCmdApi = {
+        // Chrome's built-in Translator API (138+, on-device model) when
+        // available; otherwise fall back to a Google Translate tab. Returns ""
+        // when the fallback tab was opened (nothing to show inline).
+        translate: async (text, lang) => {
+          try {
+            if (window.Translator && window.LanguageDetector) {
+              const det = await LanguageDetector.create();
+              const d = await det.detect(String(text).slice(0, 1000));
+              const src = (d && d[0] && d[0].detectedLanguage) || "en";
+              if (src === lang) return text;
+              const tr = await Translator.create({ sourceLanguage: src, targetLanguage: lang });
+              return await tr.translate(text);
+            }
+          } catch {
+            /* model unavailable / language pair unsupported → tab fallback */
+          }
+          quickCmdApi.open(
+            "https://translate.google.com/?sl=auto&tl=" +
+              encodeURIComponent(lang) +
+              "&op=translate&text=" +
+              encodeURIComponent(String(text).slice(0, 5000)),
+          );
+          return "";
+        },
+        copy: (t) => copyText(String(t)),
+        open: (u) => window.open(u, "_blank", "noopener,noreferrer"),
+        send: (t) => sendToSelected(String(t)),
+        show: (t) => showQuickCmdResult(String(t)),
+      };
+      // Result overlay for js: commands — monospace text + Copy, Esc/backdrop
+      // closes. Kept dumb on purpose: a command that wants richer output can
+      // ay.open() its own tab.
+      function showQuickCmdResult(text) {
+        const overlay = document.createElement("div");
+        overlay.className = "launchoverlay";
+        overlay.style.zIndex = "42";
+        const box = document.createElement("div");
+        box.className = "omnibox";
+        box.style.cssText = "padding:16px;width:min(560px,92vw)";
+        const pre = document.createElement("pre");
+        pre.textContent = text;
+        pre.style.cssText =
+          "margin:0;max-height:50vh;overflow:auto;white-space:pre-wrap;word-break:break-word;" +
+          "background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;" +
+          "padding:10px;font:13px var(--mono)";
+        box.appendChild(pre);
+        const row = document.createElement("div");
+        row.style.cssText = "display:flex;gap:8px;justify-content:flex-end;margin-top:12px";
+        const mk = (label) => {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.textContent = label;
+          b.style.cssText =
+            "padding:7px 14px;border-radius:6px;font:13px var(--mono);cursor:pointer;" +
+            "border:1px solid var(--line);background:var(--panel2);color:var(--fg)";
+          row.appendChild(b);
+          return b;
+        };
+        mk("Copy").addEventListener("click", () => copyText(text));
+        const close = () => overlay.remove();
+        mk("Close").addEventListener("click", close);
+        box.appendChild(row);
+        overlay.appendChild(box);
+        overlay.addEventListener("pointerdown", (ev) => {
+          if (ev.target === overlay) close();
+        });
+        overlay.tabIndex = -1;
+        overlay.addEventListener("keydown", (ev) => {
+          if (ev.key === "Escape") close();
+        });
+        document.body.appendChild(overlay);
+        overlay.focus();
+      }
+      // Compile-and-run a `js:` command body. Async-wrapped so bodies can await
+      // (ay.translate is async); a returned non-empty string is shown in the
+      // result overlay. Requires 'unsafe-eval' in the CSP — granted for exactly
+      // this: user-authored, user-stored commands running in their own browser.
+      async function runJsQuickCmd(body, selText, term) {
+        try {
+          const fn = new Function(
+            "text",
+            "ay",
+            '"use strict"; return (async () => { ' + body + " })()",
+          );
+          const out = await fn(selText, quickCmdApi);
+          if (typeof out === "string" && out) showQuickCmdResult(out);
+        } catch (err) {
+          showQuickCmdResult("quick command error: " + (err && err.message ? err.message : err));
+        }
+        try {
+          term && term.clearSelection && term.clearSelection();
+        } catch {}
+      }
       function loadQuickCmds() {
         try {
           const v = JSON.parse(localStorage.getItem(QUICKCMD_KEY) || "null");
@@ -4429,6 +4534,9 @@
       // A trailing Enter submits it (these are "quick commands", not drafts). The
       // selection is cleared so the highlight doesn't linger after firing.
       function runQuickCmd(cmd, selText, term) {
+        // `js:` prefix → a frontend function command, not agent stdin.
+        const js = /^js:\s*([\s\S]+)$/.exec(String(cmd.template));
+        if (js) return runJsQuickCmd(js[1], selText, term);
         const text = String(cmd.template).replace(/\[selection\]/g, selText || "");
         sendToSelected(text + "\r");
         try {
@@ -4526,8 +4634,10 @@
         if (cmds.length) {
           addSep();
           for (const cmd of cmds)
-            addItem(cmd.label, { hint: selText ? "[sel]" : "" }, () =>
-              runQuickCmd(cmd, selText, term),
+            addItem(
+              cmd.label,
+              { hint: /^js:/.test(cmd.template) ? "ƒ" : selText ? "[sel]" : "" },
+              () => runQuickCmd(cmd, selText, term),
             );
         }
         addSep();
@@ -4561,7 +4671,10 @@
         box.style.width = "min(560px, 92vw)";
         box.innerHTML =
           '<div style="color:var(--fg);font-size:14px;margin-bottom:6px">Quick commands</div>' +
-          '<div style="color:var(--muted);font-size:12px;margin-bottom:10px">One per line: <code>Label | template</code>. Use <code>[selection]</code> for the highlighted text, e.g. <code>/fork [selection]</code>.</div>';
+          '<div style="color:var(--muted);font-size:12px;margin-bottom:10px">One per line: <code>Label | template</code>. Use <code>[selection]</code> for the highlighted text, e.g. <code>/fork [selection]</code>.<br>' +
+          "A template starting with <code>js:</code> runs as a frontend function body with <code>(text, ay)</code> — " +
+          "<code>text</code> is the selection, <code>ay</code> = {translate(text, lang), copy(t), open(url), send(t), show(t)}. " +
+          'Duplicate the translate line and change the language code to make your own, e.g. <code>Translate → 日本語 | js: return ay.translate(text, "ja")</code>.</div>';
         const ta = document.createElement("textarea");
         ta.value = quickCmdsToText(loadQuickCmds());
         ta.spellcheck = false;
