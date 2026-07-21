@@ -4397,6 +4397,12 @@
         // available; otherwise fall back to a Google Translate tab. Returns ""
         // when the fallback tab was opened (nothing to show inline).
         translate: async (text, lang) => {
+          // Never end silently: every path returns something the result
+          // overlay will show — an empty selection, the translation, or what
+          // the fallback did. (The first ship ended silently on mobile, where
+          // Android Chrome has NO Translator API and the fallback tab could be
+          // popup-blocked after the awaits consumed the tap's activation.)
+          if (!String(text || "").trim()) return "nothing selected — drag-select some text first";
           try {
             if (window.Translator && window.LanguageDetector) {
               const det = await LanguageDetector.create();
@@ -4409,13 +4415,16 @@
           } catch {
             /* model unavailable / language pair unsupported → tab fallback */
           }
-          quickCmdApi.open(
+          const url =
             "https://translate.google.com/?sl=auto&tl=" +
-              encodeURIComponent(lang) +
-              "&op=translate&text=" +
-              encodeURIComponent(String(text).slice(0, 5000)),
-          );
-          return "";
+            encodeURIComponent(lang) +
+            "&op=translate&text=" +
+            encodeURIComponent(String(text).slice(0, 5000));
+          const win = quickCmdApi.open(url);
+          // Popup blocked (window.open after an await has no activation left):
+          // surface the URL itself — the overlay text is selectable/copyable.
+          if (!win) return "on-device Translator unavailable and the popup was blocked — open manually:\n" + url;
+          return "no on-device Translator here — opened Google Translate in a new tab";
         },
         copy: (t) => copyText(String(t)),
         open: (u) => window.open(u, "_blank", "noopener,noreferrer"),
@@ -4521,6 +4530,9 @@
       }
 
       let ctxMenuEl = null;
+      // Last touch-drag selection ({text, at}) — the menu's fallback when the
+      // live xterm selection got collapsed by mobile tap emulation.
+      let recentTouchSel = null;
       function hideTermMenu() {
         if (!ctxMenuEl) return;
         ctxMenuEl.remove();
@@ -4617,7 +4629,15 @@
       function showTermMenu(ev, term) {
         ev.preventDefault();
         hideTermMenu();
-        const selText = term && term.hasSelection && term.hasSelection() ? term.getSelection() : "";
+        // Live xterm selection first; else fall back to the last touch-drag
+        // selection if it's fresh (≤20s) — mobile tap emulation can collapse
+        // the live selection between the drag and the long-press menu.
+        const selText =
+          term && term.hasSelection && term.hasSelection()
+            ? term.getSelection()
+            : recentTouchSel && Date.now() - recentTouchSel.at < 20_000
+              ? recentTouchSel.text
+              : "";
         const { menu, addItem, addSep } = ctxMenuShell();
 
         // Copy: disabled with nothing selected (mirrors the old behavior, minus
@@ -5670,7 +5690,14 @@
             const mt = t.modes && t.modes.mouseTrackingMode;
             if (mt && mt !== "none") return; // the TUI owns selection + OSC 52 copy
             if (t.hasSelection()) {
-              copyText(t.getSelection());
+              // Remember the selection for the long-press menu: on mobile the
+              // browser's tap/long-press emulation can collapse the xterm
+              // selection BEFORE the menu opens, which made selection-fed
+              // commands (Translate, [selection]) run against empty text.
+              const selTxt = t.getSelection();
+              // whitespace-only cell selections aren't worth remembering
+              if (selTxt.trim()) recentTouchSel = { text: selTxt, at: Date.now() };
+              copyText(selTxt);
               const pill = document.createElement("div");
               pill.className = "updatebar";
               pill.textContent = "copied";
