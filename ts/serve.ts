@@ -2001,13 +2001,27 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // The whole API as a plain handler: served over HTTP by Bun.serve (--http)
   // and called in-process by the WebRTC bridge (--webrtc) — the latter needs
   // no TCP port at all.
-  const apiFetch = async (req: Request): Promise<Response> => {
+  const apiFetch = async (req: Request, srv?: { upgrade: (r: Request, o?: unknown) => boolean }): Promise<Response> => {
     if (!checkAuth(req, token)) {
       return new Response("Unauthorized", { status: 401 });
     }
 
     const url = new URL(req.url);
     const p = url.pathname;
+
+    // GET /api/mux — WebSocket request multiplexer. HTTP/1.1 gives a browser
+    // ~6 concurrent same-origin connections and no multiplexing, so console
+    // bursts (a palette query fans out ~20 tail reads + a history search)
+    // queue behind each other for seconds. The mux carries {id, method, path,
+    // body} frames over ONE socket and answers {id, status, text} — each frame
+    // is dispatched through THIS same handler (with the socket's token), so
+    // there is exactly one API surface. Streams (SSE) don't fit req/res
+    // frames and stay on EventSource; the handler refuses them.
+    if (p === "/api/mux" && srv && req.headers.get("upgrade")?.toLowerCase() === "websocket") {
+      const muxToken = url.searchParams.get("token") || "";
+      if (srv.upgrade(req, { data: { muxToken } })) return undefined as unknown as Response;
+      return new Response("expected websocket", { status: 426 });
+    }
 
     // GET /api/ls
     if (req.method === "GET" && p === "/api/ls") {
@@ -3487,7 +3501,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       });
     }
   };
-  const httpFetch = async (req: Request): Promise<Response> => {
+  const httpFetch = async (req: Request, srv?: { upgrade: (r: Request, o?: unknown) => boolean }): Promise<Response> => {
     const p = new URL(req.url).pathname;
     if (req.method === "GET" && (p === "/" || p === "/index.html"))
       return serveUiFile("index.html", "text/html; charset=utf-8");
@@ -3522,14 +3536,64 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return serveUiFile("manifest.webmanifest", "application/manifest+json");
     if (req.method === "GET" && p === "/icon.svg") return serveUiFile("icon.svg", "image/svg+xml");
     if (req.method === "GET" && p === "/favicon.ico") return new Response(null, { status: 204 });
-    return apiFetch(req);
+    return apiFetch(req, srv);
   };
 
   const serverOpts: any = {
     hostname: host,
     port,
     idleTimeout: 0, // never time out SSE/tail streams
-    fetch: httpFetch,
+    fetch: (req: Request, srv: unknown) =>
+      httpFetch(req, srv as { upgrade: (r: Request, o?: unknown) => boolean }),
+    // /api/mux frames — each one re-enters apiFetch as a synthetic Request
+    // carrying the socket's token, so auth and routing stay single-sourced.
+    websocket: {
+      // Bun's per-socket idle cap; the console reconnects lazily on drop, but
+      // don't let a quiet-but-alive console churn sockets every 2 minutes.
+      idleTimeout: 960,
+      message: async (ws: any, raw: string | Buffer) => {
+        let m: { id?: number; method?: string; path?: string; body?: unknown };
+        try {
+          m = JSON.parse(String(raw));
+        } catch {
+          return; // not a mux frame — drop
+        }
+        const { id, method, path, body } = m || {};
+        if (!id || typeof path !== "string" || !path.startsWith("/api/")) return;
+        try {
+          const tok = ws.data?.muxToken || "";
+          const u =
+            "http://mux.internal" +
+            path +
+            (tok ? (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(tok) : "");
+          const req = new Request(u, {
+            method: method || "GET",
+            headers: body != null ? { "content-type": "application/json" } : undefined,
+            body: body != null ? JSON.stringify(body) : undefined,
+          });
+          const res = await apiFetch(req);
+          // Streams can't ride a req/res frame — refuse instead of buffering an
+          // endless SSE body (subscribe stays on EventSource client-side).
+          if ((res.headers.get("content-type") || "").includes("text/event-stream")) {
+            try {
+              await res.body?.cancel();
+            } catch {
+              /* already closed */
+            }
+            ws.send(JSON.stringify({ id, status: 501, text: "streams not supported over mux" }));
+            return;
+          }
+          const text = await res.text();
+          ws.send(JSON.stringify({ id, status: res.status, text }));
+        } catch (e) {
+          try {
+            ws.send(JSON.stringify({ id, status: 599, text: String((e as Error)?.message ?? e) }));
+          } catch {
+            /* socket gone */
+          }
+        }
+      },
+    },
   };
   if (useHttps) {
     serverOpts.tls = { cert: Bun.file(certPath!), key: Bun.file(keyPath!) };
