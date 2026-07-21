@@ -41,7 +41,9 @@ const SUBPROTO = "ay-signal-1";
 // (form-action). script-src keeps 'unsafe-inline' because the console is a
 // single-file inline app (no inline event-handler attributes exist, so a
 // stricter nonce split is a follow-up, not a regression risk); xterm loads from
-// jsdelivr. connect-src allows any wss: so custom / self-hosted signaling hosts
+// jsdelivr. 'unsafe-eval' exists for exactly one feature: user-authored `js:`
+// quick commands (new Function over user-stored localStorage text — their own
+// code in their own browser). connect-src allows any wss: so custom / self-hosted signaling hosts
 // still work, while forbidding arbitrary https fetch exfil. Keep this in sync
 // with the copy in ts/serve.ts (serveUiFile).
 const CSP = [
@@ -53,7 +55,7 @@ const CSP = [
   "img-src 'self' data:",
   "font-src 'self' data:",
   "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
-  "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net",
   "connect-src 'self' https://s.agent-yes.com https://agent-yes.com wss:",
   "worker-src 'self'",
   "manifest-src 'self'",
