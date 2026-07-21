@@ -1915,6 +1915,15 @@
             <span class="metaright">
               <button id="foldbtn" class="viewbtn" title="fold subagent trees">⊞ subs</button>
               <button id="sortbtn" class="viewbtn" title="cycle sort order">⇅ state</button>
+              <button
+                id="stalebtn"
+                class="viewbtn"
+                role="checkbox"
+                aria-checked="false"
+                title="show stale stopped agents (exited over 5 minutes ago)"
+              >
+                ◌ stale
+              </button>
               <button id="portsbtn" class="viewbtn" title="manage exposed localhost ports">
                 ⇄ ports
               </button>
@@ -5105,9 +5114,36 @@
       // room/peer/agent tree, so it reorders roots/siblings without breaking nesting.
       // Pinned entries then float to the front of their sorted group (a pinned root
       // rises to the top; a pinned subagent rises among its siblings).
+      // Stale stopped agents (exited ≥5 min ago) hide from the list by default
+      // — a fleet accumulates dead rows fast, and their replay stays reachable
+      // via ⌘K (search covers ALL entries) or the "stale" toolbar toggle. The
+      // SELECTED agent never hides (you're looking at it), and a stale
+      // ancestor of a kept agent is kept too so the subagent tree keeps its
+      // shape (fixpoint over the parent_pid → wrapper_pid links, per source).
+      const STALE_STOP_MS = 5 * 60 * 1000;
+      let showStale = localStorage.getItem("ay.showStale") === "1";
+      const isStaleStopped = (e) =>
+        e.status === "exited" &&
+        Date.now() - (e.last_active_at || e.started_at || 0) > STALE_STOP_MS;
+      function pruneStale(list) {
+        if (showStale) return list;
+        const keep = new Set(list.filter((e) => !isStaleStopped(e) || e._key === sel));
+        for (let grew = true; grew; ) {
+          grew = false;
+          const wanted = new Set();
+          for (const e of keep)
+            if (e.parent_pid != null) wanted.add((e._src || "") + "#" + e.parent_pid);
+          for (const e of list)
+            if (!keep.has(e) && e.wrapper_pid != null && wanted.has((e._src || "") + "#" + e.wrapper_pid)) {
+              keep.add(e);
+              grew = true;
+            }
+        }
+        return list.filter((e) => keep.has(e));
+      }
       function orderedEntries(toks) {
         const sorted = sortEntries(
-          entries.filter((e) => matches(e, toks)),
+          pruneStale(entries.filter((e) => matches(e, toks))),
           sortMode,
         );
         if (!pinned.size) return sorted;
@@ -5242,6 +5278,9 @@
         shownAgentCount = agentRows.length;
         updateSummary(); // one consolidated "agents · rooms · peers" badge
         $("foldbtn").textContent = foldSubs ? "⊞ subs" : "⊟ subs";
+        $("stalebtn").classList.toggle("on", showStale);
+        $("stalebtn").setAttribute("aria-checked", showStale ? "true" : "false");
+        $("stalebtn").textContent = showStale ? "◉ stale" : "◌ stale";
         $("foldbtn").classList.toggle("on", !foldSubs);
         // Show the active sort mode on the button so it's self-documenting; the
         // default ("state") is also highlighted to hint it's the implicit order.
@@ -5962,6 +6001,12 @@
         location.href = "/r/" + frag;
       });
       // Cycle the sort order: state → created → identity → state.
+      // "◌ stale" checkbox: show/hide stopped agents older than 5 min.
+      $("stalebtn").addEventListener("click", () => {
+        showStale = !showStale;
+        localStorage.setItem("ay.showStale", showStale ? "1" : "0");
+        renderList();
+      });
       $("sortbtn").addEventListener("click", () => {
         sortMode = SORT_MODES[(SORT_MODES.indexOf(sortMode) + 1) % SORT_MODES.length];
         localStorage.setItem("ay.sortMode", sortMode);
