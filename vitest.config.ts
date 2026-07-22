@@ -68,6 +68,9 @@ export default defineConfig({
         // HTTP server and remote config — integration-test only (requires a
         // running server and network); unit coverage not meaningful here.
         "ts/serve.ts",
+        // `ay callback` CLI + store IO — thin shell over callbackCore.ts (which
+        // IS covered); the mint path needs a live agent record and daemon URL.
+        "ts/callback.ts",
         "ts/remotes.ts",
         // WebRTC share bridge — needs a peer + signaling server; proven e2e, not
         // unit-testable.

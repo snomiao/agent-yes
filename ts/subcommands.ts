@@ -366,6 +366,7 @@ const SUBCOMMANDS = new Set([
   "schedule",
   "remote",
   "expose",
+  "callback",
   "reap",
   "help",
 ]);
@@ -497,6 +498,10 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         const { cmdExpose } = await import("./expose.ts");
         return cmdExpose(rest);
       }
+      case "callback": {
+        const { cmdCallback } = await import("./callback.ts");
+        return cmdCallback(rest);
+      }
       case "reap": {
         const reaper = await import("./reaper.ts");
         await reaper.sweep();
@@ -624,6 +629,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay remote add <alias> http://<token>@<host>:<port>\n` +
       `  ay remote ls / rm <alias>           manage saved remotes\n` +
       `  ay expose <port>                    share localhost:<port> at https://<id>.agent-yes.com (private link)\n` +
+      `  ay callback --expires 7d           mint an embeddable message-me widget for one agent\n` +
       `  ay ls   <token>@<host>:<port>       connect inline (no alias needed)\n` +
       `  ay send <token>@<host>:<port>:<kw> <msg>\n` +
       `\n` +
