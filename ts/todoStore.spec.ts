@@ -107,6 +107,64 @@ describe("TodoStore", () => {
     expect(done.verifyEvidence).toHaveLength(1);
   });
 
+  it("create() stores acceptanceCriteria, and approve() snapshots it into GateEvidence at approval time — later edits don't retroactively change the recorded snapshot (Milestone 1.5)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({
+      summary: "x",
+      kind: "doc",
+      owner: "worker",
+      acceptanceCriteria: "the spec covers all 5 lifecycle kinds",
+    });
+    expect(t.acceptanceCriteria).toBe("the spec covers all 5 lifecycle kinds");
+    await s.transition(t._id, "review");
+    const approved = await s.approve(t._id, "human-approved", "reviewer");
+    expect(approved.verifyEvidence[0]?.acceptanceCriteriaAtApproval).toBe(
+      "the spec covers all 5 lifecycle kinds",
+    );
+
+    // editing the criteria AFTER approval must not change the already-
+    // recorded snapshot — the audit trail is append-only history, not a
+    // live reference to the current field.
+    await s.setAcceptanceCriteria(t._id, "the spec ALSO covers the human kind");
+    const fresh = s.get(t._id)!;
+    expect(fresh.acceptanceCriteria).toBe("the spec ALSO covers the human kind");
+    expect(fresh.verifyEvidence[0]?.acceptanceCriteriaAtApproval).toBe(
+      "the spec covers all 5 lifecycle kinds",
+    );
+  });
+
+  it("approve() omits acceptanceCriteriaAtApproval entirely when the task never had criteria set", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "doc", owner: "worker" });
+    await s.transition(t._id, "review");
+    const approved = await s.approve(t._id, "human-approved", "reviewer");
+    expect(approved.verifyEvidence[0]?.acceptanceCriteriaAtApproval).toBeUndefined();
+  });
+
+  it("setAcceptanceCriteria() refuses empty text and refuses an unknown task id", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "doc" });
+    await expect(s.setAcceptanceCriteria(t._id, "")).rejects.toThrow(/must not be empty/);
+    await expect(s.setAcceptanceCriteria("T99", "text")).rejects.toThrow(/no such task/);
+  });
+
+  it("setAcceptanceCriteria() refuses WHITESPACE-only text too, and trims what it stores (codex-review round-8 Important: a blank-looking value must not silently pass as real criteria)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "doc" });
+    await expect(s.setAcceptanceCriteria(t._id, "   ")).rejects.toThrow(/must not be empty/);
+    await expect(s.setAcceptanceCriteria(t._id, "\t\n")).rejects.toThrow(/must not be empty/);
+    const updated = await s.setAcceptanceCriteria(t._id, "  real criteria  ");
+    expect(updated.acceptanceCriteria).toBe("real criteria");
+  });
+
+  it("create() treats a whitespace-only acceptanceCriteria as not provided (never stored), and trims a real one", async () => {
+    const s = await openStore(TEST_ROOT);
+    const blank = await s.create({ summary: "x", kind: "doc", acceptanceCriteria: "   " });
+    expect(blank.acceptanceCriteria).toBeUndefined();
+    const real = await s.create({ summary: "y", kind: "doc", acceptanceCriteria: "  real one  " });
+    expect(real.acceptanceCriteria).toBe("real one");
+  });
+
   it("approve() cannot have its audit trail falsified via the evidence argument — gate/validator/passedAt are trusted, never caller-overridable (codex-review round-6 Important)", async () => {
     const s = await openStore(TEST_ROOT);
     const t = await s.create({ summary: "x", kind: "doc", owner: "worker" });

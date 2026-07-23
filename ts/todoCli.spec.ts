@@ -303,8 +303,55 @@ describe("ay todo CLI", () => {
 
   it("no verb at all fails naming every expected one, via demandCommand", async () => {
     await expect(run()).rejects.toThrow(
-      /unknown "ay todo" verb.*new\/ls\/get\/transition\/approve\/verify\/block\/unblock\/dep\/tree\/digest\/reconcile/,
+      /unknown "ay todo" verb.*new\/ls\/get\/transition\/approve\/verify\/set-criteria\/block\/unblock\/dep\/tree\/digest\/reconcile/,
     );
+  });
+
+  it("new --acceptance-criteria stores it, and get renders it; set-criteria updates it later (Milestone 1.5)", async () => {
+    const created = await run(
+      "new",
+      "ship",
+      "the",
+      "feature",
+      "--kind",
+      "code",
+      "--acceptance-criteria",
+      "all tests pass and the feature flag is off by default",
+    );
+    expect(created.out).toContain(
+      "acceptanceCriteria: all tests pass and the feature flag is off by default",
+    );
+    const updated = await run(
+      "set-criteria",
+      "T1",
+      "all",
+      "tests",
+      "pass",
+      "and",
+      "docs",
+      "are",
+      "updated",
+    );
+    expect(updated.out).toContain("set acceptance criteria on T1");
+    const got = await run("get", "T1");
+    expect(got.out).toContain("acceptanceCriteria: all tests pass and docs are updated");
+  });
+
+  it("approve() snapshots acceptanceCriteria into evidence, rendered in get's output", async () => {
+    await run(
+      "new",
+      "x",
+      "--kind",
+      "doc",
+      "--owner",
+      "worker",
+      "--acceptance-criteria",
+      "reviewed by a human",
+    );
+    await run("transition", "T1", "review");
+    await run("approve", "T1", "human-approved", "reviewer");
+    const got = await run("get", "T1");
+    expect(got.out).toContain("[criteria: reviewed by a human]");
   });
 
   it("--help resolves cleanly (exit 0, no throw) — a real yargs command tree auto-generates the verb listing (taku feedback); yargs' own help writer bypasses the stdout mock in this harness, so content is verified manually rather than asserted here", async () => {

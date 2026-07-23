@@ -62,13 +62,14 @@ function renderRecord(t: TodoRecord): string {
     `${t._id} [${t.state}] ${t.summary}`,
     `kind:    ${t.kind}${t.targetTier ? `  tier:${t.targetTier}` : ""}`,
     ...(t.owner ? [`owner:   ${t.owner}`] : []),
+    ...(t.acceptanceCriteria ? [`acceptanceCriteria: ${t.acceptanceCriteria}`] : []),
     ...(t.block ? [`block:   ${describeBlock(t.block)}`] : []),
     ...(t.blockedBy.length ? [`blockedBy: ${t.blockedBy.join(", ")}`] : []),
     ...(t.tags.length ? [`tags:    ${t.tags.join(", ")}`] : []),
     ...(t.satisfiedGates.length ? [`satisfiedGates: ${t.satisfiedGates.join(", ")}`] : []),
     ...(t.verifyEvidence.length
       ? [
-          `evidence: ${t.verifyEvidence.map((e) => `${e.gate} by ${e.validator}${e.link ? ` (${e.link})` : ""}`).join("; ")}`,
+          `evidence: ${t.verifyEvidence.map((e) => `${e.gate} by ${e.validator}${e.link ? ` (${e.link})` : ""}${e.acceptanceCriteriaAtApproval ? ` [criteria: ${e.acceptanceCriteriaAtApproval}]` : ""}`).join("; ")}`,
         ]
       : []),
     `created: ${t.createdAt}`,
@@ -107,6 +108,7 @@ const newCmd: CommandModule<
     kind: string | undefined;
     description: string | undefined;
     tier: string | undefined;
+    "acceptance-criteria": string | undefined;
     owner: string | undefined;
     tag: string[] | undefined;
     dep: string[] | undefined;
@@ -126,6 +128,11 @@ const newCmd: CommandModule<
       .option("kind", { type: "string", describe: `one of: ${Object.keys(LIFECYCLES).join(", ")}` })
       .option("description", { type: "string" })
       .option("tier", { type: "string", describe: "targetTier, e.g. canary-done / shipped-done" })
+      .option("acceptance-criteria", {
+        type: "string",
+        describe:
+          "definition of done for this task — what an independent validator should check before approving/verifying it",
+      })
       .option("owner", { type: "string" })
       .option("tag", { type: "string", array: true })
       .option("dep", { type: "string", array: true, describe: "blocker task id(s)" }),
@@ -140,7 +147,7 @@ const newCmd: CommandModule<
     const summary = argv.summary.map(String).join(" ");
     if (!summary) {
       fail(
-        "usage: ay todo new <summary> --kind <kind> [--description ...] [--tier ...] [--owner ...] [--tag t]... [--dep id]...",
+        "usage: ay todo new <summary> --kind <kind> [--description ...] [--tier ...] [--acceptance-criteria ...] [--owner ...] [--tag t]... [--dep id]...",
       );
     }
     const rec = await store.create({
@@ -148,6 +155,7 @@ const newCmd: CommandModule<
       kind: parseKind(argv.kind),
       description: argv.description,
       targetTier: argv.tier,
+      acceptanceCriteria: argv["acceptance-criteria"],
       owner: argv.owner,
       tags: argv.tag ?? [],
       blockedBy: argv.dep ?? [],
@@ -342,6 +350,21 @@ const unblockCmd: CommandModule<GlobalOpts, GlobalOpts & { id: string }> = {
   },
 };
 
+const setCriteriaCmd: CommandModule<GlobalOpts, GlobalOpts & { id: string; text: string[] }> = {
+  command: "set-criteria <id> <text..>",
+  describe: "set or update a task's acceptance criteria (definition of done)",
+  builder: (y) =>
+    y
+      .positional("id", { type: "string", demandOption: true })
+      .positional("text", { type: "string", array: true, demandOption: true }),
+  handler: async (argv) => {
+    const store = await openStore(argv.root);
+    const text = argv.text.map(String).join(" ");
+    const rec = await store.setAcceptanceCriteria(argv.id, text);
+    emit(argv, rec, `set acceptance criteria on ${rec._id}\n${renderRecord(rec)}`);
+  },
+};
+
 const depCmd: CommandModule<
   GlobalOpts,
   GlobalOpts & { verb: "add" | "rm"; id: string; blockerId: string }
@@ -509,6 +532,7 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
     .command(transitionCmd)
     .command(approveCmd)
     .command(verifyCmd)
+    .command(setCriteriaCmd)
     .command(blockCmd)
     .command(unblockCmd)
     .command(depCmd)
@@ -517,7 +541,7 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
     .command(reconcileCmd)
     .demandCommand(
       1,
-      'unknown "ay todo" verb (expected: new/ls/get/transition/approve/verify/block/unblock/dep/tree/digest/reconcile)',
+      'unknown "ay todo" verb (expected: new/ls/get/transition/approve/verify/set-criteria/block/unblock/dep/tree/digest/reconcile)',
     )
     .strict()
     .help()
