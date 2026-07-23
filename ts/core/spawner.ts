@@ -6,6 +6,7 @@ import type { AgentCliConfig } from "../index.ts";
 import type { SUPPORTED_CLIS } from "../SUPPORTED_CLIS.ts";
 import { execSync } from "node:child_process";
 import { getInstalledPackage } from "../versionChecker.ts";
+import { applyAgentNice } from "../agentNice.ts";
 
 /**
  * Agent spawning utilities
@@ -137,6 +138,11 @@ export function spawnAgent(options: SpawnOptions): IPty {
     logger.info(
       `[${cli}-yes] Spawned ${bin} with PID ${spawned.pid} (agent-yes v${getInstalledPackage().version})`,
     );
+    // Deprioritize the agent CLI so it yields CPU to the interactive `ay serve`
+    // daemon under load (see ts/agentNice.ts). Fire-and-forget; the child's
+    // threads/descendants inherit the nice. Covers the TS runtime; the Rust
+    // runtime applies the same in rs/src/pty_spawner.rs.
+    void applyAgentNice(spawned.pid);
     return spawned;
   };
 
