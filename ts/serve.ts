@@ -3634,7 +3634,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return cbJson(409, { error: "agent unavailable" });
     }
   };
-  const httpFetch = async (req: Request, srv?: { upgrade: (r: Request, o?: unknown) => boolean }): Promise<Response> => {
+  const httpFetch = async (
+    req: Request,
+    srv?: { upgrade: (r: Request, o?: unknown) => boolean },
+  ): Promise<Response> => {
     const p = new URL(req.url).pathname;
     if (req.method === "GET" && (p === "/" || p === "/index.html"))
       return serveUiFile("index.html", "text/html; charset=utf-8");

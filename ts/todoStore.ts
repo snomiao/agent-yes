@@ -38,8 +38,8 @@
  * `registerGate` with its own check function (see `GateRegistration`).
  */
 
-import { readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import path from "path";
+import { lock } from "proper-lockfile";
 import { JsonlStore, type JsonlDoc } from "./JsonlStore.ts";
 import {
   DONE_STATE,
@@ -108,47 +108,6 @@ export interface GateRegistration {
 
 export class CycleError extends Error {}
 
-/**
- * Ownership-safe file lock, extracted as standalone functions (rather than
- * inlined where they're used) so the release-only-if-still-owned invariant
- * is directly unit-testable without going through a full `create()` call —
- * the same reason this repo's `notifyStore.ts` extracts `shouldStealLock`.
- * See `TodoStore.withIdLock`'s doc comment for why this exists at all.
- */
-export async function acquireIdLock(
-  lockPath: string,
-  opts: { staleMs: number; maxAttempts?: number },
-): Promise<string | null> {
-  const token = `${process.pid}:${Math.random().toString(36).slice(2, 10)}`;
-  for (let attempt = 0; attempt < (opts.maxAttempts ?? 200); attempt++) {
-    try {
-      writeFileSync(lockPath, token, { flag: "wx" });
-      return token;
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-      try {
-        if (Date.now() - statSync(lockPath).mtimeMs > opts.staleMs) {
-          rmSync(lockPath, { force: true }); // stale — steal and retry
-          continue;
-        }
-      } catch {
-        continue; // lock vanished between attempts — retry immediately
-      }
-      await new Promise((resolve) => setTimeout(resolve, 15));
-    }
-  }
-  return null;
-}
-
-/** Release ONLY while `lockPath` still contains `token` — never delete a lock some other holder has since acquired. */
-export function releaseIdLock(lockPath: string, token: string): void {
-  try {
-    if (readFileSync(lockPath, "utf8") === token) rmSync(lockPath, { force: true });
-  } catch {
-    // already gone — nothing to release
-  }
-}
-
 export class TodoStore {
   private jsonl: JsonlStore<Omit<TodoRecord, "_id">>;
   private filePath: string;
@@ -167,47 +126,62 @@ export class TodoStore {
   }
 
   /**
-   * Exclusive, cross-process, OWNERSHIP-SAFE id-allocation lock. This exists
-   * because `_id` allocation ("max existing + 1") must happen atomically with
-   * the append that claims it — computing the id from a snapshot and
-   * appending afterward, even with `JsonlStore`'s own internal per-write
-   * lock, leaves a window where two processes compute the SAME next id from
-   * the same snapshot and then both append it; JsonlStore's "same `_id` →
-   * last line wins" merge would silently make one of those two tasks
-   * disappear (its create() line is superseded by the other's). This lock is
-   * a SEPARATE file from JsonlStore's own internal `<path>.lock` (used by
-   * `append`/`updateById`) — it only ever needs to be held around id
-   * selection, not every write, and deliberately does not touch JsonlStore's
-   * internals.
+   * Exclusive, cross-process id-allocation lock, delegated ENTIRELY to
+   * `proper-lockfile` (already a dependency here — `JsonlStore` itself uses
+   * it for `append`/`updateById`) rather than hand-rolled.
    *
-   * Ownership-safe: the lock file's content is a random token unique to this
-   * acquisition. A lock older than `staleMs` is stolen (so a crashed holder
-   * cannot wedge every future create() call), but release ALWAYS re-checks
-   * that the file still contains OUR token before removing it. Without this
-   * check, a holder that merely ran slow (contention, not a crash) for
-   * longer than `staleMs` would have its still-live lock stolen by another
-   * process, and then — on finally reaching its own release — delete that
-   * NEW holder's lock, breaking exclusivity for a third caller. (This is the
-   * exact class of bug already fixed once in this lock's first draft, and
-   * independently in a downstream closed-source consumer's own lockfile.)
+   * This exists because `_id` allocation ("max existing + 1") must happen
+   * atomically with the append that claims it — computing the id from a
+   * snapshot and appending afterward, even with JsonlStore's own internal
+   * per-write lock, leaves a window where two processes compute the SAME
+   * next id from the same snapshot and then both append it; JsonlStore's
+   * "same `_id` → last line wins" merge would silently make one of those two
+   * tasks disappear. A SEPARATE lockfile path (`<path>.idlock`, distinct from
+   * JsonlStore's own internal `<path>.lock`) guards only id selection, not
+   * every write.
+   *
+   * Two hand-rolled attempts at this lock (a plain mkdir-based lock, then a
+   * token-in-file "ownership-safe" variant) each independently rediscovered
+   * why advisory file locks are hard to get right from scratch: the second
+   * attempt's own stale-lock steal path — read the stale mtime, THEN
+   * separately unlink and recreate — has a time-of-check-to-time-of-use gap
+   * where a DIFFERENT waiter's fresh acquisition can land in between, so the
+   * first waiter's unlink (issued against what it still believes is the
+   * stale file) deletes that second waiter's live lock instead. `proper-
+   * lockfile` solves exactly this class of problem (atomic directory-based
+   * locking, its own carefully-reasoned staleness/compromise handling) and
+   * is already trusted elsewhere in this same file — reusing it here instead
+   * of a third from-scratch attempt is the correct fix, not another patch.
    */
   private async withIdLock<T>(fn: () => Promise<T>): Promise<T> {
-    const lockPath = `${this.filePath}.idlock`;
-    const token = await acquireIdLock(lockPath, { staleMs: 10_000 });
-    // Falling through without ever acquiring the lock must NOT silently
-    // proceed unlocked: with the default ~3s worst-case wait against a 10s
-    // staleMs, a legitimately long-held lock would otherwise let this caller
-    // both run the critical section AND (without the ownership check in
-    // releaseIdLock) delete the other holder's still-live lock.
-    if (token === null) {
+    let release: (() => Promise<void>) | undefined;
+    try {
+      // Lock `this.filePath` itself (the todos.jsonl FILE), not its
+      // containing directory — JsonlStore's own internal lock (used by
+      // append/updateById, invoked from inside `fn()` below) locks the
+      // DIRECTORY. proper-lockfile's internal bookkeeping keys by the `file`
+      // argument's resolved path, so locking the same directory for two
+      // independent purposes from the same process caused a spurious "Lock
+      // is not acquired/owned by you" on release; locking a distinct target
+      // (the file) avoids that collision entirely. `realpath: false` because
+      // this file may not exist yet on a brand-new store (JsonlStore only
+      // creates it on the first append) and default realpath resolution
+      // would fail on a nonexistent path.
+      release = await lock(this.filePath, {
+        lockfilePath: `${this.filePath}.idlock`,
+        realpath: false,
+        stale: 10_000,
+        retries: { retries: 200, minTimeout: 15, maxTimeout: 15 },
+      });
+    } catch (err) {
       throw new Error(
-        `task id allocation: timed out waiting for ${lockPath} (held by another process for over ~3s)`,
+        `task id allocation: timed out waiting for the id lock (${err instanceof Error ? err.message : String(err)})`,
       );
     }
     try {
       return await fn();
     } finally {
-      releaseIdLock(lockPath, token);
+      await release();
     }
   }
 
@@ -420,7 +394,24 @@ export class TodoStore {
         `task ${id}: gate "${targetEdge.gate}" is not registered — call registerGate() first`,
       );
     const isPrimaryEdge = edges[0] === targetEdge;
-    const result = await impl.check();
+    const stateAtCheckStart = rec.state;
+    const result = await impl.check(); // may be slow (a real CI/QA system) — the task's state can change while this runs
+    // Re-fetch and refuse to apply a transition computed against a state the
+    // task may no longer be in: `impl.check()` can take an arbitrarily long
+    // time (a real external system), and another writer (a concurrent
+    // transition/verify/approve) can change the task's state during that
+    // window. Applying targetEdge/sibling's `.to` regardless would silently
+    // move the task across an edge that may no longer even exist from its
+    // CURRENT state, bypassing the lifecycle graph entirely (codex-review
+    // Critical). This does not need its own lock — it is a staleness
+    // precondition on the write, not a mutual-exclusion problem — but it
+    // does need to be checked AFTER the await, immediately before writing.
+    const current = this.mustGet(id);
+    if (current.state !== stateAtCheckStart) {
+      throw new Error(
+        `task ${id}: state changed from "${stateAtCheckStart}" to "${current.state}" while gate "${targetEdge.gate}" was being checked — refusing to apply a transition computed against the old state; re-run verify()`,
+      );
+    }
     if (result.passed) {
       // The gate's own name stands in for "validator" — a registered check is,
       // by construction, an independent system distinct from the worker, so
@@ -443,10 +434,17 @@ export class TodoStore {
         `task ${id}: gate "${targetEdge.gate}" reported not passed and there is no alternate transition to record it against`,
       );
     }
+    // Record the SIBLING's own gate name as evidence (falling back to
+    // targetEdge's name only if the sibling declares none) — `verifyEvidence`
+    // entries are meant to be read as "this gate passed"; attributing this
+    // entry to targetEdge.gate (which reported NOT passed) would let a
+    // downstream reader scanning evidence by gate name misread a failed
+    // check as successful evidence for that gate (codex-review Important).
     return this.applyTransition(id, sibling.to, {
-      gate: targetEdge.gate,
+      // non-null: `edges` was filtered to only entries with a truthy `gate`
+      gate: sibling.gate!,
       validator: `gate:${targetEdge.gate}`,
-      note: result.note ?? "gate reported not passed",
+      note: result.note ?? `gate "${targetEdge.gate}" reported not passed`,
       link: result.link,
     });
   }

@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { rm } from "fs/promises";
 import path from "path";
-import { TodoStore, CycleError, openStore, acquireIdLock, releaseIdLock } from "./todoStore";
+import { TodoStore, CycleError, openStore } from "./todoStore";
 
 const isWindows = process.platform === "win32";
 const TEST_ROOT = isWindows
@@ -125,6 +125,31 @@ describe("TodoStore", () => {
     );
   });
 
+  it("verify() refuses to apply a transition if the task's state changed WHILE the (possibly slow) gate check was running (codex-review round-4 Critical)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "code" });
+    await s.transition(t._id, "merged");
+    await s.transition(t._id, "shipped");
+    await s.transition(t._id, "verifying");
+    // "verify-red" resolves instantly and true, completing a REAL, valid
+    // gated transition (verifying -> verify-failed) via the public API —
+    // simulating a second, concurrent caller (a different process/agent)
+    // finishing its own verify() call for the SAME task while our
+    // "verify-green" check is still in flight.
+    s.registerGate({ name: "verify-red", check: async () => ({ passed: true }) });
+    s.registerGate({
+      name: "verify-green",
+      check: async () => {
+        await s.verify(t._id, "verify-red"); // the "concurrent" verify()
+        return { passed: true };
+      },
+    });
+    await expect(s.verify(t._id, "verify-green")).rejects.toThrow(
+      /state changed from "verifying" to "verify-failed"/,
+    );
+    expect(s.get(t._id)?.state).toBe("verify-failed"); // the concurrent verify()'s result stands; the stale one did NOT stomp it
+  });
+
   it("verify() with a passing registered gate moves to the gated state and records the gate name as validator", async () => {
     const s = await openStore(TEST_ROOT);
     s.registerGate({
@@ -158,6 +183,11 @@ describe("TodoStore", () => {
     const result = await s.verify(t._id);
     expect(result.state).toBe("verify-failed");
     expect(result.verifyEvidence.at(-1)?.note).toBe("canary red: 2 tests failed");
+    // the evidence entry names the SIBLING edge's own gate ("verify-red"),
+    // never the checked gate that actually reported not-passed
+    // ("verify-green") — an evidence entry means "this gate passed"
+    // (codex-review Important)
+    expect(result.verifyEvidence.at(-1)?.gate).toBe("verify-red");
   });
 
   it("verify-failed reopens ONLY back to doing, via a normal transition() call (real doing->verifying cycle preserved)", async () => {
@@ -310,41 +340,38 @@ describe("TodoStore", () => {
     expect(rf(lockPath, "utf8")).toBe("someone-elses-token"); // untouched — not stolen, not released
   }, 15_000);
 
-  it("acquireIdLock/releaseIdLock: release is ownership-safe — a stolen-then-reissued lock survives the ORIGINAL holder's release call (codex-review round-3 Critical)", async () => {
+  it("a live (fresh, non-stale) id lock held by someone else makes create() wait and then throw a clear timeout — proper-lockfile's own retry budget, never a silent unlocked proceed (codex-review round-4 Critical: id-lock now delegates entirely to proper-lockfile instead of a hand-rolled mkdir/token scheme)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const { lock: lockfileLock } = await import("proper-lockfile");
+    const lockPath = path.join(TEST_ROOT, ".agent-yes", "todos.jsonl");
+    const release = await lockfileLock(lockPath, {
+      lockfilePath: `${lockPath}.idlock`,
+      realpath: false,
+      stale: 10_000,
+    });
+    try {
+      await expect(s.create({ summary: "x", kind: "code" })).rejects.toThrow(
+        /task id allocation: timed out waiting for the id lock/,
+      );
+    } finally {
+      await release();
+    }
+    // once released, create() succeeds normally
+    const rec = await s.create({ summary: "after release", kind: "code" });
+    expect(rec.summary).toBe("after release");
+  }, 20_000);
+
+  it("a STALE id lock (older than proper-lockfile's stale window) is recovered automatically — a crashed holder never wedges future create() calls", async () => {
+    const s = await openStore(TEST_ROOT);
     const lockPath = path.join(TEST_ROOT, ".agent-yes", "todos.jsonl.idlock");
-    const { mkdirSync: mkSync } = await import("fs");
-    mkSync(path.dirname(lockPath), { recursive: true });
-
-    const tokenA = await acquireIdLock(lockPath, { staleMs: 10_000 });
-    expect(tokenA).not.toBeNull();
-
-    // Simulate: tokenA's holder ran long enough to go stale; a second
-    // acquirer legitimately steals and reissues the lock under tokenB.
-    const { utimesSync } = await import("fs");
-    utimesSync(lockPath, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
-    const tokenB = await acquireIdLock(lockPath, { staleMs: 10_000 });
-    expect(tokenB).not.toBeNull();
-    expect(tokenB).not.toBe(tokenA);
-
-    // The ORIGINAL (stale) holder now reaches its own release call. Without
-    // the ownership check, this would delete tokenB's live lock.
-    releaseIdLock(lockPath, tokenA!);
-    const { readFileSync: rf } = await import("fs");
-    expect(rf(lockPath, "utf8")).toBe(tokenB); // tokenB's lock is untouched
-
-    // tokenB's own release, by contrast, DOES remove it (it still owns it).
-    releaseIdLock(lockPath, tokenB!);
-    const { existsSync } = await import("fs");
-    expect(existsSync(lockPath)).toBe(false);
-  });
-
-  it("acquireIdLock returns null (never throws, never proceeds) when the wait budget is exhausted against a live lock", async () => {
-    const lockPath = path.join(TEST_ROOT, ".agent-yes", "todos.jsonl.idlock");
-    const { mkdirSync: mkSync, writeFileSync: wf } = await import("fs");
-    mkSync(path.dirname(lockPath), { recursive: true });
-    wf(lockPath, "someone-elses-fresh-token");
-    const result = await acquireIdLock(lockPath, { staleMs: 10_000, maxAttempts: 3 });
-    expect(result).toBeNull();
+    const { mkdirSync: mkSync, utimesSync } = await import("fs");
+    // proper-lockfile's own lock representation IS a directory (mkdir-based
+    // locking) — simulate a lock left behind by a crashed process the same
+    // way proper-lockfile itself would have created one.
+    mkSync(lockPath, { recursive: true });
+    utimesSync(lockPath, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000)); // well past the 10s stale window
+    const rec = await s.create({ summary: "after stale recovery", kind: "code" });
+    expect(rec.summary).toBe("after stale recovery");
   });
 
   it("verify() on a NON-primary registered gate must not fall back to the sibling on failure (codex-review Critical exploit: register only the failure-oriented gate)", async () => {

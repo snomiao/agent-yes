@@ -63,6 +63,23 @@ describe("ay todo CLI", () => {
     ).rejects.toThrow(/--format must be/);
   });
 
+  it("only TRAILING --root/--format are treated as the GLOBAL flag — a mid-command '--format' does not corrupt the actual output format or store location (codex-review round-4 Important)", async () => {
+    // The task's own sub-parser (yargs, non-strict) still separately consumes
+    // "--format output" into its own throwaway key regardless of this fix
+    // (a pre-existing, narrower limitation: an unquoted summary containing a
+    // literal "--flag" token is truncated there — quote the summary if it
+    // must contain one). What THIS fix guarantees is narrower and more
+    // important: that stray mid-command token is never mistaken for the
+    // REAL global --format/--root, which would have corrupted the store
+    // path or the output format for the WHOLE command.
+    const a = await run("new", "fix", "--format", "output", "--kind", "doc", "--format", "json");
+    expect(a.code).toBe(0);
+    // trailing --format json (appended AFTER the mid-command one) is the one
+    // that actually took effect — proving global-flag resolution is anchored
+    // to the true end of the command, not the first/any "--format" seen
+    expect(JSON.parse(a.out)._id).toBe("T1");
+  });
+
   it("new creates a task with kind/tier/owner/tags/deps and rejects a missing summary", async () => {
     const a = await run(
       "new",
@@ -243,6 +260,26 @@ describe("ay todo CLI", () => {
     cap.restore();
     const parsed = JSON.parse(cap.text());
     expect(parsed.unblocked).toEqual(["T3"]);
+  });
+
+  it("dep rejects a malformed invocation (missing blockerId, or a verb that isn't add|rm) with the usage line", async () => {
+    await run("new", "a", "--kind", "code");
+    await run("new", "b", "--kind", "code");
+    await expect(run("dep", "add", "T2")).rejects.toThrow(/usage: ay todo dep add\|rm/);
+    await expect(run("dep", "bogus", "T2", "T1")).rejects.toThrow(/usage: ay todo dep add\|rm/);
+  });
+
+  it("dep surfaces a non-cycle store error (unknown task id) by rethrowing it, not swallowing it as a cycle", async () => {
+    await run("new", "a", "--kind", "code");
+    // T99 doesn't exist: store.addDep throws a plain Error, NOT CycleError, so
+    // the CLI must rethrow (the catch only special-cases CycleError).
+    await expect(run("dep", "add", "T1", "T99")).rejects.toThrow(/T99/);
+  });
+
+  it("get renders the free-form description block when a task has one", async () => {
+    await run("new", "a", "--kind", "doc", "--description", "the long form details");
+    const got = await run("get", "T1");
+    expect(got.out).toContain("the long form details");
   });
 
   it("an unknown verb fails with a clear, enumerated error", async () => {

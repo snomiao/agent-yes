@@ -83,35 +83,54 @@ function emit(opts: CommonOpts, obj: unknown, human: string): void {
  * per-verb sub-parsers below nothing to see in their `args`. Only these two
  * global, cross-verb options are special-cased this way; everything else is
  * declared by each verb's own `yargs(args)` call further down.
+ *
+ * Scanned from the END of argv, and only consumed while each trailing token
+ * keeps matching — NOT scanned anywhere in the array. `ay todo new` joins
+ * every positional word into the summary (an intentional convenience for
+ * unquoted summaries), so scanning the whole array for `--format`/`--root`
+ * would misparse a literal `--format` or `--root` that happens to appear as
+ * a WORD inside an unquoted summary earlier in the command (e.g.
+ * `ay todo new fix --format output --kind doc`, codex-review Important) —
+ * every documented/tested invocation of this CLI puts `--root`/`--format` at
+ * the very end, so restricting extraction to that trailing position closes
+ * the real ambiguity without adding a `--` end-of-options convention. A
+ * summary that itself needs to literally END in the words "--format ..." is
+ * a narrow, documented edge case: quote it as one positional instead.
  */
 function extractCommonOpts(argv: string[]): { opts: CommonOpts; rest: string[] } {
-  const rest: string[] = [];
+  const tokens = [...argv];
   let root = process.cwd();
   let format: CommonOpts["format"] = "table";
-  for (let i = 0; i < argv.length; i++) {
-    const tok = argv[i]!;
-    // Support both `--root val` and `--root=val` (and same for --format) —
-    // the `=` form is common enough elsewhere in this CLI's own flags that
-    // silently rejecting it here would read as inconsistent (codex nitpick).
-    const eq = tok.match(/^(--root|--format)=(.*)$/);
+  for (;;) {
+    const last = tokens.at(-1);
+    if (last === undefined) break;
+    const eq = last.match(/^(--root|--format)=(.*)$/);
     if (eq) {
       if (eq[1] === "--root") root = eq[2]!;
       else if (eq[2] === "table" || eq[2] === "json") format = eq[2];
       else fail(`--format must be "table" or "json" (got "${eq[2]}")`);
-    } else if (tok === "--root") {
-      const v = argv[++i];
-      if (v === undefined) fail("--root requires a value");
-      root = v;
-    } else if (tok === "--format") {
-      const v = argv[++i];
-      if (v !== "table" && v !== "json")
-        fail(`--format must be "table" or "json" (got ${JSON.stringify(v)})`);
-      format = v;
-    } else {
-      rest.push(tok);
+      tokens.pop();
+      continue;
     }
+    if (tokens.length >= 2) {
+      const flag = tokens.at(-2)!;
+      if (flag === "--root") {
+        root = last;
+        tokens.splice(-2, 2);
+        continue;
+      }
+      if (flag === "--format") {
+        if (last !== "table" && last !== "json") {
+          fail(`--format must be "table" or "json" (got ${JSON.stringify(last)})`);
+        }
+        format = last;
+        tokens.splice(-2, 2);
+        continue;
+      }
+    }
+    break; // the trailing token isn't part of a recognized global option — stop
   }
-  return { opts: { root, format }, rest };
+  return { opts: { root, format }, rest: tokens };
 }
 
 export async function runTodoSubcommand(rest0: string[]): Promise<number> {

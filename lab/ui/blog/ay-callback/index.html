@@ -226,17 +226,17 @@
       <p class="sub">
         Your agent just published a report. The person reading it has a question. Until now the
         answer was "find the console, find the right terminal, type there." Now the report page
-        itself can carry a tiny widget that delivers the reader's message straight into that
-        agent's terminal — through a signed, send-only, single-agent capability that expires on a
-        date you chose, and never through your master token.
+        itself can carry a tiny widget that delivers the reader's message straight into that agent's
+        terminal — through a signed, send-only, single-agent capability that expires on a date you
+        chose, and never through your master token.
       </p>
 
       <h2 id="what">What it does <a class="anchor" href="#what">#</a></h2>
       <p>
         <code>ay callback</code> mints a capability for <strong>one agent</strong> and prints a
         self-contained HTML snippet — one inline <code>&lt;script&gt;</code>, zero external
-        requests. Paste it into any page your agent publishes (a status dashboard, a nightly
-        report, a postmortem) and readers get a floating button:
+        requests. Paste it into any page your agent publishes (a status dashboard, a nightly report,
+        a postmortem) and readers get a floating button:
       </p>
       <pre><code>$ ay callback --expires 7d
 callback 3b6f23e7 → claude #46555 @ ~/ws/reports
@@ -259,11 +259,13 @@ revoke:   ay callback revoke 3b6f23e7
       </div>
       <p>
         When a reader hits <em>Send</em>, the message lands in the agent's terminal wrapped in an
-        explicit "untrusted visitor" frame, and in its inbox. One way, by design — the visitor
-        never sees the terminal.
+        explicit "untrusted visitor" frame, and in its inbox. One way, by design — the visitor never
+        sees the terminal.
       </p>
 
-      <h2 id="capability">The capability is a hash, not a key <a class="anchor" href="#capability">#</a></h2>
+      <h2 id="capability">
+        The capability is a hash, not a key <a class="anchor" href="#capability">#</a>
+      </h2>
       <p>
         The obvious-but-wrong implementation is to put your daemon's serve token in the snippet.
         That token is a master key: whoever holds it can read every terminal, send to every agent,
@@ -293,8 +295,7 @@ revoke:   ay callback revoke 3b6f23e7
         <tr>
           <td>Delete the daemon's bookkeeping to "resurrect" an expired token</td>
           <td>
-            <span class="no">✗</span> expiry is in the token itself, not in local state — still
-            410
+            <span class="no">✗</span> expiry is in the token itself, not in local state — still 410
           </td>
         </tr>
         <tr>
@@ -311,7 +312,9 @@ revoke:   ay callback revoke 3b6f23e7
         other.
       </p>
 
-      <h2 id="expiry">--expires is required. There is no "never" <a class="anchor" href="#expiry">#</a></h2>
+      <h2 id="expiry">
+        --expires is required. There is no "never" <a class="anchor" href="#expiry">#</a>
+      </h2>
       <p>
         Every capability API eventually grows a default lifetime, and every default lifetime
         eventually becomes "forever, because nobody thinks about it." We refuse the default:
@@ -324,8 +327,8 @@ an embed capability must carry an explicit lifetime</code></pre>
         <code>2w</code> — and caps at 365 days. There is no <code>--expires never</code> and there
         never will be. The point is a moment of deliberate friction: whoever pastes a capability
         into a public page must answer "how long should this live?" while they still remember the
-        page exists. When it lapses, the widget doesn't fail silently — it tells the reader the
-        link expired and to ask the owner for a fresh one.
+        page exists. When it lapses, the widget doesn't fail silently — it tells the reader the link
+        expired and to ask the owner for a fresh one.
       </p>
       <p>For everything before the deadline, there's the kill switch:</p>
       <pre><code>$ ay callback ls
@@ -333,16 +336,18 @@ an embed capability must carry an explicit lifetime</code></pre>
 $ ay callback revoke 3b6f23e7
 revoked 3b6f23e7</code></pre>
 
-      <h2 id="hardening">A public route that leaks nothing <a class="anchor" href="#hardening">#</a></h2>
+      <h2 id="hardening">
+        A public route that leaks nothing <a class="anchor" href="#hardening">#</a>
+      </h2>
       <p>
-        <code>POST /cb/&lt;cap&gt;</code> is the daemon's only unauthenticated write route, so it
-        is deliberately paranoid:
+        <code>POST /cb/&lt;cap&gt;</code> is the daemon's only unauthenticated write route, so it is
+        deliberately paranoid:
       </p>
       <ul>
         <li>
           <strong>Info-tight responses.</strong> The page learns <code>ok</code>,
-          <code>expired</code>, or a generic failure — never a pid, a cwd, a hostname, or whether
-          a given agent exists. Malformed and forged tokens are indistinguishable 404s.
+          <code>expired</code>, or a generic failure — never a pid, a cwd, a hostname, or whether a
+          given agent exists. Malformed and forged tokens are indistinguishable 404s.
         </li>
         <li>
           <strong>Untrusted framing.</strong> Visitor text is stripped of control characters (no
@@ -356,8 +361,8 @@ revoked 3b6f23e7</code></pre>
         </li>
         <li>
           <strong>One-way.</strong> The route writes to the agent's stdin and records the inbox
-          entry. It never reads the terminal back — a public embed must not become a viewport
-          into your machine.
+          entry. It never reads the terminal back — a public embed must not become a viewport into
+          your machine.
         </li>
       </ul>
       <div class="note">
@@ -372,8 +377,8 @@ $ ay serve            # local daemon
 $ ay expose …         # or put the daemon on a public URL first
 $ ay callback --expires 7d --title "Ask the report bot"</code></pre>
       <p>
-        Paste the printed snippet at the end of anything your agent publishes. Ship the report;
-        keep the conversation.
+        Paste the printed snippet at the end of anything your agent publishes. Ship the report; keep
+        the conversation.
       </p>
 
       <footer>

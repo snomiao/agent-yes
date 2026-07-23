@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { openBlockers, renderDigest, renderTree, unblockedTasks } from "./todoDigest";
+import {
+  buildTreeJSON,
+  openBlockers,
+  renderDigest,
+  renderTree,
+  unblockedTasks,
+} from "./todoDigest";
 import type { TodoRecord } from "./todoStore";
 
 function task(over: Partial<TodoRecord> & { _id: string }): TodoRecord {
@@ -65,6 +71,54 @@ describe("renderTree", () => {
 
   it("reports a friendly message when there are no dependency links at all", () => {
     expect(renderTree([task({ _id: "T1" })])).toContain("no dependency links");
+  });
+});
+
+describe("buildTreeJSON", () => {
+  const tasks = [
+    task({ _id: "T1", state: "done", summary: "schema" }),
+    task({ _id: "T2", state: "doing", summary: "api", owner: "cto", blockedBy: ["T1"] }),
+    task({ _id: "T3", state: "shipped", summary: "ui", blockedBy: ["T2"] }),
+  ];
+
+  it("renders the same structure as renderTree, as nested data", () => {
+    expect(buildTreeJSON(tasks)).toEqual([
+      {
+        id: "T3",
+        state: "shipped",
+        summary: "ui",
+        children: [
+          {
+            id: "T2",
+            state: "doing",
+            summary: "api",
+            owner: "cto",
+            children: [{ id: "T1", state: "done", summary: "schema", children: [] }],
+          },
+        ],
+      },
+    ]);
+  });
+
+  it("throws on an unknown explicit root, like renderTree", () => {
+    expect(() => buildTreeJSON(tasks, "T99")).toThrow(/no such task/);
+  });
+
+  it("faithfully expands a DIAMOND dependency under EACH branch, not just the first-visited one (codex-review nitpick)", () => {
+    // A depends on both B and C, which both depend on the same D
+    const diamond = [
+      task({ _id: "A", blockedBy: ["B", "C"] }),
+      task({ _id: "B", blockedBy: ["D"] }),
+      task({ _id: "C", blockedBy: ["D"] }),
+      task({ _id: "D", state: "done" }),
+    ];
+    const [root] = buildTreeJSON(diamond, "A");
+    const b = root!.children.find((c) => c.id === "B")!;
+    const c = root!.children.find((c) => c.id === "C")!;
+    // BOTH branches show D's full (childless-but-present) node — neither is
+    // a bare stub just because the other branch already "saw" D first.
+    expect(b.children).toEqual([{ id: "D", state: "done", summary: "task D", children: [] }]);
+    expect(c.children).toEqual([{ id: "D", state: "done", summary: "task D", children: [] }]);
   });
 });
 

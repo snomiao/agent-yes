@@ -99,7 +99,15 @@ export function buildTreeJSON(tasks: TodoRecord[], rootId?: string): TreeNode[] 
     : tasks.filter((t) => !dependedOn.has(t._id) && t.blockedBy.length > 0);
   if (rootId && roots.length === 0) throw new Error(`no such task: ${rootId}`);
 
-  const build = (t: TodoRecord, seen: Set<string>): TreeNode => {
+  // `ancestors` tracks only the CURRENT root-to-node path, not every node
+  // visited anywhere in the tree — so a diamond dependency (e.g. both B and C
+  // depend on the same D) gets D's full subtree independently under EACH
+  // branch, a faithful expansion, rather than only the first-visited branch
+  // showing it and later ones getting a childless stub (codex nitpick). A
+  // fresh Set is passed down (not mutated in place) so sibling branches don't
+  // see each other's ancestry. Only a genuine cycle (impossible — the store
+  // rejects them — but checked defensively) would ever hit the `seen` guard.
+  const build = (t: TodoRecord, ancestors: Set<string>): TreeNode => {
     const node: TreeNode = {
       id: t._id,
       state: t.state,
@@ -107,12 +115,12 @@ export function buildTreeJSON(tasks: TodoRecord[], rootId?: string): TreeNode[] 
       ...(t.owner ? { owner: t.owner } : {}),
       children: [],
     };
-    if (seen.has(t._id)) return node; // cycles cannot exist (store rejects them), but stay robust
-    seen.add(t._id);
+    if (ancestors.has(t._id)) return node;
+    const nextAncestors = new Set(ancestors).add(t._id);
     node.children = t.blockedBy
       .map((d) => byId.get(d))
       .filter((x): x is TodoRecord => x !== undefined)
-      .map((d) => build(d, seen));
+      .map((d) => build(d, nextAncestors));
     return node;
   };
   return roots.map((r) => build(r, new Set()));
