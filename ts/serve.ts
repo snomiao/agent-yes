@@ -37,7 +37,7 @@ import {
   writeToIpc,
   type CommonOpts,
 } from "./subcommands.ts";
-import { answerAsk, listAsks } from "./askApi.ts";
+import { answerAsk, hasTodoStore, listAsks } from "./askApi.ts";
 import { TYPING_BADGE } from "./badges.ts";
 import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
 import { CLAUDE_SESSION_PIN_ENV } from "./sessionEnv.ts";
@@ -2092,23 +2092,38 @@ export async function cmdServe(rest: string[]): Promise<number> {
       if (!projectRoot || !taskId) {
         return new Response("missing projectRoot or taskId", { status: 400 });
       }
+      // GET /api/asks only ever surfaces roots that already have a store —
+      // require the same here, so this route can't be pointed at an
+      // arbitrary filesystem path outside what was ever actually listed
+      // (codex-review Important: the GET route scopes roots, the POST route
+      // did not, letting a caller target any directory the process can
+      // write to).
+      if (!hasTodoStore(projectRoot)) {
+        return new Response(`no ay todo store at ${projectRoot}`, { status: 404 });
+      }
       let rec: Awaited<ReturnType<typeof answerAsk>>;
       try {
         rec = await answerAsk(projectRoot, taskId, { choice, acknowledged });
       } catch (e) {
         return new Response((e as Error).message, { status: 400 });
       }
+      // Best-effort, fire-and-forget: the task is already correctly updated
+      // above regardless of whether this succeeds. Deliberately NOT awaited —
+      // a stalled FIFO write must never hang the response, which is the
+      // whole point of "best-effort" (codex-review Important: an earlier
+      // version awaited this, so a stuck agent could hang answerAsk's caller
+      // even though the todo state had already been updated).
       if (rec.owner) {
-        try {
-          const owner = await resolveOne(rec.owner, defaultOpts({ all: true }));
-          if (owner.fifo_file) {
+        resolveOne(rec.owner, defaultOpts({ all: true }))
+          .then((owner) => {
+            if (!owner.fifo_file) return;
             const answerText = choice ?? "acknowledged";
-            await writeToIpc(owner.fifo_file, `[/ask] ${taskId} answered: ${answerText}\n`);
-          }
-        } catch {
-          // owner not currently live / not resolvable — the task itself is
-          // already correctly updated regardless; this is best-effort only.
-        }
+            return writeToIpc(owner.fifo_file, `[/ask] ${taskId} answered: ${answerText}\n`);
+          })
+          .catch(() => {
+            // owner not currently live / not resolvable / FIFO write failed —
+            // best-effort only, nothing to report back to this request.
+          });
       }
       return Response.json(rec);
     }

@@ -107,7 +107,20 @@ export async function answerAsk(
     );
   }
   const block = rec.block;
-  if (block.options?.length) {
+  // actionLink checked FIRST, matching listAsksForProject's own shape
+  // precedence exactly — if a block somehow has both `options` and
+  // `actionLink` set (the CLI's `ay todo block` rejects that combination,
+  // but a direct library caller could still construct one), both functions
+  // must agree on which shape it is, or an ask could be listed as
+  // action-shape yet still demand a choice here, making it unanswerable via
+  // the /ask UI (codex-review Important).
+  if (block.actionLink) {
+    if (!answer.acknowledged) {
+      throw new Error(
+        `task ${taskId}: this ask requires { acknowledged: true } after completing ${block.actionLink}`,
+      );
+    }
+  } else if (block.options?.length) {
     if (!answer.choice) {
       throw new Error(
         `task ${taskId}: this ask requires a choice (one of: ${block.options.join(", ")})`,
@@ -123,14 +136,18 @@ export async function answerAsk(
   }
   const answerText = answer.choice ?? "acknowledged";
 
-  await store.setBlock(taskId, null);
-  if (rec.kind !== "human" && rec.kind !== "decision") {
-    return store.get(taskId)!;
+  // Satisfy the gate/transition (human/decision kinds only) BEFORE clearing
+  // the block: if either call throws (e.g. a concurrent write raced this
+  // one), the task is left correctly STILL blocked, not silently unblocked
+  // with nothing having advanced — the previous order cleared the block
+  // first, which could strand a task in an inconsistent, no-longer-visible
+  // state on a mid-sequence failure (codex-review Important).
+  if (rec.kind === "human" || rec.kind === "decision") {
+    const primary = LIFECYCLES[rec.kind].transitions.find((tr) => tr.from === rec.state && tr.gate);
+    if (primary?.gate) {
+      await store.approve(taskId, primary.gate, block.who, { note: answerText });
+      await store.transition(taskId, primary.to);
+    }
   }
-  const primary = LIFECYCLES[rec.kind].transitions.find((tr) => tr.from === rec.state && tr.gate);
-  if (!primary?.gate) {
-    return store.get(taskId)!;
-  }
-  await store.approve(taskId, primary.gate, block.who, { note: answerText });
-  return store.transition(taskId, primary.to);
+  return store.setBlock(taskId, null);
 }

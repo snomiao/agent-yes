@@ -243,6 +243,25 @@ describe("ay todo CLI", () => {
     });
   });
 
+  it("block --type blocked-by-human refuses --options together with --action-link (mutually exclusive ask shapes, codex-review round-9 Important)", async () => {
+    await run("new", "f", "--kind", "code");
+    await expect(
+      run(
+        "block",
+        "T1",
+        "--type",
+        "blocked-by-human",
+        "--who",
+        "taku",
+        "--options",
+        "a",
+        "b",
+        "--action-link",
+        "https://example/oauth",
+      ),
+    ).rejects.toThrow(/mutually exclusive/);
+  });
+
   it("dep add/rm, tree, and digest render real output and surface cycles as a clean error", async () => {
     await run("new", "a", "--kind", "code");
     await run("new", "b", "--kind", "code");

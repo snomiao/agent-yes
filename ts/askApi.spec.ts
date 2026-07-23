@@ -110,6 +110,51 @@ describe("askApi", () => {
     expect(answered.verifyEvidence[0]).toMatchObject({ gate: "human-decided", note: "canary" });
   });
 
+  it("when a block has BOTH options and actionLink set (a direct library caller bypassing the CLI's mutual-exclusivity guard), answerAsk treats it as action-shape — matching listAsksForProject's own precedence, so an ask is never listed as one shape but answerable only as another (codex-review round-9 Important)", async () => {
+    const s = await openStore(ROOT_A);
+    const t = await s.create({ summary: "x", kind: "human" });
+    await s.setBlock(t._id, {
+      type: "blocked-by-human",
+      who: "taku",
+      options: ["canary", "beta"],
+      actionLink: "https://example/oauth",
+    });
+    const asks = await listAsksForProject(ROOT_A);
+    expect(asks[0]?.shape).toBe("action");
+    // a choice alone (matching the listed shape's own actionLink requirement
+    // being ignored) must NOT satisfy it — only acknowledged does, matching
+    // the action-shape UI (open link, then confirm)
+    await expect(answerAsk(ROOT_A, t._id, { choice: "canary" })).rejects.toThrow(
+      /requires \{ acknowledged: true \}/,
+    );
+    const answered = await answerAsk(ROOT_A, t._id, { acknowledged: true });
+    expect(answered.block).toBeNull();
+  });
+
+  it("answerAsk leaves the task's block INTACT (not silently cleared) if the gate/transition step fails — atomicity means a failure never strands the task in limbo (codex-review round-9 Important)", async () => {
+    const s = await openStore(ROOT_A);
+    const t = await s.create({ summary: "pick a channel", kind: "decision", owner: "taku" });
+    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku", options: ["a", "b"] });
+    // "taku" is both the task's owner AND the asked human — approve() will
+    // throw "independent verification required" for this specific task,
+    // simulating a mid-sequence failure without needing to mock anything.
+    await expect(answerAsk(ROOT_A, t._id, { choice: "a" })).rejects.toThrow(
+      /independent verification required/,
+    );
+    // Re-open fresh rather than reusing `s`: `answerAsk()` opens its OWN
+    // separate store instance internally, so `s`'s in-memory cache is never
+    // reloaded by that call — reading `s` directly here would silently pass
+    // even if answerAsk actually cleared the block on disk before throwing
+    // (exactly the bug this test exists to catch).
+    const stillBlocked = (await openStore(ROOT_A)).get(t._id)!;
+    expect(stillBlocked.block).toEqual({
+      type: "blocked-by-human",
+      who: "taku",
+      options: ["a", "b"],
+    });
+    expect(stillBlocked.state).toBe("deciding"); // unchanged
+  });
+
   it("answerAsk requires an actual answer for a choice-shape ask (no bare acknowledged)", async () => {
     const s = await openStore(ROOT_A);
     const t = await s.create({ summary: "pick a channel", kind: "decision" });
