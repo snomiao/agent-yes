@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { rm } from "fs/promises";
+import { rm, appendFile } from "fs/promises";
 import path from "path";
 import { TodoStore, CycleError, openStore } from "./todoStore";
 
@@ -454,5 +454,65 @@ describe("TodoStore", () => {
     await s.transition(t._id, "verifying");
     const result = await s.verify(t._id);
     expect(result.state).toBe("verify-failed");
+  });
+
+  it("registeredGateNames() lists exactly the gates registered so far", async () => {
+    const s = await openStore(TEST_ROOT);
+    expect(s.registeredGateNames()).toEqual([]);
+    s.registerGate({ name: "verify-green", check: async () => ({ passed: true }) });
+    s.registerGate({ name: "human-approved", check: async () => ({ passed: true }) });
+    expect(s.registeredGateNames().sort()).toEqual(["human-approved", "verify-green"]);
+  });
+
+  it("markOrphaned() records where the task was and the reassignment candidates, refuses on an already-done or already-orphaned task", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "code", owner: "dead-agent" });
+    await s.transition(t._id, "merged");
+    const orphaned = await s.markOrphaned(t._id, "dead-agent", ["idle-1", "idle-2"]);
+    expect(orphaned.state).toBe("orphaned");
+    expect(orphaned.orphanedFrom).toBe("merged");
+    expect(orphaned.reassignCandidates).toEqual(["idle-1", "idle-2"]);
+
+    await expect(s.markOrphaned(t._id, "dead-agent", [])).rejects.toThrow(/already "orphaned"/);
+
+    const done = await s.create({ summary: "y", kind: "human", owner: "dead-agent" });
+    await s.approve(done._id, "human-replied", "taku");
+    await s.transition(done._id, "decided");
+    await s.transition(done._id, "done");
+    await expect(s.markOrphaned(done._id, "dead-agent", [])).rejects.toThrow(/already "done"/);
+  });
+
+  it("markOrphaned() refuses when the FRESH owner no longer matches expectedOwner — a stale decision must not orphan a task reassigned in the meantime (codex-review round-7 Important)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "code", owner: "dead-agent" });
+    // Simulate a concurrent write from another process/mechanism (there is
+    // no `reassign` API yet — this appends a merge line in the exact shape
+    // `jsonl.updateById` itself would write, which is exactly what any real
+    // future writer, in-process or not, would produce on this append-only
+    // file) that reassigns the task AFTER reconcileTodos() would have
+    // snapshotted the old owner.
+    await appendFile(
+      path.join(TEST_ROOT, ".agent-yes", "todos.jsonl"),
+      JSON.stringify({ _id: t._id, owner: "someone-else" }) + "\n",
+    );
+    await expect(s.markOrphaned(t._id, "dead-agent", [])).rejects.toThrow(
+      /owner changed since this was decided/,
+    );
+    expect(s.get(t._id)?.state).toBe("doing"); // unchanged — refused, not silently orphaned anyway
+  });
+
+  it("clearWaitingOnAgentBlock() clears only when the FRESH block still matches type+agentId, and refuses (without erasing) a block that changed since decided (codex-review round-7 Important)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "code" });
+    await s.setBlock(t._id, { type: "waiting-on-agent", agentId: "a1" });
+    const cleared = await s.clearWaitingOnAgentBlock(t._id, "a1");
+    expect(cleared.block).toBeNull();
+
+    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku" });
+    await expect(s.clearWaitingOnAgentBlock(t._id, "a1")).rejects.toThrow(
+      /block changed since this was decided/,
+    );
+    // refused, not erased: the newer block is still exactly what it was
+    expect(s.get(t._id)?.block).toEqual({ type: "blocked-by-human", who: "taku" });
   });
 });

@@ -40,6 +40,16 @@ export interface LifecycleGraph {
  */
 export const DONE_STATE = "done";
 
+/**
+ * Not a normal graph edge on any kind's `transitions` list — a task can be
+ * moved here from ANY state, by automation only (see `todoAutomation.ts`),
+ * when its owning agent process has vanished. Kept out of the declarative
+ * graphs deliberately: it is a side-channel signal about the WORKER, not a
+ * statement about the work itself, so it should never appear as a normal
+ * `canTransition`-reachable edge a human/CLI could aim for directly.
+ */
+export const ORPHANED_STATE = "orphaned";
+
 export const LIFECYCLES: Record<LifecycleKind, LifecycleGraph> = {
   code: {
     states: ["doing", "merged", "shipped", "verifying", "done", "verify-failed", "orphaned"],

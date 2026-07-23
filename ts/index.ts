@@ -61,6 +61,8 @@ export type {
 } from "./todoStore.ts";
 export {
   LIFECYCLES,
+  DONE_STATE,
+  ORPHANED_STATE,
   nextStates,
   canTransition,
   requiredGate,
@@ -72,6 +74,8 @@ export type { LifecycleKind, LifecycleGraph, LifecycleTransition } from "./todoL
 export { monitorHint, describeBlock } from "./todoBlock.ts";
 export type { TodoBlock, MonitorHint } from "./todoBlock.ts";
 export { unblockedTasks, openBlockers, renderTree, renderDigest } from "./todoDigest.ts";
+export { reconcileTodos } from "./todoAutomation.ts";
+export type { TodoAction, LiveAgent } from "./todoAutomation.ts";
 
 export type AgentCliConfig = {
   // cli

@@ -34,6 +34,8 @@ import { openStore, CycleError, type TodoRecord } from "./todoStore.ts";
 import { isKnownKind, LIFECYCLES, type LifecycleKind } from "./todoLifecycle.ts";
 import { describeBlock, type TodoBlock } from "./todoBlock.ts";
 import { renderDigest, renderTree } from "./todoDigest.ts";
+import { reconcileTodos, type LiveAgent } from "./todoAutomation.ts";
+import { readGlobalPids } from "./globalPidIndex.ts";
 
 function fail(message: string): never {
   throw new Error(message);
@@ -348,9 +350,80 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
       }
       return 0;
     }
+    case "reconcile": {
+      const sub = commonOptions(yargs(args)).help(false).exitProcess(false);
+      const a = await sub.parseAsync();
+      const opts = commonOptsOf(a);
+      const store = await openStore(opts.root);
+      // `liveOnly: false`: a task's owner needs to be checked against a KNOWN
+      // agent whose latest record says `exited`, not just the currently-live
+      // set — an exited-but-recorded agent is exactly the orphan signal (see
+      // todoAutomation.ts's `deadOwnerAgent`).
+      const agents: LiveAgent[] = await readGlobalPids({ liveOnly: false });
+      const registeredGates = new Set(store.registeredGateNames());
+      const actions = reconcileTodos(store.all(), agents, registeredGates);
+
+      // Every action is applied against a FRESH record inside the store
+      // (see `markOrphaned`/`clearWaitingOnAgentBlock`), since the snapshot
+      // `reconcileTodos` decided from can be stale by the time we get here
+      // (another process may have reassigned the task, changed its block,
+      // etc. — codex-review Important). A per-action failure is reported as
+      // a skip, not an aborted reconcile: the remaining actions still apply.
+      const applied: string[] = [];
+      for (const action of actions) {
+        try {
+          switch (action.type) {
+            case "orphan": {
+              await store.markOrphaned(action.taskId, action.expectedOwner, action.candidates);
+              applied.push(
+                `orphaned ${action.taskId} (was ${action.from}) — reassign candidates: ${action.candidates.join(", ") || "(none idle)"}`,
+              );
+              break;
+            }
+            case "clear-waiting-on-agent": {
+              await store.clearWaitingOnAgentBlock(action.taskId, action.expectedAgentId);
+              applied.push(
+                `cleared waiting-on-agent block on ${action.taskId} (agent ${action.expectedAgentId})`,
+              );
+              break;
+            }
+            case "auto-verify": {
+              // A registered gate reporting not-passed (or throwing for any
+              // other reason, e.g. a concurrent state change) is a real
+              // "not verified yet" outcome, reported as such rather than
+              // silently claimed as success — reconcile just tries again
+              // next call (codex-review Important: the previous version
+              // swallowed every failure and still reported "auto-verified").
+              const result = await store.verify(action.taskId);
+              applied.push(`auto-verified ${action.taskId} -> ${result.state}`);
+              break;
+            }
+            case "notify-unblocked": {
+              // Delivery to the owning agent's own inbox is not wired yet
+              // (the notify system addresses parent<->child pid trees, a
+              // different relationship than an arbitrary task owner) —
+              // surfaced here, on every call (see todoAutomation.ts), so it
+              // is visible rather than silently dropped or falsely retired.
+              applied.push(`${action.taskId} is now unblocked (owner: ${action.owner})`);
+              break;
+            }
+          }
+        } catch (err) {
+          applied.push(
+            `skipped ${action.type} on ${action.taskId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      emit(
+        opts,
+        { actions, applied },
+        applied.length ? applied.join("\n") : "(nothing to reconcile)",
+      );
+      return 0;
+    }
     default:
       fail(
-        `unknown "ay todo" verb: "${verb ?? ""}" (expected: new/ls/get/transition/approve/verify/block/unblock/dep/tree/digest)`,
+        `unknown "ay todo" verb: "${verb ?? ""}" (expected: new/ls/get/transition/approve/verify/block/unblock/dep/tree/digest/reconcile)`,
       );
   }
 }
