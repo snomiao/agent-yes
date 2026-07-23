@@ -190,8 +190,14 @@ export async function answerAsk(
     }
     answerText = answer.choice;
   } else {
-    if (!answer.acknowledged && !answer.choice) {
-      throw new Error(`task ${taskId}: this ask requires { acknowledged: true } or a choice`);
+    // A bare acknowledge-shape ask requires `acknowledged: true` SPECIFICALLY
+    // — a `choice` alone used to also satisfy it (nothing to validate a
+    // choice against here, so accepting one was a looser, less clear
+    // contract than necessary — codex-review nitpick). `answerText` was
+    // already always forced to "acknowledged" regardless, so this doesn't
+    // change what gets recorded, only what the caller is required to send.
+    if (!answer.acknowledged) {
+      throw new Error(`task ${taskId}: this ask requires { acknowledged: true }`);
     }
     answerText = "acknowledged";
   }
@@ -240,6 +246,13 @@ export async function answerAsk(
       await store.transition(taskId, primary.to);
     }
   }
-  const record = await store.setBlock(taskId, null);
+  // Clear the SPECIFIC block this function decided to answer — not
+  // unconditionally by id. `rec.block` (captured at the very top, before
+  // any of the writes above) could have been REPLACED by another process
+  // in the meantime (a follow-up question, a re-block on something else
+  // entirely); an unconditional `setBlock(taskId, null)` would silently
+  // erase that genuinely newer block too, leaving the task looking
+  // unblocked when a real, later block exists (codex-review Important).
+  const record = await store.clearBlockIfMatches(taskId, block);
   return { record, answerText };
 }

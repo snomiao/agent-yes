@@ -1,8 +1,8 @@
-import { describe, expect, it, beforeEach, afterEach } from "vitest";
+import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { rm, mkdir } from "fs/promises";
 import path from "path";
 import { listAsks, listAsksForProject, answerAsk, hasTodoStore } from "./askApi";
-import { openStore } from "./todoStore";
+import { TodoStore, openStore } from "./todoStore";
 
 const isWindows = process.platform === "win32";
 const ROOT_A = isWindows
@@ -167,6 +167,49 @@ describe("askApi", () => {
       options: ["a", "b"],
     });
     expect(stillBlocked.state).toBe("deciding"); // unchanged
+  });
+
+  it("answerAsk NEVER erases a block that was replaced by a DIFFERENT one WHILE the answer was being processed — the final clear only removes the SPECIFIC block this call decided to answer, not whatever block happens to be there by the time it gets around to clearing (codex-review round-15 Important)", async () => {
+    const s = await openStore(ROOT_A);
+    const t = await s.create({ summary: "x", kind: "human" });
+    const original = { type: "blocked-by-human", who: "taku", question: "original ask" } as const;
+    await s.setBlock(t._id, original);
+    const newerBlock = {
+      type: "blocked-by-human",
+      who: "taku",
+      question: "a brand new ask",
+    } as const;
+
+    // Deterministically inject a concurrent block replacement between
+    // answerAsk's gate/transition step and its final clear — patching
+    // TodoStore.prototype.transition (which every openStore() instance,
+    // including the one answerAsk creates internally, shares) so a SECOND,
+    // independent store instance replaces the block right after the first
+    // transition() call resolves, simulating a genuinely different process
+    // racing this exact window. A real race would be flaky to reproduce
+    // reliably; this reproduces it deterministically every run.
+    const originalTransition = TodoStore.prototype.transition;
+    const spy = vi.spyOn(TodoStore.prototype, "transition").mockImplementation(async function (
+      this: TodoStore,
+      id: string,
+      toState: string,
+    ) {
+      const result = await originalTransition.call(this, id, toState);
+      const other = await openStore(ROOT_A);
+      await other.setBlock(id, newerBlock);
+      return result;
+    });
+    try {
+      await expect(answerAsk(ROOT_A, t._id, { acknowledged: true })).rejects.toThrow(
+        /block changed since this was decided/,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    // The newer block survives untouched — not silently wiped by the stale
+    // "clear the original block" decision.
+    const fresh = (await openStore(ROOT_A)).get(t._id)!;
+    expect(fresh.block).toEqual(newerBlock);
   });
 
   it("answerAsk does not re-approve (and duplicate evidence for) a gate the FRESH record already shows satisfied — the retry-after-a-transition-failure case, since approve()+transition() are two separate persisted writes, not one atomic operation (codex-review round-10 Important)", async () => {

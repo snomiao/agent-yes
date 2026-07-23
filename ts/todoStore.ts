@@ -604,6 +604,31 @@ export class TodoStore {
   }
 
   /**
+   * Clears `block` ONLY if the FRESH record's block is still exactly
+   * `expectedBlock` (compared by JSON shape, not reference — callers pass
+   * a snapshot they read earlier) — the generalized form of
+   * `clearWaitingOnAgentBlock` above, for a caller (e.g. `askApi.ts`'s
+   * `answerAsk`) that decided to clear a specific `blocked-by-human` block
+   * from a snapshot taken at the start of a longer operation. Clearing
+   * unconditionally by `id` alone could silently erase a genuinely
+   * DIFFERENT, newer block that another process set in the meantime (e.g.
+   * the human asked a follow-up question, or the task got re-blocked on
+   * something else entirely) — the task would then look unblocked even
+   * though a real, later block exists (codex-review Important). Throws
+   * instead of silently no-op-ing so the caller can report the conflict
+   * rather than claim success.
+   */
+  clearBlockIfMatches(id: string, expectedBlock: TodoBlock): Promise<TodoRecord> {
+    const expectedJson = JSON.stringify(expectedBlock);
+    return this.rawUpdate(id, (fresh) => {
+      if (JSON.stringify(fresh.block) !== expectedJson) {
+        throw new Error(`task ${id}: block changed since this was decided — not clearing`);
+      }
+      return { block: null };
+    });
+  }
+
+  /**
    * Side-channel transition to `orphaned` (see `ORPHANED_STATE`'s doc comment
    * in `todoLifecycle.ts`) — deliberately NOT gated through `canTransition`,
    * since no kind's graph declares an edge into it: this is automation

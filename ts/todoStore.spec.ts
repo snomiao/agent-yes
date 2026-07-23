@@ -515,4 +515,25 @@ describe("TodoStore", () => {
     // refused, not erased: the newer block is still exactly what it was
     expect(s.get(t._id)?.block).toEqual({ type: "blocked-by-human", who: "taku" });
   });
+
+  it("clearBlockIfMatches() — the generalized guard — clears only when the FRESH block still deep-equals expectedBlock, and refuses (without erasing) a block that changed since decided (codex-review round-15 Important)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "code" });
+    const original = {
+      type: "blocked-by-human",
+      who: "taku",
+      question: "canary or beta?",
+    } as const;
+    await s.setBlock(t._id, original);
+    const cleared = await s.clearBlockIfMatches(t._id, original);
+    expect(cleared.block).toBeNull();
+
+    const replaced = { type: "blocked-by-human", who: "taku", question: "a NEW question" } as const;
+    await s.setBlock(t._id, replaced);
+    await expect(s.clearBlockIfMatches(t._id, original)).rejects.toThrow(
+      /block changed since this was decided/,
+    );
+    // refused, not erased: the newer block survives untouched
+    expect(s.get(t._id)?.block).toEqual(replaced);
+  });
 });
