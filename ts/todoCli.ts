@@ -90,11 +90,23 @@ function extractCommonOpts(argv: string[]): { opts: CommonOpts; rest: string[] }
   let format: CommonOpts["format"] = "table";
   for (let i = 0; i < argv.length; i++) {
     const tok = argv[i]!;
-    if (tok === "--root") {
-      root = argv[++i] ?? root;
+    // Support both `--root val` and `--root=val` (and same for --format) —
+    // the `=` form is common enough elsewhere in this CLI's own flags that
+    // silently rejecting it here would read as inconsistent (codex nitpick).
+    const eq = tok.match(/^(--root|--format)=(.*)$/);
+    if (eq) {
+      if (eq[1] === "--root") root = eq[2]!;
+      else if (eq[2] === "table" || eq[2] === "json") format = eq[2];
+      else fail(`--format must be "table" or "json" (got "${eq[2]}")`);
+    } else if (tok === "--root") {
+      const v = argv[++i];
+      if (v === undefined) fail("--root requires a value");
+      root = v;
     } else if (tok === "--format") {
       const v = argv[++i];
-      if (v === "table" || v === "json") format = v;
+      if (v !== "table" && v !== "json")
+        fail(`--format must be "table" or "json" (got ${JSON.stringify(v)})`);
+      format = v;
     } else {
       rest.push(tok);
     }
@@ -119,7 +131,11 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
         .help(false)
         .exitProcess(false);
       const a = await sub.parseAsync();
-      const summary = String(a._[0] ?? "");
+      // Join ALL positional args, not just a._[0]: an unquoted summary like
+      // `ay todo new write the spec --kind doc` splits into three separate
+      // positionals under yargs, and using only the first silently stored
+      // "write" as the entire summary (codex-review Important).
+      const summary = (a._ as (string | number)[]).map(String).join(" ");
       if (!summary)
         fail(
           "usage: ay todo new <summary> --kind <kind> [--description ...] [--tier ...] [--owner ...] [--tag t]... [--dep id]...",

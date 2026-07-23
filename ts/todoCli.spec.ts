@@ -35,6 +35,34 @@ describe("ay todo CLI", () => {
     await rm(TEST_ROOT, { recursive: true, force: true });
   });
 
+  it("new joins ALL positional words into the summary — an unquoted multi-word summary is not silently truncated to its first word (codex-review Important)", async () => {
+    const a = await run("new", "write", "the", "spec", "--kind", "doc");
+    expect(a.code).toBe(0);
+    expect(a.out).toContain("created T1");
+    const got = await run("get", "T1");
+    expect(got.out).toContain("T1 [drafting] write the spec");
+  });
+
+  it("--root=val and --format=val (equals form) work the same as the space form; an invalid --format value fails clearly", async () => {
+    const cap = captureStdout();
+    try {
+      const code = await runTodoSubcommand(["new", "x", "--kind", "code", `--root=${TEST_ROOT}`]);
+      expect(code).toBe(0);
+    } finally {
+      cap.restore();
+    }
+    const cap2 = captureStdout();
+    try {
+      await runTodoSubcommand(["get", "T1", "--root", TEST_ROOT, "--format=json"]);
+      expect(JSON.parse(cap2.text())._id).toBe("T1");
+    } finally {
+      cap2.restore();
+    }
+    await expect(
+      runTodoSubcommand(["get", "T1", "--root", TEST_ROOT, "--format", "yaml"]),
+    ).rejects.toThrow(/--format must be/);
+  });
+
   it("new creates a task with kind/tier/owner/tags/deps and rejects a missing summary", async () => {
     const a = await run(
       "new",

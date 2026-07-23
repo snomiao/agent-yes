@@ -297,6 +297,18 @@ describe("TodoStore", () => {
     expect(s.list()).toHaveLength(N); // every task actually persisted, not clobbered
   }, 30_000);
 
+  it("a held id lock makes create() throw a timeout, never silently proceed unlocked (codex-review round-2 Critical)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const { mkdirSync: mkSync } = await import("fs");
+    const lockDir = path.join(TEST_ROOT, ".agent-yes", "todos.jsonl.idlock");
+    mkSync(lockDir, { recursive: true }); // simulate another process holding the lock, freshly
+    await expect(s.create({ summary: "x", kind: "code" })).rejects.toThrow(/timed out waiting for/);
+    // and the lock must NOT have been deleted by the failed attempt (that
+    // would let a second unlocked caller in right after this one)
+    const { existsSync } = await import("fs");
+    expect(existsSync(lockDir)).toBe(true);
+  }, 15_000);
+
   it("verify() on a NON-primary registered gate must not fall back to the sibling on failure (codex-review Critical exploit: register only the failure-oriented gate)", async () => {
     const s = await openStore(TEST_ROOT);
     // Only "verify-red" (the SECOND/non-primary gated edge from "verifying")

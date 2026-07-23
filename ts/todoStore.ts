@@ -144,9 +144,11 @@ export class TodoStore {
   private async withIdLock<T>(fn: () => Promise<T>): Promise<T> {
     const lockDir = `${this.filePath}.idlock`;
     const staleMs = 10_000;
+    let acquired = false;
     for (let attempt = 0; attempt < 200; attempt++) {
       try {
         mkdirSync(lockDir);
+        acquired = true;
         break;
       } catch (err) {
         if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
@@ -160,6 +162,16 @@ export class TodoStore {
         }
         await new Promise((resolve) => setTimeout(resolve, 15));
       }
+    }
+    // Falling through the loop without ever acquiring the lock must NOT
+    // silently proceed unlocked (codex-review Critical): with 200 attempts at
+    // a ~15ms backoff (~3s worst case) against a 10s staleMs, a legitimately
+    // long-held lock would previously let this caller both run the critical
+    // section AND rmdirSync the other holder's still-live lock in `finally`.
+    if (!acquired) {
+      throw new Error(
+        `task id allocation: timed out waiting for ${lockDir} (held by another process for over ~3s)`,
+      );
     }
     try {
       return await fn();
