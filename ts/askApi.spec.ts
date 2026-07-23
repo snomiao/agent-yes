@@ -155,6 +155,22 @@ describe("askApi", () => {
     expect(stillBlocked.state).toBe("deciding"); // unchanged
   });
 
+  it("answerAsk does not re-approve (and duplicate evidence for) a gate the FRESH record already shows satisfied — the retry-after-a-transition-failure case, since approve()+transition() are two separate persisted writes, not one atomic operation (codex-review round-10 Important)", async () => {
+    const s = await openStore(ROOT_A);
+    const t = await s.create({ summary: "pick a channel", kind: "decision" });
+    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku", options: ["a", "b"] });
+    // Simulate exactly the state a first answerAsk() attempt would leave
+    // behind if approve() succeeded but transition() then failed: the gate
+    // is already satisfied, the task hasn't advanced yet, still blocked.
+    await s.approve(t._id, "human-decided", "taku", { note: "a" });
+    const answered = await answerAsk(ROOT_A, t._id, { choice: "a" });
+    expect(answered.state).toBe("decided");
+    // Exactly ONE evidence entry — a naive retry would have called
+    // approve() again and appended a second one for the same gate.
+    expect(answered.verifyEvidence).toHaveLength(1);
+    expect(answered.verifyEvidence[0]).toMatchObject({ gate: "human-decided", note: "a" });
+  });
+
   it("answerAsk requires an actual answer for a choice-shape ask (no bare acknowledged)", async () => {
     const s = await openStore(ROOT_A);
     const t = await s.create({ summary: "pick a channel", kind: "decision" });

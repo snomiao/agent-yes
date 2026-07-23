@@ -147,8 +147,16 @@
               .join("") +
             "</div>";
         } else if (ask.shape === "action") {
+          // HTML-escaping the text does NOT block a dangerous URL scheme
+          // (javascript:/data:) in an href — only checking the scheme itself
+          // does. The CLI already rejects a non-http(s) --action-link at
+          // write time, but this is the actual browser-facing enforcement
+          // point: never trust that every writer went through the CLI.
+          const link = isSafeHttpUrl(ask.actionLink)
+            ? `<a class="action-link" href="${escapeHtml(ask.actionLink)}" target="_blank" rel="noopener">open link</a>`
+            : `<span class="err">invalid action link (not http/https) - cannot open</span>`;
           body = `<div class="buttons">
-            <a class="action-link" href="${escapeHtml(ask.actionLink)}" target="_blank" rel="noopener">open link</a>
+            ${link}
             <button data-key="${encodeURIComponent(key)}" data-ack="1">I've done this - confirm</button>
           </div>`;
         } else {
@@ -168,6 +176,15 @@
           /[&<>"']/g,
           (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
         );
+      }
+
+      function isSafeHttpUrl(s) {
+        try {
+          const u = new URL(String(s));
+          return u.protocol === "http:" || u.protocol === "https:";
+        } catch {
+          return false;
+        }
       }
 
       async function refresh() {

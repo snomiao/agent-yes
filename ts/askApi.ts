@@ -142,10 +142,23 @@ export async function answerAsk(
   // with nothing having advanced — the previous order cleared the block
   // first, which could strand a task in an inconsistent, no-longer-visible
   // state on a mid-sequence failure (codex-review Important).
+  //
+  // `approve()` and `transition()` are two separately-persisted writes, not
+  // one atomic operation the underlying store supports — if `approve()`
+  // succeeds but `transition()` then throws (e.g. the state changed
+  // concurrently), a naive retry of this whole function would call
+  // `approve()` again and append a SECOND, duplicate evidence entry for the
+  // same gate (codex-review Important). Skipping `approve()` when the gate
+  // is already in the FRESH record's `satisfiedGates` makes a retry after
+  // exactly that failure idempotent — it lands on `transition()` directly
+  // instead of re-approving — without needing a full transactional rewrite
+  // of the store.
   if (rec.kind === "human" || rec.kind === "decision") {
     const primary = LIFECYCLES[rec.kind].transitions.find((tr) => tr.from === rec.state && tr.gate);
     if (primary?.gate) {
-      await store.approve(taskId, primary.gate, block.who, { note: answerText });
+      if (!rec.satisfiedGates.includes(primary.gate)) {
+        await store.approve(taskId, primary.gate, block.who, { note: answerText });
+      }
       await store.transition(taskId, primary.to);
     }
   }

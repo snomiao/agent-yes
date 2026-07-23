@@ -330,6 +330,14 @@ const blockCmd: CommandModule<
             "--options and --action-link are mutually exclusive (choice-shape vs action-shape ask)",
           );
         }
+        if (argv["action-link"] && !/^https?:\/\//i.test(argv["action-link"])) {
+          // The /ask page renders this straight into an <a href>. HTML-
+          // escaping the text does NOT block dangerous URL schemes
+          // (`javascript:`, `data:`) — only the scheme itself does. Reject
+          // at write time so a non-http(s) link can never reach the store
+          // at all (codex-review Important).
+          fail(`--action-link must start with http:// or https:// (got "${argv["action-link"]}")`);
+        }
         block = {
           type: "blocked-by-human",
           who: argv.who,

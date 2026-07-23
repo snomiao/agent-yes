@@ -262,6 +262,45 @@ describe("ay todo CLI", () => {
     ).rejects.toThrow(/mutually exclusive/);
   });
 
+  it("block --action-link refuses a non-http(s) URL scheme (javascript:/data: would be an XSS vector when /ask renders it into an <a href>, codex-review round-10 Important)", async () => {
+    await run("new", "g", "--kind", "code");
+    await expect(
+      run(
+        "block",
+        "T1",
+        "--type",
+        "blocked-by-human",
+        "--who",
+        "taku",
+        "--action-link",
+        "javascript:alert(1)",
+      ),
+    ).rejects.toThrow(/must start with http/);
+    await expect(
+      run(
+        "block",
+        "T1",
+        "--type",
+        "blocked-by-human",
+        "--who",
+        "taku",
+        "--action-link",
+        "data:text/html,x",
+      ),
+    ).rejects.toThrow(/must start with http/);
+    const ok = await run(
+      "block",
+      "T1",
+      "--type",
+      "blocked-by-human",
+      "--who",
+      "taku",
+      "--action-link",
+      "https://example/oauth",
+    );
+    expect(ok.out).toContain("https://example/oauth");
+  });
+
   it("dep add/rm, tree, and digest render real output and surface cycles as a clean error", async () => {
     await run("new", "a", "--kind", "code");
     await run("new", "b", "--kind", "code");

@@ -37,7 +37,7 @@ import {
   writeToIpc,
   type CommonOpts,
 } from "./subcommands.ts";
-import { answerAsk, hasTodoStore, listAsks } from "./askApi.ts";
+import { answerAsk, listAsks } from "./askApi.ts";
 import { TYPING_BADGE } from "./badges.ts";
 import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
 import { CLAUDE_SESSION_PIN_ENV } from "./sessionEnv.ts";
@@ -2054,18 +2054,22 @@ export async function cmdServe(rest: string[]): Promise<number> {
       }
     }
 
+    // Both /api/asks routes below share this: "every project" is derived the
+    // same way `ay ls` aggregates across projects — the distinct `cwd`s in
+    // the live-agent registry — since there is no separate "registered
+    // projects" list to read; a project this host has never run an agent in
+    // has nothing to aggregate anyway.
+    const liveProjectRoots = async (): Promise<string[]> => {
+      const records = await listRecords(undefined, defaultOpts({ all: true }));
+      return [...new Set(records.map((r) => r.cwd).filter(Boolean))];
+    };
+
     // GET /api/asks — the `/ask` decision panel (A7): every `blocked-by-human`
     // task across every project this host's agents have registered, one
-    // human-facing list. "Every project" is derived the same way `ay ls`
-    // aggregates across projects — the distinct `cwd`s in the live-agent
-    // registry — since there is no separate "registered projects" list to
-    // read; a project this host has never run an agent in has nothing to
-    // aggregate anyway.
+    // human-facing list.
     if (req.method === "GET" && p === "/api/asks") {
       try {
-        const records = await listRecords(undefined, defaultOpts({ all: true }));
-        const projectRoots = [...new Set(records.map((r) => r.cwd).filter(Boolean))];
-        const asks = await listAsks(projectRoots);
+        const asks = await listAsks(await liveProjectRoots());
         return Response.json(asks);
       } catch (e) {
         return new Response((e as Error).message, { status: 500 });
@@ -2077,29 +2081,48 @@ export async function cmdServe(rest: string[]): Promise<number> {
     // (for human/decision-kind tasks) advances the transition atomically, so
     // there is no intermediate state visible to a second request. As a
     // best-effort follow-up (never blocks the response on it), if the task's
-    // owner resolves to a currently-live agent, the answer is written
-    // straight into that agent's terminal via the exact same FIFO mechanism
-    // `/api/send` already uses — the real-time half of the closed loop, for
-    // whichever agent happens to be alive and watching right now.
+    // owner resolves to a currently-live agent IN THIS SAME PROJECT, the
+    // answer is written straight into that agent's terminal via the exact
+    // same FIFO mechanism `/api/send` already uses — the real-time half of
+    // the closed loop, for whichever agent happens to be alive and watching
+    // right now.
     if (req.method === "POST" && p === "/api/asks/answer") {
-      let body: { projectRoot: string; taskId: string; choice?: string; acknowledged?: boolean };
+      let raw: unknown;
       try {
-        body = (await req.json()) as typeof body;
+        raw = await req.json();
       } catch {
         return new Response("invalid JSON body", { status: 400 });
       }
-      const { projectRoot, taskId, choice, acknowledged } = body;
-      if (!projectRoot || !taskId) {
-        return new Response("missing projectRoot or taskId", { status: 400 });
+      // Type-validate every field explicitly — an untyped JS client (or a
+      // bug) can send a non-string projectRoot/taskId or a truthy
+      // non-boolean `acknowledged`, which would otherwise surface as an
+      // opaque 500 deep inside answerAsk() instead of a clean 400
+      // (codex-review nitpick).
+      if (typeof raw !== "object" || raw === null) {
+        return new Response("body must be a JSON object", { status: 400 });
       }
-      // GET /api/asks only ever surfaces roots that already have a store —
-      // require the same here, so this route can't be pointed at an
-      // arbitrary filesystem path outside what was ever actually listed
-      // (codex-review Important: the GET route scopes roots, the POST route
-      // did not, letting a caller target any directory the process can
-      // write to).
-      if (!hasTodoStore(projectRoot)) {
-        return new Response(`no ay todo store at ${projectRoot}`, { status: 404 });
+      const body = raw as Record<string, unknown>;
+      const { projectRoot, taskId, choice, acknowledged } = body;
+      if (typeof projectRoot !== "string" || !projectRoot) {
+        return new Response("projectRoot must be a non-empty string", { status: 400 });
+      }
+      if (typeof taskId !== "string" || !taskId) {
+        return new Response("taskId must be a non-empty string", { status: 400 });
+      }
+      if (choice !== undefined && typeof choice !== "string") {
+        return new Response("choice must be a string", { status: 400 });
+      }
+      if (acknowledged !== undefined && typeof acknowledged !== "boolean") {
+        return new Response("acknowledged must be a boolean", { status: 400 });
+      }
+      // Scoped to the SAME live-agent-derived project set GET/api/asks
+      // aggregates over — not merely "a store happens to exist here"
+      // (codex-review Important: hasTodoStore() alone still let a caller
+      // target any readable/writable ay todo store path on the host, not
+      // just ones actually surfaced by this API).
+      const registeredRoots = await liveProjectRoots();
+      if (!registeredRoots.includes(projectRoot)) {
+        return new Response(`no registered project at ${projectRoot}`, { status: 404 });
       }
       let rec: Awaited<ReturnType<typeof answerAsk>>;
       try {
@@ -2114,7 +2137,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
       // version awaited this, so a stuck agent could hang answerAsk's caller
       // even though the todo state had already been updated).
       if (rec.owner) {
-        resolveOne(rec.owner, defaultOpts({ all: true }))
+        // Scoped to THIS project's cwd — an unscoped search could match a
+        // same-named owner in a DIFFERENT project and write the answer into
+        // the wrong agent's terminal (codex-review Important).
+        resolveOne(rec.owner, defaultOpts({ all: true, cwdScope: projectRoot }))
           .then((owner) => {
             if (!owner.fifo_file) return;
             const answerText = choice ?? "acknowledged";
