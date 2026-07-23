@@ -76,21 +76,35 @@ function emit(opts: CommonOpts, obj: unknown, human: string): void {
   process.stdout.write((opts.format === "json" ? JSON.stringify(obj, null, 2) : human) + "\n");
 }
 
-export async function runTodoSubcommand(rest: string[]): Promise<number> {
-  const y = yargs(rest)
-    .scriptName("ay todo")
-    .option("root", {
-      type: "string",
-      default: process.cwd(),
-      describe: "project root holding .agent-yes/todos.jsonl",
-    })
-    .option("format", { choices: ["table", "json"] as const, default: "table" as const })
-    .help(false)
-    .version(false)
-    .exitProcess(false);
-  const argv = (await y.parseAsync()) as unknown as CommonOpts & { _: (string | number)[] };
-  const [verb, ...args] = argv._.map(String);
-  const opts: CommonOpts = { root: argv.root, format: argv.format };
+/**
+ * Pull `--root <dir>` and `--format <table|json>` out of `argv` WITHOUT a
+ * full yargs pass — a single yargs parser here would swallow every verb's
+ * own flags too (e.g. `--kind`) into the outer parse result, leaving the
+ * per-verb sub-parsers below nothing to see in their `args`. Only these two
+ * global, cross-verb options are special-cased this way; everything else is
+ * declared by each verb's own `yargs(args)` call further down.
+ */
+function extractCommonOpts(argv: string[]): { opts: CommonOpts; rest: string[] } {
+  const rest: string[] = [];
+  let root = process.cwd();
+  let format: CommonOpts["format"] = "table";
+  for (let i = 0; i < argv.length; i++) {
+    const tok = argv[i]!;
+    if (tok === "--root") {
+      root = argv[++i] ?? root;
+    } else if (tok === "--format") {
+      const v = argv[++i];
+      if (v === "table" || v === "json") format = v;
+    } else {
+      rest.push(tok);
+    }
+  }
+  return { opts: { root, format }, rest };
+}
+
+export async function runTodoSubcommand(rest0: string[]): Promise<number> {
+  const { opts, rest } = extractCommonOpts(rest0);
+  const [verb, ...args] = rest;
   const store = await openStore(opts.root);
 
   switch (verb) {

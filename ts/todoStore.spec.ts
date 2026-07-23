@@ -173,6 +173,34 @@ describe("TodoStore", () => {
     await expect(s.verify(t._id)).rejects.toThrow(/no gated transition/); // still "doing", which has no gated outgoing edge
   });
 
+  it("verify() with an explicit gateName that matches no edge from the current state throws", async () => {
+    const s = await openStore(TEST_ROOT);
+    s.registerGate({ name: "verify-green", check: async () => ({ passed: true }) });
+    const t = await s.create({ summary: "x", kind: "code" });
+    await s.transition(t._id, "merged");
+    await s.transition(t._id, "shipped");
+    await s.transition(t._id, "verifying");
+    await expect(s.verify(t._id, "no-such-gate")).rejects.toThrow(/no registered gate found/);
+  });
+
+  it("verify() failing with no sibling edge to fall back to throws instead of silently dropping the failure", async () => {
+    const s = await openStore(TEST_ROOT);
+    s.registerGate({
+      name: "human-approved",
+      check: async () => ({ passed: false, note: "not ready" }),
+    });
+    const t = await s.create({ summary: "x", kind: "doc" });
+    await s.transition(t._id, "review"); // "review" has ONE outgoing gated edge (to done) — no sibling
+    await expect(s.verify(t._id)).rejects.toThrow(/no alternate transition/);
+  });
+
+  it("isRegisteredGate reports registration status by name", async () => {
+    const s = await openStore(TEST_ROOT);
+    expect(s.isRegisteredGate("verify-green")).toBe(false);
+    s.registerGate({ name: "verify-green", check: async () => ({ passed: true }) });
+    expect(s.isRegisteredGate("verify-green")).toBe(true);
+  });
+
   it("dep add/rm: sorted, deduped, rejects self-dep, missing target, and transitive cycles", async () => {
     const s = await openStore(TEST_ROOT);
     const a = await s.create({ summary: "a", kind: "code" });
