@@ -267,7 +267,7 @@ struct Args {
     #[arg(short = 'y', long = "yes", default_value = "false")]
     yes: bool,
 
-    /// Working directory for the agent (default: current directory)
+    /// Deprecated: working directory for the agent. Prefer `cd <dir> && <command>`.
     #[arg(long)]
     cwd: Option<String>,
 

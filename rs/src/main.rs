@@ -45,6 +45,88 @@ fn detect_install_method() -> &'static str {
     "binary"
 }
 
+/// Quote one argv token for display in a copy-pasteable shell command. Leaves
+/// shell-safe tokens (including a leading `~`/`~/path`, so `cd ~/foo` still
+/// expands) bare; single-quotes anything else. Mirrors `shellDisplayQuote` in
+/// ts/cwdDeprecation.ts.
+fn shell_display_quote(s: &str) -> String {
+    if s.is_empty() {
+        return "''".to_string();
+    }
+    let safe = s.chars().all(|c| {
+        c.is_ascii_alphanumeric() || "_@%+=:,./~-".contains(c)
+    });
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+/// Build the `--cwd` deprecation warning from a program name and its user args
+/// (everything after argv[0]). Strips `--cwd <dir>` / `--cwd=<dir>` and rebuilds
+/// the copy-pasteable `cd <dir> && <same command>` hint. Pure so it can be unit
+/// tested. Mirrors detectCwdDeprecation in ts/cwdDeprecation.ts.
+fn build_cwd_migration(prog: &str, user_args: &[String]) -> String {
+    let mut dir: Option<String> = None;
+    let mut rest: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < user_args.len() {
+        let arg = &user_args[i];
+        if arg == "--cwd" {
+            // `--cwd DIR` — consume the value unless the next token is a flag.
+            if let Some(next) = user_args.get(i + 1) {
+                if !next.starts_with('-') {
+                    dir = Some(next.clone());
+                    i += 2;
+                    continue;
+                }
+            }
+            i += 1;
+            continue;
+        }
+        if let Some(v) = arg.strip_prefix("--cwd=") {
+            dir = Some(v.to_string());
+            i += 1;
+            continue;
+        }
+        rest.push(arg.clone());
+        i += 1;
+    }
+
+    let mut cmd = shell_display_quote(prog);
+    for a in &rest {
+        cmd.push(' ');
+        cmd.push_str(&shell_display_quote(a));
+    }
+    // `<dir>` is a placeholder shown when the flag had no value — keep it bare.
+    let dir_disp = match dir {
+        Some(ref d) => shell_display_quote(d),
+        None => "<dir>".to_string(),
+    };
+    format!(
+        "\x1b[33m⚠ --cwd is deprecated.\x1b[0m Run the command in the target directory instead:\n\n    cd {dir_disp} && {cmd}"
+    )
+}
+
+/// `--cwd <dir>` on an agent run is deprecated: `cd <dir> && <same command>`
+/// does the same thing without an agent-yes-specific flag. Print the migration
+/// hint before continuing (the flag still works). The JS launcher prints its own
+/// (more faithful, it knows the `cy`/`ay` name the user typed) copy and sets
+/// AGENT_YES_SUPPRESS_CWD_WARN so this mirror only fires on a direct
+/// `agent-yes … --cwd` invocation that bypassed the launcher.
+fn warn_cwd_deprecated() {
+    if std::env::var_os("AGENT_YES_SUPPRESS_CWD_WARN").is_some() {
+        return;
+    }
+    let raw: Vec<String> = std::env::args().collect();
+    let prog = raw
+        .first()
+        .map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p.as_str()).to_string())
+        .unwrap_or_else(|| "agent-yes".to_string());
+    eprintln!("{}", build_cwd_migration(&prog, &raw[1..]));
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Delegate management subcommands (ls/send/restart/stop/serve/…) to the JS
@@ -72,6 +154,7 @@ async fn main() -> Result<()> {
     // Canonicalise to an absolute path so downstream consumers (pid_store, lock keys,
     // webhooks) see a stable identifier regardless of how the user typed it.
     let cwd = if let Some(ref requested) = args.cwd {
+        warn_cwd_deprecated();
         // Expand leading `~` / `~/` because shells (zsh, bash) do NOT expand a tilde
         // that appears after `=` (e.g. `--cwd=~/foo` arrives literally). Only the
         // user's own `~` is supported; `~user` is not.
@@ -606,4 +689,50 @@ async fn run_swarm_mode(args: CliArgs, cwd: &str) -> Result<i32> {
     }
 
     Ok(0)
+}
+
+#[cfg(test)]
+mod cwd_deprecation_tests {
+    use super::{build_cwd_migration, shell_display_quote};
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn quotes_only_when_needed() {
+        assert_eq!(shell_display_quote("/ws/app"), "/ws/app");
+        assert_eq!(shell_display_quote("~/ws/product"), "~/ws/product");
+        assert_eq!(shell_display_quote(""), "''");
+        assert_eq!(shell_display_quote("a b"), "'a b'");
+        assert_eq!(shell_display_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn strips_cwd_space_form() {
+        let msg = build_cwd_migration(
+            "agent-yes",
+            &args(&["--cli", "claude", "--cwd", "/ws/app", "-p", "fix"]),
+        );
+        assert!(msg.contains("cd /ws/app && agent-yes --cli claude -p fix"), "{msg}");
+        assert!(msg.contains("--cwd is deprecated"));
+    }
+
+    #[test]
+    fn strips_cwd_equals_form() {
+        let msg = build_cwd_migration("agent-yes", &args(&["--cwd=/tmp/x", "codex"]));
+        assert!(msg.contains("cd /tmp/x && agent-yes codex"), "{msg}");
+    }
+
+    #[test]
+    fn keeps_home_relative_dir_bare() {
+        let msg = build_cwd_migration("agent-yes", &args(&["--cwd", "~/ws/product"]));
+        assert!(msg.contains("cd ~/ws/product && agent-yes"), "{msg}");
+    }
+
+    #[test]
+    fn placeholder_when_value_missing() {
+        let msg = build_cwd_migration("agent-yes", &args(&["--cli", "claude", "--cwd"]));
+        assert!(msg.contains("cd <dir> && agent-yes --cli claude"), "{msg}");
+    }
 }

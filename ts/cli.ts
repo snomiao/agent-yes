@@ -39,6 +39,20 @@ import { buildRustArgs } from "./buildRustArgs.ts";
   }
 }
 
+// Deprecation: `--cwd <dir>` on an agent run. Runs AFTER the subcommand fast
+// path above, so subcommand `--cwd` FILTERS (ay ls/status/spawn/schedule) are
+// untouched — only a real agent launch reaches here. Warn once, then continue
+// (the flag still works); suppress the Rust runner's mirror of this warning so
+// it isn't printed twice when we spawn the Rust binary below.
+{
+  const { detectCwdDeprecation, SUPPRESS_CWD_WARN_ENV } = await import("./cwdDeprecation.ts");
+  const dep = detectCwdDeprecation(process.argv);
+  if (dep) {
+    console.warn(dep.message);
+    process.env[SUPPRESS_CWD_WARN_ENV] = "1";
+  }
+}
+
 // Check for updates before starting — installs & re-execs if a newer version exists.
 // Fast path: cached result (no network), so this adds near-zero latency most of the time.
 await checkAndAutoUpdate();
