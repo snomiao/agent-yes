@@ -77,7 +77,7 @@ export { unblockedTasks, openBlockers, renderTree, renderDigest } from "./todoDi
 export { reconcileTodos } from "./todoAutomation.ts";
 export type { TodoAction, LiveAgent } from "./todoAutomation.ts";
 export { listAsks, listAsksForProject, answerAsk, hasTodoStore } from "./askApi.ts";
-export type { AskItem, AnswerInput } from "./askApi.ts";
+export type { AskItem, AnswerInput, AnswerResult } from "./askApi.ts";
 
 export type AgentCliConfig = {
   // cli

@@ -53,11 +53,34 @@ export async function listAsksForProject(projectRoot: string): Promise<AskItem[]
   return asks;
 }
 
-/** Aggregates asks across every project root that actually has a store — candidates are supplied by the caller (`ts/serve.ts` derives them from the live-agent registry's distinct `cwd`s), keeping this module itself agent-registry-agnostic. */
+/**
+ * Aggregates asks across every project root that actually has a store —
+ * candidates are supplied by the caller (`ts/serve.ts` derives them from the
+ * live-agent registry's distinct `cwd`s), keeping this module itself
+ * agent-registry-agnostic.
+ *
+ * Uses `Promise.allSettled`, not `Promise.all`: this is a cross-project
+ * aggregation by design, and `Promise.all`'s fail-fast behavior meant ONE
+ * project with an unreadable/corrupt store made the ENTIRE decision panel
+ * return nothing (a 500 at the route level) — hiding every other project's
+ * perfectly healthy asks too (codex-review Important). A failed project is
+ * logged and skipped; the healthy ones are still returned.
+ */
 export async function listAsks(projectRoots: string[]): Promise<AskItem[]> {
   const withStore = [...new Set(projectRoots)].filter(hasTodoStore);
-  const perProject = await Promise.all(withStore.map((root) => listAsksForProject(root)));
-  return perProject.flat();
+  const results = await Promise.allSettled(withStore.map((root) => listAsksForProject(root)));
+  const asks: AskItem[] = [];
+  for (const [i, result] of results.entries()) {
+    if (result.status === "fulfilled") {
+      asks.push(...result.value);
+    } else {
+      // No silent caps without a trace: at least log which project failed
+      // and why, so a persistently-broken store is discoverable rather than
+      // just quietly absent from the panel forever.
+      console.error(`[askApi] listAsksForProject(${withStore[i]}) failed:`, result.reason);
+    }
+  }
+  return asks;
 }
 
 export interface AnswerInput {
@@ -99,11 +122,27 @@ export interface AnswerInput {
  * this function only clears the block; whatever actually owns that kind's
  * transition (an agent, `ay todo verify`, etc.) still drives it.
  */
+export interface AnswerResult {
+  record: TodoRecord;
+  /**
+   * The validated, shape-derived answer text ("acknowledged" for action/bare
+   * asks, the matched option for choice-shape ones) — returned alongside the
+   * record (whose `block` is already `null` by the time the caller sees it)
+   * specifically so a caller wanting to relay this to a live agent (see
+   * `ts/serve.ts`'s `/api/asks/answer`) never has to re-derive it from the
+   * raw request body itself. Re-deriving it separately from `answer.choice`
+   * would reopen exactly the validation gap this field exists to close: an
+   * arbitrary, never-checked `choice` string accepted alongside
+   * `acknowledged: true` on a non-choice-shape ask (codex-review Important).
+   */
+  answerText: string;
+}
+
 export async function answerAsk(
   projectRoot: string,
   taskId: string,
   answer: AnswerInput,
-): Promise<TodoRecord> {
+): Promise<AnswerResult> {
   const store = await openStore(projectRoot);
   const rec = store.get(taskId);
   if (!rec) throw new Error(`no such task: ${taskId}`);
@@ -120,12 +159,24 @@ export async function answerAsk(
   // must agree on which shape it is, or an ask could be listed as
   // action-shape yet still demand a choice here, making it unanswerable via
   // the /ask UI (codex-review Important).
+  //
+  // `answerText` is derived from the SHAPE'S OWN branch, never from a bare
+  // `answer.choice ?? "acknowledged"` fallback — the earlier version only
+  // checked `answer.acknowledged` for action/acknowledge-shape asks, so a
+  // caller could ALSO send an arbitrary, unvalidated `choice` string
+  // alongside `acknowledged: true` and have it accepted as the recorded
+  // answer (durable evidence, AND written verbatim to a live agent's
+  // terminal via IPC) even though it was never checked against anything —
+  // a real injection vector on a non-choice-shape ask (codex-review
+  // Important).
+  let answerText: string;
   if (block.actionLink) {
     if (!answer.acknowledged) {
       throw new Error(
         `task ${taskId}: this ask requires { acknowledged: true } after completing ${block.actionLink}`,
       );
     }
+    answerText = "acknowledged";
   } else if (block.options?.length) {
     if (!answer.choice) {
       throw new Error(
@@ -137,10 +188,13 @@ export async function answerAsk(
         `task ${taskId}: "${answer.choice}" is not one of the offered options (${block.options.join(", ")})`,
       );
     }
-  } else if (!answer.acknowledged && !answer.choice) {
-    throw new Error(`task ${taskId}: this ask requires { acknowledged: true } or a choice`);
+    answerText = answer.choice;
+  } else {
+    if (!answer.acknowledged && !answer.choice) {
+      throw new Error(`task ${taskId}: this ask requires { acknowledged: true } or a choice`);
+    }
+    answerText = "acknowledged";
   }
-  const answerText = answer.choice ?? "acknowledged";
 
   // Satisfy the gate/transition (human/decision kinds only) BEFORE clearing
   // the block: if either call throws (e.g. a concurrent write raced this
@@ -186,5 +240,6 @@ export async function answerAsk(
       await store.transition(taskId, primary.to);
     }
   }
-  return store.setBlock(taskId, null);
+  const record = await store.setBlock(taskId, null);
+  return { record, answerText };
 }

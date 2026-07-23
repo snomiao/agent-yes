@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
-import { rm } from "fs/promises";
+import { rm, mkdir } from "fs/promises";
 import path from "path";
 import { listAsks, listAsksForProject, answerAsk, hasTodoStore } from "./askApi";
 import { openStore } from "./todoStore";
@@ -84,11 +84,25 @@ describe("askApi", () => {
     );
   });
 
+  it("listAsks isolates a per-project failure — one unreadable/broken store must not take down the whole cross-project panel (codex-review round-14 Important)", async () => {
+    const sA = await openStore(ROOT_A);
+    const tA = await sA.create({ summary: "healthy ask", kind: "human" });
+    await sA.setBlock(tA._id, { type: "blocked-by-human", who: "taku" });
+
+    // ROOT_B's todos.jsonl is a DIRECTORY, not a file — a real, easy way to
+    // force listAsksForProject(ROOT_B) to genuinely reject (EISDIR) rather
+    // than mocking anything.
+    await mkdir(path.join(ROOT_B, ".agent-yes", "todos.jsonl"), { recursive: true });
+
+    const asks = await listAsks([ROOT_A, ROOT_B]);
+    expect(asks.map((a) => a.taskId)).toEqual([tA._id]);
+  });
+
   it("answerAsk on a bare acknowledge-shape ask: clears the block, advances the human kind's pending->decided gate as the asked human, then decided->done is ungated", async () => {
     const s = await openStore(ROOT_A);
     const t = await s.create({ summary: "just fyi", kind: "human" });
     await s.setBlock(t._id, { type: "blocked-by-human", who: "taku" });
-    const answered = await answerAsk(ROOT_A, t._id, { acknowledged: true });
+    const { record: answered } = await answerAsk(ROOT_A, t._id, { acknowledged: true });
     expect(answered.block).toBeNull();
     expect(answered.state).toBe("decided"); // human-replied gate satisfied, advanced
     expect(answered.verifyEvidence[0]).toMatchObject({ gate: "human-replied", validator: "taku" });
@@ -105,7 +119,7 @@ describe("askApi", () => {
     await expect(answerAsk(ROOT_A, t._id, { choice: "stable" })).rejects.toThrow(
       /not one of the offered options/,
     );
-    const answered = await answerAsk(ROOT_A, t._id, { choice: "canary" });
+    const { record: answered } = await answerAsk(ROOT_A, t._id, { choice: "canary" });
     expect(answered.state).toBe("decided");
     expect(answered.verifyEvidence[0]).toMatchObject({ gate: "human-decided", note: "canary" });
   });
@@ -127,7 +141,7 @@ describe("askApi", () => {
     await expect(answerAsk(ROOT_A, t._id, { choice: "canary" })).rejects.toThrow(
       /requires \{ acknowledged: true \}/,
     );
-    const answered = await answerAsk(ROOT_A, t._id, { acknowledged: true });
+    const { record: answered } = await answerAsk(ROOT_A, t._id, { acknowledged: true });
     expect(answered.block).toBeNull();
   });
 
@@ -163,7 +177,7 @@ describe("askApi", () => {
     // behind if approve() succeeded but transition() then failed: the gate
     // is already satisfied, the task hasn't advanced yet, still blocked.
     await s.approve(t._id, "human-decided", "taku", { note: "a" });
-    const answered = await answerAsk(ROOT_A, t._id, { choice: "a" });
+    const { record: answered } = await answerAsk(ROOT_A, t._id, { choice: "a" });
     expect(answered.state).toBe("decided");
     // Exactly ONE evidence entry — a naive retry would have called
     // approve() again and appended a second one for the same gate.
@@ -186,6 +200,30 @@ describe("askApi", () => {
     expect(stillBlocked.state).toBe("deciding");
     expect(stillBlocked.block).not.toBeNull();
     expect(stillBlocked.verifyEvidence).toHaveLength(1); // "b" was never recorded
+  });
+
+  it("answerAsk IGNORES an unvalidated `choice` sent alongside `acknowledged: true` on a non-choice-shape ask — an arbitrary attacker-supplied string must never become the recorded/relayed answer just because it rode along with a valid acknowledgement (codex-review round-14 Important)", async () => {
+    const s = await openStore(ROOT_A);
+    const bare = await s.create({ summary: "just fyi", kind: "human" });
+    await s.setBlock(bare._id, { type: "blocked-by-human", who: "taku" });
+    const bareResult = await answerAsk(ROOT_A, bare._id, {
+      acknowledged: true,
+      choice: "attacker-controlled garbage\nrm -rf /",
+    });
+    expect(bareResult.answerText).toBe("acknowledged");
+    expect(bareResult.record.verifyEvidence[0]).toMatchObject({ note: "acknowledged" });
+
+    const action = await s.create({ summary: "finish oauth", kind: "human" });
+    await s.setBlock(action._id, {
+      type: "blocked-by-human",
+      who: "taku",
+      actionLink: "https://example/oauth",
+    });
+    const actionResult = await answerAsk(ROOT_A, action._id, {
+      acknowledged: true,
+      choice: "also attacker-controlled",
+    });
+    expect(actionResult.answerText).toBe("acknowledged");
   });
 
   it("answerAsk requires an actual answer for a choice-shape ask (no bare acknowledged)", async () => {
@@ -217,7 +255,7 @@ describe("askApi", () => {
       who: "taku",
       question: "still working on this?",
     });
-    const answered = await answerAsk(ROOT_A, t._id, { acknowledged: true });
+    const { record: answered } = await answerAsk(ROOT_A, t._id, { acknowledged: true });
     expect(answered.block).toBeNull();
     expect(answered.state).toBe("doing"); // unchanged — nothing gated to advance
     expect(answered.verifyEvidence).toEqual([]);
@@ -236,7 +274,7 @@ describe("askApi", () => {
     await s.transition(t._id, "shipped");
     await s.transition(t._id, "verifying");
     await s.setBlock(t._id, { type: "blocked-by-human", who: "taku", question: "any concerns?" });
-    const answered = await answerAsk(ROOT_A, t._id, { acknowledged: true });
+    const { record: answered } = await answerAsk(ROOT_A, t._id, { acknowledged: true });
     expect(answered.block).toBeNull();
     expect(answered.state).toBe("verifying"); // unchanged — code kind never auto-transitions on a human answer
     expect(answered.verifyEvidence).toEqual([]);

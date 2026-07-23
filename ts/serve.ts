@@ -43,6 +43,7 @@ import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
 import { CLAUDE_SESSION_PIN_ENV } from "./sessionEnv.ts";
 import { MAX_CALLBACK_MSG_BYTES, frameVisitorMessage, verifyCapability } from "./callbackCore.ts";
 import { isTerminalReply } from "./terminalReply.ts";
+import { removeControlCharacters } from "./removeControlCharacters.ts";
 import { parseStatusText } from "./statusText.ts";
 import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
 import { acquireWebrtcHostLock, type ServeLockOwner } from "./serveLock.ts";
@@ -2124,12 +2125,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
       if (!registeredRoots.includes(projectRoot)) {
         return new Response(`no registered project at ${projectRoot}`, { status: 404 });
       }
-      let rec: Awaited<ReturnType<typeof answerAsk>>;
+      let result: Awaited<ReturnType<typeof answerAsk>>;
       try {
-        rec = await answerAsk(projectRoot, taskId, { choice, acknowledged });
+        result = await answerAsk(projectRoot, taskId, { choice, acknowledged });
       } catch (e) {
         return new Response((e as Error).message, { status: 400 });
       }
+      const { record: rec, answerText } = result;
       // Best-effort, fire-and-forget: the task is already correctly updated
       // above regardless of whether this succeeds. Deliberately NOT awaited —
       // a stalled FIFO write must never hang the response, which is the
@@ -2151,8 +2153,19 @@ export async function cmdServe(rest: string[]): Promise<number> {
         resolveOne(rec.owner, defaultOpts({ all: true, cwdScope: projectRoot }))
           .then((owner) => {
             if (!owner.fifo_file) return;
-            const answerText = choice ?? "acknowledged";
-            return writeToIpc(owner.fifo_file, `[/ask] ${taskId} answered: ${answerText}\n`);
+            // `answerText` comes from answerAsk()'s own validated result, NOT
+            // re-derived from the raw request body here — the earlier
+            // version recomputed `choice ?? "acknowledged"` independently,
+            // which had the SAME unvalidated-choice gap answerAsk() itself
+            // just fixed (codex-review Important). Also strip terminal
+            // control sequences AND collapse newlines: even a genuinely
+            // validated choice option is free text set at ask-creation time
+            // and could still contain control bytes or embedded newlines
+            // that inject extra "typed" lines/escape sequences into the
+            // live agent's terminal via this raw IPC write (codex-review
+            // Important).
+            const safeAnswerText = removeControlCharacters(answerText).replace(/[\r\n]+/g, " ");
+            return writeToIpc(owner.fifo_file, `[/ask] ${taskId} answered: ${safeAnswerText}\n`);
           })
           .catch(() => {
             // owner not currently live / not resolvable / FIFO write failed —
