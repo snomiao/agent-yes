@@ -126,13 +126,20 @@
     <script type="module">
       const listEl = document.getElementById("list");
       const KEY_SEP = "::";
-      // key -> the actual DOM node for a card currently mid-answer. A poll
+      // key -> { node, blockRev } for a card currently mid-answer. A poll
       // landing while a POST is in flight must never destroy this node: an
       // earlier version rebuilt the WHOLE list from the freshly-fetched
       // (filtered) asks every 5s, which detached the in-flight card (and its
       // `.result` div) from the document — if the POST then failed, the
       // error was written into a node nobody could see, and the user saw an
       // empty list with no explanation (codex-review Important).
+      //
+      // `blockRev` is tracked alongside the node (not just the key) so
+      // refresh() can tell "same ask, still in flight" from "the task got a
+      // genuinely NEW block while this one was in flight/failed" — the
+      // latter must NOT be suppressed by the former's presence, or a fresh
+      // question on the same task would silently never appear while a
+      // stale/failed card sits there (codex-review round-17 Important).
       const inflightNodes = new Map();
 
       function keyOf(a) {
@@ -169,7 +176,7 @@
         } else {
           body = `<div class="buttons"><button data-key="${encodeURIComponent(key)}" data-ack="1">acknowledge</button></div>`;
         }
-        return `<div class="card" data-key="${encodeURIComponent(key)}">
+        return `<div class="card" data-key="${encodeURIComponent(key)}" data-blockrev="${ask.blockRev}">
           <div class="meta"><span>${escapeHtml(meta)}</span></div>
           <div class="summary">${escapeHtml(ask.summary)}</div>
           ${ask.question ? `<div class="question">${escapeHtml(ask.question)}</div>` : ""}
@@ -231,15 +238,27 @@
         // next 5s tick or one already scheduled) will have current data.
         if (epoch !== startEpoch) return;
         // Cards currently mid-answer keep their EXISTING DOM node untouched
-        // (so a result written to it later is still visible); everything
-        // else is rebuilt fresh from the server response.
-        const fresh = asks.filter((a) => !inflightNodes.has(keyOf(a)));
+        // (so a result written to it later is still visible) — UNLESS the
+        // server's blockRev for this task has moved on since, meaning the
+        // task got a genuinely NEW block while the old one was in flight or
+        // sitting there failed; that stale entry is dropped so the new ask
+        // renders instead of being silently suppressed (codex-review
+        // round-17 Important). Everything else is rebuilt fresh from the
+        // server response.
+        const fresh = [];
+        for (const a of asks) {
+          const key = keyOf(a);
+          const inflight = inflightNodes.get(key);
+          if (inflight && inflight.blockRev === a.blockRev) continue; // still the same in-flight ask
+          if (inflight) inflightNodes.delete(key); // superseded by a genuinely new block
+          fresh.push(a);
+        }
         if (fresh.length === 0 && inflightNodes.size === 0) {
           listEl.innerHTML = `<div class="empty">nothing waiting on you right now</div>`;
           return;
         }
         const frag = document.createDocumentFragment();
-        for (const node of inflightNodes.values()) frag.appendChild(node);
+        for (const entry of inflightNodes.values()) frag.appendChild(entry.node);
         for (const ask of fresh) frag.appendChild(elementFromHtml(cardHtml(ask)));
         listEl.replaceChildren(frag);
       }
@@ -256,14 +275,18 @@
         const taskId = key.slice(sepIdx + KEY_SEP.length);
         const card = listEl.querySelector(`.card[data-key="${btn.getAttribute("data-key")}"]`);
         const resultEl = card ? card.querySelector(".result") : null;
+        const blockRev = card ? Number(card.dataset.blockrev) : 0;
         if (card) card.querySelectorAll("button").forEach((b) => (b.disabled = true));
         // Store the NODE itself (not just the key) so refresh()'s poll can
         // preserve this exact element across a rebuild — losing it would
         // strand any later result/error write on a detached node no one
-        // can see (codex-review Important).
-        if (card) inflightNodes.set(key, card);
+        // can see (codex-review Important). `blockRev` travels alongside it
+        // so refresh() can tell this exact in-flight ask apart from a
+        // genuinely new one on the same task (see inflightNodes' doc
+        // comment, codex-review round-17 Important).
+        if (card) inflightNodes.set(key, { node: card, blockRev });
         try {
-          const body = { projectRoot, taskId };
+          const body = { projectRoot, taskId, expectedBlockRev: blockRev };
           if (btn.dataset.choice !== undefined)
             body.choice = decodeURIComponent(btn.dataset.choice);
           if (btn.dataset.ack !== undefined) body.acknowledged = true;

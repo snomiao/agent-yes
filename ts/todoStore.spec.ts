@@ -516,7 +516,7 @@ describe("TodoStore", () => {
     expect(s.get(t._id)?.block).toEqual({ type: "blocked-by-human", who: "taku" });
   });
 
-  it("clearBlockIfMatches() — the generalized guard — clears only when the FRESH block still deep-equals expectedBlock, and refuses (without erasing) a block that changed since decided (codex-review round-15 Important)", async () => {
+  it("clearBlockIfMatches() — the generalized guard — clears only when the FRESH record's blockRev still equals the snapshot, and refuses (without erasing) a block that changed since decided (codex-review round-15 Important)", async () => {
     const s = await openStore(TEST_ROOT);
     const t = await s.create({ summary: "x", kind: "code" });
     const original = {
@@ -524,16 +524,44 @@ describe("TodoStore", () => {
       who: "taku",
       question: "canary or beta?",
     } as const;
-    await s.setBlock(t._id, original);
-    const cleared = await s.clearBlockIfMatches(t._id, original);
+    const afterSet = await s.setBlock(t._id, original);
+    const cleared = await s.clearBlockIfMatches(t._id, afterSet.blockRev ?? 0);
     expect(cleared.block).toBeNull();
 
-    const replaced = { type: "blocked-by-human", who: "taku", question: "a NEW question" } as const;
-    await s.setBlock(t._id, replaced);
-    await expect(s.clearBlockIfMatches(t._id, original)).rejects.toThrow(
+    const afterReplace = await s.setBlock(t._id, {
+      type: "blocked-by-human",
+      who: "taku",
+      question: "a NEW question",
+    });
+    await expect(s.clearBlockIfMatches(t._id, (afterReplace.blockRev ?? 0) - 1)).rejects.toThrow(
       /block changed since this was decided/,
     );
     // refused, not erased: the newer block survives untouched
-    expect(s.get(t._id)?.block).toEqual(replaced);
+    expect(s.get(t._id)?.block).toEqual({
+      type: "blocked-by-human",
+      who: "taku",
+      question: "a NEW question",
+    });
+  });
+
+  it("clearBlockIfMatches() catches an ABA race — a block replaced with BYTE-FOR-BYTE IDENTICAL content still gets a fresh blockRev, so a stale caller is refused rather than erasing that distinct, newer block instance (codex-review round-17 Important)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "code" });
+    const identicalBlock = {
+      type: "blocked-by-human",
+      who: "taku",
+      question: "canary or beta?",
+    } as const;
+    const firstSet = await s.setBlock(t._id, identicalBlock);
+    const capturedRev = firstSet.blockRev ?? 0;
+    // Someone re-sets the EXACT same block content — a content-only
+    // comparison would see no difference at all.
+    await s.setBlock(t._id, identicalBlock);
+    await expect(s.clearBlockIfMatches(t._id, capturedRev)).rejects.toThrow(
+      /block changed since this was decided/,
+    );
+    // refused, not erased: the (identical-looking but distinct, newer)
+    // block instance survives
+    expect(s.get(t._id)?.block).toEqual(identicalBlock);
   });
 });

@@ -3,6 +3,7 @@ import { rm, mkdir } from "fs/promises";
 import path from "path";
 import { listAsks, listAsksForProject, answerAsk, hasTodoStore } from "./askApi";
 import { TodoStore, openStore } from "./todoStore";
+import type { TodoBlock } from "./todoBlock";
 
 const isWindows = process.platform === "win32";
 const ROOT_A = isWindows
@@ -321,5 +322,49 @@ describe("askApi", () => {
     expect(answered.block).toBeNull();
     expect(answered.state).toBe("verifying"); // unchanged — code kind never auto-transitions on a human answer
     expect(answered.verifyEvidence).toEqual([]);
+  });
+
+  it("listAsksForProject reports blockRev, and answerAsk refuses an expectedBlockRev that no longer matches — even when the CURRENT block has byte-for-byte identical text to what the caller last saw, since a content-only check could not distinguish 'still the same ask' from 'a new, identical-looking one' (codex-review round-17 Important)", async () => {
+    const s = await openStore(ROOT_A);
+    const t = await s.create({ summary: "pick a channel", kind: "decision" });
+    const identicalBlock: TodoBlock = {
+      type: "blocked-by-human",
+      who: "taku",
+      question: "canary or beta?",
+      options: ["canary", "beta"],
+    };
+    await s.setBlock(t._id, identicalBlock);
+    const [ask] = await listAsksForProject(ROOT_A);
+    const staleRev = ask!.blockRev;
+
+    // Someone re-blocks with the EXACT same content before the human's
+    // (now-stale) view gets answered.
+    await s.setBlock(t._id, identicalBlock);
+
+    await expect(
+      answerAsk(ROOT_A, t._id, { choice: "canary", expectedBlockRev: staleRev }),
+    ).rejects.toThrow(/this ask has changed since it was loaded/);
+    // refused, not silently answered against the newer (identical-looking)
+    // block instance
+    expect(s.get(t._id)?.block).toEqual(identicalBlock);
+    expect(s.get(t._id)?.state).toBe("deciding"); // unchanged — refused before any gate/transition
+
+    // The CURRENT blockRev succeeds normally.
+    const currentRev = (await listAsksForProject(ROOT_A))[0]!.blockRev;
+    const { record: answered } = await answerAsk(ROOT_A, t._id, {
+      choice: "canary",
+      expectedBlockRev: currentRev,
+    });
+    expect(answered.block).toBeNull();
+    expect(answered.state).toBe("decided");
+  });
+
+  it("answerAsk without expectedBlockRev (a direct/programmatic caller that doesn't track it) still works exactly as before — the check is opt-in, not required", async () => {
+    const s = await openStore(ROOT_A);
+    const t = await s.create({ summary: "x", kind: "human" });
+    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku" });
+    const { record: answered } = await answerAsk(ROOT_A, t._id, { acknowledged: true });
+    expect(answered.block).toBeNull();
+    expect(answered.state).toBe("decided");
   });
 });

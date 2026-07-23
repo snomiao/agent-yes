@@ -26,6 +26,18 @@ export interface AskItem {
   shape: "choice" | "action" | "acknowledge";
   options?: string[];
   actionLink?: string;
+  /**
+   * Identifies THIS block instance (see `TodoRecord.blockRev`'s doc
+   * comment), not just its content. A client SHOULD echo this back as
+   * `AnswerInput.expectedBlockRev` when answering — `answerAsk()` then
+   * refuses (rather than silently answering) if the block has since changed,
+   * even to another block with byte-for-byte identical text (codex-review
+   * round-17 Important: without this, a UI showing a stale/failed card for
+   * this task could submit an old answer against a genuinely NEW ask on the
+   * same task, e.g. if the new question happens to offer an identically-
+   * named option).
+   */
+  blockRev: number;
 }
 
 /** Whether `projectRoot` has ever had an `ay todo` store created — used to skip candidate project roots (e.g. from a live-agent scan) that never called `ay todo` at all. */
@@ -48,6 +60,7 @@ export async function listAsksForProject(projectRoot: string): Promise<AskItem[]
       options: block.options,
       actionLink: block.actionLink,
       shape: block.actionLink ? "action" : block.options?.length ? "choice" : "acknowledge",
+      blockRev: t.blockRev ?? 0,
     });
   }
   return asks;
@@ -86,6 +99,8 @@ export async function listAsks(projectRoots: string[]): Promise<AskItem[]> {
 export interface AnswerInput {
   choice?: string;
   acknowledged?: boolean;
+  /** See `AskItem.blockRev`'s doc comment. Optional so direct/programmatic callers that don't track it can still call this — but a UI-driven caller (`ts/serve.ts`'s route, `ask.html`) SHOULD always supply it. */
+  expectedBlockRev?: number;
 }
 
 /**
@@ -149,6 +164,18 @@ export async function answerAsk(
   if (rec.block?.type !== "blocked-by-human") {
     throw new Error(
       `task ${taskId} is not currently blocked-by-human (already answered, or blocked on something else)`,
+    );
+  }
+  if (answer.expectedBlockRev !== undefined && answer.expectedBlockRev !== (rec.blockRev ?? 0)) {
+    // The caller's view of this ask is stale — the CURRENT block may even
+    // have byte-for-byte identical text to what the caller last saw (e.g.
+    // the same question asked again), so a content comparison alone
+    // couldn't catch this. Refusing here, rather than answering whatever
+    // is currently blocking, is what prevents an answer meant for an
+    // earlier ask from being silently applied to a different, later one
+    // that happens to share a taskId (codex-review round-17 Important).
+    throw new Error(
+      `task ${taskId}: this ask has changed since it was loaded (expected blockRev ${answer.expectedBlockRev}, current ${rec.blockRev ?? 0}) — refresh and try again`,
     );
   }
   const block = rec.block;
@@ -246,13 +273,19 @@ export async function answerAsk(
       await store.transition(taskId, primary.to);
     }
   }
-  // Clear the SPECIFIC block this function decided to answer — not
-  // unconditionally by id. `rec.block` (captured at the very top, before
-  // any of the writes above) could have been REPLACED by another process
-  // in the meantime (a follow-up question, a re-block on something else
-  // entirely); an unconditional `setBlock(taskId, null)` would silently
-  // erase that genuinely newer block too, leaving the task looking
-  // unblocked when a real, later block exists (codex-review Important).
-  const record = await store.clearBlockIfMatches(taskId, block);
+  // Clear the SPECIFIC block instance this function decided to answer —
+  // not unconditionally by id, and not merely by matching content. `rec`
+  // (captured at the very top, before any of the writes above) could have
+  // been REPLACED by another process in the meantime with either a
+  // genuinely different block (a follow-up question, a re-block on
+  // something else entirely) OR one that happens to be byte-for-byte
+  // IDENTICAL in content (the exact same question asked again) — an
+  // unconditional clear, or a content-only comparison, would silently erase
+  // that other, newer block instance too, leaving the task looking
+  // unblocked when a real, later block exists (codex-review Important,
+  // sharpened round-17 to close the identical-content ABA case).
+  // `blockRev` was captured from THIS specific read, before any of this
+  // function's own writes could have bumped it.
+  const record = await store.clearBlockIfMatches(taskId, rec.blockRev ?? 0);
   return { record, answerText };
 }

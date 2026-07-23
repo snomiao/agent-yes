@@ -83,6 +83,19 @@ export interface TodoRecord extends JsonlDoc {
   orphanedFrom?: string;
   /** Up to a few currently-idle agent ids suggested as replacements, computed at the moment of orphaning — a snapshot, not live; re-run reconcile for a fresh list. */
   reassignCandidates?: string[];
+  /**
+   * Incremented every time `block` is written (set OR cleared) — never
+   * reset, never derived from `block`'s own content. Exists specifically so
+   * a caller that read a block, did other work, and now wants to clear
+   * EXACTLY that block instance (`clearBlockIfMatches`) can detect an ABA
+   * race: another process replacing the block with a byte-for-byte
+   * IDENTICAL `{type, who, question/options/actionLink}` value would be
+   * invisible to a content-only comparison, silently erasing that (distinct,
+   * newer) block instance as if it were the one originally read
+   * (codex-review round-17 Important). Absent on records written before
+   * this field existed — treated as `0`.
+   */
+  blockRev?: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -579,7 +592,11 @@ export class TodoStore {
     // reload-and-recompute-from-fresh dance the way `blockedBy` does below —
     // it still goes through the write lock via `rawUpdate` for existence
     // validation to run against a fresh record.
-    return this.rawUpdate(id, () => ({ block }));
+    //
+    // `blockRev` bumps on every write regardless of whether `block` actually
+    // changed value — see the field's doc comment for why identity, not
+    // content, is what `clearBlockIfMatches` needs.
+    return this.rawUpdate(id, (fresh) => ({ block, blockRev: (fresh.blockRev ?? 0) + 1 }));
   }
 
   /**
@@ -599,32 +616,42 @@ export class TodoStore {
           `task ${id}: block changed since this was decided (expected waiting-on-agent for "${expectedAgentId}") — not clearing`,
         );
       }
-      return { block: null };
+      return { block: null, blockRev: (fresh.blockRev ?? 0) + 1 };
     });
   }
 
   /**
-   * Clears `block` ONLY if the FRESH record's block is still exactly
-   * `expectedBlock` (compared by JSON shape, not reference — callers pass
-   * a snapshot they read earlier) — the generalized form of
-   * `clearWaitingOnAgentBlock` above, for a caller (e.g. `askApi.ts`'s
-   * `answerAsk`) that decided to clear a specific `blocked-by-human` block
-   * from a snapshot taken at the start of a longer operation. Clearing
-   * unconditionally by `id` alone could silently erase a genuinely
-   * DIFFERENT, newer block that another process set in the meantime (e.g.
-   * the human asked a follow-up question, or the task got re-blocked on
-   * something else entirely) — the task would then look unblocked even
-   * though a real, later block exists (codex-review Important). Throws
-   * instead of silently no-op-ing so the caller can report the conflict
-   * rather than claim success.
+   * Clears `block` ONLY if the FRESH record's `blockRev` still equals
+   * `expectedBlockRev` — the generalized form of `clearWaitingOnAgentBlock`
+   * above, for a caller (e.g. `askApi.ts`'s `answerAsk`) that decided to
+   * clear a specific `blocked-by-human` block instance from a snapshot
+   * taken at the start of a longer operation.
+   *
+   * Compares `blockRev`, NOT the block's own content: an earlier version of
+   * this method compared `JSON.stringify(fresh.block)` against the snapshot,
+   * which missed an ABA race — another process could replace the block with
+   * a byte-for-byte IDENTICAL `{type, who, question/options/actionLink}`
+   * value (e.g. the exact same question asked again) between the caller's
+   * read and this call, and the content-only check would see no difference,
+   * silently erasing that distinct, newer block instance as if it were the
+   * one the caller actually decided to answer (codex-review round-17
+   * Important). `blockRev` increments on every write to `block` regardless
+   * of whether the new value differs from the old one, so it uniquely
+   * identifies THIS PARTICULAR block-setting event, not just its shape.
+   *
+   * Clearing unconditionally by `id` alone (or by content alone) could
+   * silently erase a genuinely different, newer block that another process
+   * set in the meantime — the task would then look unblocked even though a
+   * real, later block exists (codex-review Important). Throws instead of
+   * silently no-op-ing so the caller can report the conflict rather than
+   * claim success.
    */
-  clearBlockIfMatches(id: string, expectedBlock: TodoBlock): Promise<TodoRecord> {
-    const expectedJson = JSON.stringify(expectedBlock);
+  clearBlockIfMatches(id: string, expectedBlockRev: number): Promise<TodoRecord> {
     return this.rawUpdate(id, (fresh) => {
-      if (JSON.stringify(fresh.block) !== expectedJson) {
+      if ((fresh.blockRev ?? 0) !== expectedBlockRev) {
         throw new Error(`task ${id}: block changed since this was decided — not clearing`);
       }
-      return { block: null };
+      return { block: null, blockRev: (fresh.blockRev ?? 0) + 1 };
     });
   }
 

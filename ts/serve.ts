@@ -2103,7 +2103,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         return new Response("body must be a JSON object", { status: 400 });
       }
       const body = raw as Record<string, unknown>;
-      const { projectRoot, taskId, choice, acknowledged } = body;
+      const { projectRoot, taskId, choice, acknowledged, expectedBlockRev } = body;
       if (typeof projectRoot !== "string" || !projectRoot) {
         return new Response("projectRoot must be a non-empty string", { status: 400 });
       }
@@ -2116,6 +2116,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
       if (acknowledged !== undefined && typeof acknowledged !== "boolean") {
         return new Response("acknowledged must be a boolean", { status: 400 });
       }
+      if (expectedBlockRev !== undefined && typeof expectedBlockRev !== "number") {
+        return new Response("expectedBlockRev must be a number", { status: 400 });
+      }
       // Scoped to the SAME live-agent-derived project set GET/api/asks
       // aggregates over — not merely "a store happens to exist here"
       // (codex-review Important: hasTodoStore() alone still let a caller
@@ -2127,7 +2130,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       }
       let result: Awaited<ReturnType<typeof answerAsk>>;
       try {
-        result = await answerAsk(projectRoot, taskId, { choice, acknowledged });
+        result = await answerAsk(projectRoot, taskId, { choice, acknowledged, expectedBlockRev });
       } catch (e) {
         return new Response((e as Error).message, { status: 400 });
       }
