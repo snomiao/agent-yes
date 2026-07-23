@@ -277,11 +277,11 @@ describe("ay todo CLI", () => {
     expect(parsed.unblocked).toEqual(["T3"]);
   });
 
-  it("dep rejects a malformed invocation (missing blockerId, or a verb that isn't add|rm) with the usage line", async () => {
+  it("dep rejects a malformed invocation (missing blockerId, or a verb that isn't add|rm) via yargs' own positional validation", async () => {
     await run("new", "a", "--kind", "code");
     await run("new", "b", "--kind", "code");
-    await expect(run("dep", "add", "T2")).rejects.toThrow(/usage: ay todo dep add\|rm/);
-    await expect(run("dep", "bogus", "T2", "T1")).rejects.toThrow(/usage: ay todo dep add\|rm/);
+    await expect(run("dep", "add", "T2")).rejects.toThrow(/not enough non-option arguments/i);
+    await expect(run("dep", "bogus", "T2", "T1")).rejects.toThrow(/invalid values/i);
   });
 
   it("dep surfaces a non-cycle store error (unknown task id) by rethrowing it, not swallowing it as a cycle", async () => {
@@ -297,8 +297,36 @@ describe("ay todo CLI", () => {
     expect(got.out).toContain("the long form details");
   });
 
-  it("an unknown verb fails with a clear, enumerated error", async () => {
-    await expect(run("bogus")).rejects.toThrow(/unknown "ay todo" verb/);
+  it("an unknown verb fails with a clear error from yargs' own command-tree validation", async () => {
+    await expect(run("bogus")).rejects.toThrow(/unknown argument: bogus/i);
+  });
+
+  it("no verb at all fails naming every expected one, via demandCommand", async () => {
+    await expect(run()).rejects.toThrow(
+      /unknown "ay todo" verb.*new\/ls\/get\/transition\/approve\/verify\/block\/unblock\/dep\/tree\/digest\/reconcile/,
+    );
+  });
+
+  it("--help resolves cleanly (exit 0, no throw) — a real yargs command tree auto-generates the verb listing (taku feedback); yargs' own help writer bypasses the stdout mock in this harness, so content is verified manually rather than asserted here", async () => {
+    const cap = captureStdout();
+    let code: number | undefined;
+    try {
+      code = await runTodoSubcommand(["--help", "--root", TEST_ROOT]);
+    } finally {
+      cap.restore();
+    }
+    expect(code).toBe(0);
+  });
+
+  it("a per-verb --help (e.g. `ay todo ls --help`) also resolves cleanly", async () => {
+    const cap = captureStdout();
+    let code: number | undefined;
+    try {
+      code = await runTodoSubcommand(["ls", "--help", "--root", TEST_ROOT]);
+    } finally {
+      cap.restore();
+    }
+    expect(code).toBe(0);
   });
 });
 
