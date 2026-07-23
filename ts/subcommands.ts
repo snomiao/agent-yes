@@ -362,6 +362,7 @@ const SUBCOMMANDS = new Set([
   "exit",
   "restart",
   "note",
+  "todo",
   "serve",
   "schedule",
   "remote",
@@ -474,6 +475,10 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdRestart(rest);
       case "note":
         return await cmdNote(rest);
+      case "todo": {
+        const { runTodoSubcommand } = await import("./todoCli.ts");
+        return runTodoSubcommand(rest);
+      }
       case "serve": {
         const { cmdServe } = await import("./serve.ts");
         return cmdServe(rest);

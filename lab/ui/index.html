@@ -3241,8 +3241,7 @@
           const rows = (window.__ayPerf || []).filter((r) => r.t > perfBeaconCursor);
           if (!rows.length) return;
           perfBeaconCursor = rows[rows.length - 1].t;
-          const slowMs =
-            (window.__ayPerfReport && window.__ayPerfReport().slowMs) || 300;
+          const slowMs = (window.__ayPerfReport && window.__ayPerfReport().slowMs) || 300;
           const byRoom = new Map();
           for (const r of rows) {
             const k = r.room || "";
@@ -4946,7 +4945,8 @@ my.translate = async (text, lang) => {
           "width:100%;box-sizing:border-box;height:300px;resize:vertical;background:var(--bg);color:var(--fg);border:1px solid var(--line);border-radius:6px;padding:10px;font:13px var(--mono);outline:none";
         box.appendChild(ta);
         const err = document.createElement("div");
-        err.style.cssText = "color:var(--red);font:12px var(--mono);margin-top:8px;white-space:pre-wrap";
+        err.style.cssText =
+          "color:var(--red);font:12px var(--mono);margin-top:8px;white-space:pre-wrap";
         box.appendChild(err);
         const row = document.createElement("div");
         row.style.cssText = "display:flex;gap:8px;justify-content:flex-end;margin-top:12px";
@@ -5400,7 +5400,11 @@ my.translate = async (text, lang) => {
           for (const e of keep)
             if (e.parent_pid != null) wanted.add((e._src || "") + "#" + e.parent_pid);
           for (const e of list)
-            if (!keep.has(e) && e.wrapper_pid != null && wanted.has((e._src || "") + "#" + e.wrapper_pid)) {
+            if (
+              !keep.has(e) &&
+              e.wrapper_pid != null &&
+              wanted.has((e._src || "") + "#" + e.wrapper_pid)
+            ) {
               keep.add(e);
               grew = true;
             }
@@ -5408,10 +5412,7 @@ my.translate = async (text, lang) => {
         return list.filter((e) => keep.has(e));
       }
       function orderedEntries(toks) {
-        const sorted = sortEntries(
-          pruneStale(entries.filter((e) => matches(e, toks))),
-          sortMode,
-        );
+        const sorted = sortEntries(pruneStale(entries.filter((e) => matches(e, toks))), sortMode);
         if (!pinned.size) return sorted;
         const hi = [],
           lo = [];
