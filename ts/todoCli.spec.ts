@@ -301,6 +301,27 @@ describe("ay todo CLI", () => {
     expect(ok.out).toContain("https://example/oauth");
   });
 
+  it("block --action-link stores the URL PARSER's normalized href, not the raw input — a value with embedded control characters that WHATWG URL parsing tolerates/strips must never persist those bytes verbatim, since describeBlock() later renders this as terminal/log text (codex-review round-16 Important)", async () => {
+    await run("new", "h", "--kind", "code");
+    const withTab = await run(
+      "block",
+      "T1",
+      "--type",
+      "blocked-by-human",
+      "--who",
+      "taku",
+      "--action-link",
+      "https://example/oauth\tinjected",
+    );
+    const got = JSON.parse((await run("get", "T1", "--format", "json")).out);
+    // whatever the parser accepted, it must be exactly what's stored — never
+    // the raw argv string re-used after validation passed on a DIFFERENT
+    // (parser-normalized) value
+    expect(got.block.actionLink).toBe(new URL("https://example/oauth\tinjected").href);
+    expect(got.block.actionLink).not.toContain("\t");
+    expect(withTab.out).not.toContain("\t");
+  });
+
   it("dep add/rm, tree, and digest render real output and surface cycles as a clean error", async () => {
     await run("new", "a", "--kind", "code");
     await run("new", "b", "--kind", "code");

@@ -280,12 +280,24 @@
           // so the resolved card clears promptly rather than sitting there
           // until the next scheduled tick.
           epoch++;
+          // Only NOW is it safe to stop protecting this node in refresh() —
+          // the answer is durably recorded, so a rebuild from fresh
+          // /api/asks data is correct (the resolved ask won't be in it
+          // anymore).
+          inflightNodes.delete(key);
           refresh();
         } catch (err) {
           if (resultEl) resultEl.innerHTML = `<div class="err">${escapeHtml(String(err))}</div>`;
           if (card) card.querySelectorAll("button").forEach((b) => (b.disabled = false));
-        } finally {
-          inflightNodes.delete(key);
+          // Deliberately NOT deleting from inflightNodes and NOT bumping
+          // epoch here: a refresh() already in flight when the POST failed
+          // would otherwise see an unchanged epoch AND find nothing in
+          // inflightNodes, treat this ask as "fresh", and rebuild the card
+          // from /api/asks — silently erasing the error message this catch
+          // just wrote (codex-review Important). Keeping the node
+          // registered makes refresh() preserve this exact DOM node (error
+          // and all) until the human retries (a successful retry deletes
+          // it above) or reloads the page.
         }
       });
 

@@ -50,13 +50,24 @@ function fail(message: string): never {
   throw new Error(message);
 }
 
-/** Same check ask.html's own render-time guard uses — a real URL parse, not just a scheme-prefix regex, which could still let a malformed string through. */
-function isHttpUrl(s: string): boolean {
+/**
+ * Same check ask.html's own render-time guard uses — a real URL parse, not
+ * just a scheme-prefix regex, which could still let a malformed string
+ * through. Returns the parser's own normalized `.href` (not the raw input)
+ * on success, `null` otherwise: WHATWG URL parsing tolerates/strips some
+ * control characters (e.g. embedded tabs/newlines) from the input while
+ * still returning a valid http(s) URL, so validating against `s` but then
+ * STORING `s` verbatim could still persist those raw control characters
+ * into the store — later rendered as terminal/log text by `describeBlock()`
+ * (codex-review Important). Storing `.href` instead guarantees the store
+ * only ever holds what the parser actually validated.
+ */
+function normalizeHttpUrl(s: string): string | null {
   try {
     const u = new URL(s);
-    return u.protocol === "http:" || u.protocol === "https:";
+    return u.protocol === "http:" || u.protocol === "https:" ? u.href : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -342,25 +353,30 @@ const blockCmd: CommandModule<
             "--options and --action-link are mutually exclusive (choice-shape vs action-shape ask)",
           );
         }
-        if (argv["action-link"] && !isHttpUrl(argv["action-link"])) {
-          // The /ask page renders this straight into an <a href>. HTML-
-          // escaping the text does NOT block dangerous URL schemes
-          // (`javascript:`, `data:`) — only the scheme itself does. Reject
-          // at write time so a non-http(s) link can never reach the store
-          // at all (codex-review Important). Uses the same `URL` parser
-          // ask.html's own render-time check uses (codex-review nitpick: a
-          // regex prefix match alone would still store a malformed string
-          // like "https:/notreallyaurl" that happens to match the prefix).
-          fail(
-            `--action-link must be a valid http:// or https:// URL (got "${argv["action-link"]}")`,
-          );
+        let normalizedActionLink: string | undefined;
+        if (argv["action-link"]) {
+          const normalized = normalizeHttpUrl(argv["action-link"]);
+          if (!normalized) {
+            // The /ask page renders this straight into an <a href>. HTML-
+            // escaping the text does NOT block dangerous URL schemes
+            // (`javascript:`, `data:`) — only the scheme itself does. Reject
+            // at write time so a non-http(s) link can never reach the store
+            // at all (codex-review Important). Uses the same `URL` parser
+            // ask.html's own render-time check uses (codex-review nitpick: a
+            // regex prefix match alone would still store a malformed string
+            // like "https:/notreallyaurl" that happens to match the prefix).
+            fail(
+              `--action-link must be a valid http:// or https:// URL (got "${argv["action-link"]}")`,
+            );
+          }
+          normalizedActionLink = normalized;
         }
         block = {
           type: "blocked-by-human",
           who: argv.who,
           question: argv.question,
           options: argv.options,
-          actionLink: argv["action-link"],
+          actionLink: normalizedActionLink,
         };
         break;
       case "blocked-by-external":
