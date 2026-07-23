@@ -30,4 +30,14 @@ describe("todoBlock", () => {
     expect(rendered[3]).toContain("xyz789");
     expect(new Set(rendered).size).toBe(4); // all distinct
   });
+
+  it("describeBlock includes the actionLink when a blocked-by-human ask is action-shaped (A7)", () => {
+    const rendered = describeBlock({
+      type: "blocked-by-human",
+      who: "taku",
+      actionLink: "https://example/oauth",
+    });
+    expect(rendered).toContain("taku");
+    expect(rendered).toContain("https://example/oauth");
+  });
 });

@@ -278,6 +278,7 @@ const blockCmd: CommandModule<
     who: string | undefined;
     question: string | undefined;
     options: string[] | undefined;
+    "action-link": string | undefined;
     signal: string | undefined;
     agent: string | undefined;
   }
@@ -292,7 +293,16 @@ const blockCmd: CommandModule<
       .option("task", { type: "string", describe: "required for --type blocked-by-task" })
       .option("who", { type: "string", describe: "required for --type blocked-by-human" })
       .option("question", { type: "string" })
-      .option("options", { type: "string", array: true })
+      .option("options", {
+        type: "string",
+        array: true,
+        describe: "choice-shape ask (/ask renders buttons)",
+      })
+      .option("action-link", {
+        type: "string",
+        describe:
+          "action-shape ask (/ask renders an 'open link, then confirm' button) — e.g. an OAuth/CAPTCHA URL",
+      })
       .option("signal", { type: "string", describe: "required for --type blocked-by-external" })
       .option("agent", { type: "string", describe: "required for --type waiting-on-agent" }),
   handler: async (argv) => {
@@ -314,6 +324,7 @@ const blockCmd: CommandModule<
           who: argv.who,
           question: argv.question,
           options: argv.options,
+          actionLink: argv["action-link"],
         };
         break;
       case "blocked-by-external":

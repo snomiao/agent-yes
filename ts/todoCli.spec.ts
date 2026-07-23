@@ -221,6 +221,28 @@ describe("ay todo CLI", () => {
     await expect(run("block", "T1")).rejects.toThrow(/usage: ay todo block/);
   });
 
+  it("block --type blocked-by-human --action-link produces an action-shaped ask (A7)", async () => {
+    await run("new", "e", "--kind", "code");
+    const action = await run(
+      "block",
+      "T1",
+      "--type",
+      "blocked-by-human",
+      "--who",
+      "taku",
+      "--action-link",
+      "https://example/oauth",
+    );
+    expect(action.out).toContain("taku");
+    expect(action.out).toContain("https://example/oauth");
+    const got = await run("get", "T1", "--format", "json");
+    expect(JSON.parse(got.out).block).toEqual({
+      type: "blocked-by-human",
+      who: "taku",
+      actionLink: "https://example/oauth",
+    });
+  });
+
   it("dep add/rm, tree, and digest render real output and surface cycles as a clean error", async () => {
     await run("new", "a", "--kind", "code");
     await run("new", "b", "--kind", "code");

@@ -37,6 +37,7 @@ import {
   writeToIpc,
   type CommonOpts,
 } from "./subcommands.ts";
+import { answerAsk, listAsks } from "./askApi.ts";
 import { TYPING_BADGE } from "./badges.ts";
 import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
 import { CLAUDE_SESSION_PIN_ENV } from "./sessionEnv.ts";
@@ -2051,6 +2052,65 @@ export async function cmdServe(rest: string[]): Promise<number> {
       } catch (e) {
         return new Response((e as Error).message, { status: 500 });
       }
+    }
+
+    // GET /api/asks — the `/ask` decision panel (A7): every `blocked-by-human`
+    // task across every project this host's agents have registered, one
+    // human-facing list. "Every project" is derived the same way `ay ls`
+    // aggregates across projects — the distinct `cwd`s in the live-agent
+    // registry — since there is no separate "registered projects" list to
+    // read; a project this host has never run an agent in has nothing to
+    // aggregate anyway.
+    if (req.method === "GET" && p === "/api/asks") {
+      try {
+        const records = await listRecords(undefined, defaultOpts({ all: true }));
+        const projectRoots = [...new Set(records.map((r) => r.cwd).filter(Boolean))];
+        const asks = await listAsks(projectRoots);
+        return Response.json(asks);
+      } catch (e) {
+        return new Response((e as Error).message, { status: 500 });
+      }
+    }
+
+    // POST /api/asks/answer  body {projectRoot, taskId, choice?, acknowledged?}
+    // — the closed loop's single request: `answerAsk()` clears the block and
+    // (for human/decision-kind tasks) advances the transition atomically, so
+    // there is no intermediate state visible to a second request. As a
+    // best-effort follow-up (never blocks the response on it), if the task's
+    // owner resolves to a currently-live agent, the answer is written
+    // straight into that agent's terminal via the exact same FIFO mechanism
+    // `/api/send` already uses — the real-time half of the closed loop, for
+    // whichever agent happens to be alive and watching right now.
+    if (req.method === "POST" && p === "/api/asks/answer") {
+      let body: { projectRoot: string; taskId: string; choice?: string; acknowledged?: boolean };
+      try {
+        body = (await req.json()) as typeof body;
+      } catch {
+        return new Response("invalid JSON body", { status: 400 });
+      }
+      const { projectRoot, taskId, choice, acknowledged } = body;
+      if (!projectRoot || !taskId) {
+        return new Response("missing projectRoot or taskId", { status: 400 });
+      }
+      let rec: Awaited<ReturnType<typeof answerAsk>>;
+      try {
+        rec = await answerAsk(projectRoot, taskId, { choice, acknowledged });
+      } catch (e) {
+        return new Response((e as Error).message, { status: 400 });
+      }
+      if (rec.owner) {
+        try {
+          const owner = await resolveOne(rec.owner, defaultOpts({ all: true }));
+          if (owner.fifo_file) {
+            const answerText = choice ?? "acknowledged";
+            await writeToIpc(owner.fifo_file, `[/ask] ${taskId} answered: ${answerText}\n`);
+          }
+        } catch {
+          // owner not currently live / not resolvable — the task itself is
+          // already correctly updated regardless; this is best-effort only.
+        }
+      }
+      return Response.json(rec);
     }
 
     // GET /api/search?q= — chat-history search across every agent's log.
