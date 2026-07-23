@@ -108,7 +108,7 @@ const newCmd: CommandModule<
     kind: string | undefined;
     description: string | undefined;
     tier: string | undefined;
-    acceptanceCriteria: string | undefined;
+    "acceptance-criteria": string | undefined;
     owner: string | undefined;
     tag: string[] | undefined;
     dep: string[] | undefined;
@@ -128,7 +128,7 @@ const newCmd: CommandModule<
       .option("kind", { type: "string", describe: `one of: ${Object.keys(LIFECYCLES).join(", ")}` })
       .option("description", { type: "string" })
       .option("tier", { type: "string", describe: "targetTier, e.g. canary-done / shipped-done" })
-      .option("acceptanceCriteria", {
+      .option("acceptance-criteria", {
         type: "string",
         describe:
           "definition of done for this task — what an independent validator should check before approving/verifying it",
@@ -155,7 +155,7 @@ const newCmd: CommandModule<
       kind: parseKind(argv.kind),
       description: argv.description,
       targetTier: argv.tier,
-      acceptanceCriteria: argv.acceptanceCriteria,
+      acceptanceCriteria: argv["acceptance-criteria"],
       owner: argv.owner,
       tags: argv.tag ?? [],
       blockedBy: argv.dep ?? [],
