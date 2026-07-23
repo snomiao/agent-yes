@@ -14,9 +14,22 @@
  * monorepo root") — a project wanting that behavior supplies it by always
  * invoking with an explicit `--root`, or by calling `openStore()` as a
  * library from its own code instead of through this CLI.
+ *
+ * Argument parsing: exactly ONE yargs pass per invocation, at the verb
+ * level. `--root`/`--format` are declared as options on EVERY verb's own
+ * `yargs(args)` call (via `commonOptions()` below) alongside that verb's own
+ * options, rather than pre-scanned out of argv by a separate pass. An
+ * earlier design tried a separate outer parse (swallowed every verb's own
+ * flags — fixed) and then a "--root/--format only recognized at the very
+ * end of argv" scan (broke completely ordinary invocations like
+ * `ay todo ls --format json --owner alice`, where --format isn't the last
+ * token — codex-review Important). A single parse per verb, with every
+ * option — common and verb-specific — declared on the SAME yargs instance,
+ * is how yargs is meant to be used and has neither problem: it correctly
+ * separates recognized flags from positional text regardless of order.
  */
 
-import yargs from "yargs";
+import yargs, { type Argv } from "yargs";
 import { openStore, CycleError, type TodoRecord } from "./todoStore.ts";
 import { isKnownKind, LIFECYCLES, type LifecycleKind } from "./todoLifecycle.ts";
 import { describeBlock, type TodoBlock } from "./todoBlock.ts";
@@ -76,71 +89,28 @@ function emit(opts: CommonOpts, obj: unknown, human: string): void {
   process.stdout.write((opts.format === "json" ? JSON.stringify(obj, null, 2) : human) + "\n");
 }
 
-/**
- * Pull `--root <dir>` and `--format <table|json>` out of `argv` WITHOUT a
- * full yargs pass — a single yargs parser here would swallow every verb's
- * own flags too (e.g. `--kind`) into the outer parse result, leaving the
- * per-verb sub-parsers below nothing to see in their `args`. Only these two
- * global, cross-verb options are special-cased this way; everything else is
- * declared by each verb's own `yargs(args)` call further down.
- *
- * Scanned from the END of argv, and only consumed while each trailing token
- * keeps matching — NOT scanned anywhere in the array. `ay todo new` joins
- * every positional word into the summary (an intentional convenience for
- * unquoted summaries), so scanning the whole array for `--format`/`--root`
- * would misparse a literal `--format` or `--root` that happens to appear as
- * a WORD inside an unquoted summary earlier in the command (e.g.
- * `ay todo new fix --format output --kind doc`, codex-review Important) —
- * every documented/tested invocation of this CLI puts `--root`/`--format` at
- * the very end, so restricting extraction to that trailing position closes
- * the real ambiguity without adding a `--` end-of-options convention. A
- * summary that itself needs to literally END in the words "--format ..." is
- * a narrow, documented edge case: quote it as one positional instead.
- */
-function extractCommonOpts(argv: string[]): { opts: CommonOpts; rest: string[] } {
-  const tokens = [...argv];
-  let root = process.cwd();
-  let format: CommonOpts["format"] = "table";
-  for (;;) {
-    const last = tokens.at(-1);
-    if (last === undefined) break;
-    const eq = last.match(/^(--root|--format)=(.*)$/);
-    if (eq) {
-      if (eq[1] === "--root") root = eq[2]!;
-      else if (eq[2] === "table" || eq[2] === "json") format = eq[2];
-      else fail(`--format must be "table" or "json" (got "${eq[2]}")`);
-      tokens.pop();
-      continue;
-    }
-    if (tokens.length >= 2) {
-      const flag = tokens.at(-2)!;
-      if (flag === "--root") {
-        root = last;
-        tokens.splice(-2, 2);
-        continue;
-      }
-      if (flag === "--format") {
-        if (last !== "table" && last !== "json") {
-          fail(`--format must be "table" or "json" (got ${JSON.stringify(last)})`);
-        }
-        format = last;
-        tokens.splice(-2, 2);
-        continue;
-      }
-    }
-    break; // the trailing token isn't part of a recognized global option — stop
-  }
-  return { opts: { root, format }, rest: tokens };
+/** Adds `--root`/`--format` to a verb's own yargs builder — see the module doc comment for why every verb declares these itself rather than a separate outer parse. */
+function commonOptions<T>(y: Argv<T>) {
+  return y
+    .option("root", {
+      type: "string" as const,
+      default: process.cwd(),
+      describe: "project root holding .agent-yes/todos.jsonl",
+    })
+    .option("format", { choices: ["table", "json"] as const, default: "table" as const });
+}
+
+function commonOptsOf(a: { root: string; format: "table" | "json" }): CommonOpts {
+  if (a.root === "") fail("--root must not be empty");
+  return { root: a.root, format: a.format };
 }
 
 export async function runTodoSubcommand(rest0: string[]): Promise<number> {
-  const { opts, rest } = extractCommonOpts(rest0);
-  const [verb, ...args] = rest;
-  const store = await openStore(opts.root);
+  const [verb, ...args] = rest0;
 
   switch (verb) {
     case "new": {
-      const sub = yargs(args)
+      const sub = commonOptions(yargs(args))
         .option("kind", { type: "string" })
         .option("description", { type: "string" })
         .option("tier", { type: "string" })
@@ -150,15 +120,21 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
         .help(false)
         .exitProcess(false);
       const a = await sub.parseAsync();
+      const opts = commonOptsOf(a);
+      const store = await openStore(opts.root);
       // Join ALL positional args, not just a._[0]: an unquoted summary like
       // `ay todo new write the spec --kind doc` splits into three separate
       // positionals under yargs, and using only the first silently stored
-      // "write" as the entire summary (codex-review Important).
+      // "write" as the entire summary (codex-review Important). A summary
+      // that must itself contain a literal "--flag"-shaped word is a narrow,
+      // separate edge case (yargs will consume it as a flag regardless of
+      // which parser sees it) — quote the whole summary in that case.
       const summary = (a._ as (string | number)[]).map(String).join(" ");
-      if (!summary)
+      if (!summary) {
         fail(
           "usage: ay todo new <summary> --kind <kind> [--description ...] [--tier ...] [--owner ...] [--tag t]... [--dep id]...",
         );
+      }
       const rec = await store.create({
         summary,
         kind: parseKind(a.kind as string | undefined),
@@ -172,7 +148,7 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
       return 0;
     }
     case "ls": {
-      const sub = yargs(args)
+      const sub = commonOptions(yargs(args))
         .option("kind", { type: "string" })
         .option("state", { type: "string" })
         .option("owner", { type: "string" })
@@ -181,6 +157,8 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
         .help(false)
         .exitProcess(false);
       const a = await sub.parseAsync();
+      const opts = commonOptsOf(a);
+      const store = await openStore(opts.root);
       const tasks = store.list({
         kind: a.kind ? parseKind(a.kind as string) : undefined,
         state: a.state as string | undefined,
@@ -192,7 +170,11 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
       return 0;
     }
     case "get": {
-      const id = args[0];
+      const sub = commonOptions(yargs(args)).help(false).exitProcess(false);
+      const a = await sub.parseAsync();
+      const opts = commonOptsOf(a);
+      const store = await openStore(opts.root);
+      const id = String(a._[0] ?? "");
       if (!id) fail("usage: ay todo get <id>");
       const rec = store.get(id);
       if (!rec) fail(`no such task: ${id}`);
@@ -200,22 +182,29 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
       return 0;
     }
     case "transition": {
-      const [id, toState] = args;
+      const sub = commonOptions(yargs(args)).help(false).exitProcess(false);
+      const a = await sub.parseAsync();
+      const opts = commonOptsOf(a);
+      const store = await openStore(opts.root);
+      const [id, toState] = (a._ as (string | number)[]).map(String);
       if (!id || !toState) fail("usage: ay todo transition <id> <toState>");
       const rec = await store.transition(id, toState);
       emit(opts, rec, `transitioned ${rec._id} -> ${rec.state}\n${renderRecord(rec)}`);
       return 0;
     }
     case "approve": {
-      const sub = yargs(args)
+      const sub = commonOptions(yargs(args))
         .option("note", { type: "string" })
         .option("link", { type: "string" })
         .help(false)
         .exitProcess(false);
       const a = await sub.parseAsync();
+      const opts = commonOptsOf(a);
+      const store = await openStore(opts.root);
       const [id, gate, validator] = (a._ as (string | number)[]).map(String);
-      if (!id || !gate || !validator)
+      if (!id || !gate || !validator) {
         fail("usage: ay todo approve <id> <gate> <validatorIdentity> [--note ...] [--link ...]");
+      }
       const rec = await store.approve(id, gate, validator, {
         note: a.note as string | undefined,
         link: a.link as string | undefined,
@@ -228,14 +217,18 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
       return 0;
     }
     case "verify": {
-      const [id, gate] = args;
+      const sub = commonOptions(yargs(args)).help(false).exitProcess(false);
+      const a = await sub.parseAsync();
+      const opts = commonOptsOf(a);
+      const store = await openStore(opts.root);
+      const [id, gate] = (a._ as (string | number)[]).map(String);
       if (!id) fail("usage: ay todo verify <id> [gateName]");
-      const rec = await store.verify(id, gate);
+      const rec = await store.verify(id, gate || undefined);
       emit(opts, rec, `verified ${rec._id} -> ${rec.state}\n${renderRecord(rec)}`);
       return 0;
     }
     case "block": {
-      const sub = yargs(args)
+      const sub = commonOptions(yargs(args))
         .option("type", {
           type: "string",
           choices: [
@@ -254,11 +247,14 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
         .help(false)
         .exitProcess(false);
       const a = await sub.parseAsync();
+      const opts = commonOptsOf(a);
+      const store = await openStore(opts.root);
       const id = String(a._[0] ?? "");
-      if (!id || !a.type)
+      if (!id || !a.type) {
         fail(
           "usage: ay todo block <id> --type <blocked-by-task|blocked-by-human|blocked-by-external|waiting-on-agent> ...",
         );
+      }
       let block: TodoBlock;
       switch (a.type) {
         case "blocked-by-task":
@@ -290,14 +286,22 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
       return 0;
     }
     case "unblock": {
-      const id = args[0];
+      const sub = commonOptions(yargs(args)).help(false).exitProcess(false);
+      const a = await sub.parseAsync();
+      const opts = commonOptsOf(a);
+      const store = await openStore(opts.root);
+      const id = String(a._[0] ?? "");
       if (!id) fail("usage: ay todo unblock <id>");
       const rec = await store.setBlock(id, null);
       emit(opts, rec, `unblocked ${rec._id}\n${renderRecord(rec)}`);
       return 0;
     }
     case "dep": {
-      const [verb2, id, blockerId] = args;
+      const sub = commonOptions(yargs(args)).help(false).exitProcess(false);
+      const a = await sub.parseAsync();
+      const opts = commonOptsOf(a);
+      const store = await openStore(opts.root);
+      const [verb2, id, blockerId] = (a._ as (string | number)[]).map(String);
       if (!verb2 || !id || !blockerId || (verb2 !== "add" && verb2 !== "rm")) {
         fail("usage: ay todo dep add|rm <id> <blockerId>");
       }
@@ -316,7 +320,11 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
       }
     }
     case "tree": {
-      const rootId = args[0];
+      const sub = commonOptions(yargs(args)).help(false).exitProcess(false);
+      const a = await sub.parseAsync();
+      const opts = commonOptsOf(a);
+      const store = await openStore(opts.root);
+      const rootId = a._[0] !== undefined ? String(a._[0]) : undefined;
       const tasks = store.all();
       if (opts.format === "json") {
         const { buildTreeJSON } = await import("./todoDigest.ts");
@@ -327,6 +335,10 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
       return 0;
     }
     case "digest": {
+      const sub = commonOptions(yargs(args)).help(false).exitProcess(false);
+      const a = await sub.parseAsync();
+      const opts = commonOptsOf(a);
+      const store = await openStore(opts.root);
       const tasks = store.all();
       if (opts.format === "json") {
         const { unblockedTasks } = await import("./todoDigest.ts");

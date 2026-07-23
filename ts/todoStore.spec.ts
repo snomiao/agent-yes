@@ -68,6 +68,20 @@ describe("TodoStore", () => {
     );
   });
 
+  it("CONCURRENT array-field mutations on the SAME task both land — neither addDep() silently overwrites the other's blockedBy write (codex-review round-5 Important)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const target = await s.create({ summary: "target", kind: "code" });
+    const blockerA = await s.create({ summary: "a", kind: "code" });
+    const blockerB = await s.create({ summary: "b", kind: "code" });
+    // Fired concurrently (both start before either awaits its own lock) —
+    // without the write lock serializing the reload-recompute-write cycle,
+    // whichever addDep() call's jsonl.updateById landed SECOND would have
+    // built its blockedBy array from a snapshot taken before the FIRST
+    // call's write, silently dropping it.
+    await Promise.all([s.addDep(target._id, blockerA._id), s.addDep(target._id, blockerB._id)]);
+    expect(s.get(target._id)?.blockedBy.sort()).toEqual([blockerA._id, blockerB._id].sort());
+  });
+
   it("approve() by a DIFFERENT identity succeeds, records evidence, and unblocks the transition", async () => {
     const s = await openStore(TEST_ROOT);
     const t = await s.create({ summary: "x", kind: "doc", owner: "worker" });
@@ -327,31 +341,18 @@ describe("TodoStore", () => {
     expect(s.list()).toHaveLength(N); // every task actually persisted, not clobbered
   }, 30_000);
 
-  it("a held id lock makes create() throw a timeout, never silently proceed unlocked (codex-review round-2 Critical)", async () => {
-    const s = await openStore(TEST_ROOT);
-    const { mkdirSync: mkSync, writeFileSync: wf } = await import("fs");
-    const lockPath = path.join(TEST_ROOT, ".agent-yes", "todos.jsonl.idlock");
-    mkSync(path.dirname(lockPath), { recursive: true });
-    wf(lockPath, "someone-elses-token"); // simulate another process holding the lock, freshly
-    await expect(s.create({ summary: "x", kind: "code" })).rejects.toThrow(/timed out waiting for/);
-    // and the lock must NOT have been deleted by the failed attempt (that
-    // would let a second unlocked caller in right after this one)
-    const { readFileSync: rf } = await import("fs");
-    expect(rf(lockPath, "utf8")).toBe("someone-elses-token"); // untouched — not stolen, not released
-  }, 15_000);
-
-  it("a live (fresh, non-stale) id lock held by someone else makes create() wait and then throw a clear timeout — proper-lockfile's own retry budget, never a silent unlocked proceed (codex-review round-4 Critical: id-lock now delegates entirely to proper-lockfile instead of a hand-rolled mkdir/token scheme)", async () => {
+  it("a live (fresh, non-stale) write lock held by someone else makes create() wait and then throw a clear timeout — proper-lockfile's own retry budget, never a silent unlocked proceed (codex-review round-4 Critical: the store's write lock now delegates entirely to proper-lockfile instead of a hand-rolled mkdir/token scheme)", async () => {
     const s = await openStore(TEST_ROOT);
     const { lock: lockfileLock } = await import("proper-lockfile");
     const lockPath = path.join(TEST_ROOT, ".agent-yes", "todos.jsonl");
     const release = await lockfileLock(lockPath, {
-      lockfilePath: `${lockPath}.idlock`,
+      lockfilePath: `${lockPath}.writelock`,
       realpath: false,
       stale: 10_000,
     });
     try {
       await expect(s.create({ summary: "x", kind: "code" })).rejects.toThrow(
-        /task id allocation: timed out waiting for the id lock/,
+        /store write: timed out waiting for the write lock/,
       );
     } finally {
       await release();
@@ -361,9 +362,9 @@ describe("TodoStore", () => {
     expect(rec.summary).toBe("after release");
   }, 20_000);
 
-  it("a STALE id lock (older than proper-lockfile's stale window) is recovered automatically — a crashed holder never wedges future create() calls", async () => {
+  it("a STALE write lock (older than proper-lockfile's stale window) is recovered automatically — a crashed holder never wedges future create() calls", async () => {
     const s = await openStore(TEST_ROOT);
-    const lockPath = path.join(TEST_ROOT, ".agent-yes", "todos.jsonl.idlock");
+    const lockPath = path.join(TEST_ROOT, ".agent-yes", "todos.jsonl.writelock");
     const { mkdirSync: mkSync, utimesSync } = await import("fs");
     // proper-lockfile's own lock representation IS a directory (mkdir-based
     // locking) — simulate a lock left behind by a crashed process the same

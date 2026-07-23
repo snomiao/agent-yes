@@ -126,34 +126,54 @@ export class TodoStore {
   }
 
   /**
-   * Exclusive, cross-process id-allocation lock, delegated ENTIRELY to
+   * Exclusive, cross-process, whole-store write lock, delegated ENTIRELY to
    * `proper-lockfile` (already a dependency here — `JsonlStore` itself uses
    * it for `append`/`updateById`) rather than hand-rolled.
    *
-   * This exists because `_id` allocation ("max existing + 1") must happen
-   * atomically with the append that claims it — computing the id from a
-   * snapshot and appending afterward, even with JsonlStore's own internal
-   * per-write lock, leaves a window where two processes compute the SAME
-   * next id from the same snapshot and then both append it; JsonlStore's
-   * "same `_id` → last line wins" merge would silently make one of those two
-   * tasks disappear. A SEPARATE lockfile path (`<path>.idlock`, distinct from
-   * JsonlStore's own internal `<path>.lock`) guards only id selection, not
-   * every write.
+   * EVERY mutating method (`create`, `transition`/`applyTransition`,
+   * `approve`, `setBlock`, `addDep`, `rmDep`) runs its "reload from disk,
+   * recompute from the FRESH record, write" sequence entirely inside this
+   * lock. Two motivating races, both real and both found by review:
    *
-   * Two hand-rolled attempts at this lock (a plain mkdir-based lock, then a
-   * token-in-file "ownership-safe" variant) each independently rediscovered
-   * why advisory file locks are hard to get right from scratch: the second
-   * attempt's own stale-lock steal path — read the stale mtime, THEN
-   * separately unlink and recreate — has a time-of-check-to-time-of-use gap
-   * where a DIFFERENT waiter's fresh acquisition can land in between, so the
-   * first waiter's unlink (issued against what it still believes is the
-   * stale file) deletes that second waiter's live lock instead. `proper-
-   * lockfile` solves exactly this class of problem (atomic directory-based
-   * locking, its own carefully-reasoned staleness/compromise handling) and
-   * is already trusted elsewhere in this same file — reusing it here instead
-   * of a third from-scratch attempt is the correct fix, not another patch.
+   *   - `_id` allocation ("max existing + 1") must happen atomically with
+   *     the append that claims it — computing the id from a snapshot and
+   *     appending afterward, even with JsonlStore's own internal per-write
+   *     lock, leaves a window where two processes compute the SAME next id
+   *     from the same snapshot and then both append it; JsonlStore's "same
+   *     `_id` → last line wins" merge would silently make one of those two
+   *     tasks disappear.
+   *   - Every other mutator reads a record's array fields (`verifyEvidence`,
+   *     `satisfiedGates`, `blockedBy`) to build a new array and writes that
+   *     whole array back. Without a lock, two concurrent mutations on the
+   *     SAME task (e.g. two `approve()` calls, or an `approve()` racing a
+   *     `verify()`) each compute their patch from a snapshot taken before
+   *     either write lands; whichever write reaches JsonlStore SECOND
+   *     silently overwrites the first one's array contents (JsonlStore's
+   *     merge replaces whole fields, it does not merge array elements) —
+   *     losing gate evidence or a satisfied-gate flag with no error at all.
+   *
+   * This lock is intentionally coarse (the WHOLE store, not per-task): a
+   * per-task lock would need its own bookkeeping to avoid deadlock and
+   * leaks, for a local, low-throughput CLI tool where store-wide
+   * serialization of these fast (disk-only) critical sections has no
+   * meaningful cost. The one thing that must NEVER happen inside this lock
+   * is an arbitrarily slow external call (`verify()`'s `impl.check()`,
+   * which can be a real CI/QA system taking minutes) — that stays outside;
+   * only the fast reload-check-write that follows it is lock-protected.
+   *
+   * Two hand-rolled attempts at a narrower (id-only) version of this lock (a
+   * plain mkdir-based lock, then a token-in-file "ownership-safe" variant)
+   * each independently rediscovered why advisory file locks are hard to get
+   * right from scratch: the second attempt's own stale-lock steal path —
+   * read the stale mtime, THEN separately unlink and recreate — has a
+   * time-of-check-to-time-of-use gap where a DIFFERENT waiter's fresh
+   * acquisition can land in between, so the first waiter's unlink (issued
+   * against what it still believes is the stale file) deletes that second
+   * waiter's live lock instead. `proper-lockfile` solves exactly this class
+   * of problem and is already trusted elsewhere in this same file — reusing
+   * it here instead of a third from-scratch attempt is the correct fix.
    */
-  private async withIdLock<T>(fn: () => Promise<T>): Promise<T> {
+  private async withStoreLock<T>(fn: () => Promise<T>): Promise<T> {
     let release: (() => Promise<void>) | undefined;
     try {
       // Lock `this.filePath` itself (the todos.jsonl FILE), not its
@@ -168,14 +188,14 @@ export class TodoStore {
       // creates it on the first append) and default realpath resolution
       // would fail on a nonexistent path.
       release = await lock(this.filePath, {
-        lockfilePath: `${this.filePath}.idlock`,
+        lockfilePath: `${this.filePath}.writelock`,
         realpath: false,
         stale: 10_000,
         retries: { retries: 200, minTimeout: 15, maxTimeout: 15 },
       });
     } catch (err) {
       throw new Error(
-        `task id allocation: timed out waiting for the id lock (${err instanceof Error ? err.message : String(err)})`,
+        `store write: timed out waiting for the write lock (${err instanceof Error ? err.message : String(err)})`,
       );
     }
     try {
@@ -225,7 +245,7 @@ export class TodoStore {
   }
 
   async create(input: CreateInput): Promise<TodoRecord> {
-    return this.withIdLock(async () => {
+    return this.withStoreLock(async () => {
       // Reload from disk WHILE holding the id lock: another process may have
       // appended tasks since this instance last loaded, and the id must be
       // computed from the freshest possible state or two concurrent create()
@@ -263,6 +283,14 @@ export class TodoStore {
    * already been satisfied via `approve()`. Throws — refusing the write
    * entirely — for an edge with no such edge in the graph, or a gate that is
    * either registered (must go through `verify()`) or not yet satisfied.
+   *
+   * The check below (against `this.mustGet(id)`, a possibly-stale snapshot)
+   * is a fast, cheap, EARLY rejection for an obviously-invalid call — it is
+   * NOT the source of correctness. `applyTransition`'s `precondition`
+   * callback re-runs the SAME check against a record reloaded from disk
+   * while holding the write lock, immediately before writing, so a
+   * concurrent mutation that changed the state or consumed the gate between
+   * this early check and the lock being acquired is still caught.
    */
   async transition(id: string, toState: string): Promise<TodoRecord> {
     const rec = this.mustGet(id);
@@ -272,22 +300,26 @@ export class TodoStore {
       );
     }
     const gate = requiredGate(rec.kind, rec.state, toState);
-    if (gate) {
-      if (this.gates.has(gate)) {
-        throw new Error(
-          `task ${id}: "${gate}" is a registered gate — it can only be satisfied by verify("${id}"), not a direct transition`,
-        );
-      }
-      if (!rec.satisfiedGates.includes(gate)) {
-        throw new Error(
-          `task ${id}: transition ${rec.state} -> ${toState} requires gate "${gate}" — call approve("${id}", "${gate}") first`,
-        );
-      }
+    if (gate && this.gates.has(gate)) {
+      throw new Error(
+        `task ${id}: "${gate}" is a registered gate — it can only be satisfied by verify("${id}"), not a direct transition`,
+      );
     }
     // No new evidence entry here: approve() already recorded one (with the
     // independently-verified validator identity) at approval time. This call
     // only consumes the satisfied-gate flag so it cannot be replayed.
-    return this.applyTransition(id, toState, undefined, gate);
+    return this.applyTransition(id, toState, undefined, gate, (fresh) => {
+      if (!canTransition(fresh.kind, fresh.state, toState)) {
+        throw new Error(
+          `task ${id}: no transition ${fresh.state} -> ${toState} for kind "${fresh.kind}" (state changed concurrently)`,
+        );
+      }
+      if (gate && !fresh.satisfiedGates.includes(gate)) {
+        throw new Error(
+          `task ${id}: transition ${fresh.state} -> ${toState} requires gate "${gate}", which is no longer satisfied (consumed or reset by a concurrent write) — call approve("${id}", "${gate}") again`,
+        );
+      }
+    });
   }
 
   /**
@@ -307,7 +339,6 @@ export class TodoStore {
     validatorIdentity: string,
     evidence?: { note?: string; link?: string },
   ): Promise<TodoRecord> {
-    const rec = this.mustGet(id);
     // Trim ONCE, up front, and use this value everywhere below — comparing a
     // trimmed owner against an untrimmed validatorIdentity (or vice versa)
     // would let "worker" vs "worker " sneak past the self-certification
@@ -323,33 +354,43 @@ export class TodoStore {
         `task ${id}: "${gateName}" is a registered gate and cannot be approved manually — it is satisfied by verify("${id}")`,
       );
     }
-    const onGraph = LIFECYCLES[rec.kind].transitions.some(
-      (t) => t.from === rec.state && t.gate === gateName,
-    );
-    if (!onGraph) {
-      throw new Error(
-        `task ${id}: "${gateName}" is not a gate on any transition from its current state "${rec.state}"`,
+    return this.withStoreLock(async () => {
+      // Reload + re-fetch WHILE holding the lock: verifyEvidence/
+      // satisfiedGates are arrays rebuilt from the current record and
+      // written back whole, so building them from a stale snapshot would
+      // silently drop a concurrent write to the SAME arrays (codex-review
+      // Important — the same class of race id-allocation had, but for
+      // per-task array fields instead of the id sequence).
+      await this.jsonl.load();
+      const rec = this.mustGet(id);
+      const onGraph = LIFECYCLES[rec.kind].transitions.some(
+        (t) => t.from === rec.state && t.gate === gateName,
       );
-    }
-    if (rec.owner && rec.owner.trim().toLowerCase() === validator.toLowerCase()) {
-      throw new Error(
-        `task ${id}: independent verification required — validator "${validator}" is the same identity as owner "${rec.owner}"; the worker cannot certify their own work`,
-      );
-    }
-    const satisfied = new Set(rec.satisfiedGates);
-    satisfied.add(gateName);
-    const evidenceEntry: GateEvidence = {
-      gate: gateName,
-      passedAt: new Date().toISOString(),
-      validator,
-      ...evidence,
-    };
-    await this.jsonl.updateById(id, {
-      satisfiedGates: [...satisfied],
-      verifyEvidence: [...rec.verifyEvidence, evidenceEntry],
-      updatedAt: evidenceEntry.passedAt,
-    } as Partial<Omit<TodoRecord, "_id">>);
-    return this.mustGet(id);
+      if (!onGraph) {
+        throw new Error(
+          `task ${id}: "${gateName}" is not a gate on any transition from its current state "${rec.state}"`,
+        );
+      }
+      if (rec.owner && rec.owner.trim().toLowerCase() === validator.toLowerCase()) {
+        throw new Error(
+          `task ${id}: independent verification required — validator "${validator}" is the same identity as owner "${rec.owner}"; the worker cannot certify their own work`,
+        );
+      }
+      const satisfied = new Set(rec.satisfiedGates);
+      satisfied.add(gateName);
+      const evidenceEntry: GateEvidence = {
+        gate: gateName,
+        passedAt: new Date().toISOString(),
+        validator,
+        ...evidence,
+      };
+      await this.jsonl.updateById(id, {
+        satisfiedGates: [...satisfied],
+        verifyEvidence: [...rec.verifyEvidence, evidenceEntry],
+        updatedAt: evidenceEntry.passedAt,
+      } as Partial<Omit<TodoRecord, "_id">>);
+      return this.mustGet(id);
+    });
   }
 
   /**
@@ -396,32 +437,38 @@ export class TodoStore {
     const isPrimaryEdge = edges[0] === targetEdge;
     const stateAtCheckStart = rec.state;
     const result = await impl.check(); // may be slow (a real CI/QA system) — the task's state can change while this runs
-    // Re-fetch and refuse to apply a transition computed against a state the
-    // task may no longer be in: `impl.check()` can take an arbitrarily long
-    // time (a real external system), and another writer (a concurrent
-    // transition/verify/approve) can change the task's state during that
-    // window. Applying targetEdge/sibling's `.to` regardless would silently
-    // move the task across an edge that may no longer even exist from its
-    // CURRENT state, bypassing the lifecycle graph entirely (codex-review
-    // Critical). This does not need its own lock — it is a staleness
-    // precondition on the write, not a mutual-exclusion problem — but it
-    // does need to be checked AFTER the await, immediately before writing.
-    const current = this.mustGet(id);
-    if (current.state !== stateAtCheckStart) {
-      throw new Error(
-        `task ${id}: state changed from "${stateAtCheckStart}" to "${current.state}" while gate "${targetEdge.gate}" was being checked — refusing to apply a transition computed against the old state; re-run verify()`,
-      );
-    }
+    // `impl.check()` can take an arbitrarily long time (a real external
+    // system), and another writer (a concurrent transition/verify/approve)
+    // can change the task's state during that window. The precondition
+    // passed to `applyTransition` below re-checks this AFTER the await,
+    // atomically with the write, inside the store's write lock — not here,
+    // and not as a separate unlocked re-fetch (codex-review Critical, then
+    // strengthened again after review found the first fix's re-check was
+    // itself outside any lock and so could race a concurrent WRITE, not
+    // just be stale relative to one).
+    const precondition = (fresh: TodoRecord): void => {
+      if (fresh.state !== stateAtCheckStart) {
+        throw new Error(
+          `task ${id}: state changed from "${stateAtCheckStart}" to "${fresh.state}" while gate "${targetEdge.gate}" was being checked — refusing to apply a transition computed against the old state; re-run verify()`,
+        );
+      }
+    };
     if (result.passed) {
       // The gate's own name stands in for "validator" — a registered check is,
       // by construction, an independent system distinct from the worker, so
       // no separate identity argument is needed here (unlike approve()).
-      return this.applyTransition(id, targetEdge.to, {
-        gate: targetEdge.gate,
-        validator: `gate:${targetEdge.gate}`,
-        note: result.note,
-        link: result.link,
-      });
+      return this.applyTransition(
+        id,
+        targetEdge.to,
+        {
+          gate: targetEdge.gate,
+          validator: `gate:${targetEdge.gate}`,
+          note: result.note,
+          link: result.link,
+        },
+        undefined,
+        precondition,
+      );
     }
     if (!isPrimaryEdge) {
       throw new Error(
@@ -440,64 +487,97 @@ export class TodoStore {
     // entry to targetEdge.gate (which reported NOT passed) would let a
     // downstream reader scanning evidence by gate name misread a failed
     // check as successful evidence for that gate (codex-review Important).
-    return this.applyTransition(id, sibling.to, {
-      // non-null: `edges` was filtered to only entries with a truthy `gate`
-      gate: sibling.gate!,
-      validator: `gate:${targetEdge.gate}`,
-      note: result.note ?? `gate "${targetEdge.gate}" reported not passed`,
-      link: result.link,
-    });
+    return this.applyTransition(
+      id,
+      sibling.to,
+      {
+        // non-null: `edges` was filtered to only entries with a truthy `gate`
+        gate: sibling.gate!,
+        validator: `gate:${targetEdge.gate}`,
+        note: result.note ?? `gate "${targetEdge.gate}" reported not passed`,
+        link: result.link,
+      },
+      undefined,
+      precondition,
+    );
   }
 
+  /**
+   * Apply a state write, entirely inside the store write lock: reload from
+   * disk, re-fetch the record, run the caller's `precondition` (if any)
+   * against that FRESH record (throws to abort with no write), then build
+   * the patch from the fresh record's arrays and write it. Building the
+   * patch from a pre-lock snapshot (the previous design) let a concurrent
+   * mutation on the same task silently lose its own array write once this
+   * one landed — this method exists specifically so every caller (`verify`,
+   * `transition`) gets that protection uniformly rather than each
+   * reimplementing its own reload dance (codex-review Important).
+   */
   private async applyTransition(
     id: string,
     toState: string,
     gateInfo?: { gate: string; validator: string; note?: string; link?: string },
     consumeGate?: string | null,
+    precondition?: (fresh: TodoRecord) => void,
   ): Promise<TodoRecord> {
-    const rec = this.mustGet(id);
-    const now = new Date().toISOString();
-    const patch: Partial<Omit<TodoRecord, "_id">> = { state: toState, updatedAt: now };
-    if (gateInfo) {
-      const evidenceEntry: GateEvidence = {
-        gate: gateInfo.gate,
-        passedAt: now,
-        validator: gateInfo.validator,
-        note: gateInfo.note,
-        link: gateInfo.link,
-      };
-      patch.verifyEvidence = [...rec.verifyEvidence, evidenceEntry];
-    }
-    if (consumeGate) {
-      patch.satisfiedGates = rec.satisfiedGates.filter((g) => g !== consumeGate);
-    }
-    await this.jsonl.updateById(id, patch);
-    return this.mustGet(id);
+    return this.withStoreLock(async () => {
+      await this.jsonl.load();
+      const fresh = this.mustGet(id);
+      precondition?.(fresh);
+      const now = new Date().toISOString();
+      const patch: Partial<Omit<TodoRecord, "_id">> = { state: toState, updatedAt: now };
+      if (gateInfo) {
+        const evidenceEntry: GateEvidence = {
+          gate: gateInfo.gate,
+          passedAt: now,
+          validator: gateInfo.validator,
+          note: gateInfo.note,
+          link: gateInfo.link,
+        };
+        patch.verifyEvidence = [...fresh.verifyEvidence, evidenceEntry];
+      }
+      if (consumeGate) {
+        patch.satisfiedGates = fresh.satisfiedGates.filter((g) => g !== consumeGate);
+      }
+      await this.jsonl.updateById(id, patch);
+      return this.mustGet(id);
+    });
   }
 
   setBlock(id: string, block: TodoBlock | null): Promise<TodoRecord> {
     // `null`, never `undefined`: JSON.stringify drops `undefined` keys
     // entirely, so an update line with an omitted `block` would fail to
     // clear a previously-set value once merged on reload (see the field
-    // doc comment on TodoRecord.block).
-    return this.rawUpdate(id, { block });
+    // doc comment on TodoRecord.block). `block` is a scalar-ish field (not
+    // built from the record's own prior array contents), so this needs no
+    // reload-and-recompute-from-fresh dance the way `blockedBy` does below —
+    // it still goes through the write lock via `rawUpdate` for existence
+    // validation to run against a fresh record.
+    return this.rawUpdate(id, () => ({ block }));
   }
 
   async addDep(id: string, blockerId: string): Promise<TodoRecord> {
-    const rec = this.mustGet(id);
     if (blockerId === id) throw new Error(`task ${id} cannot depend on itself`);
+    // Cheap early check outside the lock (missing-target is a fast, obvious
+    // rejection); `rawUpdate`'s `computePatch` re-validates the cycle check
+    // against the FRESH record below, since `blockedBy` is exactly the kind
+    // of array field a concurrent `addDep`/`rmDep` on the same task could
+    // race on otherwise (codex-review Important).
     if (!this.get(blockerId)) throw new Error(`no such task: ${blockerId}`);
-    if (this.dependsOn(blockerId, id)) {
-      throw new CycleError(`cycle: ${blockerId} already depends (transitively) on ${id}`);
-    }
-    const deps = new Set(rec.blockedBy);
-    deps.add(blockerId);
-    return this.rawUpdate(id, { blockedBy: [...deps].sort() });
+    return this.rawUpdate(id, (fresh) => {
+      if (this.dependsOn(blockerId, id)) {
+        throw new CycleError(`cycle: ${blockerId} already depends (transitively) on ${id}`);
+      }
+      const deps = new Set(fresh.blockedBy);
+      deps.add(blockerId);
+      return { blockedBy: [...deps].sort() };
+    });
   }
 
   async rmDep(id: string, blockerId: string): Promise<TodoRecord> {
-    const rec = this.mustGet(id);
-    return this.rawUpdate(id, { blockedBy: rec.blockedBy.filter((d) => d !== blockerId) });
+    return this.rawUpdate(id, (fresh) => ({
+      blockedBy: fresh.blockedBy.filter((d) => d !== blockerId),
+    }));
   }
 
   /** True when `from` transitively depends on `target` via `blockedBy` edges. Ported from the equivalent, already-tested algorithm in symval-dev-cli's store.ts. */
@@ -509,13 +589,23 @@ export class TodoStore {
     return (node?.blockedBy ?? []).some((d) => this.dependsOn(d, target, seen));
   }
 
+  /**
+   * Reload, re-fetch, run `computePatch` against the FRESH record (inside
+   * the write lock), then write whatever it returns. Every array-field
+   * mutator (`setBlock`/`addDep`/`rmDep`) goes through this so none of them
+   * has to hand-roll its own reload discipline.
+   */
   private async rawUpdate(
     id: string,
-    patch: Partial<Omit<TodoRecord, "_id">>,
+    computePatch: (fresh: TodoRecord) => Partial<Omit<TodoRecord, "_id">>,
   ): Promise<TodoRecord> {
-    this.mustGet(id);
-    await this.jsonl.updateById(id, { ...patch, updatedAt: new Date().toISOString() });
-    return this.mustGet(id);
+    return this.withStoreLock(async () => {
+      await this.jsonl.load();
+      const fresh = this.mustGet(id);
+      const patch = computePatch(fresh);
+      await this.jsonl.updateById(id, { ...patch, updatedAt: new Date().toISOString() });
+      return this.mustGet(id);
+    });
   }
 }
 

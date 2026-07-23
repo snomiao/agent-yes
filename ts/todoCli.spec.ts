@@ -43,7 +43,7 @@ describe("ay todo CLI", () => {
     expect(got.out).toContain("T1 [drafting] write the spec");
   });
 
-  it("--root=val and --format=val (equals form) work the same as the space form; an invalid --format value fails clearly", async () => {
+  it("--root=val and --format=val (equals form, native to yargs) work the same as the space form; an invalid --format value fails clearly", async () => {
     const cap = captureStdout();
     try {
       const code = await runTodoSubcommand(["new", "x", "--kind", "code", `--root=${TEST_ROOT}`]);
@@ -60,24 +60,39 @@ describe("ay todo CLI", () => {
     }
     await expect(
       runTodoSubcommand(["get", "T1", "--root", TEST_ROOT, "--format", "yaml"]),
-    ).rejects.toThrow(/--format must be/);
+    ).rejects.toThrow();
   });
 
-  it("only TRAILING --root/--format are treated as the GLOBAL flag — a mid-command '--format' does not corrupt the actual output format or store location (codex-review round-4 Important)", async () => {
-    // The task's own sub-parser (yargs, non-strict) still separately consumes
-    // "--format output" into its own throwaway key regardless of this fix
-    // (a pre-existing, narrower limitation: an unquoted summary containing a
-    // literal "--flag" token is truncated there — quote the summary if it
-    // must contain one). What THIS fix guarantees is narrower and more
-    // important: that stray mid-command token is never mistaken for the
-    // REAL global --format/--root, which would have corrupted the store
-    // path or the output format for the WHOLE command.
-    const a = await run("new", "fix", "--format", "output", "--kind", "doc", "--format", "json");
+  it("--format/--root work regardless of position — NOT just at the end of the command (codex-review round-5 Important: a prior design broke ordinary invocations like this one)", async () => {
+    // --format BEFORE --owner (neither is trailing) — a real, entirely
+    // ordinary way to type this command.
+    await run("new", "a", "--kind", "code", "--owner", "alice");
+    const a = await run("ls", "--format", "json", "--owner", "alice");
     expect(a.code).toBe(0);
-    // trailing --format json (appended AFTER the mid-command one) is the one
-    // that actually took effect — proving global-flag resolution is anchored
-    // to the true end of the command, not the first/any "--format" seen
-    expect(JSON.parse(a.out)._id).toBe("T1");
+    expect(JSON.parse(a.out)).toHaveLength(1);
+    // --root itself not at the end either (a verb-specific flag follows it)
+    const cap = captureStdout();
+    try {
+      const code = await runTodoSubcommand([
+        "ls",
+        "--root",
+        TEST_ROOT,
+        "--owner",
+        "alice",
+        "--format",
+        "json",
+      ]);
+      expect(code).toBe(0);
+      expect(JSON.parse(cap.text())).toHaveLength(1);
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it("--root cannot be the empty string (codex-review round-4 nitpick)", async () => {
+    await expect(runTodoSubcommand(["ls", "--root", ""])).rejects.toThrow(
+      /--root must not be empty/,
+    );
   });
 
   it("new creates a task with kind/tier/owner/tags/deps and rejects a missing summary", async () => {
