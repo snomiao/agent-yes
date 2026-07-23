@@ -50,6 +50,16 @@ function fail(message: string): never {
   throw new Error(message);
 }
 
+/** Same check ask.html's own render-time guard uses — a real URL parse, not just a scheme-prefix regex, which could still let a malformed string through. */
+function isHttpUrl(s: string): boolean {
+  try {
+    const u = new URL(s);
+    return u.protocol === "http:" || u.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
 function parseKind(raw: string | undefined): LifecycleKind {
   if (!raw) fail(`--kind is required (one of: ${Object.keys(LIFECYCLES).join(", ")})`);
   if (!isKnownKind(raw))
@@ -332,13 +342,18 @@ const blockCmd: CommandModule<
             "--options and --action-link are mutually exclusive (choice-shape vs action-shape ask)",
           );
         }
-        if (argv["action-link"] && !/^https?:\/\//i.test(argv["action-link"])) {
+        if (argv["action-link"] && !isHttpUrl(argv["action-link"])) {
           // The /ask page renders this straight into an <a href>. HTML-
           // escaping the text does NOT block dangerous URL schemes
           // (`javascript:`, `data:`) — only the scheme itself does. Reject
           // at write time so a non-http(s) link can never reach the store
-          // at all (codex-review Important).
-          fail(`--action-link must start with http:// or https:// (got "${argv["action-link"]}")`);
+          // at all (codex-review Important). Uses the same `URL` parser
+          // ask.html's own render-time check uses (codex-review nitpick: a
+          // regex prefix match alone would still store a malformed string
+          // like "https:/notreallyaurl" that happens to match the prefix).
+          fail(
+            `--action-link must be a valid http:// or https:// URL (got "${argv["action-link"]}")`,
+          );
         }
         block = {
           type: "blocked-by-human",

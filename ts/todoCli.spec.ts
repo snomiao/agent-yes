@@ -275,7 +275,7 @@ describe("ay todo CLI", () => {
         "--action-link",
         "javascript:alert(1)",
       ),
-    ).rejects.toThrow(/must start with http/);
+    ).rejects.toThrow(/must be a valid http/);
     await expect(
       run(
         "block",
@@ -287,7 +287,7 @@ describe("ay todo CLI", () => {
         "--action-link",
         "data:text/html,x",
       ),
-    ).rejects.toThrow(/must start with http/);
+    ).rejects.toThrow(/must be a valid http/);
     const ok = await run(
       "block",
       "T1",
