@@ -39,6 +39,7 @@ import {
 } from "./subcommands.ts";
 import { TYPING_BADGE } from "./badges.ts";
 import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
+import { CLAUDE_SESSION_PIN_ENV } from "./sessionEnv.ts";
 import { MAX_CALLBACK_MSG_BYTES, frameVisitorMessage, verifyCapability } from "./callbackCore.ts";
 import { isTerminalReply } from "./terminalReply.ts";
 import { parseStatusText } from "./statusText.ts";
@@ -223,23 +224,17 @@ const defaultOpts = (overrides: Partial<CommonOpts> = {}): CommonOpts => ({
   ...overrides,
 });
 
-// The vars that pin a process to a PARENT Claude Code session — NOT the many
-// other CLAUDE_CODE_* settings that configure provider/auth/limits (USE_BEDROCK,
-// USE_VERTEX, MAX_OUTPUT_TOKENS, …), which must pass through untouched.
-const SESSION_PIN_ENV = new Set([
-  "CLAUDECODE",
-  "CLAUDE_CODE_SSE_PORT",
-  "CLAUDE_CODE_SESSION_ID",
-  "CLAUDE_CODE_CHILD_SESSION",
-  "CLAUDE_CODE_ENTRYPOINT",
-  // The agent-yes wrapper pid of the agent that launched `ay serve`. A daemon
-  // started from inside an agent's shell carries that agent's AGENT_YES_PID for
-  // its whole lifetime; without stripping it, every console-spawned agent would
-  // inherit it and be recorded with parent_pid = that stale agent, mis-rooting
-  // the whole subagent tree under an unrelated agent. Dropping it makes console
-  // spawns clean top-level agents (parent_pid = None).
-  "AGENT_YES_PID",
-]);
+// The vars that pin a process to a PARENT Claude Code session (the shared
+// CLAUDE_SESSION_PIN_ENV set, see ts/sessionEnv.ts) plus AGENT_YES_PID:
+//   The agent-yes wrapper pid of the agent that launched `ay serve`. A daemon
+//   started from inside an agent's shell carries that agent's AGENT_YES_PID for
+//   its whole lifetime; without stripping it, every console-spawned agent would
+//   inherit it and be recorded with parent_pid = that stale agent, mis-rooting
+//   the whole subagent tree under an unrelated agent. Dropping it makes console
+//   spawns clean top-level agents (parent_pid = None).
+// (The direct `ay …` launch path re-stamps AGENT_YES_PID with its own pid instead
+// — see ts/index.ts — so it strips only the shared claude set, not this one.)
+const SESSION_PIN_ENV = new Set<string>([...CLAUDE_SESSION_PIN_ENV, "AGENT_YES_PID"]);
 
 // The login-shell environment, captured once and cached for the daemon's
 // lifetime. `ay serve` is daemonized by oxmgr/launchd/pm2, which start it with a

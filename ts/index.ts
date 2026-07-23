@@ -13,6 +13,7 @@ import {
 } from "./resume/codexSessionManager.ts";
 import pty, { ptyPackage } from "./pty.ts";
 import { removeControlCharacters } from "./removeControlCharacters.ts";
+import { stripClaudeSessionPin } from "./sessionEnv.ts";
 import { acquireLock, releaseLock, shouldUseLock } from "./runningLock.ts";
 import { logger } from "./logger.ts";
 import { createFifoStream } from "./beta/fifo.ts";
@@ -394,6 +395,16 @@ export default async function agentYes({
   // `ay`) don't inherit it and register under the same id (which would make that
   // id ambiguous). The wrapper's own process.env still carries it for pidStore.
   delete ptyEnv.AGENT_YES_AGENT_ID;
+  // Strip the parent Claude Code session markers so the wrapped CLI is a CLEAN
+  // top-level session. Without this, an `ay claude` launched from inside another
+  // Claude Code session (or this claude's Bash tool) inherits
+  // CLAUDE_CODE_CHILD_SESSION — the child claude then disables transcript saving
+  // ("⚠ Transcript saving is off …") — and CLAUDE_CODE_SSE_PORT/SESSION_ID make it
+  // attach to the parent's stale session. The daemon /api/spawn path already drops
+  // these via freshAgentEnv; this covers the direct-launch path. Idempotent, and
+  // AGENT_YES_PID is handled above (read for parentPid, then re-stamped). See
+  // ts/sessionEnv.ts (mirrored in rs/src/pty_spawner.rs for the Rust runtime).
+  stripClaudeSessionPin(ptyEnv);
   // Inject per-CLI env (e.g. glm → Z.AI endpoint). Expand ${VAR} against the
   // launching env; skip entries whose vars are unset so we never blank out an
   // inherited value (e.g. ANTHROPIC_AUTH_TOKEN when ZAI_API_KEY isn't exported).

@@ -9,6 +9,21 @@ use std::thread;
 use tokio::sync::mpsc;
 use tracing::{debug, info};
 
+/// Env vars that pin a process to a PARENT Claude Code session — stripped from
+/// every spawned CLI so the agent is a clean top-level session (its own saved
+/// transcript; no attach to a parent's stale SSE port/session id). Deliberately
+/// NARROW: other CLAUDE_CODE_* settings (provider/auth/limits) pass through.
+/// MIRRORS `CLAUDE_SESSION_PIN_ENV` in ts/sessionEnv.ts — keep the two in sync.
+/// `AGENT_YES_PID` is NOT here: it is re-stamped with our own pid to build the
+/// subagent tree, not dropped.
+pub const CLAUDE_SESSION_PIN_ENV: &[&str] = &[
+    "CLAUDECODE",
+    "CLAUDE_CODE_SSE_PORT",
+    "CLAUDE_CODE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_ENTRYPOINT",
+];
+
 /// Expand `${VAR}` references in `raw` against the current process environment.
 /// Sets `*unresolved = true` if any referenced variable is unset or empty, so
 /// callers can choose to skip the assignment rather than emit a blank value.
@@ -301,6 +316,17 @@ pub async fn spawn_agent(
     // ambiguous. Our own process env still carries it for new_agent_id().
     cmd.env_remove("AGENT_YES_AGENT_ID");
 
+    // Strip the parent Claude Code session markers so the wrapped CLI is a CLEAN
+    // top-level session. Without this, an `ay claude` launched from inside another
+    // Claude Code session inherits CLAUDE_CODE_CHILD_SESSION — the child claude then
+    // disables transcript saving ("⚠ Transcript saving is off …") — and
+    // CLAUDE_CODE_SSE_PORT/SESSION_ID make it attach to the parent's stale session.
+    // AGENT_YES_PID is re-stamped above (not stripped here). Mirrors
+    // CLAUDE_SESSION_PIN_ENV in ts/sessionEnv.ts (and freshAgentEnv in ts/serve.ts).
+    for key in CLAUDE_SESSION_PIN_ENV {
+        cmd.env_remove(key);
+    }
+
     // The agent runs in a PTY (a real terminal), so advertise terminal
     // capabilities. A console/daemon-spawned agent inherits an env with no TERM/
     // COLORTERM: neither the daemon (no controlling terminal) nor the recovered
@@ -493,6 +519,42 @@ mod tests {
         assert!(!unresolved);
 
         std::env::remove_var("AY_TEST_KEY");
+    }
+
+    #[test]
+    fn test_claude_session_pin_env_stripped() {
+        use std::ffi::OsStr;
+        // The claude marker that turns transcript saving off must be in the set.
+        assert!(CLAUDE_SESSION_PIN_ENV.contains(&"CLAUDE_CODE_CHILD_SESSION"));
+
+        let mut cmd = CommandBuilder::new("true");
+        // Simulate the env inherited from a parent Claude Code session…
+        for key in CLAUDE_SESSION_PIN_ENV {
+            cmd.env(key, "inherited");
+        }
+        // …alongside config that MUST survive (a non-pin CLAUDE_CODE_* var, and
+        // AGENT_YES_PID which is re-stamped, not stripped).
+        cmd.env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "8000");
+        cmd.env("AGENT_YES_PID", "999");
+
+        // Same removal loop the spawn path runs.
+        for key in CLAUDE_SESSION_PIN_ENV {
+            cmd.env_remove(key);
+        }
+
+        for key in CLAUDE_SESSION_PIN_ENV {
+            assert!(cmd.get_env(key).is_none(), "{key} should be stripped");
+        }
+        assert_eq!(
+            cmd.get_env("CLAUDE_CODE_MAX_OUTPUT_TOKENS"),
+            Some(OsStr::new("8000")),
+            "non-pin CLAUDE_CODE_* config must pass through"
+        );
+        assert_eq!(
+            cmd.get_env("AGENT_YES_PID"),
+            Some(OsStr::new("999")),
+            "AGENT_YES_PID is re-stamped, not stripped"
+        );
     }
 
     #[test]
