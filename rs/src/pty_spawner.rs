@@ -379,9 +379,13 @@ pub async fn spawn_agent(
     // to verify the FFI, which can't be done from this Linux toolchain).
     #[cfg(unix)]
     if let Some(child_pid) = child.process_id() {
+        // Parse as f64 then truncate toward zero (`as i32`) so a fractional value
+        // like "3.9" → 3 matches ts/agentNice.ts's Number()+Math.trunc(), rather
+        // than failing i32 parsing and silently falling back to the default.
         let nice = std::env::var("AGENT_YES_AGENT_NICE")
             .ok()
-            .and_then(|v| v.trim().parse::<i32>().ok())
+            .and_then(|v| v.trim().parse::<f64>().ok())
+            .map(|f| f as i32)
             .unwrap_or(5)
             .clamp(0, 19);
         if nice > 0 {
