@@ -171,6 +171,23 @@ describe("askApi", () => {
     expect(answered.verifyEvidence[0]).toMatchObject({ gate: "human-decided", note: "a" });
   });
 
+  it("answerAsk refuses (as a conflict, not a silent overwrite) when the gate is already satisfied with a DIFFERENT answer than this request — two different answers for one ask must never silently pick one (codex-review round-12 Important)", async () => {
+    const s = await openStore(ROOT_A);
+    const t = await s.create({ summary: "pick a channel", kind: "decision" });
+    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku", options: ["a", "b"] });
+    // A prior attempt persisted "a" then (hypothetically) failed before
+    // transitioning — a DIFFERENT request now tries to answer "b".
+    await s.approve(t._id, "human-decided", "taku", { note: "a" });
+    await expect(answerAsk(ROOT_A, t._id, { choice: "b" })).rejects.toThrow(
+      /already satisfied with a DIFFERENT answer/,
+    );
+    // Refused, not silently resolved either way — still blocked, unchanged.
+    const stillBlocked = (await openStore(ROOT_A)).get(t._id)!;
+    expect(stillBlocked.state).toBe("deciding");
+    expect(stillBlocked.block).not.toBeNull();
+    expect(stillBlocked.verifyEvidence).toHaveLength(1); // "b" was never recorded
+  });
+
   it("answerAsk requires an actual answer for a choice-shape ask (no bare acknowledged)", async () => {
     const s = await openStore(ROOT_A);
     const t = await s.create({ summary: "pick a channel", kind: "decision" });

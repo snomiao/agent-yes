@@ -200,7 +200,18 @@
         return tpl.content.firstElementChild;
       }
 
+      // Bumped every time an answer successfully lands. A `refresh()` fetch
+      // that was ALREADY in flight when that happened is carrying a snapshot
+      // from before the answer — without this check, that stale response
+      // could resurrect the just-answered card (server hadn't processed the
+      // answer yet when the GET was issued) with fresh, re-clickable buttons,
+      // right after `inflightNodes.delete()` stopped protecting it. A second
+      // click would then submit a duplicate answer against an already-
+      // resolved ask (codex-review Important).
+      let epoch = 0;
+
       async function refresh() {
+        const startEpoch = epoch;
         let asks;
         try {
           const res = await fetch("/api/asks");
@@ -210,11 +221,15 @@
           // Never wipe the list on a transient fetch failure while a card is
           // still mid-answer — only show the error page when there is
           // nothing in flight to preserve.
-          if (inflightNodes.size === 0) {
+          if (inflightNodes.size === 0 && epoch === startEpoch) {
             listEl.innerHTML = `<div class="empty">failed to load: ${escapeHtml(String(e))}</div>`;
           }
           return;
         }
+        // An answer landed WHILE this fetch was in flight — this response
+        // predates that answer and is stale; a later refresh() (either the
+        // next 5s tick or one already scheduled) will have current data.
+        if (epoch !== startEpoch) return;
         // Cards currently mid-answer keep their EXISTING DOM node untouched
         // (so a result written to it later is still visible); everything
         // else is rebuilt fresh from the server response.
@@ -259,6 +274,13 @@
           });
           if (!res.ok) throw new Error(await res.text());
           if (resultEl) resultEl.innerHTML = '<div class="status">answered</div>';
+          // Invalidates any refresh() fetch already in flight (it predates
+          // this answer, so its response is stale — see epoch's doc comment)
+          // and triggers an immediate re-fetch instead of waiting up to 5s,
+          // so the resolved card clears promptly rather than sitting there
+          // until the next scheduled tick.
+          epoch++;
+          refresh();
         } catch (err) {
           if (resultEl) resultEl.innerHTML = `<div class="err">${escapeHtml(String(err))}</div>`;
           if (card) card.querySelectorAll("button").forEach((b) => (b.disabled = false));

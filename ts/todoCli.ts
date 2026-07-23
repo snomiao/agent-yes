@@ -320,11 +320,13 @@ const blockCmd: CommandModule<
       case "blocked-by-human":
         if (!argv.who) fail("--who <name> is required for --type blocked-by-human");
         // choice-shape (--options) and action-shape (--action-link) are
-        // mutually exclusive: askApi.ts's listAsksForProject() classifies a
-        // block with BOTH set as action-shape (actionLink checked first),
-        // but answerAsk() would still demand a choice because options.length
-        // is truthy — an ask the /ask UI could never actually answer
-        // (codex-review Important). Reject the combination here instead.
+        // mutually exclusive — reject the combination outright here rather
+        // than let it depend on askApi.ts's own tie-breaking precedence
+        // (which, as of codex-review round-9, checks actionLink first in
+        // BOTH listAsksForProject() and answerAsk(), so the two now agree
+        // with each other even if this guard were bypassed by a direct
+        // library caller — but a block should simply never be created with
+        // both set in the first place).
         if (argv.options?.length && argv["action-link"]) {
           fail(
             "--options and --action-link are mutually exclusive (choice-shape vs action-shape ask)",

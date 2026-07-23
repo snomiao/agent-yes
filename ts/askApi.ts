@@ -159,10 +159,28 @@ export async function answerAsk(
   // exactly that failure idempotent — it lands on `transition()` directly
   // instead of re-approving — without needing a full transactional rewrite
   // of the store.
+  //
+  // But a retry is only safe to treat as "the same answer resuming" if it
+  // ACTUALLY is the same answer: if a first attempt persisted evidence for
+  // "a" (then failed before transitioning) and a DIFFERENT request answers
+  // "b", silently skipping approve() and transitioning would durably keep
+  // "a" as the recorded answer while the human who just successfully
+  // submitted "b" has no idea their answer wasn't what got recorded
+  // (codex-review Important). Require the existing evidence to match the
+  // current answer before treating this as a resumable retry; otherwise
+  // this is a genuine conflict (two different answers for one ask), which
+  // this function refuses rather than silently picking one.
   if (rec.kind === "human" || rec.kind === "decision") {
     const primary = LIFECYCLES[rec.kind].transitions.find((tr) => tr.from === rec.state && tr.gate);
     if (primary?.gate) {
-      if (!rec.satisfiedGates.includes(primary.gate)) {
+      if (rec.satisfiedGates.includes(primary.gate)) {
+        const existing = [...rec.verifyEvidence].reverse().find((e) => e.gate === primary.gate);
+        if (existing?.note !== answerText) {
+          throw new Error(
+            `task ${taskId}: gate "${primary.gate}" was already satisfied with a DIFFERENT answer ("${existing?.note}") than this request ("${answerText}") — refusing to silently overwrite; resolve the conflict manually`,
+          );
+        }
+      } else {
         await store.approve(taskId, primary.gate, block.who, { note: answerText });
       }
       await store.transition(taskId, primary.to);
