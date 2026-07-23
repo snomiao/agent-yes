@@ -612,7 +612,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `                                        --before-line L [--limit N]\n` +
       `  ay cat <keyword>                    full log\n` +
       `  ay head <keyword>                   first N lines\n` +
-      `  ay send <keyword> <msg>             send a message\n` +
+      `  ay send <keyword> <msg>             send a message (keyword '.' = agent in this cwd)\n` +
       `  ay msgs [keyword] [--in|--out]      inter-agent message log (sent + received)\n` +
       `  ay key <keyword> <key...>           send raw keystrokes (down/up/enter/esc/…) — drives menus\n` +
       `  ay select <keyword> <N>             pick option N of a needs_input selection menu\n` +
@@ -675,6 +675,14 @@ export function matchKeyword(record: GlobalPidRecord, keyword: string): boolean 
   if (/^\d+$/.test(keyword)) {
     if (record.pid === Number(keyword)) return true;
     return !!(record.agent_id && record.agent_id.toLowerCase().startsWith(kw));
+  }
+  // 1b. `.` / `./` — shell convention for "the current directory": target the
+  // agent whose cwd IS process.cwd() (exact match). Lets `ay send .` reach the
+  // sibling agent running in this same dir without typing its pid or a path
+  // fragment. Repurposed from the (near-useless) substring behavior — a lone `.`
+  // was in almost every path, so it never selected anything meaningful.
+  if (kw === "." || kw === "./") {
+    return path.resolve(record.cwd) === path.resolve(process.cwd());
   }
   // 2. cwd contains keyword
   if (record.cwd.toLowerCase().includes(kw)) return true;
@@ -3190,6 +3198,24 @@ async function cmdSend(rest: string[]): Promise<number> {
           .join("\n") +
         "\n",
     );
+  }
+
+  // Echo the tail of the target's screen so the sender sees, inline, whether the
+  // message landed and how the agent reacted — no separate `ay tail` round-trip.
+  // Rendered fresh from the log after the settle/confirm wait above, so it
+  // reflects the post-submit state. Best-effort: a missing/empty log just skips.
+  if (record.log_file) {
+    const tail = (await renderLogTailLines(record.log_file, 10)) ?? [];
+    let end = tail.length;
+    while (end > 0 && tail[end - 1]!.trim() === "") end--; // drop trailing blanks
+    const trimmed = tail.slice(0, end);
+    if (trimmed.length) {
+      process.stderr.write(
+        `\n── pid ${record.pid} · last ${trimmed.length} line${trimmed.length === 1 ? "" : "s"} ──\n` +
+          trimmed.map((l) => `  ${l}`).join("\n") +
+          `\n`,
+      );
+    }
   }
 
   const replyHint = sender.agent

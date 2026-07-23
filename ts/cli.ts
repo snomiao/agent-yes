@@ -83,6 +83,15 @@ if (!config.showVersion && !config.appendPrompt && !config.tray) {
   });
 }
 
+// Warn if another live agent already occupies this cwd — two agents in one
+// working tree clobber each other's files/builds/ports. Sits alongside the
+// spawn gate (real-launch only) and BEFORE the --rust dispatch so it covers both
+// runtimes. Best-effort, non-blocking; silence with AGENT_YES_NO_CWD_WARN=1.
+if (!config.showVersion && !config.appendPrompt && !config.tray) {
+  const { warnIfCwdOccupied } = await import("./cwdConflictWarn.ts");
+  await warnIfCwdOccupied(process.argv);
+}
+
 // Handle --rust: spawn the Rust binary instead, fall back to TypeScript if unavailable
 if (config.useRust) {
   let rustBinary: string | undefined;
