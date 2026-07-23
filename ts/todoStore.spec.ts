@@ -148,6 +148,23 @@ describe("TodoStore", () => {
     await expect(s.setAcceptanceCriteria("T99", "text")).rejects.toThrow(/no such task/);
   });
 
+  it("setAcceptanceCriteria() refuses WHITESPACE-only text too, and trims what it stores (codex-review round-8 Important: a blank-looking value must not silently pass as real criteria)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "doc" });
+    await expect(s.setAcceptanceCriteria(t._id, "   ")).rejects.toThrow(/must not be empty/);
+    await expect(s.setAcceptanceCriteria(t._id, "\t\n")).rejects.toThrow(/must not be empty/);
+    const updated = await s.setAcceptanceCriteria(t._id, "  real criteria  ");
+    expect(updated.acceptanceCriteria).toBe("real criteria");
+  });
+
+  it("create() treats a whitespace-only acceptanceCriteria as not provided (never stored), and trims a real one", async () => {
+    const s = await openStore(TEST_ROOT);
+    const blank = await s.create({ summary: "x", kind: "doc", acceptanceCriteria: "   " });
+    expect(blank.acceptanceCriteria).toBeUndefined();
+    const real = await s.create({ summary: "y", kind: "doc", acceptanceCriteria: "  real one  " });
+    expect(real.acceptanceCriteria).toBe("real one");
+  });
+
   it("approve() cannot have its audit trail falsified via the evidence argument — gate/validator/passedAt are trusted, never caller-overridable (codex-review round-6 Important)", async () => {
     const s = await openStore(TEST_ROOT);
     const t = await s.create({ summary: "x", kind: "doc", owner: "worker" });

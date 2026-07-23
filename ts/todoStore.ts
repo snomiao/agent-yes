@@ -295,7 +295,13 @@ export class TodoStore {
         createdAt: now,
         updatedAt: now,
         ...(input.targetTier ? { targetTier: input.targetTier } : {}),
-        ...(input.acceptanceCriteria ? { acceptanceCriteria: input.acceptanceCriteria } : {}),
+        // Trimmed, and a whitespace-only value is treated as "not provided"
+        // (same reasoning as setAcceptanceCriteria's own guard, codex-review
+        // Important) — otherwise a blank-looking criteria string could be
+        // stored and later snapshotted into approval evidence.
+        ...(input.acceptanceCriteria?.trim()
+          ? { acceptanceCriteria: input.acceptanceCriteria.trim() }
+          : {}),
         ...(input.owner ? { owner: input.owner } : {}),
       };
       await this.jsonl.append({ ...doc, _id: id });
@@ -594,8 +600,16 @@ export class TodoStore {
     // guard's throw becomes a rejected promise like every other validating
     // mutator here, rather than throwing synchronously before any promise
     // exists — matching `addDep`'s same convention.
-    if (!text) throw new Error(`task ${id}: acceptance criteria text must not be empty`);
-    return this.rawUpdate(id, () => ({ acceptanceCriteria: text }));
+    //
+    // Trim BEFORE checking and store the trimmed value: a whitespace-only
+    // string (e.g. `ay todo set-criteria T1 "   "`) is truthy and would
+    // otherwise pass an `if (!text)` check, get stored, and later be
+    // snapshotted into approval evidence as if it were a real definition of
+    // done — violating this method's own "must not be empty" contract
+    // (codex-review Important).
+    const trimmed = text.trim();
+    if (!trimmed) throw new Error(`task ${id}: acceptance criteria text must not be empty`);
+    return this.rawUpdate(id, () => ({ acceptanceCriteria: trimmed }));
   }
 
   setBlock(id: string, block: TodoBlock | null): Promise<TodoRecord> {
