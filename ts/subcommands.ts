@@ -2025,7 +2025,7 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
   }
 
   const buf = await readFile(logPath);
-  const size = await readPtysize(record.pid);
+  const size = await readAgentPtysize(record);
   const notes = await readNotes();
   const noteLabel = notes.get(record.pid);
   const header = noteLabel
@@ -2307,6 +2307,24 @@ export async function readPtysize(pid: number): Promise<{ cols: number; rows: nu
   } catch {
     /* no ptysize sidecar */
   }
+  return null;
+}
+
+/**
+ * An agent's real PTY geometry for log rendering, robust to a writer/reader pid
+ * mismatch. The Rust runtime keys the ptysize sidecar by the PTY child pid
+ * (= record.pid), so that lookup hits directly. But the TS runtime writes it
+ * under its wrapper's process.pid (= record.wrapper_pid; see writeCurrentPtysize
+ * in ts/index.ts), NOT the child — so a plain readPtysize(record.pid) misses for
+ * TS-launched agents and the log reflows at the default 200-col width. Fall back
+ * to wrapper_pid to cover that path. Returns null when neither has a sidecar.
+ */
+export async function readAgentPtysize(
+  record: GlobalPidRecord,
+): Promise<{ cols: number; rows: number } | null> {
+  const own = await readPtysize(record.pid);
+  if (own) return own;
+  if (record.wrapper_pid) return readPtysize(record.wrapper_pid);
   return null;
 }
 
@@ -3215,7 +3233,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   // Rendered fresh from the log after the settle/confirm wait above, so it
   // reflects the post-submit state. Best-effort: a missing/empty log just skips.
   if (record.log_file) {
-    const geom = (await readPtysize(record.pid)) ?? undefined;
+    const geom = (await readAgentPtysize(record)) ?? undefined;
     const tail = (await renderLogTailLines(record.log_file, 10, geom)) ?? [];
     let end = tail.length;
     while (end > 0 && tail[end - 1]!.trim() === "") end--; // drop trailing blanks

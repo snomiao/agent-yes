@@ -270,6 +270,47 @@ describe("subcommands.GRACEFUL_EXIT_COMMANDS", () => {
   });
 });
 
+describe("subcommands.readAgentPtysize (writer/reader pid fallback)", () => {
+  const rec = (pid: number, wrapper_pid: number | null) =>
+    ({
+      pid,
+      wrapper_pid,
+      cli: "claude",
+      prompt: null,
+      cwd: "/x",
+      log_file: null,
+      status: "active" as const,
+      exit_code: null,
+      exit_reason: null,
+      started_at: 0,
+    }) as any;
+
+  async function writeSidecar(pid: number, cols: number, rows: number) {
+    const dir = path.join(testHome, ".agent-yes", "ptysize");
+    await mkdir(dir, { recursive: true });
+    await writeFile(path.join(dir, String(pid)), `${cols} ${rows}\n`);
+  }
+
+  it("reads geometry keyed by the agent's own pid (Rust runtime)", async () => {
+    const { readAgentPtysize } = await loadModule();
+    await writeSidecar(500, 120, 40);
+    expect(await readAgentPtysize(rec(500, 499))).toEqual({ cols: 120, rows: 40 });
+  });
+
+  it("falls back to wrapper_pid when the child pid has no sidecar (TS runtime)", async () => {
+    const { readAgentPtysize } = await loadModule();
+    // Only the wrapper pid's sidecar exists — mirrors ts/index.ts writing under process.pid
+    await writeSidecar(499, 200, 50);
+    expect(await readAgentPtysize(rec(500, 499))).toEqual({ cols: 200, rows: 50 });
+  });
+
+  it("returns null when neither pid has a sidecar", async () => {
+    const { readAgentPtysize } = await loadModule();
+    expect(await readAgentPtysize(rec(500, 499))).toBeNull();
+    expect(await readAgentPtysize(rec(500, null))).toBeNull();
+  });
+});
+
 describe("subcommands.matchKeyword", () => {
   const baseRecord = {
     pid: 1234,
