@@ -207,6 +207,24 @@ describe("ay todo CLI", () => {
     expect(removed.out).toContain("removed dep T1 on T2");
   });
 
+  it("tree --format json emits the actual nested structure, not the human text (codex-review Important)", async () => {
+    await run("new", "a", "--kind", "code", "--owner", "cto");
+    await run("new", "b", "--kind", "code");
+    await run("dep", "add", "T2", "T1");
+    const cap = captureStdout();
+    await runTodoSubcommand(["tree", "--root", TEST_ROOT, "--format", "json"]);
+    cap.restore();
+    const parsed = JSON.parse(cap.text());
+    expect(parsed).toEqual([
+      {
+        id: "T2",
+        state: "doing",
+        summary: "b",
+        children: [{ id: "T1", state: "doing", summary: "a", owner: "cto", children: [] }],
+      },
+    ]);
+  });
+
   it("digest --format json includes the unblocked list", async () => {
     await run("new", "a", "--kind", "code");
     await run("transition", "T1", "merged");

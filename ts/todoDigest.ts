@@ -76,6 +76,48 @@ export function renderTree(tasks: TodoRecord[], rootId?: string): string {
   return lines.join("\n");
 }
 
+export interface TreeNode {
+  id: string;
+  state: string;
+  summary: string;
+  owner?: string;
+  children: TreeNode[];
+}
+
+/**
+ * JSON-shaped equivalent of `renderTree` — same roots-and-edges logic, built
+ * as data instead of formatted lines, so a machine caller (`--format json`)
+ * gets the actual tree structure rather than a string it would have to
+ * re-parse (codex-review Important: the CLI previously ignored --format for
+ * this command entirely, always writing the human text with exit code 0).
+ */
+export function buildTreeJSON(tasks: TodoRecord[], rootId?: string): TreeNode[] {
+  const byId = new Map(tasks.map((t) => [t._id, t]));
+  const dependedOn = new Set(tasks.flatMap((t) => t.blockedBy));
+  const roots = rootId
+    ? [byId.get(rootId) ?? null].filter((t): t is TodoRecord => t !== null)
+    : tasks.filter((t) => !dependedOn.has(t._id) && t.blockedBy.length > 0);
+  if (rootId && roots.length === 0) throw new Error(`no such task: ${rootId}`);
+
+  const build = (t: TodoRecord, seen: Set<string>): TreeNode => {
+    const node: TreeNode = {
+      id: t._id,
+      state: t.state,
+      summary: t.summary,
+      ...(t.owner ? { owner: t.owner } : {}),
+      children: [],
+    };
+    if (seen.has(t._id)) return node; // cycles cannot exist (store rejects them), but stay robust
+    seen.add(t._id);
+    node.children = t.blockedBy
+      .map((d) => byId.get(d))
+      .filter((x): x is TodoRecord => x !== undefined)
+      .map((d) => build(d, seen));
+    return node;
+  };
+  return roots.map((r) => build(r, new Set()));
+}
+
 /** Per-tag board: state counts per tag, plus an unblocked-tasks callout. */
 export function renderDigest(tasks: TodoRecord[]): string {
   if (tasks.length === 0) return "(no tasks)";

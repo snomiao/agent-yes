@@ -38,7 +38,7 @@
  * `registerGate` with its own check function (see `GateRegistration`).
  */
 
-import { mkdirSync, rmdirSync, statSync } from "fs";
+import { readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import path from "path";
 import { JsonlStore, type JsonlDoc } from "./JsonlStore.ts";
 import {
@@ -108,6 +108,47 @@ export interface GateRegistration {
 
 export class CycleError extends Error {}
 
+/**
+ * Ownership-safe file lock, extracted as standalone functions (rather than
+ * inlined where they're used) so the release-only-if-still-owned invariant
+ * is directly unit-testable without going through a full `create()` call —
+ * the same reason this repo's `notifyStore.ts` extracts `shouldStealLock`.
+ * See `TodoStore.withIdLock`'s doc comment for why this exists at all.
+ */
+export async function acquireIdLock(
+  lockPath: string,
+  opts: { staleMs: number; maxAttempts?: number },
+): Promise<string | null> {
+  const token = `${process.pid}:${Math.random().toString(36).slice(2, 10)}`;
+  for (let attempt = 0; attempt < (opts.maxAttempts ?? 200); attempt++) {
+    try {
+      writeFileSync(lockPath, token, { flag: "wx" });
+      return token;
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+      try {
+        if (Date.now() - statSync(lockPath).mtimeMs > opts.staleMs) {
+          rmSync(lockPath, { force: true }); // stale — steal and retry
+          continue;
+        }
+      } catch {
+        continue; // lock vanished between attempts — retry immediately
+      }
+      await new Promise((resolve) => setTimeout(resolve, 15));
+    }
+  }
+  return null;
+}
+
+/** Release ONLY while `lockPath` still contains `token` — never delete a lock some other holder has since acquired. */
+export function releaseIdLock(lockPath: string, token: string): void {
+  try {
+    if (readFileSync(lockPath, "utf8") === token) rmSync(lockPath, { force: true });
+  } catch {
+    // already gone — nothing to release
+  }
+}
+
 export class TodoStore {
   private jsonl: JsonlStore<Omit<TodoRecord, "_id">>;
   private filePath: string;
@@ -126,10 +167,9 @@ export class TodoStore {
   }
 
   /**
-   * Exclusive, cross-process id-allocation lock (mkdir-based: `mkdirSync` is
-   * atomic, so exactly one caller anywhere wins the race). This exists
-   * because `_id` allocation ("max existing + 1") must happen atomically
-   * with the append that claims it — computing the id from a snapshot and
+   * Exclusive, cross-process, OWNERSHIP-SAFE id-allocation lock. This exists
+   * because `_id` allocation ("max existing + 1") must happen atomically with
+   * the append that claims it — computing the id from a snapshot and
    * appending afterward, even with `JsonlStore`'s own internal per-write
    * lock, leaves a window where two processes compute the SAME next id from
    * the same snapshot and then both append it; JsonlStore's "same `_id` →
@@ -138,49 +178,36 @@ export class TodoStore {
    * a SEPARATE file from JsonlStore's own internal `<path>.lock` (used by
    * `append`/`updateById`) — it only ever needs to be held around id
    * selection, not every write, and deliberately does not touch JsonlStore's
-   * internals. A lock whose directory has existed longer than staleMs is
-   * stolen (a crashed process must not wedge every future create() call).
+   * internals.
+   *
+   * Ownership-safe: the lock file's content is a random token unique to this
+   * acquisition. A lock older than `staleMs` is stolen (so a crashed holder
+   * cannot wedge every future create() call), but release ALWAYS re-checks
+   * that the file still contains OUR token before removing it. Without this
+   * check, a holder that merely ran slow (contention, not a crash) for
+   * longer than `staleMs` would have its still-live lock stolen by another
+   * process, and then — on finally reaching its own release — delete that
+   * NEW holder's lock, breaking exclusivity for a third caller. (This is the
+   * exact class of bug already fixed once in this lock's first draft, and
+   * independently in a downstream closed-source consumer's own lockfile.)
    */
   private async withIdLock<T>(fn: () => Promise<T>): Promise<T> {
-    const lockDir = `${this.filePath}.idlock`;
-    const staleMs = 10_000;
-    let acquired = false;
-    for (let attempt = 0; attempt < 200; attempt++) {
-      try {
-        mkdirSync(lockDir);
-        acquired = true;
-        break;
-      } catch (err) {
-        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
-        try {
-          if (Date.now() - statSync(lockDir).mtimeMs > staleMs) {
-            rmdirSync(lockDir); // stale — steal and retry
-            continue;
-          }
-        } catch {
-          continue; // lock vanished between attempts — retry immediately
-        }
-        await new Promise((resolve) => setTimeout(resolve, 15));
-      }
-    }
-    // Falling through the loop without ever acquiring the lock must NOT
-    // silently proceed unlocked (codex-review Critical): with 200 attempts at
-    // a ~15ms backoff (~3s worst case) against a 10s staleMs, a legitimately
-    // long-held lock would previously let this caller both run the critical
-    // section AND rmdirSync the other holder's still-live lock in `finally`.
-    if (!acquired) {
+    const lockPath = `${this.filePath}.idlock`;
+    const token = await acquireIdLock(lockPath, { staleMs: 10_000 });
+    // Falling through without ever acquiring the lock must NOT silently
+    // proceed unlocked: with the default ~3s worst-case wait against a 10s
+    // staleMs, a legitimately long-held lock would otherwise let this caller
+    // both run the critical section AND (without the ownership check in
+    // releaseIdLock) delete the other holder's still-live lock.
+    if (token === null) {
       throw new Error(
-        `task id allocation: timed out waiting for ${lockDir} (held by another process for over ~3s)`,
+        `task id allocation: timed out waiting for ${lockPath} (held by another process for over ~3s)`,
       );
     }
     try {
       return await fn();
     } finally {
-      try {
-        rmdirSync(lockDir);
-      } catch {
-        // already gone (e.g. stolen after we went stale) — nothing to release
-      }
+      releaseIdLock(lockPath, token);
     }
   }
 

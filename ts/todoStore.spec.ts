@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach } from "vitest";
 import { rm } from "fs/promises";
 import path from "path";
-import { TodoStore, CycleError, openStore } from "./todoStore";
+import { TodoStore, CycleError, openStore, acquireIdLock, releaseIdLock } from "./todoStore";
 
 const isWindows = process.platform === "win32";
 const TEST_ROOT = isWindows
@@ -299,15 +299,53 @@ describe("TodoStore", () => {
 
   it("a held id lock makes create() throw a timeout, never silently proceed unlocked (codex-review round-2 Critical)", async () => {
     const s = await openStore(TEST_ROOT);
-    const { mkdirSync: mkSync } = await import("fs");
-    const lockDir = path.join(TEST_ROOT, ".agent-yes", "todos.jsonl.idlock");
-    mkSync(lockDir, { recursive: true }); // simulate another process holding the lock, freshly
+    const { mkdirSync: mkSync, writeFileSync: wf } = await import("fs");
+    const lockPath = path.join(TEST_ROOT, ".agent-yes", "todos.jsonl.idlock");
+    mkSync(path.dirname(lockPath), { recursive: true });
+    wf(lockPath, "someone-elses-token"); // simulate another process holding the lock, freshly
     await expect(s.create({ summary: "x", kind: "code" })).rejects.toThrow(/timed out waiting for/);
     // and the lock must NOT have been deleted by the failed attempt (that
     // would let a second unlocked caller in right after this one)
-    const { existsSync } = await import("fs");
-    expect(existsSync(lockDir)).toBe(true);
+    const { readFileSync: rf } = await import("fs");
+    expect(rf(lockPath, "utf8")).toBe("someone-elses-token"); // untouched — not stolen, not released
   }, 15_000);
+
+  it("acquireIdLock/releaseIdLock: release is ownership-safe — a stolen-then-reissued lock survives the ORIGINAL holder's release call (codex-review round-3 Critical)", async () => {
+    const lockPath = path.join(TEST_ROOT, ".agent-yes", "todos.jsonl.idlock");
+    const { mkdirSync: mkSync } = await import("fs");
+    mkSync(path.dirname(lockPath), { recursive: true });
+
+    const tokenA = await acquireIdLock(lockPath, { staleMs: 10_000 });
+    expect(tokenA).not.toBeNull();
+
+    // Simulate: tokenA's holder ran long enough to go stale; a second
+    // acquirer legitimately steals and reissues the lock under tokenB.
+    const { utimesSync } = await import("fs");
+    utimesSync(lockPath, new Date(Date.now() - 60_000), new Date(Date.now() - 60_000));
+    const tokenB = await acquireIdLock(lockPath, { staleMs: 10_000 });
+    expect(tokenB).not.toBeNull();
+    expect(tokenB).not.toBe(tokenA);
+
+    // The ORIGINAL (stale) holder now reaches its own release call. Without
+    // the ownership check, this would delete tokenB's live lock.
+    releaseIdLock(lockPath, tokenA!);
+    const { readFileSync: rf } = await import("fs");
+    expect(rf(lockPath, "utf8")).toBe(tokenB); // tokenB's lock is untouched
+
+    // tokenB's own release, by contrast, DOES remove it (it still owns it).
+    releaseIdLock(lockPath, tokenB!);
+    const { existsSync } = await import("fs");
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it("acquireIdLock returns null (never throws, never proceeds) when the wait budget is exhausted against a live lock", async () => {
+    const lockPath = path.join(TEST_ROOT, ".agent-yes", "todos.jsonl.idlock");
+    const { mkdirSync: mkSync, writeFileSync: wf } = await import("fs");
+    mkSync(path.dirname(lockPath), { recursive: true });
+    wf(lockPath, "someone-elses-fresh-token");
+    const result = await acquireIdLock(lockPath, { staleMs: 10_000, maxAttempts: 3 });
+    expect(result).toBeNull();
+  });
 
   it("verify() on a NON-primary registered gate must not fall back to the sibling on failure (codex-review Critical exploit: register only the failure-oriented gate)", async () => {
     const s = await openStore(TEST_ROOT);

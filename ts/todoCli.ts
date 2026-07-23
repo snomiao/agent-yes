@@ -298,7 +298,13 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
     }
     case "tree": {
       const rootId = args[0];
-      process.stdout.write(renderTree(store.all(), rootId) + "\n");
+      const tasks = store.all();
+      if (opts.format === "json") {
+        const { buildTreeJSON } = await import("./todoDigest.ts");
+        emit(opts, buildTreeJSON(tasks, rootId), "");
+      } else {
+        process.stdout.write(renderTree(tasks, rootId) + "\n");
+      }
       return 0;
     }
     case "digest": {
