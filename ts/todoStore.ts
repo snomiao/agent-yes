@@ -59,6 +59,8 @@ export interface GateEvidence {
   validator: string;
   note?: string;
   link?: string;
+  /** The task's `acceptanceCriteria` TEXT as it read at the moment this manual gate was approved (not merely a reference to the live field, which could be edited afterward) — durably records what the validator actually judged the work against. Absent if the task had no acceptance criteria set at approval time. Only set by `approve()`; a registered gate's own `check(record)` already receives the live `acceptanceCriteria` on the record it's passed, so no snapshot is needed there. */
+  acceptanceCriteriaAtApproval?: string;
 }
 
 export interface TodoRecord extends JsonlDoc {
@@ -68,6 +70,8 @@ export interface TodoRecord extends JsonlDoc {
   targetTier?: string;
   summary: string;
   description: string;
+  /** Free-text definition of done for THIS task — what an independent validator should check before approving/verifying it. Optional at this layer (Part A stays neutral on whether it's required; a consuming project enforces that itself, e.g. by validating it in its own CLI wrapper before calling `create`). Editable via `setAcceptanceCriteria` since criteria may firm up after a task starts. */
+  acceptanceCriteria?: string;
   /** A human name/handle, or a tracked agent's stable identifier. Opaque to this module. */
   owner?: string;
   /** `null` (not `undefined`) is the explicit "no block" value once a task has ever been blocked — JSON drops `undefined` keys entirely, so an update line with an omitted `block` would silently fail to clear a previous value on reload; `null` serializes and therefore actually overwrites (see `setBlock`). */
@@ -92,6 +96,7 @@ export interface CreateInput {
   kind: LifecycleKind;
   description?: string;
   targetTier?: string;
+  acceptanceCriteria?: string;
   owner?: string;
   tags?: string[];
   blockedBy?: string[];
@@ -290,6 +295,7 @@ export class TodoStore {
         createdAt: now,
         updatedAt: now,
         ...(input.targetTier ? { targetTier: input.targetTier } : {}),
+        ...(input.acceptanceCriteria ? { acceptanceCriteria: input.acceptanceCriteria } : {}),
         ...(input.owner ? { owner: input.owner } : {}),
       };
       await this.jsonl.append({ ...doc, _id: id });
@@ -409,6 +415,11 @@ export class TodoStore {
         gate: gateName,
         passedAt: new Date().toISOString(),
         validator,
+        // Snapshot the FRESH record's acceptanceCriteria text, not a
+        // reference to the live field — the criteria could be edited after
+        // this approval, and the audit trail should durably show what the
+        // validator actually judged the work against at the time.
+        ...(rec.acceptanceCriteria ? { acceptanceCriteriaAtApproval: rec.acceptanceCriteria } : {}),
       };
       await this.jsonl.updateById(id, {
         satisfiedGates: [...satisfied],
@@ -568,6 +579,23 @@ export class TodoStore {
       await this.jsonl.updateById(id, patch);
       return this.mustGet(id);
     });
+  }
+
+  /**
+   * Set or update a task's acceptance criteria (free text) after creation —
+   * criteria may firm up once a task is underway, not just at `create()`
+   * time. Requires non-empty text: this method updates criteria, it does
+   * not clear them (clearing would need a `null`-vs-`undefined` sentinel
+   * distinction, like `block` has, which isn't needed for the "set/update"
+   * use case this exists for).
+   */
+  async setAcceptanceCriteria(id: string, text: string): Promise<TodoRecord> {
+    // `async` (not a plain function returning rawUpdate's promise) so this
+    // guard's throw becomes a rejected promise like every other validating
+    // mutator here, rather than throwing synchronously before any promise
+    // exists — matching `addDep`'s same convention.
+    if (!text) throw new Error(`task ${id}: acceptance criteria text must not be empty`);
+    return this.rawUpdate(id, () => ({ acceptanceCriteria: text }));
   }
 
   setBlock(id: string, block: TodoBlock | null): Promise<TodoRecord> {
