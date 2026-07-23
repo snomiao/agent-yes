@@ -71,10 +71,16 @@ export interface AnswerInput {
  * kind's gated outgoing edge as the asked human (`block.who`, always a
  * different identity from the task's `owner` by construction, satisfying
  * independent verification) and advances the transition. This atomicity is
- * the closed loop's core property for those two kinds: there is no
- * intermediate state where the block is cleared but the gate/transition
- * hasn't happened, and no separate step a human or orchestrator has to
- * remember to run afterward.
+ * the closed loop's core property for those two kinds, and it is about the
+ * TASK'S STORED STATE specifically: there is no intermediate state where the
+ * block is cleared but the gate/transition hasn't happened, and no separate
+ * step a human or orchestrator has to remember to run afterward. (Real-time
+ * delivery of the answer to a currently-live agent is a SEPARATE, best-effort
+ * concern handled by the caller — see `ts/serve.ts`'s `/api/asks/answer`
+ * route — and deliberately not part of this guarantee: if that delivery
+ * fails, the task's state is still correctly updated and durable here, and
+ * the agent finds out on its own next normal check, e.g. `ay todo get` or a
+ * reconcile pass, rather than through a guaranteed push.)
  *
  * Restricted to `human`/`decision` deliberately: this function opens its own
  * fresh `TodoStore` (via `openStore`), which has NO registered gates of its

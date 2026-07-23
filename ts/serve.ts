@@ -2135,7 +2135,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
       // a stalled FIFO write must never hang the response, which is the
       // whole point of "best-effort" (codex-review Important: an earlier
       // version awaited this, so a stuck agent could hang answerAsk's caller
-      // even though the todo state had already been updated).
+      // even though the todo state had already been updated). This is a real,
+      // accepted limitation, not a bug: if owner resolution or the FIFO
+      // write fails, there is no retry queue here — the durable, correct
+      // outcome is that the task's stored state already reflects the
+      // answer (see answerAsk's own doc comment), and the owning agent will
+      // pick it up on its own next normal check (`ay todo get`, a reconcile
+      // pass, etc.) rather than through a guaranteed real-time push. A
+      // persistent notification-retry mechanism would be new scope well
+      // beyond this route.
       if (rec.owner) {
         // Scoped to THIS project's cwd — an unscoped search could match a
         // same-named owner in a DIFFERENT project and write the answer into

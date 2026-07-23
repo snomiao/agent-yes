@@ -230,6 +230,9 @@
       }
 
       listEl.addEventListener("click", async (e) => {
+        // e.target is a Node in general (e.g. a text node), not always an
+        // Element — .closest() only exists on Element (codex-review nitpick).
+        if (!(e.target instanceof Element)) return;
         const btn = e.target.closest("button[data-key]");
         if (!btn) return;
         const key = decodeURIComponent(btn.dataset.key);
