@@ -2001,7 +2001,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // The whole API as a plain handler: served over HTTP by Bun.serve (--http)
   // and called in-process by the WebRTC bridge (--webrtc) — the latter needs
   // no TCP port at all.
-  const apiFetch = async (req: Request, srv?: { upgrade: (r: Request, o?: unknown) => boolean }): Promise<Response> => {
+  const apiFetch = async (
+    req: Request,
+    srv?: { upgrade: (r: Request, o?: unknown) => boolean },
+  ): Promise<Response> => {
     if (!checkAuth(req, token)) {
       return new Response("Unauthorized", { status: 401 });
     }
@@ -3542,7 +3545,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
       });
     }
   };
-  const httpFetch = async (req: Request, srv?: { upgrade: (r: Request, o?: unknown) => boolean }): Promise<Response> => {
+  const httpFetch = async (
+    req: Request,
+    srv?: { upgrade: (r: Request, o?: unknown) => boolean },
+  ): Promise<Response> => {
     const p = new URL(req.url).pathname;
     if (req.method === "GET" && (p === "/" || p === "/index.html"))
       return serveUiFile("index.html", "text/html; charset=utf-8");

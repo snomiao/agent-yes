@@ -46,6 +46,32 @@ import * as reaper from "./reaper.ts";
 export { removeControlCharacters };
 export { AgentContext };
 
+// `ay todo` library surface — only symbols listed here reach the published
+// `dist/index.js` a consuming project (e.g. a thin project-specific shell
+// around this engine) actually imports; creating the underlying modules
+// alone is not sufficient.
+export { openStore, TodoStore, CycleError } from "./todoStore.ts";
+export type {
+  TodoRecord,
+  CreateInput,
+  ListFilter,
+  GateRegistration,
+  GateEvidence,
+} from "./todoStore.ts";
+export {
+  LIFECYCLES,
+  nextStates,
+  canTransition,
+  requiredGate,
+  initialState,
+  statesOf,
+  isKnownKind,
+} from "./todoLifecycle.ts";
+export type { LifecycleKind, LifecycleGraph, LifecycleTransition } from "./todoLifecycle.ts";
+export { monitorHint, describeBlock } from "./todoBlock.ts";
+export type { TodoBlock, MonitorHint } from "./todoBlock.ts";
+export { unblockedTasks, openBlockers, renderTree, renderDigest } from "./todoDigest.ts";
+
 export type AgentCliConfig = {
   // cli
   install?:
