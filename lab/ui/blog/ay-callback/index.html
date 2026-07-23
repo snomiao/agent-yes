@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>ay callback — let readers message your agent from any web page</title>
+    <meta
+      name="description"
+      content="ay callback mints a signed, send-only, single-agent capability and an embeddable widget — so a public report page can message the agent that wrote it, without ever exposing your serve token."
+    />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%E2%9C%93%3C/text%3E%3C/svg%3E"
+    />
+    <style>
+      :root {
+        --bg: #0d1117;
+        --fg: #e6edf3;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --green: #3fb950;
+        --red: #f85149;
+        --card: #161b22;
+        --border: #30363d;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #ffffff;
+          --fg: #1f2328;
+          --muted: #59636e;
+          --accent: #0969da;
+          --green: #1a7f37;
+          --red: #cf222e;
+          --card: #f6f8fa;
+          --border: #d0d7de;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          16px/1.65 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          Helvetica,
+          Arial,
+          sans-serif;
+        margin: 0;
+        padding: 0 20px;
+      }
+      main {
+        max-width: 760px;
+        margin: 0 auto;
+        padding: 56px 0 96px;
+      }
+      .tag {
+        background: var(--accent);
+        color: #fff;
+        padding: 2px 8px;
+        border-radius: 6px;
+        font-size: 0.8em;
+        letter-spacing: 0.02em;
+      }
+      h1 {
+        font-size: 2em;
+        line-height: 1.2;
+        margin: 18px 0 8px;
+      }
+      h2 {
+        font-size: 1.3em;
+        margin: 40px 0 10px;
+        border-top: 1px solid var(--border);
+        padding-top: 28px;
+      }
+      h2 a.anchor {
+        color: var(--muted);
+        text-decoration: none;
+        margin-left: 6px;
+        opacity: 0;
+      }
+      h2:hover a.anchor {
+        opacity: 1;
+      }
+      .sub {
+        color: var(--muted);
+        font-size: 1.05em;
+      }
+      a {
+        color: var(--accent);
+      }
+      code {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 5px;
+        padding: 1px 5px;
+        font-size: 0.88em;
+        font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      }
+      pre {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px;
+        overflow-x: auto;
+        font-size: 0.86em;
+        line-height: 1.5;
+      }
+      pre code {
+        background: none;
+        border: 0;
+        padding: 0;
+      }
+      .note {
+        border-left: 3px solid var(--accent);
+        background: var(--card);
+        padding: 10px 16px;
+        border-radius: 0 8px 8px 0;
+        margin: 18px 0;
+      }
+      .ok {
+        color: var(--green);
+      }
+      .no {
+        color: var(--red);
+      }
+      footer {
+        color: var(--muted);
+        font-size: 0.9em;
+        margin-top: 48px;
+        border-top: 1px solid var(--border);
+        padding-top: 20px;
+      }
+      table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 16px 0;
+        font-size: 0.92em;
+      }
+      th,
+      td {
+        border: 1px solid var(--border);
+        padding: 8px 10px;
+        text-align: left;
+        vertical-align: top;
+      }
+      th {
+        background: var(--card);
+      }
+      /* Inert demo replica of the widget the snippet renders. */
+      .demo {
+        position: relative;
+        background: var(--card);
+        border: 1px dashed var(--border);
+        border-radius: 12px;
+        min-height: 180px;
+        margin: 18px 0;
+        padding: 12px 16px;
+        color: var(--muted);
+        font-size: 0.9em;
+      }
+      .demo .fab {
+        position: absolute;
+        right: 16px;
+        bottom: 16px;
+        padding: 10px 14px;
+        border-radius: 20px;
+        border: none;
+        background: #1a7f37;
+        color: #fff;
+        font: 13px system-ui;
+        cursor: pointer;
+        box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+      }
+      .demo .modal {
+        position: absolute;
+        right: 16px;
+        bottom: 64px;
+        width: min(300px, 80%);
+        background: var(--bg);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 12px;
+        font: 13px system-ui;
+        box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+        display: none;
+        text-align: left;
+      }
+      .demo .modal textarea {
+        width: 100%;
+        height: 64px;
+        box-sizing: border-box;
+        font: inherit;
+        margin: 8px 0;
+        resize: vertical;
+        background: var(--card);
+        color: var(--fg);
+        border: 1px solid var(--border);
+        border-radius: 6px;
+        padding: 6px;
+      }
+      .demo .modal button {
+        padding: 6px 12px;
+        border: none;
+        border-radius: 6px;
+        background: #1a7f37;
+        color: #fff;
+        cursor: pointer;
+        font: inherit;
+      }
+      .demo .status {
+        min-height: 16px;
+        font-size: 12px;
+        color: var(--muted);
+        margin-top: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <p><span class="tag">agent-yes</span> · engineering</p>
+      <h1>ay callback: let readers message your agent from any web page</h1>
+      <p class="sub">
+        Your agent just published a report. The person reading it has a question. Until now the
+        answer was "find the console, find the right terminal, type there." Now the report page
+        itself can carry a tiny widget that delivers the reader's message straight into that
+        agent's terminal — through a signed, send-only, single-agent capability that expires on a
+        date you chose, and never through your master token.
+      </p>
+
+      <h2 id="what">What it does <a class="anchor" href="#what">#</a></h2>
+      <p>
+        <code>ay callback</code> mints a capability for <strong>one agent</strong> and prints a
+        self-contained HTML snippet — one inline <code>&lt;script&gt;</code>, zero external
+        requests. Paste it into any page your agent publishes (a status dashboard, a nightly
+        report, a postmortem) and readers get a floating button:
+      </p>
+      <pre><code>$ ay callback --expires 7d
+callback 3b6f23e7 → claude #46555 @ ~/ws/reports
+expires:  2026-07-29T10:57:01.398Z  (7d)
+endpoint: https://x1a2b3c.agent-yes.com/cb/cb1.eyJpZCI6…
+revoke:   ay callback revoke 3b6f23e7
+
+── embed snippet ──────────────────────────────
+&lt;script&gt; … &lt;/script&gt;</code></pre>
+      <p>Here is what the widget feels like (demo only — this one talks to nobody):</p>
+      <div class="demo" id="cb-demo">
+        Imagine this box is your agent's published report page…
+        <button class="fab" id="cb-demo-fab">💬 Message the agent</button>
+        <div class="modal" id="cb-demo-modal">
+          <strong>Message the agent</strong>
+          <textarea id="cb-demo-ta" placeholder="Your message to the agent…"></textarea>
+          <button id="cb-demo-send">Send</button>
+          <div class="status" id="cb-demo-status"></div>
+        </div>
+      </div>
+      <p>
+        When a reader hits <em>Send</em>, the message lands in the agent's terminal wrapped in an
+        explicit "untrusted visitor" frame, and in its inbox. One way, by design — the visitor
+        never sees the terminal.
+      </p>
+
+      <h2 id="capability">The capability is a hash, not a key <a class="anchor" href="#capability">#</a></h2>
+      <p>
+        The obvious-but-wrong implementation is to put your daemon's serve token in the snippet.
+        That token is a master key: whoever holds it can read every terminal, send to every agent,
+        spawn and kill. Pasting it into a public page is game over.
+      </p>
+      <p>
+        So the snippet carries a <strong>capability token</strong> instead — three dot-separated
+        parts, the last one an HMAC-SHA256 over the rest:
+      </p>
+      <pre><code>cb1 . base64url({ "id": "3b6f23e7",
+                  "agent": "4d65a096e983",   // exactly one agent_id
+                  "exp": 1785322621398 })    // hard expiry, unix ms
+    . base64url(HMAC-SHA256(secret, "cb1." + payload))</code></pre>
+      <p>
+        The scope lives <em>inside the signed payload</em>. That has three consequences worth
+        spelling out:
+      </p>
+      <table>
+        <tr>
+          <th>Attack</th>
+          <th>Result</th>
+        </tr>
+        <tr>
+          <td>Edit the payload to point at another agent, or push the expiry out</td>
+          <td><span class="no">✗</span> signature no longer verifies — the daemon answers 404</td>
+        </tr>
+        <tr>
+          <td>Delete the daemon's bookkeeping to "resurrect" an expired token</td>
+          <td>
+            <span class="no">✗</span> expiry is in the token itself, not in local state — still
+            410
+          </td>
+        </tr>
+        <tr>
+          <td>Steal the token from the page source</td>
+          <td>
+            <span class="ok">✓</span> you can do exactly what the page could already do: send
+            rate-limited text to one agent, until the expiry the owner chose
+          </td>
+        </tr>
+      </table>
+      <p>
+        The HMAC secret is minted on first use into <code>~/.agent-yes/.callback-secret</code>
+        (0600), deliberately separate from the serve token — rotating one never invalidates the
+        other.
+      </p>
+
+      <h2 id="expiry">--expires is required. There is no "never" <a class="anchor" href="#expiry">#</a></h2>
+      <p>
+        Every capability API eventually grows a default lifetime, and every default lifetime
+        eventually becomes "forever, because nobody thinks about it." We refuse the default:
+      </p>
+      <pre><code>$ ay callback
+ay callback: --expires is required (e.g. --expires 7d) —
+an embed capability must carry an explicit lifetime</code></pre>
+      <p>
+        <code>--expires</code> takes <code>30m</code>, <code>12h</code>, <code>7d</code>,
+        <code>2w</code> — and caps at 365 days. There is no <code>--expires never</code> and there
+        never will be. The point is a moment of deliberate friction: whoever pastes a capability
+        into a public page must answer "how long should this live?" while they still remember the
+        page exists. When it lapses, the widget doesn't fail silently — it tells the reader the
+        link expired and to ask the owner for a fresh one.
+      </p>
+      <p>For everything before the deadline, there's the kill switch:</p>
+      <pre><code>$ ay callback ls
+3b6f23e7  6d left     → claude #46555 @ ~/ws/reports
+$ ay callback revoke 3b6f23e7
+revoked 3b6f23e7</code></pre>
+
+      <h2 id="hardening">A public route that leaks nothing <a class="anchor" href="#hardening">#</a></h2>
+      <p>
+        <code>POST /cb/&lt;cap&gt;</code> is the daemon's only unauthenticated write route, so it
+        is deliberately paranoid:
+      </p>
+      <ul>
+        <li>
+          <strong>Info-tight responses.</strong> The page learns <code>ok</code>,
+          <code>expired</code>, or a generic failure — never a pid, a cwd, a hostname, or whether
+          a given agent exists. Malformed and forged tokens are indistinguishable 404s.
+        </li>
+        <li>
+          <strong>Untrusted framing.</strong> Visitor text is stripped of control characters (no
+          smuggled escape sequences, no fake Enter) and wrapped in an
+          <code>&lt;ay-callback&gt;</code> block that names it an untrusted visitor message — the
+          agent is told to treat it as data, not instructions.
+        </li>
+        <li>
+          <strong>Flood control.</strong> Per-capability sliding-window rate limit and a 4&nbsp;KB
+          body cap. A public page can nudge your agent; it cannot bury it.
+        </li>
+        <li>
+          <strong>One-way.</strong> The route writes to the agent's stdin and records the inbox
+          entry. It never reads the terminal back — a public embed must not become a viewport
+          into your machine.
+        </li>
+      </ul>
+      <div class="note">
+        Two-way chat — the widget showing the agent's reply — is the obvious next step, and the
+        design line is already drawn: the page will only ever see replies the agent
+        <em>explicitly</em> addresses to that callback, never the raw terminal.
+      </div>
+
+      <h2 id="try">Try it <a class="anchor" href="#try">#</a></h2>
+      <pre><code>$ npm i -g agent-yes
+$ ay serve            # local daemon
+$ ay expose …         # or put the daemon on a public URL first
+$ ay callback --expires 7d --title "Ask the report bot"</code></pre>
+      <p>
+        Paste the printed snippet at the end of anything your agent publishes. Ship the report;
+        keep the conversation.
+      </p>
+
+      <footer>
+        <a href="/blog/">← All posts</a> · <a href="/">agent-yes.com</a> ·
+        <a href="https://github.com/snomiao/agent-yes">GitHub</a> ·
+        <a href="https://github.com/snomiao/agent-yes/pull/295">PR #295</a>
+      </footer>
+    </main>
+    <script>
+      // Inert demo widget — mirrors the real snippet's UX, delivers nowhere.
+      (function () {
+        var fab = document.getElementById("cb-demo-fab");
+        var modal = document.getElementById("cb-demo-modal");
+        var ta = document.getElementById("cb-demo-ta");
+        var send = document.getElementById("cb-demo-send");
+        var status = document.getElementById("cb-demo-status");
+        fab.onclick = function () {
+          modal.style.display = modal.style.display === "block" ? "none" : "block";
+        };
+        send.onclick = function () {
+          if (!ta.value.trim()) return;
+          status.textContent = "sending…";
+          setTimeout(function () {
+            status.textContent = "Delivered. (demo — no agent was harmed)";
+            ta.value = "";
+          }, 450);
+        };
+      })();
+    </script>
+  </body>
+</html>

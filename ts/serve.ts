@@ -38,6 +38,9 @@ import {
   type CommonOpts,
 } from "./subcommands.ts";
 import { TYPING_BADGE } from "./badges.ts";
+import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
+import { CLAUDE_SESSION_PIN_ENV } from "./sessionEnv.ts";
+import { MAX_CALLBACK_MSG_BYTES, frameVisitorMessage, verifyCapability } from "./callbackCore.ts";
 import { isTerminalReply } from "./terminalReply.ts";
 import { parseStatusText } from "./statusText.ts";
 import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
@@ -221,23 +224,17 @@ const defaultOpts = (overrides: Partial<CommonOpts> = {}): CommonOpts => ({
   ...overrides,
 });
 
-// The vars that pin a process to a PARENT Claude Code session — NOT the many
-// other CLAUDE_CODE_* settings that configure provider/auth/limits (USE_BEDROCK,
-// USE_VERTEX, MAX_OUTPUT_TOKENS, …), which must pass through untouched.
-const SESSION_PIN_ENV = new Set([
-  "CLAUDECODE",
-  "CLAUDE_CODE_SSE_PORT",
-  "CLAUDE_CODE_SESSION_ID",
-  "CLAUDE_CODE_CHILD_SESSION",
-  "CLAUDE_CODE_ENTRYPOINT",
-  // The agent-yes wrapper pid of the agent that launched `ay serve`. A daemon
-  // started from inside an agent's shell carries that agent's AGENT_YES_PID for
-  // its whole lifetime; without stripping it, every console-spawned agent would
-  // inherit it and be recorded with parent_pid = that stale agent, mis-rooting
-  // the whole subagent tree under an unrelated agent. Dropping it makes console
-  // spawns clean top-level agents (parent_pid = None).
-  "AGENT_YES_PID",
-]);
+// The vars that pin a process to a PARENT Claude Code session (the shared
+// CLAUDE_SESSION_PIN_ENV set, see ts/sessionEnv.ts) plus AGENT_YES_PID:
+//   The agent-yes wrapper pid of the agent that launched `ay serve`. A daemon
+//   started from inside an agent's shell carries that agent's AGENT_YES_PID for
+//   its whole lifetime; without stripping it, every console-spawned agent would
+//   inherit it and be recorded with parent_pid = that stale agent, mis-rooting
+//   the whole subagent tree under an unrelated agent. Dropping it makes console
+//   spawns clean top-level agents (parent_pid = None).
+// (The direct `ay …` launch path re-stamps AGENT_YES_PID with its own pid instead
+// — see ts/index.ts — so it strips only the shared claude set, not this one.)
+const SESSION_PIN_ENV = new Set<string>([...CLAUDE_SESSION_PIN_ENV, "AGENT_YES_PID"]);
 
 // The login-shell environment, captured once and cached for the daemon's
 // lifetime. `ay serve` is daemonized by oxmgr/launchd/pm2, which start it with a
@@ -795,6 +792,21 @@ async function portlessAppPort(): Promise<number | null> {
   } catch {
     return null;
   }
+}
+
+// Local base URL of the installed daemon, for `ay callback` snippet endpoints:
+// the portless console origin when the daemon runs portless, else the plain
+// loopback origin for a fixed --port install. Null when no daemon is installed
+// (callers must then pass --base explicitly).
+export async function resolveLocalServeUrl(): Promise<string | null> {
+  const mgr = await resolveActiveManager();
+  const daemonArgs = mgr ? await readDaemonServeArgs(mgr) : null;
+  if (daemonArgs === null) return null;
+  if (argsUsePortless(daemonArgs)) {
+    return (await resolvedPortlessConsoleUrl()).replace(/\/+$/, "");
+  }
+  const port = portFromArgs(daemonArgs);
+  return port ? `http://127.0.0.1:${port}` : null;
 }
 
 async function warnStrayServeProcesses(): Promise<void> {
@@ -3545,10 +3557,84 @@ export async function cmdServe(rest: string[]): Promise<number> {
       });
     }
   };
-  const httpFetch = async (
-    req: Request,
-    srv?: { upgrade: (r: Request, o?: unknown) => boolean },
-  ): Promise<Response> => {
+  // POST /cb/<cap> — the PUBLIC visitor-callback route for `ay callback`
+  // embeds. Authentication is the signed capability itself (send-only, one
+  // agent, hard expiry), NEVER the serve token, so it lives outside apiFetch's
+  // checkAuth gate. One-way and info-tight by design: responses carry ok/fail
+  // only — no pid, cwd, or agent details leak to the public page. CORS is
+  // wide open on purpose (snippets are embedded on third-party report sites).
+  const CB_CORS: Record<string, string> = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+  };
+  const cbJson = (status: number, body: Record<string, unknown>): Response =>
+    Response.json(body, { status, headers: CB_CORS });
+  // Per-capability rate limit: a public page must not be able to flood an
+  // agent's stdin. Sliding window, in-memory (a daemon restart resets it —
+  // acceptable for a limiter, the capability signature is the real gate).
+  const CB_RATE_MAX = 6;
+  const CB_RATE_WINDOW_MS = 60_000;
+  const cbRecent = new Map<string, number[]>();
+  const handleCallback = async (req: Request, p: string): Promise<Response> => {
+    if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: CB_CORS });
+    if (req.method !== "POST") return cbJson(405, { error: "POST only" });
+    const cap = p.slice("/cb/".length);
+    const secret = loadCallbackSecretReadOnly();
+    // No secret on this host = no capability was ever minted here: 404, and
+    // never mint one as a side effect of unauthenticated traffic.
+    if (!secret) return cbJson(404, { error: "unknown" });
+    const v = verifyCapability(secret, cap, Date.now());
+    if (!v.ok) {
+      // Expired is surfaced distinctly (the widget tells the visitor to ask
+      // for a re-issue); malformed and badsig are indistinguishable 404s.
+      if (v.reason === "expired") return cbJson(410, { expired: true });
+      return cbJson(404, { error: "unknown" });
+    }
+    if (isCallbackRevoked(v.payload.id)) return cbJson(410, { expired: true });
+    const now = Date.now();
+    const recent = (cbRecent.get(v.payload.id) ?? []).filter((t) => now - t < CB_RATE_WINDOW_MS);
+    if (recent.length >= CB_RATE_MAX) return cbJson(429, { error: "rate limited" });
+    recent.push(now);
+    cbRecent.set(v.payload.id, recent);
+    let msg: string;
+    try {
+      const body = (await req.json()) as { msg?: unknown };
+      msg = String(body?.msg ?? "").trim();
+    } catch {
+      return cbJson(400, { error: "invalid JSON body" });
+    }
+    if (!msg) return cbJson(400, { error: "empty message" });
+    if (Buffer.byteLength(msg, "utf8") > MAX_CALLBACK_MSG_BYTES)
+      return cbJson(413, { error: "message too large" });
+    try {
+      const record = await resolveOne(v.payload.agent, defaultOpts());
+      // The capability names ONE agent_id; resolveOne matching anything else
+      // (prefix collisions aside, ids are full here) would be a scope break.
+      if (record.agent_id !== v.payload.agent || !record.fifo_file)
+        return cbJson(409, { error: "agent unavailable" });
+      const framed = frameVisitorMessage(v.payload.id, msg);
+      await writeToIpc(record.fifo_file, framed);
+      await new Promise((r) => setTimeout(r, 200));
+      await writeToIpc(record.fifo_file, controlCodeFromName("enter"));
+      await noteStdinWrite(record.pid, record.fifo_file, true);
+      await recordInbox({
+        at: Date.now(),
+        from: null,
+        to: { pid: record.pid, cli: record.cli, cwd: record.cwd, agent_id: record.agent_id },
+        body: framed,
+        confirmed: true,
+        wrapped: true,
+        remote: "wire",
+      });
+      return cbJson(200, { ok: true });
+    } catch {
+      // resolveOne threw = the target agent is gone. Same shape as any other
+      // delivery failure — the public page learns nothing about the host.
+      return cbJson(409, { error: "agent unavailable" });
+    }
+  };
+  const httpFetch = async (req: Request, srv?: { upgrade: (r: Request, o?: unknown) => boolean }): Promise<Response> => {
     const p = new URL(req.url).pathname;
     if (req.method === "GET" && (p === "/" || p === "/index.html"))
       return serveUiFile("index.html", "text/html; charset=utf-8");
@@ -3583,6 +3669,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return serveUiFile("manifest.webmanifest", "application/manifest+json");
     if (req.method === "GET" && p === "/icon.svg") return serveUiFile("icon.svg", "image/svg+xml");
     if (req.method === "GET" && p === "/favicon.ico") return new Response(null, { status: 204 });
+    if (p.startsWith("/cb/")) return handleCallback(req, p);
     return apiFetch(req, srv);
   };
 
