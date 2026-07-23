@@ -57,6 +57,15 @@ describe("TodoStore", () => {
     await expect(s.approve(t._id, "human-approved", "WORKER")).rejects.toThrow(
       /independent verification required/,
     );
+    // whitespace must not bypass the check either direction (codex-review Important)
+    await expect(s.approve(t._id, "human-approved", "worker ")).rejects.toThrow(
+      /independent verification required/,
+    );
+    const t2 = await s.create({ summary: "y", kind: "doc", owner: " worker " });
+    await s.transition(t2._id, "review");
+    await expect(s.approve(t2._id, "human-approved", "worker")).rejects.toThrow(
+      /independent verification required/,
+    );
   });
 
   it("approve() by a DIFFERENT identity succeeds, records evidence, and unblocks the transition", async () => {
@@ -245,5 +254,79 @@ describe("TodoStore", () => {
     const s2 = await openStore(TEST_ROOT);
     expect(s2.list().map((t) => t.summary)).toEqual(["persisted"]);
     expect(s2.get("T1")?._id).toBe("T1");
+  });
+
+  it("a cleared block ACTUALLY clears after a fresh reload — not just in the instance that cleared it (codex-review Critical)", async () => {
+    const s1 = await openStore(TEST_ROOT);
+    const t = await s1.create({ summary: "x", kind: "code" });
+    await s1.setBlock(t._id, { type: "blocked-by-human", who: "someone" });
+    await s1.setBlock(t._id, null);
+    // the bug: JSON.stringify({block: undefined}) drops the key, so the
+    // clearing update line carried no `block` field at all, and the merge
+    // `{...existing, ...doc}` left the OLD block value in place once a
+    // DIFFERENT (or freshly reloaded) instance read it back from disk.
+    const s2 = await openStore(TEST_ROOT);
+    expect(s2.get(t._id)?.block).toBeFalsy();
+  });
+
+  it("N concurrent OS processes calling create() against the same store never collide on an id (codex-review Critical)", async () => {
+    const N = 8;
+    const script = path.join(TEST_ROOT, "create-once.ts");
+    const { writeFileSync, mkdirSync } = await import("fs");
+    mkdirSync(TEST_ROOT, { recursive: true });
+    writeFileSync(
+      script,
+      `import { openStore } from ${JSON.stringify(path.join(import.meta.dirname, "todoStore.ts"))};\n` +
+        `const s = await openStore(${JSON.stringify(TEST_ROOT)});\n` +
+        `const t = await s.create({ summary: "concurrent", kind: "code" });\n` +
+        `console.log(t._id);\n`,
+    );
+    // node:child_process, not Bun.spawn — vitest here runs under the node matrix too
+    const { spawn } = await import("node:child_process");
+    const runOne = () =>
+      new Promise<string>((resolve, reject) => {
+        const p = spawn("bun", [script], { stdio: ["ignore", "pipe", "inherit"] });
+        let out = "";
+        p.stdout.on("data", (chunk) => (out += chunk.toString()));
+        p.on("error", reject);
+        p.on("close", () => resolve(out.trim()));
+      });
+    const outputs = await Promise.all(Array.from({ length: N }, runOne));
+    expect(new Set(outputs).size).toBe(N); // every id distinct — none silently overwritten
+    const s = await openStore(TEST_ROOT);
+    expect(s.list()).toHaveLength(N); // every task actually persisted, not clobbered
+  }, 30_000);
+
+  it("verify() on a NON-primary registered gate must not fall back to the sibling on failure (codex-review Critical exploit: register only the failure-oriented gate)", async () => {
+    const s = await openStore(TEST_ROOT);
+    // Only "verify-red" (the SECOND/non-primary gated edge from "verifying")
+    // is registered — "verify-green" (the primary edge, listed first in
+    // todoLifecycle.ts) is NOT. A naive "always fall back to the sibling on
+    // not-passed" implementation would read this false as license to reach
+    // the sibling edge, which happens to be "done".
+    s.registerGate({
+      name: "verify-red",
+      check: async () => ({ passed: false, note: "not confirmed red" }),
+    });
+    const t = await s.create({ summary: "x", kind: "code" });
+    await s.transition(t._id, "merged");
+    await s.transition(t._id, "shipped");
+    await s.transition(t._id, "verifying");
+    await expect(s.verify(t._id)).rejects.toThrow(/non-primary gate.*not passed/);
+    expect(s.get(t._id)?.state).toBe("verifying"); // unchanged — definitely not "done"
+  });
+
+  it("verify() on a non-primary gate DOES apply its own edge when it reports passed", async () => {
+    const s = await openStore(TEST_ROOT);
+    s.registerGate({
+      name: "verify-red",
+      check: async () => ({ passed: true, note: "confirmed red" }),
+    });
+    const t = await s.create({ summary: "x", kind: "code" });
+    await s.transition(t._id, "merged");
+    await s.transition(t._id, "shipped");
+    await s.transition(t._id, "verifying");
+    const result = await s.verify(t._id);
+    expect(result.state).toBe("verify-failed");
   });
 });

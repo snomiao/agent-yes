@@ -38,6 +38,7 @@
  * `registerGate` with its own check function (see `GateRegistration`).
  */
 
+import { mkdirSync, rmdirSync, statSync } from "fs";
 import path from "path";
 import { JsonlStore, type JsonlDoc } from "./JsonlStore.ts";
 import {
@@ -68,7 +69,8 @@ export interface TodoRecord extends JsonlDoc {
   description: string;
   /** A human name/handle, or a tracked agent's stable identifier. Opaque to this module. */
   owner?: string;
-  block?: TodoBlock;
+  /** `null` (not `undefined`) is the explicit "no block" value once a task has ever been blocked — JSON drops `undefined` keys entirely, so an update line with an omitted `block` would silently fail to clear a previous value on reload; `null` serializes and therefore actually overwrites (see `setBlock`). */
+  block?: TodoBlock | null;
   /** Task-id dependencies — separate from `block`: a task can both structurally depend on other tasks AND be separately blocked-by-human at the same time. */
   blockedBy: string[];
   tags: string[];
@@ -108,21 +110,66 @@ export class CycleError extends Error {}
 
 export class TodoStore {
   private jsonl: JsonlStore<Omit<TodoRecord, "_id">>;
+  private filePath: string;
   private gates = new Map<string, GateRegistration>();
-  private nextSeq = 1;
 
-  private constructor(jsonl: JsonlStore<Omit<TodoRecord, "_id">>) {
+  private constructor(jsonl: JsonlStore<Omit<TodoRecord, "_id">>, filePath: string) {
     this.jsonl = jsonl;
+    this.filePath = filePath;
   }
 
   static async open(projectRoot: string): Promise<TodoStore> {
     const filePath = path.join(projectRoot, ".agent-yes", "todos.jsonl");
     const jsonl = new JsonlStore<Omit<TodoRecord, "_id">>(filePath);
     await jsonl.load();
-    const store = new TodoStore(jsonl);
-    const existingIds = jsonl.getAll().map((d) => Number(String(d._id).replace(/^T/, "")) || 0);
-    store.nextSeq = (existingIds.length ? Math.max(...existingIds) : 0) + 1;
-    return store;
+    return new TodoStore(jsonl, filePath);
+  }
+
+  /**
+   * Exclusive, cross-process id-allocation lock (mkdir-based: `mkdirSync` is
+   * atomic, so exactly one caller anywhere wins the race). This exists
+   * because `_id` allocation ("max existing + 1") must happen atomically
+   * with the append that claims it — computing the id from a snapshot and
+   * appending afterward, even with `JsonlStore`'s own internal per-write
+   * lock, leaves a window where two processes compute the SAME next id from
+   * the same snapshot and then both append it; JsonlStore's "same `_id` →
+   * last line wins" merge would silently make one of those two tasks
+   * disappear (its create() line is superseded by the other's). This lock is
+   * a SEPARATE file from JsonlStore's own internal `<path>.lock` (used by
+   * `append`/`updateById`) — it only ever needs to be held around id
+   * selection, not every write, and deliberately does not touch JsonlStore's
+   * internals. A lock whose directory has existed longer than staleMs is
+   * stolen (a crashed process must not wedge every future create() call).
+   */
+  private async withIdLock<T>(fn: () => Promise<T>): Promise<T> {
+    const lockDir = `${this.filePath}.idlock`;
+    const staleMs = 10_000;
+    for (let attempt = 0; attempt < 200; attempt++) {
+      try {
+        mkdirSync(lockDir);
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+        try {
+          if (Date.now() - statSync(lockDir).mtimeMs > staleMs) {
+            rmdirSync(lockDir); // stale — steal and retry
+            continue;
+          }
+        } catch {
+          continue; // lock vanished between attempts — retry immediately
+        }
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+    }
+    try {
+      return await fn();
+    } finally {
+      try {
+        rmdirSync(lockDir);
+      } catch {
+        // already gone (e.g. stolen after we went stale) — nothing to release
+      }
+    }
   }
 
   registerGate(gate: GateRegistration): void {
@@ -155,8 +202,9 @@ export class TodoStore {
       if (filter.tag && !t.tags.some((x) => x.toLowerCase() === filter.tag!.toLowerCase()))
         return false;
       if (filter.blocked) {
-        const isBlocked =
-          t.state !== DONE_STATE && (t.block !== undefined || t.blockedBy.length > 0);
+        // `!= null` (not `!== undefined`): block is explicitly cleared to
+        // `null`, not left as `undefined`, so both must read as "no block"
+        const isBlocked = t.state !== DONE_STATE && (t.block != null || t.blockedBy.length > 0);
         if (!isBlocked) return false;
       }
       return true;
@@ -164,27 +212,37 @@ export class TodoStore {
   }
 
   async create(input: CreateInput): Promise<TodoRecord> {
-    const id = `T${this.nextSeq++}`;
-    const now = new Date().toISOString();
-    for (const dep of input.blockedBy ?? []) {
-      if (!this.get(dep)) throw new Error(`no such task: ${dep}`);
-    }
-    const doc: Omit<TodoRecord, "_id"> = {
-      kind: input.kind,
-      state: initialState(input.kind),
-      summary: input.summary,
-      description: input.description ?? "",
-      blockedBy: input.blockedBy ?? [],
-      tags: input.tags ?? [],
-      satisfiedGates: [],
-      verifyEvidence: [],
-      createdAt: now,
-      updatedAt: now,
-      ...(input.targetTier ? { targetTier: input.targetTier } : {}),
-      ...(input.owner ? { owner: input.owner } : {}),
-    };
-    await this.jsonl.append({ ...doc, _id: id });
-    return this.mustGet(id);
+    return this.withIdLock(async () => {
+      // Reload from disk WHILE holding the id lock: another process may have
+      // appended tasks since this instance last loaded, and the id must be
+      // computed from the freshest possible state or two concurrent create()
+      // calls could still agree on the same "next" id before either writes.
+      await this.jsonl.load();
+      const existingIds = this.jsonl
+        .getAll()
+        .map((d) => Number(String(d._id).replace(/^T/, "")) || 0);
+      const id = `T${(existingIds.length ? Math.max(...existingIds) : 0) + 1}`;
+      const now = new Date().toISOString();
+      for (const dep of input.blockedBy ?? []) {
+        if (!this.get(dep)) throw new Error(`no such task: ${dep}`);
+      }
+      const doc: Omit<TodoRecord, "_id"> = {
+        kind: input.kind,
+        state: initialState(input.kind),
+        summary: input.summary,
+        description: input.description ?? "",
+        blockedBy: input.blockedBy ?? [],
+        tags: input.tags ?? [],
+        satisfiedGates: [],
+        verifyEvidence: [],
+        createdAt: now,
+        updatedAt: now,
+        ...(input.targetTier ? { targetTier: input.targetTier } : {}),
+        ...(input.owner ? { owner: input.owner } : {}),
+      };
+      await this.jsonl.append({ ...doc, _id: id });
+      return this.mustGet(id);
+    });
   }
 
   /**
@@ -237,7 +295,12 @@ export class TodoStore {
     evidence?: { note?: string; link?: string },
   ): Promise<TodoRecord> {
     const rec = this.mustGet(id);
-    if (!validatorIdentity.trim()) {
+    // Trim ONCE, up front, and use this value everywhere below — comparing a
+    // trimmed owner against an untrimmed validatorIdentity (or vice versa)
+    // would let "worker" vs "worker " sneak past the self-certification
+    // check, and would also record untrimmed noise in the audit trail.
+    const validator = validatorIdentity.trim();
+    if (!validator) {
       throw new Error(
         `task ${id}: approve() requires a validatorIdentity (who is satisfying "${gateName}")`,
       );
@@ -255,9 +318,9 @@ export class TodoStore {
         `task ${id}: "${gateName}" is not a gate on any transition from its current state "${rec.state}"`,
       );
     }
-    if (rec.owner && rec.owner.toLowerCase() === validatorIdentity.toLowerCase()) {
+    if (rec.owner && rec.owner.trim().toLowerCase() === validator.toLowerCase()) {
       throw new Error(
-        `task ${id}: independent verification required — validator "${validatorIdentity}" is the same identity as owner "${rec.owner}"; the worker cannot certify their own work`,
+        `task ${id}: independent verification required — validator "${validator}" is the same identity as owner "${rec.owner}"; the worker cannot certify their own work`,
       );
     }
     const satisfied = new Set(rec.satisfiedGates);
@@ -265,7 +328,7 @@ export class TodoStore {
     const evidenceEntry: GateEvidence = {
       gate: gateName,
       passedAt: new Date().toISOString(),
-      validator: validatorIdentity,
+      validator,
       ...evidence,
     };
     await this.jsonl.updateById(id, {
@@ -279,11 +342,25 @@ export class TodoStore {
   /**
    * Run a registered gate's check function and, based on its result, apply
    * whichever transition out of the task's current state that gate governs.
-   * If the check reports NOT passed, and there is a sibling transition from
-   * the same state (e.g. the `code` kind's `verifying -> verify-failed`
-   * alongside `verifying -> done`), that sibling is taken instead — this is
-   * how a single automated check naturally produces the kind's real
-   * pass/fail states without hardcoding kind-specific names here.
+   *
+   * The PRIMARY edge from a state is, by this graph's declaration-order
+   * convention (see `todoLifecycle.ts` — e.g. `code`'s `verifying` state
+   * lists `verify-green` before `verify-red`), the first gated edge. Only a
+   * check registered against the primary edge may fall back to a sibling
+   * edge on a not-passed result (e.g. `verifying -> verify-failed` alongside
+   * `verifying -> done`) — this is how a single automated check naturally
+   * produces the kind's real pass/fail states without hardcoding
+   * kind-specific gate names here.
+   *
+   * A check registered against a NON-primary edge (e.g. a project that
+   * registers "verify-red" instead of "verify-green") must itself report
+   * `passed: true` to take its own edge; if it reports not-passed, this
+   * throws rather than falling back to the sibling. A secondary/failure-
+   * oriented gate reporting "not passed" only means "the specific bad thing
+   * this check looks for did not happen" — that is a strictly weaker claim
+   * than "verified good," and silently treating it as license to reach a
+   * possibly `done`-bound sibling would be exactly the kind of unverified
+   * done state this whole module exists to prevent.
    */
   async verify(id: string, gateName?: string): Promise<TodoRecord> {
     const rec = this.mustGet(id);
@@ -303,6 +380,7 @@ export class TodoStore {
       throw new Error(
         `task ${id}: gate "${targetEdge.gate}" is not registered — call registerGate() first`,
       );
+    const isPrimaryEdge = edges[0] === targetEdge;
     const result = await impl.check();
     if (result.passed) {
       // The gate's own name stands in for "validator" — a registered check is,
@@ -314,6 +392,11 @@ export class TodoStore {
         note: result.note,
         link: result.link,
       });
+    }
+    if (!isPrimaryEdge) {
+      throw new Error(
+        `task ${id}: gate "${targetEdge.gate}" (a non-primary gate on this state) reported not passed — this alone is not evidence of success, so no transition was applied. Register and satisfy the primary gate for this state instead.`,
+      );
     }
     const sibling = edges.find((e) => e !== targetEdge);
     if (!sibling) {
@@ -356,7 +439,11 @@ export class TodoStore {
   }
 
   setBlock(id: string, block: TodoBlock | null): Promise<TodoRecord> {
-    return this.rawUpdate(id, { block: block ?? undefined });
+    // `null`, never `undefined`: JSON.stringify drops `undefined` keys
+    // entirely, so an update line with an omitted `block` would fail to
+    // clear a previously-set value once merged on reload (see the field
+    // doc comment on TodoRecord.block).
+    return this.rawUpdate(id, { block });
   }
 
   async addDep(id: string, blockerId: string): Promise<TodoRecord> {
