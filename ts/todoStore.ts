@@ -583,18 +583,52 @@ export class TodoStore {
   }
 
   /**
+   * Clears a `waiting-on-agent` block ONLY if the FRESH record's block is
+   * still that exact type and `agentId` — used by automation
+   * (`todoAutomation.ts`'s `reconcile`), which decides from a snapshot that
+   * can be stale by the time this runs. Clearing unconditionally by `id`
+   * alone could erase a genuinely different, newer block (e.g. a manual
+   * `blocked-by-human` set after the decision was made) that happened to
+   * land in between (codex-review Important). Throws instead of silently
+   * no-op-ing so the caller can report the skip rather than claim success.
+   */
+  clearWaitingOnAgentBlock(id: string, expectedAgentId: string): Promise<TodoRecord> {
+    return this.rawUpdate(id, (fresh) => {
+      if (fresh.block?.type !== "waiting-on-agent" || fresh.block.agentId !== expectedAgentId) {
+        throw new Error(
+          `task ${id}: block changed since this was decided (expected waiting-on-agent for "${expectedAgentId}") — not clearing`,
+        );
+      }
+      return { block: null };
+    });
+  }
+
+  /**
    * Side-channel transition to `orphaned` (see `ORPHANED_STATE`'s doc comment
    * in `todoLifecycle.ts`) — deliberately NOT gated through `canTransition`,
    * since no kind's graph declares an edge into it: this is automation
    * (`todoAutomation.ts`) observing that the task's owner process is gone,
    * not a statement about the work reaching some declared state. Refuses to
    * orphan a task that is already `done` or already `orphaned` (finished
-   * work, or already-recorded, should never be re-flagged).
+   * work, or already-recorded, should never be re-flagged), OR whose FRESH
+   * owner no longer matches `expectedOwner` — the decision was made from a
+   * snapshot, and another process may have reassigned the task to a still-
+   * live owner in the meantime; orphaning it anyway would be acting on stale
+   * information (codex-review Important).
    */
-  markOrphaned(id: string, reassignCandidates: string[]): Promise<TodoRecord> {
+  markOrphaned(
+    id: string,
+    expectedOwner: string,
+    reassignCandidates: string[],
+  ): Promise<TodoRecord> {
     return this.rawUpdate(id, (fresh) => {
       if (fresh.state === DONE_STATE || fresh.state === ORPHANED_STATE) {
         throw new Error(`task ${id}: cannot mark orphaned — already "${fresh.state}"`);
+      }
+      if (fresh.owner !== expectedOwner) {
+        throw new Error(
+          `task ${id}: owner changed since this was decided (expected "${expectedOwner}", now "${fresh.owner ?? "(none)"}") — not orphaning`,
+        );
       }
       return { orphanedFrom: fresh.state, reassignCandidates, state: ORPHANED_STATE };
     });

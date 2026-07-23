@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
-import { rm, mkdir, writeFile, readFile } from "fs/promises";
+import { rm, mkdir, writeFile } from "fs/promises";
 import path from "path";
 import { runTodoSubcommand } from "./todoCli";
 
@@ -365,7 +365,7 @@ describe("ay todo reconcile", () => {
     expect(got.out).toContain("[orphaned]");
   });
 
-  it("does not re-fire notify-unblocked for the same episode on a second reconcile, thanks to the persisted automation-state file", async () => {
+  it("reports notify-unblocked on EVERY reconcile call while the task stays unblocked — there is no real delivery channel yet, so persisting 'already notified' would retire the signal with nobody ever receiving it (codex-review round-7 Important)", async () => {
     await seedGlobalPids([]);
     // `human` kind's decided->done edge is ungated, so it's the simplest way
     // to get a real blocker into `done` without a registered gate.
@@ -379,22 +379,6 @@ describe("ay todo reconcile", () => {
     expect(first.out).toContain("T2 is now unblocked");
 
     const second = await run("reconcile");
-    expect(second.out).not.toContain("T2 is now unblocked");
-    expect(second.out).toContain("nothing to reconcile");
-  });
-
-  it("persists automation state as JSON under .agent-yes/todo-automation-state.json", async () => {
-    await seedGlobalPids([]);
-    await run("new", "human-blocker", "--kind", "human"); // T1
-    await run("approve", "T1", "human-replied", "someone");
-    await run("transition", "T1", "decided");
-    await run("transition", "T1", "done");
-    await run("new", "waiter", "--kind", "code", "--owner", "worker", "--dep", "T1"); // T2
-    await run("reconcile");
-    const raw = await readFile(
-      path.join(TEST_ROOT, ".agent-yes", "todo-automation-state.json"),
-      "utf8",
-    );
-    expect(JSON.parse(raw).notifiedUnblocked).toEqual(["T2"]);
+    expect(second.out).toContain("T2 is now unblocked"); // still reported, not silently retired
   });
 });
