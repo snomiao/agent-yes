@@ -39,6 +39,40 @@ describe("unblockedTasks", () => {
   });
 });
 
+describe("unblockedTasks with a blocked-by-task block", () => {
+  it("treats block:{type:blocked-by-task,taskId} as an additional dependency, so it self-clears once the target reaches done, matching todoBlock.ts's documented promise (codex-review round-6 Important — this was previously inert)", () => {
+    const tasks = [
+      task({ _id: "T1", state: "done" }),
+      task({
+        _id: "T2",
+        state: "doing",
+        block: { type: "blocked-by-task", taskId: "T1" },
+      }),
+      task({
+        _id: "T3",
+        state: "doing",
+        block: { type: "blocked-by-task", taskId: "T4" },
+      }),
+      task({ _id: "T4", state: "doing" }), // T3's target not done yet -> still blocked
+    ];
+    expect(unblockedTasks(tasks).map((t) => t._id)).toEqual(["T2"]);
+  });
+
+  it("folds a blocked-by-task block in ALONGSIDE blockedBy — both must clear", () => {
+    const tasks = [
+      task({ _id: "T1", state: "done" }),
+      task({ _id: "T2", state: "doing" }), // not done
+      task({
+        _id: "T3",
+        state: "doing",
+        blockedBy: ["T2"],
+        block: { type: "blocked-by-task", taskId: "T1" },
+      }),
+    ];
+    expect(unblockedTasks(tasks)).toEqual([]); // T2 still open
+  });
+});
+
 describe("openBlockers", () => {
   it("reports only the not-yet-done blockers, including a missing id as open", () => {
     const byId = new Map([

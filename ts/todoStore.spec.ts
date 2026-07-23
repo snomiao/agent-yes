@@ -107,6 +107,30 @@ describe("TodoStore", () => {
     expect(done.verifyEvidence).toHaveLength(1);
   });
 
+  it("approve() cannot have its audit trail falsified via the evidence argument — gate/validator/passedAt are trusted, never caller-overridable (codex-review round-6 Important)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "doc", owner: "worker" });
+    await s.transition(t._id, "review");
+    // evidence is typed to only note/link, but an untyped JS caller (or a
+    // bug) could still pass extra fields at runtime; the store must not let
+    // them win regardless of what TypeScript alone would forbid, so this
+    // simulates that via an untyped value rather than fighting the compiler.
+    const forgedEvidence = {
+      note: "legit note",
+      link: "https://example/legit",
+      gate: "forged-gate",
+      validator: "forged-validator",
+      passedAt: "1999-01-01T00:00:00.000Z",
+    } as unknown as { note?: string; link?: string };
+    const approved = await s.approve(t._id, "human-approved", "reviewer", forgedEvidence);
+    const entry = approved.verifyEvidence[0]!;
+    expect(entry.gate).toBe("human-approved");
+    expect(entry.validator).toBe("reviewer");
+    expect(entry.passedAt).not.toBe("1999-01-01T00:00:00.000Z");
+    expect(entry.note).toBe("legit note");
+    expect(entry.link).toBe("https://example/legit");
+  });
+
   it("approve() with an empty owner allows any validator (nothing to compare against) but still requires one", async () => {
     const s = await openStore(TEST_ROOT);
     const t = await s.create({ summary: "x", kind: "doc" }); // no owner
@@ -182,6 +206,30 @@ describe("TodoStore", () => {
       note: "canary green",
       link: "https://ci/run/1",
     });
+  });
+
+  it("verify() passes the task record being checked to the registered gate's check(), so one shared gate name can distinguish between concurrently-verified tasks (codex-review round-6 Important)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const seen: string[] = [];
+    s.registerGate({
+      name: "verify-green",
+      check: async (record) => {
+        seen.push(record._id);
+        return { passed: true, note: `checked ${record.summary}` };
+      },
+    });
+    const a = await s.create({ summary: "task a", kind: "code", owner: "worker" });
+    const b = await s.create({ summary: "task b", kind: "code", owner: "worker" });
+    for (const t of [a, b]) {
+      await s.transition(t._id, "merged");
+      await s.transition(t._id, "shipped");
+      await s.transition(t._id, "verifying");
+    }
+    const verifiedA = await s.verify(a._id);
+    const verifiedB = await s.verify(b._id);
+    expect(verifiedA.verifyEvidence.at(-1)?.note).toBe("checked task a");
+    expect(verifiedB.verifyEvidence.at(-1)?.note).toBe("checked task b");
+    expect(seen).toEqual([a._id, b._id]);
   });
 
   it("verify() with a failing check takes the SIBLING edge (verify-failed), not done — the failure is a real distinct state, not silently dropped", async () => {
