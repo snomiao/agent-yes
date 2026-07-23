@@ -15,8 +15,23 @@ import { DONE_STATE } from "./todoLifecycle.ts";
 import type { TodoRecord } from "./todoStore.ts";
 
 /**
- * A task is "unblocked" when it is not itself finished, it declares
- * `blockedBy` dependencies, and every one of them has reached `done`.
+ * The full set of task ids `t` is waiting on: the structural `blockedBy`
+ * array PLUS, if `t.block` is a `blocked-by-task` shape, that block's own
+ * `taskId`. Without folding the latter in, a task blocked via
+ * `ay todo block --type blocked-by-task --task X` would never be detected
+ * as resolved once X reaches `done` — contradicting `todoBlock.ts`'s own
+ * documented promise that this block type "clears itself... pure data, no
+ * monitor needed" (codex-review Important: the two mechanisms didn't
+ * actually talk to each other, making `blocked-by-task` blocks inert).
+ */
+function declaredTaskDeps(t: TodoRecord): string[] {
+  return t.block?.type === "blocked-by-task" ? [...t.blockedBy, t.block.taskId] : t.blockedBy;
+}
+
+/**
+ * A task is "unblocked" when it is not itself finished, it declares task
+ * dependencies (via `blockedBy` and/or a `blocked-by-task` block), and
+ * every one of them has reached `done`.
  * Surfaced for a caller to act on — never auto-applied here (deciding to
  * resume a task is left to automation, a later milestone, or a human).
  */
@@ -24,14 +39,15 @@ export function unblockedTasks(tasks: TodoRecord[]): TodoRecord[] {
   const byId = new Map(tasks.map((t) => [t._id, t]));
   return tasks.filter((t) => {
     if (t.state === DONE_STATE) return false;
-    if (t.blockedBy.length === 0) return false;
-    return t.blockedBy.every((d) => byId.get(d)?.state === DONE_STATE);
+    const deps = declaredTaskDeps(t);
+    if (deps.length === 0) return false;
+    return deps.every((d) => byId.get(d)?.state === DONE_STATE);
   });
 }
 
 /** Blockers of `t` that have not reached `done` yet (a missing id is reported as-is, still "open"). */
 export function openBlockers(t: TodoRecord, byId: Map<string, TodoRecord>): string[] {
-  return t.blockedBy.filter((d) => byId.get(d)?.state !== DONE_STATE);
+  return declaredTaskDeps(t).filter((d) => byId.get(d)?.state !== DONE_STATE);
 }
 
 function nodeLine(t: TodoRecord): string {

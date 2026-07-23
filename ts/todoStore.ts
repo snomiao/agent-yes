@@ -103,7 +103,16 @@ export interface ListFilter {
 export interface GateRegistration {
   /** Opaque name supplied BY the consuming project — this module never inspects or hardcodes it. */
   name: string;
-  check: () => Promise<{ passed: boolean; note?: string; link?: string }>;
+  /**
+   * Receives the task record being verified (as of the moment `verify()`
+   * started checking it), so a project's gate implementation can act on the
+   * specific task — e.g. derive a commit/branch from its fields — instead of
+   * relying on external mutable state to figure out which task this call is
+   * for. Without the record, one registered gate name shared by concurrent
+   * verify() calls on DIFFERENT tasks would have no way to tell them apart
+   * (codex-review Important).
+   */
+  check: (record: TodoRecord) => Promise<{ passed: boolean; note?: string; link?: string }>;
 }
 
 export class CycleError extends Error {}
@@ -378,11 +387,18 @@ export class TodoStore {
       }
       const satisfied = new Set(rec.satisfiedGates);
       satisfied.add(gateName);
+      // Trusted fields (gate/passedAt/validator) are spread LAST so a
+      // caller-supplied `evidence` object cannot override them — only
+      // `note`/`link` are ever taken from it. Spreading `evidence` last (the
+      // previous order) let a caller pass e.g. `{ validator: "...", gate:
+      // "..." }` and silently falsify the audit trail (codex-review
+      // Important).
       const evidenceEntry: GateEvidence = {
+        note: evidence?.note,
+        link: evidence?.link,
         gate: gateName,
         passedAt: new Date().toISOString(),
         validator,
-        ...evidence,
       };
       await this.jsonl.updateById(id, {
         satisfiedGates: [...satisfied],
@@ -436,7 +452,7 @@ export class TodoStore {
       );
     const isPrimaryEdge = edges[0] === targetEdge;
     const stateAtCheckStart = rec.state;
-    const result = await impl.check(); // may be slow (a real CI/QA system) — the task's state can change while this runs
+    const result = await impl.check(rec); // may be slow (a real CI/QA system) — the task's state can change while this runs
     // `impl.check()` can take an arbitrarily long time (a real external
     // system), and another writer (a concurrent transition/verify/approve)
     // can change the task's state during that window. The precondition
