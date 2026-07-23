@@ -455,4 +455,30 @@ describe("TodoStore", () => {
     const result = await s.verify(t._id);
     expect(result.state).toBe("verify-failed");
   });
+
+  it("registeredGateNames() lists exactly the gates registered so far", async () => {
+    const s = await openStore(TEST_ROOT);
+    expect(s.registeredGateNames()).toEqual([]);
+    s.registerGate({ name: "verify-green", check: async () => ({ passed: true }) });
+    s.registerGate({ name: "human-approved", check: async () => ({ passed: true }) });
+    expect(s.registeredGateNames().sort()).toEqual(["human-approved", "verify-green"]);
+  });
+
+  it("markOrphaned() records where the task was and the reassignment candidates, refuses on an already-done or already-orphaned task", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "code", owner: "dead-agent" });
+    await s.transition(t._id, "merged");
+    const orphaned = await s.markOrphaned(t._id, ["idle-1", "idle-2"]);
+    expect(orphaned.state).toBe("orphaned");
+    expect(orphaned.orphanedFrom).toBe("merged");
+    expect(orphaned.reassignCandidates).toEqual(["idle-1", "idle-2"]);
+
+    await expect(s.markOrphaned(t._id, [])).rejects.toThrow(/already "orphaned"/);
+
+    const done = await s.create({ summary: "y", kind: "human", owner: "dead-agent" });
+    await s.approve(done._id, "human-replied", "taku");
+    await s.transition(done._id, "decided");
+    await s.transition(done._id, "done");
+    await expect(s.markOrphaned(done._id, [])).rejects.toThrow(/already "done"/);
+  });
 });

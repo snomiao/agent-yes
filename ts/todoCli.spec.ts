@@ -1,5 +1,5 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
-import { rm } from "fs/promises";
+import { rm, mkdir, writeFile, readFile } from "fs/promises";
 import path from "path";
 import { runTodoSubcommand } from "./todoCli";
 
@@ -299,5 +299,102 @@ describe("ay todo CLI", () => {
 
   it("an unknown verb fails with a clear, enumerated error", async () => {
     await expect(run("bogus")).rejects.toThrow(/unknown "ay todo" verb/);
+  });
+});
+
+describe("ay todo reconcile", () => {
+  const AGENT_HOME = isWindows
+    ? path.join(process.env.TEMP || "C:\\Temp", "todocli-agenthome-" + process.pid)
+    : "/tmp/todocli-agenthome-" + process.pid;
+  let prevHome: string | undefined;
+
+  beforeEach(async () => {
+    await rm(TEST_ROOT, { recursive: true, force: true });
+    await rm(AGENT_HOME, { recursive: true, force: true });
+    prevHome = process.env.AGENT_YES_HOME;
+    process.env.AGENT_YES_HOME = AGENT_HOME;
+    await mkdir(AGENT_HOME, { recursive: true });
+  });
+  afterEach(async () => {
+    await rm(TEST_ROOT, { recursive: true, force: true });
+    await rm(AGENT_HOME, { recursive: true, force: true });
+    if (prevHome === undefined) delete process.env.AGENT_YES_HOME;
+    else process.env.AGENT_YES_HOME = prevHome;
+  });
+
+  async function seedGlobalPids(records: object[]): Promise<void> {
+    await writeFile(
+      path.join(AGENT_HOME, "pids.jsonl"),
+      records.map((r) => JSON.stringify(r)).join("\n") + "\n",
+    );
+  }
+
+  it("orphans a task whose owner is a known, exited agent, and reports the reassignment candidates", async () => {
+    await seedGlobalPids([
+      {
+        pid: 111,
+        cli: "claude",
+        prompt: null,
+        cwd: "/x",
+        log_file: null,
+        status: "exited",
+        exit_code: 0,
+        exit_reason: null,
+        started_at: 0,
+        agent_id: "dead-agent",
+      },
+      {
+        pid: 222,
+        cli: "claude",
+        prompt: null,
+        cwd: "/x",
+        log_file: null,
+        status: "idle",
+        exit_code: null,
+        exit_reason: null,
+        started_at: 0,
+        agent_id: "idle-agent",
+      },
+    ]);
+    await run("new", "do the thing", "--kind", "code", "--owner", "dead-agent");
+    const result = await run("reconcile");
+    expect(result.code).toBe(0);
+    expect(result.out).toContain("orphaned T1");
+    expect(result.out).toContain("idle-agent");
+    const got = await run("get", "T1");
+    expect(got.out).toContain("[orphaned]");
+  });
+
+  it("does not re-fire notify-unblocked for the same episode on a second reconcile, thanks to the persisted automation-state file", async () => {
+    await seedGlobalPids([]);
+    // `human` kind's decided->done edge is ungated, so it's the simplest way
+    // to get a real blocker into `done` without a registered gate.
+    await run("new", "human-blocker", "--kind", "human"); // T1
+    await run("approve", "T1", "human-replied", "someone");
+    await run("transition", "T1", "decided");
+    await run("transition", "T1", "done");
+    await run("new", "waiter", "--kind", "code", "--owner", "worker", "--dep", "T1"); // T2
+
+    const first = await run("reconcile");
+    expect(first.out).toContain("T2 is now unblocked");
+
+    const second = await run("reconcile");
+    expect(second.out).not.toContain("T2 is now unblocked");
+    expect(second.out).toContain("nothing to reconcile");
+  });
+
+  it("persists automation state as JSON under .agent-yes/todo-automation-state.json", async () => {
+    await seedGlobalPids([]);
+    await run("new", "human-blocker", "--kind", "human"); // T1
+    await run("approve", "T1", "human-replied", "someone");
+    await run("transition", "T1", "decided");
+    await run("transition", "T1", "done");
+    await run("new", "waiter", "--kind", "code", "--owner", "worker", "--dep", "T1"); // T2
+    await run("reconcile");
+    const raw = await readFile(
+      path.join(TEST_ROOT, ".agent-yes", "todo-automation-state.json"),
+      "utf8",
+    );
+    expect(JSON.parse(raw).notifiedUnblocked).toEqual(["T2"]);
   });
 });

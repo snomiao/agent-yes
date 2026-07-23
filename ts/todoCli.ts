@@ -29,11 +29,20 @@
  * separates recognized flags from positional text regardless of order.
  */
 
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import path from "node:path";
 import yargs, { type Argv } from "yargs";
 import { openStore, CycleError, type TodoRecord } from "./todoStore.ts";
 import { isKnownKind, LIFECYCLES, type LifecycleKind } from "./todoLifecycle.ts";
 import { describeBlock, type TodoBlock } from "./todoBlock.ts";
 import { renderDigest, renderTree } from "./todoDigest.ts";
+import {
+  reconcileTodos,
+  EMPTY_AUTOMATION_STATE,
+  type AutomationState,
+  type LiveAgent,
+} from "./todoAutomation.ts";
+import { readGlobalPids } from "./globalPidIndex.ts";
 
 function fail(message: string): never {
   throw new Error(message);
@@ -348,9 +357,82 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
       }
       return 0;
     }
+    case "reconcile": {
+      const sub = commonOptions(yargs(args)).help(false).exitProcess(false);
+      const a = await sub.parseAsync();
+      const opts = commonOptsOf(a);
+      const store = await openStore(opts.root);
+      const statePath = path.join(opts.root, ".agent-yes", "todo-automation-state.json");
+      const priorState = loadAutomationState(statePath);
+      // `liveOnly: false`: a task's owner needs to be checked against a KNOWN
+      // agent whose latest record says `exited`, not just the currently-live
+      // set — an exited-but-recorded agent is exactly the orphan signal (see
+      // todoAutomation.ts's `deadOwnerAgent`).
+      const agents: LiveAgent[] = await readGlobalPids({ liveOnly: false });
+      const registeredGates = new Set(store.registeredGateNames());
+      const { actions, nextState } = reconcileTodos(
+        store.all(),
+        agents,
+        registeredGates,
+        priorState,
+      );
+
+      const applied: string[] = [];
+      for (const action of actions) {
+        switch (action.type) {
+          case "orphan":
+            await store.markOrphaned(action.taskId, action.candidates);
+            applied.push(
+              `orphaned ${action.taskId} (was ${action.from}) — reassign candidates: ${action.candidates.join(", ") || "(none idle)"}`,
+            );
+            break;
+          case "clear-waiting-on-agent":
+            await store.setBlock(action.taskId, null);
+            applied.push(
+              `cleared waiting-on-agent block on ${action.taskId} (agent ${action.agentId})`,
+            );
+            break;
+          case "auto-verify":
+            // Best-effort: a registered gate not yet reporting `passed` is not
+            // an error here — reconcile just tries again next tick.
+            await store.verify(action.taskId).catch(() => null);
+            applied.push(`auto-verified ${action.taskId}`);
+            break;
+          case "notify-unblocked":
+            // Delivery to the owning agent's own inbox is not wired yet (the
+            // notify system addresses parent<->child pid trees, a different
+            // relationship than an arbitrary task owner) — surfaced here so
+            // it is visible rather than silently dropped.
+            applied.push(`${action.taskId} is now unblocked (owner: ${action.owner})`);
+            break;
+        }
+      }
+      saveAutomationState(statePath, nextState);
+      emit(
+        opts,
+        { actions, applied },
+        applied.length ? applied.join("\n") : "(nothing to reconcile)",
+      );
+      return 0;
+    }
     default:
       fail(
-        `unknown "ay todo" verb: "${verb ?? ""}" (expected: new/ls/get/transition/approve/verify/block/unblock/dep/tree/digest)`,
+        `unknown "ay todo" verb: "${verb ?? ""}" (expected: new/ls/get/transition/approve/verify/block/unblock/dep/tree/digest/reconcile)`,
       );
   }
+}
+
+function loadAutomationState(statePath: string): AutomationState {
+  try {
+    if (existsSync(statePath))
+      return JSON.parse(readFileSync(statePath, "utf8")) as AutomationState;
+  } catch {
+    // corrupt state file — start fresh; worst case is one re-fired notify
+  }
+  return EMPTY_AUTOMATION_STATE;
+}
+
+function saveAutomationState(statePath: string, state: AutomationState): void {
+  mkdirSync(path.dirname(statePath), { recursive: true });
+  writeFileSync(statePath, JSON.stringify(state, null, 2) + "\n");
 }

@@ -44,6 +44,7 @@ import { JsonlStore, type JsonlDoc } from "./JsonlStore.ts";
 import {
   DONE_STATE,
   LIFECYCLES,
+  ORPHANED_STATE,
   canTransition,
   initialState,
   requiredGate,
@@ -78,6 +79,10 @@ export interface TodoRecord extends JsonlDoc {
   satisfiedGates: string[];
   /** Append-only history of every gate that has ever passed for this task (manual or registered), the append-only proof trail `verifyEvidence` from the ExecPlan. */
   verifyEvidence: GateEvidence[];
+  /** Set by `markOrphaned` (see `todoAutomation.ts`) — the state the task was in right before its owner agent vanished, so whoever picks it up knows where work left off. */
+  orphanedFrom?: string;
+  /** Up to a few currently-idle agent ids suggested as replacements, computed at the moment of orphaning — a snapshot, not live; re-run reconcile for a fresh list. */
+  reassignCandidates?: string[];
   createdAt: string;
   updatedAt: string;
 }
@@ -220,6 +225,11 @@ export class TodoStore {
 
   isRegisteredGate(name: string): boolean {
     return this.gates.has(name);
+  }
+
+  /** All currently-registered gate names — used by `todoAutomation.ts` to find tasks eligible for an automatic `verify()` without exposing the internal gate map. */
+  registeredGateNames(): string[] {
+    return [...this.gates.keys()];
   }
 
   all(): TodoRecord[] {
@@ -570,6 +580,24 @@ export class TodoStore {
     // it still goes through the write lock via `rawUpdate` for existence
     // validation to run against a fresh record.
     return this.rawUpdate(id, () => ({ block }));
+  }
+
+  /**
+   * Side-channel transition to `orphaned` (see `ORPHANED_STATE`'s doc comment
+   * in `todoLifecycle.ts`) — deliberately NOT gated through `canTransition`,
+   * since no kind's graph declares an edge into it: this is automation
+   * (`todoAutomation.ts`) observing that the task's owner process is gone,
+   * not a statement about the work reaching some declared state. Refuses to
+   * orphan a task that is already `done` or already `orphaned` (finished
+   * work, or already-recorded, should never be re-flagged).
+   */
+  markOrphaned(id: string, reassignCandidates: string[]): Promise<TodoRecord> {
+    return this.rawUpdate(id, (fresh) => {
+      if (fresh.state === DONE_STATE || fresh.state === ORPHANED_STATE) {
+        throw new Error(`task ${id}: cannot mark orphaned — already "${fresh.state}"`);
+      }
+      return { orphanedFrom: fresh.state, reassignCandidates, state: ORPHANED_STATE };
+    });
   }
 
   async addDep(id: string, blockerId: string): Promise<TodoRecord> {
