@@ -166,18 +166,14 @@ export async function answerAsk(
       `task ${taskId} is not currently blocked-by-human (already answered, or blocked on something else)`,
     );
   }
-  if (answer.expectedBlockRev !== undefined && answer.expectedBlockRev !== (rec.blockRev ?? 0)) {
-    // The caller's view of this ask is stale — the CURRENT block may even
-    // have byte-for-byte identical text to what the caller last saw (e.g.
-    // the same question asked again), so a content comparison alone
-    // couldn't catch this. Refusing here, rather than answering whatever
-    // is currently blocking, is what prevents an answer meant for an
-    // earlier ask from being silently applied to a different, later one
-    // that happens to share a taskId (codex-review round-17 Important).
-    throw new Error(
-      `task ${taskId}: this ask has changed since it was loaded (expected blockRev ${answer.expectedBlockRev}, current ${rec.blockRev ?? 0}) — refresh and try again`,
-    );
-  }
+  // `expectedBlockRev`, if the caller supplied one, is enforced by the
+  // single atomic `answerHumanBlock` write below (compared against the
+  // FRESH record at write time, not this snapshot) — see its own doc
+  // comment. Not re-checked here against `rec.blockRev` too: that would be
+  // the exact same comparison against a snapshot that's already stale by
+  // the time this function does anything else, duplicating logic without
+  // closing any additional gap (codex-review round-17/18).
+  const expectedBlockRev = answer.expectedBlockRev ?? rec.blockRev ?? 0;
   const block = rec.block;
   // actionLink checked FIRST, matching listAsksForProject's own shape
   // precedence exactly — if a block somehow has both `options` and
@@ -229,63 +225,31 @@ export async function answerAsk(
     answerText = "acknowledged";
   }
 
-  // Satisfy the gate/transition (human/decision kinds only) BEFORE clearing
-  // the block: if either call throws (e.g. a concurrent write raced this
-  // one), the task is left correctly STILL blocked, not silently unblocked
-  // with nothing having advanced — the previous order cleared the block
-  // first, which could strand a task in an inconsistent, no-longer-visible
-  // state on a mid-sequence failure (codex-review Important).
-  //
-  // `approve()` and `transition()` are two separately-persisted writes, not
-  // one atomic operation the underlying store supports — if `approve()`
-  // succeeds but `transition()` then throws (e.g. the state changed
-  // concurrently), a naive retry of this whole function would call
-  // `approve()` again and append a SECOND, duplicate evidence entry for the
-  // same gate (codex-review Important). Skipping `approve()` when the gate
-  // is already in the FRESH record's `satisfiedGates` makes a retry after
-  // exactly that failure idempotent — it lands on `transition()` directly
-  // instead of re-approving — without needing a full transactional rewrite
-  // of the store.
-  //
-  // But a retry is only safe to treat as "the same answer resuming" if it
-  // ACTUALLY is the same answer: if a first attempt persisted evidence for
-  // "a" (then failed before transitioning) and a DIFFERENT request answers
-  // "b", silently skipping approve() and transitioning would durably keep
-  // "a" as the recorded answer while the human who just successfully
-  // submitted "b" has no idea their answer wasn't what got recorded
-  // (codex-review Important). Require the existing evidence to match the
-  // current answer before treating this as a resumable retry; otherwise
-  // this is a genuine conflict (two different answers for one ask), which
-  // this function refuses rather than silently picking one.
-  if (rec.kind === "human" || rec.kind === "decision") {
-    const primary = LIFECYCLES[rec.kind].transitions.find((tr) => tr.from === rec.state && tr.gate);
-    if (primary?.gate) {
-      if (rec.satisfiedGates.includes(primary.gate)) {
-        const existing = [...rec.verifyEvidence].reverse().find((e) => e.gate === primary.gate);
-        if (existing?.note !== answerText) {
-          throw new Error(
-            `task ${taskId}: gate "${primary.gate}" was already satisfied with a DIFFERENT answer ("${existing?.note}") than this request ("${answerText}") — refusing to silently overwrite; resolve the conflict manually`,
+  // Gate/transition (human/decision kinds only) and clearing the block are
+  // applied via ONE atomic store write (`answerHumanBlock`), not as
+  // separately-persisted approve()+transition()+clearBlockIfMatches() calls
+  // — an earlier version composed those three, which left a real gap: if
+  // approve()/transition() durably succeeded but a THEN-concurrent block
+  // replacement made the final clear fail, the task was left already
+  // transitioned/evidenced for the OLD block while `block` still held a
+  // DIFFERENT, newer ask that was never gated at all (codex-review round-18
+  // Important). With one atomic write, either everything below applies
+  // together or nothing does — there is no partial-completion state, and so
+  // no separate retry-idempotency/conflict-detection logic is needed either:
+  // a genuine retry after a full success simply sees `rec.block` already
+  // `null` and is rejected by the "not currently blocked-by-human" check at
+  // the top of this function, which is itself an accurate, clear outcome.
+  const gate =
+    rec.kind === "human" || rec.kind === "decision"
+      ? (() => {
+          const primary = LIFECYCLES[rec.kind].transitions.find(
+            (tr) => tr.from === rec.state && tr.gate,
           );
-        }
-      } else {
-        await store.approve(taskId, primary.gate, block.who, { note: answerText });
-      }
-      await store.transition(taskId, primary.to);
-    }
-  }
-  // Clear the SPECIFIC block instance this function decided to answer —
-  // not unconditionally by id, and not merely by matching content. `rec`
-  // (captured at the very top, before any of the writes above) could have
-  // been REPLACED by another process in the meantime with either a
-  // genuinely different block (a follow-up question, a re-block on
-  // something else entirely) OR one that happens to be byte-for-byte
-  // IDENTICAL in content (the exact same question asked again) — an
-  // unconditional clear, or a content-only comparison, would silently erase
-  // that other, newer block instance too, leaving the task looking
-  // unblocked when a real, later block exists (codex-review Important,
-  // sharpened round-17 to close the identical-content ABA case).
-  // `blockRev` was captured from THIS specific read, before any of this
-  // function's own writes could have bumped it.
-  const record = await store.clearBlockIfMatches(taskId, rec.blockRev ?? 0);
+          return primary?.gate
+            ? { name: primary.gate, toState: primary.to, validator: block.who, note: answerText }
+            : null;
+        })()
+      : null;
+  const record = await store.answerHumanBlock(taskId, expectedBlockRev, gate);
   return { record, answerText };
 }

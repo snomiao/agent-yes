@@ -45,6 +45,7 @@ import { describeBlock, type TodoBlock } from "./todoBlock.ts";
 import { renderDigest, renderTree, buildTreeJSON, unblockedTasks } from "./todoDigest.ts";
 import { reconcileTodos, type LiveAgent } from "./todoAutomation.ts";
 import { readGlobalPids } from "./globalPidIndex.ts";
+import { removeControlCharacters } from "./removeControlCharacters.ts";
 
 function fail(message: string): never {
   throw new Error(message);
@@ -365,8 +366,12 @@ const blockCmd: CommandModule<
             // ask.html's own render-time check uses (codex-review nitpick: a
             // regex prefix match alone would still store a malformed string
             // like "https:/notreallyaurl" that happens to match the prefix).
+            // The rejected input is echoed for the operator's benefit, but
+            // never verbatim — an invalid value can still contain control
+            // characters/newlines, and this string reaches a terminal
+            // (codex-review round-18 nitpick).
             fail(
-              `--action-link must be a valid http:// or https:// URL (got "${argv["action-link"]}")`,
+              `--action-link must be a valid http:// or https:// URL (got "${removeControlCharacters(argv["action-link"]).replace(/[\r\n]+/g, " ")}")`,
             );
           }
           normalizedActionLink = normalized;

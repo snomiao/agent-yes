@@ -2116,8 +2116,14 @@ export async function cmdServe(rest: string[]): Promise<number> {
       if (acknowledged !== undefined && typeof acknowledged !== "boolean") {
         return new Response("acknowledged must be a boolean", { status: 400 });
       }
-      if (expectedBlockRev !== undefined && typeof expectedBlockRev !== "number") {
-        return new Response("expectedBlockRev must be a number", { status: 400 });
+      if (expectedBlockRev !== undefined && !Number.isSafeInteger(expectedBlockRev)) {
+        // A boundary route must never forward NaN/Infinity/fractional values
+        // into the store's blockRev comparison — those can never legitimately
+        // equal a real blockRev (always a safe, non-negative integer), so
+        // letting them through just produces a confusing rejection deep
+        // inside answerAsk() instead of a clean 400 here (codex-review
+        // Important).
+        return new Response("expectedBlockRev must be a safe integer", { status: 400 });
       }
       // Scoped to the SAME live-agent-derived project set GET/api/asks
       // aggregates over — not merely "a store happens to exist here"

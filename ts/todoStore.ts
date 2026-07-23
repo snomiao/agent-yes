@@ -656,6 +656,82 @@ export class TodoStore {
   }
 
   /**
+   * Atomically clears a `blocked-by-human` block AND, if `gate` is given,
+   * appends its evidence and advances the transition it names — all inside
+   * ONE `rawUpdate` write (one lock acquisition, one reload, one write).
+   *
+   * This exists specifically so `askApi.ts`'s `answerAsk()` never composes
+   * "verify blockRev, approve() a gate, transition(), clearBlockIfMatches()"
+   * as separate locked writes again. That composition (this method's
+   * predecessor) had a real gap: `approve()`/`transition()` could durably
+   * succeed — evidence appended, state advanced — and ONLY THEN could the
+   * final `clearBlockIfMatches()` fail because another process replaced the
+   * block in between. The task was left in a state no caller intended:
+   * already transitioned/evidenced for the OLD block, while `block` still
+   * held a DIFFERENT, newer `blocked-by-human` ask that was never gated at
+   * all (codex-review round-18 Important — the exact race this module's
+   * whole `blockRev` mechanism exists to close, just one step further out
+   * than `clearBlockIfMatches` alone could reach). Folding everything into
+   * one `rawUpdate` cycle makes the two outcomes (nothing changed / gate +
+   * transition + clear all changed together) the only two possible ones —
+   * there is no window in which one succeeded and the other didn't.
+   *
+   * `blockRev` re-validates `canTransition` against the FRESH state (not a
+   * value captured before this call), matching `transition()`'s own
+   * concurrent-state-drift defense — a state change unrelated to `block`
+   * (and so invisible to the `blockRev` check alone) must still be caught.
+   *
+   * Independent verification (this module's single most important
+   * invariant — see the file's own header comment) is re-checked here
+   * against the FRESH owner, exactly as `approve()` checks it: `gate`, when
+   * given, is never applied if its `validator` is the task's own owner.
+   * This method does not call `approve()` (it is not a separate write), so
+   * skipping this check here would silently let a human answer their own
+   * gated ask with no independent-verification enforcement at all.
+   */
+  answerHumanBlock(
+    id: string,
+    expectedBlockRev: number,
+    gate: { name: string; toState: string; validator: string; note: string } | null,
+  ): Promise<TodoRecord> {
+    return this.rawUpdate(id, (fresh) => {
+      if ((fresh.blockRev ?? 0) !== expectedBlockRev) {
+        throw new Error(
+          `task ${id}: this ask has changed since it was loaded (expected blockRev ${expectedBlockRev}, current ${fresh.blockRev ?? 0}) — refresh and try again`,
+        );
+      }
+      const patch: Partial<Omit<TodoRecord, "_id">> = {
+        block: null,
+        blockRev: (fresh.blockRev ?? 0) + 1,
+      };
+      if (gate) {
+        if (
+          fresh.owner &&
+          fresh.owner.trim().toLowerCase() === gate.validator.trim().toLowerCase()
+        ) {
+          throw new Error(
+            `task ${id}: independent verification required — validator "${gate.validator}" is the same identity as owner "${fresh.owner}"; the worker cannot certify their own work`,
+          );
+        }
+        if (!canTransition(fresh.kind, fresh.state, gate.toState)) {
+          throw new Error(
+            `task ${id}: no transition ${fresh.state} -> ${gate.toState} for kind "${fresh.kind}" (state changed concurrently) — not clearing`,
+          );
+        }
+        const evidenceEntry: GateEvidence = {
+          gate: gate.name,
+          passedAt: new Date().toISOString(),
+          validator: gate.validator,
+          note: gate.note,
+        };
+        patch.verifyEvidence = [...fresh.verifyEvidence, evidenceEntry];
+        patch.state = gate.toState;
+      }
+      return patch;
+    });
+  }
+
+  /**
    * Side-channel transition to `orphaned` (see `ORPHANED_STATE`'s doc comment
    * in `todoLifecycle.ts`) — deliberately NOT gated through `canTransition`,
    * since no kind's graph declares an edge into it: this is automation

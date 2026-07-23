@@ -182,27 +182,30 @@ describe("askApi", () => {
     } as const;
 
     // Deterministically inject a concurrent block replacement between
-    // answerAsk's gate/transition step and its final clear — patching
-    // TodoStore.prototype.transition (which every openStore() instance,
-    // including the one answerAsk creates internally, shares) so a SECOND,
-    // independent store instance replaces the block right after the first
-    // transition() call resolves, simulating a genuinely different process
+    // answerAsk's initial read (which captures the blockRev it expects to
+    // still be current) and its atomic answerHumanBlock() write — patching
+    // TodoStore.prototype.answerHumanBlock (which every openStore()
+    // instance, including the one answerAsk creates internally, shares) so
+    // a SECOND, independent store instance replaces the block right BEFORE
+    // the real atomic write runs, simulating a genuinely different process
     // racing this exact window. A real race would be flaky to reproduce
     // reliably; this reproduces it deterministically every run.
-    const originalTransition = TodoStore.prototype.transition;
-    const spy = vi.spyOn(TodoStore.prototype, "transition").mockImplementation(async function (
-      this: TodoStore,
-      id: string,
-      toState: string,
-    ) {
-      const result = await originalTransition.call(this, id, toState);
-      const other = await openStore(ROOT_A);
-      await other.setBlock(id, newerBlock);
-      return result;
-    });
+    const originalAnswerHumanBlock = TodoStore.prototype.answerHumanBlock;
+    const spy = vi
+      .spyOn(TodoStore.prototype, "answerHumanBlock")
+      .mockImplementation(async function (
+        this: TodoStore,
+        id: string,
+        expectedBlockRev: number,
+        gate: Parameters<TodoStore["answerHumanBlock"]>[2],
+      ) {
+        const other = await openStore(ROOT_A);
+        await other.setBlock(id, newerBlock);
+        return originalAnswerHumanBlock.call(this, id, expectedBlockRev, gate);
+      });
     try {
       await expect(answerAsk(ROOT_A, t._id, { acknowledged: true })).rejects.toThrow(
-        /block changed since this was decided/,
+        /this ask has changed since it was loaded/,
       );
     } finally {
       spy.mockRestore();
@@ -213,37 +216,22 @@ describe("askApi", () => {
     expect(fresh.block).toEqual(newerBlock);
   });
 
-  it("answerAsk does not re-approve (and duplicate evidence for) a gate the FRESH record already shows satisfied — the retry-after-a-transition-failure case, since approve()+transition() are two separate persisted writes, not one atomic operation (codex-review round-10 Important)", async () => {
+  it("a naive retry after answerAsk already fully succeeded is cleanly refused — it never duplicates evidence or re-transitions, because the gate/transition/clear are now ONE atomic write with no partial-completion state for a retry to resume from (codex-review round-18: replaces the old approve()+transition()+clearBlockIfMatches composition's retry-idempotency workaround, which is no longer needed)", async () => {
     const s = await openStore(ROOT_A);
     const t = await s.create({ summary: "pick a channel", kind: "decision" });
     await s.setBlock(t._id, { type: "blocked-by-human", who: "taku", options: ["a", "b"] });
-    // Simulate exactly the state a first answerAsk() attempt would leave
-    // behind if approve() succeeded but transition() then failed: the gate
-    // is already satisfied, the task hasn't advanced yet, still blocked.
-    await s.approve(t._id, "human-decided", "taku", { note: "a" });
-    const { record: answered } = await answerAsk(ROOT_A, t._id, { choice: "a" });
-    expect(answered.state).toBe("decided");
-    // Exactly ONE evidence entry — a naive retry would have called
-    // approve() again and appended a second one for the same gate.
-    expect(answered.verifyEvidence).toHaveLength(1);
-    expect(answered.verifyEvidence[0]).toMatchObject({ gate: "human-decided", note: "a" });
-  });
-
-  it("answerAsk refuses (as a conflict, not a silent overwrite) when the gate is already satisfied with a DIFFERENT answer than this request — two different answers for one ask must never silently pick one (codex-review round-12 Important)", async () => {
-    const s = await openStore(ROOT_A);
-    const t = await s.create({ summary: "pick a channel", kind: "decision" });
-    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku", options: ["a", "b"] });
-    // A prior attempt persisted "a" then (hypothetically) failed before
-    // transitioning — a DIFFERENT request now tries to answer "b".
-    await s.approve(t._id, "human-decided", "taku", { note: "a" });
-    await expect(answerAsk(ROOT_A, t._id, { choice: "b" })).rejects.toThrow(
-      /already satisfied with a DIFFERENT answer/,
+    const { record: first } = await answerAsk(ROOT_A, t._id, { choice: "a" });
+    expect(first.state).toBe("decided");
+    expect(first.verifyEvidence).toHaveLength(1);
+    // A retry (e.g. the client never saw the first response and resubmits)
+    // sees the block already cleared — a clear, accurate rejection, not a
+    // silent no-op and not a duplicate evidence entry.
+    await expect(answerAsk(ROOT_A, t._id, { choice: "a" })).rejects.toThrow(
+      /not currently blocked-by-human/,
     );
-    // Refused, not silently resolved either way — still blocked, unchanged.
-    const stillBlocked = (await openStore(ROOT_A)).get(t._id)!;
-    expect(stillBlocked.state).toBe("deciding");
-    expect(stillBlocked.block).not.toBeNull();
-    expect(stillBlocked.verifyEvidence).toHaveLength(1); // "b" was never recorded
+    const stillDone = (await openStore(ROOT_A)).get(t._id)!;
+    expect(stillDone.verifyEvidence).toHaveLength(1); // never duplicated
+    expect(stillDone.state).toBe("decided"); // never re-transitioned
   });
 
   it("answerAsk IGNORES an unvalidated `choice` sent alongside `acknowledged: true` on a non-choice-shape ask — an arbitrary attacker-supplied string must never become the recorded/relayed answer just because it rode along with a valid acknowledgement (codex-review round-14 Important)", async () => {
