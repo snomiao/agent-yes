@@ -336,6 +336,18 @@ describe("subcommands.matchKeyword", () => {
     expect(matchKeyword(r, "parser")).toBe(false);
   });
 
+  it("treats '.' / './' as the current working directory (exact cwd match)", async () => {
+    const { matchKeyword } = await loadModule();
+    const here = { ...baseRecord, cwd: process.cwd() };
+    const elsewhere = { ...baseRecord, cwd: "/some/other/place" };
+    // sibling agent in this exact cwd resolves
+    expect(matchKeyword(here, ".")).toBe(true);
+    expect(matchKeyword(here, "./")).toBe(true);
+    // an agent in a different cwd (even a subdir/parent) does not
+    expect(matchKeyword(elsewhere, ".")).toBe(false);
+    expect(matchKeyword({ ...baseRecord, cwd: process.cwd() + "/sub" }, ".")).toBe(false);
+  });
+
   it("matches by agent_id prefix", async () => {
     const { matchKeyword } = await loadModule();
     const r = { ...baseRecord, agent_id: "a1b2c3d4e5f6" };
