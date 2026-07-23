@@ -2025,7 +2025,7 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
   }
 
   const buf = await readFile(logPath);
-  const size = await readPtysize(record.pid);
+  const size = await readAgentPtysize(record);
   const notes = await readNotes();
   const noteLabel = notes.get(record.pid);
   const header = noteLabel
@@ -2311,6 +2311,24 @@ export async function readPtysize(pid: number): Promise<{ cols: number; rows: nu
 }
 
 /**
+ * An agent's real PTY geometry for log rendering, robust to a writer/reader pid
+ * mismatch. The Rust runtime keys the ptysize sidecar by the PTY child pid
+ * (= record.pid), so that lookup hits directly. But the TS runtime writes it
+ * under its wrapper's process.pid (= record.wrapper_pid; see writeCurrentPtysize
+ * in ts/index.ts), NOT the child — so a plain readPtysize(record.pid) misses for
+ * TS-launched agents and the log reflows at the default 200-col width. Fall back
+ * to wrapper_pid to cover that path. Returns null when neither has a sidecar.
+ */
+export async function readAgentPtysize(
+  record: GlobalPidRecord,
+): Promise<{ cols: number; rows: number } | null> {
+  const own = await readPtysize(record.pid);
+  if (own) return own;
+  if (record.wrapper_pid) return readPtysize(record.wrapper_pid);
+  return null;
+}
+
+/**
  * Feed the raw PTY bytes through @xterm/headless and emit plain text.
  * Same approach as koho's renderTerminalBuffer + agent-yes's XtermProxy.
  */
@@ -2530,7 +2548,11 @@ function cliDefaults(): Promise<Record<string, AgentCliConfig>> {
  * null on any read/render error or an empty log. Shared by the needs_input and
  * stuck classifiers so they don't each re-implement the tail read.
  */
-export async function renderLogTailLines(logPath: string, n = 40): Promise<string[] | null> {
+export async function renderLogTailLines(
+  logPath: string,
+  n = 40,
+  geom?: RenderGeom,
+): Promise<string[] | null> {
   const TAIL_BYTES = 32 * 1024;
   let buf: Uint8Array;
   try {
@@ -2553,7 +2575,13 @@ export async function renderLogTailLines(logPath: string, n = 40): Promise<strin
     return null;
   }
   try {
-    return (await renderRawLog(buf, { mode: "tail", n })).split("\n");
+    // Render at the agent's REAL PTY geometry when provided — the raw log is full
+    // of absolute cursor-positioning, so replaying at the wrong width reflows the
+    // TUI into garbage (chars land in the wrong columns). Callers with a pid pass
+    // readPtysize(pid); without it we fall back to the default width.
+    return (await renderRawLog(buf, { mode: "tail", n, cols: geom?.cols, rows: geom?.rows })).split(
+      "\n",
+    );
   } catch {
     return null;
   }
@@ -3205,7 +3233,8 @@ async function cmdSend(rest: string[]): Promise<number> {
   // Rendered fresh from the log after the settle/confirm wait above, so it
   // reflects the post-submit state. Best-effort: a missing/empty log just skips.
   if (record.log_file) {
-    const tail = (await renderLogTailLines(record.log_file, 10)) ?? [];
+    const geom = (await readAgentPtysize(record)) ?? undefined;
+    const tail = (await renderLogTailLines(record.log_file, 10, geom)) ?? [];
     let end = tail.length;
     while (end > 0 && tail[end - 1]!.trim() === "") end--; // drop trailing blanks
     const trimmed = tail.slice(0, end);
