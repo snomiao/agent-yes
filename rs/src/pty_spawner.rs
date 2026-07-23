@@ -366,6 +366,30 @@ pub async fn spawn_agent(
     // Spawn the child
     let child = slave.spawn_command(cmd)?;
 
+    // Scheduler policy: deprioritize the agent CLI so it yields CPU to the
+    // interactive `ay serve` daemon (nice 0) under host load. RAISING serve's
+    // priority (negative nice) needs CAP_SYS_NICE — dropped in many containers —
+    // so we LOWER the agent's instead (always permitted for your own process).
+    // The child's threads/descendants inherit it. Configurable via
+    // AGENT_YES_AGENT_NICE (0..19, default 5, 0 = off). Mirrors ts/agentNice.ts.
+    //
+    // Unix only: on Windows the TS runtime's os.setPriority (which maps nice to a
+    // BELOW_NORMAL/IDLE priority class) covers agents launched via that runtime;
+    // a Windows-Rust SetPriorityClass branch is a follow-up (needs a Windows build
+    // to verify the FFI, which can't be done from this Linux toolchain).
+    #[cfg(unix)]
+    if let Some(child_pid) = child.process_id() {
+        let nice = std::env::var("AGENT_YES_AGENT_NICE")
+            .ok()
+            .and_then(|v| v.trim().parse::<i32>().ok())
+            .unwrap_or(5)
+            .clamp(0, 19);
+        if nice > 0 {
+            // Best-effort; ignore failures (a scheduling hint must never break a spawn).
+            unsafe { libc::setpriority(libc::PRIO_PROCESS, child_pid, nice) };
+        }
+    }
+
     // CRITICAL: Drop the slave after spawning!
     // On Unix, keeping the slave open in the parent can cause writes to fail
     // in the child because the parent still holds references to the slave PTY.
