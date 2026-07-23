@@ -126,7 +126,14 @@
     <script type="module">
       const listEl = document.getElementById("list");
       const KEY_SEP = "::";
-      let inflight = new Set();
+      // key -> the actual DOM node for a card currently mid-answer. A poll
+      // landing while a POST is in flight must never destroy this node: an
+      // earlier version rebuilt the WHOLE list from the freshly-fetched
+      // (filtered) asks every 5s, which detached the in-flight card (and its
+      // `.result` div) from the document — if the POST then failed, the
+      // error was written into a node nobody could see, and the user saw an
+      // empty list with no explanation (codex-review Important).
+      const inflightNodes = new Map();
 
       function keyOf(a) {
         return a.projectRoot + KEY_SEP + a.taskId;
@@ -187,6 +194,12 @@
         }
       }
 
+      function elementFromHtml(html) {
+        const tpl = document.createElement("template");
+        tpl.innerHTML = html.trim();
+        return tpl.content.firstElementChild;
+      }
+
       async function refresh() {
         let asks;
         try {
@@ -194,17 +207,26 @@
           if (!res.ok) throw new Error(await res.text());
           asks = await res.json();
         } catch (e) {
-          listEl.innerHTML = `<div class="empty">failed to load: ${escapeHtml(String(e))}</div>`;
+          // Never wipe the list on a transient fetch failure while a card is
+          // still mid-answer — only show the error page when there is
+          // nothing in flight to preserve.
+          if (inflightNodes.size === 0) {
+            listEl.innerHTML = `<div class="empty">failed to load: ${escapeHtml(String(e))}</div>`;
+          }
           return;
         }
-        // Don't blow away a card whose answer is still in flight (avoids a
-        // double-submit if the poll lands mid-request).
-        asks = asks.filter((a) => !inflight.has(keyOf(a)));
-        if (asks.length === 0) {
+        // Cards currently mid-answer keep their EXISTING DOM node untouched
+        // (so a result written to it later is still visible); everything
+        // else is rebuilt fresh from the server response.
+        const fresh = asks.filter((a) => !inflightNodes.has(keyOf(a)));
+        if (fresh.length === 0 && inflightNodes.size === 0) {
           listEl.innerHTML = `<div class="empty">nothing waiting on you right now</div>`;
           return;
         }
-        listEl.innerHTML = asks.map(cardHtml).join("");
+        const frag = document.createDocumentFragment();
+        for (const node of inflightNodes.values()) frag.appendChild(node);
+        for (const ask of fresh) frag.appendChild(elementFromHtml(cardHtml(ask)));
+        listEl.replaceChildren(frag);
       }
 
       listEl.addEventListener("click", async (e) => {
@@ -217,7 +239,11 @@
         const card = listEl.querySelector(`.card[data-key="${btn.getAttribute("data-key")}"]`);
         const resultEl = card ? card.querySelector(".result") : null;
         if (card) card.querySelectorAll("button").forEach((b) => (b.disabled = true));
-        inflight.add(key);
+        // Store the NODE itself (not just the key) so refresh()'s poll can
+        // preserve this exact element across a rebuild — losing it would
+        // strand any later result/error write on a detached node no one
+        // can see (codex-review Important).
+        if (card) inflightNodes.set(key, card);
         try {
           const body = { projectRoot, taskId };
           if (btn.dataset.choice !== undefined)
@@ -234,7 +260,7 @@
           if (resultEl) resultEl.innerHTML = `<div class="err">${escapeHtml(String(err))}</div>`;
           if (card) card.querySelectorAll("button").forEach((b) => (b.disabled = false));
         } finally {
-          inflight.delete(key);
+          inflightNodes.delete(key);
         }
       });
 
