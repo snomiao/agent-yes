@@ -45,9 +45,31 @@ import { describeBlock, type TodoBlock } from "./todoBlock.ts";
 import { renderDigest, renderTree, buildTreeJSON, unblockedTasks } from "./todoDigest.ts";
 import { reconcileTodos, type LiveAgent } from "./todoAutomation.ts";
 import { readGlobalPids } from "./globalPidIndex.ts";
+import { removeControlCharacters } from "./removeControlCharacters.ts";
 
 function fail(message: string): never {
   throw new Error(message);
+}
+
+/**
+ * Same check ask.html's own render-time guard uses — a real URL parse, not
+ * just a scheme-prefix regex, which could still let a malformed string
+ * through. Returns the parser's own normalized `.href` (not the raw input)
+ * on success, `null` otherwise: WHATWG URL parsing tolerates/strips some
+ * control characters (e.g. embedded tabs/newlines) from the input while
+ * still returning a valid http(s) URL, so validating against `s` but then
+ * STORING `s` verbatim could still persist those raw control characters
+ * into the store — later rendered as terminal/log text by `describeBlock()`
+ * (codex-review Important). Storing `.href` instead guarantees the store
+ * only ever holds what the parser actually validated.
+ */
+function normalizeHttpUrl(s: string): string | null {
+  try {
+    const u = new URL(s);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.href : null;
+  } catch {
+    return null;
+  }
 }
 
 function parseKind(raw: string | undefined): LifecycleKind {
@@ -286,6 +308,7 @@ const blockCmd: CommandModule<
     who: string | undefined;
     question: string | undefined;
     options: string[] | undefined;
+    "action-link": string | undefined;
     signal: string | undefined;
     agent: string | undefined;
   }
@@ -300,7 +323,16 @@ const blockCmd: CommandModule<
       .option("task", { type: "string", describe: "required for --type blocked-by-task" })
       .option("who", { type: "string", describe: "required for --type blocked-by-human" })
       .option("question", { type: "string" })
-      .option("options", { type: "string", array: true })
+      .option("options", {
+        type: "string",
+        array: true,
+        describe: "choice-shape ask (/ask renders buttons)",
+      })
+      .option("action-link", {
+        type: "string",
+        describe:
+          "action-shape ask (/ask renders an 'open link, then confirm' button) — e.g. an OAuth/CAPTCHA URL",
+      })
       .option("signal", { type: "string", describe: "required for --type blocked-by-external" })
       .option("agent", { type: "string", describe: "required for --type waiting-on-agent" }),
   handler: async (argv) => {
@@ -317,11 +349,47 @@ const blockCmd: CommandModule<
         break;
       case "blocked-by-human":
         if (!argv.who) fail("--who <name> is required for --type blocked-by-human");
+        // choice-shape (--options) and action-shape (--action-link) are
+        // mutually exclusive — reject the combination outright here rather
+        // than let it depend on askApi.ts's own tie-breaking precedence
+        // (which, as of codex-review round-9, checks actionLink first in
+        // BOTH listAsksForProject() and answerAsk(), so the two now agree
+        // with each other even if this guard were bypassed by a direct
+        // library caller — but a block should simply never be created with
+        // both set in the first place).
+        if (argv.options?.length && argv["action-link"]) {
+          fail(
+            "--options and --action-link are mutually exclusive (choice-shape vs action-shape ask)",
+          );
+        }
+        let normalizedActionLink: string | undefined;
+        if (argv["action-link"]) {
+          const normalized = normalizeHttpUrl(argv["action-link"]);
+          if (!normalized) {
+            // The /ask page renders this straight into an <a href>. HTML-
+            // escaping the text does NOT block dangerous URL schemes
+            // (`javascript:`, `data:`) — only the scheme itself does. Reject
+            // at write time so a non-http(s) link can never reach the store
+            // at all (codex-review Important). Uses the same `URL` parser
+            // ask.html's own render-time check uses (codex-review nitpick: a
+            // regex prefix match alone would still store a malformed string
+            // like "https:/notreallyaurl" that happens to match the prefix).
+            // The rejected input is echoed for the operator's benefit, but
+            // never verbatim — an invalid value can still contain control
+            // characters/newlines, and this string reaches a terminal
+            // (codex-review round-18 nitpick).
+            fail(
+              `--action-link must be a valid http:// or https:// URL (got "${removeControlCharacters(argv["action-link"]).replace(/[\r\n]+/g, " ")}")`,
+            );
+          }
+          normalizedActionLink = normalized;
+        }
         block = {
           type: "blocked-by-human",
           who: argv.who,
           question: argv.question,
           options: argv.options,
+          actionLink: normalizedActionLink,
         };
         break;
       case "blocked-by-external":

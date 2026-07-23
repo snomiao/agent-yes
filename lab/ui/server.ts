@@ -15,6 +15,7 @@ const AY_API = process.env.AY_API ?? "http://127.0.0.1:7432";
 const TOKEN = readFileSync(path.join(homedir(), ".agent-yes", ".serve-token"), "utf-8").trim();
 
 const HTML = readFileSync(path.join(import.meta.dir, "index.html"));
+const ASK_HTML = readFileSync(path.join(import.meta.dir, "ask.html"));
 
 Bun.serve({
   port: UI_PORT,
@@ -24,6 +25,11 @@ Bun.serve({
 
     if (url.pathname === "/" || url.pathname === "/index.html") {
       return new Response(HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
+    }
+
+    // A7's decision panel — every task waiting on a human, one page.
+    if (url.pathname === "/ask" || url.pathname === "/ask.html") {
+      return new Response(ASK_HTML, { headers: { "Content-Type": "text/html; charset=utf-8" } });
     }
 
     // The codehost room transport, vendored beside this file (see index.html's

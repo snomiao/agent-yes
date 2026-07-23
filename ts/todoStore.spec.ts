@@ -573,4 +573,130 @@ describe("TodoStore", () => {
     // refused, not erased: the newer block is still exactly what it was
     expect(s.get(t._id)?.block).toEqual({ type: "blocked-by-human", who: "taku" });
   });
+
+  it("clearBlockIfMatches() — the generalized guard — clears only when the FRESH record's blockRev still equals the snapshot, and refuses (without erasing) a block that changed since decided (codex-review round-15 Important)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "code" });
+    const original = {
+      type: "blocked-by-human",
+      who: "taku",
+      question: "canary or beta?",
+    } as const;
+    const afterSet = await s.setBlock(t._id, original);
+    const cleared = await s.clearBlockIfMatches(t._id, afterSet.blockRev ?? 0);
+    expect(cleared.block).toBeNull();
+
+    const afterReplace = await s.setBlock(t._id, {
+      type: "blocked-by-human",
+      who: "taku",
+      question: "a NEW question",
+    });
+    await expect(s.clearBlockIfMatches(t._id, (afterReplace.blockRev ?? 0) - 1)).rejects.toThrow(
+      /block changed since this was decided/,
+    );
+    // refused, not erased: the newer block survives untouched
+    expect(s.get(t._id)?.block).toEqual({
+      type: "blocked-by-human",
+      who: "taku",
+      question: "a NEW question",
+    });
+  });
+
+  it("clearBlockIfMatches() catches an ABA race — a block replaced with BYTE-FOR-BYTE IDENTICAL content still gets a fresh blockRev, so a stale caller is refused rather than erasing that distinct, newer block instance (codex-review round-17 Important)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "code" });
+    const identicalBlock = {
+      type: "blocked-by-human",
+      who: "taku",
+      question: "canary or beta?",
+    } as const;
+    const firstSet = await s.setBlock(t._id, identicalBlock);
+    const capturedRev = firstSet.blockRev ?? 0;
+    // Someone re-sets the EXACT same block content — a content-only
+    // comparison would see no difference at all.
+    await s.setBlock(t._id, identicalBlock);
+    await expect(s.clearBlockIfMatches(t._id, capturedRev)).rejects.toThrow(
+      /block changed since this was decided/,
+    );
+    // refused, not erased: the (identical-looking but distinct, newer)
+    // block instance survives
+    expect(s.get(t._id)?.block).toEqual(identicalBlock);
+  });
+
+  it("answerHumanBlock() applies a gate's evidence, its transition, AND the block clear in ONE atomic write — never a partial application (codex-review round-18 Important, replacing the old approve()+transition()+clearBlockIfMatches() composition)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "pick a channel", kind: "decision" });
+    const afterSet = await s.setBlock(t._id, {
+      type: "blocked-by-human",
+      who: "taku",
+      options: ["canary", "beta"],
+    });
+    const answered = await s.answerHumanBlock(t._id, afterSet.blockRev ?? 0, {
+      name: "human-decided",
+      toState: "decided",
+      validator: "taku",
+      note: "canary",
+    });
+    expect(answered.block).toBeNull();
+    expect(answered.state).toBe("decided");
+    expect(answered.verifyEvidence).toEqual([
+      expect.objectContaining({ gate: "human-decided", validator: "taku", note: "canary" }),
+    ]);
+  });
+
+  it("answerHumanBlock() refuses (without applying anything) a stale expectedBlockRev, and separately refuses independent-verification violations (validator === owner) — matching approve()'s own unconditional rule (codex-review round-18 Important)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "decision" });
+    const afterSet = await s.setBlock(t._id, { type: "blocked-by-human", who: "taku" });
+    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku" }); // bumps blockRev again
+    await expect(
+      s.answerHumanBlock(t._id, afterSet.blockRev ?? 0, {
+        name: "human-decided",
+        toState: "decided",
+        validator: "taku",
+        note: "acknowledged",
+      }),
+    ).rejects.toThrow(/this ask has changed since it was loaded/);
+    expect(s.get(t._id)?.state).toBe("deciding"); // unchanged — refused before any write
+
+    const owned = await s.create({ summary: "y", kind: "decision", owner: "taku" });
+    const ownedBlock = await s.setBlock(owned._id, { type: "blocked-by-human", who: "taku" });
+    await expect(
+      s.answerHumanBlock(owned._id, ownedBlock.blockRev ?? 0, {
+        name: "human-decided",
+        toState: "decided",
+        validator: "taku", // same identity as owner
+        note: "acknowledged",
+      }),
+    ).rejects.toThrow(/independent verification required/);
+    expect(s.get(owned._id)?.state).toBe("deciding"); // unchanged
+    expect(s.get(owned._id)?.block).not.toBeNull(); // NOT cleared either — refused, not partially applied
+  });
+
+  it("answerHumanBlock() re-validates canTransition against the FRESH state, not a value captured before the call — a state change UNRELATED to block (so invisible to the blockRev check alone) must still be caught, matching transition()'s own concurrent-state-drift defense (codex-review round-18 Important)", async () => {
+    const s = await openStore(TEST_ROOT);
+    const t = await s.create({ summary: "x", kind: "decision" });
+    const afterSet = await s.setBlock(t._id, { type: "blocked-by-human", who: "taku" });
+    // Simulate a concurrent writer moving the task's STATE (not its block)
+    // to "done" — the same append-only-merge-line technique the
+    // markOrphaned() test above uses. blockRev is untouched, so the
+    // blockRev check alone would see nothing wrong; only re-validating
+    // canTransition against the fresh state catches this.
+    await appendFile(
+      path.join(TEST_ROOT, ".agent-yes", "todos.jsonl"),
+      JSON.stringify({ _id: t._id, state: "done" }) + "\n",
+    );
+    await expect(
+      s.answerHumanBlock(t._id, afterSet.blockRev ?? 0, {
+        name: "human-decided",
+        toState: "decided",
+        validator: "taku",
+        note: "acknowledged",
+      }),
+    ).rejects.toThrow(/no transition done -> decided.*state changed concurrently/);
+    // refused, not partially applied: block survives untouched, state
+    // stays exactly what the concurrent writer set it to
+    expect(s.get(t._id)?.block).not.toBeNull();
+    expect(s.get(t._id)?.state).toBe("done");
+  });
 });

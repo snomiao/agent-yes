@@ -23,7 +23,19 @@
 
 export type TodoBlock =
   | { type: "blocked-by-task"; taskId: string }
-  | { type: "blocked-by-human"; who: string; question?: string; options?: string[] }
+  // `options` (choice-shape, A7): the human picks one via /ask's buttons.
+  // `actionLink` (action-shape, A7): the human must personally complete
+  // something at that URL (e.g. an OAuth/CAPTCHA flow) — /ask renders an
+  // "open link, then confirm" button instead of a choice list. At most one
+  // of the two is expected to be set; neither is required (a bare question
+  // with no options/actionLink just needs an acknowledgement).
+  | {
+      type: "blocked-by-human";
+      who: string;
+      question?: string;
+      options?: string[];
+      actionLink?: string;
+    }
   | { type: "blocked-by-external"; signal: string; checkFn?: string }
   | { type: "waiting-on-agent"; agentId: string };
 
@@ -52,7 +64,7 @@ export function describeBlock(block: TodoBlock): string {
     case "blocked-by-task":
       return `blocked by task ${block.taskId}`;
     case "blocked-by-human":
-      return `waiting on ${block.who}${block.question ? `: ${block.question}` : ""}`;
+      return `waiting on ${block.who}${block.question ? `: ${block.question}` : ""}${block.actionLink ? ` (action: ${block.actionLink})` : ""}`;
     case "blocked-by-external":
       return `waiting on external signal: ${block.signal}`;
     case "waiting-on-agent":

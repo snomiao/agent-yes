@@ -1,0 +1,331 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>agent-yes - ask</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #0d1117;
+        --panel: #161b22;
+        --line: #2d3748;
+        --fg: #e6edf3;
+        --muted: #8b949e;
+        --accent: #58a6ff;
+        --green: #3fb950;
+        --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--fg);
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 14px;
+        line-height: 1.5;
+      }
+      header {
+        padding: 16px 20px;
+        border-bottom: 1px solid var(--line);
+      }
+      header h1 {
+        margin: 0;
+        font-size: 18px;
+      }
+      header p {
+        margin: 4px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      main {
+        max-width: 720px;
+        margin: 0 auto;
+        padding: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .empty {
+        color: var(--muted);
+        text-align: center;
+        padding: 40px 0;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 16px;
+      }
+      .card .meta {
+        display: flex;
+        justify-content: space-between;
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 8px;
+        font-family: var(--mono);
+      }
+      .card .summary {
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+      .card .question {
+        margin-bottom: 12px;
+      }
+      .buttons {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      button {
+        background: var(--accent);
+        color: #fff;
+        border: none;
+        border-radius: 6px;
+        padding: 8px 14px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: transparent;
+        border: 1px solid var(--line);
+        color: var(--fg);
+      }
+      button:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      button:hover:not(:disabled) {
+        filter: brightness(1.1);
+      }
+      a.action-link {
+        color: var(--accent);
+      }
+      .status {
+        font-size: 12px;
+        color: var(--green);
+        margin-top: 8px;
+      }
+      .err {
+        font-size: 12px;
+        color: #f85149;
+        margin-top: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>ask</h1>
+      <p>every task waiting on a human, across every project this host's agents have registered</p>
+    </header>
+    <main id="list">
+      <div class="empty">loading...</div>
+    </main>
+    <script type="module">
+      const listEl = document.getElementById("list");
+      const KEY_SEP = "::";
+      // key -> { node, blockRev } for a card currently mid-answer. A poll
+      // landing while a POST is in flight must never destroy this node: an
+      // earlier version rebuilt the WHOLE list from the freshly-fetched
+      // (filtered) asks every 5s, which detached the in-flight card (and its
+      // `.result` div) from the document — if the POST then failed, the
+      // error was written into a node nobody could see, and the user saw an
+      // empty list with no explanation (codex-review Important).
+      //
+      // `blockRev` is tracked alongside the node (not just the key) so
+      // refresh() can tell "same ask, still in flight" from "the task got a
+      // genuinely NEW block while this one was in flight/failed" — the
+      // latter must NOT be suppressed by the former's presence, or a fresh
+      // question on the same task would silently never appear while a
+      // stale/failed card sits there (codex-review round-17 Important).
+      const inflightNodes = new Map();
+
+      function keyOf(a) {
+        return a.projectRoot + KEY_SEP + a.taskId;
+      }
+
+      function cardHtml(ask) {
+        const key = keyOf(ask);
+        const meta = ask.projectRoot + " - " + ask.taskId + " - asking " + ask.who;
+        let body = "";
+        if (ask.shape === "choice") {
+          body =
+            '<div class="buttons">' +
+            ask.options
+              .map(
+                (o) =>
+                  `<button data-key="${encodeURIComponent(key)}" data-choice="${encodeURIComponent(o)}">${escapeHtml(o)}</button>`,
+              )
+              .join("") +
+            "</div>";
+        } else if (ask.shape === "action") {
+          // HTML-escaping the text does NOT block a dangerous URL scheme
+          // (javascript:/data:) in an href — only checking the scheme itself
+          // does. The CLI already rejects a non-http(s) --action-link at
+          // write time, but this is the actual browser-facing enforcement
+          // point: never trust that every writer went through the CLI.
+          const link = isSafeHttpUrl(ask.actionLink)
+            ? `<a class="action-link" href="${escapeHtml(ask.actionLink)}" target="_blank" rel="noopener">open link</a>`
+            : `<span class="err">invalid action link (not http/https) - cannot open</span>`;
+          body = `<div class="buttons">
+            ${link}
+            <button data-key="${encodeURIComponent(key)}" data-ack="1">I've done this - confirm</button>
+          </div>`;
+        } else {
+          body = `<div class="buttons"><button data-key="${encodeURIComponent(key)}" data-ack="1">acknowledge</button></div>`;
+        }
+        return `<div class="card" data-key="${encodeURIComponent(key)}" data-blockrev="${ask.blockRev}">
+          <div class="meta"><span>${escapeHtml(meta)}</span></div>
+          <div class="summary">${escapeHtml(ask.summary)}</div>
+          ${ask.question ? `<div class="question">${escapeHtml(ask.question)}</div>` : ""}
+          ${body}
+          <div class="result"></div>
+        </div>`;
+      }
+
+      function escapeHtml(s) {
+        return String(s).replace(
+          /[&<>"']/g,
+          (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c],
+        );
+      }
+
+      function isSafeHttpUrl(s) {
+        try {
+          const u = new URL(String(s));
+          return u.protocol === "http:" || u.protocol === "https:";
+        } catch {
+          return false;
+        }
+      }
+
+      function elementFromHtml(html) {
+        const tpl = document.createElement("template");
+        tpl.innerHTML = html.trim();
+        return tpl.content.firstElementChild;
+      }
+
+      // Bumped every time an answer successfully lands. A `refresh()` fetch
+      // that was ALREADY in flight when that happened is carrying a snapshot
+      // from before the answer — without this check, that stale response
+      // could resurrect the just-answered card (server hadn't processed the
+      // answer yet when the GET was issued) with fresh, re-clickable buttons,
+      // right after `inflightNodes.delete()` stopped protecting it. A second
+      // click would then submit a duplicate answer against an already-
+      // resolved ask (codex-review Important).
+      let epoch = 0;
+
+      async function refresh() {
+        const startEpoch = epoch;
+        let asks;
+        try {
+          const res = await fetch("/api/asks");
+          if (!res.ok) throw new Error(await res.text());
+          asks = await res.json();
+        } catch (e) {
+          // Never wipe the list on a transient fetch failure while a card is
+          // still mid-answer — only show the error page when there is
+          // nothing in flight to preserve.
+          if (inflightNodes.size === 0 && epoch === startEpoch) {
+            listEl.innerHTML = `<div class="empty">failed to load: ${escapeHtml(String(e))}</div>`;
+          }
+          return;
+        }
+        // An answer landed WHILE this fetch was in flight — this response
+        // predates that answer and is stale; a later refresh() (either the
+        // next 5s tick or one already scheduled) will have current data.
+        if (epoch !== startEpoch) return;
+        // Cards currently mid-answer keep their EXISTING DOM node untouched
+        // (so a result written to it later is still visible) — UNLESS the
+        // server's blockRev for this task has moved on since, meaning the
+        // task got a genuinely NEW block while the old one was in flight or
+        // sitting there failed; that stale entry is dropped so the new ask
+        // renders instead of being silently suppressed (codex-review
+        // round-17 Important). Everything else is rebuilt fresh from the
+        // server response.
+        const fresh = [];
+        for (const a of asks) {
+          const key = keyOf(a);
+          const inflight = inflightNodes.get(key);
+          if (inflight && inflight.blockRev === a.blockRev) continue; // still the same in-flight ask
+          if (inflight) inflightNodes.delete(key); // superseded by a genuinely new block
+          fresh.push(a);
+        }
+        if (fresh.length === 0 && inflightNodes.size === 0) {
+          listEl.innerHTML = `<div class="empty">nothing waiting on you right now</div>`;
+          return;
+        }
+        const frag = document.createDocumentFragment();
+        for (const entry of inflightNodes.values()) frag.appendChild(entry.node);
+        for (const ask of fresh) frag.appendChild(elementFromHtml(cardHtml(ask)));
+        listEl.replaceChildren(frag);
+      }
+
+      listEl.addEventListener("click", async (e) => {
+        // e.target is a Node in general (e.g. a text node), not always an
+        // Element — .closest() only exists on Element (codex-review nitpick).
+        if (!(e.target instanceof Element)) return;
+        const btn = e.target.closest("button[data-key]");
+        if (!btn) return;
+        const key = decodeURIComponent(btn.dataset.key);
+        const sepIdx = key.lastIndexOf(KEY_SEP);
+        const projectRoot = key.slice(0, sepIdx);
+        const taskId = key.slice(sepIdx + KEY_SEP.length);
+        const card = listEl.querySelector(`.card[data-key="${btn.getAttribute("data-key")}"]`);
+        const resultEl = card ? card.querySelector(".result") : null;
+        const blockRev = card ? Number(card.dataset.blockrev) : 0;
+        if (card) card.querySelectorAll("button").forEach((b) => (b.disabled = true));
+        // Store the NODE itself (not just the key) so refresh()'s poll can
+        // preserve this exact element across a rebuild — losing it would
+        // strand any later result/error write on a detached node no one
+        // can see (codex-review Important). `blockRev` travels alongside it
+        // so refresh() can tell this exact in-flight ask apart from a
+        // genuinely new one on the same task (see inflightNodes' doc
+        // comment, codex-review round-17 Important).
+        if (card) inflightNodes.set(key, { node: card, blockRev });
+        try {
+          const body = { projectRoot, taskId, expectedBlockRev: blockRev };
+          if (btn.dataset.choice !== undefined)
+            body.choice = decodeURIComponent(btn.dataset.choice);
+          if (btn.dataset.ack !== undefined) body.acknowledged = true;
+          const res = await fetch("/api/asks/answer", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body),
+          });
+          if (!res.ok) throw new Error(await res.text());
+          if (resultEl) resultEl.innerHTML = '<div class="status">answered</div>';
+          // Invalidates any refresh() fetch already in flight (it predates
+          // this answer, so its response is stale — see epoch's doc comment)
+          // and triggers an immediate re-fetch instead of waiting up to 5s,
+          // so the resolved card clears promptly rather than sitting there
+          // until the next scheduled tick.
+          epoch++;
+          // Only NOW is it safe to stop protecting this node in refresh() —
+          // the answer is durably recorded, so a rebuild from fresh
+          // /api/asks data is correct (the resolved ask won't be in it
+          // anymore).
+          inflightNodes.delete(key);
+          refresh();
+        } catch (err) {
+          if (resultEl) resultEl.innerHTML = `<div class="err">${escapeHtml(String(err))}</div>`;
+          if (card) card.querySelectorAll("button").forEach((b) => (b.disabled = false));
+          // Deliberately NOT deleting from inflightNodes and NOT bumping
+          // epoch here: a refresh() already in flight when the POST failed
+          // would otherwise see an unchanged epoch AND find nothing in
+          // inflightNodes, treat this ask as "fresh", and rebuild the card
+          // from /api/asks — silently erasing the error message this catch
+          // just wrote (codex-review Important). Keeping the node
+          // registered makes refresh() preserve this exact DOM node (error
+          // and all) until the human retries (a successful retry deletes
+          // it above) or reloads the page.
+        }
+      });
+
+      refresh();
+      setInterval(refresh, 5000);
+    </script>
+  </body>
+</html>

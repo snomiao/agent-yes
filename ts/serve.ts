@@ -37,11 +37,13 @@ import {
   writeToIpc,
   type CommonOpts,
 } from "./subcommands.ts";
+import { answerAsk, listAsks } from "./askApi.ts";
 import { TYPING_BADGE } from "./badges.ts";
 import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
 import { CLAUDE_SESSION_PIN_ENV } from "./sessionEnv.ts";
 import { MAX_CALLBACK_MSG_BYTES, frameVisitorMessage, verifyCapability } from "./callbackCore.ts";
 import { isTerminalReply } from "./terminalReply.ts";
+import { removeControlCharacters } from "./removeControlCharacters.ts";
 import { parseStatusText } from "./statusText.ts";
 import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
 import { acquireWebrtcHostLock, type ServeLockOwner } from "./serveLock.ts";
@@ -2051,6 +2053,135 @@ export async function cmdServe(rest: string[]): Promise<number> {
       } catch (e) {
         return new Response((e as Error).message, { status: 500 });
       }
+    }
+
+    // Both /api/asks routes below share this: "every project" is derived the
+    // same way `ay ls` aggregates across projects — the distinct `cwd`s in
+    // the live-agent registry — since there is no separate "registered
+    // projects" list to read; a project this host has never run an agent in
+    // has nothing to aggregate anyway.
+    const liveProjectRoots = async (): Promise<string[]> => {
+      const records = await listRecords(undefined, defaultOpts({ all: true }));
+      return [...new Set(records.map((r) => r.cwd).filter(Boolean))];
+    };
+
+    // GET /api/asks — the `/ask` decision panel (A7): every `blocked-by-human`
+    // task across every project this host's agents have registered, one
+    // human-facing list.
+    if (req.method === "GET" && p === "/api/asks") {
+      try {
+        const asks = await listAsks(await liveProjectRoots());
+        return Response.json(asks);
+      } catch (e) {
+        return new Response((e as Error).message, { status: 500 });
+      }
+    }
+
+    // POST /api/asks/answer  body {projectRoot, taskId, choice?, acknowledged?}
+    // — the closed loop's single request: `answerAsk()` clears the block and
+    // (for human/decision-kind tasks) advances the transition atomically, so
+    // there is no intermediate state visible to a second request. As a
+    // best-effort follow-up (never blocks the response on it), if the task's
+    // owner resolves to a currently-live agent IN THIS SAME PROJECT, the
+    // answer is written straight into that agent's terminal via the exact
+    // same FIFO mechanism `/api/send` already uses — the real-time half of
+    // the closed loop, for whichever agent happens to be alive and watching
+    // right now.
+    if (req.method === "POST" && p === "/api/asks/answer") {
+      let raw: unknown;
+      try {
+        raw = await req.json();
+      } catch {
+        return new Response("invalid JSON body", { status: 400 });
+      }
+      // Type-validate every field explicitly — an untyped JS client (or a
+      // bug) can send a non-string projectRoot/taskId or a truthy
+      // non-boolean `acknowledged`, which would otherwise surface as an
+      // opaque 500 deep inside answerAsk() instead of a clean 400
+      // (codex-review nitpick).
+      if (typeof raw !== "object" || raw === null) {
+        return new Response("body must be a JSON object", { status: 400 });
+      }
+      const body = raw as Record<string, unknown>;
+      const { projectRoot, taskId, choice, acknowledged, expectedBlockRev } = body;
+      if (typeof projectRoot !== "string" || !projectRoot) {
+        return new Response("projectRoot must be a non-empty string", { status: 400 });
+      }
+      if (typeof taskId !== "string" || !taskId) {
+        return new Response("taskId must be a non-empty string", { status: 400 });
+      }
+      if (choice !== undefined && typeof choice !== "string") {
+        return new Response("choice must be a string", { status: 400 });
+      }
+      if (acknowledged !== undefined && typeof acknowledged !== "boolean") {
+        return new Response("acknowledged must be a boolean", { status: 400 });
+      }
+      if (expectedBlockRev !== undefined && !Number.isSafeInteger(expectedBlockRev)) {
+        // A boundary route must never forward NaN/Infinity/fractional values
+        // into the store's blockRev comparison — those can never legitimately
+        // equal a real blockRev (always a safe, non-negative integer), so
+        // letting them through just produces a confusing rejection deep
+        // inside answerAsk() instead of a clean 400 here (codex-review
+        // Important).
+        return new Response("expectedBlockRev must be a safe integer", { status: 400 });
+      }
+      // Scoped to the SAME live-agent-derived project set GET/api/asks
+      // aggregates over — not merely "a store happens to exist here"
+      // (codex-review Important: hasTodoStore() alone still let a caller
+      // target any readable/writable ay todo store path on the host, not
+      // just ones actually surfaced by this API).
+      const registeredRoots = await liveProjectRoots();
+      if (!registeredRoots.includes(projectRoot)) {
+        return new Response(`no registered project at ${projectRoot}`, { status: 404 });
+      }
+      let result: Awaited<ReturnType<typeof answerAsk>>;
+      try {
+        result = await answerAsk(projectRoot, taskId, { choice, acknowledged, expectedBlockRev });
+      } catch (e) {
+        return new Response((e as Error).message, { status: 400 });
+      }
+      const { record: rec, answerText } = result;
+      // Best-effort, fire-and-forget: the task is already correctly updated
+      // above regardless of whether this succeeds. Deliberately NOT awaited —
+      // a stalled FIFO write must never hang the response, which is the
+      // whole point of "best-effort" (codex-review Important: an earlier
+      // version awaited this, so a stuck agent could hang answerAsk's caller
+      // even though the todo state had already been updated). This is a real,
+      // accepted limitation, not a bug: if owner resolution or the FIFO
+      // write fails, there is no retry queue here — the durable, correct
+      // outcome is that the task's stored state already reflects the
+      // answer (see answerAsk's own doc comment), and the owning agent will
+      // pick it up on its own next normal check (`ay todo get`, a reconcile
+      // pass, etc.) rather than through a guaranteed real-time push. A
+      // persistent notification-retry mechanism would be new scope well
+      // beyond this route.
+      if (rec.owner) {
+        // Scoped to THIS project's cwd — an unscoped search could match a
+        // same-named owner in a DIFFERENT project and write the answer into
+        // the wrong agent's terminal (codex-review Important).
+        resolveOne(rec.owner, defaultOpts({ all: true, cwdScope: projectRoot }))
+          .then((owner) => {
+            if (!owner.fifo_file) return;
+            // `answerText` comes from answerAsk()'s own validated result, NOT
+            // re-derived from the raw request body here — the earlier
+            // version recomputed `choice ?? "acknowledged"` independently,
+            // which had the SAME unvalidated-choice gap answerAsk() itself
+            // just fixed (codex-review Important). Also strip terminal
+            // control sequences AND collapse newlines: even a genuinely
+            // validated choice option is free text set at ask-creation time
+            // and could still contain control bytes or embedded newlines
+            // that inject extra "typed" lines/escape sequences into the
+            // live agent's terminal via this raw IPC write (codex-review
+            // Important).
+            const safeAnswerText = removeControlCharacters(answerText).replace(/[\r\n]+/g, " ");
+            return writeToIpc(owner.fifo_file, `[/ask] ${taskId} answered: ${safeAnswerText}\n`);
+          })
+          .catch(() => {
+            // owner not currently live / not resolvable / FIFO write failed —
+            // best-effort only, nothing to report back to this request.
+          });
+      }
+      return Response.json(rec);
     }
 
     // GET /api/search?q= — chat-history search across every agent's log.

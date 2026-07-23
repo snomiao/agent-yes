@@ -76,6 +76,8 @@ export type { TodoBlock, MonitorHint } from "./todoBlock.ts";
 export { unblockedTasks, openBlockers, renderTree, renderDigest } from "./todoDigest.ts";
 export { reconcileTodos } from "./todoAutomation.ts";
 export type { TodoAction, LiveAgent } from "./todoAutomation.ts";
+export { listAsks, listAsksForProject, answerAsk, hasTodoStore } from "./askApi.ts";
+export type { AskItem, AnswerInput, AnswerResult } from "./askApi.ts";
 
 export type AgentCliConfig = {
   // cli
