@@ -26,6 +26,14 @@ describe("op", () => {
     expect(isValidOp(makeOp({ ...base, kind: "reaction", body: "👍", ref: "x" }))).toBe(true);
   });
 
+  it("validates control ops (cmd/stream) only with a payload body", () => {
+    expect(isValidOp(makeOp({ ...base, kind: "cmd", body: '{"action":"highlight"}' }))).toBe(true);
+    expect(isValidOp(makeOp({ ...base, kind: "stream", body: "delta" }))).toBe(true);
+    // cmd/stream without a body are rejected (fail-closed)
+    expect(isValidOp({ ...base, id: "a1@h1", kind: "cmd", name: "x" })).toBe(false);
+    expect(isValidOp({ ...base, id: "a1@h1", kind: "stream", name: "x" })).toBe(false);
+  });
+
   it("rejects malformed ops (fail-closed)", () => {
     expect(isValidOp(null)).toBe(false);
     expect(isValidOp({ ...base, id: "a1@h1", kind: "nope", name: "x" })).toBe(false);

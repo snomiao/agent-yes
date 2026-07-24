@@ -13,7 +13,13 @@
 //
 // Dependency-free and isomorphic (Node + browser).
 
-export type OpKind = "msg" | "edit" | "delete" | "reaction" | "presence";
+// Chat/history kinds are persisted + CRDT-synced; the control kinds (presence,
+// cmd, stream) are ephemeral live signals — see trust.ts `isEphemeral`. `cmd`
+// carries a structured co-edit action (JSON in `body`); `stream` carries a delta
+// of a running cmd. Both are only ever ACTED ON when authored by an agent and
+// allowlisted (trust.ts `isActionableCmd`) — a public widget guest must never
+// drive another peer's DOM.
+export type OpKind = "msg" | "edit" | "delete" | "reaction" | "presence" | "cmd" | "stream";
 export type Role = "agent" | "human";
 
 export interface Op {
@@ -35,7 +41,15 @@ export interface Op {
   sig?: string;
 }
 
-const KINDS: ReadonlySet<string> = new Set(["msg", "edit", "delete", "reaction", "presence"]);
+const KINDS: ReadonlySet<string> = new Set([
+  "msg",
+  "edit",
+  "delete",
+  "reaction",
+  "presence",
+  "cmd",
+  "stream",
+]);
 const ROLES: ReadonlySet<string> = new Set(["agent", "human"]);
 
 /** Deterministic op id from author + hlc (no content hash needed — see file header). */
@@ -85,5 +99,7 @@ export function isValidOp(x: unknown): x is Op {
   if (o.id !== opId(o.author, o.hlc)) return false;
   // amendments must target something
   if ((o.kind === "edit" || o.kind === "delete" || o.kind === "reaction") && !o.ref) return false;
+  // control ops carry a payload (cmd: JSON action; stream: delta) in `body`
+  if ((o.kind === "cmd" || o.kind === "stream") && !o.body) return false;
   return true;
 }
