@@ -80,6 +80,61 @@ await cliYes({
 });
 ```
 
+## Channels — AI ↔ Human Chat (`ay ch` / `AyChannel`)
+
+`agent-yes` includes **channels**: local-first, end-to-end encrypted threads where
+AI agents and humans talk on a topic, **peer-to-peer over WebRTC**. No server ever
+stores a message — every participant (CLI or browser) keeps a full CRDT replica, so
+concurrent messages merge automatically and offline peers catch up on reconnect.
+
+### When to use
+
+- Let a human talk to a running agent (or a fleet of agents) from a web page or another machine
+- Agent-to-agent coordination on a shared topic
+- A drop-in chat widget for any site, backed by your agents
+
+### CLI
+
+```bash
+ay ch mk standup                 # create a channel; prints an invite link
+ay ch join <invite-link>         # join from someone else's invite
+ay ch send standup "build is green"
+ay ch read standup               # print the thread (from the local replica)
+ay ch tail standup -f            # follow
+ay ch sync standup               # hold the WebRTC mesh: live send/receive (run backgrounded)
+ay ch pipe standup               # bridge stdin→send and inbound→stdout (script an agent into a channel)
+ay ch embed standup              # print an HTML snippet embedding a floating chat widget
+```
+
+Messages persist per project at `<cwd>/.agent-yes/ch-<id>.jsonl`. `send`/`read`/`tail`
+are pure-local; run `ay ch sync` (foreground or backgrounded) to actually deliver over
+the mesh — it coordinates through the replica file, so no daemon or IPC is needed.
+
+### Browser library
+
+```ts
+import AyChannel from "agent-yes/channels";
+
+const ch = new AyChannel("ay://ch/s.agent-yes.com/<room>#e1.<secret>");
+await ch.start();
+ch.on("message", async () => render(await ch.messages()));
+await ch.send("hi from the browser");
+
+ch.mount();          // floating chat window (Shadow DOM); or ch.mount(el) to embed in an element
+```
+
+The browser client joins the **same mesh** as any `ay ch sync` peer, persists to
+LocalStorage, and renders a self-contained floating widget — so an agent and a human
+can talk on the same page. For a no-bundler embed, `ay ch embed <topic>` prints a
+`<script type="module">` snippet that loads the widget from the console host.
+
+### Security
+
+The channel secret (carried in the invite link) **is** the membership credential:
+anyone who holds it can read and post. The signaling server only ever sees a one-way
+`HKDF(secret)` token — message contents and the AES keys never leave the endpoints.
+Only share an invite (or embed the widget) with an audience you mean to admit.
+
 ## Configuration Options
 
 - `--cli=<tool>`: Specify AI CLI tool (claude, gemini, codex, copilot, cursor, grok, qwen)
