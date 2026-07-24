@@ -155,6 +155,61 @@ pub fn parse_winsize_line(line: &str) -> Option<(u16, u16)> {
     Some((cols.max(20), rows))
 }
 
+/// Parse AGENT_YES_AGENT_NICE → a clamped positive nice (0..19, default 5, 0 =
+/// off). Mirrors ts/agentNice.ts — keep the two in sync. Parsed as f64 then
+/// truncated toward zero (`as i32`) so a fractional value like "3.9" → 3 matches
+/// ts/agentNice.ts's Number()+Math.trunc(), rather than failing i32 parsing and
+/// silently falling back to the default. Only compiled where a deprioritization
+/// syscall exists (unix setpriority / windows SetPriorityClass).
+#[cfg(any(unix, windows))]
+fn agent_nice_value() -> i32 {
+    std::env::var("AGENT_YES_AGENT_NICE")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .map(|f| f as i32)
+        .unwrap_or(5)
+        .clamp(0, 19)
+}
+
+/// Best-effort: lower a freshly-spawned agent process's scheduling priority to
+/// `nice` so it yields CPU to the interactive `ay serve` daemon under load. The
+/// child's threads/descendants inherit it. Never errors — a scheduling hint must
+/// not break a spawn, and where the syscall is unavailable it no-ops. Mirrors
+/// ts/agentNice.ts's `applyAgentNice` (which calls `os.setPriority`).
+///
+/// - Unix: `setpriority(PRIO_PROCESS, pid, nice)`.
+/// - Windows: `SetPriorityClass` — a mild nice (1..9) → BELOW_NORMAL, a strong
+///   one (>=10) → IDLE, the same collapse Node's `os.setPriority` performs. Needs
+///   a handle opened with `PROCESS_SET_INFORMATION`.
+#[cfg(any(unix, windows))]
+fn deprioritize_pid(pid: u32, nice: i32) {
+    if nice <= 0 {
+        return;
+    }
+    #[cfg(unix)]
+    unsafe {
+        libc::setpriority(libc::PRIO_PROCESS, pid, nice);
+    }
+    #[cfg(windows)]
+    unsafe {
+        use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS, IDLE_PRIORITY_CLASS,
+            PROCESS_SET_INFORMATION,
+        };
+        let class = if nice >= 10 {
+            IDLE_PRIORITY_CLASS
+        } else {
+            BELOW_NORMAL_PRIORITY_CLASS
+        };
+        let handle = OpenProcess(PROCESS_SET_INFORMATION, FALSE, pid);
+        if !handle.is_null() {
+            SetPriorityClass(handle, class);
+            CloseHandle(handle);
+        }
+    }
+}
+
 /// Terminal size for initial PTY spawn: COLUMNS/LINES env vars first (useful in
 /// non-TTY/pipe/CI contexts), then the OS console size (ioctl on Unix, the
 /// console screen buffer on Windows), then (80, 24).
@@ -373,25 +428,12 @@ pub async fn spawn_agent(
     // The child's threads/descendants inherit it. Configurable via
     // AGENT_YES_AGENT_NICE (0..19, default 5, 0 = off). Mirrors ts/agentNice.ts.
     //
-    // Unix only: on Windows the TS runtime's os.setPriority (which maps nice to a
-    // BELOW_NORMAL/IDLE priority class) covers agents launched via that runtime;
-    // a Windows-Rust SetPriorityClass branch is a follow-up (needs a Windows build
-    // to verify the FFI, which can't be done from this Linux toolchain).
-    #[cfg(unix)]
+    // Unix: setpriority(PRIO_PROCESS, nice). Windows: SetPriorityClass — a mild
+    // nice (1..9) maps to BELOW_NORMAL, a strong one (>=10) to IDLE, matching how
+    // the TS runtime's os.setPriority collapses nice → a Windows priority class.
+    #[cfg(any(unix, windows))]
     if let Some(child_pid) = child.process_id() {
-        // Parse as f64 then truncate toward zero (`as i32`) so a fractional value
-        // like "3.9" → 3 matches ts/agentNice.ts's Number()+Math.trunc(), rather
-        // than failing i32 parsing and silently falling back to the default.
-        let nice = std::env::var("AGENT_YES_AGENT_NICE")
-            .ok()
-            .and_then(|v| v.trim().parse::<f64>().ok())
-            .map(|f| f as i32)
-            .unwrap_or(5)
-            .clamp(0, 19);
-        if nice > 0 {
-            // Best-effort; ignore failures (a scheduling hint must never break a spawn).
-            unsafe { libc::setpriority(libc::PRIO_PROCESS, child_pid, nice) };
-        }
+        deprioritize_pid(child_pid, agent_nice_value());
     }
 
     // CRITICAL: Drop the slave after spawning!
@@ -946,5 +988,82 @@ mod tests {
         std::env::remove_var("COLUMNS");
         std::env::remove_var("LINES");
         assert_eq!(cols, 20, "cols below minimum should be clamped to 20");
+    }
+
+    #[test]
+    fn agent_nice_value_parses_and_clamps() {
+        // Mirrors ts/agentNice.spec.ts: default 5, fractional truncates, clamps 0..19.
+        let cases = [
+            (None, 5),
+            (Some(""), 5),
+            (Some("0"), 0),
+            (Some("5"), 5),
+            (Some("3.9"), 3),
+            (Some("19"), 19),
+            (Some("25"), 19),
+            (Some("-4"), 0),
+            (Some("garbage"), 5),
+        ];
+        for (raw, want) in cases {
+            match raw {
+                Some(v) => std::env::set_var("AGENT_YES_AGENT_NICE", v),
+                None => std::env::remove_var("AGENT_YES_AGENT_NICE"),
+            }
+            assert_eq!(agent_nice_value(), want, "AGENT_YES_AGENT_NICE={raw:?}");
+        }
+        std::env::remove_var("AGENT_YES_AGENT_NICE");
+    }
+
+    // Runtime proof the Windows FFI actually works on this box (not just compiles):
+    // spawn a benign long-lived child through the same PTY machinery the real
+    // spawner uses, deprioritize it, and read the priority class back with
+    // GetPriorityClass. Ignored by default because it spawns a real process and is
+    // OS-specific; run with `cargo test -- --ignored deprioritize_pid`.
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "spawns a real child; run explicitly to verify the SetPriorityClass FFI"]
+    fn deprioritize_pid_sets_below_normal_priority_class() {
+        use portable_pty::{native_pty_system, CommandBuilder, PtySize};
+        use windows_sys::Win32::Foundation::{CloseHandle, FALSE};
+        use windows_sys::Win32::System::Threading::{
+            GetPriorityClass, OpenProcess, BELOW_NORMAL_PRIORITY_CLASS,
+            PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .expect("openpty");
+        // Spawn ping.exe by ABSOLUTE path: under an msys/git-bash PATH a bare
+        // "cmd"/"ping" resolves to a msys shim that CreateProcessW rejects
+        // ("not a valid Win32 application"). `ping -n 30` idles ~29s — long
+        // enough to spawn, renice, and read the priority class back.
+        let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| "C:\\Windows".into());
+        let mut cmd = CommandBuilder::new(format!("{sysroot}\\System32\\ping.exe"));
+        cmd.args(["-n", "30", "127.0.0.1"]);
+        let mut child = pair.slave.spawn_command(cmd).expect("spawn child");
+        let pid = child.process_id().expect("child pid");
+
+        deprioritize_pid(pid, 5); // default nice → BELOW_NORMAL
+
+        let got = unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            assert!(!h.is_null(), "OpenProcess (readback) failed");
+            let class = GetPriorityClass(h);
+            CloseHandle(h);
+            class
+        };
+
+        let _ = child.kill();
+        let _ = child.wait();
+
+        assert_eq!(
+            got, BELOW_NORMAL_PRIORITY_CLASS,
+            "child priority class should be BELOW_NORMAL after deprioritize_pid(pid, 5)"
+        );
     }
 }
