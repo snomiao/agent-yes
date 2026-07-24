@@ -79,6 +79,11 @@ export default defineConfig({
         "ts/channels.ts",
         // Re-export barrel — no logic to cover (same rationale as ts/index.ts).
         "ts/channels/index.ts",
+        // Channels WebRTC mesh peer — needs a live signaling server + real
+        // DataChannel + node-datachannel native addon; proven via the mesh
+        // integration script, not unit-testable (same rationale as share.ts /
+        // webrtcRemote.ts). Its pure helpers (op/store/hlc) live in covered modules.
+        "ts/channels/peer.ts",
         "ts/remotes.ts",
         // WebRTC share bridge — needs a peer + signaling server; proven e2e, not
         // unit-testable.

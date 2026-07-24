@@ -12,11 +12,15 @@
  *   ay ch read <topic> [-n N] [--json]
  *   ay ch head <topic> [-n N]
  *   ay ch tail <topic> [-n N] [-f]
+ *   ay ch sync <topic> [--quiet]   — hold the WebRTC mesh (live send/receive)
+ *   ay ch pipe <topic>             — sync + bridge stdin→send, inbound→stdout
  *
- * Phase 1 is local-only (the log, the CRDT, the verbs). Live delivery over the
- * WebRTC mesh (`--once`, real `tail -f` across peers, `pipe`) arrives with the
- * serve daemon in Phase 2; the on-disk format and identity model here are the
- * foundation both share.
+ * The read/write verbs are pure-local (they only touch the jsonl replica). Live
+ * delivery is a separate `sync` peer that holds the WebRTC mesh, appends inbound
+ * ops, and broadcasts newly-appeared local ops — so send/tail COMPOSE with a
+ * running sync through the shared replica file, no IPC/daemon. The browser side
+ * (Phase 3) joins the same mesh with its own peer, so agent↔human chat is truly
+ * peer-to-peer with no central bridge.
  *
  * The channels core (ts/channels/) is isomorphic and reused verbatim by the
  * browser lib; this file is the Node CLI shell over it, mirroring ts/ws.ts.
@@ -41,6 +45,8 @@ import {
   type Role,
 } from "./channels/index.ts";
 import { appendOps, channelFilePath, readOps } from "./channels/store.node.ts";
+import type { ChannelPeerStore } from "./channels/peer.ts";
+import type { Op } from "./channels/index.ts";
 
 const REG_SCHEMA = "ay-ch/v1";
 
@@ -400,6 +406,123 @@ function followChannel(cwd: string, channelId: string, seen: Set<string>): Promi
   });
 }
 
+// --- live mesh (Phase 2) ----------------------------------------------------
+
+/** Store adapter the mesh peer drives (persist + dedup, returns new ops). */
+function nodeStore(cwd: string, channelId: string): ChannelPeerStore {
+  return {
+    all: () => readOps(cwd, channelId),
+    append: (ops) => appendOps(cwd, channelId, ops),
+  };
+}
+
+/** One inbound op as a line (only messages are surfaced live). */
+function printOp(op: Op): void {
+  if (op.kind !== "msg") return;
+  const t = new Date(Number(op.hlc.split(".")[0])).toISOString().slice(11, 19);
+  process.stdout.write(`${t}  ${op.name}(${op.role[0]}): ${op.body ?? ""}\n`);
+}
+
+/**
+ * Hold the WebRTC mesh for a channel: append inbound ops to the local replica and
+ * broadcast newly-appeared LOCAL ops (e.g. from a separate `ay ch send`) to peers.
+ * All coordination is through the jsonl file — no IPC — so `send`/`tail` compose
+ * with a running `sync` unchanged. Resolves when stopped (SIGINT/SIGTERM) or when
+ * `extraStdin` (pipe mode) drives it. Returns the started peer + a stop fn.
+ */
+async function runMesh(
+  cwd: string,
+  entry: ChannelRegEntry,
+  opts: { onInbound?: (op: Op) => void; quiet?: boolean },
+): Promise<{
+  stop: () => void;
+  done: Promise<void>;
+  peer: import("./channels/peer.ts").ChannelPeer;
+}> {
+  const { ChannelPeer } = await import("./channels/peer.ts");
+  const seen = new Set((await readOps(cwd, entry.channelId)).map((o) => o.id));
+  const peer = new ChannelPeer({
+    room: entry.room,
+    sighost: entry.sighost,
+    s: entry.s,
+    store: nodeStore(cwd, entry.channelId),
+    onOp: (op) => {
+      seen.add(op.id);
+      opts.onInbound?.(op);
+      if (!opts.quiet) printOp(op);
+    },
+    onPeers: (n) => process.stderr.write(`[ch] peers: ${n}\n`),
+  });
+  await peer.start();
+  const poll = setInterval(() => {
+    void (async () => {
+      for (const op of await readOps(cwd, entry.channelId)) {
+        if (seen.has(op.id)) continue;
+        seen.add(op.id);
+        await peer.publish(op);
+      }
+    })();
+  }, 500);
+  let resolveDone!: () => void;
+  const done = new Promise<void>((r) => (resolveDone = r));
+  const stop = () => {
+    clearInterval(poll);
+    peer.close();
+    resolveDone();
+  };
+  process.once("SIGINT", stop);
+  process.once("SIGTERM", stop);
+  return { stop, done, peer };
+}
+
+async function cmdChSync(cwd: string, args: string[]): Promise<number> {
+  const { flags, positional } = parseFlags(args, { quiet: "bool" });
+  const topic = positional[0];
+  if (!topic || positional.length > 1) throw new Error("usage: ay ch sync <topic> [--quiet]");
+  const reg = await readRegistry(cwd);
+  const { entry } = await resolveChannel(reg, topic);
+  if (!entry) throw new Error(`join "${topic}" before syncing: ay ch join <link>`);
+  process.stderr.write(`syncing "${topic}" over the mesh — Ctrl-C to stop\n`);
+  const { done } = await runMesh(cwd, entry, { quiet: !!flags.quiet });
+  await done;
+  return 0;
+}
+
+async function cmdChPipe(cwd: string, args: string[]): Promise<number> {
+  const { positional } = parseFlags(args, {});
+  const topic = positional[0];
+  if (!topic || positional.length > 1) throw new Error("usage: ay ch pipe <topic>");
+  const reg = await readRegistry(cwd);
+  const { entry } = await resolveChannel(reg, topic);
+  if (!entry) throw new Error(`join "${topic}" before piping: ay ch join <link>`);
+
+  const { done } = await runMesh(cwd, entry, {});
+  // stdin lines → messages
+  const rl = (await import("readline")).createInterface({ input: process.stdin });
+  rl.on("line", (line) => {
+    const text = line.trimEnd();
+    if (!text) return;
+    void (async () => {
+      const ops = await readOps(cwd, entry.channelId);
+      const hlc = hlcSend(maxHlc(ops), Date.now(), entry.author);
+      await appendOps(cwd, entry.channelId, [
+        makeOp({
+          author: entry.author,
+          name: entry.name,
+          role: entry.role,
+          hlc,
+          kind: "msg",
+          body: text,
+        }),
+      ]);
+      // the mesh poll loop broadcasts it on the next tick
+    })();
+  });
+  await done;
+  rl.close();
+  return 0;
+}
+
 function chHelp(): number {
   process.stdout.write(
     `ay ch - local-first E2E channels for AI ↔ humans (per-cwd, no server storage)\n` +
@@ -412,9 +535,13 @@ function chHelp(): number {
       `  ay ch read <topic> [-n N] [--json]       print the thread (last N)\n` +
       `  ay ch head <topic> [-n N]                first N messages\n` +
       `  ay ch tail <topic> [-n N] [-f]           last N (96), -f to follow\n` +
+      `  ay ch sync <topic> [--quiet]             hold the WebRTC mesh: live send/receive (Ctrl-C to stop)\n` +
+      `  ay ch pipe <topic>                       sync + bridge stdin→send and inbound→stdout\n` +
       `\n` +
       `  identity: --name defaults to $AY_CH_NAME/OS user; --role to agent (in an agent) or human\n` +
-      `  storage:  <cwd>/.agent-yes/ch-<id>.jsonl  (a full CRDT replica; cwd-scoped)\n`,
+      `  storage:  <cwd>/.agent-yes/ch-<id>.jsonl  (a full CRDT replica; cwd-scoped)\n` +
+      `  live:     run 'ay ch sync <topic>' (foreground/backgrounded) to join the mesh; then\n` +
+      `            'ay ch send/tail' compose with it through the shared replica file — no daemon\n`,
   );
   return 0;
 }
@@ -445,6 +572,10 @@ export async function cmdCh(args: string[]): Promise<number> {
       return cmdChRead(cwd, rest, "head");
     case "tail":
       return cmdChRead(cwd, rest, "tail");
+    case "sync":
+      return cmdChSync(cwd, rest);
+    case "pipe":
+      return cmdChPipe(cwd, rest);
     case undefined:
     case "help":
     case "--help":

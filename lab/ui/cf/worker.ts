@@ -120,7 +120,7 @@ export default {
   },
 };
 
-type Attach = { authed: boolean; role?: "host" | "client"; peer?: string };
+type Attach = { authed: boolean; role?: "host" | "client"; peer?: string; mesh?: boolean };
 
 export class Room {
   constructor(private state: DurableObjectState) {
@@ -170,25 +170,40 @@ export class Room {
     }
 
     if (!self.authed) {
-      // First message must be the hello that carries role + token.
+      // First message must be the hello that carries role + token (+ optional mesh flag).
       if (msg.type !== "hello") return ws.close(1008, "expected hello");
       const role: "host" | "client" = msg.role === "host" ? "host" : "client";
       const token = String(msg.token ?? "");
       const proto = Number(msg.v ?? 1); // protocol generation (v2 = e2e)
+      // Mesh rooms (ay ch channels) are symmetric — every peer relays to every
+      // other peer, no single host. The mode is TOFU-pinned on room open, so the
+      // star (share) and mesh (channels) wires can never mix within one room and
+      // the existing host↔client path stays byte-identical for non-mesh clients.
+      const mesh = msg.mesh === true;
       const stored = await this.state.storage.get<string>("token");
       const storedProto = (await this.state.storage.get<number>("proto")) ?? 1;
+      const storedMesh = (await this.state.storage.get<boolean>("mesh")) ?? false;
       if (stored === undefined) {
-        if (role !== "host") return ws.close(1008, "room not open");
+        // Opening the room: a star room must be opened by its host; a mesh room
+        // is opened by whoever arrives first (all peers are equal).
+        if (!mesh && role !== "host") return ws.close(1008, "room not open");
         await this.state.storage.put("token", token);
         await this.state.storage.put("proto", proto);
+        await this.state.storage.put("mesh", mesh);
       } else {
         if (stored !== token) return ws.close(1008, "forbidden"); // token never echoed
         if (storedProto !== proto) return ws.close(1008, "protocol mismatch");
+        if (storedMesh !== mesh) return ws.close(1008, "room mode mismatch");
       }
-      const peer = role === "host" ? "host" : crypto.randomUUID().slice(0, 8);
-      ws.serializeAttachment({ authed: true, role, peer } satisfies Attach);
-      ws.send(JSON.stringify({ type: "welcome", peer, role, v: proto }));
-      if (role === "client") this.toHost({ type: "peer-join", peer });
+      const peer = mesh || role === "client" ? crypto.randomUUID().slice(0, 8) : "host";
+      // In a mesh, tell the newcomer who is already here (roster) and announce it
+      // to everyone else, so both sides can open a direct DataChannel. Who sends
+      // the offer (initiator = lower peer id) is decided client-side to avoid glare.
+      const roster = mesh ? this.peers(ws) : undefined;
+      ws.serializeAttachment({ authed: true, role, peer, mesh } satisfies Attach);
+      ws.send(JSON.stringify({ type: "welcome", peer, role, v: proto, mesh, peers: roster }));
+      if (mesh) this.broadcast(ws, { type: "peer-join", peer });
+      else if (role === "client") this.toHost({ type: "peer-join", peer });
       return;
     }
 
@@ -198,6 +213,13 @@ export class Room {
     // byte-for-byte; answer it directly rather than relay it onward.
     if (msg.type === "ping") return void ws.send(PONG);
 
+    if (self.mesh) {
+      // Symmetric relay: every message carries a `to`; forward it to that peer.
+      msg.from = self.peer; // tag so the recipient can reply/route back
+      const to = typeof msg.to === "string" ? msg.to : "";
+      if (to) this.toPeer(to, msg);
+      return;
+    }
     if (self.role === "client") {
       msg.from = self.peer; // tag so the host can route the reply back
       this.toHost(msg);
@@ -209,7 +231,9 @@ export class Room {
 
   webSocketClose(ws: WebSocket): void {
     const self = ws.deserializeAttachment() as Attach;
-    if (self.authed && self.role === "client") this.toHost({ type: "peer-leave", peer: self.peer });
+    if (!self.authed) return;
+    if (self.mesh) this.broadcast(ws, { type: "peer-leave", peer: self.peer });
+    else if (self.role === "client") this.toHost({ type: "peer-leave", peer: self.peer });
   }
 
   // Role isn't a hibernation tag (it's only known after the hello), so route by
@@ -227,5 +251,25 @@ export class Room {
       const a = s.deserializeAttachment() as Attach | null;
       if (a?.authed && a.peer === peer) s.send(data);
     }
+  }
+
+  // Mesh helpers: fan a frame out to every OTHER authed peer, and list the peers
+  // currently in the room (excluding `except` — the newcomer receiving the roster).
+  private broadcast(except: WebSocket, obj: unknown): void {
+    const data = JSON.stringify(obj);
+    for (const s of this.state.getWebSockets()) {
+      if (s === except) continue;
+      const a = s.deserializeAttachment() as Attach | null;
+      if (a?.authed) s.send(data);
+    }
+  }
+  private peers(except: WebSocket): string[] {
+    const out: string[] = [];
+    for (const s of this.state.getWebSockets()) {
+      if (s === except) continue;
+      const a = s.deserializeAttachment() as Attach | null;
+      if (a?.authed && a.peer) out.push(a.peer);
+    }
+    return out;
   }
 }
