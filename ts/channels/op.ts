@@ -15,10 +15,10 @@
 
 // Chat/history kinds are persisted + CRDT-synced; the control kinds (presence,
 // cmd, stream) are ephemeral live signals — see trust.ts `isEphemeral`. `cmd`
-// carries a structured co-edit action (JSON in `body`); `stream` carries a delta
-// of a running cmd. Both are only ever ACTED ON when authored by an agent and
-// allowlisted (trust.ts `isActionableCmd`) — a public widget guest must never
-// drive another peer's DOM.
+// carries an application-defined structured action (JSON in `body`); `stream`
+// carries a delta of a running cmd. Both are only ever ACTED ON when authored by
+// an agent and allowlisted by the consuming app (trust.ts `isActionableCmd`) — a
+// public channel's guest must never act on another peer's behalf.
 export type OpKind = "msg" | "edit" | "delete" | "reaction" | "presence" | "cmd" | "stream";
 export type Role = "agent" | "human";
 
