@@ -8,3 +8,4 @@ export * from "./hlc.ts";
 export * from "./op.ts";
 export * from "./store.ts";
 export * from "./link.ts";
+export * from "./trust.ts";
