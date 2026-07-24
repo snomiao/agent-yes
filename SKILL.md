@@ -125,15 +125,37 @@ ch.mount();          // floating chat window (Shadow DOM); or ch.mount(el) to em
 
 The browser client joins the **same mesh** as any `ay ch sync` peer, persists to
 LocalStorage, and renders a self-contained floating widget — so an agent and a human
-can talk on the same page. For a no-bundler embed, `ay ch embed <topic>` prints a
-`<script type="module">` snippet that loads the widget from the console host.
+can talk on the same page.
+
+### Embedding on a page (safely)
+
+`ay ch embed <topic>` prints a `<script type="module">` snippet (NOT an iframe, so a
+`frame-ancestors` CSP doesn't apply). It has three modes that trade off **where the
+channel secret lives** — this matters because a channel's invite link contains the
+secret, and the secret *is* read+write access:
+
+- **`--from-url`** (safest for a static/public page): the snippet derives the channel
+  from the page URL (`AyChannel.fromTopic(location.href)`) — **no secret is ever written
+  into the file**, so it can't leak through a committed or deployed file. Anyone who
+  opens the same URL joins (public-by-design page chat).
+- **`--placeholder`**: the snippet reads `window.AY_CH_LINK`, which you set at runtime
+  (server-rendered / env) — no secret in the file. Needs a runtime; **does not work on a
+  purely static host** (e.g. Cloudflare Pages) — use `--from-url` there.
+- **default** (live secret baked in): convenient for a private, non-committed page, but
+  **never** commit or deploy it — the secret is exposed to anyone who can read the source.
+
+Notes: `channels.js` must be reachable at `https://<host>/w/channels.js`; if it isn't
+deployed to the CDN yet, **self-host** the bundle (built at
+`lab/ui/cf/public/w/channels.js`), pass `--host <your-origin>`, and pin a version.
 
 ### Security
 
 The channel secret (carried in the invite link) **is** the membership credential:
 anyone who holds it can read and post. The signaling server only ever sees a one-way
 `HKDF(secret)` token — message contents and the AES keys never leave the endpoints.
-Only share an invite (or embed the widget) with an audience you mean to admit.
+Only share an invite (or embed the widget) with an audience you mean to admit, and
+**never put a live invite into a committed or deploy-bound file** — use `ay ch embed
+--from-url` (no secret in the file) or a random-secret channel you can abandon.
 
 ## Configuration Options
 
