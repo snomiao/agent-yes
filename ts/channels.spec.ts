@@ -4,6 +4,7 @@ import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildBookmarklet,
+  buildEmbedSnippet,
   cmdCh,
   defaultName,
   defaultRole,
@@ -65,7 +66,9 @@ describe("formatMessage", () => {
   });
   it("shows (deleted) and reaction counts", () => {
     expect(formatMessage({ ...base, deleted: true, text: "" })).toContain("(deleted)");
-    expect(formatMessage({ ...base, reactions: [{ emoji: "👍", by: ["a", "b"] }] })).toContain("👍2");
+    expect(formatMessage({ ...base, reactions: [{ emoji: "👍", by: ["a", "b"] }] })).toContain(
+      "👍2",
+    );
     expect(formatMessage({ ...base, reactions: [{ emoji: "🎉", by: ["a"] }] })).toContain("🎉");
   });
 });
@@ -166,6 +169,39 @@ describe("ay ch CLI (local-only)", () => {
     expect(bm).toContain("beta.example.dev/w/channels.js");
     expect(bm).toContain("sig.example.dev");
     expect(bm).toContain("location.href"); // default topic = full page URL
+  });
+
+  it("embed modes trade off where the secret lives", async () => {
+    await capture(() => cmdCh(["mk", "pub"]));
+    // default (live): the secret IS in the file
+    expect((await capture(() => cmdCh(["embed", "pub"]))).out).toContain("e1.");
+    // --placeholder: no secret; runtime-injected global
+    const ph = (await capture(() => cmdCh(["embed", "pub", "--placeholder"]))).out;
+    expect(ph).not.toContain("e1.");
+    expect(ph).toContain("window.AY_CH_LINK");
+    // --from-url: no secret; derived from the page URL (safe for static pages)
+    const fu = (await capture(() => cmdCh(["embed", "pub", "--from-url"]))).out;
+    expect(fu).not.toContain("e1.");
+    expect(fu).toContain("AyChannel.fromTopic(location.href)");
+    // the two secret-less modes are mutually exclusive
+    await expect(cmdCh(["embed", "pub", "--from-url", "--placeholder"])).rejects.toThrow(
+      /mutually/,
+    );
+  });
+
+  it("buildEmbedSnippet: always a <script> (never an iframe), across modes", () => {
+    const live = buildEmbedSnippet("agent-yes.com", "t", {
+      kind: "live",
+      link: "ay://ch/h/r#e1.dead",
+    });
+    expect(live).toContain("<script");
+    expect(live).not.toContain("<iframe");
+    expect(live).toContain("ay://ch/h/r#e1.dead");
+    const fu = buildEmbedSnippet("self.example", "t", { kind: "from-url" });
+    expect(fu).toContain("self.example/w/channels.js");
+    expect(fu).toContain("fromTopic(location.href)");
+    expect(fu).not.toContain("e1.");
+    expect(buildEmbedSnippet("h", "t", { kind: "placeholder" })).toContain("window.AY_CH_LINK");
   });
 
   it("prints help for no subcommand and rejects unknown ones", async () => {

@@ -541,26 +541,94 @@ async function cmdChPipe(cwd: string, args: string[]): Promise<number> {
   return 0;
 }
 
+export type EmbedMode =
+  | { kind: "live"; link: string } // the invite (with secret) is baked into the file
+  | { kind: "placeholder" } // page injects window.AY_CH_LINK at runtime (server-rendered)
+  | { kind: "from-url" }; // channel derived from the page URL — NO secret in the file
+
+/**
+ * The embed `<script>` snippet — a script (NOT an iframe) that loads the AyChannel
+ * browser lib and mounts the floating widget in the page, so the console's
+ * `frame-ancestors` CSP is irrelevant. Three modes trade off where the secret lives:
+ * baked in (`live`), injected at runtime (`placeholder`), or never present because
+ * the channel is derived from the (public) page URL (`from-url`) — the last is the
+ * safe default for a STATIC public page, since no token ever lands in the file.
+ */
+export function buildEmbedSnippet(host: string, topic: string, mode: EmbedMode): string {
+  const imp = `  import AyChannel from "https://${host}/w/channels.js";\n`;
+  if (mode.kind === "from-url") {
+    return (
+      `<!-- ay channel: ${topic} — channel derived from the page URL; no secret in this file -->\n` +
+      `<script type="module">\n${imp}` +
+      `  AyChannel.fromTopic(location.href).then((c) => c.mount());\n` +
+      `</script>\n`
+    );
+  }
+  if (mode.kind === "placeholder") {
+    return (
+      `<!-- ay channel: ${topic} — set window.AY_CH_LINK to the invite at runtime; do NOT commit the secret -->\n` +
+      `<script type="module">\n${imp}` +
+      `  new AyChannel(window.AY_CH_LINK).mount();\n` +
+      `</script>\n`
+    );
+  }
+  return (
+    `<!-- ay channel: ${topic} — this snippet contains a LIVE secret; anyone who reads it can join -->\n` +
+    `<script type="module">\n${imp}` +
+    `  new AyChannel(${JSON.stringify(mode.link)}).mount();\n` +
+    `</script>\n`
+  );
+}
+
 async function cmdChEmbed(cwd: string, args: string[]): Promise<number> {
-  const { flags, positional } = parseFlags(args, { host: "value" });
+  const { flags, positional } = parseFlags(args, {
+    host: "value",
+    placeholder: "bool",
+    "from-url": "bool",
+  });
   const topic = positional[0];
   if (!topic || positional.length > 1)
-    throw new Error("usage: ay ch embed <topic> [--host <console-host>]");
+    throw new Error("usage: ay ch embed <topic> [--host H] [--placeholder | --from-url]");
+  if (flags.placeholder && flags["from-url"])
+    throw new Error("--placeholder and --from-url are mutually exclusive");
   const reg = await readRegistry(cwd);
   const { entry } = await resolveChannel(reg, topic);
   if (!entry) throw new Error(`join "${topic}" before embedding: ay ch join <link>`);
-  const consoleHost = typeof flags.host === "string" ? flags.host : "agent-yes.com";
-  const link = formatChannelLink({ sighost: entry.sighost, room: entry.room, s: entry.s });
-  // A self-contained snippet: loads the AyChannel browser lib and mounts the
-  // floating chat widget. Anyone who can read the page source holds the secret S
-  // and can therefore join — that IS the channel's membership model (secret =
-  // access), so only embed on a page whose audience you mean to let in.
-  process.stdout.write(
-    `<!-- ay channel: ${topic} — anyone who can read this snippet can join -->\n` +
-      `<script type="module">\n` +
-      `  import AyChannel from "https://${consoleHost}/w/channels.js";\n` +
-      `  new AyChannel(${JSON.stringify(link)}).mount();\n` +
-      `</script>\n`,
+  const host = typeof flags.host === "string" ? flags.host : "agent-yes.com";
+  const invite = formatChannelLink({ sighost: entry.sighost, room: entry.room, s: entry.s });
+  const mode: EmbedMode = flags["from-url"]
+    ? { kind: "from-url" }
+    : flags.placeholder
+      ? { kind: "placeholder" }
+      : { kind: "live", link: invite };
+
+  // stdout: only the snippet (safe to pipe/paste). stderr: the guidance.
+  process.stdout.write(buildEmbedSnippet(host, topic, mode));
+
+  if (mode.kind === "from-url") {
+    process.stderr.write(
+      `\n  URL-derived: no secret in the snippet — the channel is computed from the page URL,\n` +
+        `  so a committed/static file carries no token (ideal for static public pages like\n` +
+        `  Cloudflare Pages). Anyone who opens the same URL joins — that IS the membership.\n`,
+    );
+  } else if (mode.kind === "placeholder") {
+    process.stderr.write(
+      `\n  Placeholder: the invite is NOT in the snippet — set window.AY_CH_LINK at runtime\n` +
+        `  (server-rendered / env), so a committed file carries no secret. This needs a\n` +
+        `  runtime; on a STATIC host use --from-url instead. Invite to inject: ${invite}\n`,
+    );
+  } else {
+    process.stderr.write(
+      `\n  ⚠ This snippet embeds a LIVE channel secret (read+write). Anyone who can read the\n` +
+        `    page source can join. Do NOT commit it to a public or deploy-bound file. For a\n` +
+        `    static public page use --from-url (no secret in the file); for a server-rendered\n` +
+        `    page use --placeholder. Prefer a dedicated random-secret channel you can abandon.\n`,
+    );
+  }
+  process.stderr.write(
+    `  channels.js must load from https://${host}/w/channels.js — if it 404s (not yet on the\n` +
+      `  CDN), self-host the bundle (lab/ui/cf/public/w/channels.js) and pass --host <origin>,\n` +
+      `  pinning a version. The embed is a <script>, not an iframe.\n`,
   );
   return 0;
 }
@@ -611,7 +679,8 @@ function chHelp(): number {
       `  ay ch tail <topic> [-n N] [-f]           last N (96), -f to follow\n` +
       `  ay ch sync <topic> [--quiet]             hold the WebRTC mesh: live send/receive (Ctrl-C to stop)\n` +
       `  ay ch pipe <topic>                       sync + bridge stdin→send and inbound→stdout\n` +
-      `  ay ch embed <topic> [--host H]           print an HTML snippet embedding a floating chat widget\n` +
+      `  ay ch embed <topic> [--host H] [--from-url|--placeholder]  HTML snippet for a chat widget\n` +
+      `                                           (--from-url keeps NO secret in the file — best for static pages)\n` +
       `  ay ch bookmarklet [--host H]             print a bookmarklet: any page joins a channel by its URL\n` +
       `\n` +
       `  URL-topic: 'ay ch mk <name> --topic <string>' derives the SAME channel a\n` +
