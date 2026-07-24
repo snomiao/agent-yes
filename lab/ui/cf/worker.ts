@@ -40,8 +40,12 @@ const SUBPROTO = "ay-signal-1";
 // hijack (base-uri), clickjacking (frame-ancestors) and form exfil
 // (form-action). script-src keeps 'unsafe-inline' because the console is a
 // single-file inline app (no inline event-handler attributes exist, so a
-// stricter nonce split is a follow-up, not a regression risk); xterm loads from
-// jsdelivr. 'unsafe-eval' exists for exactly one feature: user-authored `js:`
+// stricter nonce split is a follow-up, not a regression risk). The jsdelivr
+// allowance in script-src/style-src is now ONLY for the rgui console at /r/
+// (still CDN-loaded); the main /w/ console vendors xterm same-origin. Dropping
+// jsdelivr is a follow-up gated on self-hosting rgui too (this CSP is global —
+// _headers `/*` + every HTML response here — so removing it now would break /r/).
+// 'unsafe-eval' exists for exactly one feature: user-authored `js:`
 // quick commands (new Function over user-stored localStorage text — their own
 // code in their own browser). connect-src allows any wss: so custom / self-hosted signaling hosts
 // still work, while forbidding arbitrary https fetch exfil. Keep this in sync

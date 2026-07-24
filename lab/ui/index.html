@@ -1855,14 +1855,20 @@
     <link rel="modulepreload" href="./console-logic.js" />
     <link rel="modulepreload" href="./rtc.js" />
     <link rel="modulepreload" href="./e2e.js" />
-    <link
-      rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/css/xterm.min.css"
-    />
-    <script src="https://cdn.jsdelivr.net/npm/@xterm/xterm@5.5.0/lib/xterm.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-fit@0.10.0/lib/addon-fit.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-web-links@0.11.0/lib/addon-web-links.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/@xterm/addon-clipboard@0.1.0/lib/addon-clipboard.min.js"></script>
+    <!-- xterm.js + addons — vendored same-origin (was cdn.jsdelivr.net). A
+         third-party CDN on the critical render path (the terminal can't paint
+         without xterm) meant a separate DNS+TLS handshake and 5 cross-origin
+         fetches on every open, NOT in the SW precache, and jsdelivr is slow/
+         throttled in much of Asia. Local copies are HTTP/2-multiplexed with the
+         rest of /w/, CF-edge-cached, SW-precached (offline), and region-neutral.
+         Pinned: xterm 5.5.0, addon-fit 0.10.0, addon-web-links 0.11.0,
+         addon-clipboard 0.1.0. Load order preserved (classic sync scripts define
+         the Terminal/FitAddon globals before console-logic.js runs). -->
+    <link rel="stylesheet" href="./vendor/xterm.min.css" />
+    <script src="./vendor/xterm.min.js"></script>
+    <script src="./vendor/addon-fit.min.js"></script>
+    <script src="./vendor/addon-web-links.min.js"></script>
+    <script src="./vendor/addon-clipboard.min.js"></script>
     <!-- QR generator (MIT, Kazuhiko Arase) — vendored locally so single-agent
          share QR codes render offline under `ay serve --http`. Classic script:
          defines the global `qrcode`. -->

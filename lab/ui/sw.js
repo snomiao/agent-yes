@@ -4,9 +4,9 @@
 // versioned wire protocol to the signaling server, so it must never run stale —
 // online we always fetch fresh (and refresh the cache); the cache is only a
 // fallback when offline, which is what makes the installed app launchable with no
-// network. WebSocket signaling and cross-origin CDN scripts are not GET fetches we
-// own, so they pass straight through.
-const CACHE = "agent-yes-w-v3";
+// network. WebSocket signaling passes straight through (not a GET we own). xterm
+// is now vendored same-origin (see SHELL / index.html), so it's precached too.
+const CACHE = "agent-yes-w-v4";
 // Preview proxy: <scope>p/<encSrc>/<port>/* renders a machine's local dev
 // server INSIDE the console's existing WebRTC tunnel (peer-to-peer, off the
 // edge relay). We can't own the RTCPeerConnection here, so we forward each
@@ -128,6 +128,13 @@ const SHELL = [
   "./qrcode.js",
   "./manifest.webmanifest",
   "./icon.svg",
+  // Vendored xterm.js + addons (were cdn.jsdelivr.net, off-critical-path & never
+  // cached). Precaching them makes /w/ open offline and region-independent.
+  "./vendor/xterm.min.css",
+  "./vendor/xterm.min.js",
+  "./vendor/addon-fit.min.js",
+  "./vendor/addon-web-links.min.js",
+  "./vendor/addon-clipboard.min.js",
 ];
 
 self.addEventListener("install", (e) => {
