@@ -103,7 +103,9 @@ function dcBufferedAmount(dc: any): number {
 // secret — but it means a share link also grants ~1h of Cloudflare TURN relay
 // capacity. Keep the TTL short; do not widen it.
 let iceCache: { servers: IceServer[]; exp: number } | null = null;
-async function getIceServers(): Promise<IceServer[]> {
+// Exported so the channels mesh peer (ts/channels/peer.ts) reuses the exact same
+// TURN-credential minting + STUN fallback rather than re-deriving it.
+export async function getIceServers(): Promise<IceServer[]> {
   const keyId = process.env.CF_TURN_KEY_ID;
   const apiToken = process.env.CF_TURN_API_TOKEN;
   if (!keyId || !apiToken) return STUN;
@@ -280,7 +282,9 @@ async function ensureAddon(ndDir: string): Promise<void> {
 // unproven under that live load, so it's not used; the proactive recycle + oxmgr
 // health watchdog remain the mitigation until node-datachannel ships libdatachannel
 // >0.24.2 (cf upstream #1538/#1548).
-async function importRTC(): Promise<any> {
+// Exported so the channels mesh peer reuses the exact same Bun/native-addon
+// loading dance (ensureAddon + linkFromBunCache) instead of re-solving it.
+export async function importRTC(): Promise<any> {
   // Ensure the native addon is on disk before the first import — a failed
   // dynamic import is cached by Bun, so post-import healing can't recover it.
   const ndDir = await ndPackageDir();

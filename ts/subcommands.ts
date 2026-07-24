@@ -363,6 +363,8 @@ const SUBCOMMANDS = new Set([
   "restart",
   "note",
   "todo",
+  "ch",
+  "channels",
   "serve",
   "schedule",
   "remote",
@@ -478,6 +480,11 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
       case "todo": {
         const { runTodoSubcommand } = await import("./todoCli.ts");
         return runTodoSubcommand(rest);
+      }
+      case "ch":
+      case "channels": {
+        const { cmdCh } = await import("./channels.ts");
+        return cmdCh(rest);
       }
       case "serve": {
         const { cmdServe } = await import("./serve.ts");
@@ -614,6 +621,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay head <keyword>                   first N lines\n` +
       `  ay send <keyword> <msg>             send a message (keyword '.' = agent in this cwd)\n` +
       `  ay msgs [keyword] [--in|--out]      inter-agent message log (sent + received)\n` +
+      `  ay ch mk|join|send|read|tail <topic>  local-first E2E channels: AI ↔ humans on a topic (ay ch help)\n` +
       `  ay key <keyword> <key...>           send raw keystrokes (down/up/enter/esc/…) — drives menus\n` +
       `  ay select <keyword> <N>             pick option N of a needs_input selection menu\n` +
       `  ay attach <keyword>                 interactive attach (detach: Ctrl-\\)\n` +

@@ -13,7 +13,7 @@
 #   public/r/ + public/rgui/ — the rgui forest page (built from lib/rgui)
 set -e
 mkdir -p ./public/w
-cp ../index.html ../*.js ../manifest.webmanifest ../icon.svg ./public/w/
+cp ../index.html ../ch.html ../*.js ../manifest.webmanifest ../icon.svg ./public/w/
 cp ../landing.html ./public/index.html
 cp ../architecture.html ./public/architecture.html
 rm -rf ./public/blog
@@ -40,6 +40,12 @@ if [ "${AGENT_YES_CHANNEL:-stable}" = "beta" ]; then
     ./public/setup.ps1 > ./public/setup.ps1.tmp
   mv ./public/setup.ps1.tmp ./public/setup.ps1
 fi
+# Channel widget: bundle the browser AyChannel lib (`import AyChannel from
+# "agent-yes/channels"`) into a self-contained ESM the hosted chat page (w/ch.html)
+# and third-party embeds load. Built with bun (browser target) independent of the
+# npm dist build, so it exists even in a bare `wrangler dev` / beta Pages deploy.
+bun build ../../../ts/channels/browser.ts --outfile ./public/w/channels.js --format esm --target browser --minify
+
 cp _headers ./public/_headers
 bun ../../../scripts/build-rgui.ts ./public/r
 rm -rf ./public/rgui
