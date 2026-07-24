@@ -3,6 +3,7 @@ import os from "os";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  buildBookmarklet,
   cmdCh,
   defaultName,
   defaultRole,
@@ -143,6 +144,28 @@ describe("ay ch CLI (local-only)", () => {
     expect(resolved.entry).toBeTruthy();
     const linkResolved = await resolveChannel(await readRegistry(cwd), link);
     expect(linkResolved.entry).toBeNull();
+  });
+
+  it("mk --topic derives the same channel for the same topic string", async () => {
+    await capture(() => cmdCh(["mk", "a", "--topic", "https://example.com/p"]));
+    await capture(() => cmdCh(["mk", "b", "--topic", "https://example.com/p"]));
+    await capture(() => cmdCh(["mk", "c", "--topic", "https://example.com/other"]));
+    const reg = await readRegistry(cwd);
+    // same topic → same underlying channel; different topic → different channel
+    expect(reg.channels.a!.channelId).toBe(reg.channels.b!.channelId);
+    expect(reg.channels.c!.channelId).not.toBe(reg.channels.a!.channelId);
+  });
+
+  it("bookmarklet prints a javascript: URL that loads the widget by page topic", async () => {
+    const out = (await capture(() => cmdCh(["bookmarklet"]))).out;
+    expect(out).toMatch(/^javascript:/);
+    expect(out).toContain("AyChannel.fromTopic");
+    expect(out).toContain("agent-yes.com/w/channels.js");
+    // custom host/sighost flow through
+    const bm = buildBookmarklet("beta.example.dev", "sig.example.dev");
+    expect(bm).toContain("beta.example.dev/w/channels.js");
+    expect(bm).toContain("sig.example.dev");
+    expect(bm).toContain("location.href"); // default topic = full page URL
   });
 
   it("prints help for no subcommand and rejects unknown ones", async () => {

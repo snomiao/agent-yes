@@ -6,6 +6,7 @@ import {
   formatChannelWebLink,
   isChannelLink,
   parseChannelLink,
+  secretFromTopic,
 } from "./link.ts";
 
 const S = "a".repeat(64); // a valid 64-hex secret
@@ -23,6 +24,18 @@ describe("channel identity derivation", () => {
 
   it("rejects a non-hex secret before hashing", async () => {
     await expect(deriveChannelId("not-hex")).rejects.toThrow();
+  });
+
+  it("derives a deterministic, valid secret from a topic (same URL → same channel)", async () => {
+    const url = "https://example.com/docs/page";
+    const [a, b] = await Promise.all([secretFromTopic(url), secretFromTopic(url)]);
+    expect(a).toBe(b); // deterministic
+    expect(a).toMatch(/^[0-9a-f]{64}$/); // a valid S
+    // usable as a real secret end-to-end
+    await expect(deriveChannelId(a)).resolves.toMatch(/^[0-9a-f]{16}$/);
+    // distinct topics (incl. a differing hash) yield distinct channels
+    expect(await secretFromTopic(url + "#section")).not.toBe(a);
+    expect(await secretFromTopic("https://example.com/other")).not.toBe(a);
   });
 });
 
