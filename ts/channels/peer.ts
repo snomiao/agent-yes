@@ -1,11 +1,12 @@
-// Node/Bun WebRTC mesh peer for ONE channel.
+// Isomorphic WebRTC mesh peer for ONE channel (Node/Bun AND browser).
 //
 // Unlike the share bridge (ts/share.ts), a channel is symmetric: there is no
 // host, every participant holds a full replica, and BOTH ends of each pairwise
-// DataChannel send application traffic (chat ops). But the transport reuses the
-// share stack verbatim — the same node-datachannel loader + TURN credentials
-// (importRTC / getIceServers, exported from share.ts) and the same E2E sealed
-// frames + mandatory bidirectional key-confirmation handshake (lab/ui/e2e.js).
+// DataChannel send application traffic (chat ops). The transport is injected —
+// Node wires node-datachannel + Cloudflare TURN (via share.ts), the browser
+// wires its native RTCPeerConnection/WebSocket — so this one class runs both
+// sides. It reuses the E2E sealed frames + mandatory bidirectional key-
+// confirmation handshake from lab/ui/e2e.js verbatim.
 //
 // Topology: the signaling Room DO runs in mesh mode (lab/ui/cf/worker.ts) and
 // relays offer/answer/candidate between any two peers plus broadcasts
@@ -28,15 +29,17 @@ import {
   randomHex,
   unpackEnvelope,
 } from "../../lab/ui/e2e.js";
-import { getIceServers, importRTC } from "../share.ts";
 import { isValidOp, type Op } from "./op.ts";
 import { haveVector, opsMissing } from "./store.ts";
 
 const SIGNAL_SUBPROTOCOL = "ay-signal-1";
 const HEARTBEAT_MS = 20_000; // keepalive ping to the rendezvous (edge auto-pongs)
 const DC_LABEL = "ch";
+const STUN = [{ urls: "stun:stun.l.google.com:19302" }];
 
-/** Persistence the peer drives — the daemon supplies a jsonl-backed adapter. */
+export type IceServer = { urls: string | string[]; username?: string; credential?: string };
+
+/** Persistence the peer drives — Node supplies a jsonl adapter, the browser LocalStorage. */
 export interface ChannelPeerStore {
   all(): Promise<Op[]>;
   /** Merge + persist; returns only the ops that were genuinely new. */
@@ -49,6 +52,12 @@ export interface ChannelPeerOpts {
   /** Secret S (64-hex) — derives the authToken the server sees + the AES keys it never does. */
   s: string;
   store: ChannelPeerStore;
+  /** RTCPeerConnection constructor — node-datachannel/polyfill (Node) or the browser global. */
+  rtc: new (config?: any) => any;
+  /** ICE servers provider (TURN+STUN). Defaults to public STUN. */
+  iceServers?: () => Promise<IceServer[]>;
+  /** WebSocket constructor. Defaults to the global. */
+  WebSocketImpl?: typeof WebSocket;
   /** Called for each op newly added to the replica (live tail / UI). */
   onOp?: (op: Op) => void;
   /** Called when the confirmed-peer count changes (presence). */
@@ -83,16 +92,23 @@ export class ChannelPeer {
   private ws?: WebSocket;
   private myId = "";
   private authToken = "";
-  private RTCPeerConnection: any;
+  private RTCPeerConnection: new (config?: any) => any;
+  private WS: typeof WebSocket;
   private conns = new Map<string, Conn>();
   private heartbeat?: ReturnType<typeof setInterval>;
   private closed = false;
 
-  constructor(private opts: ChannelPeerOpts) {}
+  constructor(private opts: ChannelPeerOpts) {
+    this.RTCPeerConnection = opts.rtc;
+    this.WS = opts.WebSocketImpl ?? WebSocket;
+  }
+
+  private ice(): Promise<IceServer[]> {
+    return this.opts.iceServers ? this.opts.iceServers() : Promise.resolve(STUN);
+  }
 
   /** Connect to signaling and start meshing. Resolves once the socket is open. */
   async start(): Promise<void> {
-    this.RTCPeerConnection = await importRTC();
     this.authToken = await deriveAuthToken(this.opts.s, this.opts.room, this.opts.sighost);
     await this.connectSignaling();
   }
@@ -130,7 +146,7 @@ export class ChannelPeer {
 
   private async connectSignaling(): Promise<void> {
     await new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(this.wsUrl(), [SIGNAL_SUBPROTOCOL]);
+      const ws = new this.WS(this.wsUrl(), [SIGNAL_SUBPROTOCOL]);
       this.ws = ws;
       let opened = false;
       ws.onopen = () => {
@@ -146,7 +162,7 @@ export class ChannelPeer {
         );
         this.heartbeat = setInterval(() => {
           try {
-            if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "ping" }));
+            if (ws.readyState === this.WS.OPEN) ws.send(JSON.stringify({ type: "ping" }));
           } catch {
             /* dropped */
           }
@@ -228,7 +244,7 @@ export class ChannelPeer {
     };
     this.conns.set(peerId, c);
     pc.onicecandidate = (e: any) => {
-      if (e.candidate && this.ws?.readyState === WebSocket.OPEN)
+      if (e.candidate && this.ws?.readyState === this.WS.OPEN)
         this.ws.send(JSON.stringify({ type: "candidate", to: peerId, candidate: e.candidate }));
     };
     pc.onconnectionstatechange = () => {
@@ -265,7 +281,7 @@ export class ChannelPeer {
   private async beginOffer(peerId: string): Promise<void> {
     if (this.conns.has(peerId) || this.closed) return;
     try {
-      const iceServers = await getIceServers();
+      const iceServers = await this.ice();
       const pc = new this.RTCPeerConnection({ iceServers });
       const c = this.newConn(peerId, true, pc);
       const dc = pc.createDataChannel(DC_LABEL);
@@ -273,7 +289,7 @@ export class ChannelPeer {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
       c.localSdp = pc.localDescription.sdp;
-      if (this.conns.get(peerId) !== c || this.ws?.readyState !== WebSocket.OPEN) return;
+      if (this.conns.get(peerId) !== c || this.ws?.readyState !== this.WS.OPEN) return;
       this.ws.send(JSON.stringify({ type: "offer", to: peerId, sdp: c.localSdp, iceServers }));
     } catch (err) {
       this.log(`beginOffer ${peerId}: ${err}`);
@@ -284,7 +300,7 @@ export class ChannelPeer {
   private async onOffer(peerId: string, sdp: string, iceServers: any): Promise<void> {
     if (!peerId || this.conns.has(peerId)) return;
     try {
-      const pc = new this.RTCPeerConnection({ iceServers: iceServers ?? (await getIceServers()) });
+      const pc = new this.RTCPeerConnection({ iceServers: iceServers ?? (await this.ice()) });
       const c = this.newConn(peerId, false, pc);
       pc.ondatachannel = (e: any) => this.wireDataChannel(c, e.channel);
       c.remoteSdp = sdp;
@@ -294,7 +310,7 @@ export class ChannelPeer {
       await pc.setLocalDescription(answer);
       c.localSdp = pc.localDescription.sdp;
       await this.deriveKeys(c);
-      if (this.conns.get(peerId) !== c || this.ws?.readyState !== WebSocket.OPEN) return;
+      if (this.conns.get(peerId) !== c || this.ws?.readyState !== this.WS.OPEN) return;
       this.ws.send(JSON.stringify({ type: "answer", to: peerId, sdp: c.localSdp }));
     } catch (err) {
       this.log(`onOffer ${peerId}: ${err}`);

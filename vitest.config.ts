@@ -84,6 +84,11 @@ export default defineConfig({
         // integration script, not unit-testable (same rationale as share.ts /
         // webrtcRemote.ts). Its pure helpers (op/store/hlc) live in covered modules.
         "ts/channels/peer.ts",
+        // Browser AyChannel client + floating widget — needs a DOM + real
+        // RTCPeerConnection + a live mesh; verified in a browser, not unit-testable
+        // (its store backend store.browser.ts IS covered, and it delegates all CRDT
+        // logic to the covered core). Same rationale as peer.ts.
+        "ts/channels/browser.ts",
         "ts/remotes.ts",
         // WebRTC share bridge — needs a peer + signaling server; proven e2e, not
         // unit-testable.

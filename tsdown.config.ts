@@ -1,7 +1,13 @@
 import { defineConfig } from "tsdown";
 
 export default defineConfig({
-  entry: ["./ts/cli.ts", "./ts/index.ts"],
+  // Object form so the browser channels lib emits as dist/channels.js (the
+  // `agent-yes/channels` subpath target), not dist/browser.js.
+  entry: {
+    cli: "./ts/cli.ts",
+    index: "./ts/index.ts",
+    channels: "./ts/channels/browser.ts",
+  },
   outDir: "dist",
   platform: "node",
   sourcemap: true,

@@ -440,11 +440,18 @@ async function runMesh(
   peer: import("./channels/peer.ts").ChannelPeer;
 }> {
   const { ChannelPeer } = await import("./channels/peer.ts");
+  // Node transport: node-datachannel + Cloudflare TURN, loaded lazily from the
+  // proven share stack so the mesh peer stays isomorphic (the browser injects its
+  // own globals).
+  const { importRTC, getIceServers } = await import("./share.ts");
+  const rtc = await importRTC();
   const seen = new Set((await readOps(cwd, entry.channelId)).map((o) => o.id));
   const peer = new ChannelPeer({
     room: entry.room,
     sighost: entry.sighost,
     s: entry.s,
+    rtc,
+    iceServers: getIceServers,
     store: nodeStore(cwd, entry.channelId),
     onOp: (op) => {
       seen.add(op.id);
@@ -523,6 +530,30 @@ async function cmdChPipe(cwd: string, args: string[]): Promise<number> {
   return 0;
 }
 
+async function cmdChEmbed(cwd: string, args: string[]): Promise<number> {
+  const { flags, positional } = parseFlags(args, { host: "value" });
+  const topic = positional[0];
+  if (!topic || positional.length > 1)
+    throw new Error("usage: ay ch embed <topic> [--host <console-host>]");
+  const reg = await readRegistry(cwd);
+  const { entry } = await resolveChannel(reg, topic);
+  if (!entry) throw new Error(`join "${topic}" before embedding: ay ch join <link>`);
+  const consoleHost = typeof flags.host === "string" ? flags.host : "agent-yes.com";
+  const link = formatChannelLink({ sighost: entry.sighost, room: entry.room, s: entry.s });
+  // A self-contained snippet: loads the AyChannel browser lib and mounts the
+  // floating chat widget. Anyone who can read the page source holds the secret S
+  // and can therefore join — that IS the channel's membership model (secret =
+  // access), so only embed on a page whose audience you mean to let in.
+  process.stdout.write(
+    `<!-- ay channel: ${topic} — anyone who can read this snippet can join -->\n` +
+      `<script type="module">\n` +
+      `  import AyChannel from "https://${consoleHost}/w/channels.js";\n` +
+      `  new AyChannel(${JSON.stringify(link)}).mount();\n` +
+      `</script>\n`,
+  );
+  return 0;
+}
+
 function chHelp(): number {
   process.stdout.write(
     `ay ch - local-first E2E channels for AI ↔ humans (per-cwd, no server storage)\n` +
@@ -537,6 +568,7 @@ function chHelp(): number {
       `  ay ch tail <topic> [-n N] [-f]           last N (96), -f to follow\n` +
       `  ay ch sync <topic> [--quiet]             hold the WebRTC mesh: live send/receive (Ctrl-C to stop)\n` +
       `  ay ch pipe <topic>                       sync + bridge stdin→send and inbound→stdout\n` +
+      `  ay ch embed <topic> [--host H]           print an HTML snippet embedding a floating chat widget\n` +
       `\n` +
       `  identity: --name defaults to $AY_CH_NAME/OS user; --role to agent (in an agent) or human\n` +
       `  storage:  <cwd>/.agent-yes/ch-<id>.jsonl  (a full CRDT replica; cwd-scoped)\n` +
@@ -576,6 +608,8 @@ export async function cmdCh(args: string[]): Promise<number> {
       return cmdChSync(cwd, rest);
     case "pipe":
       return cmdChPipe(cwd, rest);
+    case "embed":
+      return cmdChEmbed(cwd, rest);
     case undefined:
     case "help":
     case "--help":

@@ -78,8 +78,14 @@
   "module": "ts/index.ts",
   "types": "./ts/index.ts",
   "exports": {
-    "types": "./ts/index.ts",
-    "import": "./dist/index.js"
+    ".": {
+      "types": "./ts/index.ts",
+      "import": "./dist/index.js"
+    },
+    "./channels": {
+      "types": "./ts/channels/browser.ts",
+      "import": "./dist/channels.js"
+    }
   },
   "publishConfig": {
     "access": "public",
