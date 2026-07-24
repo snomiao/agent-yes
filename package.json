@@ -60,6 +60,8 @@
     "examples",
     "scripts",
     "ts/*.ts",
+    "ts/channels/*.ts",
+    "!ts/channels/*.spec.ts",
     "!dist/**/*.map",
     "dist/**/*.js",
     "lab/ui/console-logic.js",
