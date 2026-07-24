@@ -14,6 +14,10 @@
 set -e
 mkdir -p ./public/w
 cp ../index.html ../ch.html ../*.js ../manifest.webmanifest ../icon.svg ./public/w/
+# Vendored xterm.js + addons + css (self-hosted, same-origin — see index.html).
+# rm first so a re-run doesn't nest into public/w/vendor/vendor (cp -R into an
+# existing dir copies the source dir INSIDE it).
+rm -rf ./public/w/vendor && cp -R ../vendor ./public/w/vendor
 cp ../landing.html ./public/index.html
 cp ../architecture.html ./public/architecture.html
 rm -rf ./public/blog
