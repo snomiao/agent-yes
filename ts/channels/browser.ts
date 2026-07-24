@@ -184,6 +184,53 @@ export class AyChannel {
 
   private widget?: any;
 
+  // The channel's display name in the header — a local, user-editable label
+  // persisted per room (the secret/identity is unaffected).
+  private labelKey(): string {
+    return `ay29ch-label:${this.room}`;
+  }
+  private defaultLabel(): string {
+    return this.room ? this.room.slice(0, 14) : "Channel";
+  }
+  private loadLabel(): string {
+    try {
+      return localStorage.getItem(this.labelKey()) || this.defaultLabel();
+    } catch {
+      return this.defaultLabel();
+    }
+  }
+  private saveLabel(v: string): void {
+    try {
+      localStorage.setItem(this.labelKey(), v.trim() || this.defaultLabel());
+    } catch {
+      /* ignore */
+    }
+  }
+
+  /** Door icon → prompt for another channel (topic or invite link) and switch to it. */
+  private async joinAnother(parent: any): Promise<void> {
+    const g = globalThis as any;
+    const input: string | null = g.prompt?.("Join a channel — topic or invite link:", "");
+    if (!input) return;
+    const isLink = input.startsWith("ay://") || input.includes("#ch=");
+    let next: AyChannel;
+    try {
+      next = isLink
+        ? new AyChannel({ link: input, name: this.name, role: this.role })
+        : await AyChannel.fromTopic(input, {
+            sighost: this.sighost,
+            name: this.name,
+            role: this.role,
+          });
+    } catch (e) {
+      g.alert?.("Could not join: " + ((e as any)?.message || e));
+      return;
+    }
+    this.close(); // tears down this peer + removes this widget
+    await next.start();
+    next.mount(parent, { open: true });
+  }
+
   /**
    * Render the floating chat window. With no target it mounts a fixed-position
    * bubble in the corner; pass an element to embed it there. Auto-calls start().
@@ -204,6 +251,12 @@ export class AyChannel {
     const badge = root.getElementById("peers")!;
     const panel = root.getElementById("panel")!;
     const toggle = root.getElementById("toggle")!;
+    const chname = root.getElementById("chname") as any;
+    const door = root.getElementById("door")!;
+    const parent = target ?? doc.body;
+    chname.value = this.loadLabel();
+    chname.addEventListener("change", () => this.saveLabel(chname.value));
+    door.addEventListener("click", () => void this.joinAnother(parent));
 
     const esc = (s: string) =>
       s.replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
@@ -261,9 +314,12 @@ const WIDGET_HTML = `
     box-shadow: 0 12px 40px rgba(0,0,0,.45); overflow: hidden; border: 1px solid #2c2f3a;
   }
   #panel.open { display: flex; }
-  header { padding: 12px 14px; background: #23262f; display: flex; align-items: center; gap: 8px; }
-  header .title { font-weight: 600; font-size: 14px; }
-  header .peers { margin-left: auto; font-size: 12px; opacity: .8; background: #4f46e5; border-radius: 10px; padding: 1px 8px; }
+  header { padding: 10px 12px; background: #23262f; display: flex; align-items: center; gap: 6px; }
+  header .chname { flex: 1; min-width: 0; background: transparent; border: none; color: #e6e6ea; font-weight: 600; font-size: 14px; padding: 3px 5px; border-radius: 6px; }
+  header .chname:focus { outline: none; background: #2c2f3a; }
+  header .door { background: transparent; border: none; cursor: pointer; font-size: 15px; padding: 2px 4px; opacity: .75; }
+  header .door:hover { opacity: 1; }
+  header .peers { font-size: 12px; opacity: .8; background: #4f46e5; border-radius: 10px; padding: 1px 8px; }
   #list { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
   .msg { max-width: 82%; }
   .msg .meta { font-size: 11px; opacity: .6; margin-bottom: 2px; }
@@ -277,7 +333,11 @@ const WIDGET_HTML = `
 </style>
 <button id="toggle" title="Chat">💬</button>
 <section id="panel">
-  <header><span class="title">Channel</span><span class="peers" id="peers">0</span></header>
+  <header>
+    <input id="chname" class="chname" spellcheck="false" title="Channel name (editable)" />
+    <button id="door" class="door" title="Join another channel">🚪</button>
+    <span class="peers" id="peers" title="peers online">0</span>
+  </header>
   <div id="list"></div>
   <form id="form"><input id="input" placeholder="Message…" autocomplete="off" /><button type="submit">Send</button></form>
 </section>
