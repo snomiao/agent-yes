@@ -71,6 +71,14 @@ export default defineConfig({
         // `ay callback` CLI + store IO — thin shell over callbackCore.ts (which
         // IS covered); the mint path needs a live agent record and daemon URL.
         "ts/callback.ts",
+        // `ay ch` CLI shell — a thin dispatcher over the fully-covered channels
+        // core (ts/channels/*, unit-tested in ts/channels/*.spec.ts) plus a
+        // signal-driven `tail -f` follow loop and TTY/stderr branches that are
+        // integration-only (same rationale as callback.ts). Its happy paths are
+        // still exercised end-to-end in ts/channels.spec.ts.
+        "ts/channels.ts",
+        // Re-export barrel — no logic to cover (same rationale as ts/index.ts).
+        "ts/channels/index.ts",
         "ts/remotes.ts",
         // WebRTC share bridge — needs a peer + signaling server; proven e2e, not
         // unit-testable.
