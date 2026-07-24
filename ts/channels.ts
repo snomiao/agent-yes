@@ -41,6 +41,7 @@ import {
   maxHlc,
   parseChannelLink,
   renderThread,
+  secretFromTopic,
   type Message,
   type Role,
 } from "./channels/index.ts";
@@ -196,15 +197,25 @@ async function cmdChMk(cwd: string, args: string[]): Promise<number> {
     name: "value",
     role: "value",
     salt: "value",
+    topic: "value",
   });
   const topic = positional[0];
   if (!topic || positional.length > 1)
-    throw new Error("usage: ay ch mk <topic> [--sighost H] [--name N] [--role R] [--salt HEX]");
+    throw new Error(
+      "usage: ay ch mk <name> [--topic <string>] [--sighost H] [--name N] [--role R] [--salt HEX]",
+    );
   const reg = await readRegistry(cwd);
   if (reg.channels[topic])
     throw new Error(`channel "${topic}" already exists (ay ch rm ${topic} to replace)`);
 
-  const s = typeof flags.salt === "string" ? flags.salt : randomBytes(32).toString("hex");
+  // --topic derives a deterministic secret from a public string (e.g. a page URL)
+  // so this peer lands in the SAME channel a bookmarklet on that URL joins.
+  const s =
+    typeof flags.topic === "string"
+      ? await secretFromTopic(flags.topic)
+      : typeof flags.salt === "string"
+        ? flags.salt
+        : randomBytes(32).toString("hex");
   const [channelId, room] = await Promise.all([deriveChannelId(s), deriveRoom(s)]);
   const sighost = typeof flags.sighost === "string" ? flags.sighost : undefined;
   const entry: ChannelRegEntry = {
@@ -554,6 +565,38 @@ async function cmdChEmbed(cwd: string, args: string[]): Promise<number> {
   return 0;
 }
 
+/** The page bookmarklet: derive a channel from the page URL and mount the widget. */
+export function buildBookmarklet(host: string, sighost: string): string {
+  // One line, minimal, defensive: prompt for the topic (default = full URL incl.
+  // hash), remember the name, load the widget, and alert clearly if the page CSP
+  // blocks the cross-origin import (the expected failure on hardened sites).
+  return (
+    `javascript:(async()=>{try{` +
+    `const{AyChannel}=await import('https://${host}/w/channels.js');` +
+    `const t=prompt('ay channel — topic (same topic = same room):',location.href);if(!t)return;` +
+    `let n=localStorage.getItem('ay29ch-name');if(!n){n=prompt('Your name:','guest')||'guest';localStorage.setItem('ay29ch-name',n);}` +
+    `const ch=await AyChannel.fromTopic(t,{sighost:'${sighost}',name:n});` +
+    `ch.mount(document.body,{open:true});` +
+    `}catch(e){alert('ay channel could not load — this page\\'s CSP may block it (works on your own apps, localhost, blogs, docs).\\n'+(e&&e.message||e));}})()`
+  );
+}
+
+async function cmdChBookmarklet(_cwd: string, args: string[]): Promise<number> {
+  const { flags, positional } = parseFlags(args, { host: "value", sighost: "value" });
+  if (positional.length) throw new Error("usage: ay ch bookmarklet [--host H] [--sighost H]");
+  const host = typeof flags.host === "string" ? flags.host : "agent-yes.com";
+  const sighost = typeof flags.sighost === "string" ? flags.sighost : "s.agent-yes.com";
+  process.stdout.write(buildBookmarklet(host, sighost) + "\n");
+  process.stderr.write(
+    `\n  Make a new bookmark and paste the line above as its URL. Click it on any\n` +
+      `  page to drop an ay-channel chat window joined to that page's URL (edit the\n` +
+      `  prompt to change the topic). Same topic = same room, no invite needed.\n` +
+      `  Heads-up: strict site CSP (GitHub/Google/…) blocks it; it works on your own\n` +
+      `  apps, localhost, blogs, and docs.\n`,
+  );
+  return 0;
+}
+
 function chHelp(): number {
   process.stdout.write(
     `ay ch - local-first E2E channels for AI ↔ humans (per-cwd, no server storage)\n` +
@@ -569,7 +612,10 @@ function chHelp(): number {
       `  ay ch sync <topic> [--quiet]             hold the WebRTC mesh: live send/receive (Ctrl-C to stop)\n` +
       `  ay ch pipe <topic>                       sync + bridge stdin→send and inbound→stdout\n` +
       `  ay ch embed <topic> [--host H]           print an HTML snippet embedding a floating chat widget\n` +
+      `  ay ch bookmarklet [--host H]             print a bookmarklet: any page joins a channel by its URL\n` +
       `\n` +
+      `  URL-topic: 'ay ch mk <name> --topic <string>' derives the SAME channel a\n` +
+      `             bookmarklet on that URL joins (topic = public membership)\n` +
       `  identity: --name defaults to $AY_CH_NAME/OS user; --role to agent (in an agent) or human\n` +
       `  storage:  <cwd>/.agent-yes/ch-<id>.jsonl  (a full CRDT replica; cwd-scoped)\n` +
       `  live:     run 'ay ch sync <topic>' (foreground/backgrounded) to join the mesh; then\n` +
@@ -610,6 +656,8 @@ export async function cmdCh(args: string[]): Promise<number> {
       return cmdChPipe(cwd, rest);
     case "embed":
       return cmdChEmbed(cwd, rest);
+    case "bookmarklet":
+      return cmdChBookmarklet(cwd, rest);
     case undefined:
     case "help":
     case "--help":

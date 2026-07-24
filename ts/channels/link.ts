@@ -35,6 +35,20 @@ export async function deriveRoom(s: string): Promise<string> {
   return "c" + (await sha256Hex(`ay/ch/room\n${validateS(s)}`)).slice(0, 12);
 }
 
+/**
+ * Deterministic channel secret from a public topic string (e.g. a page URL) —
+ * `sha256("ay/ch/topic/v1\n" + topic)`, a full 64-hex S. Everyone who derives
+ * from the SAME topic gets the SAME channel, so a page can "join by its URL" with
+ * no invite exchange (the bookmarklet + `ay ch mk --topic`).
+ *
+ * SECURITY: this makes the channel PUBLIC to anyone who knows the topic (topic =
+ * membership). Message contents still stay E2E from the signaling server, but it
+ * is NOT a private channel — use a random secret (the default) for those.
+ */
+export async function secretFromTopic(topic: string): Promise<string> {
+  return sha256Hex(`ay/ch/topic/v1\n${topic}`);
+}
+
 export interface ChannelLink {
   sighost: string;
   room: string;

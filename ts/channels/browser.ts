@@ -13,7 +13,7 @@
 //   ch.mount();                 // floating widget, or ch.mount(el) to embed
 //   await ch.send("hello");
 
-import { deriveChannelId, parseChannelLink } from "./link.ts";
+import { deriveChannelId, deriveRoom, parseChannelLink, secretFromTopic } from "./link.ts";
 import { hlcSend } from "./hlc.ts";
 import { makeOp, type Role } from "./op.ts";
 import { maxHlc, renderThread, type Message } from "./store.ts";
@@ -49,6 +49,21 @@ export class AyChannel {
   private listeners = new Map<Events, Set<(arg: any) => void>>();
   private started = false;
   private peers = 0;
+
+  /**
+   * Build a channel whose identity is DERIVED from a topic string (e.g. the page
+   * URL) — same topic ⇒ same room, no invite needed. Public to anyone with the
+   * topic (see secretFromTopic). This is what the page bookmarklet uses.
+   */
+  static async fromTopic(
+    topic: string,
+    opts?: { sighost?: string; name?: string; role?: Role },
+  ): Promise<AyChannel> {
+    const s = await secretFromTopic(topic);
+    const sighost = opts?.sighost ?? "s.agent-yes.com";
+    const room = await deriveRoom(s);
+    return new AyChannel({ room, sighost, s, name: opts?.name, role: opts?.role });
+  }
 
   constructor(info: string | AyChannelInfo) {
     const o = typeof info === "string" ? { link: info } : info;
