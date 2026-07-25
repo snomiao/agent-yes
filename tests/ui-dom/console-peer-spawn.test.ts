@@ -87,7 +87,9 @@ async function openConsole(
   url: string,
 ): Promise<{ ctx: BrowserContext; page: Page }> {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 800 } });
-  await ctx.route(/cdn\.jsdelivr\.net/, (route) => {
+  // xterm.js + addons are self-hosted now (./vendor/*.min.js, #317), not jsdelivr —
+  // intercept both so the stub applies (see console-dom.test.ts for the rationale).
+  await ctx.route(/cdn\.jsdelivr\.net|\/vendor\/[\w-]+\.min\.js/, (route) => {
     const body = route.request().url().includes("addon-fit") ? FITADDON_STUB : TERMINAL_STUB;
     route.fulfill({ status: 200, contentType: "application/javascript", body });
   });

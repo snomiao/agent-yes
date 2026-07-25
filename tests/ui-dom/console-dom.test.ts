@@ -40,7 +40,11 @@ async function openConsole(
   extra: Record<string, unknown> = {},
 ): Promise<{ ctx: BrowserContext; page: Page }> {
   const ctx = await browser.newContext({ viewport, ...extra });
-  await ctx.route(/cdn\.jsdelivr\.net/, (route) => {
+  // Stub xterm.js + addons. The console self-hosts them (./vendor/*.min.js, #317)
+  // instead of cdn.jsdelivr.net now, so intercept BOTH paths — otherwise the real
+  // xterm loads, the stub's onData never captures window.__onData, and the
+  // keystroke tests time out.
+  await ctx.route(/cdn\.jsdelivr\.net|\/vendor\/[\w-]+\.min\.js/, (route) => {
     const body = route.request().url().includes("addon-fit") ? FITADDON_STUB : TERMINAL_STUB;
     route.fulfill({ status: 200, contentType: "application/javascript", body });
   });
