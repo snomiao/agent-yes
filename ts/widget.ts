@@ -126,8 +126,21 @@ async function cmdWidgetRead(args: string[]): Promise<number> {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ viewer, kind, args: cmdArgs }),
   });
-  const body = (await res.json().catch(() => ({}))) as any;
-  if (!res.ok) throw new Error(`widget read failed: ${res.status} ${JSON.stringify(body)}`);
+  // Read the body as text first: a daemon error (403/404/409) is a plain-text
+  // reason (e.g. "scoped token lacks 'screenshot'"), not JSON — parsing it as JSON
+  // would swallow the reason. Success bodies ARE JSON (the envelope).
+  const raw = await res.text();
+  let body: any = {};
+  try {
+    body = raw ? JSON.parse(raw) : {};
+  } catch {
+    body = { error: raw }; // non-JSON error text → surface it verbatim
+  }
+  if (!res.ok) {
+    // Surface the daemon's plain-text reason cleanly (e.g. a scoped-token 403), not a stack.
+    process.stderr.write(`read ${kind} @ ${viewer}: ${res.status} ${raw || "request failed"}\n`);
+    return 1;
+  }
   if (body.error) {
     process.stderr.write(`read ${kind} @ ${body.viewer ?? viewer}: ${body.error}\n`);
     return 1;
