@@ -988,6 +988,26 @@ export async function resolveLocalServeUrl(): Promise<string | null> {
   return port ? `http://127.0.0.1:${port}` : null;
 }
 
+/**
+ * Best-effort HTTP base URL of the LOCAL running daemon, for CLI→daemon calls
+ * (`ay widget`). More robust than resolveLocalServeUrl for UNMANAGED daemons: it
+ * also reads the portless proxy backend port (~/.portless/routes.json) and the
+ * PORT env, so a daemon started outside oxmgr (e.g. a portless wrapper that injects
+ * PORT) is still found without the caller having to pass --base. Null if nothing
+ * local is discoverable.
+ */
+export async function resolveDaemonHttpBase(): Promise<string | null> {
+  const managed = await resolveLocalServeUrl();
+  if (managed) return managed;
+  // Unmanaged portless run: the real loopback backend is in the portless routes.
+  const pport = await portlessAppPort();
+  if (pport) return `http://127.0.0.1:${pport}`;
+  // Last resort: an explicit port in the environment.
+  const envPort = process.env.AGENT_YES_SERVE_PORT || process.env.PORT;
+  if (envPort && /^\d+$/.test(envPort)) return `http://127.0.0.1:${envPort}`;
+  return null;
+}
+
 async function warnStrayServeProcesses(): Promise<void> {
   const stray = await listStrayServeProcesses();
   if (stray.length === 0) return;

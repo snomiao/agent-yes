@@ -42,8 +42,8 @@ function parseFlags(
 async function daemonTarget(
   flags: Record<string, string | boolean>,
 ): Promise<{ base: string; token: string }> {
-  const { resolveLocalServeUrl, loadTokenReadOnly } = await import("./serve.ts");
-  const base = typeof flags.base === "string" ? flags.base : await resolveLocalServeUrl();
+  const { resolveDaemonHttpBase, loadTokenReadOnly } = await import("./serve.ts");
+  const base = typeof flags.base === "string" ? flags.base : await resolveDaemonHttpBase();
   if (!base)
     throw new Error(
       "no running ay serve daemon found — start `ay serve` or pass --base <url> (e.g. http://127.0.0.1:PORT)",
