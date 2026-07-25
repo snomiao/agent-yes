@@ -161,14 +161,60 @@ function cmdTermEmbed(args: string[]): number {
   return 0;
 }
 
+/** Parse a TTL like "900", "30s", "15m", "2h" → seconds. */
+function parseTtlSec(s: string): number {
+  const m = /^(\d+)(s|m|h)?$/.exec(s.trim());
+  if (!m) throw new Error(`bad --ttl "${s}" (use e.g. 900, 30s, 15m, 2h)`);
+  const mult = m[2] === "h" ? 3600 : m[2] === "m" ? 60 : 1;
+  return Number(m[1]) * mult;
+}
+
+async function cmdTermMint(args: string[]): Promise<number> {
+  const { flags, positional } = parseFlags(args, {
+    ttl: "value",
+    ro: "bool",
+    interactive: "bool",
+    json: "bool",
+  });
+  const pid = positional[0];
+  if (!pid || positional.length > 1)
+    throw new Error("usage: ay term mint <pid|keyword> [--ttl 15m] [--ro | --interactive] [--json]");
+  if (flags.ro && flags.interactive)
+    throw new Error("--ro and --interactive are mutually exclusive");
+  const ttlSec = parseTtlSec(typeof flags.ttl === "string" ? flags.ttl : "15m");
+  const canSend = flags.interactive === true; // default read-only
+  // Sign locally off ~/.agent-yes/.serve-token — no daemon round-trip.
+  const { mintScopedTermToken } = await import("./serve.ts");
+  const r = await mintScopedTermToken(pid, { ttlSec, canSend });
+  if (flags.json === true) {
+    process.stdout.write(JSON.stringify(r) + "\n");
+    return 0;
+  }
+  process.stdout.write(r.token + "\n");
+  const mins = Math.round(ttlSec / 60);
+  process.stderr.write(
+    `\n  Scoped ${canSend ? "INTERACTIVE (read+write)" : "read-only"} token for #${r.pid}, ` +
+      `expires in ~${mins}m (${new Date(r.exp * 1000).toISOString()}).\n` +
+      `  It grants ONLY ${canSend ? "read+write of" : "read of"} #${r.pid} — no other agent, no spawn.\n` +
+      `  Safe to embed in a page (this is NOT the master token):\n` +
+      `    ay term embed ${r.pid} --token <token> ${canSend ? "--interactive " : ""}--origin <daemon-url>\n` +
+      `  Short TTL is the backstop (serverless — no central revoke); re-mint when it lapses.\n`,
+  );
+  return 0;
+}
+
 function termHelp(): number {
   process.stdout.write(
     `ay term — embed a live, read-only agent terminal in a web page\n\n` +
       `Usage:\n` +
-      `  ay term embed <pid|keyword> [--host H] [--origin URL] [--token TOK | --placeholder]\n\n` +
+      `  ay term embed <pid|keyword> [--host H] [--origin URL] [--token TOK | --placeholder] [--interactive]\n` +
+      `  ay term mint  <pid|keyword> [--ttl 15m] [--ro | --interactive] [--json]\n\n` +
       `  embed   print a <script> snippet that mounts a read-only xterm mirror of the agent\n` +
-      `          into <div id="ay-term">, or a floating panel if that div is absent.\n\n` +
-      `Flags:\n` +
+      `          into <div id="ay-term">, or a floating panel if that div is absent.\n` +
+      `  mint    mint a scoped, short-TTL token bound to ONE agent (read-only by default;\n` +
+      `          --interactive also grants that agent's stdin) — safe to embed in a page,\n` +
+      `          unlike the master serve token. Prints the token on stdout.\n\n` +
+      `Flags (embed):\n` +
       `  --host H        CDN host serving terminal.js (default agent-yes.com)\n` +
       `  --origin URL    daemon origin if the page is NOT served by the daemon (same-origin default)\n` +
       `  --token TOK     bake a LIVE serve token into the snippet (⚠ full-fleet r/w; avoid committing)\n` +
@@ -184,6 +230,8 @@ export async function cmdTerm(args: string[]): Promise<number> {
   switch (sub) {
     case "embed":
       return cmdTermEmbed(rest);
+    case "mint":
+      return cmdTermMint(rest);
     case undefined:
     case "help":
     case "--help":
