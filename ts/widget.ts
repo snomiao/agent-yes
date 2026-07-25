@@ -95,18 +95,30 @@ async function cmdWidgetRead(args: string[]): Promise<number> {
     text: "bool",
     html: "bool",
     json: "bool",
+    viewport: "bool",
+    selection: "bool",
+    out: "value",
     base: "value",
     token: "value",
   });
   const kind = positional[0];
   const viewer = positional[1];
   if (!kind || !viewer)
-    throw new Error("usage: ay widget read <selection|dom> <viewer> [--selector <css>] [--all] [--text|--html]");
+    throw new Error(
+      "usage: ay widget read <selection|dom|screenshot> <viewer> [--selector <css>] [--all] [--text|--html] " +
+        "[--viewport|--selection] [--out f.png] [--json]",
+    );
   const cmdArgs: Record<string, unknown> = {};
   if (kind === "dom") {
     if (typeof flags.selector !== "string") throw new Error("dom read needs --selector <css>");
     cmdArgs.selector = flags.selector;
     cmdArgs.all = flags.all === true;
+  }
+  if (kind === "screenshot") {
+    // exactly one region mode; --selector implies selector mode, else --selection, else --viewport
+    cmdArgs.mode =
+      typeof flags.selector === "string" ? "selector" : flags.selection ? "selection" : "viewport";
+    if (cmdArgs.mode === "selector") cmdArgs.selector = flags.selector;
   }
   const { base, token } = await daemonTarget(flags);
   const res = await fetch(withTok(`${base}/api/widget/read`, token), {
@@ -119,6 +131,27 @@ async function cmdWidgetRead(args: string[]): Promise<number> {
   if (body.error) {
     process.stderr.write(`read ${kind} @ ${body.viewer ?? viewer}: ${body.error}\n`);
     return 1;
+  }
+  // Screenshot: --out writes the PNG; else --json gives the envelope; else a summary
+  // (the base64 is large, so we don't dump it by default).
+  if (kind === "screenshot") {
+    const d = body.data ?? {};
+    if (typeof flags.out === "string") {
+      const { writeFile } = await import("fs/promises");
+      const buf = Buffer.from(String(d.b64 ?? ""), "base64");
+      await writeFile(flags.out, buf);
+      process.stderr.write(`wrote ${buf.length} bytes → ${flags.out} (${d.w}×${d.h} ${d.mime})\n`);
+      return 0;
+    }
+    if (flags.json) {
+      process.stdout.write(JSON.stringify(body, null, 2) + "\n");
+      return 0;
+    }
+    const bytes = Math.round((String(d.b64 ?? "").length * 3) / 4);
+    process.stdout.write(
+      `screenshot ${d.w}×${d.h} ${d.mime}, ~${bytes} bytes — use --out <f.png> to save or --json for the base64\n`,
+    );
+    return 0;
   }
   // Plain-text shortcut for selection unless --json/--html asked for the envelope.
   if (kind === "selection" && !flags.json) {
@@ -136,7 +169,8 @@ function widgetHelp(): number {
       `Usage:\n` +
       `  ay widget ls [--json]\n` +
       `  ay widget read selection <viewer> [--text|--html|--json]\n` +
-      `  ay widget read dom <viewer> --selector <css> [--all] [--json]\n\n` +
+      `  ay widget read dom <viewer> --selector <css> [--all] [--json]\n` +
+      `  ay widget read screenshot <viewer> [--viewport|--selector <css>|--selection] [--out f.png] [--json]\n\n` +
       `  <viewer> = an id, or a url/title substring (see \`ay widget ls\`).\n` +
       `  Common flags: --base <daemon-url>  --token <tok>  (default: the local daemon).\n` +
       `  The page must embed \`new AyWidget({sensors:[...]}).start()\` and the token must\n` +

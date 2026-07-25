@@ -3083,11 +3083,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
       const push = widgetPushers.get(vid);
       if (!push) return new Response("viewer offline", { status: 409 });
       const cmdId = `c${++widgetCmdSeq}_${Date.now()}`;
+      // Screenshot waits on a human one-time consent, so it gets a longer window.
+      const readTimeoutMs = b.kind === "screenshot" ? 30_000 : 10_000;
       const result = await new Promise<{ ok: boolean; data?: unknown; error?: string }>((resolve) => {
         const timer = setTimeout(() => {
           widgetWaiters.delete(cmdId);
           resolve({ ok: false, error: "timeout" });
-        }, 10_000);
+        }, readTimeoutMs);
         widgetWaiters.set(cmdId, (r) => {
           clearTimeout(timer);
           resolve(r);
