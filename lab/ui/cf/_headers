@@ -10,3 +10,17 @@
 # keeps working.
 /*
   Content-Security-Policy: default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; font-src 'self' data:; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; connect-src 'self' https://s.agent-yes.com https://agent-yes.com wss:; worker-src 'self'; manifest-src 'self'
+
+# The widget bundles (channels.js / terminal.js) are designed to be imported
+# cross-origin from any page (e.g. `import AyChannel from
+# "https://agent-yes.com/w/channels.js"` — the ay ch/term embed snippets). A
+# cross-origin `type=module` import is CORS-gated, so the bundle MUST advertise
+# CORS or every embed fails to load. They're public, credential-free JS, so `*` is
+# correct; CORP:cross-origin lets them also load under a strict COEP embedder.
+# Different header names from /* still apply, so the CSP above is unaffected.
+/w/channels.js
+  Access-Control-Allow-Origin: *
+  Cross-Origin-Resource-Policy: cross-origin
+/w/terminal.js
+  Access-Control-Allow-Origin: *
+  Cross-Origin-Resource-Policy: cross-origin

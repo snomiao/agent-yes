@@ -7,6 +7,8 @@ export default defineConfig({
     cli: "./ts/cli.ts",
     index: "./ts/index.ts",
     channels: "./ts/channels/browser.ts",
+    terminal: "./ts/terminal/browser.ts",
+    widgets: "./ts/widgets.ts",
   },
   outDir: "dist",
   platform: "node",

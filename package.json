@@ -62,6 +62,8 @@
     "ts/*.ts",
     "ts/channels/*.ts",
     "!ts/channels/*.spec.ts",
+    "ts/terminal/*.ts",
+    "!ts/terminal/*.spec.ts",
     "!dist/**/*.map",
     "dist/**/*.js",
     "lab/ui/console-logic.js",
@@ -87,6 +89,14 @@
     "./channels": {
       "types": "./ts/channels/browser.ts",
       "import": "./dist/channels.js"
+    },
+    "./terminal": {
+      "types": "./ts/terminal/browser.ts",
+      "import": "./dist/terminal.js"
+    },
+    "./widgets": {
+      "types": "./ts/widgets.ts",
+      "import": "./dist/widgets.js"
     }
   },
   "publishConfig": {
@@ -134,6 +144,8 @@
   },
   "devDependencies": {
     "@google/generative-ai": "^0.24.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "@semantic-release/exec": "^7.1.0",
     "@semantic-release/git": "^10.0.1",
     "@types/bun": "^1.3.6",
