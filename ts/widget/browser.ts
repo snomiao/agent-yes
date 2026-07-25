@@ -60,6 +60,7 @@ export class AyWidget {
     this.handlers.set("ping", async () => ({ caps: [...this.sensors], id: this.viewerId }));
     this.handlers.set("selection", readSelection);
     this.handlers.set("dom", readDom);
+    this.handlers.set("screenshot", (a) => this.readScreenshot(a));
   }
 
   private url(path: string): string {
@@ -163,6 +164,128 @@ export class AyWidget {
     el._t = setTimeout(() => (el.style.opacity = "0"), 500);
   }
 
+  // ── screenshot (opt-in) ─────────────────────────────────────────────────────
+  // One-time viewer consent, then capture via the author snapshot hook (exact —
+  // for WebGL/three.js that html2canvas can't grab) or html2canvas (DOM render).
+  private async readScreenshot(args: {
+    mode?: string;
+    selector?: string;
+  }): Promise<{ mime: string; w: number; h: number; b64: string }> {
+    const g = globalThis as any;
+    const doc = g.document;
+    if (!(await this.ensureScreenshotConsent())) throw new Error("screenshot declined by viewer");
+    const mode = args?.mode ?? "viewport";
+
+    if (mode === "selector") {
+      if (!args?.selector) throw new Error("screenshot --selector needs a css selector");
+      const el = doc.querySelector(args.selector);
+      if (!el) throw new Error(`no element matches ${args.selector}`);
+      // Hook hit by ELEMENT IDENTITY (not string equality) → exact capture.
+      const hook = this.snapshotFor(el);
+      if (hook) return dataUrlResult(hook, el.width, el.height);
+      return canvasResult(await this.h2c(el, false));
+    }
+    if (mode === "selection") {
+      const sel = g.getSelection?.();
+      const rect = sel && sel.rangeCount ? sel.getRangeAt(0).getBoundingClientRect() : null;
+      return canvasResult(await this.h2c(g.document.body, true, rect));
+    }
+    // viewport (default): full page; onclone swaps registered WebGL canvases for
+    // the hook's <img> so the 3D region isn't a black block.
+    return canvasResult(await this.h2c(g.document.body, true, null));
+  }
+
+  /** A registered snapshot hook whose element IS `el` (identity / matches) → its dataURL, else null. */
+  private snapshotFor(el: any): string | null {
+    const doc = (globalThis as any).document;
+    for (const key of Object.keys(this.snapshots)) {
+      try {
+        if (el === doc.querySelector(key) || el.matches?.(key)) return this.snapshots[key]!();
+      } catch {
+        /* bad selector / hook threw — skip */
+      }
+    }
+    return null;
+  }
+
+  private async h2c(el: any, viewport: boolean, rect?: any): Promise<any> {
+    const g = globalThis as any;
+    const mod: any = await import("html2canvas"); // deferred: only loaded on first screenshot
+    const html2canvas = mod.default ?? mod;
+    const opts: any = {
+      backgroundColor: viewport ? "#ffffff" : null,
+      logging: false,
+      useCORS: true,
+      scale: g.devicePixelRatio || 1,
+      onclone: (d: any) => this.swapSnapshots(d),
+    };
+    if (rect) {
+      opts.x = rect.left + (g.scrollX || 0);
+      opts.y = rect.top + (g.scrollY || 0);
+      opts.width = Math.max(1, rect.width);
+      opts.height = Math.max(1, rect.height);
+    }
+    return html2canvas(el, opts);
+  }
+
+  /** In the doc html2canvas clones, replace each registered WebGL canvas with the hook's <img>. */
+  private swapSnapshots(clonedDoc: any): void {
+    const liveDoc = (globalThis as any).document;
+    for (const key of Object.keys(this.snapshots)) {
+      try {
+        const liveEl = liveDoc.querySelector(key);
+        const cloneEl = clonedDoc.querySelector(key);
+        if (!liveEl || !cloneEl?.parentNode) continue;
+        const img = clonedDoc.createElement("img");
+        img.src = this.snapshots[key]!();
+        const r = liveEl.getBoundingClientRect();
+        img.width = Math.round(r.width);
+        img.height = Math.round(r.height);
+        img.style.cssText = cloneEl.getAttribute?.("style") ?? "";
+        cloneEl.parentNode.replaceChild(img, cloneEl);
+      } catch {
+        /* skip a failed swap */
+      }
+    }
+  }
+
+  /** One-time per-viewer screenshot consent (remembered), auto-denying before the daemon read times out. */
+  private async ensureScreenshotConsent(): Promise<boolean> {
+    const g = globalThis as any;
+    const doc = g.document;
+    const key = `ay29widget:screenshot-ok:${this.viewerId}`;
+    try {
+      if (g.localStorage?.getItem(key) === "1") return true;
+    } catch {
+      /* no storage */
+    }
+    if (!doc?.body) return false;
+    return await new Promise<boolean>((resolve) => {
+      const host = doc.createElement("div");
+      const root = host.attachShadow({ mode: "open" });
+      root.innerHTML = CONSENT_HTML;
+      doc.body.appendChild(host);
+      let settled = false;
+      const timer = setTimeout(() => done(false), 25_000); // fail-closed if ignored
+      function done(ok: boolean) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        host.remove();
+        if (ok) {
+          try {
+            g.localStorage?.setItem(key, "1");
+          } catch {
+            /* ignore */
+          }
+        }
+        resolve(ok);
+      }
+      root.getElementById("ay-ss-ok")?.addEventListener("click", () => done(true));
+      root.getElementById("ay-ss-no")?.addEventListener("click", () => done(false));
+    });
+  }
+
   stop(): void {
     this.es?.close?.();
     this.es = undefined;
@@ -171,6 +294,32 @@ export class AyWidget {
     this.started = false;
   }
 }
+
+function dataUrlResult(url: string, w = 0, h = 0): { mime: string; w: number; h: number; b64: string } {
+  const b64 = String(url).replace(/^data:[^,]*,/, "");
+  return { mime: "image/png", w: Number(w) || 0, h: Number(h) || 0, b64 };
+}
+function canvasResult(canvas: any): { mime: string; w: number; h: number; b64: string } {
+  return dataUrlResult(canvas.toDataURL("image/png"), canvas.width, canvas.height);
+}
+
+// Shadow-DOM consent bar for the first screenshot per viewer.
+const CONSENT_HTML = `
+<style>
+  :host { all: initial; }
+  .bar { position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%); z-index: 2147483001;
+    display: flex; align-items: center; gap: 10px; background: #161b22; color: #c9d1d9;
+    border: 1px solid #30363d; border-radius: 10px; padding: 10px 14px;
+    font: 13px system-ui, -apple-system, sans-serif; box-shadow: 0 8px 30px rgba(0,0,0,.4); }
+  button { border: none; border-radius: 7px; padding: 6px 12px; cursor: pointer; font: inherit; }
+  #ay-ss-ok { background: #1f6feb; color: #fff; }
+  #ay-ss-no { background: #30363d; color: #c9d1d9; }
+</style>
+<div class="bar">
+  <span>This page's agent wants to capture the current view.</span>
+  <button id="ay-ss-ok">Allow</button>
+  <button id="ay-ss-no">Deny</button>
+</div>`;
 
 async function readSelection(): Promise<{ text: string; html: string }> {
   const g = globalThis as any;
