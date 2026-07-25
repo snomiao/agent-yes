@@ -2855,6 +2855,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
           pid: record.pid,
           cols: size?.cols ?? null,
           rows: size?.rows ?? null,
+          // Enough identity for a widget's title bar without exposing /api/ls to a
+          // scoped token (it's bound to this pid anyway — no extra info leaked).
+          cwd: record.cwd,
+          cli: record.cli,
           // This host negotiates the PTY size from viewer capacities (presence
           // `cap`) — a capable console should report its cap instead of pushing
           // /api/resize directly, so viewers stop fighting last-writer-wins.
