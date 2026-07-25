@@ -210,7 +210,9 @@ export class AyWidget {
 
   private async h2c(el: any, viewport: boolean, rect?: any): Promise<any> {
     const g = globalThis as any;
-    const mod: any = await import("html2canvas"); // deferred: only loaded on first screenshot
+    // html2canvas-pro (fork) supports color-mix()/oklch()/lab() — the modern CSS
+    // the original html2canvas silently fails on. Deferred: only loaded on a screenshot.
+    const mod: any = await import("html2canvas-pro");
     const html2canvas = mod.default ?? mod;
     const opts: any = {
       backgroundColor: viewport ? "#ffffff" : null,
@@ -225,7 +227,21 @@ export class AyWidget {
       opts.width = Math.max(1, rect.width);
       opts.height = Math.max(1, rect.height);
     }
-    return html2canvas(el, opts);
+    let canvas: any;
+    try {
+      canvas = await html2canvas(el, opts);
+    } catch (e: any) {
+      throw new Error(`screenshot render failed: ${String(e?.message ?? e)}`);
+    }
+    // A 0×0 result means the renderer choked (unsupported CSS, tainted canvas, …).
+    // Surface it as an error rather than returning a fake-success empty image.
+    if (!canvas?.width || !canvas?.height) {
+      throw new Error(
+        "screenshot render produced an empty image — the target may use CSS the renderer " +
+          "can't handle; for a WebGL/<canvas> element register a snapshots hook for an exact capture",
+      );
+    }
+    return canvas;
   }
 
   /** In the doc html2canvas clones, replace each registered WebGL canvas with the hook's <img>. */
