@@ -97,6 +97,13 @@ export default defineConfig({
         // daemon SSE stream; verified in a browser, not unit-testable. Same
         // rationale as ts/channels/browser.ts.
         "ts/terminal/browser.ts",
+        // `ay widget`/`ay mint` CLI shell — thin dispatcher over the daemon broker;
+        // integration-only (needs a live daemon + a browser widget). Same rationale
+        // as ts/terminal.ts / ts/channels.ts.
+        "ts/widget.ts",
+        // Browser AyWidget sensor — needs a DOM + live daemon SSE; verified in a
+        // browser, not unit-testable (same rationale as ts/terminal/browser.ts).
+        "ts/widget/browser.ts",
         // Aggregate widget re-export barrel — no logic (same rationale as ts/index.ts).
         "ts/widgets.ts",
         "ts/remotes.ts",

@@ -17,16 +17,28 @@
 // delivers short-TTL + read-only + single-session, which is what embeds need.)
 import { createHash, createHmac, timingSafeEqual } from "crypto";
 
+/** Capability vocabulary a scoped token can carry (see scopedGate in serve.ts). */
+export type Cap = "tail" | "size" | "send" | "resize" | "read" | "screenshot";
+
 export interface TermScope {
-  /** The agent pid this token is bound to (resolved to a concrete pid at mint time). */
+  /** Subject the token is bound to: an agent pid (terminal) or a viewer id (widget). */
   pid: string;
-  /** Interactive: may also write to this pid's stdin (/api/send). Read-only when false. */
+  /** Convenience mirror of caps.includes("send") — interactive terminal write. */
   canSend: boolean;
+  /** Full capability list this token grants for its subject. */
+  caps: string[];
   /** Expiry, epoch seconds. */
   exp: number;
 }
 
 const PREFIX = "ayt1";
+
+const CAPS_READONLY: Cap[] = ["tail", "size"];
+const CAPS_INTERACTIVE: Cap[] = ["tail", "size", "send", "resize"];
+/** Derive caps for a legacy `{w}` token (pre-caps format): w=1 ⇒ interactive. */
+function legacyCaps(w: unknown): string[] {
+  return w === 1 ? [...CAPS_INTERACTIVE] : [...CAPS_READONLY];
+}
 
 /** Dedicated HMAC key derived from the master token (so the token isn't signed with the raw master). */
 function keyFor(masterToken: string): Buffer {
@@ -40,10 +52,19 @@ export function isTermToken(tok: unknown): tok is string {
   return typeof tok === "string" && tok.startsWith(PREFIX + ".");
 }
 
-/** Mint a scoped token bound to `scope.pid`, signed with the master token. */
-export function mintTermToken(masterToken: string, scope: TermScope): string {
+/**
+ * Mint a scoped token bound to `scope.pid` (the subject), signed with the master
+ * token. `caps` is authoritative; if omitted it derives from `canSend` (terminal
+ * back-compat). Emits the caps-format payload `{s, c, x}` (verified alongside the
+ * legacy `{p, w, x}`).
+ */
+export function mintTermToken(
+  masterToken: string,
+  scope: { pid: string; exp: number; caps?: string[]; canSend?: boolean },
+): string {
+  const caps = scope.caps ?? (scope.canSend ? [...CAPS_INTERACTIVE] : [...CAPS_READONLY]);
   const payload = Buffer.from(
-    JSON.stringify({ p: scope.pid, w: scope.canSend ? 1 : 0, x: Math.floor(scope.exp) }),
+    JSON.stringify({ s: scope.pid, c: caps, x: Math.floor(scope.exp) }),
   ).toString("base64url");
   const body = `${PREFIX}.${payload}`;
   const sig = createHmac("sha256", keyFor(masterToken)).update(body).digest().toString("base64url");
@@ -73,13 +94,19 @@ export function verifyTermToken(
   }
   // constant-time compare; length check first (timingSafeEqual throws on mismatch)
   if (got.length !== expected.length || !timingSafeEqual(got, expected)) return null;
-  let obj: { p?: unknown; w?: unknown; x?: unknown };
+  let obj: { s?: unknown; p?: unknown; w?: unknown; c?: unknown; x?: unknown };
   try {
     obj = JSON.parse(Buffer.from(parts[1]!, "base64url").toString("utf-8"));
   } catch {
     return null;
   }
-  if (typeof obj.p !== "string" || !obj.p) return null;
+  // subject: new tokens use `s`, legacy tokens use `p`
+  const sub = typeof obj.s === "string" && obj.s ? obj.s : obj.p;
+  if (typeof sub !== "string" || !sub) return null;
   if (typeof obj.x !== "number" || !Number.isFinite(obj.x) || obj.x <= nowSec) return null; // expired
-  return { pid: obj.p, canSend: obj.w === 1, exp: obj.x };
+  // caps: new tokens carry `c`; legacy tokens derive from `w`
+  const caps = Array.isArray(obj.c)
+    ? (obj.c.filter((x) => typeof x === "string") as string[])
+    : legacyCaps(obj.w);
+  return { pid: sub, canSend: caps.includes("send"), caps, exp: obj.x };
 }
