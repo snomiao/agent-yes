@@ -113,6 +113,29 @@ describe("subcommands.isSubcommand", () => {
   });
 });
 
+describe("subcommands.isUnknownManagerToken (footgun guard)", () => {
+  const CLIS = ["claude", "codex", "gemini"];
+  it("flags a bare non-cli non-subcommand word on the manager entry", async () => {
+    const { isUnknownManagerToken } = await loadModule();
+    // `ay frobnicate` / a newer subcommand on an older build — neither a
+    // subcommand nor a CLI here → error (rather than spawn it as a prompt).
+    expect(isUnknownManagerToken("frobnicate", true, CLIS)).toBe(true);
+    expect(isUnknownManagerToken("xyzzy", true, CLIS)).toBe(true);
+  });
+  it("allows a known CLI, a subcommand, a flag, and empty", async () => {
+    const { isUnknownManagerToken } = await loadModule();
+    expect(isUnknownManagerToken("claude", true, CLIS)).toBe(false); // `ay claude …`
+    expect(isUnknownManagerToken("ls", true, CLIS)).toBe(false); // subcommand
+    expect(isUnknownManagerToken("--cli", true, CLIS)).toBe(false); // flag → explicit spawn
+    expect(isUnknownManagerToken(undefined, true, CLIS)).toBe(false); // bare `ay`
+  });
+  it("never fires for a cli-bound alias (first word is the prompt)", async () => {
+    const { isUnknownManagerToken } = await loadModule();
+    // `cy widget ls` → managerCommands=false → "widget ls" is a prompt to claude.
+    expect(isUnknownManagerToken("widget", false, CLIS)).toBe(false);
+  });
+});
+
 describe("subcommands.cmdHelp", () => {
   const capture = async (managerCommands?: boolean) => {
     const { cmdHelp } = await loadModule();
