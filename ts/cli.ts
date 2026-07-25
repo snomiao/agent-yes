@@ -28,7 +28,9 @@ import { buildRustArgs } from "./buildRustArgs.ts";
   const managerCommands = !invokedCliName(process.argv);
   // Intercept bare -h/--help so we show TS subcommands, not just Rust agent-runner options.
   const isHelpFlag = rawArg === "-h" || rawArg === "--help";
-  const { isSubcommand, runSubcommand, cmdHelp } = await import("./subcommands.ts");
+  const { isSubcommand, runSubcommand, cmdHelp, isUnknownManagerToken } = await import(
+    "./subcommands.ts"
+  );
   if (isHelpFlag && process.argv.length === 3) {
     await cmdHelp(managerCommands);
     process.exit(0);
@@ -36,6 +38,21 @@ import { buildRustArgs } from "./buildRustArgs.ts";
   if (isSubcommand(rawArg, managerCommands)) {
     const code = await runSubcommand(process.argv);
     process.exit(code ?? 0);
+  }
+  // Footgun guard: on the manager entry, a bare first word that is neither a
+  // subcommand nor a known CLI is a typo or a newer subcommand on an older build
+  // — error instead of silently spawning an agent with it as the prompt (taku
+  // 2026-07-26). A spawn must name a CLI: `ay <cli> …` or `ay --cli <cli> …`.
+  {
+    const { SUPPORTED_CLIS } = await import("./SUPPORTED_CLIS.ts");
+    if (isUnknownManagerToken(rawArg, managerCommands, SUPPORTED_CLIS)) {
+      process.stderr.write(
+        `ay: unknown subcommand or CLI '${rawArg}'.\n` +
+          `    See 'ay help' for subcommands. To run an agent, name a CLI:\n` +
+          `    'ay <cli> …' (e.g. 'ay claude …') or 'ay --cli <cli> …'.\n`,
+      );
+      process.exit(1);
+    }
   }
 }
 

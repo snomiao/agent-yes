@@ -426,6 +426,25 @@ export function isSubcommand(name: string | undefined, managerCommands = true): 
 }
 
 /**
+ * Footgun guard for the MANAGER entry (`ay`/`agent-yes`): true when the first arg
+ * is a bare word (not a flag) that is neither a subcommand nor a known CLI — a
+ * typo, or a newer subcommand run on an older build. The caller should error
+ * rather than silently spawn an agent with the word as a prompt (taku 2026-07-26:
+ * bare `ay <prompt>` is too dangerous; a spawn must name a CLI — `ay <cli> …` or
+ * `--cli`). Never fires for cli-bound aliases (cy/claude-yes/…), where the first
+ * word is legitimately the prompt, nor for flags or an empty invocation.
+ */
+export function isUnknownManagerToken(
+  rawArg: string | undefined,
+  managerCommands: boolean,
+  supportedClis: readonly string[],
+): boolean {
+  if (!managerCommands || !rawArg || rawArg.startsWith("-")) return false;
+  if (isSubcommand(rawArg, managerCommands)) return false;
+  return !supportedClis.includes(rawArg);
+}
+
+/**
  * Top-level entry. Returns the desired process exit code, or null if argv
  * is not a subcommand invocation.
  */
