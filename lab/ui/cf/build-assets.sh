@@ -49,6 +49,11 @@ fi
 # and third-party embeds load. Built with bun (browser target) independent of the
 # npm dist build, so it exists even in a bare `wrangler dev` / beta Pages deploy.
 bun build ../../../ts/channels/browser.ts --outfile ./public/w/channels.js --format esm --target browser --minify
+# Terminal widget: bundle the browser AyTerminal lib (`import AyTerminal from
+# "agent-yes/terminal"`) — a self-contained ESM (xterm.js inlined) that any page
+# loads to render a live read-only agent terminal (ay term embed). Same browser
+# target + independence from the npm dist build as channels.js above.
+bun build ../../../ts/terminal/browser.ts --outfile ./public/w/terminal.js --format esm --target browser --minify
 
 cp _headers ./public/_headers
 bun ../../../scripts/build-rgui.ts ./public/r

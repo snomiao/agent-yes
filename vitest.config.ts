@@ -89,6 +89,16 @@ export default defineConfig({
         // (its store backend store.browser.ts IS covered, and it delegates all CRDT
         // logic to the covered core). Same rationale as peer.ts.
         "ts/channels/browser.ts",
+        // `ay term` CLI shell — thin dispatcher over buildTermEmbedSnippet (pure,
+        // unit-tested in ts/terminal.spec.ts); the flag/stderr-guidance branches are
+        // integration-only. Same rationale as ts/channels.ts.
+        "ts/terminal.ts",
+        // Browser AyTerminal client + xterm widget — needs a DOM + xterm + a live
+        // daemon SSE stream; verified in a browser, not unit-testable. Same
+        // rationale as ts/channels/browser.ts.
+        "ts/terminal/browser.ts",
+        // Aggregate widget re-export barrel — no logic (same rationale as ts/index.ts).
+        "ts/widgets.ts",
         "ts/remotes.ts",
         // WebRTC share bridge — needs a peer + signaling server; proven e2e, not
         // unit-testable.

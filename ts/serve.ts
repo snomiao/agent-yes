@@ -39,6 +39,7 @@ import {
 } from "./subcommands.ts";
 import { answerAsk, listAsks } from "./askApi.ts";
 import { TYPING_BADGE } from "./badges.ts";
+import { isTermToken, mintTermToken, verifyTermToken, type TermScope } from "./termToken.ts";
 import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
 import { CLAUDE_SESSION_PIN_ENV } from "./sessionEnv.ts";
 import { MAX_CALLBACK_MSG_BYTES, frameVisitorMessage, verifyCapability } from "./callbackCore.ts";
@@ -215,6 +216,122 @@ function checkAuth(req: Request, expectedToken: string): boolean {
   // Fallback: ?token= query param — the web UI's EventSource cannot set headers.
   const q = new URL(req.url).searchParams.get("token");
   return q ? tokenEqual(q, expectedToken) : false;
+}
+
+// Authorization result: the master token grants everything (as before); a scoped
+// terminal-embed token (termToken.ts) grants a NARROW capability confined to one
+// agent by scopedGate() below.
+type AuthResult = { kind: "master" } | { kind: "scoped"; scope: TermScope };
+
+function authorizeRequest(req: Request, expectedToken: string): AuthResult | null {
+  const auth = req.headers.get("authorization") ?? "";
+  const bearer = auth.startsWith("Bearer ") ? auth.slice(7) : null;
+  const provided = bearer ?? new URL(req.url).searchParams.get("token") ?? "";
+  if (!provided) return null;
+  if (tokenEqual(provided, expectedToken)) return { kind: "master" };
+  // A scoped token is verified against the master token (stateless HMAC).
+  if (isTermToken(provided)) {
+    const scope = verifyTermToken(expectedToken, provided);
+    if (scope) return { kind: "scoped", scope };
+  }
+  return null;
+}
+
+// The embeddable terminal routes. Token-gated (master OR scoped) but CORS-open so
+// a cross-origin report page can reach the daemon — the token is still required to
+// get a 200, and no cookies are involved, so `*` leaks nothing.
+function isTermCorsPath(p: string): boolean {
+  return /^\/api\/(tail|size)\/.+$/.test(p) || p === "/api/send";
+}
+
+function withTermCors(req: Request, res: Response | undefined): Response | undefined {
+  if (!res) return res; // mux upgrade returns undefined
+  if (isTermCorsPath(new URL(req.url).pathname)) {
+    try {
+      res.headers.set("Access-Control-Allow-Origin", "*");
+      res.headers.set("Vary", "Origin");
+    } catch {
+      /* immutable headers — skip */
+    }
+  }
+  return res;
+}
+
+function termCorsPreflight(): Response {
+  return new Response(null, {
+    status: 204,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+      "Access-Control-Allow-Headers": "content-type, authorization",
+      "Access-Control-Max-Age": "600",
+    },
+  });
+}
+
+/** Does `keyword` resolve to the exact pid a scoped token is bound to? */
+async function scopedKeywordOk(keyword: string, scope: TermScope): Promise<boolean> {
+  try {
+    const rec = await resolveOne(keyword, defaultOpts({ all: true }));
+    return String(rec.pid) === String(scope.pid);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Confine a scoped token to its capability. Returns a 403 Response when the
+ * request is outside the token's grant, or null when it's allowed to proceed.
+ * Allowed: GET /api/tail|size/<kw> for the bound pid; POST /api/send for the bound
+ * pid IFF the token is interactive (canSend). Everything else is denied.
+ */
+async function scopedGate(
+  scope: TermScope,
+  method: string,
+  p: string,
+): Promise<Response | null> {
+  const forbid = (m: string) => new Response(m, { status: 403 });
+  const m = /^\/api\/(?:tail|size)\/(.+)$/.exec(p);
+  if (method === "GET" && m) {
+    return (await scopedKeywordOk(decodeURIComponent(m[1]!), scope))
+      ? null
+      : forbid("scoped token: not bound to this agent");
+  }
+  if (method === "POST" && p === "/api/send") {
+    if (!scope.canSend) return forbid("scoped token is read-only");
+    return null; // pid binding enforced in the /api/send handler (it has the body)
+  }
+  // Interactive viewers may renegotiate the agent's PTY size (drag-to-resize) —
+  // send-capable scope only, bound pid. The keyword is in the path, so bind here.
+  const rz = /^\/api\/resize\/(.+)$/.exec(p);
+  if (method === "POST" && rz) {
+    if (!scope.canSend) return forbid("scoped token is read-only");
+    return (await scopedKeywordOk(decodeURIComponent(rz[1]!), scope))
+      ? null
+      : forbid("scoped token: not bound to this agent");
+  }
+  return forbid("scoped token: route not permitted");
+}
+
+/**
+ * Mint a scoped terminal-embed token locally (no daemon round-trip): read the
+ * master token file, resolve the keyword to a concrete pid, and sign. Used by
+ * `ay term mint`. Throws if there's no serve token or the agent can't be resolved.
+ */
+export async function mintScopedTermToken(
+  keyword: string,
+  opts: { ttlSec: number; canSend: boolean },
+): Promise<{ token: string; pid: string; exp: number; canSend: boolean }> {
+  const master = await loadTokenReadOnly();
+  if (!master)
+    throw new Error(
+      "no serve token at ~/.agent-yes/.serve-token — run `ay serve` once on this host to create it",
+    );
+  const rec = await resolveOne(keyword, defaultOpts({ all: true }));
+  const pid = String(rec.pid);
+  const exp = Math.floor(Date.now() / 1000) + Math.max(1, Math.floor(opts.ttlSec));
+  const token = mintTermToken(master, { pid, canSend: opts.canSend, exp });
+  return { token, pid, exp, canSend: opts.canSend };
 }
 
 const defaultOpts = (overrides: Partial<CommonOpts> = {}): CommonOpts => ({
@@ -2019,12 +2136,23 @@ export async function cmdServe(rest: string[]): Promise<number> {
     req: Request,
     srv?: { upgrade: (r: Request, o?: unknown) => boolean },
   ): Promise<Response> => {
-    if (!checkAuth(req, token)) {
-      return new Response("Unauthorized", { status: 401 });
-    }
-
     const url = new URL(req.url);
     const p = url.pathname;
+
+    // CORS preflight for the embeddable terminal routes carries no auth header —
+    // answer it before the auth gate.
+    if (req.method === "OPTIONS" && isTermCorsPath(p)) return termCorsPreflight();
+
+    const authResult = authorizeRequest(req, token);
+    if (!authResult) {
+      return withTermCors(req, new Response("Unauthorized", { status: 401 }))!;
+    }
+    // A scoped token is confined to its bound agent + capability; the master token
+    // is unrestricted (existing behavior).
+    if (authResult.kind === "scoped") {
+      const denied = await scopedGate(authResult.scope, req.method, p);
+      if (denied) return withTermCors(req, denied)!;
+    }
 
     // GET /api/mux — WebSocket request multiplexer. HTTP/1.1 gives a browser
     // ~6 concurrent same-origin connections and no multiplexing, so console
@@ -2936,6 +3064,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
       if (!keyword || typeof keyword !== "string") {
         return new Response("missing keyword", { status: 400 });
       }
+      // A scoped interactive token may only write to the agent it's bound to
+      // (the gate already confirmed canSend; bind the pid now that we have the body).
+      if (authResult.kind === "scoped" && !(await scopedKeywordOk(keyword, authResult.scope))) {
+        return new Response("scoped token: not bound to this agent", { status: 403 });
+      }
       try {
         const record = await resolveOne(keyword, defaultOpts());
         if (!record.fifo_file)
@@ -3804,7 +3937,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
     if (req.method === "GET" && p === "/icon.svg") return serveUiFile("icon.svg", "image/svg+xml");
     if (req.method === "GET" && p === "/favicon.ico") return new Response(null, { status: 204 });
     if (p.startsWith("/cb/")) return handleCallback(req, p);
-    return apiFetch(req, srv);
+    // CORS-open the embeddable terminal routes (tail/size/send) so a cross-origin
+    // report page can reach this daemon; the token is still required for a 200.
+    return withTermCors(req, await apiFetch(req, srv)) as Response;
   };
 
   const serverOpts: any = {
