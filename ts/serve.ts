@@ -184,7 +184,7 @@ async function loadOrCreateToken(tokenFlag?: string): Promise<string> {
 
 // Read the serve token WITHOUT creating one — `ay serve status` must be a pure
 // read (creating a token as a side effect of asking "is it running?" is wrong).
-async function loadTokenReadOnly(): Promise<string | null> {
+export async function loadTokenReadOnly(): Promise<string | null> {
   try {
     return (await readFile(tokenPath(), "utf-8")).trim();
   } catch {
@@ -241,7 +241,12 @@ function authorizeRequest(req: Request, expectedToken: string): AuthResult | nul
 // a cross-origin report page can reach the daemon — the token is still required to
 // get a 200, and no cookies are involved, so `*` leaks nothing.
 function isTermCorsPath(p: string): boolean {
-  return /^\/api\/(tail|size)\/.+$/.test(p) || p === "/api/send";
+  return (
+    /^\/api\/(tail|size)\/.+$/.test(p) ||
+    p === "/api/send" ||
+    /^\/api\/resize\/.+$/.test(p) ||
+    p.startsWith("/api/widget/")
+  );
 }
 
 function withTermCors(req: Request, res: Response | undefined): Response | undefined {
@@ -291,24 +296,34 @@ async function scopedGate(
   p: string,
 ): Promise<Response | null> {
   const forbid = (m: string) => new Response(m, { status: 403 });
+  const needs = (cap: string) => (scope.caps.includes(cap) ? null : forbid(`scoped token lacks '${cap}'`));
   const m = /^\/api\/(?:tail|size)\/(.+)$/.exec(p);
   if (method === "GET" && m) {
-    return (await scopedKeywordOk(decodeURIComponent(m[1]!), scope))
-      ? null
-      : forbid("scoped token: not bound to this agent");
+    return (
+      needs("tail") ??
+      ((await scopedKeywordOk(decodeURIComponent(m[1]!), scope))
+        ? null
+        : forbid("scoped token: not bound to this agent"))
+    );
   }
   if (method === "POST" && p === "/api/send") {
-    if (!scope.canSend) return forbid("scoped token is read-only");
-    return null; // pid binding enforced in the /api/send handler (it has the body)
+    return needs("send"); // pid binding enforced in the /api/send handler (it has the body)
   }
   // Interactive viewers may renegotiate the agent's PTY size (drag-to-resize) —
-  // send-capable scope only, bound pid. The keyword is in the path, so bind here.
+  // needs the resize cap, bound pid. The keyword is in the path, so bind here.
   const rz = /^\/api\/resize\/(.+)$/.exec(p);
   if (method === "POST" && rz) {
-    if (!scope.canSend) return forbid("scoped token is read-only");
-    return (await scopedKeywordOk(decodeURIComponent(rz[1]!), scope))
-      ? null
-      : forbid("scoped token: not bound to this agent");
+    return (
+      needs("resize") ??
+      ((await scopedKeywordOk(decodeURIComponent(rz[1]!), scope))
+        ? null
+        : forbid("scoped token: not bound to this agent"))
+    );
+  }
+  // Widget sensor routes: require the 'read' cap; the widget-route handlers do the
+  // fine-grained viewer-binding (and the 'screenshot' cap check for that kind).
+  if (p.startsWith("/api/widget/")) {
+    return needs("read");
   }
   return forbid("scoped token: route not permitted");
 }
@@ -318,20 +333,65 @@ async function scopedGate(
  * master token file, resolve the keyword to a concrete pid, and sign. Used by
  * `ay term mint`. Throws if there's no serve token or the agent can't be resolved.
  */
+const TERMINAL_CAPS = new Set(["tail", "size", "send", "resize"]);
+
 export async function mintScopedTermToken(
-  keyword: string,
-  opts: { ttlSec: number; canSend: boolean },
-): Promise<{ token: string; pid: string; exp: number; canSend: boolean }> {
+  target: string,
+  opts: { ttlSec: number; caps?: string[]; canSend?: boolean },
+): Promise<{ token: string; sub: string; pid: string; exp: number; caps: string[] }> {
   const master = await loadTokenReadOnly();
   if (!master)
     throw new Error(
       "no serve token at ~/.agent-yes/.serve-token — run `ay serve` once on this host to create it",
     );
-  const rec = await resolveOne(keyword, defaultOpts({ all: true }));
-  const pid = String(rec.pid);
+  const caps = opts.caps ?? (opts.canSend ? ["tail", "size", "send", "resize"] : ["tail", "size"]);
+  // A terminal-cap token binds to a concrete pid (resolve it); a widget-only token
+  // (read/screenshot) binds to the target verbatim (a viewer id, or "*" for any).
+  let sub = target;
+  if (target !== "*" && caps.some((c) => TERMINAL_CAPS.has(c))) {
+    const rec = await resolveOne(target, defaultOpts({ all: true }));
+    sub = String(rec.pid);
+  }
   const exp = Math.floor(Date.now() / 1000) + Math.max(1, Math.floor(opts.ttlSec));
-  const token = mintTermToken(master, { pid, canSend: opts.canSend, exp });
-  return { token, pid, exp, canSend: opts.canSend };
+  const token = mintTermToken(master, { pid: sub, caps, exp });
+  return { token, sub, pid: sub, exp, caps };
+}
+
+// ── Widget sensor broker (`ay widget`) ──────────────────────────────────────
+// The daemon is a STATELESS broker between the CLI (`ay widget read …`) and an
+// in-page AyWidget: it correlates a command with its result and forwards the
+// payload, but stores no page data. A widget registers on mount, holds an SSE
+// poll for commands, and POSTs results; a CLI read enqueues a command and awaits
+// the matching result. All in-memory — one daemon per process.
+interface WidgetViewer {
+  id: string;
+  url: string;
+  title: string;
+  caps: string[]; // what the page author opted into (selection/dom/screenshot)
+  lastSeen: number;
+}
+const widgetViewers = new Map<string, WidgetViewer>();
+const widgetPushers = new Map<string, (cmd: unknown) => void>(); // viewerId → active poll push
+const widgetWaiters = new Map<string, (r: { ok: boolean; data?: unknown; error?: string }) => void>();
+let widgetCmdSeq = 0;
+const WIDGET_TTL_MS = 30_000; // a viewer with no poll heartbeat this long is offline
+
+function widgetNewId(): string {
+  return "v_" + randomBytes(4).toString("hex");
+}
+function widgetLive(): WidgetViewer[] {
+  const now = Date.now();
+  for (const [id, v] of widgetViewers) if (now - v.lastSeen >= WIDGET_TTL_MS) widgetViewers.delete(id);
+  return [...widgetViewers.values()];
+}
+/** Resolve a `<viewer>` selector: exact id, then id-prefix / url / title substring. */
+function widgetResolve(sel: string): string | null {
+  if (widgetViewers.has(sel) && Date.now() - widgetViewers.get(sel)!.lastSeen < WIDGET_TTL_MS)
+    return sel;
+  const hit = widgetLive().find(
+    (v) => v.id.startsWith(sel) || v.url.includes(sel) || v.title.includes(sel),
+  );
+  return hit?.id ?? null;
 }
 
 const defaultOpts = (overrides: Partial<CommonOpts> = {}): CommonOpts => ({
@@ -2867,6 +2927,161 @@ export async function cmdServe(rest: string[]): Promise<number> {
       } catch (e) {
         return new Response((e as Error).message, { status: 404 });
       }
+    }
+
+    // ── Widget sensor broker routes (`ay widget`) ───────────────────────────
+    // A scoped token binds to one viewer id (scope.pid); "*" means any. Enforce
+    // that binding on the per-viewer routes (scopedGate already required 'read').
+    const scopedSub = authResult.kind === "scoped" ? authResult.scope.pid : null;
+    const boundOk = (vid: string) => !scopedSub || scopedSub === "*" || scopedSub === vid;
+
+    // POST /api/widget/register {id?, url, title, caps} → { viewerId }
+    if (req.method === "POST" && p === "/api/widget/register") {
+      let b: { id?: string; url?: string; title?: string; caps?: string[] };
+      try {
+        b = (await req.json()) as typeof b;
+      } catch {
+        return new Response("invalid JSON body", { status: 400 });
+      }
+      // A scoped token pins the id to its subject (so a page can't register as
+      // another viewer); "*"/master lets the widget pick (its provided id or a new one).
+      const id =
+        scopedSub && scopedSub !== "*"
+          ? scopedSub
+          : typeof b.id === "string" && b.id
+            ? b.id
+            : widgetNewId();
+      widgetViewers.set(id, {
+        id,
+        url: String(b.url ?? ""),
+        title: String(b.title ?? ""),
+        caps: Array.isArray(b.caps) ? b.caps.filter((c) => typeof c === "string") : [],
+        lastSeen: Date.now(),
+      });
+      return Response.json({ viewerId: id });
+    }
+
+    // GET /api/widget/list → live viewers (id, url, title, caps, age)
+    if (req.method === "GET" && p === "/api/widget/list") {
+      const now = Date.now();
+      return Response.json(
+        widgetLive().map((v) => ({
+          id: v.id,
+          url: v.url,
+          title: v.title,
+          caps: v.caps,
+          age: Math.round((now - v.lastSeen) / 1000),
+        })),
+      );
+    }
+
+    // GET /api/widget/poll/:viewerId  (SSE) — the widget's command channel + heartbeat
+    const pollM = /^\/api\/widget\/poll\/(.+)$/.exec(p);
+    if (req.method === "GET" && pollM) {
+      const vid = decodeURIComponent(pollM[1]!);
+      if (!boundOk(vid)) return new Response("token not bound to this viewer", { status: 403 });
+      const enc = new TextEncoder();
+      let hb: ReturnType<typeof setInterval> | null = null;
+      const stream = new ReadableStream({
+        start(controller) {
+          const push = (obj: unknown) => {
+            try {
+              controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
+            } catch {
+              /* stream closed */
+            }
+          };
+          widgetPushers.set(vid, push);
+          const touch = () => {
+            const v = widgetViewers.get(vid);
+            if (v) v.lastSeen = Date.now();
+          };
+          touch();
+          hb = setInterval(() => {
+            try {
+              controller.enqueue(enc.encode(": ping\n\n"));
+              touch();
+            } catch {
+              /* closed */
+            }
+          }, 15_000);
+          const cleanup = () => {
+            if (hb) clearInterval(hb);
+            if (widgetPushers.get(vid) === push) widgetPushers.delete(vid);
+          };
+          req.signal.addEventListener("abort", cleanup);
+        },
+        cancel() {
+          if (hb) clearInterval(hb);
+        },
+      });
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+        },
+      });
+    }
+
+    // POST /api/widget/result {cmdId, ok, data?, error?} — widget → CLI result
+    if (req.method === "POST" && p === "/api/widget/result") {
+      let b: { cmdId?: string; ok?: boolean; data?: unknown; error?: string };
+      try {
+        b = (await req.json()) as typeof b;
+      } catch {
+        return new Response("invalid JSON body", { status: 400 });
+      }
+      const resolve = b.cmdId ? widgetWaiters.get(b.cmdId) : undefined;
+      if (resolve) {
+        widgetWaiters.delete(b.cmdId!);
+        resolve({ ok: b.ok === true, data: b.data, error: b.error });
+      }
+      return Response.json({ ok: true });
+    }
+
+    // POST /api/widget/read {viewer, kind, args?} — CLI issues a read to a viewer
+    if (req.method === "POST" && p === "/api/widget/read") {
+      let b: { viewer?: string; kind?: string; args?: unknown };
+      try {
+        b = (await req.json()) as typeof b;
+      } catch {
+        return new Response("invalid JSON body", { status: 400 });
+      }
+      if (!b.viewer || !b.kind) return new Response("missing viewer/kind", { status: 400 });
+      // A scoped token needs the 'screenshot' cap for that kind (scopedGate already
+      // required 'read'); the master token is unrestricted.
+      if (
+        authResult.kind === "scoped" &&
+        b.kind === "screenshot" &&
+        !authResult.scope.caps.includes("screenshot")
+      )
+        return new Response("scoped token lacks 'screenshot'", { status: 403 });
+      const vid = widgetResolve(b.viewer);
+      if (!vid) return new Response(`no online viewer matching "${b.viewer}"`, { status: 404 });
+      if (!boundOk(vid)) return new Response("token not bound to this viewer", { status: 403 });
+      const push = widgetPushers.get(vid);
+      if (!push) return new Response("viewer offline", { status: 409 });
+      const cmdId = `c${++widgetCmdSeq}_${Date.now()}`;
+      const result = await new Promise<{ ok: boolean; data?: unknown; error?: string }>((resolve) => {
+        const timer = setTimeout(() => {
+          widgetWaiters.delete(cmdId);
+          resolve({ ok: false, error: "timeout" });
+        }, 10_000);
+        widgetWaiters.set(cmdId, (r) => {
+          clearTimeout(timer);
+          resolve(r);
+        });
+        push({ cmdId, kind: b.kind, args: b.args ?? {} });
+      });
+      const v = widgetViewers.get(vid);
+      return Response.json({
+        viewer: vid,
+        url: v?.url ?? "",
+        ts: Math.floor(Date.now() / 1000),
+        kind: b.kind,
+        ...(result.ok ? { data: result.data } : { error: result.error ?? "failed" }),
+      });
     }
 
     // GET /api/tail/:keyword  — SSE streaming

@@ -12,3 +12,5 @@ export { AyTerminal } from "./terminal/browser.ts";
 export type { AyTerminalInfo } from "./terminal/browser.ts";
 export { AyChannel } from "./channels/browser.ts";
 export type { AyChannelInfo } from "./channels/browser.ts";
+export { AyWidget } from "./widget/browser.ts";
+export type { AyWidgetInfo } from "./widget/browser.ts";

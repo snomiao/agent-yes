@@ -54,6 +54,9 @@ bun build ../../../ts/channels/browser.ts --outfile ./public/w/channels.js --for
 # loads to render a live read-only agent terminal (ay term embed). Same browser
 # target + independence from the npm dist build as channels.js above.
 bun build ../../../ts/terminal/browser.ts --outfile ./public/w/terminal.js --format esm --target browser --minify
+# Widget sensor lib (`import { AyWidget } from "agent-yes/widgets"` / agent-yes/widget):
+# an in-page agent sensor (selection/dom/screenshot) an agent reads via `ay widget`.
+bun build ../../../ts/widget/browser.ts --outfile ./public/w/widget.js --format esm --target browser --minify
 
 cp _headers ./public/_headers
 bun ../../../scripts/build-rgui.ts ./public/r

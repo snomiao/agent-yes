@@ -8,6 +8,7 @@ export default defineConfig({
     index: "./ts/index.ts",
     channels: "./ts/channels/browser.ts",
     terminal: "./ts/terminal/browser.ts",
+    widget: "./ts/widget/browser.ts",
     widgets: "./ts/widgets.ts",
   },
   outDir: "dist",

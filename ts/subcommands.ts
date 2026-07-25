@@ -366,6 +366,8 @@ const SUBCOMMANDS = new Set([
   "ch",
   "channels",
   "term",
+  "widget",
+  "mint",
   "serve",
   "schedule",
   "remote",
@@ -490,6 +492,14 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
       case "term": {
         const { cmdTerm } = await import("./terminal.ts");
         return cmdTerm(rest);
+      }
+      case "widget": {
+        const { cmdWidget } = await import("./widget.ts");
+        return cmdWidget(rest);
+      }
+      case "mint": {
+        const { cmdMint } = await import("./widget.ts");
+        return cmdMint(rest);
       }
       case "serve": {
         const { cmdServe } = await import("./serve.ts");
@@ -628,6 +638,8 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay msgs [keyword] [--in|--out]      inter-agent message log (sent + received)\n` +
       `  ay ch mk|join|send|read|tail <topic>  local-first E2E channels: AI ↔ humans on a topic (ay ch help)\n` +
       `  ay term embed <pid>                 <script> to embed a live read-only agent terminal in a page (ay term help)\n` +
+      `  ay widget ls | read selection|dom   read an opted-in page widget's context (selection/DOM) (ay widget help)\n` +
+      `  ay mint <target> --caps ...         mint a scoped, short-TTL capability token (embeddable in a page)\n` +
       `  ay key <keyword> <key...>           send raw keystrokes (down/up/enter/esc/…) — drives menus\n` +
       `  ay select <keyword> <N>             pick option N of a needs_input selection menu\n` +
       `  ay attach <keyword>                 interactive attach (detach: Ctrl-\\)\n` +

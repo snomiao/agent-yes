@@ -94,6 +94,10 @@
       "types": "./ts/terminal/browser.ts",
       "import": "./dist/terminal.js"
     },
+    "./widget": {
+      "types": "./ts/widget/browser.ts",
+      "import": "./dist/widget.js"
+    },
     "./widgets": {
       "types": "./ts/widgets.ts",
       "import": "./dist/widgets.js"
