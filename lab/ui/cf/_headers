@@ -24,3 +24,6 @@
 /w/terminal.js
   Access-Control-Allow-Origin: *
   Cross-Origin-Resource-Policy: cross-origin
+/w/widget.js
+  Access-Control-Allow-Origin: *
+  Cross-Origin-Resource-Policy: cross-origin
