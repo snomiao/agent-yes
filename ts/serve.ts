@@ -3483,6 +3483,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
       if (!cols || !rows) return new Response("missing cols/rows", { status: 400 });
       try {
         const record = await resolveOne(keyword, defaultOpts());
+        // Trace the SOURCE of every PTY resize: a secondary/observer view (a console
+        // tab, a widget) that force-resizes the shared PTY to its own window can
+        // clobber the agent's terminal (last-writer-wins), and without this it's
+        // impossible to tell who did it. Logs auth kind + origin/referer/UA.
+        process.stderr.write(
+          `[api/resize] pid=${record.pid} ${cols}x${rows} auth=${authResult.kind} ` +
+            `origin=${req.headers.get("origin") ?? "-"} ref=${req.headers.get("referer") ?? "-"} ` +
+            `ua=${(req.headers.get("user-agent") ?? "-").slice(0, 80)}\n`,
+        );
         const ayHome = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
         const winsizeDir = path.join(ayHome, "winsize");
         await mkdir(winsizeDir, { recursive: true });
