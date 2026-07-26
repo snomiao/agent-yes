@@ -28,9 +28,8 @@ import { buildRustArgs } from "./buildRustArgs.ts";
   const managerCommands = !invokedCliName(process.argv);
   // Intercept bare -h/--help so we show TS subcommands, not just Rust agent-runner options.
   const isHelpFlag = rawArg === "-h" || rawArg === "--help";
-  const { isSubcommand, runSubcommand, cmdHelp, isUnknownManagerToken } = await import(
-    "./subcommands.ts"
-  );
+  const { isSubcommand, runSubcommand, cmdHelp, isUnknownManagerToken } =
+    await import("./subcommands.ts");
   if (isHelpFlag && process.argv.length === 3) {
     await cmdHelp(managerCommands);
     process.exit(0);

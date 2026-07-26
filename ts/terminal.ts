@@ -178,7 +178,9 @@ async function cmdTermMint(args: string[]): Promise<number> {
   });
   const pid = positional[0];
   if (!pid || positional.length > 1)
-    throw new Error("usage: ay term mint <pid|keyword> [--ttl 15m] [--ro | --interactive] [--json]");
+    throw new Error(
+      "usage: ay term mint <pid|keyword> [--ttl 15m] [--ro | --interactive] [--json]",
+    );
   if (flags.ro && flags.interactive)
     throw new Error("--ro and --interactive are mutually exclusive");
   const ttlSec = parseTtlSec(typeof flags.ttl === "string" ? flags.ttl : "15m");

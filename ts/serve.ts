@@ -291,13 +291,10 @@ async function scopedKeywordOk(keyword: string, scope: TermScope): Promise<boole
  * Allowed: GET /api/tail|size/<kw> for the bound pid; POST /api/send for the bound
  * pid IFF the token is interactive (canSend). Everything else is denied.
  */
-async function scopedGate(
-  scope: TermScope,
-  method: string,
-  p: string,
-): Promise<Response | null> {
+async function scopedGate(scope: TermScope, method: string, p: string): Promise<Response | null> {
   const forbid = (m: string) => new Response(m, { status: 403 });
-  const needs = (cap: string) => (scope.caps.includes(cap) ? null : forbid(`scoped token lacks '${cap}'`));
+  const needs = (cap: string) =>
+    scope.caps.includes(cap) ? null : forbid(`scoped token lacks '${cap}'`);
   const m = /^\/api\/(?:tail|size)\/(.+)$/.exec(p);
   if (method === "GET" && m) {
     return (
@@ -379,7 +376,10 @@ interface WidgetViewer {
 }
 const widgetViewers = new Map<string, WidgetViewer>();
 const widgetPushers = new Map<string, (cmd: unknown) => void>(); // viewerId → active poll push
-const widgetWaiters = new Map<string, (r: { ok: boolean; data?: unknown; error?: string }) => void>();
+const widgetWaiters = new Map<
+  string,
+  (r: { ok: boolean; data?: unknown; error?: string }) => void
+>();
 let widgetCmdSeq = 0;
 const WIDGET_TTL_MS = 30_000; // a viewer with no poll heartbeat this long is offline
 
@@ -388,7 +388,8 @@ function widgetNewId(): string {
 }
 function widgetLive(): WidgetViewer[] {
   const now = Date.now();
-  for (const [id, v] of widgetViewers) if (now - v.lastSeen >= WIDGET_TTL_MS) widgetViewers.delete(id);
+  for (const [id, v] of widgetViewers)
+    if (now - v.lastSeen >= WIDGET_TTL_MS) widgetViewers.delete(id);
   return [...widgetViewers.values()];
 }
 /** Resolve a `<viewer>` selector: exact id, then id-prefix / url / title substring. */
@@ -3163,17 +3164,19 @@ export async function cmdServe(rest: string[]): Promise<number> {
       const cmdId = `c${++widgetCmdSeq}_${Date.now()}`;
       // Screenshot waits on a human one-time consent, so it gets a longer window.
       const readTimeoutMs = b.kind === "screenshot" ? 30_000 : 10_000;
-      const result = await new Promise<{ ok: boolean; data?: unknown; error?: string }>((resolve) => {
-        const timer = setTimeout(() => {
-          widgetWaiters.delete(cmdId);
-          resolve({ ok: false, error: "timeout" });
-        }, readTimeoutMs);
-        widgetWaiters.set(cmdId, (r) => {
-          clearTimeout(timer);
-          resolve(r);
-        });
-        push({ cmdId, kind: b.kind, args: b.args ?? {} });
-      });
+      const result = await new Promise<{ ok: boolean; data?: unknown; error?: string }>(
+        (resolve) => {
+          const timer = setTimeout(() => {
+            widgetWaiters.delete(cmdId);
+            resolve({ ok: false, error: "timeout" });
+          }, readTimeoutMs);
+          widgetWaiters.set(cmdId, (r) => {
+            clearTimeout(timer);
+            resolve(r);
+          });
+          push({ cmdId, kind: b.kind, args: b.args ?? {} });
+        },
+      );
       const v = widgetViewers.get(vid);
       return Response.json({
         viewer: vid,

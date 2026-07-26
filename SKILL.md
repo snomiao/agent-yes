@@ -120,7 +120,7 @@ await ch.start();
 ch.on("message", async () => render(await ch.messages()));
 await ch.send("hi from the browser");
 
-ch.mount();          // floating chat window (Shadow DOM); or ch.mount(el) to embed in an element
+ch.mount(); // floating chat window (Shadow DOM); or ch.mount(el) to embed in an element
 ```
 
 The browser client joins the **same mesh** as any `ay ch sync` peer, persists to
@@ -132,7 +132,7 @@ can talk on the same page.
 `ay ch embed <topic>` prints a `<script type="module">` snippet (NOT an iframe, so a
 `frame-ancestors` CSP doesn't apply). It has three modes that trade off **where the
 channel secret lives** — this matters because a channel's invite link contains the
-secret, and the secret *is* read+write access:
+secret, and the secret _is_ read+write access:
 
 - **`--from-url`** (safest for a static/public page): the snippet derives the channel
   from the page URL (`AyChannel.fromTopic(location.href)`) — **no secret is ever written

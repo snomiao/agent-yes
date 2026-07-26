@@ -123,8 +123,22 @@ export class AyTerminal {
     if (this.capHeartbeat || this.readOnly) return;
     const g = globalThis as any;
     this.capHeartbeat = (g.setInterval ?? setInterval)(() => {
-      if (this.lastCap) this.sendCap(this.lastCap.cols, this.lastCap.rows);
+      // Self-validate each tick: if the panel is no longer showing its grid
+      // (minimized/collapsed/detached — via ANY path, not just the wired min button),
+      // withdraw instead of blindly renewing. Backstops a collapse that doesn't hit
+      // reflow (e.g. the host detached from the DOM, where ResizeObserver may not fire).
+      if (!this.lastCap || !this.isPanelVisible()) {
+        this.withdrawCap();
+        return;
+      }
+      this.sendCap(this.lastCap.cols, this.lastCap.rows);
     }, 5000);
+  }
+
+  /** True while this widget's terminal grid is actually rendered (panel open & visible). */
+  private isPanelVisible(): boolean {
+    const el = this.term?.element as any; // the .xterm root
+    return !!(el && el.offsetWidth && el.offsetHeight);
   }
 
   /** Withdraw this widget's size cap (closed/minimized) → the daemon re-negotiates without it. */
@@ -292,7 +306,15 @@ export class AyTerminal {
     // adds keystroke input (start(), /api/send), not a resize.
     const reflow = () => {
       const xt = inner.querySelector(".xterm") as any;
-      if (!xt || !xt.offsetWidth || !xt.offsetHeight) return;
+      if (!xt || !xt.offsetWidth || !xt.offsetHeight) {
+        // The panel just went invisible (minimized/collapsed/hidden — the wrap
+        // ResizeObserver fires this on collapse). Withdraw our cap so a hidden panel
+        // stops constraining the shared PTY, no matter WHICH gesture hid it (the wired
+        // min button, a page hiding the host, a max/min quirk). Guard on an active cap
+        // so transient 0-size layout ticks on mount don't spam the daemon.
+        if (!this.readOnly && (this.capHeartbeat || this.lastCap)) this.withdrawCap();
+        return;
+      }
       const s = Math.min(1, wrap.clientWidth / xt.offsetWidth, wrap.clientHeight / xt.offsetHeight);
       inner.style.transform = `scale(${s})`;
       // 3c: an interactive panel reports how many cols/rows it can show as a size
@@ -300,8 +322,14 @@ export class AyTerminal {
       // widget renegotiates the shared PTY — through the daemon's min, bounded by the
       // operator's local cap + floor, never a raw resize.
       if (!this.readOnly && this.term?.cols) {
-        const capCols = Math.max(1, Math.floor((wrap.clientWidth * this.term.cols) / xt.offsetWidth));
-        const capRows = Math.max(1, Math.floor((wrap.clientHeight * this.term.rows) / xt.offsetHeight));
+        const capCols = Math.max(
+          1,
+          Math.floor((wrap.clientWidth * this.term.cols) / xt.offsetWidth),
+        );
+        const capRows = Math.max(
+          1,
+          Math.floor((wrap.clientHeight * this.term.rows) / xt.offsetHeight),
+        );
         this.reportCap(capCols, capRows);
       }
     };

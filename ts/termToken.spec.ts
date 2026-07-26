@@ -20,7 +20,11 @@ describe("termToken", () => {
   });
 
   it("carries an explicit caps array (widget read/screenshot)", () => {
-    const tok = mintTermToken(MASTER, { pid: "v_ab12", caps: ["read", "screenshot"], exp: now + 60 });
+    const tok = mintTermToken(MASTER, {
+      pid: "v_ab12",
+      caps: ["read", "screenshot"],
+      exp: now + 60,
+    });
     const scope = verifyTermToken(MASTER, tok, now);
     expect(scope?.caps).toEqual(["read", "screenshot"]);
     expect(scope?.canSend).toBe(false); // no "send" cap
@@ -32,7 +36,9 @@ describe("termToken", () => {
     const legacy = Buffer.from(JSON.stringify({ p: "9", w: 1, x: now + 60 })).toString("base64url");
     const body = `ayt1.${legacy}`;
     const { createHmac, createHash } = require("crypto");
-    const key = createHash("sha256").update("ay/term/token/v1\n" + MASTER).digest();
+    const key = createHash("sha256")
+      .update("ay/term/token/v1\n" + MASTER)
+      .digest();
     const sig = createHmac("sha256", key).update(body).digest().toString("base64url");
     const scope = verifyTermToken(MASTER, `${body}.${sig}`, now);
     expect(scope?.pid).toBe("9");
@@ -52,7 +58,9 @@ describe("termToken", () => {
   it("rejects a tampered payload (pid swap) — signature no longer matches", () => {
     const tok = mintTermToken(MASTER, { pid: "7", canSend: false, exp: now + 60 });
     const [prefix, , sig] = tok.split(".");
-    const evil = Buffer.from(JSON.stringify({ p: "9999", w: 1, x: now + 60 })).toString("base64url");
+    const evil = Buffer.from(JSON.stringify({ p: "9999", w: 1, x: now + 60 })).toString(
+      "base64url",
+    );
     expect(verifyTermToken(MASTER, `${prefix}.${evil}.${sig}`, now)).toBeNull();
   });
 
