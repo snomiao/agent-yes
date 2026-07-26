@@ -244,6 +244,7 @@ function isTermCorsPath(p: string): boolean {
   return (
     /^\/api\/(tail|size)\/.+$/.test(p) ||
     p === "/api/send" ||
+    p === "/api/presence" ||
     /^\/api\/resize\/.+$/.test(p) ||
     p.startsWith("/api/widget/")
   );
@@ -319,6 +320,12 @@ async function scopedGate(
         ? null
         : forbid("scoped token: not bound to this agent"))
     );
+  }
+  // A viewer reporting its size CAP (3c widget drag-resize) participates in the
+  // resize negotiation, so it needs the resize cap; the presence handler binds the
+  // reported `agent` to the token's pid.
+  if (method === "POST" && p === "/api/presence") {
+    return needs("resize");
   }
   // Widget sensor routes: require the 'read' cap; the widget-route handlers do the
   // fine-grained viewer-binding (and the 'screenshot' cap check for that kind).
@@ -3640,6 +3647,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
       }
       const viewer = String(b.viewer ?? "").slice(0, 64);
       if (!viewer) return new Response("missing viewer", { status: 400 });
+      // A scoped token may only report presence/caps for the agent it's bound to.
+      if (
+        authResult.kind === "scoped" &&
+        b.agent != null &&
+        String(b.agent) !== authResult.scope.pid
+      )
+        return new Response("scoped token: not bound to this agent", { status: 403 });
       // The agent this viewer WAS on — if the entry moves (agent switch) or
       // clears, that agent's negotiated size must be recomputed (grow-back).
       const prevAgent = presence.get(viewer)?.agent;
