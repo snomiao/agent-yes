@@ -4063,6 +4063,12 @@ async function cmdAttach(rest: string[]): Promise<number> {
   const daemonToken = daemonBase ? ((await loadTokenReadOnly().catch(() => null)) ?? "") : "";
   const capViewer = `attach:${process.pid}`;
   let capMode = !!daemonBase;
+  // Announce the resolved path up front so a "nothing happened" run is diagnosable
+  // (grocy: attach silently did nothing — the discovery/branch was invisible).
+  process.stderr.write(
+    `[ay-attach] pid=${record.pid} daemon=${daemonBase ?? "none"} ` +
+      `token=${daemonToken ? "yes" : "empty"} mode=${capMode ? "cap" : "direct"}\n`,
+  );
 
   const writeWinsizeDirect = async (cols: number, rows: number) => {
     try {
@@ -4077,15 +4083,27 @@ async function cmdAttach(rest: string[]): Promise<number> {
       /* ignore */
     }
   };
+  let sizeWarned = false;
   const sendResize = async () => {
     const cols = process.stdout.columns ?? 0;
     const rows = process.stdout.rows ?? 0;
     // Size not ready yet (a freshly-allocated pty — e.g. under script(1) — reports
-    // 0×0 for a beat): skip rather than drive the agent to 0×0. The stdout "resize"
-    // listener fires sendResize again once the real size lands.
-    if (cols < 1 || rows < 1) return;
+    // 0×0 for a beat): skip rather than drive the agent to 0×0. Trace it ONCE so a
+    // genuinely size-less terminal reads as "skipped: no size", not silence.
+    if (cols < 1 || rows < 1) {
+      if (!sizeWarned) {
+        sizeWarned = true;
+        process.stderr.write(
+          `[ay-attach] pid=${record.pid} terminal size unavailable (${cols}x${rows}) — not reporting yet\n`,
+        );
+      }
+      return;
+    }
     // Cap path: POST /api/resize (cap-report; the daemon publishCap+scheduleNego's it).
-    if (capMode && daemonBase && daemonToken) {
+    // "" is a valid token (a localhost daemon without .serve-token accepts it as
+    // master) — gate on the daemon BASE, not the token, or a tokenless daemon wrongly
+    // falls to the direct path (the token was the reason cap mode never fired).
+    if (capMode && daemonBase) {
       try {
         const res = await fetch(
           `${daemonBase}/api/resize/${encodeURIComponent(String(record.pid))}?token=${encodeURIComponent(daemonToken)}`,
@@ -4108,6 +4126,12 @@ async function cmdAttach(rest: string[]): Promise<number> {
     }
     await writeWinsizeDirect(cols, rows);
   };
+  // Some ptys report 0×0 for a beat after allocation and — because the size was
+  // correct from creation — never fire a 'resize', so a single initial send would
+  // skip on 0×0 and then never retry (grocy: attach silently did nothing, winsize
+  // untouched). Poll briefly for a real size before the first report.
+  for (let i = 0; i < 15 && (!process.stdout.columns || !process.stdout.rows); i++)
+    await new Promise((r) => setTimeout(r, 100));
   await sendResize();
   // A one-shot cap fades on the daemon's ~12s TTL, so renew it while attached (cap
   // mode only — a direct winsize write persists and needs no heartbeat).
@@ -4120,12 +4144,17 @@ async function cmdAttach(rest: string[]): Promise<number> {
   // re-negotiates back to the remaining viewers / its real tty immediately.
   const withdrawAttachCap = async () => {
     if (capHeartbeat) clearInterval(capHeartbeat);
-    if (!daemonBase || !daemonToken) return;
+    if (!daemonBase) return; // "" token is valid — gate on the base, not the token
     try {
+      // Withdraw by reporting presence for THIS pid with NO cap: the daemon then
+      // withdrawCap()s our entry and re-negotiates. `agent:null` does NOT work here —
+      // the daemon keys that withdraw off an in-memory presence entry we never created
+      // (our cap was published via /api/resize, not /api/presence), so it'd no-op and
+      // the cap would linger a full TTL.
       await fetch(`${daemonBase}/api/presence?token=${encodeURIComponent(daemonToken)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ viewer: capViewer, agent: null }),
+        body: JSON.stringify({ viewer: capViewer, agent: record.pid }),
       });
     } catch {
       /* daemon gone — its TTL will prune our cap */
