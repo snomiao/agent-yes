@@ -4056,9 +4056,13 @@ async function cmdAttach(rest: string[]): Promise<number> {
   // no daemon is running — then this attach is the sole authority and drives it itself.
   const { resolveDaemonHttpBase, loadTokenReadOnly } = await import("./serve.ts");
   const daemonBase = await resolveDaemonHttpBase().catch(() => null);
-  const daemonToken = daemonBase ? await loadTokenReadOnly().catch(() => null) : null;
+  // The token may legitimately be "" — a localhost daemon started without a
+  // .serve-token accepts an empty token as master. Gate cap mode on the BASE alone,
+  // exactly like `ay widget ls` (which discovers the same daemon and works with ""):
+  // requiring a non-null token here is what wrongly dropped attach to the direct path.
+  const daemonToken = daemonBase ? ((await loadTokenReadOnly().catch(() => null)) ?? "") : "";
   const capViewer = `attach:${process.pid}`;
-  let capMode = !!(daemonBase && daemonToken);
+  let capMode = !!daemonBase;
 
   const writeWinsizeDirect = async (cols: number, rows: number) => {
     try {
@@ -4074,8 +4078,12 @@ async function cmdAttach(rest: string[]): Promise<number> {
     }
   };
   const sendResize = async () => {
-    const cols = process.stdout.columns ?? 80;
-    const rows = process.stdout.rows ?? 24;
+    const cols = process.stdout.columns ?? 0;
+    const rows = process.stdout.rows ?? 0;
+    // Size not ready yet (a freshly-allocated pty — e.g. under script(1) — reports
+    // 0×0 for a beat): skip rather than drive the agent to 0×0. The stdout "resize"
+    // listener fires sendResize again once the real size lands.
+    if (cols < 1 || rows < 1) return;
     // Cap path: POST /api/resize (cap-report; the daemon publishCap+scheduleNego's it).
     if (capMode && daemonBase && daemonToken) {
       try {
@@ -4194,6 +4202,8 @@ async function cmdAttach(rest: string[]): Promise<number> {
     detached = true;
     if (pollTimer) clearInterval(pollTimer);
     if (aliveCheck) clearInterval(aliveCheck);
+    process.off("SIGTERM", onSignalExit);
+    process.off("SIGHUP", onSignalExit);
     void withdrawAttachCap(); // release our size cap so the PTY re-negotiates without us
     watcher.close();
     process.stdout.removeListener("resize", onResize);
@@ -4239,6 +4249,20 @@ async function cmdAttach(rest: string[]): Promise<number> {
     triggerDetach();
   };
   process.stdin.on("data", onStdinData);
+
+  // `kill`/SIGHUP (e.g. the controlling terminal closing) must run the same cleanup
+  // as a manual detach — restore cooked mode AND withdraw our size cap — else the
+  // agent's PTY is left pinned at this attach's size (grocy: kill -TERM left 80×24).
+  // In raw mode Ctrl-C arrives as a stdin byte, not SIGINT, so SIGINT isn't handled
+  // here (it'd double-fire); SIGTERM/SIGHUP are the `kill` paths that need it.
+  const onSignalExit = () => {
+    triggerDetach(); // restores the terminal (sync) + fires the async cap withdraw
+    // give withdrawAttachCap's fetch a beat to reach the daemon before we exit; the
+    // daemon's TTL + nego reconciliation heal it even if the process dies first.
+    setTimeout(() => process.exit(0), 200);
+  };
+  process.on("SIGTERM", onSignalExit);
+  process.on("SIGHUP", onSignalExit);
 
   // 7. Detach automatically if the agent exits.
   aliveCheck = setInterval(() => {
