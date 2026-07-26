@@ -231,12 +231,18 @@ export async function cmdMint(args: string[]): Promise<number> {
   });
   const target = positional[0];
   if (!target || positional.length > 1)
-    throw new Error("usage: ay mint <pid|viewer|url|*> --caps tail,send,read,screenshot [--ttl 15m] [--json]");
+    throw new Error(
+      "usage: ay mint <pid|viewer|url|*> --caps tail,send,read,screenshot [--ttl 15m] [--json]",
+    );
   if (typeof flags.caps !== "string")
     throw new Error("--caps is required, e.g. --caps read  or  --caps tail,send");
-  const caps = flags.caps.split(",").map((c) => c.trim()).filter(Boolean);
+  const caps = flags.caps
+    .split(",")
+    .map((c) => c.trim())
+    .filter(Boolean);
   const bad = caps.filter((c) => !KNOWN_CAPS.has(c));
-  if (bad.length) throw new Error(`unknown cap(s): ${bad.join(", ")} (valid: ${[...KNOWN_CAPS].join(", ")})`);
+  if (bad.length)
+    throw new Error(`unknown cap(s): ${bad.join(", ")} (valid: ${[...KNOWN_CAPS].join(", ")})`);
   const ttlSec = parseTtlSec(typeof flags.ttl === "string" ? flags.ttl : "15m");
   const { mintScopedTermToken } = await import("./serve.ts");
   const r = await mintScopedTermToken(target, { ttlSec, caps });

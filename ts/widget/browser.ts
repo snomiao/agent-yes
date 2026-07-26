@@ -113,7 +113,10 @@ export class AyWidget {
     const handler = this.handlers.get(kind);
     // Author allowlist: only "ping" is implicit; sensor kinds must be opted in.
     if (!handler || (kind !== "ping" && !this.sensors.has(kind))) {
-      return this.postResult(cmdId, { ok: false, error: `kind '${kind}' not enabled on this widget` });
+      return this.postResult(cmdId, {
+        ok: false,
+        error: `kind '${kind}' not enabled on this widget`,
+      });
     }
     try {
       const data = await handler(args);
@@ -123,7 +126,10 @@ export class AyWidget {
     }
   }
 
-  private async postResult(cmdId: string, r: { ok: boolean; data?: unknown; error?: string }): Promise<void> {
+  private async postResult(
+    cmdId: string,
+    r: { ok: boolean; data?: unknown; error?: string },
+  ): Promise<void> {
     const g = globalThis as any;
     try {
       await g.fetch(this.url("/api/widget/result"), {
@@ -311,7 +317,11 @@ export class AyWidget {
   }
 }
 
-function dataUrlResult(url: string, w = 0, h = 0): { mime: string; w: number; h: number; b64: string } {
+function dataUrlResult(
+  url: string,
+  w = 0,
+  h = 0,
+): { mime: string; w: number; h: number; b64: string } {
   const b64 = String(url).replace(/^data:[^,]*,/, "");
   return { mime: "image/png", w: Number(w) || 0, h: Number(h) || 0, b64 };
 }
