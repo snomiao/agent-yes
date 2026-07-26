@@ -2213,30 +2213,40 @@ export async function cmdServe(rest: string[]): Promise<number> {
     try {
       if (eff) {
         negoCapsGoneAt.delete(pid); // caps are back — cancel any pending withdraw
-        // ±1-cell dead band: a viewer's reported capacity jitters by a row/col
-        // between visits (open-time layout vs steady state), and a 1-cell
-        // SIGWINCH reflow on every re-visit is exactly the churn users notice.
-        if (prev && Math.abs(prev.cols - eff.cols) <= 1 && Math.abs(prev.rows - eff.rows) <= 1)
-          return;
-        // Cross-daemon convergence: if the winsize file ALREADY holds this size (a
-        // sibling daemon negotiated the same min), do NOT rewrite/re-SIGWINCH — else
-        // two daemons thrash the PTY with same-size, different-timestamp writes.
+        // RECONCILE the winsize to the negotiated min. Compare against the ACTUAL
+        // winsize on disk — NOT the last value we ourselves negotiated (`prev`) — so
+        // that a drift introduced by a FOREIGN writer gets healed: `ay attach`'s
+        // direct fallback, a `force:true` resize, or an old console can pin the file
+        // to some other size, and with no subsequent cap change the old prev-only dead
+        // band never corrected it → a stale size (e.g. 80×24) lingered forever
+        // (grocy's design gap). The ±1-cell band still absorbs a viewer's open-time
+        // capacity jitter AND makes a sibling daemon's identical write a no-op (no
+        // cross-daemon same-size thrash). The 5s grow-back sweep re-runs this, so a
+        // foreign write is reconciled within ~5s even without a cap change.
+        let curr: { cols: number; rows: number } | null = null;
         try {
-          const curr = (await readFile(file, "utf-8")).trim().split(/\s+/);
-          if (Number(curr[0]) === eff.cols && Number(curr[1]) === eff.rows) {
-            negoApplied.set(pid, { cols: eff.cols, rows: eff.rows, content: "" });
-            return;
-          }
+          const parts = (await readFile(file, "utf-8")).trim().split(/\s+/);
+          const c = Number(parts[0]);
+          const r = Number(parts[1]);
+          if (Number.isFinite(c) && Number.isFinite(r)) curr = { cols: c, rows: r };
         } catch {
-          /* no winsize file yet — fall through and write it */
+          /* no winsize file yet — treat as drift and write it */
+        }
+        if (curr && Math.abs(curr.cols - eff.cols) <= 1 && Math.abs(curr.rows - eff.rows) <= 1) {
+          // Already at (≈) the negotiated size — nothing to correct.
+          negoApplied.set(pid, { cols: eff.cols, rows: eff.rows, content: "" });
+          return;
         }
         const content = `${eff.cols} ${eff.rows} ${Date.now()}\n`;
         // Trace the negotiated resize + this daemon's identity (multi-daemon topology:
         // the HTTP daemon and each --webrtc share daemon each negotiate off the shared
         // store; the trace shows which one wrote, so a resize-fight is diagnosable).
+        // `correct=` shows the drifted size we healed (a foreign write), if any.
         process.stderr.write(
           `[api/resize] pid=${pid} ${eff.cols}x${eff.rows} src=presence-nego ` +
-            `daemon=${daemonTag} caps=${caps.length}\n`,
+            `daemon=${daemonTag} caps=${caps.length}` +
+            (curr ? ` correct=${curr.cols}x${curr.rows}` : ``) +
+            `\n`,
         );
         await mkdir(path.dirname(file), { recursive: true });
         await writeFile(file, content);
