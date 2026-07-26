@@ -8,12 +8,13 @@
 //   const t = new AyTerminal({ pid: "12345" });   // token auto-discovered
 //   t.mount(document.getElementById("term"));      // inline, or t.mount() to float
 //
-// READ-ONLY by default: the grid is sized to the agent's NATIVE PTY (via
-// /api/size) and CSS-scaled to fit, and NO resize is ever pushed back, so a viewer
-// can't reflow the agent's real terminal (the rgui read-only model). INTERACTIVE
-// (an explicit opt-in gated on a send-capable token) instead lets the viewer type
-// (→ /api/send) and drag-resize to renegotiate the real PTY (→ /api/resize); it
-// fails closed to a mirror on a 403.
+// The grid is ALWAYS sized to the agent's NATIVE PTY (via /api/size) and CSS-scaled
+// to fit the panel — the widget NEVER resizes the agent's real terminal, so opening
+// or resizing this (secondary) view can't reflow the agent's own/other viewers' TUI.
+// READ-ONLY by default (a mirror). INTERACTIVE (an explicit opt-in gated on a
+// send-capable token) additionally forwards keystrokes (→ /api/send), failing closed
+// to a mirror on a 403. (Explicit viewer-driven PTY renegotiation is future work — it
+// must go through the daemon's size negotiation, not a raw per-widget /api/resize.)
 //
 // The floating widget is a draggable, resizable window with OS-native min/max
 // controls; `transparent:true` lets it float over page content. xterm + its CSS
@@ -24,7 +25,6 @@
 // DOM/xterm are accessed as `any` throughout because the Node tsconfig has no DOM
 // lib (xterm's own types reference DOM types); the widget only ever runs in a browser.
 import { Terminal } from "@xterm/xterm";
-import { FitAddon } from "@xterm/addon-fit";
 
 export interface AyTerminalInfo {
   /** Agent pid or any keyword `ay` can resolve (passed to /api/tail/<keyword>). */
@@ -33,7 +33,7 @@ export interface AyTerminalInfo {
   origin?: string;
   /** Serve token. Default: discovered from window.AY_TERM_TOKEN, the page #k= hash, or localStorage. */
   token?: string;
-  /** Interactive when false (type to the agent + drag-resize the PTY); read-only mirror when true (default). */
+  /** Interactive when false (type to the agent); read-only mirror when true (default). Never resizes the PTY. */
   readOnly?: boolean;
   /** Header label; default a rich title fetched from /api/ls, falling back to `#<pid>`. */
   title?: string;
@@ -52,13 +52,11 @@ export class AyTerminal {
   private token: string;
   private controls: "left" | "right" | "auto";
   private term?: any; // xterm Terminal
-  private fit?: any; // FitAddon (interactive PTY-fit only)
   private es?: any; // EventSource
   private widget?: any;
   private badgeEl?: any; // the interactive/read-only header badge (flipped on a 403)
   private started = false;
-  private writable = false; // flips false on the first /api/send|resize 403 (token is read-only)
-  private resizeTimer: any = null;
+  private writable = false; // flips false on the first /api/send 403 (token is read-only)
 
   constructor(info: string | number | AyTerminalInfo) {
     const o: AyTerminalInfo =
@@ -101,12 +99,6 @@ export class AyTerminal {
       scrollback: 2000,
       convertEol: false,
     });
-    // Interactive viewers reflow the real PTY, so load the fit addon to propose
-    // cols/rows from the container size; read-only viewers never do (native grid).
-    if (!this.readOnly) {
-      this.fit = new FitAddon();
-      this.term.loadAddon(this.fit);
-    }
     this.term.open(el);
 
     // Size the grid to the agent's own PTY so absolute-cursor raw bytes land in
@@ -176,28 +168,6 @@ export class AyTerminal {
     }
   }
 
-  /**
-   * Push a PTY resize to the agent (interactive only). Debounced, gated on a
-   * still-writable token; a 403 reverts to read-only.
-   */
-  private pushPtyResize(cols: number, rows: number): void {
-    if (this.readOnly || !this.writable) return;
-    const g = globalThis as any;
-    clearTimeout(this.resizeTimer);
-    this.resizeTimer = setTimeout(() => {
-      void g
-        .fetch(this.url(`/api/resize/${encodeURIComponent(this.pid)}`), {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ cols, rows }),
-        })
-        .then((r: any) => {
-          if (r.status === 403 || r.status === 401) this.revokeWrite();
-        })
-        .catch(() => {});
-    }, 200);
-  }
-
   /** Tear down the stream, the terminal, and the mounted widget. */
   close(): void {
     this.es?.close();
@@ -239,23 +209,17 @@ export class AyTerminal {
 
     // Reflow: read-only CSS-scales the native grid to fit; interactive fits the
     // grid to the container and pushes the new PTY size to the agent.
+    // Both read-only AND interactive render the terminal at the agent's NATIVE PTY
+    // grid and CSS-scale it to fit the panel — NEVER resizing the shared PTY. A
+    // widget panel is a SECONDARY view; auto-resizing the agent's real terminal to
+    // a small floating panel (or, worse, a mis-measured viewport) scrambled the
+    // agent's own/other viewers' TUI (taku's "xterm looks weird"). Interactive only
+    // adds keystroke input (start(), /api/send), not a resize.
     const reflow = () => {
-      if (this.readOnly) {
-        const xt = inner.querySelector(".xterm") as any;
-        if (!xt || !xt.offsetWidth || !xt.offsetHeight) return;
-        const s = Math.min(
-          1,
-          wrap.clientWidth / xt.offsetWidth,
-          wrap.clientHeight / xt.offsetHeight,
-        );
-        inner.style.transform = `scale(${s})`;
-      } else if (this.fit) {
-        const d = this.fit.proposeDimensions?.();
-        if (d?.cols && d?.rows && this.term) {
-          this.term.resize(d.cols, d.rows);
-          this.pushPtyResize(d.cols, d.rows);
-        }
-      }
+      const xt = inner.querySelector(".xterm") as any;
+      if (!xt || !xt.offsetWidth || !xt.offsetHeight) return;
+      const s = Math.min(1, wrap.clientWidth / xt.offsetWidth, wrap.clientHeight / xt.offsetHeight);
+      inner.style.transform = `scale(${s})`;
     };
 
     if (inline) {
@@ -266,7 +230,6 @@ export class AyTerminal {
         /* no getComputedStyle */
       }
     } else {
-      inner.style.inset = this.readOnly ? "" : "0"; // interactive fills the wrap (no scale)
       this.wireWindow(root, panel, doc, reflow);
     }
 
