@@ -646,6 +646,12 @@ impl AgentContext {
             initial_size.0,
             initial_size.1,
         );
+        // Publish the operator terminal's real size as the `local` cap so `ay serve`
+        // negotiation can't let a remote viewer grow the PTY past it (3b). Heartbeated
+        // + updated on SIGWINCH below; a headless agent (no console) publishes nothing.
+        if let Some((c, r)) = crate::pty_spawner::console_size() {
+            crate::pty_spawner::write_local_cap(std::process::id(), c, r);
+        }
         // Keep vterm in sync with the same initial size, otherwise vterm
         // could remain stuck at AgentContext::new() dimensions until the
         // first SIGWINCH fires.
@@ -680,8 +686,32 @@ impl AgentContext {
                     // workflow working.
                     let size = crate::pty_spawner::read_external_winsize(my_pid)
                         .unwrap_or_else(|| crate::pty_spawner::console_size().unwrap_or((80, 24)));
+                    // Refresh the `local` cap from the REAL console size (independent
+                    // of any external winsize applied to the child) so a window resize
+                    // updates negotiation immediately.
+                    if let Some((c, r)) = crate::pty_spawner::console_size() {
+                        crate::pty_spawner::write_local_cap(my_pid, c, r);
+                    }
                     if resize_tx.send(size).is_err() {
                         break;
+                    }
+                }
+            })
+        };
+
+        // Local-cap heartbeat: keep the operator terminal's size fresh in the shared
+        // cap store (short TTL) so negotiation includes it, and it EXPIRES cleanly if
+        // the terminal goes away (console_size() → None → remove). Best-effort.
+        #[cfg(unix)]
+        let _local_cap_handle = {
+            let my_pid = std::process::id();
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(Duration::from_secs(5));
+                loop {
+                    tick.tick().await;
+                    match crate::pty_spawner::console_size() {
+                        Some((c, r)) => crate::pty_spawner::write_local_cap(my_pid, c, r),
+                        None => crate::pty_spawner::remove_local_cap(my_pid),
                     }
                 }
             })

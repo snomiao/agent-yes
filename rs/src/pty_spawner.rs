@@ -136,6 +136,37 @@ pub fn write_current_ptysize(pid: u32, cols: u16, rows: u16) {
     }
 }
 
+/// Publish this agent's REAL controlling-terminal size as the `local` size cap in
+/// the shared cap store (`$AGENT_YES_HOME/caps/<pid>/local`, format
+/// `<cols> <rows> <ts_ms> local`). `ay serve`'s size negotiation reads every cap
+/// (all viewers + this one) and drives the agent's PTY to the elementwise minimum
+/// — so a remote web viewer can no longer GROW the PTY past the operator's own
+/// terminal (a smaller viewer still shrinks it, tmux-style). Heartbeated (see
+/// context.rs) so it expires by TTL when the operator's terminal goes away.
+/// Best-effort; never panics.
+pub fn write_local_cap(pid: u32, cols: u16, rows: u16) {
+    if cols == 0 || rows == 0 {
+        return;
+    }
+    if let Some(dir) = crate::log_files::global_dir() {
+        let d = dir.join("caps").join(pid.to_string());
+        let _ = std::fs::create_dir_all(&d);
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|x| x.as_millis())
+            .unwrap_or(0);
+        let _ = std::fs::write(d.join("local"), format!("{} {} {} local\n", cols, rows, ts));
+    }
+}
+
+/// Remove this agent's `local` size cap (operator terminal gone / agent exiting),
+/// so negotiation stops counting it immediately instead of waiting for the TTL.
+pub fn remove_local_cap(pid: u32) {
+    if let Some(dir) = crate::log_files::global_dir() {
+        let _ = std::fs::remove_file(dir.join("caps").join(pid.to_string()).join("local"));
+    }
+}
+
 /// Parse a single `"cols rows timestamp_ms"` line. Extracted for unit tests.
 pub fn parse_winsize_line(line: &str) -> Option<(u16, u16)> {
     let mut parts = line.split_ascii_whitespace();
