@@ -2159,6 +2159,20 @@ export async function cmdServe(rest: string[]): Promise<number> {
         if (prev && Math.abs(prev.cols - eff.cols) <= 1 && Math.abs(prev.rows - eff.rows) <= 1)
           return;
         const content = `${eff.cols} ${eff.rows} ${Date.now()}\n`;
+        // Log this presence-negotiated resize (mirrors the POST /api/resize log) so
+        // resize-fights are traceable across ALL channels, not just direct HTTP — a
+        // remote console reporting a big viewport cap resizes the shared PTY THROUGH
+        // HERE, which otherwise leaves no trace and looks like "nobody pushed".
+        const srcViewers = [...presence.values()]
+          .filter(
+            (v) => Date.now() - v.ts <= PRESENCE_TTL_MS && String(v.agent) === String(pid) && v.cap,
+          )
+          .map((v) => v.viewer)
+          .join(",");
+        process.stderr.write(
+          `[api/resize] pid=${pid} ${eff.cols}x${eff.rows} src=presence-nego ` +
+            `caps=${liveCapsFor(pid).length} viewers=${srcViewers || "-"}\n`,
+        );
         await mkdir(path.dirname(file), { recursive: true });
         await writeFile(file, content);
         negoApplied.set(pid, { ...eff, content });
@@ -3488,7 +3502,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         // clobber the agent's terminal (last-writer-wins), and without this it's
         // impossible to tell who did it. Logs auth kind + origin/referer/UA.
         process.stderr.write(
-          `[api/resize] pid=${record.pid} ${cols}x${rows} auth=${authResult.kind} ` +
+          `[api/resize] pid=${record.pid} ${cols}x${rows} src=api-resize auth=${authResult.kind} ` +
             `origin=${req.headers.get("origin") ?? "-"} ref=${req.headers.get("referer") ?? "-"} ` +
             `ua=${(req.headers.get("user-agent") ?? "-").slice(0, 80)}\n`,
         );

@@ -4054,6 +4054,10 @@ async function cmdAttach(rest: string[]): Promise<number> {
     const rows = process.stdout.rows ?? 24;
     try {
       await writeFile(winsizePath, `${cols} ${rows} ${Date.now()}\n`);
+      // Trace the source (mirrors the daemon's /api/resize log) — `ay attach` also
+      // resizes the shared PTY to its terminal, so it must be visible when hunting
+      // a resize-fight. Goes to this attach process's stderr (not the daemon log).
+      process.stderr.write(`[api/resize] pid=${record.pid} ${cols}x${rows} src=ay-attach\n`);
       try {
         process.kill(record.pid, "SIGWINCH");
       } catch {
