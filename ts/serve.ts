@@ -3547,13 +3547,25 @@ export async function cmdServe(rest: string[]): Promise<number> {
       }
     }
 
-    // POST /api/resize/:keyword  body {cols, rows} — drive the agent's PTY size.
-    // Mirrors `ay attach`: write ~/.agent-yes/winsize/<pid> then SIGWINCH; the
-    // agent's resize listener picks it up and reflows its TUI to that width.
+    // POST /api/resize/:keyword  body {cols, rows, force?, viewer?} — size the agent.
+    //
+    // DEFAULT (3d): report {cols,rows} as a size CAP into the negotiation (publishCap
+    // + scheduleNego) — the smallest-client-wins path every other viewer uses — NOT a
+    // raw winsize write. A raw write is last-writer-wins: a secondary view (console
+    // tab, widget) sizing the shared PTY to its own window clobbered the agent's
+    // terminal and every other viewer. As a cap, this caller's size is just one input
+    // to the min; a one-shot cap fades on TTL if not renewed (a live viewer renews via
+    // its presence heartbeat, so its size stays without any raw push).
+    //
+    // FORCE escape hatch — TRIPLE-LOCKED: master token AND body.force===true, traced
+    // src=api-resize-FORCED. The operator's diagnostic override for when negotiation
+    // misbehaves (kept deliberately usable). A scoped token can NEVER force — force:true
+    // from a scoped token silently falls through to a cap report (no raw write, no
+    // privilege leak).
     const resizeM = /^\/api\/resize\/(.+)$/.exec(p);
     if (req.method === "POST" && resizeM) {
       const keyword = decodeURIComponent(resizeM[1]!);
-      let body: { cols?: number; rows?: number };
+      let body: { cols?: number; rows?: number; force?: boolean; viewer?: string };
       try {
         body = (await req.json()) as typeof body;
       } catch {
@@ -3564,28 +3576,37 @@ export async function cmdServe(rest: string[]): Promise<number> {
       if (!cols || !rows) return new Response("missing cols/rows", { status: 400 });
       try {
         const record = await resolveOne(keyword, defaultOpts());
-        // Trace the SOURCE of every PTY resize: a secondary/observer view (a console
-        // tab, a widget) that force-resizes the shared PTY to its own window can
-        // clobber the agent's terminal (last-writer-wins), and without this it's
-        // impossible to tell who did it. Logs auth kind + origin/referer/UA.
-        process.stderr.write(
-          `[api/resize] pid=${record.pid} ${cols}x${rows} src=api-resize auth=${authResult.kind} ` +
-            `origin=${req.headers.get("origin") ?? "-"} ref=${req.headers.get("referer") ?? "-"} ` +
-            `ua=${(req.headers.get("user-agent") ?? "-").slice(0, 80)}\n`,
-        );
-        const ayHome = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
-        const winsizeDir = path.join(ayHome, "winsize");
-        await mkdir(winsizeDir, { recursive: true });
-        await writeFile(
-          path.join(winsizeDir, String(record.pid)),
-          `${cols} ${rows} ${Date.now()}\n`,
-        );
-        try {
-          process.kill(record.pid, "SIGWINCH");
-        } catch {
-          /* agent gone */
+        const originTrace =
+          `auth=${authResult.kind} origin=${req.headers.get("origin") ?? "-"} ` +
+          `ref=${req.headers.get("referer") ?? "-"} ` +
+          `ua=${(req.headers.get("user-agent") ?? "-").slice(0, 80)}`;
+        // FORCE: master + force:true → raw winsize write that BYPASSES negotiation.
+        if (body.force === true && authResult.kind === "master") {
+          process.stderr.write(
+            `[api/resize] pid=${record.pid} ${cols}x${rows} src=api-resize-FORCED ${originTrace}\n`,
+          );
+          const file = winsizePathFor(record.pid);
+          await mkdir(path.dirname(file), { recursive: true });
+          await writeFile(file, `${cols} ${rows} ${Date.now()}\n`);
+          try {
+            process.kill(record.pid, "SIGWINCH");
+          } catch {
+            /* agent gone */
+          }
+          return Response.json({ ok: true, pid: record.pid, cols, rows, forced: true });
         }
-        return Response.json({ ok: true, pid: record.pid, cols, rows });
+        // DEFAULT: report a cap into the negotiation (no raw clobber).
+        const cap = sanitizeCap({ cols, rows });
+        if (!cap) return new Response("missing cols/rows", { status: 400 });
+        const viewer =
+          (body.viewer ? String(body.viewer).slice(0, 64) : "") ||
+          (authResult.kind === "scoped" ? `api:${authResult.scope.pid}` : "api-resize");
+        process.stderr.write(
+          `[api/resize] pid=${record.pid} ${cols}x${rows} src=api-resize-cap viewer=${viewer} ${originTrace}\n`,
+        );
+        await publishCap(record.pid, viewer, cap, "viewer");
+        scheduleNego(record.pid);
+        return Response.json({ ok: true, pid: record.pid, cols, rows, mode: "cap" });
       } catch (e) {
         return new Response((e as Error).message, { status: 404 });
       }
