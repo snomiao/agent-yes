@@ -61,6 +61,7 @@ export class AyTerminal {
   private capTimer: any = null; // debounce for cap reports on drag-resize
   private capHeartbeat: any = null; // keeps the cap renewed while the panel is open
   private lastCap: { cols: number; rows: number } | null = null;
+  private panelEl?: any; // the #panel element — the thing that goes display:none on collapse
 
   constructor(info: string | number | AyTerminalInfo) {
     const o: AyTerminalInfo =
@@ -135,10 +136,24 @@ export class AyTerminal {
     }, 5000);
   }
 
-  /** True while this widget's terminal grid is actually rendered (panel open & visible). */
+  /**
+   * True while this widget's panel is actually on-screen. Checks the PANEL element
+   * itself — its computed `display` and bounding rect — NOT the xterm grid: xterm
+   * keeps a non-zero `cols/rows` (and its `.xterm` node a cached box) even when an
+   * ancestor is `display:none`, so measuring the grid falsely reads "visible" while
+   * collapsed (grocy's ③). The panel's own `display:none`/0×0 rect is unambiguous.
+   */
   private isPanelVisible(): boolean {
-    const el = this.term?.element as any; // the .xterm root
-    return !!(el && el.offsetWidth && el.offsetHeight);
+    const p = this.panelEl;
+    if (!p) return false;
+    const g = globalThis as any;
+    try {
+      if (g.getComputedStyle?.(p)?.display === "none") return false;
+    } catch {
+      /* no getComputedStyle — fall through to the rect check */
+    }
+    const r = p.getBoundingClientRect?.();
+    return !!(r && r.width > 0 && r.height > 0);
   }
 
   /** Withdraw this widget's size cap (closed/minimized) → the daemon re-negotiates without it. */
@@ -294,6 +309,7 @@ export class AyTerminal {
     const wrap = root.getElementById("wrap")!;
     const titleEl = root.getElementById("title")!;
     this.badgeEl = root.getElementById("badge");
+    this.panelEl = panel; // used by isPanelVisible() to detect collapse
     if (this.transparent) panel.classList.add("transparent");
 
     // Reflow: read-only CSS-scales the native grid to fit; interactive fits the
@@ -305,13 +321,18 @@ export class AyTerminal {
     // agent's own/other viewers' TUI (taku's "xterm looks weird"). Interactive only
     // adds keystroke input (start(), /api/send), not a resize.
     const reflow = () => {
+      // Collapsed/hidden interactive panel → withdraw our cap and DON'T re-arm the
+      // heartbeat. Gate on the PANEL's own visibility (isPanelVisible), because the
+      // wrap ResizeObserver does NOT reliably fire when an ancestor goes display:none,
+      // and the xterm grid stays non-zero while hidden — so neither a grid measure nor
+      // the ResizeObserver alone catches a collapse (grocy's ③). Guard on an active cap
+      // so transient 0-size layout ticks on mount don't spam the daemon.
+      if (!this.readOnly && !this.isPanelVisible()) {
+        if (this.capHeartbeat || this.lastCap) this.withdrawCap();
+        return;
+      }
       const xt = inner.querySelector(".xterm") as any;
       if (!xt || !xt.offsetWidth || !xt.offsetHeight) {
-        // The panel just went invisible (minimized/collapsed/hidden — the wrap
-        // ResizeObserver fires this on collapse). Withdraw our cap so a hidden panel
-        // stops constraining the shared PTY, no matter WHICH gesture hid it (the wired
-        // min button, a page hiding the host, a max/min quirk). Guard on an active cap
-        // so transient 0-size layout ticks on mount don't spam the daemon.
         if (!this.readOnly && (this.capHeartbeat || this.lastCap)) this.withdrawCap();
         return;
       }
@@ -350,6 +371,16 @@ export class AyTerminal {
       new g.ResizeObserver(() => reflow()).observe(wrap);
     } catch {
       /* no ResizeObserver — fall back to the window listener below */
+    }
+    // Reflow on VISIBILITY changes too. A ResizeObserver does NOT reliably fire when
+    // an element (or an ancestor — e.g. a page hiding our host) goes display:none, so
+    // a collapse can slip past it and leave the cap pinned (grocy's ③). An
+    // IntersectionObserver DOES fire when the panel leaves/enters the viewport or is
+    // hidden — that reflow then sees isPanelVisible() false and withdraws the cap.
+    try {
+      new g.IntersectionObserver(() => reflow()).observe(panel);
+    } catch {
+      /* no IntersectionObserver — the 5s heartbeat self-check still catches it */
     }
     g.addEventListener?.("resize", reflow);
 
