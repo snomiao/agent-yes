@@ -59,6 +59,8 @@ export class AyTerminal {
   private writable = false; // flips false on the first /api/send 403 (token is read-only)
   private capViewerId = ""; // stable presence id for this widget's size cap (interactive)
   private capTimer: any = null; // debounce for cap reports on drag-resize
+  private capHeartbeat: any = null; // keeps the cap renewed while the panel is open
+  private lastCap: { cols: number; rows: number } | null = null;
 
   constructor(info: string | number | AyTerminalInfo) {
     const o: AyTerminalInfo =
@@ -83,26 +85,58 @@ export class AyTerminal {
    * local terminal + the 40×10 floor), NOT a raw /api/resize that scrambled everyone.
    * Debounced so a drag doesn't spam. Read-only widgets never report (pure observers).
    */
+  private sendCap(cols: number, rows: number): void {
+    const g = globalThis as any;
+    void g
+      .fetch(this.url("/api/presence"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ viewer: this.capViewerId, agent: this.pid, cap: { cols, rows } }),
+      })
+      .catch(() => {});
+  }
+
   private reportCap(cols: number, rows: number): void {
     if (this.readOnly || !this.capViewerId) return;
-    const g = globalThis as any;
+    // Dead-band: ignore ±1-cell jitter so the resize→PTY→redraw feedback loop can't
+    // churn the shared size (grocy: avoid second-level flicker).
+    if (
+      this.lastCap &&
+      Math.abs(this.lastCap.cols - cols) <= 1 &&
+      Math.abs(this.lastCap.rows - rows) <= 1
+    ) {
+      this.ensureCapHeartbeat();
+      return;
+    }
+    this.lastCap = { cols, rows };
     clearTimeout(this.capTimer);
-    this.capTimer = setTimeout(() => {
-      void g
-        .fetch(this.url("/api/presence"), {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ viewer: this.capViewerId, agent: this.pid, cap: { cols, rows } }),
-        })
-        .catch(() => {});
-    }, 250);
+    this.capTimer = setTimeout(() => this.sendCap(cols, rows), 250);
+    this.ensureCapHeartbeat();
+  }
+
+  /**
+   * Renew the cap every ~5s while the panel is open — the daemon TTLs a viewer cap
+   * (~12s) to drop tabs that vanish, so a static open panel MUST keep refreshing or
+   * its cap silently expires and the negotiated size springs back (grocy's bug).
+   */
+  private ensureCapHeartbeat(): void {
+    if (this.capHeartbeat || this.readOnly) return;
+    const g = globalThis as any;
+    this.capHeartbeat = (g.setInterval ?? setInterval)(() => {
+      if (this.lastCap) this.sendCap(this.lastCap.cols, this.lastCap.rows);
+    }, 5000);
   }
 
   /** Withdraw this widget's size cap (closed/minimized) → the daemon re-negotiates without it. */
   private withdrawCap(): void {
+    if (this.capHeartbeat) {
+      clearInterval(this.capHeartbeat);
+      this.capHeartbeat = null;
+    }
+    this.lastCap = null;
+    clearTimeout(this.capTimer);
     if (this.readOnly || !this.capViewerId) return;
     const g = globalThis as any;
-    clearTimeout(this.capTimer);
     void g
       .fetch(this.url("/api/presence"), {
         method: "POST",
