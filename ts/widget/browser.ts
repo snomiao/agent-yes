@@ -189,7 +189,11 @@ export class AyWidget {
       // Hook hit by ELEMENT IDENTITY (not string equality) → exact capture.
       const hook = this.snapshotFor(el);
       if (hook) return dataUrlResult(hook, el.width, el.height);
-      return canvasResult(await this.h2c(el, false));
+      // Pass the selector so onclone can un-clip the target's ancestor chain: a
+      // flex-item / overflow scroll container (e.g. a side panel inside a
+      // display:flex + overflow:hidden body) otherwise renders EMPTY or clipped
+      // because html2canvas recomputes the flex/clip context in its cloned doc.
+      return canvasResult(await this.h2c(el, false, undefined, args.selector));
     }
     if (mode === "selection") {
       const sel = g.getSelection?.();
@@ -214,7 +218,12 @@ export class AyWidget {
     return null;
   }
 
-  private async h2c(el: any, viewport: boolean, rect?: any): Promise<any> {
+  private async h2c(
+    el: any,
+    viewport: boolean,
+    rect?: any,
+    unclipSelector?: string,
+  ): Promise<any> {
     const g = globalThis as any;
     // html2canvas-pro (fork) supports color-mix()/oklch()/lab() — the modern CSS
     // the original html2canvas silently fails on. Deferred: only loaded on a screenshot.
@@ -225,7 +234,10 @@ export class AyWidget {
       logging: false,
       useCORS: true,
       scale: g.devicePixelRatio || 1,
-      onclone: (d: any) => this.swapSnapshots(d),
+      onclone: (d: any) => {
+        this.swapSnapshots(d);
+        if (unclipSelector) this.unclipForCapture(d, unclipSelector);
+      },
     };
     if (rect) {
       opts.x = rect.left + (g.scrollX || 0);
@@ -248,6 +260,44 @@ export class AyWidget {
       );
     }
     return canvas;
+  }
+
+  /**
+   * In the cloned doc, neutralise the clipping/flex context around a selector-capture
+   * target so its FULL subtree lays out and renders. Without this, a target that is a
+   * flex item and/or an `overflow:auto|hidden|scroll` box (very common: a fixed-width
+   * side panel inside `body{display:flex;overflow:hidden}`) renders EMPTY or clipped —
+   * html2canvas recomputes the flex/clip box in its clone and the content falls outside it.
+   * Only applied for `--selector` captures; viewport/selection keep the natural layout.
+   */
+  private unclipForCapture(clonedDoc: any, selector: string): void {
+    let target: any;
+    try {
+      target = clonedDoc.querySelector(selector);
+    } catch {
+      return; // bad selector
+    }
+    if (!target) return;
+    // Walk ancestors: drop overflow clipping + flex + fixed heights so nothing crops
+    // the target subtree in the clone.
+    for (let n = target.parentElement; n && n !== clonedDoc.documentElement; n = n.parentElement) {
+      try {
+        n.style.setProperty("overflow", "visible", "important");
+        n.style.setProperty("display", "block", "important");
+        n.style.setProperty("height", "auto", "important");
+        n.style.setProperty("max-height", "none", "important");
+      } catch {
+        /* frozen style — skip */
+      }
+    }
+    // The target itself: reveal its full (scrolled-out) content.
+    try {
+      target.style.setProperty("overflow", "visible", "important");
+      target.style.setProperty("max-height", "none", "important");
+      target.style.setProperty("height", "auto", "important");
+    } catch {
+      /* skip */
+    }
   }
 
   /** In the doc html2canvas clones, replace each registered WebGL canvas with the hook's <img>. */
