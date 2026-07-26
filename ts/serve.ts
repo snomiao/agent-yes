@@ -1,4 +1,4 @@
-import { appendFile, mkdir, open, readFile, stat, unlink, writeFile } from "fs/promises";
+import { appendFile, mkdir, open, readdir, readFile, stat, unlink, writeFile } from "fs/promises";
 import { existsSync, renameSync, watch, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -2092,6 +2092,63 @@ export async function cmdServe(rest: string[]): Promise<number> {
   >();
   const PRESENCE_TTL_MS = 12_000;
 
+  // ── Shared cap store (3a: multi-daemon size negotiation) ────────────────────
+  // Presence is in-memory PER DAEMON, so multiple `ay serve` processes (the HTTP
+  // daemon + each `--webrtc share` daemon) used to negotiate independently and
+  // fight over the single winsize file (cross-process last-writer-wins). Instead
+  // every daemon publishes each viewer's size cap to a SHARED on-disk store —
+  // ~/.agent-yes/caps/<pid>/<daemon>:<viewer> — and negotiation reads the WHOLE
+  // store (all daemons' viewers + the local-tty cap, 3b). Deterministic min +
+  // read-before-write means every daemon converges on the same winsize instead of
+  // clobbering each other. Lock-free: one writer per file (a daemon owns its own
+  // viewers' entries), short TTL prunes tabs that vanished without a clean clear.
+  const CAP_TTL_MS = 12_000;
+  const daemonTag = `d${process.pid}`; // unique per daemon process
+  const capsDir = (pid: number) => path.join(agentYesHome(), "caps", String(pid));
+  const capFile = (pid: number, key: string) =>
+    path.join(capsDir(pid), key.replace(/[^\w.:-]/g, "_"));
+  const publishCap = async (pid: number, viewer: string, cap: SizeCap, role: string) => {
+    try {
+      await mkdir(capsDir(pid), { recursive: true });
+      await writeFile(
+        capFile(pid, `${daemonTag}:${viewer}`),
+        `${cap.cols} ${cap.rows} ${Date.now()} ${role}\n`,
+      );
+    } catch {
+      /* best-effort */
+    }
+  };
+  const withdrawCap = async (pid: number, viewer: string) => {
+    await unlink(capFile(pid, `${daemonTag}:${viewer}`)).catch(() => {});
+  };
+  // Read every live cap for a pid across ALL daemons; prune expired files.
+  const readSharedCaps = async (pid: number): Promise<SizeCap[]> => {
+    let files: string[];
+    try {
+      files = await readdir(capsDir(pid));
+    } catch {
+      return [];
+    }
+    const now = Date.now();
+    const caps: SizeCap[] = [];
+    for (const f of files) {
+      const fp = path.join(capsDir(pid), f);
+      try {
+        const parts = (await readFile(fp, "utf-8")).trim().split(/\s+/);
+        const ts = Number(parts[2]);
+        if (!Number.isFinite(ts) || now - ts > CAP_TTL_MS) {
+          await unlink(fp).catch(() => {}); // stale (its writer vanished) — prune
+          continue;
+        }
+        const cap = sanitizeCap({ cols: Number(parts[0]), rows: Number(parts[1]) });
+        if (cap) caps.push(cap);
+      } catch {
+        /* unreadable/racing — skip */
+      }
+    }
+    return caps;
+  };
+
   // ── PTY size negotiation — tmux's "smallest client wins" ──────────────────
   // Writable viewers report their readable capacity (`cap`) alongside their
   // presence; we resize the agent's PTY to the elementwise min across live caps
@@ -2137,17 +2194,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
       "winsize",
       String(pid),
     );
-  const liveCapsFor = (pid: number): SizeCap[] => {
-    const now = Date.now();
-    const caps: SizeCap[] = [];
-    for (const v of presence.values())
-      if (now - v.ts <= PRESENCE_TTL_MS && String(v.agent) === String(pid) && v.cap)
-        caps.push(v.cap);
-    return caps;
-  };
   const applyNego = async (pid: number) => {
     negoTimers.delete(pid);
-    const eff = negotiateSize(liveCapsFor(pid));
+    // Negotiate over the SHARED cap store — every daemon's viewers (+ the local
+    // tty cap, 3b) — so all daemons compute the same min and converge.
+    const caps = await readSharedCaps(pid);
+    const eff = negotiateSize(caps);
     const file = winsizePathFor(pid);
     const prev = negoApplied.get(pid);
     try {
@@ -2158,20 +2210,25 @@ export async function cmdServe(rest: string[]): Promise<number> {
         // SIGWINCH reflow on every re-visit is exactly the churn users notice.
         if (prev && Math.abs(prev.cols - eff.cols) <= 1 && Math.abs(prev.rows - eff.rows) <= 1)
           return;
+        // Cross-daemon convergence: if the winsize file ALREADY holds this size (a
+        // sibling daemon negotiated the same min), do NOT rewrite/re-SIGWINCH — else
+        // two daemons thrash the PTY with same-size, different-timestamp writes.
+        try {
+          const curr = (await readFile(file, "utf-8")).trim().split(/\s+/);
+          if (Number(curr[0]) === eff.cols && Number(curr[1]) === eff.rows) {
+            negoApplied.set(pid, { cols: eff.cols, rows: eff.rows, content: "" });
+            return;
+          }
+        } catch {
+          /* no winsize file yet — fall through and write it */
+        }
         const content = `${eff.cols} ${eff.rows} ${Date.now()}\n`;
-        // Log this presence-negotiated resize (mirrors the POST /api/resize log) so
-        // resize-fights are traceable across ALL channels, not just direct HTTP — a
-        // remote console reporting a big viewport cap resizes the shared PTY THROUGH
-        // HERE, which otherwise leaves no trace and looks like "nobody pushed".
-        const srcViewers = [...presence.values()]
-          .filter(
-            (v) => Date.now() - v.ts <= PRESENCE_TTL_MS && String(v.agent) === String(pid) && v.cap,
-          )
-          .map((v) => v.viewer)
-          .join(",");
+        // Trace the negotiated resize + this daemon's identity (multi-daemon topology:
+        // the HTTP daemon and each --webrtc share daemon each negotiate off the shared
+        // store; the trace shows which one wrote, so a resize-fight is diagnosable).
         process.stderr.write(
           `[api/resize] pid=${pid} ${eff.cols}x${eff.rows} src=presence-nego ` +
-            `caps=${liveCapsFor(pid).length} viewers=${srcViewers || "-"}\n`,
+            `daemon=${daemonTag} caps=${caps.length}\n`,
         );
         await mkdir(path.dirname(file), { recursive: true });
         await writeFile(file, content);
@@ -3586,6 +3643,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       // The agent this viewer WAS on — if the entry moves (agent switch) or
       // clears, that agent's negotiated size must be recomputed (grow-back).
       const prevAgent = presence.get(viewer)?.agent;
+      const cap = sanitizeCap(b.cap);
       if (b.agent == null) presence.delete(viewer);
       else
         presence.set(viewer, {
@@ -3594,10 +3652,19 @@ export async function cmdServe(rest: string[]): Promise<number> {
           cols: Math.max(0, Math.floor(Number(b.cols) || 0)),
           rows: Math.max(0, Math.floor(Number(b.rows) || 0)),
           sel: typeof b.sel === "string" ? b.sel.slice(0, 200) : null,
-          cap: sanitizeCap(b.cap),
+          cap,
           ts: Date.now(),
         });
-      if (b.agent != null) scheduleNego(Number(b.agent));
+      // Mirror this viewer's SIZE cap into the shared cap store so sibling daemons
+      // negotiate off it too. A cleared/agent-switched/cap-less viewer withdraws its
+      // cap (from the old agent) so its size stops counting immediately, not on TTL.
+      if (prevAgent != null && String(prevAgent) !== String(b.agent ?? ""))
+        await withdrawCap(Number(prevAgent), viewer);
+      if (b.agent != null) {
+        if (cap) await publishCap(Number(b.agent), viewer, cap, "viewer");
+        else await withdrawCap(Number(b.agent), viewer);
+        scheduleNego(Number(b.agent));
+      }
       if (prevAgent != null && String(prevAgent) !== String(b.agent ?? ""))
         scheduleNego(Number(prevAgent));
       return new Response(null, { status: 204 });
