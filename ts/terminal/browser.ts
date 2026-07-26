@@ -57,6 +57,8 @@ export class AyTerminal {
   private badgeEl?: any; // the interactive/read-only header badge (flipped on a 403)
   private started = false;
   private writable = false; // flips false on the first /api/send 403 (token is read-only)
+  private capViewerId = ""; // stable presence id for this widget's size cap (interactive)
+  private capTimer: any = null; // debounce for cap reports on drag-resize
 
   constructor(info: string | number | AyTerminalInfo) {
     const o: AyTerminalInfo =
@@ -70,6 +72,44 @@ export class AyTerminal {
     this.controls = o.controls ?? "auto";
     this.token = o.token ?? discoverToken();
     this.title = o.title ?? `#${this.pid}`;
+    this.capViewerId = `wterm-${this.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  /**
+   * Report this panel's readable capacity as a size cap (interactive only), so the
+   * daemon's negotiation (3a/3b) can shrink the shared PTY to what the panel shows —
+   * the "drag the widget to resize the agent" behavior, but through the same
+   * smallest-client-wins negotiation as every other viewer (bounded by the operator's
+   * local terminal + the 40×10 floor), NOT a raw /api/resize that scrambled everyone.
+   * Debounced so a drag doesn't spam. Read-only widgets never report (pure observers).
+   */
+  private reportCap(cols: number, rows: number): void {
+    if (this.readOnly || !this.capViewerId) return;
+    const g = globalThis as any;
+    clearTimeout(this.capTimer);
+    this.capTimer = setTimeout(() => {
+      void g
+        .fetch(this.url("/api/presence"), {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ viewer: this.capViewerId, agent: this.pid, cap: { cols, rows } }),
+        })
+        .catch(() => {});
+    }, 250);
+  }
+
+  /** Withdraw this widget's size cap (closed/minimized) → the daemon re-negotiates without it. */
+  private withdrawCap(): void {
+    if (this.readOnly || !this.capViewerId) return;
+    const g = globalThis as any;
+    clearTimeout(this.capTimer);
+    void g
+      .fetch(this.url("/api/presence"), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ viewer: this.capViewerId, agent: null }),
+      })
+      .catch(() => {});
   }
 
   /** URL to a daemon API path with the token appended as a query param (EventSource can't set headers). */
@@ -170,6 +210,7 @@ export class AyTerminal {
 
   /** Tear down the stream, the terminal, and the mounted widget. */
   close(): void {
+    this.withdrawCap(); // stop counting this panel's size in the shared negotiation
     this.es?.close();
     this.es = undefined;
     this.term?.dispose();
@@ -220,6 +261,15 @@ export class AyTerminal {
       if (!xt || !xt.offsetWidth || !xt.offsetHeight) return;
       const s = Math.min(1, wrap.clientWidth / xt.offsetWidth, wrap.clientHeight / xt.offsetHeight);
       inner.style.transform = `scale(${s})`;
+      // 3c: an interactive panel reports how many cols/rows it can show as a size
+      // cap (derived from the wrap vs the native grid's pixel size), so dragging the
+      // widget renegotiates the shared PTY — through the daemon's min, bounded by the
+      // operator's local cap + floor, never a raw resize.
+      if (!this.readOnly && this.term?.cols) {
+        const capCols = Math.max(1, Math.floor((wrap.clientWidth * this.term.cols) / xt.offsetWidth));
+        const capRows = Math.max(1, Math.floor((wrap.clientHeight * this.term.rows) / xt.offsetHeight));
+        this.reportCap(capCols, capRows);
+      }
     };
 
     if (inline) {
@@ -263,7 +313,10 @@ export class AyTerminal {
     const showPanel = (on: boolean) => {
       panel.classList.toggle("open", on);
       toggle.style.display = on ? "none" : "";
+      // Minimizing hides the panel → withdraw its size cap so it stops constraining
+      // the shared PTY; opening re-reports via reflow.
       if (on) reflow();
+      else this.withdrawCap();
     };
     toggle.addEventListener("click", () => showPanel(true));
     root.getElementById("min")?.addEventListener("click", () => showPanel(false));
