@@ -4049,15 +4049,21 @@ async function cmdAttach(rest: string[]): Promise<number> {
   await mkdir(winsizeDir, { recursive: true });
   const winsizePath = path.join(winsizeDir, String(record.pid));
 
-  const sendResize = async () => {
-    const cols = process.stdout.columns ?? 80;
-    const rows = process.stdout.rows ?? 24;
+  // Prefer reporting our terminal as a size CAP to the local `ay serve` daemon (3d):
+  // it negotiates the shared PTY as the min across ALL viewers (this attach + web
+  // console + widgets), so attaching a wide terminal no longer raw-clobbers a phone
+  // viewer's small grid (last-writer-wins). Falls back to a direct winsize write when
+  // no daemon is running — then this attach is the sole authority and drives it itself.
+  const { resolveDaemonHttpBase, loadTokenReadOnly } = await import("./serve.ts");
+  const daemonBase = await resolveDaemonHttpBase().catch(() => null);
+  const daemonToken = daemonBase ? await loadTokenReadOnly().catch(() => null) : null;
+  const capViewer = `attach:${process.pid}`;
+  let capMode = !!(daemonBase && daemonToken);
+
+  const writeWinsizeDirect = async (cols: number, rows: number) => {
     try {
       await writeFile(winsizePath, `${cols} ${rows} ${Date.now()}\n`);
-      // Trace the source (mirrors the daemon's /api/resize log) — `ay attach` also
-      // resizes the shared PTY to its terminal, so it must be visible when hunting
-      // a resize-fight. Goes to this attach process's stderr (not the daemon log).
-      process.stderr.write(`[api/resize] pid=${record.pid} ${cols}x${rows} src=ay-attach\n`);
+      process.stderr.write(`[api/resize] pid=${record.pid} ${cols}x${rows} src=ay-attach-direct\n`);
       try {
         process.kill(record.pid, "SIGWINCH");
       } catch {
@@ -4067,7 +4073,56 @@ async function cmdAttach(rest: string[]): Promise<number> {
       /* ignore */
     }
   };
+  const sendResize = async () => {
+    const cols = process.stdout.columns ?? 80;
+    const rows = process.stdout.rows ?? 24;
+    // Cap path: POST /api/resize (cap-report; the daemon publishCap+scheduleNego's it).
+    if (capMode && daemonBase && daemonToken) {
+      try {
+        const res = await fetch(
+          `${daemonBase}/api/resize/${encodeURIComponent(String(record.pid))}?token=${encodeURIComponent(daemonToken)}`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ cols, rows, viewer: capViewer }),
+          },
+        );
+        if (res.ok) {
+          process.stderr.write(
+            `[api/resize] pid=${record.pid} ${cols}x${rows} src=ay-attach-cap\n`,
+          );
+          return;
+        }
+      } catch {
+        /* daemon vanished mid-session — fall through to the direct write */
+      }
+      capMode = false; // stop retrying the daemon; drive the winsize ourselves
+    }
+    await writeWinsizeDirect(cols, rows);
+  };
   await sendResize();
+  // A one-shot cap fades on the daemon's ~12s TTL, so renew it while attached (cap
+  // mode only — a direct winsize write persists and needs no heartbeat).
+  const capHeartbeat = capMode
+    ? setInterval(() => {
+        if (capMode) void sendResize();
+      }, 5000)
+    : null;
+  // Release the cap promptly on detach (don't wait out the TTL) so the agent
+  // re-negotiates back to the remaining viewers / its real tty immediately.
+  const withdrawAttachCap = async () => {
+    if (capHeartbeat) clearInterval(capHeartbeat);
+    if (!daemonBase || !daemonToken) return;
+    try {
+      await fetch(`${daemonBase}/api/presence?token=${encodeURIComponent(daemonToken)}`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ viewer: capViewer, agent: null }),
+      });
+    } catch {
+      /* daemon gone — its TTL will prune our cap */
+    }
+  };
   await new Promise((r) => setTimeout(r, 50)); // let agent redraw
 
   // 3. Raw TTY so per-keystroke bytes flow through unchanged.
@@ -4139,6 +4194,7 @@ async function cmdAttach(rest: string[]): Promise<number> {
     detached = true;
     if (pollTimer) clearInterval(pollTimer);
     if (aliveCheck) clearInterval(aliveCheck);
+    void withdrawAttachCap(); // release our size cap so the PTY re-negotiates without us
     watcher.close();
     process.stdout.removeListener("resize", onResize);
     process.stdin.removeListener("data", onStdinData);
