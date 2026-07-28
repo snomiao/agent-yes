@@ -1,3 +1,4 @@
+mod agent_permissions;
 mod cli;
 mod codex_sessions;
 mod config;
@@ -377,13 +378,23 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
 
         // Register in PID store and send RUNNING webhook
         let log_file = agent_ctx.raw_log_path();
-        pid_store.register_with_fifo(
+        // Stamp the permission posture alongside the record: `auto_continue` is
+        // robust AND a CLI that declares restore_args — robust alone only
+        // restarts, it resumes nothing. Mirrors ts/index.ts.
+        let permissions = agent_permissions::derive_permissions(
+            &cmd_args,
+            &cli_config.yes_args,
+            args.robust,
+            args.robust && !cli_config.restore_args.is_empty(),
+        );
+        pid_store.register_full(
             pid,
             &args.cli,
             args.prompt.as_deref(),
             cwd,
             log_file.as_deref(),
             fifo_str.as_deref(),
+            Some(permissions),
         );
         webhook::notify("RUNNING", args.prompt.as_deref().unwrap_or(""), cwd);
 

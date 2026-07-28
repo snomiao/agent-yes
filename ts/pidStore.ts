@@ -4,6 +4,7 @@ import path from "path";
 import { logger } from "./logger.ts";
 import { JsonlStore } from "./JsonlStore.ts";
 import { agentYesHome } from "./agentYesHome.ts";
+import type { AgentPermissions } from "./agentPermissions.ts";
 import {
   appendGlobalPid,
   maybeCompactGlobalPids,
@@ -26,6 +27,8 @@ export interface PidRecord {
   startedAt: number;
   // Stable id minted at registration; mirrored to the global index as `agent_id`.
   agentId?: string;
+  /** Permission posture at spawn time; mirrored to the global index. */
+  permissions?: AgentPermissions;
 }
 
 export class PidStore {
@@ -59,6 +62,7 @@ export class PidStore {
     cwd,
     wrapperPid,
     parentPid,
+    permissions,
   }: {
     pid: number;
     cli: string;
@@ -67,6 +71,7 @@ export class PidStore {
     cwd: string;
     wrapperPid?: number;
     parentPid?: number;
+    permissions?: AgentPermissions;
   }): Promise<PidRecord> {
     const now = Date.now();
     const argsJson = JSON.stringify(args);
@@ -91,6 +96,7 @@ export class PidStore {
       pid,
       cli,
       args: argsJson,
+      permissions,
       prompt,
       cwd,
       logFile,
@@ -133,6 +139,7 @@ export class PidStore {
       wrapper_pid: wrapperPid ?? null,
       parent_pid: parentPid ?? null,
       agent_id: agentId,
+      permissions: permissions ?? null,
     })
       .then(() => maybeCompactGlobalPids())
       .catch(() => null);
