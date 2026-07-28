@@ -1,5 +1,64 @@
-import { statSync } from "node:fs";
+import { accessSync, constants, statSync } from "node:fs";
 import path from "node:path";
+
+/**
+ * Decide whether a PATH candidate is a runnable program.
+ *
+ * Two checks, both load-bearing:
+ * - `isFile()` rejects directories and symlinks-to-directories (statSync FOLLOWS
+ *   symlinks), which is the case that used to abort the whole process — see
+ *   {@link resolveProgram}.
+ * - `access(X_OK)` rejects non-executables. Preferred over testing the raw mode
+ *   bits because it accounts for the caller's uid/gid, and because Windows has
+ *   no exec bit (there it succeeds for any existing file, which is correct —
+ *   Windows executability is decided by PATHEXT, not by permissions).
+ *
+ * The Rust runtime's `resolve_program` makes the equivalent pair of checks with
+ * `metadata().is_file()` + mode & 0o111 (it only ever runs on unix).
+ */
+export function isExecutableFile(candidate: string): boolean {
+  try {
+    if (!statSync(candidate).isFile()) return false;
+    accessSync(candidate, constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Walk `rawPath` and return the first entry that names a runnable `bin`.
+ *
+ * Split out from {@link resolveProgram} (and taking an injectable `isExec`) so
+ * the resolution logic itself is exercised on every platform, including the
+ * Windows CI leg where {@link resolveProgram} short-circuits.
+ *
+ * @throws Error mentioning ENOENT / "command not found" when unresolvable, so
+ *   `isCommandNotFoundError` in ts/core/spawner.ts still routes it to the
+ *   auto-install path
+ */
+export function resolveOnPath(
+  bin: string,
+  rawPath: string,
+  isExec: (candidate: string) => boolean = isExecutableFile,
+): string {
+  // A name that already carries a separator is a path, not a PATH lookup —
+  // `./claude` must keep meaning the one in this directory.
+  if (bin.includes("/") || bin.includes(path.sep)) return bin;
+
+  for (const dir of rawPath.split(path.delimiter)) {
+    // Empty PATH entries mean "the cwd" under a legacy POSIX allowance.
+    // Honouring that would reintroduce exactly the shadowing described in
+    // resolveProgram, so skip them.
+    if (!dir) continue;
+    const candidate = path.join(dir, bin);
+    if (isExec(candidate)) return candidate;
+  }
+
+  throw new Error(
+    `spawn ${bin} ENOENT: command not found in PATH (install it, or point \`binary:\` at a full path)`,
+  );
+}
 
 /**
  * Resolve a bare program name to an absolute path using POSIX PATH semantics.
@@ -20,42 +79,17 @@ import path from "node:path";
  *
  * POSIX is unambiguous that a command name containing no slash is looked up in
  * PATH *only*, never in the cwd, so pre-resolving here is both the fix and the
- * correct semantics. Names that already contain a separator are passed through
- * untouched, so `./claude` still means "the one in this directory".
- *
- * Empty PATH entries are skipped rather than treated as the cwd (a legacy POSIX
- * allowance) — honouring them would reintroduce exactly the shadowing above.
+ * correct semantics.
  *
  * Mirrors `resolve_program` in rs/src/pty_spawner.rs — keep the two in sync.
  *
  * @param bin - Program name as configured (`cliConf.binary` or the CLI name)
  * @param pathEnv - PATH the child will see; defaults to this process's PATH
  * @returns Absolute path to the executable
- * @throws Error mentioning ENOENT / "command not found" when unresolvable, so
- *   {@link isCommandNotFoundError} still routes it to the auto-install path
  */
 export function resolveProgram(bin: string, pathEnv?: string): string {
   // Windows spawns through cmd.exe / ConPTY, which apply their own PATH+PATHEXT
   // resolution — the cwd-shadowing bug is unix-specific, so pass through.
   if (process.platform === "win32") return bin;
-  if (bin.includes("/")) return bin;
-
-  const raw = pathEnv ?? process.env.PATH ?? "";
-  for (const dir of raw.split(path.delimiter)) {
-    if (!dir) continue;
-    const candidate = path.join(dir, bin);
-    let st;
-    try {
-      // statSync FOLLOWS symlinks, so a symlink pointing at a directory is
-      // correctly rejected by the isFile() check below.
-      st = statSync(candidate);
-    } catch {
-      continue;
-    }
-    if (st.isFile() && (st.mode & 0o111) !== 0) return candidate;
-  }
-
-  throw new Error(
-    `spawn ${bin} ENOENT: command not found in PATH (install it, or point \`binary:\` at a full path)`,
-  );
+  return resolveOnPath(bin, pathEnv ?? process.env.PATH ?? "");
 }
