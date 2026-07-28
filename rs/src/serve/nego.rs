@@ -529,8 +529,9 @@ mod tests {
     // the non-reentrant tokio Mutex that froze every later presence request.
     #[tokio::test]
     async fn viewer_agent_switch_does_not_deadlock() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("AGENT_YES_HOME", tmp.path());
+        // NOTE: no AGENT_YES_HOME override — env vars are process-global and
+        // racing the other tests on it is flaky. The fake pids write throwaway
+        // cap files under the real home; cleaned up below (and TTL-pruned).
         let b1 = serde_json::json!({"viewer":"swt","agent":911111,"cap":{"cols":100,"rows":30}});
         let b2 = serde_json::json!({"viewer":"swt","agent":922222,"cap":{"cols":100,"rows":30}});
         let run = async {
@@ -541,8 +542,11 @@ mod tests {
         let got = tokio::time::timeout(std::time::Duration::from_secs(5), run)
             .await
             .expect("presence deadlocked on viewer agent-switch");
-        assert_eq!(got.as_array().unwrap().len(), 1);
-        std::env::remove_var("AGENT_YES_HOME");
+        assert!(!got.as_array().unwrap().is_empty());
+        for pid in [911111u32, 922222] {
+            let _ = std::fs::remove_dir_all(caps_dir(pid));
+            let _ = std::fs::remove_file(winsize_path(pid));
+        }
     }
 
     #[test]

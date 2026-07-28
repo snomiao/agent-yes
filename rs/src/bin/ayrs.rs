@@ -12,6 +12,8 @@ mod pid_store;
 mod log_files;
 #[path = "../fifo.rs"]
 mod fifo;
+#[path = "../vterm.rs"]
+mod vterm;
 #[path = "../serve/mod.rs"]
 mod serve;
 
