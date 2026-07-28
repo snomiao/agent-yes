@@ -433,7 +433,11 @@ fn hostname() -> String {
             if libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) == 0 {
                 if let Some(end) = buf.iter().position(|&b| b == 0) {
                     if let Ok(s) = std::str::from_utf8(&buf[..end]) {
-                        return s.split('.').next().unwrap_or(s).to_string();
+                        // Keep the FULL hostname (e.g. "tak.local") — the TS
+                        // daemon reports os.hostname() verbatim, and the console
+                        // dedupes agents by host label; a stripped domain would
+                        // make the same machine look like two hosts.
+                        return s.to_string();
                     }
                 }
             }
