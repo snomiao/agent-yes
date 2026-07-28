@@ -15,6 +15,12 @@ path = "src/main.rs"
 # window (CREATE_NO_WINDOW) under a kill-on-close Job Object, so a process manager
 # (oxmgr) can spawn console programs without flashing a window onto the desktop.
 # On non-Windows it's a no-op stub. See src/bin/ay-spawn-hidden.rs.
+# Standalone Rust serve daemon (`ayrs serve --webrtc`). Kept as a separate
+# binary so it can coexist with the TS `ay serve` daemon during the migration.
+[[bin]]
+name = "ayrs"
+path = "src/bin/ayrs.rs"
+
 [[bin]]
 name = "ay-spawn-hidden"
 path = "src/bin/ay-spawn-hidden.rs"
@@ -83,11 +89,17 @@ libp2p = { version = "0.54", features = [
 # URL encoding for swarm URLs
 urlencoding = { version = "2", optional = true }
 
-# Random number generation for room codes
-rand = { version = "0.8", optional = true }
+# Random number generation for room codes / E2E nonces
+rand = "0.8"
 
 # UUID for agent identification
 uuid = { version = "1", features = ["v4"] }
+webrtc = "0.17.2"
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
+hkdf = "0.13.0"
+sha2 = "0.11.0"
+aes-gcm = "0.11.0"
+hex = "0.4.3"
 
 # Unix-specific
 [target.'cfg(unix)'.dependencies]
@@ -110,7 +122,7 @@ windows-sys = { version = "0.59", features = [
 
 [features]
 default = []
-swarm = ["libp2p", "urlencoding", "rand"]
+swarm = ["libp2p", "urlencoding"]
 
 [dev-dependencies]
 tempfile = "3"
