@@ -4790,6 +4790,21 @@ my.translate = async (text, lang) => {
         addItem("Copy URL", {}, () => copyText(uri));
         openCtxMenu(menu, ev);
       }
+      // A clicked localhost URL gets a chooser first instead of jumping straight
+      // into the expose modal: the URL may be reachable directly (viewer on the
+      // same machine / port-forwarded), or the user may just want to copy it.
+      // "Expose…" is the only path that publishes anything.
+      function showLocalhostMenu(ev, uri, port, tx) {
+        const { menu, addItem, addSep } = ctxMenuShell();
+        const short = uri.length > 48 ? uri.slice(0, 45) + "…" : uri;
+        addItem(short, { disabled: true }, () => {});
+        addSep();
+        addItem("Open directly", {}, () => window.open(uri, "_blank", "noopener,noreferrer"));
+        addItem("Copy URL", {}, () => copyText(uri));
+        addSep();
+        addItem("Expose via agent-yes.com…", {}, () => promptExpose(port, tx));
+        openCtxMenu(menu, ev);
+      }
       // Append a built menu at the pointer, clamp into the viewport, and wire the
       // shared dismiss listeners (outside-click, Escape, blur, resize).
       function openCtxMenu(menu, ev) {
@@ -5842,10 +5857,11 @@ my.translate = async (text, lang) => {
         try {
           term.loadAddon(
             new WebLinksAddon.WebLinksAddon((ev, uri) => {
-              // A localhost URL isn't reachable from the viewer's browser — offer
-              // to publish it through agent-yes.com (on THIS agent's host: txFor(e)).
+              // A localhost URL may not be reachable from the viewer's browser —
+              // offer a chooser (copy / open directly / expose via agent-yes.com
+              // on THIS agent's host: txFor(e)) instead of an outright modal.
               const port = localhostPort(uri);
-              if (port) return promptExpose(port, txFor(e));
+              if (port) return showLocalhostMenu(ev, uri, port, txFor(e));
               // Mobile: confirm via the copy/open menu instead of navigating
               // straight away (see showLinkMenu).
               if (window.innerWidth <= 720) return showLinkMenu(ev, uri);
