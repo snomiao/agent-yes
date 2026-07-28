@@ -44,6 +44,7 @@ import { globalAgentRegistry } from "./agentRegistry.ts";
 import { notifyWebhook } from "./webhookNotifier.ts";
 import { readGlobalPids } from "./globalPidIndex.ts";
 import * as reaper from "./reaper.ts";
+import { derivePermissions } from "./agentPermissions.ts";
 
 export { removeControlCharacters };
 export { AgentContext };
@@ -510,6 +511,15 @@ export default async function agentYes({
       wrapperPid: process.pid,
       // The parent agent's wrapper pid (inherited AGENT_YES_PID), for the tree.
       parentPid,
+      // Audit trail: what this agent is actually allowed to do. `auto_continue`
+      // is robust AND a CLI that declares restoreArgs — robust alone only
+      // restarts, it resumes nothing.
+      permissions: derivePermissions({
+        cliArgs,
+        yesArgs: cliConf.yesArgs,
+        robust,
+        autoContinue: Boolean(robust && cliConf.restoreArgs?.length),
+      }),
     });
   } catch (error) {
     logger.warn(`[pidStore] Failed to register process ${shell.pid}:`, error);
