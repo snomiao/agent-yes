@@ -4,6 +4,8 @@
 // (separate room persisted in ~/.agent-yes/.share-room-ayrs).
 #![allow(dead_code)]
 
+#[path = "../agent_permissions.rs"]
+mod agent_permissions;
 #[path = "../pid_store.rs"]
 mod pid_store;
 #[path = "../log_files.rs"]
