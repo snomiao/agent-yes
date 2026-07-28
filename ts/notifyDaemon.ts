@@ -362,6 +362,13 @@ export async function acquireDaemonLock(
       } catch {
         /* torn / not-yet-written */
       }
+      // Does the OS disagree that this pid is still the process that took the
+      // lock? Then the pid was recycled onto something unrelated: the owner
+      // "looks" live (its pid is alive, its ts is fresh) but the daemon is gone.
+      const recycled =
+        owner && typeof owner.pid === "number" && owner.pid > 0
+          ? osStartTokenMismatch(owner.os_start, osProcessStartToken(owner.pid))
+          : false;
       if (
         owner &&
         typeof owner.pid === "number" &&
@@ -373,7 +380,7 @@ export async function acquireDaemonLock(
         // ...and the OS agrees that pid is still the process that took the lock.
         // Without this, a pid recycled onto an unrelated live process inside the
         // TTL would make us decline to start — leaving the host with NO daemon.
-        !osStartTokenMismatch(owner.os_start, osProcessStartToken(owner.pid))
+        !recycled
       ) {
         return false;
       }
@@ -387,6 +394,12 @@ export async function acquireDaemonLock(
           .then((s) => s.mtimeMs)
           .catch(() => now));
       if (
+        // A RECYCLED owner must be stolen, not waited on. shouldStealLock only
+        // sees pid-liveness and heartbeat freshness — and a recycled pid looks
+        // alive with a fresh-enough ts — so on its own it says "respect the
+        // holder" and this loop would spin until the caller times out, never
+        // reclaiming a lock whose real owner is provably gone.
+        recycled ||
         shouldStealLock(raw, now, {
           staleMs: OWNER_TTL_MS,
           lockAgeMs,
