@@ -204,8 +204,18 @@ export class Room {
       // to everyone else, so both sides can open a direct DataChannel. Who sends
       // the offer (initiator = lower peer id) is decided client-side to avoid glare.
       const roster = mesh ? this.peers(ws) : undefined;
+      // hostPresent lets a client FAST-FAIL a previously-opened star room whose
+      // host has since left: the room's token is still stored (so we don't close
+      // it as "room not open" above), but no live host socket remains to answer
+      // with an offer — without this the client waits the full 8s connect timeout
+      // (rtc.js) for an offer that never comes, and a viewer with N dead saved
+      // rooms pays N×8s of reconnect churn on every open. Only meaningful for a
+      // non-mesh client; omitted (undefined → dropped by JSON) for host/mesh.
+      const hostPresent = mesh || role === "host" ? undefined : this.hasHost();
       ws.serializeAttachment({ authed: true, role, peer, mesh } satisfies Attach);
-      ws.send(JSON.stringify({ type: "welcome", peer, role, v: proto, mesh, peers: roster }));
+      ws.send(
+        JSON.stringify({ type: "welcome", peer, role, v: proto, mesh, peers: roster, hostPresent }),
+      );
       if (mesh) this.broadcast(ws, { type: "peer-join", peer });
       else if (role === "client") this.toHost({ type: "peer-join", peer });
       return;
@@ -238,6 +248,19 @@ export class Room {
     if (!self.authed) return;
     if (self.mesh) this.broadcast(ws, { type: "peer-leave", peer: self.peer });
     else if (self.role === "client") this.toHost({ type: "peer-leave", peer: self.peer });
+  }
+
+  // Is a live host peer currently attached? (star rooms only.) Used to tell a
+  // joining client to fast-fail a room whose host has left, instead of waiting
+  // for an offer that will never arrive. A dead host that dropped uncleanly may
+  // linger briefly until the runtime reaps its socket — a transient false
+  // "present" just means one more 8s wait + backoff, never a wrong connection.
+  private hasHost(): boolean {
+    for (const s of this.state.getWebSockets()) {
+      const a = s.deserializeAttachment() as Attach | null;
+      if (a?.authed && a.role === "host") return true;
+    }
+    return false;
   }
 
   // Role isn't a hibernation tag (it's only known after the hello), so route by

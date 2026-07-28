@@ -176,7 +176,12 @@ export class RTCClient {
       ws.onmessage = async (ev) => {
         const m = JSON.parse(ev.data);
         if (m.type === "welcome") {
-          mark("signal.welcome", { v: m.v });
+          mark("signal.welcome", { v: m.v, hostPresent: m.hostPresent });
+          // No live host in this (previously-opened) room → fail NOW instead of
+          // waiting out the 8s connect-timeout for an offer that never comes.
+          // Distinct error so telemetry separates "dead room" from a real
+          // timeout, and so the reconnect layer can evict it fast (see below).
+          if (m.hostPresent === false) return fail(new Error("no host in room"));
           if (this._v2 && m.v !== 2)
             return fail(new Error("host is running an old agent-yes — ask it to upgrade"));
           // pc is created on the offer below so it can use the host-supplied
