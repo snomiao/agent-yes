@@ -30,6 +30,8 @@ import {
   shouldStealLock,
 } from "./notifyStore.ts";
 import { deriveLiveState, isPidAlive, listRecords, renderLogTailLines } from "./subcommands.ts";
+import { osProcessStartToken, osStartTokenMismatch } from "./procStartTime.ts";
+import { startOwnerHeartbeat } from "./ownerHeartbeat.ts";
 import { logger } from "./logger.ts";
 
 const POLL_MS = 2000;
@@ -262,6 +264,12 @@ export interface DaemonIdentity {
   ts: number;
   /** The owner fencing token at validation time — pins THIS incarnation. */
   token: string | null;
+  /**
+   * The OS's own start time for `pid` when the lock was acquired (opaque token;
+   * see ts/procStartTime.ts). Absent on platforms with no reader and on owner
+   * files written by older builds — readers must treat absent as "no opinion".
+   */
+  os_start?: string | null;
 }
 
 // The daemon's start time, captured ONCE when it acquires the lock. The
@@ -269,6 +277,11 @@ export interface DaemonIdentity {
 // identity check (pid + started_at unchanged) can't see it move and mistake the
 // running daemon for "not running".
 let daemonStartedAt = 0;
+// The OS's start time for OUR pid, captured once at acquire alongside
+// `daemonStartedAt`. Recorded in the owner file so any later reader can prove
+// the pid still belongs to the same process (issue #169 item 1). Null on
+// platforms with no reader — everything downstream treats that as "no opinion".
+let daemonOsStart: string | null = null;
 // Fencing token for THIS daemon's lock ownership (see the inbox lock). We only
 // overwrite the owner file or delete the lock while it still carries our token,
 // so a stale-stolen daemon can't clobber or delete the new daemon's lock.
@@ -299,6 +312,7 @@ async function writeOwner(): Promise<boolean> {
         started_at: daemonStartedAt,
         ts: Date.now(),
         token: daemonToken,
+        os_start: daemonOsStart,
       }),
     );
     await rename(tmp, daemonLockOwnerPath());
@@ -328,6 +342,7 @@ export async function acquireDaemonLock(
       await mkdir(daemonLockDir(), { recursive: false });
       daemonStartedAt = Date.now(); // fixed for this daemon's lifetime
       daemonToken = randomUUID(); // fencing token for this ownership
+      daemonOsStart = osProcessStartToken(process.pid); // null where unreadable
       // If we can't write our owner file, we don't own the lock — drop and retry.
       if (!(await writeOwner())) {
         await rm(daemonLockDir(), { recursive: true, force: true }).catch(() => {});
@@ -341,12 +356,19 @@ export async function acquireDaemonLock(
       const now = Date.now();
       // A COMPLETE, live, fresh owner belonging to a DIFFERENT pid → another
       // daemon is already running; we are not it.
-      let owner: { pid?: number; ts?: number } | null = null;
+      let owner: { pid?: number; ts?: number; os_start?: string | null } | null = null;
       try {
-        owner = JSON.parse(raw) as { pid: number; ts: number };
+        owner = JSON.parse(raw) as { pid: number; ts: number; os_start?: string | null };
       } catch {
         /* torn / not-yet-written */
       }
+      // Does the OS disagree that this pid is still the process that took the
+      // lock? Then the pid was recycled onto something unrelated: the owner
+      // "looks" live (its pid is alive, its ts is fresh) but the daemon is gone.
+      const recycled =
+        owner && typeof owner.pid === "number" && owner.pid > 0
+          ? osStartTokenMismatch(owner.os_start, osProcessStartToken(owner.pid))
+          : false;
       if (
         owner &&
         typeof owner.pid === "number" &&
@@ -354,7 +376,11 @@ export async function acquireDaemonLock(
         owner.pid !== process.pid &&
         typeof owner.ts === "number" &&
         now - owner.ts <= OWNER_TTL_MS &&
-        isAlive(owner.pid)
+        isAlive(owner.pid) &&
+        // ...and the OS agrees that pid is still the process that took the lock.
+        // Without this, a pid recycled onto an unrelated live process inside the
+        // TTL would make us decline to start — leaving the host with NO daemon.
+        !recycled
       ) {
         return false;
       }
@@ -368,6 +394,12 @@ export async function acquireDaemonLock(
           .then((s) => s.mtimeMs)
           .catch(() => now));
       if (
+        // A RECYCLED owner must be stolen, not waited on. shouldStealLock only
+        // sees pid-liveness and heartbeat freshness — and a recycled pid looks
+        // alive with a fresh-enough ts — so on its own it says "respect the
+        // holder" and this loop would spin until the caller times out, never
+        // reclaiming a lock whose real owner is provably gone.
+        recycled ||
         shouldStealLock(raw, now, {
           staleMs: OWNER_TTL_MS,
           lockAgeMs,
@@ -408,31 +440,30 @@ export async function runDaemon(opts: DaemonOptions = {}): Promise<number> {
   }
 
   let running = true;
-  // Heartbeat the owner ts on a BACKGROUND timer (not once per loop) so a slow
-  // tick — many watched children, slow log I/O — can't let the heartbeat cross
-  // OWNER_TTL and have another `watch` steal the lock as "stale" → double daemon.
-  // Refresh well inside the TTL; cleared on shutdown.
-  const ownerBeat = setInterval(
-    () => {
-      void (async () => {
-        // Refresh ONLY while the owner still carries OUR token. Any other value — a
-        // different token (superseded) OR null/absent (a new daemon's mkdir→write
-        // window) — means we no longer own it, so stop rather than clobber an
-        // unknown/absent owner. Atomic writeOwner means a null read is never our own
-        // write in flight.
-        if ((await readDaemonOwnerToken()) !== daemonToken) {
-          clearInterval(ownerBeat);
-          return;
-        }
-        await writeOwner();
-      })();
+  // Heartbeat the owner ts on its OWN THREAD, not on the main loop's timer. A
+  // slow tick — many watched children, slow log I/O — must never let the stamp
+  // cross OWNER_TTL and have another `watch` steal the lock as "stale" → double
+  // daemon. A background timer already decoupled the beat from tick DURATION; a
+  // worker additionally decouples it from a synchronous main-thread block, which
+  // a single-threaded timer could only bound, never eliminate (issue #169 item
+  // 5). Fencing is unchanged — the beat refreshes ONLY while the owner still
+  // carries our token, and stops the moment it doesn't. It never signals us:
+  // the shutdown decision stays with the loop below, which re-reads the token
+  // every tick and exits when it isn't ours.
+  const ownerBeat = startOwnerHeartbeat({
+    ownerPath: daemonLockOwnerPath(),
+    token: daemonToken,
+    payload: {
+      pid: process.pid,
+      started_at: daemonStartedAt,
+      token: daemonToken,
+      os_start: daemonOsStart,
     },
-    Math.max(1000, Math.floor(OWNER_TTL_MS / 3)),
-  );
-  if (typeof ownerBeat.unref === "function") ownerBeat.unref();
+    intervalMs: Math.max(1000, Math.floor(OWNER_TTL_MS / 3)),
+  });
   const cleanup = async () => {
     running = false;
-    clearInterval(ownerBeat);
+    await ownerBeat.stop();
     // Delete the lock ONLY if it still carries our token — never remove a lock a
     // newer daemon now owns.
     if ((await readDaemonOwnerToken()) === daemonToken)
@@ -594,13 +625,14 @@ async function gcTick(host: string): Promise<void> {
  * kill an unrelated process. `stop` re-reads and re-checks this identity right
  * before signalling, so it can't SIGTERM a pid recycled between status and stop.
  *
- * Residual edge (documented, not yet closed): a pid recycled onto an UNRELATED
- * live process WITHIN the tight OWNER_TTL window (a few ticks) could be briefly
- * trusted, since we compare our recorded `started_at` against the owner file, not
- * against the OS's actual process start time (which is non-portable to read:
- * `/proc/<pid>/stat` on Linux vs `proc_pidinfo`/`ps -o lstart` on macOS). The
- * heartbeat freshness + tight TTL keep the window to seconds; a real OS
- * start-time cross-check is deferred to a future issue.
+ * The pid-recycled-inside-the-TTL window is closed by an OS start-time
+ * cross-check (issue #169 item 1): the owner file records the OS's own start
+ * time for the daemon pid at acquire, and every read re-reads it and rejects a
+ * disagreement — an unrelated process that inherited the pid has a different
+ * start time and is never reported as "the daemon". The reader is best-effort
+ * per platform (`/proc/<pid>/stat` on Linux, `ps -o lstart` on macOS/BSD, none
+ * on Windows); where it can't answer, behaviour is exactly as before — the
+ * heartbeat freshness + tight TTL still bound the window to seconds.
  */
 export async function daemonIdentity(now = Date.now()): Promise<DaemonIdentity | null> {
   const raw = await readFile(daemonLockOwnerPath(), "utf8").catch(() => "");
@@ -613,13 +645,21 @@ export async function daemonIdentity(now = Date.now()): Promise<DaemonIdentity |
       o.started_at > 0 &&
       typeof o.ts === "number" &&
       now - o.ts <= OWNER_TTL_MS &&
-      isPidAlive(o.pid)
+      isPidAlive(o.pid) &&
+      // ...and the OS's start time for that pid still matches the one recorded
+      // when the lock was taken. This is what closes the pid-recycled-inside-the-
+      // TTL window: an unrelated process that inherited the pid has a different
+      // start time, so it is never reported as "the daemon". Absent on either
+      // side (older owner file / no platform reader) => no opinion, trust the
+      // checks above, exactly as before.
+      !osStartTokenMismatch(o.os_start, osProcessStartToken(o.pid))
     ) {
       return {
         pid: o.pid,
         started_at: o.started_at,
         ts: o.ts,
         token: typeof o.token === "string" ? o.token : null,
+        os_start: typeof o.os_start === "string" ? o.os_start : null,
       };
     }
   } catch {

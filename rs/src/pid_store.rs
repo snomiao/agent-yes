@@ -1,5 +1,6 @@
 //! JSONL-based process registry — tracks running agent-yes processes
 
+use crate::agent_permissions::AgentPermissions;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -57,6 +58,12 @@ pub struct PidRecord {
     /// follow-up (see docs/agent-sharing.md). Mirrors the TS `agent_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// The permission posture this agent was SPAWNED with (yolo flag + the
+    /// wrapper's robust/auto-continue flags). Stamped at registration because
+    /// neither the CLI argv nor the wrapper flags survive into the index
+    /// otherwise. Mirrors the TS `permissions`. See agent_permissions.rs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permissions: Option<AgentPermissions>,
 }
 
 /// The agent id for this process: adopt a caller-injected `AGENT_YES_AGENT_ID`
@@ -117,6 +124,20 @@ impl PidStore {
         log_file: Option<&str>,
         fifo_file: Option<&str>,
     ) {
+        self.register_full(pid, cli, prompt, cwd, log_file, fifo_file, None);
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_full(
+        &self,
+        pid: u32,
+        cli: &str,
+        prompt: Option<&str>,
+        cwd: &str,
+        log_file: Option<&str>,
+        fifo_file: Option<&str>,
+        permissions: Option<AgentPermissions>,
+    ) {
         let record = PidRecord {
             pid,
             cli: cli.to_string(),
@@ -136,6 +157,7 @@ impl PidStore {
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok()),
             agent_id: Some(new_agent_id()),
+            permissions,
         };
         // Hold the cross-runtime lock across the append so a concurrent rewrite
         // (another wrapper's clean_stale / a status update) can't clobber it.
@@ -576,6 +598,7 @@ mod tests {
             wrapper_pid: None,
             parent_pid: None,
             agent_id: None,
+            permissions: None,
         }];
         store.write_all(&records).unwrap();
         let loaded = store.read_all().unwrap();
@@ -613,6 +636,7 @@ mod tests {
                 wrapper_pid: None,
                 parent_pid: None,
                 agent_id: None,
+                permissions: None,
             }])
             .unwrap();
 

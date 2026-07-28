@@ -38,6 +38,7 @@ import {
   type CommonOpts,
 } from "./subcommands.ts";
 import { answerAsk, listAsks } from "./askApi.ts";
+import { permissionBadge } from "./agentPermissions.ts";
 import { TYPING_BADGE } from "./badges.ts";
 import { isTermToken, mintTermToken, verifyTermToken, type TermScope } from "./termToken.ts";
 import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
@@ -65,6 +66,7 @@ import {
   hasSpawnHook,
   isProvisionAllowed,
   resolveSpawnCwd,
+  allowsSkipPermissions,
 } from "./workspaceConfig.ts";
 
 const DEFAULT_PORT = 0;
@@ -2749,6 +2751,16 @@ export async function cmdServe(rest: string[]): Promise<number> {
             inputs: [textIn, envIn],
             outputs: [textOut],
             renderHints: await hintsOf(r),
+            // What this agent is actually permitted to do, stamped at spawn (see
+            // ts/agentPermissions.ts). Carried on the node so the viewer can badge
+            // the env edge — "skip" means the CLI's confirmation gate is off, i.e.
+            // this agent edits and executes with no human in the loop. Null for
+            // agents registered before the stamp existed, which the viewer renders
+            // as "unknown" rather than as safe.
+            configPublic: {
+              permissions: r.permissions ?? null,
+              permissionBadge: permissionBadge(r.permissions),
+            },
           })),
         );
         // The host environment node: identity + capability flags only (no cwd,
@@ -2776,6 +2788,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
               spawn: true,
               spawnHook: hasSpawnHook(),
               provision: hasProvisionHook(),
+              skipPermissions: allowsSkipPermissions(),
             },
           },
         } as unknown as (typeof nodes)[number]); // configPublic is envelope-legal but absent from the agent-node literal type
@@ -2919,6 +2932,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
           spawn: true, // /api/spawn is always on; hooks below shape it
           spawnHook: hasSpawnHook(),
           provision: hasProvisionHook(),
+          // Whether this environment permits spawning agents with the CLI's own
+          // permission gate disabled. Host-enforced in /api/spawn — a client
+          // that asks anyway gets a 403, not a downgrade.
+          skipPermissions: allowsSkipPermissions(),
         },
       });
     }
@@ -3739,6 +3756,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         cwd?: string;
         from?: string;
         prompt?: string;
+        yes?: boolean;
         fork?: { fromCwd?: string; branch?: string };
       };
       try {
@@ -3750,6 +3768,26 @@ export async function cmdServe(rest: string[]): Promise<number> {
       if (!SUPPORTED_CLIS.includes(cli as never))
         return new Response(`unsupported cli: ${cli}`, { status: 400 });
       const prompt = String(body.prompt ?? "");
+
+      // Capability enforcement, BEFORE admission control and any provisioning: a
+      // request that this environment will never honour must fail immediately,
+      // not after cloning a repo. `yes` appends the CLI's own "yolo" flag, which
+      // disables its confirmation gate — so a restricted environment refuses it
+      // outright rather than silently downgrading to a safe spawn (which would
+      // hand back an agent that looks like what was asked for and isn't). The
+      // environment declares the cap on its env node / GET /api/host, and it is
+      // enforced HERE, host-side, the way agentShare's default-deny is: a client
+      // cannot ask its way past it. Issue #236.
+      const wantsSkipPermissions = body.yes === true;
+      if (wantsSkipPermissions && !allowsSkipPermissions()) {
+        return new Response(
+          `this environment does not permit skip-permissions agents ` +
+            `(caps.skipPermissions=false) — spawn without \`yes\`, or set ` +
+            `"allowSkipPermissions": true in ~/.agent-yes/config.json ` +
+            `(or AGENT_YES_ALLOW_SKIP_PERMISSIONS=1) on the host`,
+          { status: 403 },
+        );
+      }
 
       // Admission control BEFORE any provisioning (clone/worktree) so a capped
       // request fails fast without doing expensive work. Enforces the optional
@@ -3946,7 +3984,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
         process.platform === "win32" && ayBin.toLowerCase().endsWith(".exe")
           ? [ayBin]
           : [process.execPath, ayBin];
-      const agentArgv = [...ayCmd, cli, ...(prompt ? ["--", prompt] : [])];
+      // `-y` goes BEFORE the prompt separator so it is parsed as an agent-yes
+      // flag (global flags precede the CLI's own args), and only after the
+      // capability check above has allowed it.
+      const agentArgv = [
+        ...ayCmd,
+        ...(wantsSkipPermissions ? ["-y"] : []),
+        cli,
+        ...(prompt ? ["--", prompt] : []),
+      ];
       // don't leak our Claude Code session into the agent
       const agentEnv = freshAgentEnv();
       // Correlation id: the spawn response returns the `ay` LAUNCHER pid, which is

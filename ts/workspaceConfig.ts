@@ -35,6 +35,13 @@ interface Config {
    */
   provisionHook?: string;
   /**
+   * Whether this environment permits spawning agents with the CLI's permission
+   * gate disabled (`-y` / `--dangerously-skip-permissions` and friends).
+   * Defaults to TRUE — the historical behaviour — so a host opts IN to being
+   * restricted. See {@link allowsSkipPermissions}.
+   */
+  allowSkipPermissions?: boolean;
+  /**
    * Max number of concurrently-live agents the daemon will admit via
    * `/api/spawn`. `0`/unset = unlimited (current behavior). See {@link getMaxAgents}.
    */
@@ -262,4 +269,27 @@ export function resolveSpawnCwd(input?: string): string {
   if (v.startsWith("~")) return path.resolve(expandTilde(v));
   if (v.includes("/") || v.includes("\\") || path.isAbsolute(v)) return path.resolve(v);
   return path.join(root, v);
+}
+
+/**
+ * Whether this environment permits spawning agents that skip the CLI's own
+ * permission gate (`-y` / `--dangerously-skip-permissions` and equivalents).
+ *
+ * This is an ENVIRONMENT capability, not a per-request preference: a restricted
+ * host publishes `caps.skipPermissions: false` on its env node and `/api/spawn`
+ * refuses such a request, host-enforced the way agentShare's default-deny is.
+ * A client can't talk its way past it by asking differently.
+ *
+ * Defaults to TRUE so nothing changes for an existing host — restricting is an
+ * explicit opt-in, via `~/.agent-yes/config.json` (`"allowSkipPermissions": false`)
+ * or env `AGENT_YES_ALLOW_SKIP_PERMISSIONS=0`. Only an explicit falsy value
+ * restricts; anything unset or unparseable leaves the environment permissive
+ * rather than silently locking spawns out.
+ *
+ * Issue #236.
+ */
+export function allowsSkipPermissions(): boolean {
+  const raw = process.env.AGENT_YES_ALLOW_SKIP_PERMISSIONS?.trim();
+  if (raw !== undefined && raw !== "") return !/^(0|false|no|off)$/i.test(raw);
+  return readConfig().allowSkipPermissions !== false;
 }

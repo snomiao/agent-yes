@@ -1,5 +1,6 @@
 import { appendFile, mkdir, readFile, rename, unlink, writeFile } from "fs/promises";
 import { homedir } from "os";
+import type { AgentPermissions } from "./agentPermissions.ts";
 import path from "path";
 import { lock } from "proper-lockfile";
 import { logger } from "./logger.ts";
@@ -57,6 +58,13 @@ export interface GlobalPidRecord {
   // (snake_case). Currently per-process; cross-restart re-binding is a follow-up
   // (see docs/agent-sharing.md). Preserved verbatim through merges/compaction.
   agent_id?: string | null;
+  // The permission posture this agent was SPAWNED with — whether the wrapped CLI
+  // got its "yolo" flag, plus the wrapper's own robust/auto-continue flags. The
+  // index carries no argv and the wrapper flags never reach the CLI's args at
+  // all, so without stamping this at registration "was this agent running with
+  // permission checks off?" is unanswerable after the fact. See
+  // ts/agentPermissions.ts (mirrored in rs/src/agent_permissions.rs).
+  permissions?: AgentPermissions | null;
 }
 
 /**

@@ -13,7 +13,10 @@ import {
   nextSeq,
   parseCursor,
   parseInboxText,
+  postmortemStartedAt,
   rotateKeep,
+  emergencyKeep,
+  eventBytes,
   serializeCursor,
   serializeEvent,
 } from "./notifyInbox.ts";
@@ -189,5 +192,86 @@ describe("notifyInbox — watcher liveness", () => {
       15_000,
     );
     expect([...live].sort()).toEqual([1, 3]);
+  });
+});
+
+describe("notifyInbox — emergency rotation (#169.3)", () => {
+  const many = () => Array.from({ length: 500 }, (_, i) => ev({ seq: i + 1 }));
+
+  it("eventBytes sums the on-disk footprint (line + newline)", () => {
+    const evs = [ev({ seq: 1 }), ev({ seq: 2 })];
+    expect(eventBytes(evs)).toBe(
+      serializeEvent(evs[0]!).length + 1 + serializeEvent(evs[1]!).length + 1,
+    );
+    expect(eventBytes([])).toBe(0);
+  });
+
+  it("drops the OLDEST events even though they are unacked", () => {
+    // This is the whole point: rotateKeep protects every unacked event, which is
+    // right until the file threatens the disk. emergencyKeep ignores the
+    // watermark — the escape hatch a stuck consumer forces us to have.
+    const kept = emergencyKeep(many(), 1, 5);
+    expect(kept.length).toBeLessThan(500);
+    expect(kept[kept.length - 1]!.seq).toBe(500); // newest survive
+    expect(kept.some((e) => e.seq === 1)).toBe(false); // oldest sacrificed
+  });
+
+  it("still honours minKeep, so recent edges are never the ones sacrificed", () => {
+    const kept = emergencyKeep(many(), 1, 25);
+    expect(kept.length).toBe(25);
+    expect(kept.map((e) => e.seq)).toEqual(Array.from({ length: 25 }, (_, i) => 476 + i));
+  });
+
+  it("keeps everything that fits the cap", () => {
+    const evs = many();
+    expect(emergencyKeep(evs, eventBytes(evs), 5).length).toBe(500);
+  });
+
+  it("is a no-op below minKeep", () => {
+    const evs = [ev({ seq: 1 }), ev({ seq: 2 })];
+    expect(emergencyKeep(evs, 1, 100)).toEqual(evs);
+  });
+
+  it("returns events in ascending seq order (append order preserved)", () => {
+    const kept = emergencyKeep(many(), 1, 10);
+    expect(kept.map((e) => e.seq)).toEqual([...kept.map((e) => e.seq)].sort((a, b) => a - b));
+  });
+});
+
+describe("notifyInbox — postmortem identity (#169.6)", () => {
+  it("uses the single distinct incarnation stamped in the inbox", () => {
+    const evs = [ev({ seq: 1, parent_started_at: 500 }), ev({ seq: 2, parent_started_at: 500 })];
+    expect(postmortemStartedAt(evs)).toBe(500);
+  });
+
+  it("refuses to guess when the pid was reused across sessions", () => {
+    // Two agents' edges share the file. Picking one silently would attribute a
+    // stranger's children to whichever we chose — so make the operator decide.
+    const evs = [ev({ seq: 1, parent_started_at: 500 }), ev({ seq: 2, parent_started_at: 900 })];
+    expect(() => postmortemStartedAt(evs)).toThrow(/2 incarnations/);
+    expect(() => postmortemStartedAt(evs)).toThrow(/--started-at/);
+  });
+
+  it("lets an explicit choice win, even when ambiguous", () => {
+    const evs = [ev({ seq: 1, parent_started_at: 500 }), ev({ seq: 2, parent_started_at: 900 })];
+    expect(postmortemStartedAt(evs, 900)).toBe(900);
+  });
+
+  it("returns 0 (no filter) for a legacy inbox with no identity stamps", () => {
+    expect(postmortemStartedAt([ev({ seq: 1 })])).toBe(0);
+    expect(postmortemStartedAt([])).toBe(0);
+  });
+
+  it("ignores a non-positive or non-finite explicit choice", () => {
+    const evs = [ev({ seq: 1, parent_started_at: 500 })];
+    expect(postmortemStartedAt(evs, 0)).toBe(500);
+    expect(postmortemStartedAt(evs, -1)).toBe(500);
+    expect(postmortemStartedAt(evs, NaN)).toBe(500);
+  });
+
+  it("ignores zero stamps when finding distinct incarnations", () => {
+    // A 0 is "unknown", not an incarnation — it must not create false ambiguity.
+    const evs = [ev({ seq: 1, parent_started_at: 0 }), ev({ seq: 2, parent_started_at: 500 })];
+    expect(postmortemStartedAt(evs)).toBe(500);
   });
 });

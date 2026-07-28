@@ -91,9 +91,36 @@ describe("notifyd singleton lock", () => {
     expect(await acquireDaemonLock(() => true)).toBe(true);
     const owner = JSON.parse(await readFile(daemonLockOwnerPath(), "utf8"));
     // Rewrite the owner to a DIFFERENT, "alive" pid to simulate another daemon.
-    await writeFile(daemonLockOwnerPath(), JSON.stringify({ ...owner, pid: owner.pid + 1 }));
+    // Drop os_start with it: a real second daemon records the OS start time of
+    // ITS OWN pid, so carrying ours over would describe a pid whose recorded and
+    // actual start times disagree — i.e. a RECYCLED pid, which is a different
+    // scenario (covered below) and would correctly be stolen rather than
+    // respected. Omitting it models an owner written by a build without the
+    // field, where pid-liveness + heartbeat freshness alone govern.
+    const { os_start: _dropped, ...noToken } = owner;
+    await writeFile(daemonLockOwnerPath(), JSON.stringify({ ...noToken, pid: owner.pid + 1 }));
     expect(await acquireDaemonLock((pid) => pid === owner.pid + 1)).toBe(false);
   });
+
+  // Windows has no start-time reader, so there is no token to disagree with.
+  it.skipIf(process.platform === "win32")(
+    "STEALS a lock whose owner pid was RECYCLED (looks alive, isn't the daemon)",
+    async () => {
+      // The failure this guards: a recycled pid is alive and its owner ts is
+      // fresh, so the shared steal decision says "respect the holder" — without
+      // treating the OS start-time disagreement as its own steal reason, acquire
+      // would neither take the lock nor decline, and spin until the caller timed
+      // out. The host would be left with no daemon and no error.
+      expect(await acquireDaemonLock(() => true)).toBe(true);
+      const owner = JSON.parse(await readFile(daemonLockOwnerPath(), "utf8"));
+      expect(typeof owner.os_start).toBe("string"); // the platform did record one
+      await writeFile(
+        daemonLockOwnerPath(),
+        JSON.stringify({ ...owner, ts: Date.now(), os_start: "not-the-real-start-time" }),
+      );
+      expect(await acquireDaemonLock(() => true)).toBe(true); // stolen, not spun on
+    },
+  );
 });
 
 describe("notifyd identity (status/stop safety)", () => {

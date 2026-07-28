@@ -19,6 +19,8 @@ import {
   WATCHER_TTL_MS,
   cursorDir,
   cursorPath,
+  emergencyKeep,
+  eventBytes,
   inboxDir,
   inboxPath,
   maxSeq,
@@ -371,6 +373,14 @@ export async function gcInboxes(
   livePids: Set<number>,
   liveChildParentPids: Set<number>,
   capBytes = 10 * 1024 * 1024,
+  /**
+   * HARD cap. `capBytes` is a soft cap — an event above the min consumer cursor
+   * is never evicted, so a parent that never acks can push an inbox past it
+   * indefinitely. Past this second, much higher threshold we drop the oldest
+   * UNACKED events anyway and log loudly (issue #169 item 3). Set well above the
+   * soft cap so it only ever fires on a genuinely stuck consumer.
+   */
+  hardCapBytes = capBytes * 4,
 ): Promise<void> {
   const parents = await listInboxParents(host);
   for (const p of parents) {
@@ -395,14 +405,38 @@ export async function gcInboxes(
       if (size <= capBytes) continue;
       const events = await readInbox(host, p);
       const protectAboveSeq = await minConsumerCursor(host, p);
-      const kept = rotateKeep(events, capBytes, protectAboveSeq);
+      let kept = rotateKeep(events, capBytes, protectAboveSeq);
+      // Second line of defence: if even after honouring the un-acked watermark
+      // the inbox would still exceed the HARD cap, sacrifice the oldest unacked
+      // events. `capBytes` alone is a soft cap (an unacked edge is never
+      // evicted), which is right until the file threatens the disk — a parent
+      // watching without `--ack` and never advancing its cursor is the one way
+      // that happens. Newest-first, so the edges most likely to still matter
+      // survive.
+      let dropped: NotifyEvent[] = [];
+      if (eventBytes(kept) > hardCapBytes) {
+        const before = kept;
+        kept = emergencyKeep(kept, capBytes);
+        dropped = before.slice(0, before.length - kept.length);
+      }
       if (kept.length < events.length) {
         await writeFile(inboxPath(host, p), kept.map(serializeEvent).join("\n") + "\n");
+        if (dropped.length > 0) {
+          // Loud, and actionable: silently losing an at-least-once edge is
+          // exactly the failure this subsystem exists to prevent, so say so.
+          logger.error(
+            `[notify] EMERGENCY TRIM: inbox for parent ${p} exceeded the hard cap ` +
+              `${hardCapBytes} bytes — dropped ${dropped.length} UNACKED events ` +
+              `(seq ${dropped[0]!.seq}..${dropped[dropped.length - 1]!.seq}). ` +
+              `The consumer's cursor is not advancing: run \`ay notify watch --ack\` ` +
+              `(or \`ay notify cursor set <seq>\`) for parent ${p}.`,
+          );
+        }
       } else {
         // Oversize but nothing was trimmable — every event is unacked (min cursor
-        // at/below the oldest). `capBytes` is a SOFT cap here (we never drop an
-        // unacked edge), so surface the unbounded growth rather than silently
-        // exceeding it. A parent that never acks is the usual cause.
+        // at/below the oldest) and we are still under the hard cap. Surface the
+        // growth rather than silently exceeding the soft cap; a parent that never
+        // acks is the usual cause.
         logger.warn(
           `[notify] inbox for parent ${p} is ${size} bytes (> soft cap ${capBytes}) but all events are unacked — cursor not advancing?`,
         );
@@ -426,7 +460,16 @@ export async function heartbeatWatcher(parentPid: number, startedAt: number): Pr
   await ensureDir(watchersDir());
   await atomicWrite(
     watcherPath(parentPid),
-    JSON.stringify({ pid: parentPid, started_at: startedAt, ts: Date.now() }),
+    // `watch_pid` is the `ay notify watch` SUBPROCESS's own pid (this process),
+    // as distinct from `pid`, the parent AGENT it watches on behalf of. Carrying
+    // both lets liveWatchers prove the watcher itself is alive rather than
+    // inferring it from freshness alone — see there (issue #169 item 2).
+    JSON.stringify({
+      pid: parentPid,
+      started_at: startedAt,
+      ts: Date.now(),
+      watch_pid: process.pid,
+    }),
   );
 }
 
@@ -453,14 +496,24 @@ export async function liveWatchers(now = Date.now()): Promise<Map<number, number
     if (!n.endsWith(".json")) continue;
     const raw = await readFile(path.join(watchersDir(), n), "utf8").catch(() => "");
     try {
-      const o = JSON.parse(raw) as { pid: number; started_at?: number; ts: number };
+      const o = JSON.parse(raw) as {
+        pid: number;
+        started_at?: number;
+        ts: number;
+        watch_pid?: number;
+      };
       if (
         typeof o?.pid === "number" &&
         typeof o?.started_at === "number" &&
         o.started_at > 0 &&
         typeof o?.ts === "number" &&
         now - o.ts <= WATCHER_TTL_MS &&
-        pidAlive(o.pid)
+        pidAlive(o.pid) &&
+        // The `ay notify watch` SUBPROCESS must itself still be alive. Freshness
+        // alone only bounds a crashed watcher's lingering heartbeat to the TTL;
+        // this drops it on the very next sweep. Absent `watch_pid` (a heartbeat
+        // from an older build) keeps the previous freshness-only behaviour.
+        (typeof o.watch_pid !== "number" || o.watch_pid <= 0 || pidAlive(o.watch_pid))
       ) {
         live.set(o.pid, o.started_at);
       }
