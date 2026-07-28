@@ -132,6 +132,33 @@ describe("notifyStore (fs)", () => {
     expect(nextSeq).toBe(131); // continues from the counter, no seq reuse
   });
 
+  it("never drops an UNACKED event while under the hard cap (soft cap holds)", async () => {
+    // 130 events, cursor never advanced: everything is unacked. The soft cap is
+    // 1 byte, so normal rotation can trim nothing — and must not, because
+    // at-least-once outranks the soft cap. A generous hard cap keeps it that way.
+    for (let i = 0; i < 130; i++) await appendEvent(901, baseEvent("idle"));
+    await gcInboxes(host, new Set([901]), new Set([901]), 1, 10 * 1024 * 1024);
+    expect((await readInbox(host, 901)).length).toBe(130);
+  });
+
+  it("emergency-trims the OLDEST unacked events past the HARD cap (#169.3)", async () => {
+    // Same stuck consumer, but now the inbox has blown through the hard cap.
+    // Unbounded growth is the worse failure, so the oldest unacked edges go —
+    // newest-first retention keeps the ones the parent may still act on.
+    for (let i = 0; i < 130; i++) await appendEvent(902, baseEvent("idle"));
+    const before = await readInbox(host, 902);
+    await gcInboxes(host, new Set([902]), new Set([902]), 1, 1);
+    const after = await readInbox(host, 902);
+    expect(after.length).toBeLessThan(before.length);
+    // The survivors are the NEWEST ones, contiguous up to the high-water seq.
+    expect(after[after.length - 1]!.seq).toBe(before[before.length - 1]!.seq);
+    expect(after.map((e) => e.seq)).toEqual(
+      before.slice(before.length - after.length).map((e) => e.seq),
+    );
+    // And seq allocation still moves forward — a trim must never reuse a seq.
+    expect(await appendEvent(902, baseEvent("needs_input"))).toBe(131);
+  });
+
   it("release() does NOT delete a lock that was STOLEN out from under it (fencing)", async () => {
     const { mkdtemp, writeFile } = await import("fs/promises");
     const { tmpdir } = await import("os");
@@ -202,6 +229,46 @@ describe("notifyStore (fs)", () => {
   it("drops a watcher whose heartbeat is fresh but whose process is DEAD (I3)", async () => {
     await heartbeatWatcher(424242, 999); // 424242 is not a live process
     expect((await liveWatchers()).has(424242)).toBe(false);
+  });
+
+  it("drops a watcher whose WATCH SUBPROCESS is dead, even with a live parent (#169.2)", async () => {
+    // The heartbeat is fresh and the parent agent is alive — only the `ay notify
+    // watch` subprocess died. Freshness alone would keep this watcher live for a
+    // whole TTL; carrying watch_pid drops it on the very next sweep.
+    const { watcherPath, watchersDir } = await import("./notifyInbox.ts");
+    const { mkdir, writeFile } = await import("fs/promises");
+    await mkdir(watchersDir(), { recursive: true });
+    await writeFile(
+      watcherPath(process.pid),
+      JSON.stringify({
+        pid: process.pid, // parent: alive
+        started_at: 111,
+        ts: Date.now(), // heartbeat: fresh
+        watch_pid: 424242, // the watch subprocess: gone
+      }),
+    );
+    expect((await liveWatchers()).has(process.pid)).toBe(false);
+  });
+
+  it("keeps a watcher whose heartbeat predates watch_pid (back-compat)", async () => {
+    // An older build's heartbeat has no watch_pid — it must keep the previous
+    // freshness-only behaviour rather than being dropped as unverifiable.
+    const { watcherPath, watchersDir } = await import("./notifyInbox.ts");
+    const { mkdir, writeFile } = await import("fs/promises");
+    await mkdir(watchersDir(), { recursive: true });
+    await writeFile(
+      watcherPath(process.pid),
+      JSON.stringify({ pid: process.pid, started_at: 111, ts: Date.now() }),
+    );
+    expect((await liveWatchers()).has(process.pid)).toBe(true);
+  });
+
+  it("records this process as watch_pid so its own liveness is provable", async () => {
+    await heartbeatWatcher(process.pid, 111);
+    const { watcherPath } = await import("./notifyInbox.ts");
+    const raw = JSON.parse(await readFile(watcherPath(process.pid), "utf8"));
+    expect(raw.watch_pid).toBe(process.pid);
+    expect((await liveWatchers()).has(process.pid)).toBe(true);
   });
 
   it("drops a watcher with a missing/non-positive started_at (fail-closed)", async () => {
