@@ -39,6 +39,7 @@ Other verbs:
 
 ```bash
 ay notify read [--parent <pid>] [--since <seq>] [--unread] [--ack] [--json]
+ay notify read --postmortem [--parent <pid>] [--started-at <ms>]   # after it exited
 ay notify cursor get|set <seq> [--parent <pid>] [--consumer <name>]
 ay notifyd run|start|status|stop
 ```
@@ -74,11 +75,11 @@ parent addresses its own inbox with no argument.
   refreshed every poll, TTL 15s) and the daemon:
   - **scopes** its work to children whose parent has a live heartbeat — where
     "live" means the heartbeat is fresh (refreshed within the TTL) AND the parent
-    agent's pid is alive. A crashed `watch` stops refreshing, so its heartbeat
-    goes stale within the TTL and is dropped; a dead parent is dropped
-    immediately. (The heartbeat proves parent-liveness + freshness, not the watch
-    subprocess's own pid — carrying the watch pid/token in the heartbeat for a
-    strict check is a documented follow-up.) So an unrelated agent that never
+    agent's pid is alive AND the `ay notify watch` subprocess that wrote it is
+    alive. The heartbeat carries all three (`pid`, `ts`, `watch_pid`), so a
+    crashed watcher is dropped on the very next sweep instead of lingering for the
+    TTL on freshness alone; a dead parent is dropped immediately. So an unrelated
+    agent that never
     watches gets **no inbox** (the scope matches the "nothing happens unless you
     watch" promise). The daemon takes the parent's `started_at` from the watcher's
     own heartbeat (authoritative, never 0), not a registry lookup that could miss;
@@ -160,9 +161,13 @@ ts}`. A stale lock (owner pid dead / torn) is **stolen** — but the steal only
   the watcher returns and the hot-path guard sees the new start time — delayed,
   never dropped.
 
-- **The daemon heartbeats its owner on a background timer**, not once per loop, so
-  a slow tick (many watched children, slow log I/O) can't let the heartbeat cross
+- **The daemon heartbeats its owner on its own THREAD**, not once per loop and not
+  on the main thread's timer, so neither a slow tick (many watched children, slow
+  log I/O) nor a synchronous main-thread block can let the heartbeat cross
   `OWNER_TTL` and have another `watch` steal the lock as "stale" → double daemon.
+  The beat is one-way (it never signals the daemon): shutdown stays the loop's
+  decision, made by its per-tick owner-token check. It falls back to a main-thread
+  timer if a worker can't be created, so it is never worse than before.
   `started_at` is captured once at acquire; the heartbeat updates only `ts`, so
   `stop`'s identity re-check never sees it move.
 
@@ -177,11 +182,15 @@ ts}`. A stale lock (owner pid dead / torn) is **stolen** — but the steal only
   The daemon singleton lock shares the same torn-owner grace, so two concurrent
   daemon starts can't both win.
 
-- **Residual (documented): `stop` identity vs OS start time.** `status`/`stop`
-  compare our recorded `started_at`, not the OS's real process start time (non-
-  portable to read), so a pid recycled onto an unrelated process within the tight
-  `OWNER_TTL` window could be briefly trusted. Heartbeat freshness + a few-tick
-  TTL bound it to seconds; a real OS start-time cross-check is deferred.
+- **Owner identity is cross-checked against the OS process start time.** The
+  owner file records the OS's own start time for the daemon pid at acquire
+  (`os_start`, an opaque per-platform token — `/proc/<pid>/stat` field 22 on
+  Linux, `ps -o lstart` on macOS/BSD, none on Windows), and every read re-reads it
+  and rejects a disagreement. A pid recycled onto an unrelated live process inside
+  `OWNER_TTL` therefore can't be mistaken for the daemon — which previously would
+  have left the host with NO daemon, because `ensureDaemon` declined to start one.
+  Best-effort by contract: where a platform can't answer, behaviour is exactly as
+  before (pid-liveness + heartbeat freshness, bounding the window to seconds).
 
 - **`notifyd stop` re-verifies identity before signalling.** It re-reads the
   owner (`pid` + `started_at`) immediately before `SIGTERM`, so a pid recycled
@@ -200,7 +209,8 @@ ts}`. A stale lock (owner pid dead / torn) is **stolen** — but the steal only
   the cursor persists across a restart of the `ay notify watch` **subprocess**
   within the same parent-agent session — NOT across a restart of the parent agent
   itself, which gets a new pid (and thus a fresh inbox). A truly stable parent
-  identity across pid changes is a follow-up (issue #169).
+  identity across pid changes is still open — see "Known limitations" below for
+  why it waits on a durable `agent_id` rather than on this layer.
 
 - **At-least-once by default; ack is monotonic.** `ay notify watch` does **not**
   advance the cursor unless you pass `--ack` (or use `ay notify read --ack`). A
@@ -243,46 +253,40 @@ ts}`. A stale lock (owner pid dead / torn) is **stolen** — but the steal only
   (tail + git head), daemon lifecycle.
 - `ts/subcommands.ts` — `ay notify` / `ay notifyd` CLI.
 
-## Known limitations (v1 — tracked as follow-ups)
+## Known limitations (tracked as follow-ups)
 
-These are deliberately out of v1 scope; each is a bounded, low-probability edge
-with a documented mitigation, tracked in a single follow-up issue.
+The v1 identity/liveness/retention residuals below were closed in issue #169 —
+see the design decisions above for how each is now handled:
+`notifyd` owner identity vs the OS process start time; the watcher heartbeat
+proving only parent-liveness; postmortem inbox inspection; the event-loop-block
+false steal; and an inbox nobody acks growing unbounded.
 
-- **`notifyd stop` trusts the owner file's identity, not the OS process start
-  time.** A pid recycled onto an unrelated process WITHIN the tight `OWNER_TTL`
-  window (a few ticks) could be briefly trusted and signalled. Reading the real
-  OS start time is non-portable (`/proc/<pid>/stat` on Linux vs `ps -o lstart` /
-  `proc_pidinfo` on macOS); heartbeat freshness + a few-tick TTL bound the window
-  to seconds. A strict OS start-time cross-check is a follow-up.
-- **The watcher heartbeat proves parent-liveness, not the `ay notify watch`
-  subprocess's own liveness.** A crashed watch stops refreshing, so its heartbeat
-  goes stale within the TTL and is dropped — but carrying the watch subprocess's
-  pid/token in the heartbeat for a strict check is a follow-up.
-- **No postmortem inbox inspection after the parent exits.** `ay notify
-read/watch` fail closed when the parent isn't a live registry record (started_at
-  can't be resolved) — deliberately, so a recycled parent pid can't read another
-  session's inbox. The trade-off is that you can't inspect a parent's inbox after
-  that parent has exited. A read-only "postmortem" mode (inspect without
-  registering as a watcher, identity-checked by started_at) is a follow-up.
-- **Event-loop-block false steal.** The daemon heartbeats its lock owner on a
-  single-threaded JS timer. If the daemon loop ever blocked SYNCHRONOUSLY longer
-  than `OWNER_TTL` (30s), the heartbeat would stall and another `watch` could
-  steal the singleton lock → a second daemon. The loop is all `await`s and never
-  blocks for seconds, and `OWNER_TTL` is set well above any realistic sync block,
-  so this is a theoretical window; fully closing it needs a worker-isolated
-  heartbeat (follow-up).
-- **An inbox nobody acks can grow unbounded.** Rotation only evicts events at or
-  below the minimum consumer cursor (at-least-once). So a parent that runs
-  `ay notify watch` WITHOUT `--ack` (the default, at-least-once) and never
-  otherwise advances its cursor will accumulate events past `capBytes` until the
-  parent exits (then GC removes the whole inbox). This is a deliberate trade
-  (never drop an unacked edge) for the human-in-the-loop scale this targets; a
-  future safeguard could warn or apply an emergency hard cap that drops the
-  oldest unacked events with a logged notice. `gcInboxes` already logs a warning
-  when it can't trim an oversize inbox. **Manual cleanup:** an operator can delete
-  `$AGENT_YES_HOME/notify/inbox/<host>/<parent>.ndjson` (and its `.seq` +
-  `cursors/<host>/<parent>/`) for a parent that is done; the whole inbox is GC'd
-  automatically once that parent is dead and unreferenced.
+What remains:
+
+- **No durable parent identity across pid changes.** The inbox and cursor are
+  keyed by the parent's WRAPPER PID, so they survive a restart of the
+  `ay notify watch` subprocess within one parent session — but NOT a restart of
+  the parent agent itself, which gets a new pid and therefore a fresh inbox. A
+  stable identity would need an `agent_id` that survives a restart; today
+  `agent_id` is minted per process (`docs/agent-sharing.md` tracks the same gap
+  for share grants), so this waits on that, not on the notify layer.
+
+- **Emergency trim drops unacked edges.** Past the HARD cap (4x the soft cap) an
+  inbox whose consumer never advances its cursor has its OLDEST unacked events
+  dropped, with a loud `logger.error` naming the parent and the seq range. This is
+  a deliberate last resort — unbounded growth is the worse failure — but it does
+  mean at-least-once is not absolute for a consumer that never acks. The cursor is
+  NOT advanced, so the loss is visible as a seq gap. **Manual cleanup:** an
+  operator can delete `$AGENT_YES_HOME/notify/inbox/<host>/<parent>.ndjson` (and
+  its `.seq` + `cursors/<host>/<parent>/`) for a parent that is done; the whole
+  inbox is GC'd automatically once that parent is dead and unreferenced.
+
+- **Postmortem reads are read-only and single-incarnation.** `ay notify read
+  --postmortem` inspects a finished parent's inbox without registering a watcher
+  or starting the daemon, filtering to one incarnation taken from the inbox's own
+  `parent_started_at` stamps. If the pid was reused across sessions the inbox
+  holds more than one agent's edges and the command refuses, listing the
+  candidates for `--started-at <ms>` — it will not guess.
 
 ## Not done — drafted for later
 

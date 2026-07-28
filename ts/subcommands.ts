@@ -42,6 +42,7 @@ import {
   filterSinceTs,
   filterUnread,
   maxSeq,
+  postmortemStartedAt,
   type NotifyEvent,
 } from "./notifyInbox.ts";
 import {
@@ -4989,7 +4990,7 @@ async function cmdNotify(rest: string[]): Promise<number> {
   if (verb === "cursor") return cmdNotifyCursor(args);
   if (verb !== "read" && verb !== "watch") {
     process.stderr.write(
-      "usage: ay notify <read|watch|cursor> [--parent <pid>] [--since <seq>] [--since-ts <ms>] [--unread] [--ack] [--json]\n",
+      "usage: ay notify <read|watch|cursor> [--parent <pid>] [--since <seq>] [--since-ts <ms>] [--unread] [--ack] [--json] [--postmortem]\n",
     );
     return 1;
   }
@@ -5027,6 +5028,15 @@ async function cmdNotify(rest: string[]): Promise<number> {
       default: true,
       description: "Start the notifyd singleton if not running (watch)",
     })
+    .option("postmortem", {
+      type: "boolean",
+      default: false,
+      description: "Read-only: inspect an inbox whose parent has exited (read)",
+    })
+    .option("started-at", {
+      type: "number",
+      description: "Disambiguate which incarnation to show (--postmortem)",
+    })
     .help(false)
     .version(false)
     .exitProcess(false);
@@ -5041,12 +5051,33 @@ async function cmdNotify(rest: string[]): Promise<number> {
   // open the notification path at all rather than fail-open and risk delivering a
   // recycled pid's inbox to an unrelated agent (or registering a 0-identity
   // watcher). "If we don't know who the parent is, don't open the path."
-  const selfStartedAt = await resolveParentStartedAt(parent);
-  if (selfStartedAt <= 0)
-    throw new Error(
-      `cannot resolve identity for pid ${parent} (no live agent record) — ` +
-        `refusing to open the notification path (pass --parent for a live agent).`,
+  // Postmortem: a READ-ONLY inspection of an inbox whose parent has already
+  // exited. The normal path fails closed when the parent isn't a live registry
+  // record — deliberately, so a recycled pid can't read a prior session's inbox —
+  // but that also made a finished parent's inbox permanently uninspectable, which
+  // is exactly when an operator wants to see what the children reported. This
+  // mode keeps the identity guard (events are still filtered to ONE incarnation)
+  // but takes that identity from the inbox's own stamps instead of the registry,
+  // and never registers a watcher or starts the daemon. Issue #169 item 6.
+  const postmortem = Boolean(argv.postmortem);
+  if (postmortem && verb !== "read")
+    throw new Error("--postmortem is read-only — use `ay notify read --postmortem`");
+
+  let selfStartedAt: number;
+  if (postmortem) {
+    selfStartedAt = postmortemStartedAt(
+      await readInbox(host, parent),
+      argv["started-at"] as number | undefined,
     );
+  } else {
+    selfStartedAt = await resolveParentStartedAt(parent);
+    if (selfStartedAt <= 0)
+      throw new Error(
+        `cannot resolve identity for pid ${parent} (no live agent record) — ` +
+          `refusing to open the notification path (pass --parent for a live agent, ` +
+          `or \`ay notify read --postmortem --parent ${parent}\` to inspect a finished one).`,
+      );
+  }
 
   const drain = async (sinceSeqOverride?: number): Promise<number> => {
     let events = await readInbox(host, parent);

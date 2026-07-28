@@ -261,6 +261,81 @@ export function inboxesToGC(
 }
 
 /**
+ * Which incarnation of a parent pid a POSTMORTEM read should show (pure).
+ *
+ * The normal read path resolves the parent's `started_at` from the registry and
+ * fails closed when there is no live record — deliberately, so a recycled pid
+ * can't read a prior session's inbox. That also makes a FINISHED parent's inbox
+ * permanently uninspectable, which is exactly when an operator wants to see what
+ * the children reported. Postmortem keeps the identity guard but takes the
+ * identity from the inbox's own `parent_started_at` stamps instead.
+ *
+ * - An explicit choice always wins.
+ * - One distinct stamp is unambiguous — use it.
+ * - Several mean the pid was reused across sessions and the file holds more than
+ *   one agent's edges: refuse and list them rather than guess, because guessing
+ *   would show one agent's children under another's name.
+ * - None (a legacy, identity-less inbox) yields 0 = "no filter"; there is nothing
+ *   to disambiguate and nothing to mis-attribute.
+ *
+ * Issue #169 item 6.
+ */
+export function postmortemStartedAt(events: NotifyEvent[], explicit?: number): number {
+  if (Number.isFinite(explicit) && (explicit as number) > 0) return explicit as number;
+  const distinct = [
+    ...new Set(events.map((e) => e.parent_started_at ?? 0).filter((v) => v > 0)),
+  ].sort((a, b) => a - b);
+  if (distinct.length === 0) return 0;
+  if (distinct.length === 1) return distinct[0]!;
+  throw new Error(
+    `inbox holds edges from ${distinct.length} incarnations of this pid ` +
+      `(started_at ${distinct.join(", ")}) — pass --started-at <ms> to pick one.`,
+  );
+}
+
+/** Byte size one event occupies in the inbox file (its line + newline). */
+export function eventBytes(events: NotifyEvent[]): number {
+  let n = 0;
+  for (const e of events) n += serializeEvent(e).length + 1;
+  return n;
+}
+
+/**
+ * EMERGENCY rotation (pure): keep the newest events that fit `capBytes`,
+ * IGNORING the un-acked watermark that {@link rotateKeep} protects.
+ *
+ * This is the escape hatch for the one way an inbox can grow without bound: a
+ * parent that watches WITHOUT `--ack` (the default, at-least-once) never
+ * advances its cursor, so every event stays protected and normal rotation can
+ * trim nothing. That is the right default — an unacked edge must not be dropped
+ * — but "right" stops being right once the file threatens the disk. Past a hard
+ * cap well above the soft one, dropping the OLDEST unacked events (loudly) beats
+ * unbounded growth.
+ *
+ * `minKeep` still floors the result, so the newest edges — the ones a parent is
+ * most likely to still act on — are never the ones sacrificed.
+ *
+ * Issue #169 item 3.
+ */
+export function emergencyKeep(
+  events: NotifyEvent[],
+  capBytes: number,
+  minKeep = 100,
+): NotifyEvent[] {
+  if (events.length <= minKeep) return events.slice();
+  const kept: NotifyEvent[] = [];
+  let bytes = 0;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i]!;
+    bytes += serializeEvent(e).length + 1;
+    if (kept.length < minKeep || bytes <= capBytes) kept.push(e);
+    else break;
+  }
+  kept.reverse();
+  return kept;
+}
+
+/**
  * Rotation decision (pure): given an inbox's events, a byte cap, and the minimum
  * un-acked cursor across ALL consumers, return the events to KEEP after
  * rotating. Critically, an event with `seq > protectAboveSeq` is NEVER dropped —
