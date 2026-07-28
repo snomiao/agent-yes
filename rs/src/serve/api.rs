@@ -16,7 +16,11 @@ use tokio::sync::mpsc;
 const TAIL_SNAPSHOT_BYTES: u64 = 65_536;
 const SSE_PING_MS: u64 = 15_000;
 const LS_TICK_MS: u64 = 1_000;
-const TAIL_POLL_MS: u64 = 200;
+// 50ms keeps keystroke echo snappy (the TS daemon uses fs.watch + a 60ms
+// unwatched poll; a plain 50ms stat poll costs ~nothing and needs no watcher
+// lifecycle — see agent-yes-fswatch-dies-in-daemon for why watchers are risky
+// in long-lived daemons).
+const TAIL_POLL_MS: u64 = 50;
 /// Consider an agent "active" if its log grew within this window, else "idle".
 const ACTIVE_WINDOW_MS: i64 = 60_000;
 
