@@ -37,6 +37,7 @@ import {
   saveDeprecatedLogFile,
 } from "./core/logging.ts";
 import { spawnAgent } from "./core/spawner.ts";
+import { resolveProgram } from "./resolveBinary.ts";
 import { AgentContext } from "./core/context.ts";
 import { createTerminatorStream } from "./core/streamHelpers.ts";
 import { globalAgentRegistry } from "./agentRegistry.ts";
@@ -639,7 +640,8 @@ export default async function agentYes({
         cwd: cwd ?? process.cwd(),
         env: ptyEnv,
       };
-      shell = pty.spawn(bin!, args, restartPtyOptions);
+      // Resolve via PATH so a cwd entry named like the CLI can't shadow it (#138).
+      shell = pty.spawn(resolveProgram(bin!, ptyEnv.PATH), args, restartPtyOptions);
       shellWrite = (data: string) => shell.write(data);
       // Register process in pidStore (non-blocking)
       try {
@@ -745,7 +747,8 @@ export default async function agentYes({
         cwd: cwd ?? process.cwd(),
         env: ptyEnv,
       };
-      shell = pty.spawn(cli, restoreArgs, restorePtyOptions);
+      // Resolve via PATH so a cwd entry named like the CLI can't shadow it (#138).
+      shell = pty.spawn(resolveProgram(cli, ptyEnv.PATH), restoreArgs, restorePtyOptions);
       shellWrite = (data: string) => shell.write(data);
       // Register process in pidStore (non-blocking)
       try {
@@ -1417,7 +1420,11 @@ export default async function agentYes({
     return {
       // Enforce minimum 20 columns to avoid layout issues
       cols: Math.max(20, process.stdout.columns),
-      rows: process.stdout.rows,
+      // Clamp rows too: a tty whose winsize was never set (e.g. a pty created by
+      // `script`/a daemon) reports 0, and bun-pty rejects rows <= 0 outright —
+      // the spawn then fails with a bare "PTY spawn failed" and no clue why.
+      // Mirrors get_terminal_size() in rs/src/pty_spawner.rs.
+      rows: Math.max(4, process.stdout.rows),
     };
   }
 }

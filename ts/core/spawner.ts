@@ -7,6 +7,7 @@ import type { SUPPORTED_CLIS } from "../SUPPORTED_CLIS.ts";
 import { execSync } from "node:child_process";
 import { getInstalledPackage } from "../versionChecker.ts";
 import { applyAgentNice } from "../agentNice.ts";
+import { resolveProgram } from "../resolveBinary.ts";
 
 /**
  * Agent spawning utilities
@@ -133,8 +134,12 @@ export function spawnAgent(options: SpawnOptions): IPty {
   const spawn = () => {
     const cliCommand = cliConf?.binary || cli;
     let [bin, ...args] = [...parseCommandString(cliCommand), ...cliArgs];
-    logger.debug(`Spawning ${bin} with args: ${JSON.stringify(args)}`);
-    const spawned = pty.spawn(bin!, args, ptyOptions);
+    // Resolve to an absolute path first so a cwd entry named like the CLI can't
+    // shadow the real binary and abort the forked child (issue #138). Throws a
+    // command-not-found error, which the handler below routes to auto-install.
+    const program = resolveProgram(bin!, ptyOptions.env.PATH);
+    logger.debug(`Spawning ${program} with args: ${JSON.stringify(args)}`);
+    const spawned = pty.spawn(program, args, ptyOptions);
     logger.info(
       `[${cli}-yes] Spawned ${bin} with PID ${spawned.pid} (agent-yes v${getInstalledPackage().version})`,
     );

@@ -24,6 +24,70 @@ pub const CLAUDE_SESSION_PIN_ENV: &[&str] = &[
     "CLAUDE_CODE_ENTRYPOINT",
 ];
 
+/// Resolve a bare program name to an absolute path using POSIX PATH semantics.
+///
+/// `portable-pty`'s `CommandBuilder` resolves a RELATIVE program name against the
+/// cwd FIRST and accepts the result if it merely `exists()` — with no regular-file
+/// or executable check (portable-pty 0.8.1, `cmdbuilder.rs::search_path`). So a cwd
+/// that happens to hold an entry named like the agent CLI — a `claude/` directory,
+/// a symlink to one, or a non-executable `claude` file — shadows the real binary.
+/// exec then fails inside the forked child, and portable-pty's `close_random_fds()`
+/// `pre_exec` hook has already closed every fd >= 3, including std's CLOEXEC
+/// error-report pipe. The child therefore can't hand the errno back to the parent
+/// and dies on std's `rtassert!(output.write(&bytes).is_ok())` with
+/// `fatal runtime error: assertion failed: output.write(&bytes).is_ok(), aborting`
+/// instead of surfacing a normal "not found / not executable" spawn error.
+/// See issue #138.
+///
+/// POSIX is unambiguous that a command name containing no slash is looked up in
+/// PATH *only*, never in the cwd, so pre-resolving here is both the fix and the
+/// correct semantics. Names that already contain a separator are passed through
+/// untouched, so `./claude` still means "the one in this directory".
+///
+/// Empty PATH entries are skipped rather than treated as the cwd (a legacy POSIX
+/// allowance) — honouring them would reintroduce exactly the shadowing above.
+///
+/// Mirrors `resolveProgram` in ts/resolveBinary.ts — keep the two in sync.
+#[cfg(unix)]
+fn resolve_program(binary: &str, path_env: Option<&str>) -> Result<String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if binary.contains('/') {
+        return Ok(binary.to_string());
+    }
+
+    let path = match path_env {
+        Some(p) => p.to_string(),
+        None => std::env::var("PATH").unwrap_or_default(),
+    };
+
+    for dir in std::env::split_paths(&path) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let candidate = dir.join(binary);
+        // `metadata` FOLLOWS symlinks, so a symlink pointing at a directory is
+        // correctly rejected by the `is_file()` check.
+        let Ok(meta) = std::fs::metadata(&candidate) else {
+            continue;
+        };
+        if meta.is_file() && meta.permissions().mode() & 0o111 != 0 {
+            return Ok(candidate.to_string_lossy().into_owned());
+        }
+    }
+
+    Err(anyhow!(
+        "{binary}: command not found in PATH (install it, or point `binary:` at a full path)"
+    ))
+}
+
+/// Windows spawns through `cmd.exe /c`, which applies its own PATH/PATHEXT
+/// resolution — the cwd-shadowing bug above is unix-specific, so pass through.
+#[cfg(not(unix))]
+fn resolve_program(binary: &str, _path_env: Option<&str>) -> Result<String> {
+    Ok(binary.to_string())
+}
+
 /// Expand `${VAR}` references in `raw` against the current process environment.
 /// Sets `*unresolved = true` if any referenced variable is unset or empty, so
 /// callers can choose to skip the assignment rather than emit a blank value.
@@ -247,12 +311,17 @@ fn deprioritize_pid(pid: u32, nice: i32) {
 pub fn get_terminal_size() -> (u16, u16) {
     if let (Ok(cols), Ok(rows)) = (std::env::var("COLUMNS"), std::env::var("LINES")) {
         if let (Ok(cols), Ok(rows)) = (cols.parse::<u16>(), rows.parse::<u16>()) {
-            return (cols.max(20), rows);
+            return (cols.max(20), rows.max(4));
         }
     }
     // OS console size (ioctl on Unix, screen buffer on Windows). None when
     // stdout isn't a console (piped/redirected) -> fall through to 80x24.
-    console_size().unwrap_or((80, 24))
+    // A console whose winsize was never set (a pty created by `script`/a daemon)
+    // reports 0x0, so clamp both axes — a zero-sized PTY is rejected outright by
+    // the spawn layer. Mirrors getTerminalDimensions() in ts/index.ts.
+    console_size()
+        .map(|(cols, rows)| (cols.max(20), rows.max(4)))
+        .unwrap_or((80, 24))
 }
 
 /// PTY process context
@@ -371,6 +440,23 @@ pub async fn spawn_agent(
 
     // Determine the binary to run
     let binary = config.binary.as_ref().map(|s| s.as_str()).unwrap_or(cli);
+
+    // Resolve it to an absolute path BEFORE handing it to portable-pty, so an
+    // entry in the cwd that happens to share the CLI's name can never shadow the
+    // real binary and abort the forked child (issue #138 — see resolve_program).
+    // Honour a per-CLI PATH override from `config.env`: that's the PATH the child
+    // would actually see, so it must be the one we search.
+    let path_override = config.env.get("PATH").and_then(|raw| {
+        let mut unresolved = false;
+        let value = expand_env_vars(raw, &mut unresolved);
+        if unresolved {
+            None
+        } else {
+            Some(value)
+        }
+    });
+    let binary = resolve_program(binary, path_override.as_deref())?;
+    let binary = binary.as_str();
 
     // Build command - inherits parent environment by default
     // On Windows, use cmd.exe /c to resolve .cmd/.bat files via PATHEXT
@@ -572,6 +658,66 @@ mod tests {
 
     // Serialize tests that mutate env vars — std::env::set_var is not thread-safe
     static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    // Issue #138: a cwd entry named like the agent CLI used to shadow the real
+    // binary inside portable-pty, killing the forked child with
+    // "fatal runtime error: assertion failed: output.write(&bytes).is_ok()".
+    // resolve_program must consult PATH only, and only accept executable files.
+    #[cfg(unix)]
+    #[test]
+    fn test_resolve_program_ignores_cwd_and_non_executables() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = std::env::temp_dir().join(format!("ay-resolve-{}", std::process::id()));
+        let bin_dir = tmp.join("bin");
+        let cwd_dir = tmp.join("cwd");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::create_dir_all(&cwd_dir).unwrap();
+
+        // The real, executable binary — only reachable via PATH.
+        let real = bin_dir.join("ayfake");
+        std::fs::write(&real, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // The decoys the old code would have picked: a directory, a symlink to a
+        // directory, and a non-executable file — all named like the CLI.
+        std::fs::create_dir_all(cwd_dir.join("ayfake")).unwrap();
+        let path = bin_dir.to_string_lossy().into_owned();
+
+        // PATH wins over anything sitting in the cwd.
+        let resolved = resolve_program("ayfake", Some(&path)).unwrap();
+        assert_eq!(resolved, real.to_string_lossy());
+
+        // A non-executable file on PATH is skipped, not returned.
+        let dud_dir = tmp.join("dud");
+        std::fs::create_dir_all(&dud_dir).unwrap();
+        let dud = dud_dir.join("aydud");
+        std::fs::write(&dud, "not executable").unwrap();
+        std::fs::set_permissions(&dud, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(resolve_program("aydud", Some(&dud_dir.to_string_lossy())).is_err());
+
+        // A directory on PATH named like the CLI is skipped too.
+        assert!(resolve_program("ayfake", Some(&cwd_dir.to_string_lossy())).is_err());
+
+        // Empty PATH entries must NOT be treated as the cwd.
+        let with_empty = format!(":{path}");
+        assert_eq!(
+            resolve_program("ayfake", Some(&with_empty)).unwrap(),
+            real.to_string_lossy()
+        );
+
+        // A name containing a separator is passed through verbatim.
+        assert_eq!(
+            resolve_program("./ayfake", Some(&path)).unwrap(),
+            "./ayfake"
+        );
+
+        // Missing binaries produce a real error instead of a doomed spawn.
+        let err = resolve_program("ay-does-not-exist", Some(&path)).unwrap_err();
+        assert!(err.to_string().contains("command not found"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
 
     #[test]
     fn test_expand_env_vars() {
