@@ -5,4 +5,5 @@
 // signaling room, while sharing the same pids.jsonl / logs / fifos data plane.
 pub mod api;
 pub mod e2e;
+pub mod nego;
 pub mod share;

@@ -546,13 +546,41 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
         ("GET", p) if p.starts_with("/api/size/") => {
             let kw = url_decode(&p["/api/size/".len()..]);
             match resolve_one(&kw) {
-                Ok(r) => json_res(
-                    200,
-                    &json!({
-                        "pid": r.pid, "cols": null, "rows": null,
-                        "cwd": r.cwd, "cli": r.cli, "nego": false,
-                    }),
-                ),
+                Ok(r) => {
+                    let size = crate::serve::nego::read_ptysize(r.pid);
+                    json_res(
+                        200,
+                        &json!({
+                            "pid": r.pid,
+                            "cols": size.map(|s| s.0),
+                            "rows": size.map(|s| s.1),
+                            "cwd": r.cwd, "cli": r.cli, "nego": true,
+                        }),
+                    )
+                }
+                Err(e) => text(404, e),
+            }
+        }
+        ("GET", "/api/presence") => json_res(200, &crate::serve::nego::presence_get().await),
+        ("POST", "/api/presence") => {
+            let Ok(v) = serde_json::from_str::<Value>(body) else {
+                return text(400, "invalid JSON body");
+            };
+            match crate::serve::nego::presence_post(&v).await {
+                Ok(()) => text(204, ""),
+                Err((status, msg)) => text(status, msg),
+            }
+        }
+        ("POST", p) if p.starts_with("/api/resize/") => {
+            let kw = url_decode(&p["/api/resize/".len()..]);
+            let Ok(v) = serde_json::from_str::<Value>(body) else {
+                return text(400, "invalid JSON body");
+            };
+            match resolve_one(&kw) {
+                Ok(r) => match crate::serve::nego::resize_post(r.pid, &v).await {
+                    Ok(res) => json_res(200, &res),
+                    Err((status, msg)) => text(status, msg),
+                },
                 Err(e) => text(404, e),
             }
         }
