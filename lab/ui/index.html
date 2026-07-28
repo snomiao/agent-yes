@@ -7209,6 +7209,12 @@ my.translate = async (text, lang) => {
       // ---- rooms: localStorage cache + a manager you open by clicking the badge ----
       const ROOMS_KEY = "ay.rooms";
       const ROOM_TTL_MS = 90 * 24 * 60 * 60 * 1000; // evict stale rooms to bound how long a secret lingers in localStorage
+      // Cap the saved-room set so the boot fan-out (and the localStorage secret
+      // footprint) stays bounded no matter how many share links get opened over
+      // time. When over the cap we keep the most-recently-saved rooms and drop the
+      // oldest — a room silently forgotten this way is trivially re-added by
+      // re-opening its share link.
+      const MAX_ROOMS = 16;
       const loadRooms = () => {
         try {
           const r = JSON.parse(localStorage.getItem(ROOMS_KEY) || "{}");
@@ -7216,6 +7222,14 @@ my.translate = async (text, lang) => {
           let changed = false;
           for (const k of Object.keys(r)) {
             if (r[k]?.ts && now - r[k].ts > ROOM_TTL_MS) {
+              delete r[k];
+              changed = true;
+            }
+          }
+          const keys = Object.keys(r);
+          if (keys.length > MAX_ROOMS) {
+            keys.sort((a, b) => (r[b]?.ts || 0) - (r[a]?.ts || 0)); // newest first
+            for (const k of keys.slice(MAX_ROOMS)) {
               delete r[k];
               changed = true;
             }
@@ -7229,6 +7243,14 @@ my.translate = async (text, lang) => {
       const saveRoom = (room, token, host) => {
         const r = loadRooms();
         r[room] = { token, host: host || SIG_DEFAULT, ts: Date.now() };
+        // Bound at write time too: loadRooms() trims on read, but a fresh add can
+        // push to MAX_ROOMS+1 until the next read. The just-added room has the
+        // newest ts, so the trim drops the oldest OTHER room, never this one.
+        const keys = Object.keys(r);
+        if (keys.length > MAX_ROOMS) {
+          keys.sort((a, b) => (r[b]?.ts || 0) - (r[a]?.ts || 0)); // newest first
+          for (const k of keys.slice(MAX_ROOMS)) delete r[k];
+        }
         localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
       };
       const dropRoom = (room) => {
@@ -7461,14 +7483,26 @@ my.translate = async (text, lang) => {
         loadList();
       }
 
-      // Connect to every saved room at once (called on boot). A room already
-      // started from the URL/hash can be skipped so it gets a brief uncontended
-      // head start before the rest of the fleet performs crypto + ICE setup.
+      // Connect the saved rooms on boot. A room already started from the URL/hash
+      // is skipped (exceptRoom) so it gets an uncontended head start. The rest are
+      // STAGGERED rather than fired in one tick: opening N WebSockets + doing N
+      // crypto/ICE setups simultaneously janks the foreground room's open and
+      // spikes the browser's connection pool. Combined with the host-presence
+      // fast-fail (welcome.hostPresent), a dead saved room now costs ~one round
+      // trip instead of an 8s timeout, so the whole fleet settles quickly.
+      const RTC_FANOUT_STAGGER_MS = 120;
       function connectAllRooms(exceptRoom = null) {
         const r = loadRooms();
-        for (const name of Object.keys(r)) {
-          if (name !== exceptRoom) addRoomSource(name, r[name].token, r[name].host);
-        }
+        const names = Object.keys(r).filter((n) => n !== exceptRoom);
+        names.forEach((name, i) => {
+          setTimeout(() => {
+            // Re-read at fire time: during the stagger delay the user may have
+            // forgotten this room (removeRoom + dropRoom) — don't let a stale
+            // closure resurrect and re-persist it.
+            const cur = loadRooms()[name];
+            if (cur) addRoomSource(name, cur.token, cur.host);
+          }, i * RTC_FANOUT_STAGGER_MS);
+        });
       }
 
       // Back-compat alias: a freshly pasted/linked room is added like any other.
