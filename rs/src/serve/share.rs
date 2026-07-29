@@ -145,6 +145,83 @@ pub struct ShareConfig {
     pub sighost: String,
 }
 
+/// Path of the advisory lock recording which pid is hosting a given room.
+fn room_lock_path(room: &str) -> std::path::PathBuf {
+    global_dir().join(format!(".share-host-{room}.pid"))
+}
+
+/// Two `ayrs` hosts in the same signaling room both answer every `peer-join`,
+/// so each viewer's answer reaches the host that did *not* originate the offer
+/// and blows up with "invalid proposed signaling state transition from stable".
+/// Nothing recovers from that — the room just stops accepting viewers — so
+/// refuse to start rather than degrade the room that's already working.
+fn claim_room(room: &str) -> Result<()> {
+    claim_room_at(&room_lock_path(room), room)
+}
+
+fn claim_room_at(path: &std::path::Path, room: &str) -> Result<()> {
+    if let Ok(txt) = std::fs::read_to_string(path) {
+        if let Ok(pid) = txt.trim().parse::<i32>() {
+            if pid != std::process::id() as i32 && crate::pid_store::is_process_alive(pid as u32) {
+                bail!(
+                    "another ayrs host (pid {pid}) is already serving room {room}\n\
+                     running two hosts in one room breaks WebRTC answering for every viewer.\n\
+                     stop it first (`ayrs serve uninstall`, or kill {pid}), or host a different room."
+                );
+            }
+        }
+    }
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p).ok();
+    }
+    std::fs::write(path, std::process::id().to_string()).ok();
+    Ok(())
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::*;
+
+    #[test]
+    fn claims_a_free_room_and_records_our_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("lock.pid");
+        claim_room_at(&p, "r1").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), std::process::id().to_string());
+    }
+
+    #[test]
+    fn takes_over_a_room_held_by_a_dead_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("lock.pid");
+        // pid 1 is alive but is not us; use an implausibly high dead pid instead.
+        std::fs::write(&p, "4194303").unwrap();
+        claim_room_at(&p, "r1").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), std::process::id().to_string());
+    }
+
+    #[test]
+    fn refuses_a_room_held_by_a_live_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("lock.pid");
+        // A real live process that isn't us (pid 1 is unusable: kill(1,0) is
+        // EPERM for a normal user, which reads as "dead").
+        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        std::fs::write(&p, child.id().to_string()).unwrap();
+        let err = claim_room_at(&p, "r1").unwrap_err().to_string();
+        let _ = child.kill();
+        assert!(err.contains("already serving room r1"), "{err}");
+    }
+
+    #[test]
+    fn reclaiming_our_own_room_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("lock.pid");
+        claim_room_at(&p, "r1").unwrap();
+        claim_room_at(&p, "r1").unwrap();
+    }
+}
+
 pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     let explicit = cfg.url.is_some();
     let mut room = match &cfg.url {
@@ -156,6 +233,7 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
         bail!("refusing to host an unencrypted room — delete ~/.agent-yes/.share-room-ayrs to rotate");
     }
     let mut secret = s;
+    claim_room(&room.room)?;
     let api_token = api::load_or_create_token().context("serve token")?;
 
     let peers: Peers = Arc::new(Mutex::new(HashMap::new()));
@@ -179,6 +257,7 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
                 room = mint_room(&room.host);
                 secret = e2e::parse_secret(&room.token)?.0;
                 persist_room(&room);
+                claim_room(&room.room)?;
                 let link = format_share_link(&room.room, &secret, &room.host);
                 eprintln!("[ayrs share] room rotated: {link}");
             }
