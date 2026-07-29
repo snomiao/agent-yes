@@ -8,6 +8,11 @@
 mod agent_permissions;
 #[path = "../pid_store.rs"]
 mod pid_store;
+// needs_input classification reuses the CLI `needsInput`/`working` patterns
+// that ship embedded in default.config.yaml, so the Rust daemon's dot matches
+// `ay ls` exactly instead of re-deriving its own heuristics.
+#[path = "../config_loader.rs"]
+mod config_loader;
 #[path = "../log_files.rs"]
 mod log_files;
 #[path = "../fifo.rs"]

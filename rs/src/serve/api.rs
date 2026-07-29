@@ -118,6 +118,15 @@ fn file_mtime_ms(path: &str) -> Option<i64> {
     Some(m.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as i64)
 }
 
+/// Window within which a recorded human keystroke still counts as "typing"
+/// (ts/subcommands.ts TYPING_WINDOW_MS) — comfortably longer than the Rust
+/// writer's throttle so continuous typing never flickers off.
+const TYPING_WINDOW_MS: i64 = 3_000;
+
+fn is_user_typing(pid: u32) -> bool {
+    last_stdin_at(pid).map(|t| now_ms() - t < TYPING_WINDOW_MS).unwrap_or(false)
+}
+
 fn last_stdin_at(pid: u32) -> Option<i64> {
     let p = global_dir().join("activity").join(format!("{pid}.stdin"));
     std::fs::read_to_string(p).ok()?.trim().parse().ok()
@@ -254,15 +263,217 @@ fn log_status_text(log_file: Option<&str>) -> Option<String> {
     status
 }
 
+/// Render the last `n` rows of a raw PTY log tail (ts/subcommands.ts
+/// renderLogTailLines). `max` bounds the byte window: 32KB for screen-state
+/// questions, more for the todo block, which later output often pushes up.
+fn render_tail_lines(log_file: &str, max: u64, n: usize) -> Option<(u64, i64, Vec<String>)> {
+    let (size, mtime, buf) = read_file_tail(log_file, max).ok()?;
+    if size == 0 {
+        return None;
+    }
+    let mut vt = crate::vterm::VTermProxy::new(50, 200);
+    vt.process(&buf);
+    let rendered = if vt.alternate_screen() { vt.contents() } else { vt.dump_scrollback() };
+    let mut lines: Vec<String> = rendered.lines().map(|l| l.trim_end().to_string()).collect();
+    if n > 0 && lines.len() > n {
+        lines.drain(..lines.len() - n);
+    }
+    Some((size, mtime, lines))
+}
+
+/// (size, mtime)-keyed cache for the JSON-valued derived fields, same
+/// invalidation rule as TITLE_CACHE: recompute only when the log grew, so the
+/// 1s subscribe tick over a big fleet doesn't re-render every screen.
+type JsonCache = std::sync::Mutex<std::collections::HashMap<String, (u64, i64, Value)>>;
+static TASKS_CACHE: once_cell::sync::Lazy<JsonCache> = once_cell::sync::Lazy::new(Default::default);
+static BADGE_CACHE: once_cell::sync::Lazy<JsonCache> = once_cell::sync::Lazy::new(Default::default);
+static NI_CACHE: once_cell::sync::Lazy<JsonCache> = once_cell::sync::Lazy::new(Default::default);
+
+fn json_cached(
+    cache: &JsonCache,
+    key: &str,
+    size: u64,
+    mtime: i64,
+    compute: impl FnOnce() -> Value,
+) -> Value {
+    if let Ok(map) = cache.lock() {
+        if let Some((s, m, v)) = map.get(key) {
+            if *s == size && *m == mtime {
+                return v.clone();
+            }
+        }
+    }
+    let v = compute();
+    if let Ok(mut map) = cache.lock() {
+        map.insert(key.to_string(), (size, mtime, v.clone()));
+    }
+    v
+}
+
+/// Task progress from the rendered todo block. Reads a 256KB window (vs 32KB
+/// elsewhere) and keeps the WHOLE render — the latest block is often scrolled
+/// well back from the final rows.
+fn log_tasks(log_file: Option<&str>) -> Value {
+    let Some(log_file) = log_file else { return Value::Null };
+    let Some((size, mtime, lines)) = render_tail_lines(log_file, 256 * 1024, 0) else {
+        return Value::Null;
+    };
+    json_cached(&TASKS_CACHE, log_file, size, mtime, || {
+        crate::serve::meta::parse_task_counts(&lines)
+            .map(|t| json!({ "done": t.done, "total": t.total }))
+            .unwrap_or(Value::Null)
+    })
+}
+
+fn log_badges(log_file: Option<&str>) -> Vec<String> {
+    let Some(log_file) = log_file else { return vec![] };
+    let Some((size, mtime, lines)) = render_tail_lines(log_file, 32_768, 40) else {
+        return vec![];
+    };
+    let v = json_cached(&BADGE_CACHE, log_file, size, mtime, || {
+        json!(crate::serve::meta::match_badges(&lines))
+    });
+    serde_json::from_value(v).unwrap_or_default()
+}
+
+/// The CLI's needsInput/working patterns, compiled once per CLI name. Falls
+/// back to "no patterns" (→ never needs_input) for CLIs config doesn't know.
+fn cli_patterns(cli: &str) -> std::sync::Arc<(Vec<regex::Regex>, Vec<regex::Regex>)> {
+    type Cell = std::sync::Mutex<
+        std::collections::HashMap<String, std::sync::Arc<(Vec<regex::Regex>, Vec<regex::Regex>)>>,
+    >;
+    static CACHE: once_cell::sync::Lazy<Cell> = once_cell::sync::Lazy::new(Default::default);
+    if let Ok(map) = CACHE.lock() {
+        if let Some(v) = map.get(cli) {
+            return v.clone();
+        }
+    }
+    let v = std::sync::Arc::new(crate::serve::meta::cli_patterns(cli).unwrap_or_default());
+    if let Ok(mut map) = CACHE.lock() {
+        map.insert(cli.to_string(), v.clone());
+    }
+    v
+}
+
+fn log_needs_input(log_file: Option<&str>, cli: &str) -> Value {
+    let Some(log_file) = log_file else { return Value::Null };
+    let pats = cli_patterns(cli);
+    if pats.0.is_empty() {
+        return Value::Null;
+    }
+    let Some((size, mtime, lines)) = render_tail_lines(log_file, 32_768, 40) else {
+        return Value::Null;
+    };
+    json_cached(&NI_CACHE, log_file, size, mtime, || {
+        crate::serve::meta::classify_needs_input(&lines, &pats.0, &pats.1)
+            .map(Value::String)
+            .unwrap_or(Value::Null)
+    })
+}
+
+/// Git snapshot for the list — served ONLY from cache. A miss returns the stale
+/// value (null the first time) and schedules a background refresh.
+///
+/// Forking `git status` on the request path is what the TS daemon calls out as
+/// the old design that "pinned host load": one fork per agent per poll tick. It
+/// really does — a first uncached /api/ls over ~40 agents in submodule-heavy
+/// superprojects took **1m48s** before this. The console reads a slightly stale
+/// branch/dirty count instead, which is what the TS watcher-invalidated cache
+/// effectively gives it too.
+/// Repo root for a cwd, cached forever (a checkout doesn't move). Keying the
+/// status cache by ROOT — as the TS daemon does — collapses the N agents that
+/// share a worktree into ONE `git status` instead of N racing forks.
+fn git_root(cwd: &str) -> Option<String> {
+    type Cell = std::sync::Mutex<std::collections::HashMap<String, Option<String>>>;
+    static ROOTS: once_cell::sync::Lazy<Cell> = once_cell::sync::Lazy::new(Default::default);
+    if let Ok(map) = ROOTS.lock() {
+        if let Some(v) = map.get(cwd) {
+            return v.clone();
+        }
+    }
+    let root = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Ok(mut map) = ROOTS.lock() {
+        map.insert(cwd.to_string(), root.clone());
+    }
+    root
+}
+
+fn git_status(cwd: Option<&str>) -> Value {
+    let Some(cwd) = cwd else { return Value::Null };
+    let Some(cwd) = git_root(cwd) else { return Value::Null }; // not a repo
+    let cwd = cwd.as_str();
+    const GIT_TTL_MS: i64 = 10_000;
+    type Cell = std::sync::Mutex<std::collections::HashMap<String, (i64, Value)>>;
+    static CACHE: once_cell::sync::Lazy<Cell> = once_cell::sync::Lazy::new(Default::default);
+    // Repo roots already being refreshed, so N agents sharing a root fork once.
+    type Flight = std::sync::Mutex<std::collections::HashSet<String>>;
+    static INFLIGHT: once_cell::sync::Lazy<Flight> = once_cell::sync::Lazy::new(Default::default);
+
+    let now = now_ms();
+    let mut stale = Value::Null;
+    let mut fresh = false;
+    if let Ok(map) = CACHE.lock() {
+        if let Some((ts, v)) = map.get(cwd) {
+            stale = v.clone();
+            fresh = now - *ts < GIT_TTL_MS;
+        }
+    }
+    if fresh {
+        return stale;
+    }
+    let claimed = INFLIGHT.lock().map(|mut s| s.insert(cwd.to_string())).unwrap_or(false);
+    if claimed {
+        let cwd = cwd.to_string();
+        std::thread::spawn(move || {
+            let out = std::process::Command::new("git")
+                .args(["status", "--porcelain=v2", "--branch"])
+                .current_dir(&cwd)
+                .output();
+            let v = match out {
+                Ok(o) if o.status.success() => serde_json::to_value(
+                    crate::serve::meta::parse_porcelain_v2(&String::from_utf8_lossy(&o.stdout)),
+                )
+                .unwrap_or(Value::Null),
+                // Not a repo / git missing: null, same as the TS daemon.
+                _ => Value::Null,
+            };
+            if let Ok(mut map) = CACHE.lock() {
+                map.insert(cwd.clone(), (now_ms(), v));
+            }
+            if let Ok(mut s) = INFLIGHT.lock() {
+                s.remove(&cwd);
+            }
+        });
+    }
+    stale
+}
+
 /// One /api/ls entry: the raw record plus the derived fields the console reads.
 fn with_meta(r: &PidRecord) -> Value {
     let alive = is_process_alive(r.pid);
     let exited = r.status == "exited" || !alive;
     let last_active = r.log_file.as_deref().and_then(file_mtime_ms);
+    // "Waiting on you": alive, and parked on a menu it didn't auto-resolve.
+    // Skipped when unresponsive — the Rust wedge signal (`stuck`) wins, which
+    // is the same precedence deriveLiveState uses in `ay ls`.
+    let question = if exited || r.unresponsive {
+        Value::Null
+    } else {
+        log_needs_input(r.log_file.as_deref(), &r.cli)
+    };
     let status = if exited {
         "exited"
     } else if r.unresponsive {
         "stuck"
+    } else if !question.is_null() {
+        "needs_input"
     } else if last_active.map(|t| now_ms() - t < ACTIVE_WINDOW_MS).unwrap_or(false) {
         "active"
     } else {
@@ -277,10 +488,23 @@ fn with_meta(r: &PidRecord) -> Value {
         "status_text".into(),
         if exited { Value::Null } else { json!(log_status_text(r.log_file.as_deref())) },
     );
-    o.insert("question".into(), Value::Null);
-    o.insert("git".into(), Value::Null);
-    o.insert("tasks".into(), Value::Null);
-    o.insert("badges".into(), json!([]));
+    o.insert("question".into(), question);
+    // Exited agents get null/[]: their screen and repo state are no longer live.
+    o.insert("git".into(), if exited { Value::Null } else { git_status(Some(&r.cwd)) });
+    o.insert("tasks".into(), if exited { Value::Null } else { log_tasks(r.log_file.as_deref()) });
+    o.insert(
+        "badges".into(),
+        if exited {
+            json!([])
+        } else {
+            let mut b = log_badges(r.log_file.as_deref());
+            // Time-derived, not screen-matched — same chip `ay ls` shows.
+            if is_user_typing(r.pid) {
+                b.push(crate::serve::meta::TYPING_BADGE.to_string());
+            }
+            json!(b)
+        },
+    );
     // TS falls back to started_at when there's no log yet (freshly spawned).
     o.insert("last_active_at".into(), json!(last_active.unwrap_or(r.started_at)));
     o.insert("last_stdin_at".into(), json!(last_stdin_at(r.pid)));
@@ -315,12 +539,13 @@ fn resolve_one(kw: &str) -> Result<PidRecord, String> {
     recs.into_iter().next().ok_or_else(|| format!("no agent matches {kw:?}"))
 }
 
-fn ls_json(all: bool, active: bool) -> Vec<Value> {
+fn ls_json(all: bool, active: bool, keyword: &str) -> Vec<Value> {
     let mut recs = read_records();
     recs.sort_by_key(|r| -r.started_at);
     recs.iter()
         .filter(|r| all || r.status != "exited")
         .filter(|r| !active || is_process_alive(r.pid))
+        .filter(|r| matches_keyword(r, keyword))
         .map(with_meta)
         .collect()
 }
@@ -331,14 +556,15 @@ fn sse_frame(payload: &Value) -> Vec<u8> {
     format!("data: {}\n\n", payload).into_bytes()
 }
 
-fn spawn_ls_subscribe(all: bool, active: bool) -> mpsc::Receiver<Vec<u8>> {
+fn spawn_ls_subscribe(all: bool, active: bool, keyword: String) -> mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
     tokio::spawn(async move {
         let mut known: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
         let mut first = true;
         let mut last_ping = std::time::Instant::now();
         loop {
-            let entries = tokio::task::spawn_blocking(move || ls_json(all, active))
+            let kw = keyword.clone();
+            let entries = tokio::task::spawn_blocking(move || ls_json(all, active, &kw))
                 .await
                 .unwrap_or_default();
             let mut upsert: Vec<Value> = Vec::new();
@@ -660,10 +886,11 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
     let q = parse_query(query);
     let all = q.get("all").map(|v| v == "1").unwrap_or(false);
     let active = q.get("active").map(|v| v == "1").unwrap_or(false);
+    let keyword = q.get("keyword").cloned().unwrap_or_default();
 
     match (method, path) {
         ("GET", "/api/ls") => {
-            let entries = tokio::task::spawn_blocking(move || ls_json(all, active))
+            let entries = tokio::task::spawn_blocking(move || ls_json(all, active, &keyword))
                 .await
                 .unwrap_or_default();
             json_res(200, &Value::Array(entries))
@@ -671,7 +898,7 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
         ("GET", "/api/ls/subscribe") => ApiResponse {
             status: 200,
             content_type: "text/event-stream".into(),
-            body: Body::Stream(spawn_ls_subscribe(all, active)),
+            body: Body::Stream(spawn_ls_subscribe(all, active, keyword.clone())),
         },
         ("GET", "/api/whoami") => json_res(200, &json!({ "host": whoami_host() })),
         ("GET", "/api/version") => {

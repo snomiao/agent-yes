@@ -2,7 +2,8 @@
 //! Supports JSON, YAML, YML formats
 //! Priority: project-dir > home-dir > package-dir
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -977,3 +978,49 @@ logsDir: /custom/logs
         }
     }
 }
+
+// ── regex compilation ────────────────────────────────────────────────────────
+// Lives here (rather than in config.rs) because config_loader has no other
+// crate-internal dependencies, so the standalone `ayrs` binary can compile the
+// shipped `needsInput`/`working` patterns without pulling in the whole runtime.
+
+pub fn compile_regex_list(sources: Option<Vec<RegexSource>>) -> Result<Vec<Regex>> {
+    sources
+        .unwrap_or_default()
+        .into_iter()
+        .map(compile_regex)
+        .collect()
+}
+
+fn compile_regex(source: RegexSource) -> Result<Regex> {
+    let (pattern, flags) = match source {
+        RegexSource::Pattern(pattern) => (pattern, None),
+        RegexSource::Structured { pattern, flags } => (pattern, flags),
+    };
+
+    let inline_flags = compile_inline_flags(flags.as_deref().unwrap_or(""))?;
+    let compiled = format!("{}{}", inline_flags, pattern);
+    Regex::new(&compiled).with_context(|| format!("Invalid regex pattern '{}'", pattern))
+}
+
+fn compile_inline_flags(flags: &str) -> Result<String> {
+    if flags.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut normalized = String::new();
+    for flag in flags.chars() {
+        match flag {
+            'i' | 'm' | 's' | 'x' | 'U' => normalized.push(flag),
+            'u' => {}
+            other => return Err(anyhow!("Unsupported regex flag '{}'", other)),
+        }
+    }
+
+    if normalized.is_empty() {
+        Ok(String::new())
+    } else {
+        Ok(format!("(?{})", normalized))
+    }
+}
+
