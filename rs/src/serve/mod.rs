@@ -4,7 +4,10 @@
 // `.share-room`), so both hosts can run side by side without fighting over the
 // signaling room, while sharing the same pids.jsonl / logs / fifos data plane.
 pub mod api;
+pub mod control;
+pub mod discover;
 pub mod e2e;
+pub mod graph;
 pub mod meta;
 pub mod nego;
 pub mod service;

@@ -539,6 +539,78 @@ fn resolve_one(kw: &str) -> Result<PidRecord, String> {
     recs.into_iter().next().ok_or_else(|| format!("no agent matches {kw:?}"))
 }
 
+/// GET /api/search — content search over every agent's RENDERED screen text.
+///
+/// Scans newest-activity-first (the log mtime is the activity clock) and stops
+/// at SEARCH_MAX_HITS or when the time budget runs out, reporting `partial` so
+/// the console can say "showing the first N". Renders are cached by
+/// (size, mtime) like the other screen-derived fields.
+fn search_json(needle: &str, budget_ms: u64) -> Value {
+    const SEARCH_TAIL_BYTES: u64 = 256 * 1024;
+    const SEARCH_MAX_HITS: usize = 20;
+    if needle.chars().count() < 2 {
+        return json!({ "hits": [], "scanned": 0, "total": 0, "partial": false });
+    }
+    let ql = needle.to_lowercase();
+    let t0 = std::time::Instant::now();
+
+    // newest activity first
+    let mut live: Vec<(PidRecord, i64)> = read_records()
+        .into_iter()
+        .filter_map(|r| {
+            let m = r.log_file.as_deref().and_then(file_mtime_ms)?;
+            Some((r, m))
+        })
+        .collect();
+    live.sort_by_key(|(_, m)| -*m);
+    let total = live.len();
+
+    let mut hits: Vec<Value> = Vec::new();
+    let mut scanned = 0usize;
+    let mut partial = false;
+    for (r, _) in live {
+        if hits.len() >= SEARCH_MAX_HITS {
+            break;
+        }
+        if t0.elapsed().as_millis() as u64 > budget_ms {
+            partial = true;
+            break;
+        }
+        let Some(log) = r.log_file.as_deref() else { continue };
+        let Some((_, _, lines)) = render_tail_lines(log, SEARCH_TAIL_BYTES, 0) else { continue };
+        scanned += 1;
+        if let Some(h) =
+            crate::serve::discover::search_hit(r.pid, &r.cli, &r.cwd, &lines.join("\n"), &ql)
+        {
+            hits.push(h);
+        }
+    }
+    json!({ "hits": hits, "scanned": scanned, "total": total, "partial": partial })
+}
+
+/// resolve_one over ALL records (including exited) — what the lifecycle routes
+/// need, since killing/restarting an already-dead agent must still resolve it.
+pub fn resolve_one_all(kw: &str) -> Result<PidRecord, String> {
+    resolve_one(kw)
+}
+
+/// Mark an agent exited in the shared pids.jsonl, so both daemons and `ay ls`
+/// agree immediately instead of waiting for liveness to be re-derived.
+pub fn mark_exited(pid: u32, reason: &str) {
+    let path = global_dir().join("pids.jsonl");
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
+        return;
+    };
+    // Append-only: readers merge by pid with last-line-wins, so a partial record
+    // would drop fields. Re-emit the whole record with the status patched.
+    let Some(mut rec) = read_records().into_iter().find(|r| r.pid == pid) else { return };
+    rec.status = "exited".to_string();
+    rec.exit_reason = Some(reason.to_string());
+    if let Ok(line) = serde_json::to_string(&rec) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 fn ls_json(all: bool, active: bool, keyword: &str) -> Vec<Value> {
     let mut recs = read_records();
     recs.sort_by_key(|r| -r.started_at);
@@ -962,6 +1034,56 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
             }
         }
         ("POST", "/api/send") => handle_send(body).await,
+        ("GET", "/api/spawn-config") => crate::serve::control::spawn_config(),
+        ("GET", "/api/notes") => json_res(200, &crate::serve::discover::notes(&global_dir())),
+        ("GET", "/api/graph") => {
+            let records: Vec<PidRecord> =
+                read_records().into_iter().filter(|r| r.status != "exited").collect();
+            let sizes = records
+                .iter()
+                .filter_map(|r| {
+                    crate::serve::nego::read_ptysize(r.pid)
+                        .map(|(c, rows)| (r.pid, (c as u16, rows as u16)))
+                })
+                .collect();
+            json_res(
+                200,
+                &crate::serve::graph::build(crate::serve::graph::GraphInput {
+                    records: &records,
+                    hostname: hostname(),
+                    reads: crate::serve::discover::read_edges(&global_dir()),
+                    sizes,
+                }),
+            )
+        }
+        // /api/ws + /api/ws/status walk the workspace root through the JS
+        // codehost/provision package; the TS daemon itself 501s without it.
+        ("GET", "/api/ws") | ("GET", "/api/ws/status") => text(
+            501,
+            "workspace routes need the JS codehost/provision package — use `ay serve`",
+        ),
+        ("GET", "/api/edges") => {
+            let cwds: Vec<String> = read_records().into_iter().map(|r| r.cwd).collect();
+            json_res(
+                200,
+                &json!({
+                    "reads": crate::serve::discover::read_edges(&global_dir()),
+                    "sends": crate::serve::discover::message_edges(&cwds),
+                }),
+            )
+        }
+        ("GET", "/api/search") => {
+            let needle = q.get("q").cloned().unwrap_or_default().trim().to_string();
+            let budget =
+                q.get("budget_ms").and_then(|v| v.parse::<u64>().ok()).unwrap_or(900).min(3_000);
+            tokio::task::spawn_blocking(move || search_json(&needle, budget))
+                .await
+                .map(|v| json_res(200, &v))
+                .unwrap_or_else(|e| text(500, e.to_string()))
+        }
+        ("POST", "/api/kill") => crate::serve::control::kill(body),
+        ("POST", "/api/restart") => crate::serve::control::restart(body),
+        ("POST", "/api/spawn") => crate::serve::control::spawn(body),
         ("OPTIONS", _) => text(204, ""),
         _ => text(404, "not found"),
     }
