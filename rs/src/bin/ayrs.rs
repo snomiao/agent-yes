@@ -37,14 +37,38 @@ enum Command {
         /// Signaling host when minting a room
         #[arg(long, default_value = serve::share::DEFAULT_SIGHOST)]
         sighost: String,
+
+        /// Install/uninstall/inspect the daemon as a native OS service
+        /// (launchd on macOS, systemd --user on Linux) instead of running it
+        /// in the foreground.
+        #[command(subcommand)]
+        action: Option<ServeAction>,
     },
+}
+
+#[derive(Subcommand)]
+enum ServeAction {
+    /// Register `ayrs serve --webrtc` with the OS supervisor and start it
+    Install,
+    /// Stop and deregister the service
+    Uninstall,
+    /// Show whether the service is installed and running
+    Status,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Serve { webrtc, sighost } => {
+        Command::Serve { webrtc, sighost, action } => {
+            match action {
+                // Service management never needs a room up front: the unit
+                // re-runs `ayrs serve --webrtc` which loads/mints as usual.
+                Some(ServeAction::Install) => return serve::service::install(&webrtc, &sighost),
+                Some(ServeAction::Uninstall) => return serve::service::uninstall(),
+                Some(ServeAction::Status) => return serve::service::status(),
+                None => {}
+            }
             let Some(webrtc) = webrtc else {
                 anyhow::bail!("ayrs serve currently requires --webrtc (HTTP mode still lives in `ay serve`)");
             };
