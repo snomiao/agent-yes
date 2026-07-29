@@ -6,4 +6,5 @@
 pub mod api;
 pub mod e2e;
 pub mod nego;
+pub mod service;
 pub mod share;
