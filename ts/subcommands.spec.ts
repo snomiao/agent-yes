@@ -1490,6 +1490,66 @@ describe("subcommands.cmdSend safety guards", () => {
       else process.env.AGENT_YES_PID = savedAyPid;
     }
   });
+
+  // An unknown flag takes the next token as its value, so `ay send <pid>
+  // --body-file report.txt` used to send an EMPTY body and report success. The
+  // sender cannot detect that — the missing thing is the body itself — so only
+  // the receiver ever sees it. Refuse the send and name the flag that ate it.
+  it("refuses a send whose message was swallowed by an unknown flag", async () => {
+    const { runSubcommand } = await loadModule();
+    const stderr: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (s: any) => {
+      stderr.push(String(s));
+      return true;
+    };
+    try {
+      const code = await runSubcommand([
+        "bun",
+        "cli.js",
+        "send",
+        "999999",
+        "--body-file",
+        "/tmp/nope.txt",
+      ]);
+      expect(code).toBe(1);
+      const out = stderr.join("");
+      expect(out).toMatch(/no message/);
+      expect(out).toMatch(/--body-file/);
+      // It must also say what to do instead, or the caller just retries.
+      expect(out).toMatch(/ay send 999999 -/);
+    } finally {
+      process.stderr.write = orig;
+    }
+  });
+
+  // The flags were all implemented and documented in the option list, but
+  // `--help` was disabled, so the CLI only ever printed the one-line usage that
+  // mentions --code. That is what makes a real flag indistinguishable from a
+  // swallowed one from the outside.
+  it("prints the real option list for `ay send --help`, including --force", async () => {
+    const { runSubcommand } = await loadModule();
+    const stdout: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    const origLog = console.log;
+    (process.stdout as any).write = (s: any) => {
+      stdout.push(String(s));
+      return true;
+    };
+    // yargs prints help through console.log, which vitest may have replaced.
+    console.log = (...a: unknown[]) => stdout.push(a.map(String).join(" "));
+    let code: number;
+    try {
+      code = await runSubcommand(["bun", "cli.js", "send", "--help"]);
+    } finally {
+      process.stdout.write = orig;
+      console.log = origLog;
+    }
+    expect(code).toBe(0);
+    const out = stdout.join("");
+    expect(out).toMatch(/--force/);
+    expect(out).toMatch(/--no-wait/);
+  });
 });
 
 // ---------------------------------------------------------------------------

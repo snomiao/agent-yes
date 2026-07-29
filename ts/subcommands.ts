@@ -3078,11 +3078,20 @@ async function cmdSend(rest: string[]): Promise<number> {
       description:
         "Fire-and-forget: skip the paste-settle wait and submit confirmation, don't retry a swallowed Enter (also: AGENT_YES_SEND_NO_WAIT=1)",
     })
-    .help(false)
+    // `ay send --help` used to fall through to the terse one-line usage error,
+    // which mentions only --code. Every other option (--force, --no-wait,
+    // --latest, --all, --cwd) was implemented and described right here but
+    // invisible from the CLI — so a caller could not tell a real flag from one
+    // being silently swallowed. Both halves of that confusion are closed now:
+    // unknown flags are rejected below, and the real ones are printable.
+    .help("help")
     .version(false)
     .exitProcess(false);
 
   const argv = await y.parseAsync();
+  // yargs already printed the help text by this point (exitProcess(false) makes
+  // it print and keep going); just stop before the no-message guard fires.
+  if (argv.help) return 0;
   const opts: CommonOpts = {
     all: argv.all,
     active: false,
@@ -3095,6 +3104,42 @@ async function cmdSend(rest: string[]): Promise<number> {
 
   if (!keyword)
     throw new Error("usage: ay send <keyword> <msg|-> [--code=enter|esc|ctrl-c|ctrl-y|tab|none]");
+
+  // Empty-body guard: yargs is not strict here, so an unknown flag SWALLOWS the
+  // message. `ay send <pid> --body-file report.txt` parses as {body-file:
+  // "report.txt"} with `_` = [pid] — the send then succeeds with an empty body.
+  // Nothing errors: the sender sees "sent to pid N:" and cannot tell, because
+  // the one thing that would have shown it (the body) is the thing that is
+  // missing. Only the receiver can see it. So refuse to send a body-less message
+  // and name the flags that ate it.
+  if (argv._.length < 2) {
+    const known = new Set([
+      "_",
+      "$0",
+      "code",
+      "all",
+      "latest",
+      "cwd",
+      "force",
+      "no-wait",
+      "noWait",
+      "async",
+      "help",
+    ]);
+    // yargs also exposes a camelCase twin of every kebab flag; list each once.
+    const unknown = Object.keys(argv).filter((k) => !known.has(k) && !/[A-Z]/.test(k));
+    throw new Error(
+      `ay send: no message. ${
+        unknown.length
+          ? `These are not ay send options, so they consumed the message instead: ${unknown
+              .map((k) => `--${k}`)
+              .join(
+                ", ",
+              )}. There is no --body-file; pipe the file in with: cat FILE | ay send ${keyword} -`
+          : `usage: ay send <keyword> <msg|-> (pass "" explicitly to send a bare control code)`
+      }`,
+    );
+  }
 
   const codeName = argv.code.toLowerCase();
   {
@@ -3131,6 +3176,16 @@ async function cmdSend(rest: string[]): Promise<number> {
     body = Buffer.concat(chunks).toString("utf-8").trimEnd();
   } else {
     body = rawMessage;
+  }
+
+  // Same guard, one layer down: `cat missing.txt | ay send <pid> -` gives an
+  // empty stdin (cat's failure goes to the sender's stderr, not to us) and would
+  // otherwise deliver nothing. An explicit `ay send <pid> ""` still works — that
+  // is how you send a bare control code.
+  if (rawMessage === "-" && body === "") {
+    throw new Error(
+      `ay send: stdin was empty, refusing to send an empty message to pid ${record.pid}. (Did the file exist? Check the producing command's exit status.)`,
+    );
   }
 
   // Who's sending, and have they actually looked at this target recently?
