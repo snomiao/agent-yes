@@ -3222,6 +3222,15 @@ async function cmdSend(rest: string[]): Promise<number> {
     })
     .help(false)
     .version(false)
+    // An UNKNOWN flag must be an error, never a silent reinterpretation of the
+    // message. yargs otherwise swallows `--body-file /tmp/x` as an ad-hoc option
+    // whose VALUE is the next token — which removes the positional entirely and
+    // sends an EMPTY body. That failure is invisible from both ends: the sender
+    // sees a normal exit, the recipient sees a blank message and reads it as an
+    // idle lane. Observed 2026-07-30: four consecutive replies vanished this way,
+    // and the receiving lane concluded the sender had stopped working and began
+    // taking over the work.
+    .strictOptions()
     .exitProcess(false);
 
   const argv = await y.parseAsync();
@@ -3237,6 +3246,17 @@ async function cmdSend(rest: string[]): Promise<number> {
 
   if (!keyword)
     throw new Error("usage: ay send <keyword> <msg|-> [--code=enter|esc|ctrl-c|ctrl-y|tab|none]");
+
+  // Second line of defence, independent of how the message went missing: never
+  // deliver nothing. Sending an empty body is never what anyone meant, and its
+  // whole cost is paid by the RECIPIENT, who cannot tell "no message" from
+  // "nothing to say". `-` is exempt here and validated after stdin is read.
+  if (rawMessage !== "-" && rawMessage.trim() === "") {
+    throw new Error(
+      "ay send: refusing to send an empty message. Pass the text as a single argument, " +
+        "or use `-` to read the body from stdin (e.g. `ay send <keyword> - < file.txt`).",
+    );
+  }
 
   const codeName = argv.code.toLowerCase();
   {
@@ -3271,6 +3291,9 @@ async function cmdSend(rest: string[]): Promise<number> {
     const chunks: Buffer[] = [];
     for await (const chunk of process.stdin) chunks.push(chunk as Buffer);
     body = Buffer.concat(chunks).toString("utf-8").trimEnd();
+    if (body.trim() === "") {
+      throw new Error("ay send: refusing to send an empty message (stdin was empty).");
+    }
   } else {
     body = rawMessage;
   }
