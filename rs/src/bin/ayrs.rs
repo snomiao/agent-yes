@@ -43,6 +43,11 @@ enum Command {
         #[arg(long, default_value = serve::share::DEFAULT_SIGHOST)]
         sighost: String,
 
+        /// Also (or instead) serve the console over a local HTTP port.
+        /// 0 picks a free port. Loopback only.
+        #[arg(long)]
+        port: Option<u16>,
+
         /// Install/uninstall/inspect the daemon as a native OS service
         /// (launchd on macOS, systemd --user on Linux) instead of running it
         /// in the foreground.
@@ -65,7 +70,7 @@ enum ServeAction {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Serve { webrtc, sighost, action } => {
+        Command::Serve { webrtc, sighost, action, port } => {
             match action {
                 // Service management never needs a room up front: the unit
                 // re-runs `ayrs serve --webrtc` which loads/mints as usual.
@@ -74,11 +79,19 @@ async fn main() -> anyhow::Result<()> {
                 Some(ServeAction::Status) => return serve::service::status(),
                 None => {}
             }
-            let Some(webrtc) = webrtc else {
-                anyhow::bail!("ayrs serve currently requires --webrtc (HTTP mode still lives in `ay serve`)");
-            };
-            let url = if webrtc.is_empty() { None } else { Some(webrtc) };
-            serve::share::run_share(serve::share::ShareConfig { url, sighost }).await
+            // --port and --webrtc are independent transports over the SAME API
+            // surface; running both is the normal local+remote setup.
+            let http = port.map(|p| tokio::spawn(serve::http::run(p)));
+            match webrtc {
+                Some(webrtc) => {
+                    let url = if webrtc.is_empty() { None } else { Some(webrtc) };
+                    serve::share::run_share(serve::share::ShareConfig { url, sighost }).await
+                }
+                None => match http {
+                    Some(h) => h.await?,
+                    None => anyhow::bail!("ayrs serve needs --webrtc and/or --port"),
+                },
+            }
         }
     }
 }

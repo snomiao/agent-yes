@@ -100,6 +100,9 @@ hkdf = "0.13.0"
 sha2 = "0.11.0"
 aes-gcm = "0.11.0"
 hex = "0.4.3"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 
 # Unix-specific
 [target.'cfg(unix)'.dependencies]
