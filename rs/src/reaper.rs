@@ -121,7 +121,9 @@ mod tests {
     #[test]
     fn test_register_and_sweep_keeps_live_drops_dead() {
         // Isolate the registry under a temp HOME so we don't touch the real file.
+        let _guard = crate::log_files::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("AGENT_YES_HOME");
         std::env::set_var("AGENT_YES_HOME", dir.path());
 
         // A live wrapper (us) is kept; a dead wrapper (999999) is dropped. The
@@ -137,6 +139,9 @@ mod tests {
         assert_eq!(lines.len(), 1, "only the live wrapper should remain");
         assert!(lines[0].contains(&std::process::id().to_string()));
 
-        std::env::remove_var("AGENT_YES_HOME");
+        match prev {
+            Some(v) => std::env::set_var("AGENT_YES_HOME", v),
+            None => std::env::remove_var("AGENT_YES_HOME"),
+        }
     }
 }

@@ -59,6 +59,15 @@ pub fn project_log_dir(cwd: &str) -> Option<PathBuf> {
     Some(Path::new(cwd).join(".agent-yes"))
 }
 
+/// Serializes every test that reads OR writes the AGENT_YES_HOME env var.
+/// `std::env::set_var` is process-global, so a test that points the home at a
+/// tempdir raced any test asserting on the real default and made
+/// `test_global_dir_returns_some` fail intermittently in CI. Lives here because
+/// log_files is compiled into both the main crate and the standalone `ayrs`
+/// binary, so every module that touches the var can share one lock.
+#[cfg(test)]
+pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 fn ensure_project_gitignore(dir: &Path) -> std::io::Result<()> {
     let path = dir.join(".gitignore");
     if path.exists() {
@@ -73,7 +82,13 @@ mod tests {
 
     #[test]
     fn test_global_dir_returns_some() {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("AGENT_YES_HOME");
+        std::env::remove_var("AGENT_YES_HOME");
         let dir = global_dir();
+        if let Some(v) = prev {
+            std::env::set_var("AGENT_YES_HOME", v);
+        }
         assert!(dir.is_some());
         assert!(dir.unwrap().ends_with(".agent-yes"));
     }

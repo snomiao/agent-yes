@@ -353,10 +353,8 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
-    // Serializes tests that mutate the AGENT_YES_HOME env var — std::env::set_var
-    // is process-global, so two of them running in parallel clobber each other's
-    // root (Mutex::new is const, usable directly in a static).
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    // Shared with every other AGENT_YES_HOME test in the binary.
+    use crate::log_files::ENV_LOCK;
 
     #[test]
     fn test_create_and_round_trip() {
