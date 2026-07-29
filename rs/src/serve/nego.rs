@@ -366,6 +366,12 @@ pub async fn presence_post(body: &Value) -> Result<(), (u16, String)> {
         let rows = c.get("rows")?.as_f64()?;
         Some((cols, rows))
     });
+    // Mutate the map under the lock, but run every await (file I/O,
+    // schedule_nego — which re-locks STATE) strictly AFTER the guard drops:
+    // holding the non-reentrant tokio Mutex across schedule_nego() deadlocked
+    // the whole presence/nego subsystem the first time a viewer switched agents.
+    let sane = cap.and_then(|(c, r)| sanitize_cap(c, r));
+    let mut withdraw_prev: Option<u32> = None;
     let mut st = STATE.lock().await;
     let prev_agent: Option<u32> = st.presence.get(&viewer).and_then(|e| e.agent.parse().ok());
     match agent {
@@ -382,12 +388,9 @@ pub async fn presence_post(body: &Value) -> Result<(), (u16, String)> {
         Some(pid) => {
             if let Some(prev) = prev_agent {
                 if prev != pid {
-                    let v = viewer.clone();
-                    tokio::task::spawn_blocking(move || withdraw_cap(prev, &v)).await.ok();
-                    schedule_nego(prev).await;
+                    withdraw_prev = Some(prev);
                 }
             }
-            let sane = cap.and_then(|(c, r)| sanitize_cap(c, r));
             st.presence.insert(
                 viewer.clone(),
                 PresenceEntry {
@@ -404,6 +407,11 @@ pub async fn presence_post(body: &Value) -> Result<(), (u16, String)> {
                 },
             );
             drop(st);
+            if let Some(prev) = withdraw_prev {
+                let v = viewer.clone();
+                tokio::task::spawn_blocking(move || withdraw_cap(prev, &v)).await.ok();
+                schedule_nego(prev).await;
+            }
             let v = viewer.clone();
             match sane {
                 Some(c) => {
@@ -514,6 +522,31 @@ mod tests {
         let caps = [Cap { cols: 20, rows: 5 }];
         assert_eq!(negotiate_size(&caps), Some(Cap { cols: 40, rows: 10 }));
         assert_eq!(negotiate_size(&[]), None);
+    }
+
+    // Regression: a viewer switching agents (prev != pid) used to call
+    // schedule_nego() while still holding the STATE guard — a self-deadlock on
+    // the non-reentrant tokio Mutex that froze every later presence request.
+    #[tokio::test]
+    async fn viewer_agent_switch_does_not_deadlock() {
+        // NOTE: no AGENT_YES_HOME override — env vars are process-global and
+        // racing the other tests on it is flaky. The fake pids write throwaway
+        // cap files under the real home; cleaned up below (and TTL-pruned).
+        let b1 = serde_json::json!({"viewer":"swt","agent":911111,"cap":{"cols":100,"rows":30}});
+        let b2 = serde_json::json!({"viewer":"swt","agent":922222,"cap":{"cols":100,"rows":30}});
+        let run = async {
+            presence_post(&b1).await.unwrap();
+            presence_post(&b2).await.unwrap(); // the prev != pid path
+            presence_get().await
+        };
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+            .await
+            .expect("presence deadlocked on viewer agent-switch");
+        assert!(!got.as_array().unwrap().is_empty());
+        for pid in [911111u32, 922222] {
+            let _ = std::fs::remove_dir_all(caps_dir(pid));
+            let _ = std::fs::remove_file(winsize_path(pid));
+        }
     }
 
     #[test]

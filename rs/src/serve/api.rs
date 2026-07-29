@@ -16,7 +16,11 @@ use tokio::sync::mpsc;
 const TAIL_SNAPSHOT_BYTES: u64 = 65_536;
 const SSE_PING_MS: u64 = 15_000;
 const LS_TICK_MS: u64 = 1_000;
-const TAIL_POLL_MS: u64 = 200;
+// 50ms keeps keystroke echo snappy (the TS daemon uses fs.watch + a 60ms
+// unwatched poll; a plain 50ms stat poll costs ~nothing and needs no watcher
+// lifecycle — see agent-yes-fswatch-dies-in-daemon for why watchers are risky
+// in long-lived daemons).
+const TAIL_POLL_MS: u64 = 50;
 /// Consider an agent "active" if its log grew within this window, else "idle".
 const ACTIVE_WINDOW_MS: i64 = 60_000;
 
@@ -119,6 +123,137 @@ fn last_stdin_at(pid: u32) -> Option<i64> {
     std::fs::read_to_string(p).ok()?.trim().parse().ok()
 }
 
+// ---- log-derived metadata (title / status_text), same logic as ts/serve.ts ----
+
+type MetaCache = std::sync::Mutex<std::collections::HashMap<String, (u64, i64, Option<String>)>>;
+static TITLE_CACHE: once_cell::sync::Lazy<MetaCache> = once_cell::sync::Lazy::new(Default::default);
+static STATUS_CACHE: once_cell::sync::Lazy<MetaCache> = once_cell::sync::Lazy::new(Default::default);
+
+fn read_file_tail(path: &str, max: u64) -> std::io::Result<(u64, i64, Vec<u8>)> {
+    let mut f = std::fs::File::open(path)?;
+    let meta = f.metadata()?;
+    let size = meta.len();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    f.seek(SeekFrom::Start(size.saturating_sub(max)))?;
+    let mut buf = Vec::new();
+    f.read_to_end(&mut buf)?;
+    Ok((size, mtime, buf))
+}
+
+fn cache_get(cache: &MetaCache, key: &str, size: u64, mtime: i64) -> Option<Option<String>> {
+    let map = cache.lock().ok()?;
+    match map.get(key) {
+        Some((s, m, v)) if *s == size && *m == mtime => Some(v.clone()),
+        _ => None,
+    }
+}
+
+fn cache_put(cache: &MetaCache, key: &str, size: u64, mtime: i64, v: Option<String>) {
+    if let Ok(mut map) = cache.lock() {
+        map.insert(key.to_string(), (size, mtime, v));
+    }
+}
+
+fn strip_control(s: &str) -> String {
+    s.chars()
+        .filter(|c| {
+            let n = *c as u32;
+            !(n < 0x20 || (0x7f..=0x9f).contains(&n))
+        })
+        .collect()
+}
+
+/// Latest OSC 0/2 terminal title in the log tail (ts/serve.ts logTitle):
+/// agents retitle their terminal via `\x1b]2;name\x07`; the most recent
+/// non-empty one labels the console row. Cached per (size, mtime).
+fn log_title(log_file: Option<&str>) -> Option<String> {
+    let log_file = log_file?;
+    let (size, mtime, buf) = read_file_tail(log_file, 65_536).ok()?;
+    if let Some(hit) = cache_get(&TITLE_CACHE, log_file, size, mtime) {
+        return hit;
+    }
+    // /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g — last non-empty match wins.
+    static OSC_TITLE: once_cell::sync::Lazy<regex::bytes::Regex> = once_cell::sync::Lazy::new(|| {
+        regex::bytes::Regex::new(r"\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)").unwrap()
+    });
+    let mut title: Option<String> = None;
+    for m in OSC_TITLE.captures_iter(&buf) {
+        let candidate = String::from_utf8_lossy(&m[1]);
+        let cleaned = strip_control(candidate.trim());
+        let capped: String = cleaned.chars().take(256).collect();
+        let capped = capped.trim().to_string();
+        if !capped.is_empty() {
+            title = Some(capped);
+        }
+    }
+    cache_put(&TITLE_CACHE, log_file, size, mtime, title.clone());
+    title
+}
+
+/// Spinner/status line from the rendered screen (ts/statusText.ts
+/// parseStatusText): scan the last rendered lines bottom-up for a line that
+/// starts with a spinner glyph, skipping keyboard-hint lines.
+fn parse_status_text(lines: &[String]) -> Option<String> {
+    const SPINNERS: &str = "✶✻✢✳✽✦✧✩✷✸✹✺✼·•●◐◓◒◑";
+    const KEY_HINTS: [&str; 6] = ["esc", "ctrl", "enter", "return", "shift", "tab"];
+    for raw in lines.iter().rev() {
+        let line = strip_control(raw);
+        let line = line.trim();
+        if line.len() < 3 {
+            continue;
+        }
+        let mut chars = line.chars();
+        let first = chars.next()?;
+        let is_spinner =
+            ('\u{2800}'..='\u{28ff}').contains(&first) || SPINNERS.contains(first);
+        if !is_spinner || !chars.next().map(|c| c.is_whitespace()).unwrap_or(false) {
+            continue;
+        }
+        // /^(?:[•·]\s*)?(?:esc|ctrl|enter|return|shift|tab)\b/i
+        let mut probe = line;
+        if let Some(stripped) = probe.strip_prefix(['•', '·']) {
+            probe = stripped.trim_start();
+        }
+        let lower = probe.to_lowercase();
+        let is_hint = KEY_HINTS.iter().any(|k| {
+            lower.strip_prefix(k).map_or(false, |rest| {
+                rest.chars().next().map_or(true, |c| !c.is_alphanumeric())
+            })
+        });
+        if is_hint {
+            continue;
+        }
+        let capped: String = line.chars().take(220).collect();
+        return Some(capped.trim().to_string());
+    }
+    None
+}
+
+/// Rendered-screen status text (ts/serve.ts logStatusText): replay the last
+/// 32KB of raw PTY bytes through a terminal emulator at the TS fallback
+/// geometry (200x50) and parse the spinner line from the last 40 rows.
+/// Cached per (size, mtime) so the 1s subscribe tick stays cheap.
+fn log_status_text(log_file: Option<&str>) -> Option<String> {
+    let log_file = log_file?;
+    let (size, mtime, buf) = read_file_tail(log_file, 32_768).ok()?;
+    if let Some(hit) = cache_get(&STATUS_CACHE, log_file, size, mtime) {
+        return hit;
+    }
+    let mut vt = crate::vterm::VTermProxy::new(50, 200);
+    vt.process(&buf);
+    let rendered = if vt.alternate_screen() { vt.contents() } else { vt.dump_scrollback() };
+    let lines: Vec<String> = rendered.lines().map(|l| l.trim_end().to_string()).collect();
+    let tail_start = lines.len().saturating_sub(40);
+    let status = parse_status_text(&lines[tail_start..]);
+    cache_put(&STATUS_CACHE, log_file, size, mtime, status.clone());
+    status
+}
+
 /// One /api/ls entry: the raw record plus the derived fields the console reads.
 fn with_meta(r: &PidRecord) -> Value {
     let alive = is_process_alive(r.pid);
@@ -133,21 +268,21 @@ fn with_meta(r: &PidRecord) -> Value {
     } else {
         "idle"
     };
-    let dir_name = r
-        .cwd
-        .rsplit(['/', '\\'])
-        .find(|s| !s.is_empty())
-        .unwrap_or(&r.cwd);
     let mut v = serde_json::to_value(r).unwrap_or_else(|_| json!({}));
     let o = v.as_object_mut().unwrap();
     o.insert("status".into(), json!(status));
-    o.insert("title".into(), json!(format!("{} — {}", r.cli, dir_name)));
-    o.insert("status_text".into(), Value::Null);
+    // Same sources as the TS daemon: OSC title + rendered-screen spinner line.
+    o.insert("title".into(), json!(log_title(r.log_file.as_deref())));
+    o.insert(
+        "status_text".into(),
+        if exited { Value::Null } else { json!(log_status_text(r.log_file.as_deref())) },
+    );
     o.insert("question".into(), Value::Null);
     o.insert("git".into(), Value::Null);
     o.insert("tasks".into(), Value::Null);
     o.insert("badges".into(), json!([]));
-    o.insert("last_active_at".into(), json!(last_active));
+    // TS falls back to started_at when there's no log yet (freshly spawned).
+    o.insert("last_active_at".into(), json!(last_active.unwrap_or(r.started_at)));
     o.insert("last_stdin_at".into(), json!(last_stdin_at(r.pid)));
     v
 }
@@ -602,5 +737,40 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
         ("POST", "/api/send") => handle_send(body).await,
         ("OPTIONS", _) => text(204, ""),
         _ => text(404, "not found"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_status_text_spinner_and_hints() {
+        let lines = vec![
+            "✶ Verifying calendar meetings… (6m 30s · ↓ 19.5k tokens)".to_string(),
+            "· esc to interrupt".to_string(),
+        ];
+        assert_eq!(
+            parse_status_text(&lines).as_deref(),
+            Some("✶ Verifying calendar meetings… (6m 30s · ↓ 19.5k tokens)")
+        );
+        let braille = vec!["⠋ Working on it".to_string()];
+        assert_eq!(parse_status_text(&braille).as_deref(), Some("⠋ Working on it"));
+        assert_eq!(parse_status_text(&["plain text".to_string()]), None);
+    }
+
+    #[test]
+    fn log_title_multibyte_safe() {
+        // Regression: a hand-rolled byte-index scan panicked on UTF-8
+        // boundaries (Japanese titles), which nuked the whole /api/ls response.
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.raw.log");
+        std::fs::write(
+            &p,
+            "前置き日本語\x1b]2;✳ 深夜定義の統一 — テスト\x07後続\x1b]0;\x07",
+        )
+        .unwrap();
+        let t = log_title(Some(p.to_str().unwrap()));
+        assert_eq!(t.as_deref(), Some("✳ 深夜定義の統一 — テスト"));
     }
 }
