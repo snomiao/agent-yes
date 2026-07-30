@@ -950,6 +950,39 @@ fn url_decode(s: &str) -> String {
 
 /// Handle one API request. `path_with_query` like "/api/ls?all=1".
 /// Auth is the caller's job (the WebRTC bridge injects the master token).
+/// Append one perf beacon row, then cap the file by keeping the newest half
+/// once it passes 4MB. Best-effort throughout: a failed beacon write must never
+/// surface as an error to the viewer.
+fn perf_beacon(b: &Value) {
+    let clip = |k: &str, n: usize| {
+        b.get(k).and_then(|v| v.as_str()).unwrap_or("").chars().take(n).collect::<String>()
+    };
+    let line = json!({
+        "t": now_ms(),
+        "room": clip("room", 64),
+        "viewer": clip("viewer", 64),
+        "build": clip("build", 16),
+        "ua": clip("ua", 120),
+        "summary": b.get("summary").cloned().unwrap_or(Value::Null),
+    });
+    let home = global_dir();
+    let file = home.join("perf-beacons.jsonl");
+    std::fs::create_dir_all(&home).ok();
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+        writeln!(f, "{line}").ok();
+    }
+    if std::fs::metadata(&file).map(|m| m.len() > 4 * 1024 * 1024).unwrap_or(false) {
+        if let Ok(bytes) = std::fs::read(&file) {
+            // Cut at the midpoint, then resume at the next line start — that
+            // also lands us back on a UTF-8 boundary.
+            let mid = bytes.len() / 2;
+            let start = bytes[mid..].iter().position(|b| *b == b'\n').map(|i| mid + i + 1);
+            std::fs::write(&file, &bytes[start.unwrap_or(bytes.len())..]).ok();
+        }
+    }
+}
+
 pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiResponse {
     let (path, query) = match path_with_query.split_once('?') {
         Some((p, q)) => (p, q),
@@ -1084,6 +1117,65 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
         ("POST", "/api/kill") => crate::serve::control::kill(body),
         ("POST", "/api/restart") => crate::serve::control::restart(body),
         ("POST", "/api/spawn") => crate::serve::control::spawn(body),
+
+        // ── Widget sensor broker ────────────────────────────────────────────
+        // The Rust daemon issues master tokens only (no scoped-token minting),
+        // so the subject/caps binding is always unrestricted here; the broker
+        // still enforces it so a scoped path can be wired in later unchanged.
+        ("POST", "/api/widget/register") => match serde_json::from_str::<Value>(body) {
+            Ok(v) => json_res(200, &crate::serve::widget::register(&v, None)),
+            Err(_) => text(400, "invalid JSON body"),
+        },
+        ("GET", "/api/widget/list") => json_res(200, &crate::serve::widget::list()),
+        ("GET", p) if p.starts_with("/api/widget/poll/") => {
+            let vid = url_decode(&p["/api/widget/poll/".len()..]);
+            ApiResponse {
+                status: 200,
+                content_type: "text/event-stream".into(),
+                body: Body::Stream(crate::serve::widget::poll(vid)),
+            }
+        }
+        ("POST", "/api/widget/result") => match serde_json::from_str::<Value>(body) {
+            Ok(v) => json_res(200, &crate::serve::widget::result(&v)),
+            Err(_) => text(400, "invalid JSON body"),
+        },
+        ("POST", "/api/widget/read") => match serde_json::from_str::<Value>(body) {
+            Ok(v) => match crate::serve::widget::read(&v, None, None).await {
+                Ok(res) => json_res(200, &res),
+                Err((status, msg)) => text(status, msg),
+            },
+            Err(_) => text(400, "invalid JSON body"),
+        },
+
+        // POST /api/perf-beacon — a viewer that MEASURED slowness reports it.
+        // Purely local: rows append to <AGENT_YES_HOME>/perf-beacons.jsonl so a
+        // headless watcher can see slowness without driving a browser.
+        ("POST", "/api/perf-beacon") => {
+            match serde_json::from_str::<Value>(body) {
+                Ok(v) => {
+                    perf_beacon(&v);
+                    text(204, "")
+                }
+                Err(_) => text(400, "invalid JSON body"),
+            }
+        }
+
+        // /api/share + /api/expose mint scoped share tokens and drive the edge
+        // relay through the JS agentShare/expose modules; the Rust daemon has
+        // no scoped-token store or relay client, so it declines rather than
+        // shipping a weaker look-alike.
+        ("POST", "/api/share")
+        | ("GET", "/api/shares")
+        | ("POST", "/api/expose")
+        | ("GET", "/api/exposes") => text(
+            501,
+            "share/expose need the JS scoped-token + relay modules — use `ay serve`",
+        ),
+        ("DELETE", p) if p.starts_with("/api/share/") || p.starts_with("/api/expose/") => text(
+            501,
+            "share/expose need the JS scoped-token + relay modules — use `ay serve`",
+        ),
+
         ("OPTIONS", _) => text(204, ""),
         _ => text(404, "not found"),
     }
