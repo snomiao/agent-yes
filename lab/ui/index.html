@@ -3663,17 +3663,24 @@
       // 3s heartbeat (< the host's 12s TTL): refresh our presence + read others',
       // and follow the canonical grid size (resize+scale, never reflow) so all
       // viewers stay on one shared canvas and selections line up.
-      setInterval(() => {
-        pollFleetPresence(); // fleet-wide peer focus (independent of what's selected)
-        if (!sel) return;
-        sendPresence();
-        pollPresence();
-        const cur = presenceTarget();
-        if (cur)
-          cur.tx
-            .fetchJSON("/api/size/" + encodeURIComponent(cur.e.pid))
-            .then(followAgentSize)
-            .catch(() => {});
+      let presencePollRunning = false;
+      setInterval(async () => {
+        if (presencePollRunning) return;
+        presencePollRunning = true;
+        try {
+          await pollFleetPresence(); // fleet-wide peer focus (independent of what's selected)
+          if (!sel) return;
+          sendPresence();
+          await pollPresence();
+          const cur = presenceTarget();
+          if (cur) {
+            try {
+              followAgentSize(await cur.tx.fetchJSON("/api/size/" + encodeURIComponent(cur.e.pid)));
+            } catch {}
+          }
+        } finally {
+          presencePollRunning = false;
+        }
       }, 3000);
       // Fast pulse loop: drive the stdin flash on the STABLE list DOM (toggle a
       // class, no re-render) so a pulse begins/ends promptly regardless of the
@@ -3738,7 +3745,16 @@
         }
         renderSendWires();
       }
-      setInterval(() => void pollEdges(), 1500);
+      let edgesPollRunning = false;
+      setInterval(async () => {
+        if (edgesPollRunning) return;
+        edgesPollRunning = true;
+        try {
+          await pollEdges();
+        } finally {
+          edgesPollRunning = false;
+        }
+      }, 1500);
 
       // Drive the send/recv row pulses on the stable list DOM (same trick as the
       // stdin flash above), and keep the wire fading. No-op when nothing's in

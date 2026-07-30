@@ -38,7 +38,9 @@ fn global_dir() -> PathBuf {
     if let Ok(h) = std::env::var("AGENT_YES_HOME") {
         return PathBuf::from(h);
     }
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".agent-yes")
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".agent-yes")
 }
 
 fn share_room_path() -> PathBuf {
@@ -49,6 +51,10 @@ pub struct RoomUrl {
     pub room: String,
     pub token: String, // "e1.<64hex>"
     pub host: String,
+}
+
+pub fn format_room_url(room: &RoomUrl) -> String {
+    format!("webrtc://{}:{}@{}", room.room, room.token, room.host)
 }
 
 pub fn parse_share_url(s: &str) -> Result<RoomUrl> {
@@ -65,7 +71,11 @@ pub fn parse_share_url(s: &str) -> Result<RoomUrl> {
     if room.is_empty() || token.is_empty() || host.is_empty() {
         bail!("bad --webrtc url: {s}");
     }
-    Ok(RoomUrl { room: room.into(), token: token.into(), host: host.into() })
+    Ok(RoomUrl {
+        room: room.into(),
+        token: token.into(),
+        host: host.into(),
+    })
 }
 
 fn mint_room(host: &str) -> RoomUrl {
@@ -78,7 +88,7 @@ fn mint_room(host: &str) -> RoomUrl {
 
 fn persist_room(r: &RoomUrl) {
     let _ = std::fs::create_dir_all(global_dir());
-    let url = format!("webrtc://{}:{}@{}", r.room, r.token, r.host);
+    let url = format_room_url(r);
     let _ = std::fs::write(share_room_path(), &url);
     #[cfg(unix)]
     {
@@ -107,6 +117,20 @@ pub fn format_share_link(room: &str, s: &str, host: &str) -> String {
     } else {
         format!("http://localhost:7778/w/#{room}:{}{s}@{host}", e2e::MARKER)
     }
+}
+
+/// Resolve the exact room and browser link an installed service will use.
+pub fn resolve_share_urls(url: Option<&str>, sighost: &str) -> Result<(String, String)> {
+    let room = match url {
+        Some(url) if !url.is_empty() => parse_share_url(url)?,
+        _ => load_or_create_room(sighost),
+    };
+    let (secret, encrypted) = e2e::parse_secret(&room.token)?;
+    if !encrypted {
+        bail!("refusing to host an unencrypted room");
+    }
+    let browser_url = format_share_link(&room.room, &secret, &room.host);
+    Ok((format_room_url(&room), browser_url))
 }
 
 // ---- per-peer state ----------------------------------------------------------
@@ -187,7 +211,10 @@ mod claim_tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("lock.pid");
         claim_room_at(&p, "r1").unwrap();
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), std::process::id().to_string());
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            std::process::id().to_string()
+        );
     }
 
     #[test]
@@ -197,7 +224,10 @@ mod claim_tests {
         // pid 1 is alive but is not us; use an implausibly high dead pid instead.
         std::fs::write(&p, "4194303").unwrap();
         claim_room_at(&p, "r1").unwrap();
-        assert_eq!(std::fs::read_to_string(&p).unwrap(), std::process::id().to_string());
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            std::process::id().to_string()
+        );
     }
 
     #[test]
@@ -206,7 +236,10 @@ mod claim_tests {
         let p = dir.path().join("lock.pid");
         // A real live process that isn't us (pid 1 is unusable: kill(1,0) is
         // EPERM for a normal user, which reads as "dead").
-        let mut child = std::process::Command::new("sleep").arg("30").spawn().unwrap();
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
         std::fs::write(&p, child.id().to_string()).unwrap();
         let err = claim_room_at(&p, "r1").unwrap_err().to_string();
         let _ = child.kill();
@@ -230,7 +263,9 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     };
     let (s, v2) = e2e::parse_secret(&room.token)?;
     if !v2 {
-        bail!("refusing to host an unencrypted room — delete ~/.agent-yes/.share-room-ayrs to rotate");
+        bail!(
+            "refusing to host an unencrypted room — delete ~/.agent-yes/.share-room-ayrs to rotate"
+        );
     }
     let mut secret = s;
     claim_room(&room.room)?;
@@ -295,7 +330,9 @@ async fn connect_once(
         "Sec-WebSocket-Protocol",
         SUB.parse().expect("static subprotocol header"),
     );
-    let (ws, _resp) = tokio_tungstenite::connect_async(req).await.context("ws connect")?;
+    let (ws, _resp) = tokio_tungstenite::connect_async(req)
+        .await
+        .context("ws connect")?;
     let (mut sink, mut stream) = ws.split();
 
     let auth_token = e2e::derive_auth_token(secret, &room.room, &room.host)?;
@@ -368,7 +405,9 @@ async fn handle_signal(
     match m.get("type").and_then(|t| t.as_str()) {
         Some("pong") | Some("welcome") => {}
         Some("peer-join") => {
-            let Some(peer_id) = m.get("peer").map(value_to_id) else { return };
+            let Some(peer_id) = m.get("peer").map(value_to_id) else {
+                return;
+            };
             if peers.lock().await.contains_key(&peer_id) {
                 return;
             }
@@ -379,16 +418,26 @@ async fn handle_signal(
             }
         }
         Some("answer") => {
-            let Some(from) = m.get("from").map(value_to_id) else { return };
-            let sdp = m.get("sdp").and_then(|s| s.as_str()).unwrap_or("").to_string();
+            let Some(from) = m.get("from").map(value_to_id) else {
+                return;
+            };
+            let sdp = m
+                .get("sdp")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
             if let Err(e) = on_answer(&from, sdp, secret, peers).await {
                 eprintln!("[ayrs share] answer failed for {from}: {e:#}");
                 close_peer(peers, &from).await;
             }
         }
         Some("candidate") => {
-            let Some(from) = m.get("from").map(value_to_id) else { return };
-            let Some(cand) = m.get("candidate") else { return };
+            let Some(from) = m.get("from").map(value_to_id) else {
+                return;
+            };
+            let Some(cand) = m.get("candidate") else {
+                return;
+            };
             let init: RTCIceCandidateInit = match serde_json::from_value(cand.clone()) {
                 Ok(c) => c,
                 Err(_) => return,
@@ -435,7 +484,10 @@ async fn start_peer(
 ) -> Result<()> {
     let api = APIBuilder::new().build();
     let config = RTCConfiguration {
-        ice_servers: vec![RTCIceServer { urls: vec![STUN_URL.to_string()], ..Default::default() }],
+        ice_servers: vec![RTCIceServer {
+            urls: vec![STUN_URL.to_string()],
+            ..Default::default()
+        }],
         ..Default::default()
     };
     let pc = Arc::new(api.new_peer_connection(config).await?);
@@ -514,7 +566,9 @@ async fn start_peer(
                 let mut map = peers2.lock().await;
                 if let Some(p) = map.get_mut(&peer_id2) {
                     let nonce = p.my_nonce.clone();
-                    let _ = p.out_tx.send((e2e::FLAG_CONFIRM, json!({"t":"confirm","nonce":nonce})));
+                    let _ = p
+                        .out_tx
+                        .send((e2e::FLAG_CONFIRM, json!({"t":"confirm","nonce":nonce})));
                 }
                 drop(map);
                 // confirm deadline: close the peer if the handshake stalls
@@ -595,7 +649,8 @@ fn spawn_sender(
                 }
             };
             let plaintext = env.to_string().into_bytes();
-            let frame = match e2e::seal(&crypto.keys.h2c, &mut send, flags, &crypto.th, &plaintext) {
+            let frame = match e2e::seal(&crypto.keys.h2c, &mut send, flags, &crypto.th, &plaintext)
+            {
                 Ok(f) => f,
                 Err(_) => {
                     close_peer(&peers, &peer_id).await; // counter overflow — fail closed
@@ -631,7 +686,9 @@ fn spawn_receiver(
             };
             let opened = {
                 let mut map = peers.lock().await;
-                let Some(p) = map.get_mut(&peer_id) else { return };
+                let Some(p) = map.get_mut(&peer_id) else {
+                    return;
+                };
                 match e2e::open(&crypto.keys.c2h, &frame, &crypto.th, &mut p.recv) {
                     Ok(o) => o,
                     Err(_) => {
@@ -656,7 +713,9 @@ fn spawn_receiver(
                     return;
                 }
                 let mut map = peers.lock().await;
-                let Some(p) = map.get_mut(&peer_id) else { return };
+                let Some(p) = map.get_mut(&peer_id) else {
+                    return;
+                };
                 if let Some(nonce) = env.get("nonce").and_then(|n| n.as_str()) {
                     if !p.confirmed_out {
                         let my = p.my_nonce.clone();
@@ -702,8 +761,16 @@ fn spawn_receiver(
                         .and_then(|m| m.as_str())
                         .unwrap_or("GET")
                         .to_string();
-                    let path = env.get("path").and_then(|p| p.as_str()).unwrap_or("/").to_string();
-                    let body = env.get("body").and_then(|b| b.as_str()).unwrap_or("").to_string();
+                    let path = env
+                        .get("path")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("/")
+                        .to_string();
+                    let body = env
+                        .get("body")
+                        .and_then(|b| b.as_str())
+                        .unwrap_or("")
+                        .to_string();
                     let out_tx = {
                         let map = peers.lock().await;
                         match map.get(&peer_id) {

@@ -55,12 +55,16 @@ fn service_args(webrtc: &Option<String>, sighost: &str) -> Vec<String> {
 
 #[cfg(target_os = "macos")]
 fn unit_path() -> Result<PathBuf> {
-    Ok(home()?.join("Library/LaunchAgents").join(format!("{LABEL}.plist")))
+    Ok(home()?
+        .join("Library/LaunchAgents")
+        .join(format!("{LABEL}.plist")))
 }
 
 #[cfg(target_os = "linux")]
 fn unit_path() -> Result<PathBuf> {
-    Ok(home()?.join(".config/systemd/user").join(format!("{LABEL}.service")))
+    Ok(home()?
+        .join(".config/systemd/user")
+        .join(format!("{LABEL}.service")))
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -69,7 +73,9 @@ fn unit_path() -> Result<PathBuf> {
 }
 
 fn xml_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 #[cfg(target_os = "macos")]
@@ -103,7 +109,10 @@ fn render_unit(exe: &str, args: &[String], out_log: &str, err_log: &str) -> Stri
 
 #[cfg(target_os = "linux")]
 fn render_unit(exe: &str, args: &[String], _out: &str, _err: &str) -> String {
-    let quoted: Vec<String> = args.iter().map(|a| format!("'{}'", a.replace('\'', "'\\''"))).collect();
+    let quoted: Vec<String> = args
+        .iter()
+        .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+        .collect();
     format!(
         "[Unit]\n\
          Description=agent-yes Rust serve daemon (ayrs)\n\
@@ -142,6 +151,7 @@ pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
     let path = unit_path()?;
     let exe = exe()?;
     let args = service_args(webrtc, sighost);
+    let (webrtc_url, browser_url) = super::share::resolve_share_urls(webrtc.as_deref(), sighost)?;
     let dir = log_dir()?;
     let out_log = dir.join("ayrs-serve.log");
     let err_log = dir.join("ayrs-serve.err.log");
@@ -164,8 +174,14 @@ pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         let uid = unsafe { libc::getuid() };
-        run("launchctl", &["bootstrap", &format!("gui/{uid}"), &path.to_string_lossy()])?;
-        run("launchctl", &["kickstart", "-k", &format!("gui/{uid}/{LABEL}")])?;
+        run(
+            "launchctl",
+            &["bootstrap", &format!("gui/{uid}"), &path.to_string_lossy()],
+        )?;
+        run(
+            "launchctl",
+            &["kickstart", "-k", &format!("gui/{uid}/{LABEL}")],
+        )?;
     }
     #[cfg(target_os = "linux")]
     {
@@ -174,6 +190,8 @@ pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
     }
 
     println!("installed {LABEL} ({exe} {})", args.join(" "));
+    println!("webrtc: {webrtc_url}");
+    println!("console: {browser_url}");
     println!("logs: {}", out_log.display());
     Ok(())
 }
@@ -188,7 +206,9 @@ fn uninstall_quiet() -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        let _ = Command::new("systemctl").args(["--user", "disable", "--now", LABEL]).output();
+        let _ = Command::new("systemctl")
+            .args(["--user", "disable", "--now", LABEL])
+            .output();
     }
     Ok(())
 }
@@ -207,7 +227,11 @@ pub fn uninstall() -> Result<()> {
 
 pub fn status() -> Result<()> {
     let path = unit_path()?;
-    println!("unit: {} ({})", path.display(), if path.exists() { "present" } else { "missing" });
+    println!(
+        "unit: {} ({})",
+        path.display(),
+        if path.exists() { "present" } else { "missing" }
+    );
     #[cfg(target_os = "macos")]
     {
         let uid = unsafe { libc::getuid() };
@@ -215,7 +239,10 @@ pub fn status() -> Result<()> {
             Ok(s) => {
                 for line in s.lines() {
                     let t = line.trim();
-                    if t.starts_with("state =") || t.starts_with("pid =") || t.starts_with("last exit code") {
+                    if t.starts_with("state =")
+                        || t.starts_with("pid =")
+                        || t.starts_with("last exit code")
+                    {
                         println!("{t}");
                     }
                 }
@@ -225,7 +252,9 @@ pub fn status() -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        let s = Command::new("systemctl").args(["--user", "status", LABEL]).output();
+        let s = Command::new("systemctl")
+            .args(["--user", "status", LABEL])
+            .output();
         if let Ok(o) = s {
             print!("{}", String::from_utf8_lossy(&o.stdout));
         }
@@ -247,14 +276,32 @@ mod tests {
 
     #[test]
     fn service_args_pins_explicit_room() {
-        let a = service_args(&Some("webrtc://r1:e1.ab@s.agent-yes.com".into()), "s.agent-yes.com");
+        let a = service_args(
+            &Some("webrtc://r1:e1.ab@s.agent-yes.com".into()),
+            "s.agent-yes.com",
+        );
         assert_eq!(a[2], "webrtc://r1:e1.ab@s.agent-yes.com");
+    }
+
+    #[test]
+    fn install_receipt_urls_match_explicit_room() {
+        let secret = "ab".repeat(32);
+        let room_url = format!("webrtc://r1:e1.{secret}@s.agent-yes.com");
+        let (webrtc, console) =
+            super::super::share::resolve_share_urls(Some(&room_url), "ignored.example").unwrap();
+        assert_eq!(webrtc, room_url);
+        assert_eq!(console, format!("https://agent-yes.com/w/#r1:e1.{secret}"));
     }
 
     #[cfg(target_os = "macos")]
     #[test]
     fn plist_escapes_and_lists_every_arg() {
-        let u = render_unit("/bin/ayrs", &service_args(&Some(String::new()), "a&b"), "/o", "/e");
+        let u = render_unit(
+            "/bin/ayrs",
+            &service_args(&Some(String::new()), "a&b"),
+            "/o",
+            "/e",
+        );
         assert!(u.contains("<string>/bin/ayrs</string>"));
         assert!(u.contains("<string>--webrtc</string>"));
         assert!(u.contains("<string>a&amp;b</string>"));

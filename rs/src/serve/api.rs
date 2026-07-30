@@ -15,7 +15,11 @@ use tokio::sync::mpsc;
 
 const TAIL_SNAPSHOT_BYTES: u64 = 65_536;
 const SSE_PING_MS: u64 = 15_000;
-const LS_TICK_MS: u64 = 1_000;
+// A full tick enriches every agent from its live PTY log. One second saturates
+// a core on larger fleets whose logs are all moving, starving the WebRTC data
+// channel that carries the snapshot itself. Three seconds matches the console's
+// former polling cadence while SSE still avoids sending unchanged records.
+const LS_TICK_MS: u64 = 3_000;
 // 50ms keeps keystroke echo snappy (the TS daemon uses fs.watch + a 60ms
 // unwatched poll; a plain 50ms stat poll costs ~nothing and needs no watcher
 // lifecycle — see agent-yes-fswatch-dies-in-daemon for why watchers are risky
@@ -152,6 +156,17 @@ fn read_file_tail(path: &str, max: u64) -> std::io::Result<(u64, i64, Vec<u8>)> 
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)?;
     Ok((size, mtime, buf))
+}
+
+fn file_version(path: &str) -> Option<(u64, i64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    Some((meta.len(), mtime))
 }
 
 fn cache_get(cache: &MetaCache, key: &str, size: u64, mtime: i64) -> Option<Option<String>> {
@@ -310,11 +325,25 @@ fn json_cached(
     v
 }
 
+fn json_cache_get(cache: &JsonCache, key: &str, size: u64, mtime: i64) -> Option<Value> {
+    let map = cache.lock().ok()?;
+    match map.get(key) {
+        Some((s, m, v)) if *s == size && *m == mtime => Some(v.clone()),
+        _ => None,
+    }
+}
+
 /// Task progress from the rendered todo block. Reads a 256KB window (vs 32KB
 /// elsewhere) and keeps the WHOLE render — the latest block is often scrolled
 /// well back from the final rows.
 fn log_tasks(log_file: Option<&str>) -> Value {
     let Some(log_file) = log_file else { return Value::Null };
+    let Some((size, mtime)) = file_version(log_file) else {
+        return Value::Null;
+    };
+    if let Some(v) = json_cache_get(&TASKS_CACHE, log_file, size, mtime) {
+        return v;
+    }
     let Some((size, mtime, lines)) = render_tail_lines(log_file, 256 * 1024, 0) else {
         return Value::Null;
     };
@@ -327,6 +356,12 @@ fn log_tasks(log_file: Option<&str>) -> Value {
 
 fn log_badges(log_file: Option<&str>) -> Vec<String> {
     let Some(log_file) = log_file else { return vec![] };
+    let Some((size, mtime)) = file_version(log_file) else {
+        return vec![];
+    };
+    if let Some(v) = json_cache_get(&BADGE_CACHE, log_file, size, mtime) {
+        return serde_json::from_value(v).unwrap_or_default();
+    }
     let Some((size, mtime, lines)) = render_tail_lines(log_file, 32_768, 40) else {
         return vec![];
     };
@@ -360,6 +395,12 @@ fn log_needs_input(log_file: Option<&str>, cli: &str) -> Value {
     let pats = cli_patterns(cli);
     if pats.0.is_empty() {
         return Value::Null;
+    }
+    let Some((size, mtime)) = file_version(log_file) else {
+        return Value::Null;
+    };
+    if let Some(v) = json_cache_get(&NI_CACHE, log_file, size, mtime) {
+        return v;
     }
     let Some((size, mtime, lines)) = render_tail_lines(log_file, 32_768, 40) else {
         return Value::Null;
