@@ -108,6 +108,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
+    "deepseek": "bun scripts/deepseek-codex.ts",
     "build": "tsdown",
     "check:e2e": "bun scripts/check-e2e.ts",
     "cf": "bun scripts/cf.ts",
