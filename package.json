@@ -114,6 +114,8 @@
     "build:rgui": "bun scripts/build-rgui.ts",
     "dev:rgui": "bun lab/ui/rgui/dev.ts",
     "build:rs": "bun ./scripts/build-rs.ts",
+    "build:rs:fast": "bun ./scripts/build-rs.ts --fast",
+    "build:rs:dev": "bun ./scripts/build-rs.ts --dev",
     "postbuild": "bun ./ts/postbuild.ts",
     "demo": "bun run build && bun link && claude-yes -- demo",
     "dev": "bun ts/index.ts",

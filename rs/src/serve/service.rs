@@ -1,15 +1,19 @@
 // Native OS-level service install for `ayrs serve`.
 //
-// Deliberately does NOT go through oxmgr/pm2 the way the TS `ay serve install`
-// does: the whole point of the Rust daemon is to have no Node/Bun process in
-// the tree, so we talk to the platform's own supervisor directly.
+// Prefers the platform's own supervisor so the *ayrs* daemon tree stays pure
+// Rust (no Node/Bun), the whole point of the Rust daemon:
 //
 //   macOS  -> launchd user agent  ~/Library/LaunchAgents/<LABEL>.plist
 //   Linux  -> systemd user unit   ~/.config/systemd/user/<LABEL>.service
 //
-// The label is distinct from anything the TS daemon registers (oxmgr owns
-// `io.oxmgr.daemon`), so both can be installed at the same time during the
-// migration.
+// Fallback: on Linux WITHOUT a usable systemd `--user` bus (e.g. a container),
+// register with oxmgr instead of failing (see the oxmgr block below). oxmgr is a
+// separate supervisor process — the ayrs process it runs is still pure Rust — so
+// the "no Node/Bun in ayrs" invariant holds. This mirrors how the TS `ay serve`
+// is managed on such hosts.
+//
+// The systemd/launchd label is distinct from the oxmgr name the TS daemon
+// registers (`agent-yes`), so both can be installed at once during migration.
 
 use anyhow::{bail, Context, Result};
 use std::path::PathBuf;
@@ -147,6 +151,83 @@ fn run(cmd: &str, args: &[&str]) -> Result<String> {
     Ok(s)
 }
 
+// --- oxmgr fallback -------------------------------------------------------
+// On Linux WITHOUT a systemd `--user` bus (e.g. a container: `systemctl --user`
+// fails with "Failed to connect to bus … $DBUS_SESSION_BUS_ADDRESS and
+// $XDG_RUNTIME_DIR not defined"), there is no native user supervisor to talk to.
+// Rather than fail, fall back to oxmgr — the same supervisor the TS `ay serve`
+// uses. This does NOT reintroduce a Node/Bun process into the *ayrs* daemon tree
+// (oxmgr is a separate supervisor; the process it runs is still pure-Rust ayrs).
+
+/// The oxmgr-managed process name. Matches the TS daemon's convention and stays
+/// distinct from it (`agent-yes`), so both can be registered during migration.
+const OXMGR_NAME: &str = "ayrs-serve";
+
+/// `which`-style PATH lookup for an executable (Linux fallback only).
+fn which(bin: &str) -> Option<String> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let candidate = dir.join(bin);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
+        }
+    }
+    None
+}
+
+/// Is a usable systemd user bus present? Probe with a cheap read-only call — if
+/// the bus is unreachable this fails with the same connection error `install`
+/// would hit, so a `false` here reliably means "don't use systemd --user".
+#[cfg(target_os = "linux")]
+fn systemd_user_available() -> bool {
+    Command::new("systemctl")
+        .args(["--user", "show-environment"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// POSIX single-quote a token so oxmgr's shell-style word splitting keeps it
+/// intact (verified: oxmgr parses `'a b'` as one arg). Safe-charset tokens pass
+/// through unquoted for readability. Guards against spaces in the exe path
+/// (e.g. an unusual install dir) or a future arg.
+fn sh_quote(s: &str) -> String {
+    let safe = !s.is_empty()
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-+@:=".contains(&b));
+    if safe {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
+}
+
+/// The single command string oxmgr's `start <COMMAND>` positional expects; oxmgr
+/// splits it (shell-style) into program + args (verified: stores command=`…/ayrs`,
+/// args=[…]). Each token is shell-quoted so spaces/specials survive the split.
+fn oxmgr_command(exe: &str, args: &[String]) -> String {
+    std::iter::once(sh_quote(exe))
+        .chain(args.iter().map(|a| sh_quote(a)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Register (or re-register) `ayrs serve` under oxmgr with restart-on-crash.
+/// No `--health-cmd`: ayrs has no serve-liveness heartbeat, and unlike the Bun
+/// daemon (which could freeze its JS loop while alive) has no "alive-but-wedged"
+/// failure mode, so restart-always is sufficient supervision.
+fn oxmgr_install(oxmgr: &str, exe: &str, args: &[String]) -> Result<()> {
+    let _ = Command::new(oxmgr).args(["delete", OXMGR_NAME]).output(); // idempotent
+    let cmd = oxmgr_command(exe, args);
+    run(
+        oxmgr,
+        &[
+            "start", &cmd, "--name", OXMGR_NAME, "--restart", "always", "--max-restarts", "20",
+        ],
+    )?;
+    Ok(())
+}
+
 pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
     let path = unit_path()?;
     let exe = exe()?;
@@ -156,23 +237,31 @@ pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
     let out_log = dir.join("ayrs-serve.log");
     let err_log = dir.join("ayrs-serve.err.log");
 
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
     let body = render_unit(
         &exe,
         &args,
         &out_log.to_string_lossy(),
         &err_log.to_string_lossy(),
     );
-    // Reinstalling over a loaded unit: unload first so the new definition
-    // actually takes effect instead of silently keeping the old one running.
-    let _ = uninstall_quiet();
-    std::fs::write(&path, body)?;
-    println!("wrote {}", path.display());
+
+    // Write the native unit + load it. Factored into a closure so the Linux
+    // branch can choose it OR the oxmgr fallback without writing a stray unit
+    // file when systemd isn't usable.
+    let write_native_unit = || -> Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        // Reinstalling over a loaded unit: unload first so the new definition
+        // actually takes effect instead of silently keeping the old one running.
+        let _ = uninstall_quiet();
+        std::fs::write(&path, &body)?;
+        println!("wrote {}", path.display());
+        Ok(())
+    };
 
     #[cfg(target_os = "macos")]
     {
+        write_native_unit()?;
         let uid = unsafe { libc::getuid() };
         run(
             "launchctl",
@@ -182,14 +271,33 @@ pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
             "launchctl",
             &["kickstart", "-k", &format!("gui/{uid}/{LABEL}")],
         )?;
+        println!("installed {LABEL} ({exe} {})", args.join(" "));
     }
     #[cfg(target_os = "linux")]
     {
-        run("systemctl", &["--user", "daemon-reload"])?;
-        run("systemctl", &["--user", "enable", "--now", LABEL])?;
+        if systemd_user_available() {
+            write_native_unit()?;
+            run("systemctl", &["--user", "daemon-reload"])?;
+            run("systemctl", &["--user", "enable", "--now", LABEL])?;
+            println!("installed {LABEL} ({exe} {})", args.join(" "));
+        } else if let Some(oxmgr) = which("oxmgr") {
+            // No systemd --user bus (typically a container). Supervise via oxmgr
+            // instead of writing an inert unit that never loads. Also clear any
+            // stray unit a prior systemd attempt may have left behind.
+            let _ = std::fs::remove_file(&path);
+            oxmgr_install(&oxmgr, &exe, &args)?;
+            println!("no systemd --user bus — registered with oxmgr as '{OXMGR_NAME}'");
+            println!("installed {OXMGR_NAME} ({exe} {})", args.join(" "));
+        } else {
+            bail!(
+                "no systemd --user bus and no oxmgr on PATH.\n  \
+                 Install oxmgr (bun add -g oxmgr) or run this yourself under a supervisor:\n    \
+                 {exe} {}",
+                args.join(" ")
+            );
+        }
     }
 
-    println!("installed {LABEL} ({exe} {})", args.join(" "));
     println!("webrtc: {webrtc_url}");
     println!("console: {browser_url}");
     println!("logs: {}", out_log.display());
@@ -209,6 +317,11 @@ fn uninstall_quiet() -> Result<()> {
         let _ = Command::new("systemctl")
             .args(["--user", "disable", "--now", LABEL])
             .output();
+        // Also drop the oxmgr fallback registration, if any (harmless no-op when
+        // absent). Covers the container path where install() used oxmgr.
+        if let Some(oxmgr) = which("oxmgr") {
+            let _ = Command::new(oxmgr).args(["delete", OXMGR_NAME]).output();
+        }
     }
     Ok(())
 }
@@ -220,7 +333,7 @@ pub fn uninstall() -> Result<()> {
         std::fs::remove_file(&path)?;
         println!("removed {}", path.display());
     } else {
-        println!("{LABEL} was not installed");
+        println!("{LABEL} uninstalled (or was not installed)");
     }
     Ok(())
 }
@@ -252,11 +365,27 @@ pub fn status() -> Result<()> {
     }
     #[cfg(target_os = "linux")]
     {
-        let s = Command::new("systemctl")
-            .args(["--user", "status", LABEL])
-            .output();
-        if let Ok(o) = s {
-            print!("{}", String::from_utf8_lossy(&o.stdout));
+        if systemd_user_available() {
+            let s = Command::new("systemctl")
+                .args(["--user", "status", LABEL])
+                .output();
+            if let Ok(o) = s {
+                print!("{}", String::from_utf8_lossy(&o.stdout));
+            }
+        } else if let Some(oxmgr) = which("oxmgr") {
+            // Report the oxmgr fallback registration (the container path).
+            println!("supervisor: oxmgr (no systemd --user bus)");
+            let s = Command::new(oxmgr).args(["list"]).output();
+            if let Ok(o) = s {
+                let out = String::from_utf8_lossy(&o.stdout);
+                for line in out.lines() {
+                    if line.contains("NAME") || line.contains(OXMGR_NAME) {
+                        println!("{line}");
+                    }
+                }
+            }
+        } else {
+            println!("state = no supervisor (no systemd --user bus, no oxmgr)");
         }
     }
     Ok(())
@@ -272,6 +401,30 @@ mod tests {
             service_args(&Some(String::new()), "s.agent-yes.com"),
             vec!["serve", "--webrtc", "--sighost", "s.agent-yes.com"]
         );
+    }
+
+    #[test]
+    fn oxmgr_command_joins_exe_and_args() {
+        // oxmgr's `start <COMMAND>` positional takes one string it splits itself.
+        let cmd = oxmgr_command(
+            "/root/.cargo/bin/ayrs",
+            &service_args(&Some(String::new()), "s.agent-yes.com"),
+        );
+        assert_eq!(
+            cmd,
+            "/root/.cargo/bin/ayrs serve --webrtc --sighost s.agent-yes.com"
+        );
+    }
+
+    #[test]
+    fn oxmgr_command_quotes_spaces_and_specials() {
+        // A path with a space must survive oxmgr's shell-style split as ONE token.
+        let cmd = oxmgr_command("/home/a b/ayrs", &["serve".into(), "--webrtc".into()]);
+        assert_eq!(cmd, "'/home/a b/ayrs' serve --webrtc");
+        // embedded single quote → POSIX close/escape/reopen
+        assert_eq!(sh_quote("a'b"), "'a'\\''b'");
+        // safe tokens (incl. the room-URL charset) pass through unquoted
+        assert_eq!(sh_quote("webrtc://r1:e1.ab@s.agent-yes.com"), "webrtc://r1:e1.ab@s.agent-yes.com");
     }
 
     #[test]
