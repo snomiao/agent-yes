@@ -134,7 +134,12 @@ predicates = "3"
 
 [profile.release]
 opt-level = 3
-lto = true
+# Thin LTO (was `true` = fat LTO). Fat LTO relinks the whole webrtc/libp2p binary
+# on every build (~145s incremental — benchmarked, see
+# docs/serve-rust-vs-ts-benchmark.md); thin LTO links far faster with ~90% of the
+# runtime benefit, and for these I/O-bound daemons (time in syscalls/network, not
+# hot compute) the runtime loss is negligible while clean/CI builds speed up a lot.
+lto = "thin"
 strip = true
 
 # Register cfg names we set ourselves so the unexpected_cfgs lint (Rust 1.80+)
