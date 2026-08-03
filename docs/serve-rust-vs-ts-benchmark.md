@@ -102,11 +102,11 @@ Shipped as `scripts/build-rs.ts` flags (default build unchanged for CI/shipping)
 Both `cargo build` + atomic-rename the binary over `~/.cargo/bin/ayrs` (an
 in-place copy would `ETXTBSY` when the dest is a running `ayrs serve`).
 
-Optional follow-up (not applied — changes the shipped artifact): the release
-profile could use `lto = "thin"` instead of `lto = true`. Thin LTO is much faster
-to link with ~90% of the runtime benefit, which for an I/O-bound WebRTC daemon
-(time spent in syscalls/network, not hot compute) is a negligible runtime loss
-for a large clean-build/CI speedup.
+Applied to the release profile: `lto = "thin"` (was `lto = true` / fat LTO). Thin
+LTO links far faster with ~90% of the runtime benefit — negligible for an
+I/O-bound WebRTC daemon (time in syscalls/network, not hot compute). Measured: the
+release+swarm incremental build dropped from **145s → 72s (2×)**, and this also
+speeds up every clean/CI build.
 
 ## Method notes / caveats
 
