@@ -16,6 +16,7 @@
 // registers (`agent-yes`), so both can be installed at once during migration.
 
 use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -45,7 +46,7 @@ fn log_dir() -> Result<PathBuf> {
 }
 
 /// Args the service should run, after the executable path.
-fn service_args(webrtc: &Option<String>, sighost: &str) -> Vec<String> {
+pub fn service_args(webrtc: &Option<String>, sighost: &str) -> Vec<String> {
     let mut args = vec!["serve".to_string(), "--webrtc".to_string()];
     if let Some(v) = webrtc {
         if !v.is_empty() {
@@ -55,6 +56,65 @@ fn service_args(webrtc: &Option<String>, sighost: &str) -> Vec<String> {
     args.push("--sighost".to_string());
     args.push(sighost.to_string());
     args
+}
+
+// --- run receipt ----------------------------------------------------------
+// The default installed daemon runs `ayrs serve --webrtc …` with NO local HTTP
+// port, so `install` can't probe a `/api/version` endpoint the way the TS
+// `ay serve install` does to decide "already running the latest version". So
+// instead the running daemon drops a small receipt at startup recording its
+// version + pid + the service args it was launched with. `install` reads it to
+// answer the same question — same intent, file instead of HTTP.
+
+/// What the currently-running ayrs daemon recorded about itself at startup.
+#[derive(Serialize, Deserialize)]
+struct RunReceipt {
+    /// `CARGO_PKG_VERSION` of the binary that is actually running.
+    version: String,
+    /// The daemon's pid, so a stale receipt (daemon crashed/stopped) is ignored.
+    pid: u32,
+    /// The `service_args` the daemon was launched with, to compare config.
+    args: Vec<String>,
+}
+
+fn receipt_path() -> Result<PathBuf> {
+    Ok(log_dir()?.join(".ayrs-serve.receipt"))
+}
+
+/// Record what this process is running so a later `ayrs serve install` can skip
+/// a redundant teardown+reinstall when we're already the current version+config.
+/// Best-effort: a missing/unwritable receipt just means `install` won't no-op.
+pub fn write_run_receipt(args: &[String]) {
+    let receipt = RunReceipt {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        pid: std::process::id(),
+        args: args.to_vec(),
+    };
+    if let (Ok(path), Ok(body)) = (receipt_path(), serde_json::to_string(&receipt)) {
+        let _ = std::fs::write(path, body);
+    }
+}
+
+fn read_run_receipt() -> Option<RunReceipt> {
+    let txt = std::fs::read_to_string(receipt_path().ok()?).ok()?;
+    serde_json::from_str(&txt).ok()
+}
+
+/// Pure decision: does `r` describe a live daemon on THIS binary's version with
+/// THESE exact service args? Split out from [`already_current`] (which reads the
+/// file) so the version/args/liveness logic is unit-testable without touching
+/// the real receipt path. Mirrors the TS `runningVer === current && sameConfig`.
+fn receipt_is_current(r: &RunReceipt, desired_args: &[String]) -> bool {
+    r.version == env!("CARGO_PKG_VERSION")
+        && r.args == desired_args
+        && crate::pid_store::is_process_alive(r.pid)
+}
+
+/// True when a daemon is already running THIS binary's version with THESE exact
+/// service args — the condition under which `install` is a no-op. Minus the TS
+/// boot-autostart re-assert, which native launchd/systemd units already guarantee.
+fn already_current(desired_args: &[String]) -> bool {
+    read_run_receipt().is_some_and(|r| receipt_is_current(&r, desired_args))
 }
 
 #[cfg(target_os = "macos")]
@@ -232,6 +292,17 @@ pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
     let path = unit_path()?;
     let exe = exe()?;
     let args = service_args(webrtc, sighost);
+
+    // Idempotent re-run: if the daemon is already up on THIS binary's version
+    // with THESE exact args, skip the teardown+reinstall entirely — restarting
+    // it would drop every connected browser to re-assert what's already true.
+    // (Mirrors `ay serve install`'s up-to-date no-op.) An upgraded binary or a
+    // config change fails this check and falls through to the roll-forward below.
+    if already_current(&args) {
+        println!("{LABEL} already running v{} (up to date)", env!("CARGO_PKG_VERSION"));
+        return Ok(());
+    }
+
     let (webrtc_url, browser_url) = super::share::resolve_share_urls(webrtc.as_deref(), sighost)?;
     let dir = log_dir()?;
     let out_log = dir.join("ayrs-serve.log");
@@ -328,6 +399,12 @@ fn uninstall_quiet() -> Result<()> {
 
 pub fn uninstall() -> Result<()> {
     uninstall_quiet()?;
+    // Drop the run receipt too: leaving it behind (with a now-dead pid) is
+    // harmless for `already_current`'s liveness check, but removing it keeps the
+    // state clean and avoids a stale version lingering on disk.
+    if let Ok(receipt) = receipt_path() {
+        let _ = std::fs::remove_file(receipt);
+    }
     let path = unit_path()?;
     if path.exists() {
         std::fs::remove_file(&path)?;
@@ -401,6 +478,59 @@ mod tests {
             service_args(&Some(String::new()), "s.agent-yes.com"),
             vec!["serve", "--webrtc", "--sighost", "s.agent-yes.com"]
         );
+    }
+
+    fn receipt(version: &str, pid: u32) -> RunReceipt {
+        RunReceipt {
+            version: version.to_string(),
+            pid,
+            args: service_args(&Some(String::new()), "s.agent-yes.com"),
+        }
+    }
+
+    #[test]
+    fn receipt_current_when_version_args_and_pid_all_match() {
+        // Our own pid is reliably alive; version + args match → up to date.
+        let r = receipt(env!("CARGO_PKG_VERSION"), std::process::id());
+        let args = service_args(&Some(String::new()), "s.agent-yes.com");
+        assert!(receipt_is_current(&r, &args));
+    }
+
+    #[test]
+    fn receipt_stale_when_version_differs() {
+        // An upgraded binary: the running daemon still reports the old version,
+        // so install must NOT no-op (it should roll the daemon forward).
+        let r = receipt("0.0.0-old", std::process::id());
+        let args = service_args(&Some(String::new()), "s.agent-yes.com");
+        assert!(!receipt_is_current(&r, &args));
+    }
+
+    #[test]
+    fn receipt_stale_when_config_differs() {
+        // Same version, but a different sighost → a config change must reinstall.
+        let r = receipt(env!("CARGO_PKG_VERSION"), std::process::id());
+        let other = service_args(&Some(String::new()), "other.example.com");
+        assert!(!receipt_is_current(&r, &other));
+    }
+
+    #[test]
+    fn receipt_stale_when_pid_is_dead() {
+        // A crashed/stopped daemon left a receipt behind: a dead pid means the
+        // service isn't actually running, so install must (re)start it.
+        let dead = 4_194_303; // implausibly high pid, not us
+        let r = receipt(env!("CARGO_PKG_VERSION"), dead);
+        let args = service_args(&Some(String::new()), "s.agent-yes.com");
+        assert!(!receipt_is_current(&r, &args));
+    }
+
+    #[test]
+    fn receipt_serde_round_trips() {
+        let r = receipt(env!("CARGO_PKG_VERSION"), 12345);
+        let json = serde_json::to_string(&r).unwrap();
+        let back: RunReceipt = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.version, r.version);
+        assert_eq!(back.pid, r.pid);
+        assert_eq!(back.args, r.args);
     }
 
     #[test]
