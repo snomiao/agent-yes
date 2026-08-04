@@ -3084,6 +3084,13 @@ async function cmdSend(rest: string[]): Promise<number> {
       description:
         "Fire-and-forget: skip the paste-settle wait and submit confirmation, don't retry a swallowed Enter (also: AGENT_YES_SEND_NO_WAIT=1)",
     })
+    .option("raw", {
+      type: "boolean",
+      default: false,
+      alias: "no-wrap",
+      description:
+        "Send the body verbatim: omit the <ay-msg …> attribution wrapper that agent senders add by default (also: AGENT_YES_SEND_RAW=1)",
+    })
     .help(false)
     .version(false)
     .exitProcess(false);
@@ -3141,6 +3148,7 @@ async function cmdSend(rest: string[]): Promise<number> {
 
   // Who's sending, and have they actually looked at this target recently?
   const force = Boolean(argv.force) || process.env.AGENT_YES_FORCE_SEND === "1";
+  const raw = Boolean(argv.raw) || process.env.AGENT_YES_SEND_RAW === "1";
   const sender = await enforceSendGuards(record, force);
 
   // A bare "exit" / "/exit" isn't a prompt to type — claude only honours the
@@ -3182,7 +3190,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   let prefix = "";
   let suffix = "";
   let nonce: string | undefined;
-  if (sender.agent && !isSlashCommand(body)) {
+  if (sender.agent && !isSlashCommand(body) && !raw) {
     nonce = randomBytes(4).toString("hex");
     prefix = `<ay-msg ${nonce} from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${replyTarget} "...">\n`;
     suffix = `\n</ay-msg ${nonce}>`;
