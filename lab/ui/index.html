@@ -1593,6 +1593,32 @@
       .log .xterm-viewport {
         background: transparent !important;
       }
+      /* Jump-to-latest pill: thumb-reachable, bottom-right of the terminal,
+         only visible while scrolled up (JS toggles [hidden]). Sits clear of the
+         home-indicator / safe area so a one-handed tap always lands. */
+      .jumpbtn {
+        position: absolute;
+        right: max(12px, var(--sar));
+        bottom: max(12px, var(--sab));
+        z-index: 9;
+        width: 40px;
+        height: 40px;
+        border-radius: 50%;
+        border: 1px solid var(--border, #30363d);
+        background: color-mix(in srgb, var(--panel) 92%, transparent);
+        color: var(--fg);
+        font-size: 20px;
+        line-height: 1;
+        cursor: pointer;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 0;
+      }
+      .jumpbtn[hidden] {
+        display: none;
+      }
       .placeholder {
         display: flex;
         align-items: center;
@@ -5897,26 +5923,33 @@ my.translate = async (text, lang) => {
           /* addon CDN blocked — selection still works, copy falls back to menus */
         }
         term.open(logEl);
-        // ── touch text selection ────────────────────────────────────────────
-        // xterm gives touch no selection path at all — a drag only scrolled.
-        // New scheme: ONE finger drags SELECT (scrolling moved to two-finger
-        // pan — see the pinch/pan block). The drag is replayed to xterm as
-        // synthetic mouse events, so both worlds work with one mechanism: a
-        // mouse-tracking TUI (claude) receives the drag and runs its own
-        // selection (copying via OSC 52 → addon above), while a plain buffer
-        // gets xterm's local selection, auto-copied on release. A stationary
-        // long-press still raises the browser's contextmenu → our terminal
-        // menu, and a plain tap stays a click (links, focus) — we only take
-        // over once the finger has clearly moved.
+        // ── touch gestures ──────────────────────────────────────────────────
+        // Phone-first, one-thumb-while-walking scheme (every high-frequency op
+        // is ONE finger; two fingers only for the rare pinch-zoom):
+        //   • 1-finger vertical drag/flick → native viewport SCROLL (momentum,
+        //     never intercepted — the whole point of the rewrite; the old scheme
+        //     made a 1-finger drag SELECT, which fought every mobile convention).
+        //   • 1-finger horizontal flick   → switch agent (prev/next), axis-locked
+        //     so a slightly-diagonal scroll never flips agents. Skipped in a TUI
+        //     (a mouse-tracking app owns horizontal drags).
+        //   • long-press ~450ms           → select the word, then drag to extend;
+        //     opens the Copy/Paste/quick-cmd menu on release (iOS-style).
+        //   • double-tap → select word,  triple-tap → select line (xterm keys off
+        //     MouseEvent.detail 2/3), each opening the same menu.
+        //   • a plain tap stays a click (focus, links); the second finger hands
+        //     off to the pinch/pan block.
+        // In a mouse-tracking TUI (claude) a 1-finger vertical drag is forwarded
+        // as a WHEEL so the app's own view scrolls, and selection/switch are
+        // suppressed so the app keeps its gestures.
         (function touchSelBoot(t) {
           const el = t.element;
           if (!el) return;
-          let sx = 0,
-            sy = 0,
-            tracking = false, // 1-finger gesture in flight
-            selecting = false; // …and past the slop → we own it
           const screen = () => el.querySelector(".xterm-screen") || el;
-          const fire = (type, x, y, buttons) =>
+          // Synthesize a mouse event xterm understands. `detail` is the click
+          // count: 1 = range drag, 2 = word, 3 = line — xterm's SelectionService
+          // keys word/line selection off exactly that (synthetic events default
+          // to detail 0 and are silently ignored, so it must be set).
+          const fire = (type, x, y, buttons, detail = 1) =>
             screen().dispatchEvent(
               new MouseEvent(type, {
                 bubbles: true,
@@ -5925,73 +5958,221 @@ my.translate = async (text, lang) => {
                 clientY: y,
                 button: 0,
                 buttons,
-                // xterm's SelectionService starts a selection only for
-                // event.detail === 1 (single click) — synthetic events
-                // default to 0 and are silently ignored without this.
-                detail: 1,
+                detail,
               }),
             );
+          const wheelAt = (x, y, dy) =>
+            screen().dispatchEvent(
+              new WheelEvent("wheel", {
+                bubbles: true,
+                cancelable: true,
+                deltaY: dy,
+                deltaMode: 0,
+                clientX: x,
+                clientY: y,
+              }),
+            );
+          const isTui = () => {
+            const mt = t.modes && t.modes.mouseTrackingMode;
+            return !!(mt && mt !== "none");
+          };
+          const buzz = (ms) => {
+            try {
+              navigator.vibrate && navigator.vibrate(ms);
+            } catch {}
+          };
+
+          const SLOP = 14; // px before a drag is "real" (loosened for a moving hand)
+          const LONG_MS = 450; // press-and-hold to begin a word selection
+          const SWITCH_MIN = 60; // horizontal travel that commits an agent switch
+          const DBL_MS = 300; // max gap between taps for a double/triple
+          const DBL_SLOP = 24; // max spread for a multi-tap to count as "same spot"
+
+          let sx = 0,
+            sy = 0,
+            lastY = 0,
+            // '' undecided | scroll | select | switch | tui | done
+            mode = "";
+          let longTimer = null;
+          let tapCount = 0,
+            lastTapAt = 0,
+            lastTapX = 0,
+            lastTapY = 0;
+          const clearLong = () => {
+            if (longTimer) {
+              clearTimeout(longTimer);
+              longTimer = null;
+            }
+          };
+          // After a double/triple-tap selection, remember the text (mobile tap
+          // emulation can collapse the live xterm selection before the menu
+          // reads it) and pop the Copy/Paste/quick-cmd menu at the tap.
+          const afterQuickSelect = (x, y) => {
+            if (t.hasSelection && t.hasSelection()) {
+              const s = t.getSelection();
+              if (s.trim()) recentTouchSel = { text: s, at: Date.now() };
+              showTermMenu({ preventDefault() {}, clientX: x, clientY: y }, t);
+            }
+          };
+
           el.addEventListener(
             "touchstart",
             (ev) => {
               if (ev.touches.length !== 1) {
-                // second finger → this became a pan/pinch; abandon selection
-                if (selecting) fire("mouseup", sx, sy, 0);
-                tracking = selecting = false;
+                // second finger → pinch/pan owns it; release any drag in flight
+                clearLong();
+                if (mode === "select" || mode === "tui") fire("mouseup", sx, sy, 0);
+                mode = "done";
                 return;
               }
-              tracking = true;
-              selecting = false;
               sx = ev.touches[0].clientX;
-              sy = ev.touches[0].clientY;
+              sy = lastY = ev.touches[0].clientY;
+              if (isTui()) {
+                mode = "tui";
+                return;
+              }
+              mode = "";
+              clearLong();
+              longTimer = setTimeout(() => {
+                if (mode !== "") return; // the finger already moved → not a hold
+                mode = "select";
+                fire("mousedown", sx, sy, 1, 2); // detail 2 → select word, WORD-extend mode
+                buzz(10);
+              }, LONG_MS);
             },
             { passive: true },
           );
+
           el.addEventListener(
             "touchmove",
             (ev) => {
-              if (!tracking || ev.touches.length !== 1) return;
-              // preventDefault from the FIRST move: once the browser commits
-              // to a native scroll, later preventDefault calls are ignored —
-              // single-finger drags must never scroll under the selection.
-              ev.preventDefault();
+              if (ev.touches.length !== 1 || mode === "done" || mode === "switch") return;
               const x = ev.touches[0].clientX,
                 y = ev.touches[0].clientY;
-              if (!selecting) {
-                if (Math.hypot(x - sx, y - sy) <= 10) return; // tap / long-press slop
-                selecting = true;
-                fire("mousedown", sx, sy, 1); // anchor at the touch ORIGIN
+              const dx = x - sx,
+                dy = y - sy;
+
+              if (mode === "tui") {
+                // No scrollback in an alt-screen app — forward the drag as a
+                // wheel so the app's OWN view (claude's chat) scrolls instead.
+                ev.preventDefault();
+                const ddy = y - lastY;
+                lastY = y;
+                if (ddy) wheelAt(x, y, -ddy);
+                return;
               }
-              fire("mousemove", x, y, 1);
+              if (mode === "select") {
+                ev.preventDefault();
+                fire("mousemove", x, y, 1); // extend the word selection
+                return;
+              }
+              if (mode === "") {
+                if (Math.hypot(dx, dy) <= SLOP) return; // still within tap/hold slop
+                clearLong();
+                // Axis lock: a decisively horizontal, far-enough flick switches
+                // agents; anything else falls through to native vertical scroll.
+                if (Math.abs(dx) > Math.abs(dy) * 1.4 && Math.abs(dx) >= SWITCH_MIN) {
+                  mode = "switch";
+                  ev.preventDefault();
+                  // ← left = next (forward), → right = prev (back)
+                  try {
+                    stepSelection(dx < 0 ? 1 : -1);
+                  } catch {}
+                  buzz(12);
+                } else {
+                  // Let the browser scroll `.xterm-viewport` natively (momentum,
+                  // and honouring an already-committed scroll) — do NOT
+                  // preventDefault here, that's what keeps the flick smooth.
+                  mode = "scroll";
+                }
+                return;
+              }
             },
             { passive: false },
           );
+
           const end = (ev) => {
-            const was = selecting;
-            tracking = selecting = false;
-            if (!was) return;
+            clearLong();
+            const finished = mode;
             const p = (ev.changedTouches && ev.changedTouches[0]) || { clientX: sx, clientY: sy };
-            fire("mouseup", p.clientX, p.clientY, 0);
-            const mt = t.modes && t.modes.mouseTrackingMode;
-            if (mt && mt !== "none") return; // the TUI owns selection + OSC 52 copy
-            if (t.hasSelection()) {
-              // Remember the selection for the long-press menu: on mobile the
-              // browser's tap/long-press emulation can collapse the xterm
-              // selection BEFORE the menu opens, which made selection-fed
-              // commands (Translate, [selection]) run against empty text.
-              const selTxt = t.getSelection();
-              // whitespace-only cell selections aren't worth remembering
-              if (selTxt.trim()) recentTouchSel = { text: selTxt, at: Date.now() };
-              copyText(selTxt);
-              const pill = document.createElement("div");
-              pill.className = "updatebar";
-              pill.textContent = "copied";
-              document.body.appendChild(pill);
-              setTimeout(() => pill.remove(), 900);
+            mode = "";
+
+            if (finished === "tui") {
+              return; // wheel already dispatched per-move; a bare tap stays a native click
+            }
+            if (finished === "select") {
+              fire("mouseup", p.clientX, p.clientY, 0);
+              if (t.hasSelection && t.hasSelection()) {
+                const selTxt = t.getSelection();
+                if (selTxt.trim()) recentTouchSel = { text: selTxt, at: Date.now() };
+                // iOS-style: land on the selection with the action menu open.
+                showTermMenu({ preventDefault() {}, clientX: p.clientX, clientY: p.clientY }, t);
+              }
+              return;
+            }
+            if (finished === "scroll" || finished === "switch") {
+              return; // the gesture already did its work during the move
+            }
+            // finished === "" → nothing moved and no hold fired: a TAP. Fold it
+            // into double/triple-tap word/line selection; a lone tap is left as a
+            // native click so focus + link handling still work.
+            const now = Date.now();
+            const near =
+              Math.abs(p.clientX - lastTapX) < DBL_SLOP && Math.abs(p.clientY - lastTapY) < DBL_SLOP;
+            tapCount = now - lastTapAt < DBL_MS && near ? tapCount + 1 : 1;
+            lastTapAt = now;
+            lastTapX = p.clientX;
+            lastTapY = p.clientY;
+            if (isTui()) return; // let the app have its taps
+            if (tapCount === 2) {
+              fire("mousedown", p.clientX, p.clientY, 1, 2); // word
+              fire("mouseup", p.clientX, p.clientY, 0, 2);
+              afterQuickSelect(p.clientX, p.clientY);
+            } else if (tapCount >= 3) {
+              fire("mousedown", p.clientX, p.clientY, 1, 3); // line
+              fire("mouseup", p.clientX, p.clientY, 0, 3);
+              afterQuickSelect(p.clientX, p.clientY);
+              tapCount = 0;
             }
           };
           el.addEventListener("touchend", end);
-          el.addEventListener("touchcancel", end);
+          el.addEventListener("touchcancel", () => {
+            clearLong();
+            mode = "";
+          });
+        })(term);
+        // Jump-to-bottom affordance: while scrolled up, a thumb-reachable pill in
+        // the bottom-right of the terminal snaps back to the live tail. Shown only
+        // when the viewport isn't already pinned to the bottom (checked on every
+        // scroll AND render, since new output grows baseY without an onScroll).
+        (function jumpToBottomBoot(t) {
+          const host = logEl;
+          if (!host) return;
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "jumpbtn";
+          btn.setAttribute("aria-label", "Jump to latest output");
+          btn.textContent = "⤓";
+          btn.hidden = true;
+          host.appendChild(btn);
+          const atBottom = () => {
+            const b = t.buffer && t.buffer.active;
+            return !b || b.viewportY >= b.baseY;
+          };
+          const sync = () => {
+            const hide = atBottom();
+            if (btn.hidden !== hide) btn.hidden = hide;
+          };
+          try {
+            t.onScroll(sync);
+            t.onRender(sync);
+          } catch {}
+          btn.addEventListener("click", (ev) => {
+            ev.preventDefault();
+            t.scrollToBottom();
+            sync();
+          });
+          sync();
         })(term);
         // Right-click opens our own menu (Copy / Paste / customizable quick
         // commands like `/fork [selection]`) instead of copying outright. We
