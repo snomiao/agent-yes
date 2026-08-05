@@ -12,7 +12,9 @@
  */
 
 import { randomBytes } from "crypto";
+import { spawn } from "child_process";
 import { appendFile, mkdir, open, readFile, stat, writeFile } from "fs/promises";
+import { fileURLToPath } from "node:url";
 import ms from "ms";
 import { homedir } from "os";
 import path from "path";
@@ -374,6 +376,8 @@ const SUBCOMMANDS = new Set([
   "expose",
   "callback",
   "reap",
+  "deepseek",
+  "ds",
   "help",
 ]);
 
@@ -442,6 +446,42 @@ export function isUnknownManagerToken(
   if (!managerCommands || !rawArg || rawArg.startsWith("-")) return false;
   if (isSubcommand(rawArg, managerCommands)) return false;
   return !supportedClis.includes(rawArg);
+}
+
+/**
+ * Write to stdout and wait until it has actually been handed off.
+ *
+ * The CLI ends with `process.exit()`, which DISCARDS bytes still sitting in the
+ * pipe buffer. Writing to a file completes synchronously so this never showed
+ * there, but any consumer that PIPES us silently lost everything past 64KiB.
+ * Measured on `ay ls --json` with a large fleet (symval CTO, 2026-08-05):
+ *
+ *     ay ls --json > file    118055 bytes, valid JSON
+ *     ay ls --json | consumer 65536 bytes, cut mid-multibyte — will not parse
+ *
+ * The truncation is invisible to the caller: it looks exactly like a small
+ * fleet, and an orchestrator that parses this reported 27 of 71 agents.
+ *
+ * Only capturing the REAL write's completion works. Probing afterwards with an
+ * empty `write("")` — by return value, by drain event, or by callback — reports
+ * ready while the big write is still queued (all three verified failing), so do
+ * not "simplify" this into a flush helper at the exit site.
+ */
+async function writeStdoutFlushed(text: string): Promise<void> {
+  // Use the WRITE'S OWN RETURN VALUE, not a probe afterwards. `false` means the
+  // pipe buffer is full and bytes are still queued; only then do we wait.
+  //
+  // Deliberately `=== false`: a stubbed/mocked stdout (tests, embedders) returns
+  // undefined, and treating that as backpressure made this await forever — it
+  // broke 5 specs before the strict compare went in. The timeout is a second
+  // guarantee that a stuck consumer can never hang the CLI.
+  const flushed = process.stdout.write(text);
+  if (flushed === false) {
+    await Promise.race([
+      new Promise<void>((resolve) => process.stdout.once("drain", () => resolve())),
+      new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+    ]);
+  }
 }
 
 /**
@@ -553,6 +593,9 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         await reaper.sweep();
         return 0;
       }
+      case "deepseek":
+      case "ds":
+        return cmdDeepseek(rest);
       case "help":
         return cmdHelp(managerCommands);
       default:
@@ -563,6 +606,47 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
     process.stderr.write(`ay ${sub}: ${msg}\n`);
     return 1;
   }
+}
+
+// ---------------------------------------------------------------------------
+// ay deepseek / ay ds
+// ---------------------------------------------------------------------------
+
+/**
+ * `ay deepseek [-- <args>…]` / `ay ds …`: run the local DeepSeek adapter that
+ * bridges Codex's Responses API to DeepSeek's chat completions, then spawn
+ * `codex` pointed at it. The adapter script lives in this package's
+ * `scripts/deepseek-codex.ts` and is Bun-only (Bun.serve / Bun.spawn), so it is
+ * re-exec'd via the same bun runtime that's running us — never imported into
+ * this process. Extra args are forwarded verbatim to `codex`.
+ */
+export function cmdDeepseek(rest: string[]): Promise<number> {
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const script = path.join(root, "scripts", "deepseek-codex.ts");
+  const bunBin = process.execPath.split(/[/\\]/).at(-1)?.startsWith("bun")
+    ? process.execPath
+    : "bun";
+  const child = spawn(bunBin, [script, ...rest], {
+    cwd: process.cwd(),
+    env: { ...process.env, AGENT_YES_BIN: process.argv[1] },
+    stdio: "inherit",
+  });
+  return new Promise((resolve) => {
+    child.on("error", (err) => {
+      process.stderr.write(`ay deepseek: failed to start: ${err.message}\n`);
+      resolve(1);
+    });
+    child.on("exit", (code, signal) => {
+      if (signal) {
+        resolve(128 + (signal === "SIGINT" ? 2 : signal === "SIGTERM" ? 15 : 1));
+      } else {
+        resolve(code ?? 1);
+      }
+    });
+    for (const signal of ["SIGINT", "SIGTERM"] as const) {
+      process.on(signal, () => child.kill(signal));
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -669,6 +753,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay result <keyword> [--wait]        pull an agent's structured result envelope\n` +
       `  ay result set '<json>'              (inside an agent) deposit your result envelope\n` +
       `  ay reap                             kill process groups leaked by dead agents\n` +
+      `  ay deepseek|ds [-- <codex args>]    run codex via the local DeepSeek adapter (DEEPSEEK_API_KEY)\n` +
       wsLines +
       `\n` +
       `Remote:\n` +
@@ -1771,7 +1856,7 @@ async function cmdLs(rest: string[]): Promise<number> {
     const enriched = await Promise.all(
       records.map(async (r) => ({ ...r, ...(await deriveLiveState(r)) })),
     );
-    process.stdout.write(JSON.stringify(enriched, null, 2) + "\n");
+    await writeStdoutFlushed(JSON.stringify(enriched, null, 2) + "\n");
     return 0;
   }
 
