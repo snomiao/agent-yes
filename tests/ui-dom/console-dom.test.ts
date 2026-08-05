@@ -322,6 +322,46 @@ describe("console DOM behaviour", () => {
     }
   });
 
+  it("right-clicking a row opens the full agent menu, acting on THAT row", async () => {
+    // The row menu used to offer only "Pin to top"; it now mirrors the terminal
+    // header's ⋯ menu (share / stop / restart / force-kill) — bound to the
+    // right-clicked agent, not the selected one.
+    const { ctx, page } = await openConsole(browser, url);
+    const posts: { path: string; body: any }[] = [];
+    page.on("request", (r) => {
+      const u = new URL(r.url());
+      if (r.method() === "POST" && u.pathname === "/api/kill") {
+        try {
+          posts.push({ path: u.pathname, body: r.postDataJSON() });
+        } catch {}
+      }
+    });
+    page.on("dialog", (d) => d.accept());
+    try {
+      // Open 101, then right-click a DIFFERENT row (102).
+      await page.click('.list .row[data-key="local#101"]');
+      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#101");
+      await page.click('.list .row[data-key="local#102"]', { button: "right" });
+      await expect.poll(() => page.locator(".ctxmenu").isVisible()).toBe(true);
+      const items = (await page.locator(".ctxmenu").innerText()).toLowerCase();
+      expect(items).toContain("pin to top");
+      expect(items).toContain("share (view-only)");
+      expect(items).toContain("share (read-write)");
+      expect(items).toContain("stop agent");
+      expect(items).toContain("restart");
+      expect(items).toContain("force-kill");
+
+      // Force-kill targets 102 (the right-clicked row), not the open 101.
+      await page.locator(".ctxmenu-item", { hasText: "Force-kill" }).click();
+      await expect.poll(() => posts.length).toBe(1);
+      expect(posts[0].body.keyword).toBe("102");
+      // The selection never moved.
+      expect(await page.locator(".row.sel").getAttribute("data-key")).toBe("local#101");
+    } finally {
+      await ctx.close();
+    }
+  });
+
   it("Cmd+K /filter sets and clears the left panel filter box", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {

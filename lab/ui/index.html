@@ -1843,6 +1843,9 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
+      .ctxmenu-item.danger {
+        color: var(--red, #f85149);
+      }
       .ctxmenu-sep {
         height: 1px;
         margin: 4px 6px;
@@ -4755,6 +4758,7 @@ my.translate = async (text, lang) => {
           it.className = "ctxmenu-item";
           it.textContent = label;
           it.setAttribute("role", "menuitem");
+          if (opts && opts.danger) it.classList.add("danger");
           if (opts && opts.hint) {
             const h = document.createElement("span");
             h.className = "ctxmenu-hint";
@@ -4869,17 +4873,35 @@ my.translate = async (text, lang) => {
 
         openCtxMenu(menu, ev);
       }
-      // Right-click menu for a left-panel agent row: pin/unpin to the top of the
-      // list (a pin also surfaces the agent in /r/'s screen-fixed palette).
+      // Right-click menu for a left-panel agent row. Same agent actions as the
+      // terminal header's ⋯ overflow menu (share / stop / restart / force-kill),
+      // but bound to the RIGHT-CLICKED row rather than the selected agent — so you
+      // can act on an agent without switching to it first. Plus pin/unpin to the
+      // top of the list (a pin also surfaces the agent in /r/'s screen-fixed
+      // palette). View prefs (font size, perf HUD) stay in the ⋯ menu: they're
+      // properties of the terminal pane, not of an agent.
       function showAgentMenu(ev, key) {
         ev.preventDefault();
         hideTermMenu();
         const e = entries.find((x) => x._key === key);
         if (!e) return;
-        const { menu, addItem } = ctxMenuShell();
+        const { menu, addItem, addSep } = ctxMenuShell();
         const name = cliLabel(e) || ident(e) || "pid " + e.pid;
-        if (isPinned(key)) addItem("Unpin “" + name + "”", { hint: "📌" }, () => togglePin(key));
-        else addItem("Pin “" + name + "” to top", { hint: "📌" }, () => togglePin(key));
+        addItem(name, { disabled: true, hint: "pid " + e.pid }, () => {});
+        addSep();
+        if (isPinned(key)) addItem("Unpin from top", { hint: "📌" }, () => togglePin(key));
+        else addItem("Pin to top", { hint: "📌" }, () => togglePin(key));
+        // A shared read-only view can't re-share or steer its host's agent —
+        // mirrors the .app.steer-agent rule that hides these in the ⋯ menu.
+        if (!isReadonlyEnt(e) && !sharePermOf(e)) {
+          addSep();
+          addItem("👁 Share (view-only)", {}, () => shareAgent("r", e));
+          addItem("✏️ Share (read-write)…", {}, () => shareAgent("rw", e));
+          addSep();
+          addItem("⏹ Stop agent", {}, () => stopAgent(false, e));
+          addItem("↻ Restart (resume)", {}, () => restartAgent(e));
+          addItem("✕ Force-kill (SIGKILL)", { danger: true }, () => stopAgent(true, e));
+        }
         openCtxMenu(menu, ev);
       }
       // Lightweight editor: overlay + textarea of `Label | template` lines. Save
