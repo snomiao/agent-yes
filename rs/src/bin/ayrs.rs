@@ -84,6 +84,15 @@ async fn main() -> anyhow::Result<()> {
             let http = port.map(|p| tokio::spawn(serve::http::run(p)));
             match webrtc {
                 Some(webrtc) => {
+                    // Record what we're running so a later `ayrs serve install`
+                    // can detect it's already current and skip a needless
+                    // restart. Only the WebRTC path writes it — that's the shape
+                    // the installed service unit runs, so the args match exactly
+                    // what `install` recomputes for the same webrtc/sighost.
+                    serve::service::write_run_receipt(&serve::service::service_args(
+                        &Some(webrtc.clone()),
+                        &sighost,
+                    ));
                     let url = if webrtc.is_empty() { None } else { Some(webrtc) };
                     serve::share::run_share(serve::share::ShareConfig { url, sighost }).await
                 }
