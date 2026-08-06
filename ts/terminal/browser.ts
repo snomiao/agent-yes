@@ -517,7 +517,19 @@ export class AyTerminal {
       const rec = (await res.json()) as { cwd?: string; cli?: string };
       const rich = richTitle(rec);
       if (rich && titleEl) {
-        titleEl.textContent = rich;
+        const nameEl = titleEl.querySelector?.("#titlename") ?? titleEl;
+        const cwdEl = titleEl.querySelector?.("#titlecwd");
+        const cwdLeadEl = titleEl.querySelector?.("#titlecwdlead");
+        const cwdPathEl = titleEl.querySelector?.("#titlecwdpath");
+        nameEl.textContent = rich;
+        // Split off the leading "/" — it sits at the bidi paragraph edge of the
+        // rtl-ellipsis .titlecwd-path trick below and gets reordered to the far
+        // end of the line if left inside it.
+        const cwd = rec.cwd ?? "";
+        const cwdLead = cwd.startsWith("/") ? "/" : "";
+        if (cwdEl) cwdEl.style.display = cwd ? "flex" : "none";
+        if (cwdLeadEl) cwdLeadEl.textContent = cwdLead;
+        if (cwdPathEl) cwdPathEl.textContent = cwd.slice(cwdLead.length);
         titleEl.title = `#${this.pid}${rec.cwd ? " · " + rec.cwd : ""}`; // pid + full cwd tooltip
         this.title = rich;
       }
@@ -619,7 +631,15 @@ function widgetHtml(o: {
            <button id="min" data-ctl title="Minimize">_</button>
            <button id="max" data-ctl title="Maximize">□</button>
          </span>`;
-  const titleSpan = `<span class="title" id="title">${esc(o.title)}</span>`;
+  // .title is a 2-line block: the rich name/summary on top, the agent's cwd
+  // underneath once applyRichTitle() learns it from /api/size.
+  const titleSpan = `<div class="title" id="title">
+           <span class="titlename" id="titlename">${esc(o.title)}</span>
+           <span class="titlecwd" id="titlecwd"
+             ><span class="titlecwd-lead" id="titlecwdlead"></span
+             ><span class="titlecwd-path" id="titlecwdpath"></span
+           ></span>
+         </div>`;
   const header =
     !o.inline && o.side === "left"
       ? `${controls}${titleSpan}${badge}`
@@ -656,7 +676,12 @@ function widgetHtml(o: {
   #titlebar { padding: 6px 10px; background: #161b22; display: flex; align-items: center; gap: 8px;
     font: 600 12px ui-monospace, SFMono-Regular, Menlo, monospace; color: #c9d1d9; user-select: none; }
   #panel.transparent #titlebar { background: rgba(22,27,34,.7); }
-  .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .title { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; justify-content: center; }
+  .titlename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .titlecwd { display: none; min-width: 0; font-size: 10px; opacity: .6; font-weight: 400; } /* JS flips to flex once cwd is known */
+  .titlecwd-lead { flex: none; }
+  .titlecwd-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    direction: rtl; text-align: left; } /* ellipsize the boring prefix, not the tail */
   .ro { font-size: 10px; opacity: .7; background: #30363d; border-radius: 9px; padding: 1px 7px; }
   .rw { font-size: 10px; background: #1f6feb; color: #fff; border-radius: 9px; padding: 1px 7px; }
   .ctl { display: inline-flex; align-items: center; gap: 6px; flex: none; }

@@ -2643,7 +2643,9 @@ describe("subcommands.cmdWhoami", () => {
     const text = stdout2.join("");
     expect(text).toMatch(/agent {5}claude #\d+ {2}\(agent_id aaaa0000bbbb\)/);
     expect(text).toMatch(/reply {5}ay send aaaa0000bbbb/);
-    expect(text).toMatch(/<ay-msg from claude #\d+ @ \/repo\/alpha — reply: ay send aaaa0000bbbb "\.\.\.">/);
+    expect(text).toMatch(
+      /<ay-msg from claude #\d+ @ \/repo\/alpha — reply: ay send aaaa0000bbbb "\.\.\.">/,
+    );
   });
 });
 

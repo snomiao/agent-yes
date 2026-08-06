@@ -1365,6 +1365,35 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      .rowcwd {
+        display: flex;
+        font-family: var(--mono);
+        color: var(--muted);
+        font-size: 11px;
+        min-width: 0;
+      }
+      .rowcwd .tbranch {
+        /* Invisible spacer matching the row's own tree-rail prefix, so the cwd
+           line indents under the name column at any nesting depth instead of
+           a magic constant that only lines up at depth 0. */
+        visibility: hidden;
+      }
+      .rowcwd .rowcwd-lead {
+        flex: none;
+      }
+      .rowcwd .rowcwd-path {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        /* Absolute paths share a long, boring prefix (/Users/x/ws/…) — the
+           informative part is the tail, so ellipsize from the left/start
+           instead of the (default) end. Characters stay in reading order
+           (this only flips which end gets clipped, via the bidi algorithm). */
+        direction: rtl;
+        text-align: left;
+      }
       .rowtitle {
         color: var(--fg);
         font-size: 12.5px;
@@ -1381,12 +1410,19 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      /* compact view: one line per agent — dot + cli + live title (or prompt), age */
+      /* compact view: dot + cli + live title (or prompt), age — plus the agent's
+         cwd as a 2nd line (.rowcwd) underneath. */
       .row.crow {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 6px 18px;
+      }
+      .crow1 {
         display: flex;
         align-items: center;
         gap: 8px;
-        padding: 6px 18px;
+        min-width: 0;
       }
       /* Tree branch prefix for nested (sub)agents — monospace so the box-drawing
          glyphs line up into continuous │ ├ └ rails across rows. */
@@ -1499,6 +1535,19 @@
         align-items: center;
         gap: 10px;
       }
+      .rnamewrap {
+        display: flex;
+        flex-direction: column;
+        flex: 0 1 auto;
+        min-width: 0;
+        gap: 2px;
+      }
+      .rnameline {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
       .rhead .name {
         font-size: 15px;
         /* shrink + ellipsis so a long agent title can't shove the live/⋯
@@ -1508,6 +1557,27 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      .rcwd {
+        display: flex;
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted);
+        min-width: 0;
+      }
+      .rcwd-lead {
+        flex: none;
+      }
+      .rcwd-path {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        /* Ellipsize the boring home/ws prefix, not the informative tail — see
+           the matching comment on .rowcwd-path. */
+        direction: rtl;
+        text-align: left;
       }
       /* back-to-list affordance — only surfaces in the single-column mobile view */
       .rback {
@@ -1982,8 +2052,16 @@
       <div class="right">
         <div class="rhead" id="rhead" style="display: none">
           <button class="rback" id="rback" title="back to list" aria-label="back to list">‹</button>
-          <span class="dot" id="rdot"></span>
-          <span class="name" id="rname"></span>
+          <div class="rnamewrap">
+            <div class="rnameline">
+              <span class="dot" id="rdot"></span>
+              <span class="name" id="rname"></span>
+            </div>
+            <div class="rcwd" id="rcwd">
+              <span class="rcwd-lead" id="rcwdlead"></span
+              ><span class="rcwd-path" id="rcwdpath"></span>
+            </div>
+          </div>
           <span class="badge" id="rpid"></span>
           <span class="robadge" title="view-only share — you can watch but not steer this agent"
             >👁 read-only</span
@@ -5632,6 +5710,7 @@ my.translate = async (text, lang) => {
                 const id = compactIdent(e, ctx, 3, r.parentEntry);
                 const cli = cliLabel(e);
                 return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">
+        <div class="crow1">
         ${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}
         ${pinMarkHtml(e)}
         <span class="dot ${esc(e.status)}"></span>
@@ -5643,7 +5722,19 @@ my.translate = async (text, lang) => {
         ${badgeChipsHtml(e)}
         ${gitChipHtml(e)}
         ${peerChipHtml(e)}
-        <span class="age">${age(e)}</span></div>`;
+        <span class="age">${age(e)}</span></div>
+        ${
+          e.cwd
+            ? // The leading "/" sits right at the bidi paragraph edge of the
+              // rtl-ellipsis trick below and gets reordered to the far end —
+              // pin it outside that span so only the actual path direction-flips.
+              (() => {
+                const lead = e.cwd.startsWith("/") ? "/" : "";
+                const rest = e.cwd.slice(lead.length);
+                return `<div class="rowcwd" title="${esc(e.cwd)}">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}<span class="rowcwd-lead">${esc(lead)}</span><span class="rowcwd-path">${esc(rest)}</span></div>`;
+              })()
+            : ""
+        }</div>`;
               })
               .join("") || `<div class="empty">no match</div>`;
           renderSendWires(); // rows were replaced — re-draw the overlay (see below)
@@ -5870,6 +5961,14 @@ my.translate = async (text, lang) => {
         $("rname").textContent = rname;
         refreshDocTitle(); // tab title follows the selected agent (name + status)
         $("rpid").textContent = "pid " + e.pid;
+        // Split off the leading "/" before the rtl-ellipsis path span (see the
+        // matching .rowcwd-lead comment) — it sits at the bidi paragraph edge
+        // and would otherwise get reordered to the far end of the line.
+        const cwd = e.cwd || "";
+        const cwdLead = cwd.startsWith("/") ? "/" : "";
+        $("rcwdlead").textContent = cwdLead;
+        $("rcwdpath").textContent = cwd.slice(cwdLead.length);
+        $("rcwd").title = cwd;
 
         // Render the agent's native TUI with xterm.js by feeding it the raw PTY
         // stream (ANSI/cursor control intact) — see /api/tail?raw=1.
