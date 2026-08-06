@@ -38,6 +38,7 @@ import {
   type CommonOpts,
 } from "./subcommands.ts";
 import { answerAsk, listAsks } from "./askApi.ts";
+import { importProvisionModule } from "./ws.ts";
 import { permissionBadge } from "./agentPermissions.ts";
 import { TYPING_BADGE } from "./badges.ts";
 import { isTermToken, mintTermToken, verifyTermToken, type TermScope } from "./termToken.ts";
@@ -3907,11 +3908,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
           }>;
         };
         try {
-          prov = (await import("codehost/provision")) as typeof prov;
+          prov = (await importProvisionModule()) as typeof prov;
         } catch (e) {
           return new Response(
-            `fork needs the 'codehost' package (codehost/provision) — install it ` +
-              `(npm i -g codehost) or 'bun link' it for local dev: ${(e as Error).message}`,
+            `fork needs a provision implementation — '@snomiao/ws-provision' (bundled ` +
+              `dependency) or a bun-linked 'codehost': ${(e as Error).message}`,
             { status: 501 },
           );
         }
@@ -3979,11 +3980,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
           ) => Promise<{ ok: boolean; folder: string; action: string; error?: string }>;
         };
         try {
-          prov = (await import("codehost/provision")) as typeof prov;
+          prov = (await importProvisionModule()) as typeof prov;
         } catch (e) {
           return new Response(
-            `spawn-from needs the 'codehost' package (codehost/provision) — install it ` +
-              `(npm i -g codehost) or 'bun link' it for local dev: ${(e as Error).message}`,
+            `spawn-from needs a provision implementation — '@snomiao/ws-provision' (bundled ` +
+              `dependency) or a bun-linked 'codehost': ${(e as Error).message}`,
             { status: 501 },
           );
         }

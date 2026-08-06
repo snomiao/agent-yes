@@ -27,7 +27,10 @@ const prov = vi.hoisted(() => ({
   gitAuthHint: vi.fn(),
 }));
 
-vi.mock("codehost/provision", () => ({
+// loadProvision prefers @snomiao/ws-provision (a real installed dependency) and
+// falls back to codehost/provision, so BOTH must be mocked to the same shims —
+// otherwise the preferred path would bypass the mocks and hit real git.
+const provMockFactory = vi.hoisted(() => () => ({
   resolveWsRoot: (w?: string) => w ?? prov.wsRoot,
   folderFor: (spec: { owner: string; repo: string; branch: string }, wsRoot?: string) =>
     path.join(wsRoot ?? prov.wsRoot, spec.owner, spec.repo, "tree", spec.branch),
@@ -38,6 +41,8 @@ vi.mock("codehost/provision", () => ({
   forkWorktree: (opts: unknown) => prov.forkWorktree(opts),
   gitAuthHint: (host?: string) => prov.gitAuthHint(host),
 }));
+vi.mock("@snomiao/ws-provision", provMockFactory);
+vi.mock("codehost/provision", provMockFactory);
 
 describe("isPathInside", () => {
   it("contains itself and descendants", () => {

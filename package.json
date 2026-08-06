@@ -135,6 +135,7 @@
   },
   "dependencies": {
     "@snomiao/bun-pty": "^0.3.4",
+    "@snomiao/ws-provision": "^0.1.0",
     "@xterm/headless": "^6.0.0",
     "bun-pty": "^0.4.8",
     "execa": "^9.6.1",
