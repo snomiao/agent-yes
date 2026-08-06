@@ -51,15 +51,27 @@ function markerOf(line: string): Marker | null {
   return null;
 }
 
+// The TUI branches EVERY tool result under the same `⎿` glyph — "⎿  RUN v3.2.4",
+// "⎿  Read 120 lines (ctrl+o to expand)" — not just todo blocks. Such a header
+// carries its own content after the glyph, whereas a todo anchor on the line above
+// its markers is bare. Requiring bare keeps a Bash run that prints ✓ lines (vitest
+// output!) from self-anchoring into a phantom badge, while the todo shapes — the
+// anchor ON the first marker line ("⎿  ☒ Wire up the parser") or a lone "⎿" above
+// them — still qualify.
+function isBareAnchor(line: string): boolean {
+  const s = line.trim();
+  return s.startsWith(ANCHOR) && s.slice(ANCHOR.length).trim() === "";
+}
+
 /**
  * Find the MOST RECENT confidently-detected todo block in the rendered lines and
  * return its {done, total}. Returns null when none qualifies (caller omits the
  * badge entirely — never shows "0/0").
  *
  * A block is a maximal run of consecutive marker lines. It only counts when it
- * is anchored — the `⎿` glyph appears on the run's first line or the line
- * directly above it — and has ≥2 marker lines. The last qualifying block wins,
- * since the agent's current todo state is the one drawn most recently.
+ * is anchored — the `⎿` glyph sits on the run's FIRST line, or a bare `⎿` sits on
+ * the line directly above it — and has ≥2 marker lines. The last qualifying block
+ * wins, since the agent's current todo state is the one drawn most recently.
  */
 export function parseTaskCounts(lines: string[]): TaskCounts | null {
   let best: TaskCounts | null = null;
@@ -71,13 +83,15 @@ export function parseTaskCounts(lines: string[]): TaskCounts | null {
       continue;
     }
     // Start of a marker run at i.
-    let hasAnchor = i > 0 && lines[i - 1]!.includes(ANCHOR);
+    let hasAnchor = i > 0 && isBareAnchor(lines[i - 1]!);
     const counts = { done: 0, inprogress: 0, pending: 0 };
     let j = i;
     for (; j < n; j++) {
       const mk = markerOf(lines[j]!);
       if (mk === null) break;
-      if (lines[j]!.includes(ANCHOR)) hasAnchor = true;
+      // Only the run's FIRST line can carry the anchor (as the doc says); a ⎿ that
+      // turns up mid-run is not an anchor for the run that already started above it.
+      if (j === i && lines[j]!.includes(ANCHOR)) hasAnchor = true;
       counts[mk]++;
     }
     const total = counts.done + counts.inprogress + counts.pending;
