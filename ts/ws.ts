@@ -52,7 +52,7 @@ interface ProvisionResult {
   action: string;
   git?: GitStatus;
   error?: string;
-  reason?: "branch-not-found" | "repo-not-found" | "other";
+  reason?: "branch-not-found" | "repo-not-found" | "auth-missing" | "other";
 }
 interface Provision {
   resolveWsRoot(wsRoot?: string): string;
@@ -67,6 +67,7 @@ interface Provision {
     wsRoot?: string;
     wip?: boolean;
   }): Promise<ProvisionResult>;
+  gitAuthHint(host?: string): string[];
 }
 
 export async function loadProvision(): Promise<Provision> {
@@ -480,6 +481,9 @@ async function cmdWsNew(args: string[]): Promise<number> {
           ? `  (branch missing on the remote — re-run with --create to branch off the default)\n`
           : ""),
     );
+    if (res.reason === "auth-missing") {
+      for (const line of prov.gitAuthHint()) process.stderr.write(`  ${line}\n`);
+    }
     return 1;
   }
   process.stdout.write(`${res.action}  ${res.folder}\n`);

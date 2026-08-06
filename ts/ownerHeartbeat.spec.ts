@@ -2,7 +2,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
-import { startInlineHeartbeat, startOwnerHeartbeat, type OwnerHeartbeat } from "./ownerHeartbeat.ts";
+import {
+  startInlineHeartbeat,
+  startOwnerHeartbeat,
+  type OwnerHeartbeat,
+} from "./ownerHeartbeat.ts";
 
 // Issue #169 item 5. The daemon's proof-of-life is a `ts` it refreshes in the
 // lock owner file; if that stamp goes stale another `ay notify watch` steals the
@@ -58,7 +62,12 @@ for (const [name, start] of [
     it("refreshes ts while the owner still carries our token", async () => {
       const file = await ownerFile("tok-a");
       track(
-        start({ ownerPath: file, token: "tok-a", payload: { token: "tok-a" }, intervalMs: BEAT_MS }),
+        start({
+          ownerPath: file,
+          token: "tok-a",
+          payload: { token: "tok-a" },
+          intervalMs: BEAT_MS,
+        }),
       );
       expect(await beaten(file)).toBe(true);
     });
@@ -97,7 +106,12 @@ for (const [name, start] of [
       // the rename instead of resurrecting an owner file it no longer owns.
       const file = await ownerFile("tok-c");
       track(
-        start({ ownerPath: file, token: "tok-c", payload: { token: "tok-c" }, intervalMs: BEAT_MS }),
+        start({
+          ownerPath: file,
+          token: "tok-c",
+          payload: { token: "tok-c" },
+          intervalMs: BEAT_MS,
+        }),
       );
       expect(await beaten(file)).toBe(true);
       await rm(path.dirname(file), { recursive: true, force: true });

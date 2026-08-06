@@ -6118,7 +6118,8 @@ my.translate = async (text, lang) => {
             // native click so focus + link handling still work.
             const now = Date.now();
             const near =
-              Math.abs(p.clientX - lastTapX) < DBL_SLOP && Math.abs(p.clientY - lastTapY) < DBL_SLOP;
+              Math.abs(p.clientX - lastTapX) < DBL_SLOP &&
+              Math.abs(p.clientY - lastTapY) < DBL_SLOP;
             tapCount = now - lastTapAt < DBL_MS && near ? tapCount + 1 : 1;
             lastTapAt = now;
             lastTapX = p.clientX;
