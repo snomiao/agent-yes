@@ -37,7 +37,10 @@ import { readFileSync } from "node:fs";
 export function parseLinuxStartTime(stat: string): string | null {
   const close = stat.lastIndexOf(")");
   if (close < 0) return null;
-  const fields = stat.slice(close + 1).trim().split(/\s+/);
+  const fields = stat
+    .slice(close + 1)
+    .trim()
+    .split(/\s+/);
   const starttime = fields[19];
   return starttime && /^\d+$/.test(starttime) ? starttime : null;
 }
