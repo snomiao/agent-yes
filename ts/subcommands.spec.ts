@@ -2646,3 +2646,149 @@ describe("subcommands.cmdWhoami", () => {
     expect(text).toMatch(/<ay-msg from claude #\d+ @ \/repo\/alpha — reply: ay send aaaa0000bbbb "\.\.\.">/);
   });
 });
+
+describe("subcommands.cmdSend double-envelope warning", () => {
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
+
+  it.skipIf(!itUnix)(
+    "warns when an agent sender's body is already <ay-msg …>-wrapped (still delivers, still wraps)",
+    async () => {
+      const { runSubcommand } = await loadModule();
+      const { appendGlobalPid } = await import("./globalPidIndex.ts");
+      const { spawnSync } = await import("child_process");
+      const tmp = await mkdtemp(path.join(tmpdir(), "ay-fifo-"));
+      try {
+        const fifo = path.join(tmp, "warn.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        const fs = await import("fs");
+        const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR);
+        // Target agent (owns the fifo) …
+        await appendGlobalPid({
+          pid: process.pid,
+          cli: "claude",
+          prompt: null,
+          cwd: "/repo/alpha",
+          log_file: null,
+          fifo_file: fifo,
+          status: "active",
+          exit_code: null,
+          exit_reason: null,
+          started_at: Date.now(),
+        });
+        // … and a registered SENDER so cmdSend resolves an agent context and
+        // engages the auto-envelope path the warning guards.
+        await appendGlobalPid({
+          pid: 900001,
+          cli: "claude",
+          prompt: null,
+          cwd: "/repo/beta",
+          log_file: null,
+          status: "active",
+          exit_code: null,
+          exit_reason: null,
+          started_at: Date.now(),
+          wrapper_pid: 424242,
+          agent_id: "cccc0000dddd",
+        });
+        const savedAyPid = process.env.AGENT_YES_PID;
+        process.env.AGENT_YES_PID = "424242";
+        const stderr: string[] = [];
+        const origErr = process.stderr.write.bind(process.stderr);
+        (process.stderr as any).write = (s: any) => (stderr.push(String(s)), true);
+        const origOut = process.stdout.write.bind(process.stdout);
+        (process.stdout as any).write = () => true;
+        try {
+          const code = await runSubcommand([
+            "bun",
+            "cli.js",
+            "send",
+            String(process.pid),
+            '<ay-msg deadbeef from claude #900001 @ /repo/beta — reply: ay send 900001 "...">hi</ay-msg deadbeef>',
+            "--force",
+          ]);
+          expect(code).toBe(0);
+          expect(stderr.join("")).toMatch(/DOUBLE wrapper/);
+        } finally {
+          process.stderr.write = origErr;
+          process.stdout.write = origOut;
+          if (savedAyPid === undefined) delete process.env.AGENT_YES_PID;
+          else process.env.AGENT_YES_PID = savedAyPid;
+        }
+        // Delivered bytes carry BOTH envelopes — transport stamp outermost.
+        const buf = Buffer.alloc(8192);
+        const n = fs.readSync(rdwrFd, buf, 0, buf.length, null);
+        const received = buf.subarray(0, n).toString();
+        expect(received).toMatch(/^<ay-msg [0-9a-f]{8} from claude #900001 @ /);
+        expect(received).toContain("<ay-msg deadbeef");
+        fs.closeSync(rdwrFd);
+      } finally {
+        await rm(tmp, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)("plain agent-sender bodies do not trigger the warning", async () => {
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const { spawnSync } = await import("child_process");
+    const tmp = await mkdtemp(path.join(tmpdir(), "ay-fifo-"));
+    try {
+      const fifo = path.join(tmp, "plain.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const fs = await import("fs");
+      const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR);
+      await appendGlobalPid({
+        pid: process.pid,
+        cli: "claude",
+        prompt: null,
+        cwd: "/repo/alpha",
+        log_file: null,
+        fifo_file: fifo,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: Date.now(),
+      });
+      await appendGlobalPid({
+        pid: 900001,
+        cli: "claude",
+        prompt: null,
+        cwd: "/repo/beta",
+        log_file: null,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: Date.now(),
+        wrapper_pid: 424242,
+        agent_id: "cccc0000dddd",
+      });
+      const savedAyPid = process.env.AGENT_YES_PID;
+      process.env.AGENT_YES_PID = "424242";
+      const stderr: string[] = [];
+      const origErr = process.stderr.write.bind(process.stderr);
+      (process.stderr as any).write = (s: any) => (stderr.push(String(s)), true);
+      const origOut = process.stdout.write.bind(process.stdout);
+      (process.stdout as any).write = () => true;
+      try {
+        const code = await runSubcommand([
+          "bun",
+          "cli.js",
+          "send",
+          String(process.pid),
+          "plain body, quoting <ay-msg deadbeef …> mid-text is fine",
+          "--force",
+        ]);
+        expect(code).toBe(0);
+        expect(stderr.join("")).not.toMatch(/DOUBLE wrapper/);
+      } finally {
+        process.stderr.write = origErr;
+        process.stdout.write = origOut;
+        if (savedAyPid === undefined) delete process.env.AGENT_YES_PID;
+        else process.env.AGENT_YES_PID = savedAyPid;
+      }
+      fs.closeSync(rdwrFd);
+    } finally {
+      await rm(tmp, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+});

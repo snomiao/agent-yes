@@ -3255,6 +3255,18 @@ async function cmdSend(rest: string[]): Promise<number> {
     nonce = randomBytes(4).toString("hex");
     prefix = `<ay-msg ${nonce} from ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${replyTarget} "...">\n`;
     suffix = `\n</ay-msg ${nonce}>`;
+    // A body that itself starts with an <ay-msg …> header is usually an agent
+    // hand-wrapping what this send is about to wrap again — the recipient then
+    // sees a double envelope with two (possibly conflicting) reply targets.
+    // Warn but still wrap: the transport stamp is the authoritative identity
+    // (skipping it on a pre-wrapped body would let a sender forge attribution),
+    // and a quoted envelope is legitimate when deliberately forwarding.
+    if (/^\s*<ay-msg\s/.test(body)) {
+      process.stderr.write(
+        `warning: body already starts with an <ay-msg …> header — ay send adds the envelope automatically, so the recipient will see a DOUBLE wrapper. ` +
+          `Send the bare body instead (or pass --raw if you really mean to deliver a pre-built envelope verbatim; forwarding a quoted message inside a plain body is fine).\n`,
+      );
+    }
   }
 
   const fullBody = prefix + body + suffix;
