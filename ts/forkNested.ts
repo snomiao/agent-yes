@@ -1,6 +1,4 @@
-import { existsSync } from "fs";
 import path from "path";
-import { agentYesHome } from "./agentYesHome.ts";
 
 /**
  * Should a nested agent-run detach (fork) instead of blocking the caller?
@@ -42,23 +40,39 @@ export function buildSpawnTutorial(cli: string, pid: number): string {
 }
 
 /**
- * Poll for the spawned wrapper's stdin FIFO to appear, so the tutorial's
- * `ay send`/`ay tail` work the instant we print them (the wrapper registers its
- * FIFO a moment after spawn). Resolves true once registered, false on timeout or
- * if `aborted()` reports the child already died (so a startup failure fails fast
- * instead of waiting out the whole window).
+ * Poll the global pid registry (`~/.agent-yes/pids.jsonl`) for `pid` to become
+ * resolvable — the actual contract `ay tail`/`ay send` depend on (both resolve
+ * through `readGlobalPids()`), not a proxy signal. The wrapper creates its
+ * stdin FIFO BEFORE writing its pid_store record (see rs/src/main.rs), so
+ * polling the FIFO's existence — the previous approach — could report "ready"
+ * before the registration it's meant to confirm had even happened.
+ *
+ * A record with `status: "exited"` doesn't count: the agent registered and
+ * then immediately died, so it's no more "addressable" than never registering.
+ * Resolves true once a live record for this pid appears, false on timeout or
+ * if `aborted()` reports the child already died (so a startup failure fails
+ * fast instead of waiting out the whole window).
  */
-export async function waitForFifo(
+export async function waitForRegistration(
   pid: number,
-  timeoutMs = 2000,
+  timeoutMs = 5000,
   aborted?: () => boolean,
 ): Promise<boolean> {
-  const fifo = path.join(agentYesHome(), "fifo", `${pid}.stdin`);
+  const { readGlobalPids } = await import("./globalPidIndex.ts");
+  const isRegistered = async () =>
+    (await readGlobalPids()).some((r) => r.pid === pid && r.status !== "exited");
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (aborted?.()) return false;
-    if (existsSync(fifo)) return true;
-    await new Promise((r) => setTimeout(r, 50));
+    if (await isRegistered()) return true;
+    await new Promise((r) => setTimeout(r, 100));
   }
-  return existsSync(fifo);
+  return isRegistered();
+}
+
+/** Predicted per-agent raw log path — deterministic from cwd + pid (see
+ *  rs/src/log_files.rs's `project_log_dir`), so it's known even when the
+ *  agent never registered. */
+export function predictedLogPath(cwd: string, pid: number): string {
+  return path.join(cwd, ".agent-yes", `${pid}.raw.log`);
 }
