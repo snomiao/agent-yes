@@ -278,6 +278,63 @@ async function senderContext(): Promise<{ key: string; agent: GlobalPidRecord | 
 }
 
 /**
+ * `ay whoami` — the calling agent's own canonical registration, resolved from
+ * AGENT_YES_PID (see resolveSender). One command answers "which agent am I,
+ * per the registry?": after a fleet restore, several agents can share a cwd
+ * and a resumed conversation can believe it is a different lane than the
+ * process actually registered as — the registry record is the ground truth
+ * every routing surface (console, ay send, heartbeats) actually uses. Also
+ * prints the traceable reply address so an agent can stamp outgoing messages
+ * (`<ay-msg … reply: ay send <id> "...">`) without re-deriving its identity.
+ */
+async function cmdWhoami(rest: string[]): Promise<number> {
+  const y = yargs(rest)
+    .usage("Usage: ay whoami [--json]")
+    .option("json", { type: "boolean", default: false, description: "Machine-readable output" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+  const argv = await y.parseAsync();
+  const self = await resolveSender();
+  if (!self) {
+    // Two distinct failures: no agent context at all (human shell), or a set
+    // AGENT_YES_PID that resolves to nothing (stale env / record aged out).
+    const reason = process.env.AGENT_YES_PID ? "unregistered" : "no-agent-context";
+    if (argv.json) {
+      process.stdout.write(JSON.stringify({ agent: null, reason }) + "\n");
+    } else {
+      process.stderr.write(
+        reason === "unregistered"
+          ? `ay whoami: AGENT_YES_PID=${process.env.AGENT_YES_PID} is set but matches no record in the registry (stale env, or the record aged out)\n`
+          : `ay whoami: not inside an agent-yes session — AGENT_YES_PID is unset (human shell)\n`,
+      );
+    }
+    return 1;
+  }
+  const { state, question } = await deriveLiveState(self);
+  const replyKw = self.agent_id ?? String(self.pid);
+  const reply = `ay send ${replyKw}`;
+  if (argv.json) {
+    process.stdout.write(JSON.stringify({ ...self, state, question, reply }, null, 2) + "\n");
+    return 0;
+  }
+  const ageMin = Math.max(0, Math.round((Date.now() - self.started_at) / 60_000));
+  const lines = [
+    `agent     ${self.cli} #${self.pid}${self.agent_id ? `  (agent_id ${self.agent_id})` : ""}`,
+    `state     ${state}${question ? ` — ${question}` : ""}`,
+    `cwd       ${self.cwd}`,
+    `started   ${new Date(self.started_at).toISOString()}  (${ageMin}m ago)`,
+    `wrapper   ${self.wrapper_pid ?? "-"}    parent ${self.parent_pid ?? "- (top-level)"}`,
+    `log       ${self.log_file ?? "-"}`,
+    `fifo      ${self.fifo_file ?? "-"}`,
+    `reply     ${reply} "..."`,
+    `envelope  <ay-msg from ${self.cli} #${self.pid} @ ${self.cwd} — reply: ${reply} "...">…</ay-msg>`,
+  ];
+  process.stdout.write(lines.join("\n") + "\n");
+  return 0;
+}
+
+/**
  * Read the per-cwd TS PidStore JSONL and convert to the global record shape,
  * so pre-existing TS agents that were spawned before the global-index mirror
  * shipped still show up in `ay ls`. Merging is done in `mergeRecords`.
@@ -346,6 +403,7 @@ const SUBCOMMANDS = new Set([
   "list",
   "ps",
   "status",
+  "whoami",
   "result",
   "notify",
   "notifyd",
@@ -468,6 +526,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdLs(rest);
       case "status":
         return await cmdStatus(rest);
+      case "whoami":
+        return await cmdWhoami(rest);
       case "result":
         return await cmdResult(rest);
       case "notify":
@@ -672,6 +732,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay exit <keyword> [reason]          graceful shutdown, recording who/why (= 'ay send <kw> exit')\n` +
       `  ay restart <keyword> [--fresh]      stop (if live) + relaunch resuming the session; --fresh replays the prompt\n` +
       `  ay status <keyword>                 agent status snapshot\n` +
+      `  ay whoami [--json]                  (inside an agent) your own registry identity + reply address\n` +
       `  ay result <keyword> [--wait]        pull an agent's structured result envelope\n` +
       `  ay result set '<json>'              (inside an agent) deposit your result envelope\n` +
       `  ay reap                             kill process groups leaked by dead agents\n` +
