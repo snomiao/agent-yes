@@ -79,9 +79,9 @@ describe("repoBranch", () => {
   it("surfaces a submodule leaf below the worktree as `sub`", () => {
     // cwd inside a submodule keeps the superproject's owner/repo/branch (git
     // resolves it that way) but exposes the submodule dir so it's distinguishable.
-    expect(repoBranch(agent({ cwd: "/x/symval/symval/tree/share/lib/bot" }))).toEqual({
-      owner: "symval",
-      repo: "symval",
+    expect(repoBranch(agent({ cwd: "/x/acme/acme/tree/share/lib/bot" }))).toEqual({
+      owner: "acme",
+      repo: "acme",
       branch: "share",
       sub: "bot",
     });
@@ -192,8 +192,8 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
   });
   it("appends a submodule leaf with → when the cwd is nested", () => {
     const list = [
-      agent({ cwd: "/x/symval/symval/tree/share/lib/bot" }),
-      agent({ cwd: "/x/symval/symval/tree/share/lib/api" }),
+      agent({ cwd: "/x/acme/acme/tree/share/lib/bot" }),
+      agent({ cwd: "/x/acme/acme/tree/share/lib/api" }),
     ];
     const ctx = identContext(list);
     // owner/repo/branch uniform → blanked; only the submodule leaf differs.
@@ -204,11 +204,11 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
 
 describe("compactIdent (parent-relative omission in a tree)", () => {
   it("omits fields a subagent shares with its tree parent, keeping the submodule delta", () => {
-    const parent = agent({ cwd: "/x/symval/symval/tree/share" });
+    const parent = agent({ cwd: "/x/acme/acme/tree/share" });
     const list = [
       parent,
-      agent({ cwd: "/x/symval/symval/tree/share/lib/bot" }),
-      agent({ cwd: "/x/symval/symval/tree/syn" }),
+      agent({ cwd: "/x/acme/acme/tree/share/lib/bot" }),
+      agent({ cwd: "/x/acme/acme/tree/syn" }),
     ];
     const ctx = identContext(list);
     // Same owner/repo/branch as the parent → blanked; only →bot remains.
@@ -218,8 +218,8 @@ describe("compactIdent (parent-relative omission in a tree)", () => {
     expect(compactIdent(list[2], ctx, 3, parent)).toBe("//syn");
   });
   it("hides the identity entirely for a subagent in the very same checkout", () => {
-    const parent = agent({ cwd: "/x/symval/symval/tree/share" });
-    const child = agent({ cwd: "/x/symval/symval/tree/share" });
+    const parent = agent({ cwd: "/x/acme/acme/tree/share" });
+    const child = agent({ cwd: "/x/acme/acme/tree/share" });
     const ctx = identContext([parent, child, agent()]);
     const id = compactIdent(child, ctx, 3, parent);
     expect(id).toBe("//");
@@ -229,12 +229,12 @@ describe("compactIdent (parent-relative omission in a tree)", () => {
 
 describe("layeredRows parentEntry", () => {
   it("links a subagent row to its superagent's entry, null for roots/headers", () => {
-    const root = agent({ pid: 1, wrapper_pid: 1, cwd: "/x/symval/symval/tree/share" });
+    const root = agent({ pid: 1, wrapper_pid: 1, cwd: "/x/acme/acme/tree/share" });
     const child = agent({
       pid: 2,
       wrapper_pid: 2,
       parent_pid: 1,
-      cwd: "/x/symval/symval/tree/share/lib/bot",
+      cwd: "/x/acme/acme/tree/share/lib/bot",
     });
     const rows = layeredRows([root, child]);
     const rootRow = rows.find((r) => r.entry?.pid === 1);

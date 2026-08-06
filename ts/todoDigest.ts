@@ -5,7 +5,7 @@
  * (`todoCli.ts`) and any future web view.
  *
  * `unblockedTasks` is ported near-verbatim from the equivalent, already
- * mutation-tested algorithm in symval-dev-cli's `deps.ts` (a closed-source
+ * mutation-tested algorithm in a private sibling CLI's `deps.ts` (a closed-source
  * downstream consumer of an earlier, less general version of this idea) —
  * generalized here to the new `TodoRecord` shape and the `done` state name
  * from `todoLifecycle.ts` instead of a hardcoded status string.

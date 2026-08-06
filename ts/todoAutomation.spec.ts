@@ -45,7 +45,7 @@ describe("reconcileTodos: orphan detection", () => {
   });
 
   it("does not orphan a task whose owner id has NO record at all in the agent registry — assumed to be a human owner, not a tracked agent (a human obviously never appears there)", () => {
-    const tasks = [task({ _id: "T1", owner: "taku", state: "doing" })];
+    const tasks = [task({ _id: "T1", owner: "alice", state: "doing" })];
     expect(reconcileTodos(tasks, [], new Set())).toEqual([]);
   });
 
@@ -183,7 +183,7 @@ describe("reconcileTodos: auto-verify eligibility", () => {
   });
 
   it("does not flag an already-orphaned task even if it sits in a gate-eligible state", () => {
-    const t = task({ _id: "T1", kind: "code", state: "orphaned", owner: "taku" });
+    const t = task({ _id: "T1", kind: "code", state: "orphaned", owner: "alice" });
     expect(reconcileTodos([t], [], new Set(["verify-green"]))).toEqual([]);
   });
 });

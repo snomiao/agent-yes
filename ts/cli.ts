@@ -40,7 +40,7 @@ import { buildRustArgs } from "./buildRustArgs.ts";
   }
   // Footgun guard: on the manager entry, a bare first word that is neither a
   // subcommand nor a known CLI is a typo or a newer subcommand on an older build
-  // — error instead of silently spawning an agent with it as the prompt (taku
+  // — error instead of silently spawning an agent with it as the prompt (operator
   // 2026-07-26). A spawn must name a CLI: `ay <cli> …` or `ay --cli <cli> …`.
   {
     const { SUPPORTED_CLIS } = await import("./SUPPORTED_CLIS.ts");

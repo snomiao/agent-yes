@@ -431,7 +431,7 @@ export function isSubcommand(name: string | undefined, managerCommands = true): 
  * Footgun guard for the MANAGER entry (`ay`/`agent-yes`): true when the first arg
  * is a bare word (not a flag) that is neither a subcommand nor a known CLI — a
  * typo, or a newer subcommand run on an older build. The caller should error
- * rather than silently spawn an agent with the word as a prompt (taku 2026-07-26:
+ * rather than silently spawn an agent with the word as a prompt (operator 2026-07-26:
  * bare `ay <prompt>` is too dangerous; a spawn must name a CLI — `ay <cli> …` or
  * `--cli`). Never fires for cli-bound aliases (cy/claude-yes/…), where the first
  * word is legitimately the prompt, nor for flags or an empty invocation.
@@ -1691,7 +1691,7 @@ async function cmdLs(rest: string[]): Promise<number> {
     .example("ay ls --all", "include exited agents")
     .example("ay ls --json", "machine-readable output")
     .example("ay ls --watch", "stream state transitions for a whole fan-out as NDJSON")
-    .example("ay ls symval", "filter by cwd/prompt keyword")
+    .example("ay ls myrepo", "filter by cwd/prompt keyword")
     .help(false)
     .version(false)
     .exitProcess(false);
