@@ -2537,3 +2537,112 @@ describe("subcommands.resolveResumeArgs", () => {
     });
   });
 });
+
+describe("subcommands.cmdWhoami", () => {
+  const envKey = "AGENT_YES_PID";
+  let savedEnv: string | undefined;
+
+  beforeEach(() => {
+    savedEnv = process.env[envKey];
+    delete process.env[envKey];
+  });
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env[envKey];
+    else process.env[envKey] = savedEnv;
+  });
+
+  it("outside an agent (no AGENT_YES_PID) exits 1 with a human-shell hint", async () => {
+    const { runSubcommand } = await loadModule();
+    const stderr: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (s: any) => {
+      stderr.push(String(s));
+      return true;
+    };
+    try {
+      const code = await runSubcommand(["bun", "cli.js", "whoami"]);
+      expect(code).toBe(1);
+      expect(stderr.join("")).toMatch(/AGENT_YES_PID is unset/);
+    } finally {
+      process.stderr.write = orig;
+    }
+  });
+
+  it("a set-but-unregistered AGENT_YES_PID reports 'unregistered' in --json and exits 1", async () => {
+    const { runSubcommand } = await loadModule();
+    process.env[envKey] = "999999";
+    const stdout: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (s: any) => {
+      stdout.push(String(s));
+      return true;
+    };
+    try {
+      const code = await runSubcommand(["bun", "cli.js", "whoami", "--json"]);
+      expect(code).toBe(1);
+    } finally {
+      process.stdout.write = orig;
+    }
+    expect(JSON.parse(stdout.join(""))).toEqual({ agent: null, reason: "unregistered" });
+  });
+
+  it("resolves the caller via wrapper_pid and prints identity + reply address", async () => {
+    const mod = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid, // alive, so live-state derivation doesn't read it as exited
+      cli: "claude",
+      prompt: "whoami test",
+      cwd: "/repo/alpha",
+      log_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: 424242,
+      parent_pid: null,
+      agent_id: "aaaa0000bbbb",
+    });
+    process.env[envKey] = "424242";
+
+    const stdout: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (s: any) => {
+      stdout.push(String(s));
+      return true;
+    };
+    try {
+      const code = await mod.runSubcommand(["bun", "cli.js", "whoami", "--json"]);
+      expect(code).toBe(0);
+    } finally {
+      process.stdout.write = orig;
+    }
+    const parsed = JSON.parse(stdout.join(""));
+    expect(parsed).toMatchObject({
+      pid: process.pid,
+      cli: "claude",
+      cwd: "/repo/alpha",
+      agent_id: "aaaa0000bbbb",
+      wrapper_pid: 424242,
+      reply: "ay send aaaa0000bbbb",
+    });
+    expect(typeof parsed.state).toBe("string");
+
+    // Human-readable form carries the traceable envelope template.
+    const stdout2: string[] = [];
+    (process.stdout as any).write = (s: any) => {
+      stdout2.push(String(s));
+      return true;
+    };
+    try {
+      const code = await mod.runSubcommand(["bun", "cli.js", "whoami"]);
+      expect(code).toBe(0);
+    } finally {
+      process.stdout.write = orig;
+    }
+    const text = stdout2.join("");
+    expect(text).toMatch(/agent {5}claude #\d+ {2}\(agent_id aaaa0000bbbb\)/);
+    expect(text).toMatch(/reply {5}ay send aaaa0000bbbb/);
+    expect(text).toMatch(/<ay-msg from claude #\d+ @ \/repo\/alpha — reply: ay send aaaa0000bbbb "\.\.\.">/);
+  });
+});
