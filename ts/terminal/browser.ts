@@ -318,7 +318,7 @@ export class AyTerminal {
     // grid and CSS-scale it to fit the panel — NEVER resizing the shared PTY. A
     // widget panel is a SECONDARY view; auto-resizing the agent's real terminal to
     // a small floating panel (or, worse, a mis-measured viewport) scrambled the
-    // agent's own/other viewers' TUI (taku's "xterm looks weird"). Interactive only
+    // agent's own/other viewers' TUI (operator report: "xterm looks weird"). Interactive only
     // adds keystroke input (start(), /api/send), not a resize.
     const reflow = () => {
       // Collapsed/hidden interactive panel → withdraw our cap and DON'T re-arm the

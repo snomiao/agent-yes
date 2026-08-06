@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { isValidOp, makeOp, opId } from "./op.ts";
 
-const base = { author: "a1", name: "taku", role: "human" as const, hlc: "h1" };
+const base = { author: "a1", name: "alice", role: "human" as const, hlc: "h1" };
 
 describe("op", () => {
   it("derives a stable id from author + hlc", () => {

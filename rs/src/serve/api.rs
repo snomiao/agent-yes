@@ -556,8 +556,23 @@ fn matches_keyword(r: &PidRecord, kw: &str) -> bool {
     if kw.is_empty() {
         return true;
     }
-    if r.pid.to_string() == kw {
-        return true;
+    // A purely-numeric keyword is an IDENTITY selector — exact pid, or an
+    // agent_id prefix (ids are 12 random hex, so they can be all-digits). Never
+    // fall through to the cwd/cli/prompt substring rules: a pid frequently
+    // appears inside OTHER agents' prompts (a resume prompt listing peer pids,
+    // a shared `/w/#room:<pid>` URL), and a newer such record would win the
+    // newest-first tiebreak in resolve_one — sending the console's tail/stdin
+    // for `#room:<pid>` to a sibling's terminal. Mirrors ts/subcommands.ts
+    // matchKeyword (fix #72), which never reached this Rust port.
+    if kw.chars().all(|c| c.is_ascii_digit()) {
+        if r.pid.to_string() == kw {
+            return true;
+        }
+        return r
+            .agent_id
+            .as_deref()
+            .map(|id| id.starts_with(&kw.to_ascii_lowercase()))
+            .unwrap_or(false);
     }
     if let Some(id) = &r.agent_id {
         if id.starts_with(&kw.to_ascii_lowercase()) {
@@ -573,6 +588,15 @@ fn matches_keyword(r: &PidRecord, kw: &str) -> bool {
 fn resolve_one(kw: &str) -> Result<PidRecord, String> {
     let mut recs: Vec<PidRecord> = read_records().into_iter().filter(|r| matches_keyword(r, kw)).collect();
     recs.sort_by_key(|r| -r.started_at);
+    // Exact identity beats everything: when the keyword IS a record's pid, that
+    // record wins even if an all-digit agent_id prefix also matched (parity with
+    // ts/subcommands.ts resolveOne).
+    if kw.chars().all(|c| c.is_ascii_digit()) {
+        let by_pid: Vec<&PidRecord> = recs.iter().filter(|r| r.pid.to_string() == kw).collect();
+        if by_pid.len() == 1 {
+            return Ok(by_pid[0].clone());
+        }
+    }
     // prefer a living agent over exited ones
     if let Some(r) = recs.iter().find(|r| r.status != "exited" && is_process_alive(r.pid)) {
         return Ok(r.clone());
@@ -1239,6 +1263,40 @@ mod tests {
         let braille = vec!["⠋ Working on it".to_string()];
         assert_eq!(parse_status_text(&braille).as_deref(), Some("⠋ Working on it"));
         assert_eq!(parse_status_text(&["plain text".to_string()]), None);
+    }
+
+    #[test]
+    fn numeric_keyword_is_identity_not_substring() {
+        // Regression: after a fleet restore, one agent's resume prompt listed a
+        // peer's pid. That record was newer, so `/w/#room:<pid>` tail+stdin
+        // resolved to the wrong terminal while the pane header showed the
+        // requested pid.
+        let rec = |j: serde_json::Value| -> PidRecord { serde_json::from_value(j).unwrap() };
+        let target = rec(json!({
+            "pid": 1111, "cli": "claude", "cwd": "/repo/alpha",
+            "prompt": "resume your lane",
+            "log_file": null, "status": "active", "exit_code": null,
+            "exit_reason": null, "started_at": 1_000, "agent_id": "aaaa0000bbbb"
+        }));
+        let peer = rec(json!({
+            "pid": 2222, "cli": "claude", "cwd": "/repo/beta",
+            "prompt": "peers respawned: alpha 1111, gamma 3333",
+            "log_file": null, "status": "active", "exit_code": null,
+            "exit_reason": null, "started_at": 2_000, "agent_id": "cccc0000dddd"
+        }));
+        // pid match stays exact; the pid inside another agent's prompt no longer matches
+        assert!(matches_keyword(&target, "1111"));
+        assert!(!matches_keyword(&peer, "1111"));
+        // numeric keyword still reaches an all-digit agent_id prefix
+        let digits = rec(json!({
+            "pid": 42, "cli": "claude", "cwd": "/x", "prompt": null,
+            "log_file": null, "status": "active", "exit_code": null,
+            "exit_reason": null, "started_at": 3_000, "agent_id": "111134abcdef"
+        }));
+        assert!(matches_keyword(&digits, "1111"));
+        // non-numeric keywords keep the substring rules
+        assert!(matches_keyword(&peer, "repo/beta"));
+        assert!(matches_keyword(&peer, "gamma"));
     }
 
     #[test]
