@@ -6,6 +6,7 @@
       "name": "main",
       "dependencies": {
         "@snomiao/bun-pty": "^0.3.4",
+        "@snomiao/ws-provision": "^0.1.0",
         "@xterm/headless": "^6.0.0",
         "bun-pty": "^0.4.8",
         "execa": "^9.6.1",
@@ -363,6 +364,8 @@
     "@snomiao/bun-pty": ["@snomiao/bun-pty@0.3.4", "", {}, "sha512-7eVzv+fNQrELScC6vmza52rXAxfHJnPiUSi6k2i1C0NS/xCB4+baEfH4tdRaEpGNrsI2DP6rnppNXQu+6kUWFA=="],
 
     "@snomiao/daemon-kit": ["@snomiao/daemon-kit@0.2.0", "", {}, "sha512-Ymp6S/7C3cTGkakXqeYcVzieAN9O0uTmk7GxIeOEi7k2j3pX8mPVxZ5VgCQTSWmZjpNjUKR8zhb2dEkENOS+OQ=="],
+
+    "@snomiao/ws-provision": ["@snomiao/ws-provision@0.1.0", "", {}, "sha512-o8VNzDK8ux2BOY1RoVwuBGY1XPgp9FAQKdDysXCljKTFPkv8fiv6a2OR6HpGk8F1M8TQrR7Ndcl3zGB121eYVw=="],
 
     "@so-ric/colorspace": ["@so-ric/colorspace@1.1.6", "", { "dependencies": { "color": "^5.0.2", "text-hex": "1.0.x" } }, "sha512-/KiKkpHNOBgkFJwu9sh48LkHSMYGyuTcSFK/qMBdnOAlrRJzRSXAOFB5qwzaVQuDl8wAvHVMkaASQDReTahxuw=="],
 
