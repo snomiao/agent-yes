@@ -12,10 +12,13 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
   const cliName = invokedCliName(argv);
 
   // Parse args with yargs (same logic as cli.ts:16-73)
-  const parsedArgv = yargs(hideBin(argv))
-    .usage("Usage: $0 [cli] [agent-yes args] [agent-cli args] [--] [prompts...]")
+  const yargsInstance = yargs(hideBin(argv))
+    // Everything after the CLI name is the wrapped CLI's territory — by
+    // design, agent-yes never claims flags there (so `ay claude -c` reaches
+    // claude). agent-yes's own flags go BEFORE the CLI name.
+    .usage("Usage: $0 [agent-yes args] [cli] [agent-cli args] [--] [prompts...]")
     .example(
-      "$0 claude --timeout=30s -- solve all todos in my codebase, commit one by one",
+      "$0 --timeout=30s claude -- solve all todos in my codebase, commit one by one",
       "Run Claude with a 30 seconds idle timeout (will type /exit when timeout), everything after `--` will be treated as the prompt",
     )
     .example(
@@ -184,15 +187,21 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
       alias: "v",
     })
     .parserConfiguration({
-      // Unknown options (the wrapped CLI's flags, e.g. --model) stay in `_`
-      // untouched and are forwarded to the child below. Known agent-yes
-      // options are consumed WHEREVER they appear — the usage string promises
-      // `$0 [cli] [agent-yes args] [agent-cli args]`, and with the former
-      // "halt-at-non-option" everything after the cli positional was skipped,
-      // so `ay claude --timeout=30s` silently dropped the timeout (#349).
       "unknown-options-as-args": true,
-    })
-    .parseSync();
+      "halt-at-non-option": true,
+    });
+  const parsedArgv = yargsInstance.parseSync();
+
+  // Every option name agent-yes defines (canonical + aliases), as "--flag"
+  // strings — used only for the misplaced-flag warning below. Unlike
+  // `yargsConsumed`, this includes no-default options (--timeout, --prompt…)
+  // whether or not they were passed.
+  const knownAyFlags = new Set<string>(
+    Object.entries(yargsInstance.getOptions().alias ?? {})
+      .flatMap(([key, aliases]) => [key, ...(aliases as string[])])
+      .concat(Object.keys(yargsInstance.getOptions().key ?? {}))
+      .map((k) => `--${k}`),
+  );
 
   // Extract cli args and dash prompt (same logic as cli.ts:76-91)
   const optionalIndex = (e: number) => (0 <= e ? e : undefined);
@@ -222,27 +231,32 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
 
   const cliArgsForSpawn = (() => {
     if (parsedArgv._[0] && !cliName) {
-      // Explicit CLI name provided as positional arg — flags agent-yes itself
-      // consumed are filtered out (same rule as the cli-bound branch below),
-      // remaining flags go to the child, bare words become prompt text.
+      // Explicit CLI name provided as positional arg — separate flags from bare
+      // words. Every flag here is forwarded to the wrapped CLI BY DESIGN (its
+      // flags must stay reachable), but a flag that agent-yes also defines is a
+      // likely misplacement — `ay claude --timeout=30s` would silently drop the
+      // timeout (#349) — so warn on those without changing what's forwarded.
       const allAfterCli = rawArgs.slice((cliArgIndex ?? 0) + 1, dashIndex ?? undefined);
+      const misplaced = allAfterCli.filter((arg) => {
+        const [flag] = arg.split("=");
+        return (
+          (flag?.startsWith("--") &&
+            (knownAyFlags.has(flag) ||
+              (flag.startsWith("--no-") && knownAyFlags.has(`--${flag.slice(5)}`)))) ||
+          false
+        );
+      });
+      if (misplaced.length > 0) {
+        const cli = String(parsedArgv._[0]);
+        console.warn(
+          `\x1b[33m⚠ ${misplaced.join(", ")}: agent-yes flags must come BEFORE the CLI name to apply ` +
+            `(e.g. \`ay ${misplaced[0]!.split("=")[0]} ${cli}\`). Placed after \`${cli}\` they are passed to ${cli} instead.\x1b[0m`,
+        );
+      }
       const result: string[] = [];
       for (let i = 0; i < allAfterCli.length; i++) {
         const arg = allAfterCli[i]!;
-        const [flag] = arg.split("=");
-        // Check both the flag itself and its --no- negation (yargs stores --no-x as key "x")
-        const isConsumed =
-          (flag && yargsConsumed.has(flag)) ||
-          (flag?.startsWith("--no-") && yargsConsumed.has(`--${flag.slice(5)}`));
-        if (isConsumed) {
-          // Skip consumed flag and its value if separate
-          if (!arg.includes("=") && i + 1 < allAfterCli.length) {
-            const nextArg = allAfterCli[i + 1];
-            if (nextArg && !nextArg.startsWith("-")) {
-              i++; // Skip value
-            }
-          }
-        } else if (arg.startsWith("-")) {
+        if (arg.startsWith("-")) {
           result.push(arg);
           // Consume the next arg as the flag's value if separate (--flag value)
           if (!arg.includes("=") && i + 1 < allAfterCli.length) {
