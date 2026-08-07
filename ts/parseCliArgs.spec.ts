@@ -431,13 +431,36 @@ describe("CLI argument parsing", () => {
   });
 
   it("respects --no-stdpush opt-out only when placed before the CLI positional", () => {
-    // halt-at-non-option means agent-yes flags must precede the CLI positional.
+    // By design, everything after the CLI name belongs to the wrapped CLI:
+    // `ay [agent-yes args] <cli> [agent-cli args]`.
     const beforeCli = parseCliArgs(["node", "/path/to/ay", "--no-stdpush", "claude"]);
     const afterCli = parseCliArgs(["node", "/path/to/ay", "claude", "--no-stdpush"]);
 
     expect(beforeCli.useStdinAppend).toBe(false);
     expect(afterCli.useStdinAppend).toBe(true);
     expect(afterCli.cliArgs).toContain("--no-stdpush");
+  });
+
+  it("warns when an agent-yes flag is placed after the CLI name, still forwarding it (#349)", () => {
+    // `ay claude --timeout=30s` — the timeout belongs before the CLI name; the
+    // flag is forwarded to claude by design, but silently losing the timeout is
+    // the #349 footgun, so a stderr warning points at the fix.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const result = parseCliArgs(["node", "/path/to/ay", "claude", "--timeout=30s"]);
+      expect(result.exitOnIdle).toBe(0); // NOT applied — child territory
+      expect(result.cliArgs).toContain("--timeout=30s"); // forwarded unchanged
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("--timeout"));
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining("BEFORE the CLI name"));
+
+      warn.mockClear();
+      // A flag agent-yes doesn't define stays silent.
+      const clean = parseCliArgs(["node", "/path/to/ay", "claude", "--model", "opus"]);
+      expect(clean.cliArgs).toEqual(["--model", "opus"]);
+      expect(warn).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("consumes --attach as an agent-yes flag before the CLI positional", () => {
