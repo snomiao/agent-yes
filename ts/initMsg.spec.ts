@@ -90,6 +90,19 @@ describe("buildInitMsg", () => {
     expect(out).toBe(golden);
   });
 
+  it("disambiguates `ay send` from the harness's own agent-messaging tool", () => {
+    // Regression: a real subagent under Claude Code read this block, reached for
+    // its harness's built-in SendMessage/ListAgents (which only knows the
+    // harness's own subagents), got "No agent named '<id>' is reachable", and
+    // gave up without reporting anything.
+    const out = buildInitMsg("t", spawner(), "n1");
+    expect(out).toContain("RUNNING THESE SHELL COMMANDS");
+    expect(out).toContain("SHELL COMMAND");
+    expect(out).toContain("built-in agent/message tool");
+    expect(out).toContain("Do not substitute it");
+    expect(out).toMatch(/not conclude the parent is unreachable/);
+  });
+
   it("a body that tries to forge a closing tag cannot end the block early", () => {
     // The nonce is minted after the body exists, so an attacker-authored close
     // marker carries the wrong nonce and the real boundary still wins.

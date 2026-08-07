@@ -538,6 +538,12 @@ clis:
     install:
       bash: "curl -fsSL https://opencode.ai/install | bash"
       npm: "npm i -g opencode-ai"
+    # opencode's TUI takes a bare positional argument as a DIRECTORY to open, not
+    # as a prompt: `opencode "fix the bug"` fails with "Failed to change directory
+    # to <cwd>/fix the bug" (and ENAMETOOLONG once the prompt exceeds NAME_MAX).
+    # So the default first-arg delivery never worked here — the prompt has to be
+    # TYPED into the live session once it is ready, exactly like the shells below.
+    promptArg: typed
     enter: []
     ready: []
 

@@ -80,11 +80,22 @@ export function buildInitMsg(
     ``,
     `The task above was given to you by that agent — it spawned you and returned`,
     `immediately, so it is NOT watching your terminal and will not see anything you`,
-    `print. The only way to reach it is:`,
+    `print. Reach it by RUNNING THESE SHELL COMMANDS (in your bash/terminal tool):`,
     `  ay send ${target} "..."          report progress, ask a question, deliver the result`,
     `  ay tail ${target}                read what it has been doing`,
     ``,
-    `Reporting duty — you MUST \`ay send ${target}\` when either happens:`,
+    // Observed in the wild: a subagent under Claude Code read this block, reached
+    // for its harness's OWN agent-messaging tool ("SendMessage"/"ListAgents"),
+    // got "No agent named '<id>' is reachable" — that tool only knows the
+    // harness's own subagents, not agent-yes's registry — and gave up, reporting
+    // nothing. Naming the collision explicitly is what stops it: the agent must
+    // know these are shell commands and that its built-in tool cannot see us.
+    `\`ay\` is a SHELL COMMAND — run it in your bash/terminal tool. It is NOT your`,
+    `harness's built-in agent/message tool: that tool only knows agents your harness`,
+    `spawned and will say "no agent named ${target}". Do not substitute it, and do`,
+    `not conclude the parent is unreachable if it fails — use the shell.`,
+    ``,
+    `Reporting duty — you MUST run \`ay send ${target} "..."\` when either happens:`,
     `  1. You finish the task. Send the outcome itself (what changed, what you found,`,
     `     files/PRs touched), not just "done" — it cannot read your transcript.`,
     `  2. You are blocked or stuck: a decision only it can make, a missing`,

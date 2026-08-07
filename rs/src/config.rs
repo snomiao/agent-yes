@@ -600,7 +600,11 @@ mod tests {
     #[test]
     fn test_opencode_config() {
         let config = get_cli_config("opencode").unwrap();
-        assert_eq!(config.prompt_arg, "last-arg");
+        // NOT the `last-arg` default: opencode's TUI reads a bare positional as a
+        // DIRECTORY to open, so `opencode "fix the bug"` died with "Failed to
+        // change directory to <cwd>/fix the bug" (and ENAMETOOLONG once the prompt
+        // got long). The prompt has to be typed into the live session instead.
+        assert_eq!(config.prompt_arg, "typed");
         assert!(config.binary.is_none());
         assert!(config.install.bash.is_some());
         assert!(config.install.npm.is_some());

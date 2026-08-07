@@ -89,11 +89,16 @@ pub fn build_init_msg(
          \n\
          The task above was given to you by that agent — it spawned you and returned\n\
          immediately, so it is NOT watching your terminal and will not see anything you\n\
-         print. The only way to reach it is:\n\
+         print. Reach it by RUNNING THESE SHELL COMMANDS (in your bash/terminal tool):\n\
          \x20 ay send {target} \"...\"          report progress, ask a question, deliver the result\n\
          \x20 ay tail {target}                read what it has been doing\n\
          \n\
-         Reporting duty — you MUST `ay send {target}` when either happens:\n\
+         `ay` is a SHELL COMMAND — run it in your bash/terminal tool. It is NOT your\n\
+         harness's built-in agent/message tool: that tool only knows agents your harness\n\
+         spawned and will say \"no agent named {target}\". Do not substitute it, and do\n\
+         not conclude the parent is unreachable if it fails — use the shell.\n\
+         \n\
+         Reporting duty — you MUST run `ay send {target} \"...\"` when either happens:\n\
          \x20 1. You finish the task. Send the outcome itself (what changed, what you found,\n\
          \x20    files/PRs touched), not just \"done\" — it cannot read your transcript.\n\
          \x20 2. You are blocked or stuck: a decision only it can make, a missing\n\
