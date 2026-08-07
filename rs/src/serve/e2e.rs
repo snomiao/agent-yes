@@ -22,7 +22,9 @@ const NONCE_LEN: usize = 12;
 const TAG_LEN: usize = 16;
 
 fn is_hex64(s: &str) -> bool {
-    s.len() == 64 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 /// Reject anything that isn't a full-entropy 64-hex secret. Fail-closed and
@@ -41,7 +43,8 @@ fn ikm_from_s(s: &str) -> Result<Vec<u8>> {
 fn hkdf32(ikm: &[u8], salt: &[u8], info: &str) -> [u8; 32] {
     let hk = Hkdf::<Sha256>::new(Some(salt), ikm);
     let mut okm = [0u8; 32];
-    hk.expand(info.as_bytes(), &mut okm).expect("hkdf expand 32");
+    hk.expand(info.as_bytes(), &mut okm)
+        .expect("hkdf expand 32");
     okm
 }
 
@@ -168,7 +171,13 @@ pub fn seal(
     aad.extend_from_slice(&header);
     aad.extend_from_slice(th);
     let sealed = key
-        .encrypt((&nonce).into(), Payload { msg: plaintext, aad: &aad })
+        .encrypt(
+            (&nonce).into(),
+            Payload {
+                msg: plaintext,
+                aad: &aad,
+            },
+        )
         .map_err(|_| anyhow!("e2e: encrypt failed"))?;
     let mut out = Vec::with_capacity(HEADER_LEN + sealed.len());
     out.extend_from_slice(&header);
@@ -182,12 +191,7 @@ pub struct Opened {
     pub plaintext: Vec<u8>,
 }
 
-pub fn open(
-    key: &Aes256Gcm,
-    frame: &[u8],
-    th: &[u8; 32],
-    recv: &mut RecvState,
-) -> Result<Opened> {
+pub fn open(key: &Aes256Gcm, frame: &[u8], th: &[u8; 32], recv: &mut RecvState) -> Result<Opened> {
     if frame.len() < HEADER_LEN + TAG_LEN {
         bail!("e2e: short frame");
     }
@@ -204,7 +208,13 @@ pub fn open(
     aad.extend_from_slice(header);
     aad.extend_from_slice(th);
     let plaintext = key
-        .decrypt(&Nonce::try_from(nonce).expect("12-byte nonce"), Payload { msg: &frame[HEADER_LEN..], aad: &aad })
+        .decrypt(
+            &Nonce::try_from(nonce).expect("12-byte nonce"),
+            Payload {
+                msg: &frame[HEADER_LEN..],
+                aad: &aad,
+            },
+        )
         .map_err(|_| anyhow!("e2e: auth failed"))?;
     // First accepted frame of a session MUST be counter-0 (the confirmation).
     match recv.last_seen {
@@ -213,7 +223,11 @@ pub fn open(
         _ => {}
     }
     recv.last_seen = Some(ctr);
-    Ok(Opened { counter: ctr, flags: header[1], plaintext })
+    Ok(Opened {
+        counter: ctr,
+        flags: header[1],
+        plaintext,
+    })
 }
 
 /// Parse the secret slot of a share link. Ok((s, v2)).
@@ -250,7 +264,10 @@ mod tests {
         // Vector generated with lab/ui/e2e.js under bun; pinned so any drift
         // from the JS implementation fails loudly.
         let t = derive_auth_token(S, "rdeadbeef0000", "s.agent-yes.com").unwrap();
-        assert_eq!(t, "a50a14d9be1ce496e132a6b7147757b4e01b30876550f28f855f5089b6b9aa20");
+        assert_eq!(
+            t,
+            "a50a14d9be1ce496e132a6b7147757b4e01b30876550f28f855f5089b6b9aa20"
+        );
     }
 
     #[test]
@@ -275,7 +292,14 @@ mod tests {
         let keys = derive_dir_keys(S, &th).unwrap();
         let mut send = SendState { send_ctr: 0 };
         let mut recv = RecvState { last_seen: None };
-        let f = seal(&keys.h2c, &mut send, FLAG_CONFIRM, &th, b"{\"t\":\"confirm\"}").unwrap();
+        let f = seal(
+            &keys.h2c,
+            &mut send,
+            FLAG_CONFIRM,
+            &th,
+            b"{\"t\":\"confirm\"}",
+        )
+        .unwrap();
         let o = open(&keys.h2c, &f, &th, &mut recv).unwrap();
         assert_eq!(o.counter, 0);
         assert_eq!(o.flags, FLAG_CONFIRM);

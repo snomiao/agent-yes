@@ -40,7 +40,11 @@ fn ay_bin() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         // `ayrs` and `agent-yes` are installed side by side by `cargo install`.
         if let Some(dir) = exe.parent() {
-            let sibling = dir.join(if cfg!(windows) { "agent-yes.exe" } else { "agent-yes" });
+            let sibling = dir.join(if cfg!(windows) {
+                "agent-yes.exe"
+            } else {
+                "agent-yes"
+            });
             if sibling.exists() {
                 return Some(sibling);
             }
@@ -51,7 +55,9 @@ fn ay_bin() -> Option<std::path::PathBuf> {
 
 fn which_in_path(name: &str) -> Option<std::path::PathBuf> {
     let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path).map(|d| d.join(name)).find(|p| p.is_file())
+    std::env::split_paths(&path)
+        .map(|d| d.join(name))
+        .find(|p| p.is_file())
 }
 
 /// Launch a detached, fully orphaned child that outlives this request AND is not
@@ -109,7 +115,11 @@ pub fn kill(body: &str) -> super::api::ApiResponse {
     let Ok(b) = serde_json::from_str::<Value>(body) else {
         return bad(400, "invalid JSON body");
     };
-    let Some(keyword) = b.get("keyword").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else {
+    let Some(keyword) = b
+        .get("keyword")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
         return bad(400, "missing keyword");
     };
     if cfg!(windows) {
@@ -124,7 +134,10 @@ pub fn kill(body: &str) -> super::api::ApiResponse {
     {
         // Whole process group first (takes the children with it), then the pids
         // directly in case they aren't group leaders.
-        let pgid = rec.wrapper_pid.filter(|p| *p > 1).map(|p| unsafe { libc::getpgid(p as i32) });
+        let pgid = rec
+            .wrapper_pid
+            .filter(|p| *p > 1)
+            .map(|p| unsafe { libc::getpgid(p as i32) });
         if let Some(g) = pgid.filter(|g| *g > 1) {
             if unsafe { libc::kill(-g, libc::SIGKILL) } == 0 {
                 killed.push(format!("group {g}"));
@@ -155,7 +168,11 @@ pub fn restart(body: &str) -> super::api::ApiResponse {
     let Ok(b) = serde_json::from_str::<Value>(body) else {
         return bad(400, "invalid JSON body");
     };
-    let Some(keyword) = b.get("keyword").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) else {
+    let Some(keyword) = b
+        .get("keyword")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    else {
         return bad(400, "missing keyword");
     };
     let rec = match super::api::resolve_one_all(keyword) {
@@ -163,7 +180,10 @@ pub fn restart(body: &str) -> super::api::ApiResponse {
         Err(e) => return bad(404, e),
     };
     let Some(bin) = ay_bin() else {
-        return bad(500, "cannot locate the agent-yes executable to run the restart");
+        return bad(
+            500,
+            "cannot locate the agent-yes executable to run the restart",
+        );
     };
     let mut args = vec!["restart".to_string(), rec.pid.to_string()];
     if b.get("fresh").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -184,7 +204,10 @@ pub fn spawn(body: &str) -> super::api::ApiResponse {
     // branch would spawn the agent in the wrong directory, which reads as the
     // agent "ignoring" the fork.
     if b.get("fork").map(|v| !v.is_null()).unwrap_or(false)
-        || b.get("from").and_then(|v| v.as_str()).map(|s| !s.trim().is_empty()).unwrap_or(false)
+        || b.get("from")
+            .and_then(|v| v.as_str())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
     {
         return bad(
             501,
@@ -193,12 +216,25 @@ pub fn spawn(body: &str) -> super::api::ApiResponse {
              spawn into an existing cwd instead",
         );
     }
-    let cli = b.get("cli").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
+    let cli = b
+        .get("cli")
+        .and_then(|v| v.as_str())
+        .unwrap_or("claude")
+        .to_string();
     if !SUPPORTED_CLIS.contains(&cli.as_str()) {
         return bad(400, format!("unsupported cli: {cli}"));
     }
-    let prompt = b.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let cwd = b.get("cwd").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let prompt = b
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let cwd = b
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     if cwd.is_empty() {
         return bad(400, "missing cwd");
     }
@@ -207,7 +243,10 @@ pub fn spawn(body: &str) -> super::api::ApiResponse {
         return bad(400, format!("cannot create cwd {cwd}: {e}"));
     }
     let Some(bin) = ay_bin() else {
-        return bad(500, "cannot locate the agent-yes executable to spawn an agent");
+        return bad(
+            500,
+            "cannot locate the agent-yes executable to spawn an agent",
+        );
     };
     let mut args = vec![format!("--cli={cli}")];
     if b.get("yes").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -249,7 +288,10 @@ mod tests {
 
     #[test]
     fn spawn_refuses_provisioned_requests_instead_of_silently_downgrading() {
-        assert_eq!(spawn(r#"{"cli":"claude","cwd":"/tmp","from":"o/r"}"#).status, 501);
+        assert_eq!(
+            spawn(r#"{"cli":"claude","cwd":"/tmp","from":"o/r"}"#).status,
+            501
+        );
         assert_eq!(
             spawn(r#"{"cli":"claude","cwd":"/tmp","fork":{"fromCwd":"/a","branch":"b"}}"#).status,
             501
@@ -258,7 +300,9 @@ mod tests {
 
     #[test]
     fn spawn_config_lists_the_supported_clis() {
-        let super::super::api::Body::Full(b) = spawn_config().body else { panic!("not full") };
+        let super::super::api::Body::Full(b) = spawn_config().body else {
+            panic!("not full")
+        };
         let v: Value = serde_json::from_slice(&b).unwrap();
         assert!(v["clis"].as_array().unwrap().iter().any(|c| c == "claude"));
     }

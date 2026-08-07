@@ -13,19 +13,23 @@ mod pid_store;
 // `ay ls` exactly instead of re-deriving its own heuristics.
 #[path = "../config_loader.rs"]
 mod config_loader;
-#[path = "../log_files.rs"]
-mod log_files;
 #[path = "../fifo.rs"]
 mod fifo;
-#[path = "../vterm.rs"]
-mod vterm;
+#[path = "../log_files.rs"]
+mod log_files;
 #[path = "../serve/mod.rs"]
 mod serve;
+#[path = "../vterm.rs"]
+mod vterm;
 
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "ayrs", version, about = "agent-yes Rust serve daemon (experimental)")]
+#[command(
+    name = "ayrs",
+    version,
+    about = "agent-yes Rust serve daemon (experimental)"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -70,7 +74,12 @@ enum ServeAction {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Serve { webrtc, sighost, action, port } => {
+        Command::Serve {
+            webrtc,
+            sighost,
+            action,
+            port,
+        } => {
             match action {
                 // Service management never needs a room up front: the unit
                 // re-runs `ayrs serve --webrtc` which loads/mints as usual.
@@ -93,7 +102,11 @@ async fn main() -> anyhow::Result<()> {
                         &Some(webrtc.clone()),
                         &sighost,
                     ));
-                    let url = if webrtc.is_empty() { None } else { Some(webrtc) };
+                    let url = if webrtc.is_empty() {
+                        None
+                    } else {
+                        Some(webrtc)
+                    };
                     serve::share::run_share(serve::share::ShareConfig { url, sighost }).await
                 }
                 None => match http {

@@ -132,7 +132,9 @@ if (fast || dev) {
     copyFileSync(built, tmp);
     renameSync(tmp, dest);
     console.log(`[build-rs] installed ${dest}`);
-    console.log(`[build-rs] NOTE: dev build — run \`bun run build:rs\` for the fully-optimized shipped binary`);
+    console.log(
+      `[build-rs] NOTE: dev build — run \`bun run build:rs\` for the fully-optimized shipped binary`,
+    );
   } else {
     // Build failed and cargo never wrote a fresh binary — restore anything the
     // Windows lock-aside moved, else ayrs.exe would be missing from PATH.

@@ -282,7 +282,14 @@ fn oxmgr_install(oxmgr: &str, exe: &str, args: &[String]) -> Result<()> {
     run(
         oxmgr,
         &[
-            "start", &cmd, "--name", OXMGR_NAME, "--restart", "always", "--max-restarts", "20",
+            "start",
+            &cmd,
+            "--name",
+            OXMGR_NAME,
+            "--restart",
+            "always",
+            "--max-restarts",
+            "20",
         ],
     )?;
     Ok(())
@@ -299,7 +306,10 @@ pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
     // (Mirrors `ay serve install`'s up-to-date no-op.) An upgraded binary or a
     // config change fails this check and falls through to the roll-forward below.
     if already_current(&args) {
-        println!("{LABEL} already running v{} (up to date)", env!("CARGO_PKG_VERSION"));
+        println!(
+            "{LABEL} already running v{} (up to date)",
+            env!("CARGO_PKG_VERSION")
+        );
         return Ok(());
     }
 
@@ -554,7 +564,10 @@ mod tests {
         // embedded single quote → POSIX close/escape/reopen
         assert_eq!(sh_quote("a'b"), "'a'\\''b'");
         // safe tokens (incl. the room-URL charset) pass through unquoted
-        assert_eq!(sh_quote("webrtc://r1:e1.ab@s.agent-yes.com"), "webrtc://r1:e1.ab@s.agent-yes.com");
+        assert_eq!(
+            sh_quote("webrtc://r1:e1.ab@s.agent-yes.com"),
+            "webrtc://r1:e1.ab@s.agent-yes.com"
+        );
     }
 
     #[test]

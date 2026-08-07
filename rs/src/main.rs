@@ -6,6 +6,7 @@ mod config_loader;
 mod context;
 mod fifo;
 mod idle_waiter;
+mod init_msg;
 mod installer;
 mod log_files;
 mod logger;
@@ -54,9 +55,9 @@ fn shell_display_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
     }
-    let safe = s.chars().all(|c| {
-        c.is_ascii_alphanumeric() || "_@%+=:,./~-".contains(c)
-    });
+    let safe = s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./~-".contains(c));
     if safe {
         s.to_string()
     } else {
@@ -123,7 +124,12 @@ fn warn_cwd_deprecated() {
     let raw: Vec<String> = std::env::args().collect();
     let prog = raw
         .first()
-        .map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p.as_str()).to_string())
+        .map(|p| {
+            p.rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(p.as_str())
+                .to_string()
+        })
         .unwrap_or_else(|| "agent-yes".to_string());
     eprintln!("{}", build_cwd_migration(&prog, &raw[1..]));
 }
@@ -235,13 +241,41 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     // Build command arguments
     let mut cmd_args = args.cli_args.clone();
 
+    // Wrap a SUB-agent's initial prompt in `<ay-init-msg …>` — the same
+    // attribution + reply route `ay send` puts on every later message, plus an
+    // explicit duty to report back when finished or stuck. Only the DELIVERED
+    // prompt is wrapped: `args.prompt` stays the raw task, so the registry (and
+    // therefore `ay ls`) still shows what this agent was actually asked to do.
+    // No-op for a top-level agent (no inherited AGENT_YES_PID). See init_msg.rs
+    // — the format is byte-identical to ts/initMsg.ts.
+    let delivered_prompt: Option<String> = args.prompt.as_ref().map(|raw| {
+        let spawner = std::env::var("AGENT_YES_PID")
+            .ok()
+            .and_then(|v| v.trim().parse::<u32>().ok())
+            .filter(|p| *p > 0)
+            .and_then(|parent| {
+                let records = PidStore::new().read_all().ok()?;
+                init_msg::spawner_from_records(&records, parent)
+            });
+
+        match spawner {
+            Some(s) => init_msg::build_init_msg(
+                raw,
+                &s,
+                &init_msg::mint_nonce(),
+                dirs::home_dir().as_deref().and_then(|p| p.to_str()),
+            ),
+            None => raw.clone(),
+        }
+    });
+
     // Add prompt based on promptArg configuration.
     //
     // "typed" is the shell mode (bash/cmd/powershell): the prompt is NOT passed
     // as an argv (that would run-and-exit, e.g. `bash -c`), it is typed into the
     // interactive session after the shell prompt is ready — see `initial_input`
     // below and its consumer in AgentContext::run_with_fifo.
-    if let Some(ref prompt) = args.prompt {
+    if let Some(ref prompt) = delivered_prompt {
         match cli_config.prompt_arg.as_str() {
             "first-arg" => {
                 cmd_args.insert(0, prompt.clone());
@@ -261,7 +295,7 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     // For "typed" (shell) CLIs, carry the prompt into the run loop so it is typed
     // into the live session once ready; every other mode delivered it via argv.
     let initial_input = if cli_config.prompt_arg == "typed" {
-        args.prompt.clone()
+        delivered_prompt.clone()
     } else {
         None
     };
@@ -725,7 +759,10 @@ mod cwd_deprecation_tests {
             "agent-yes",
             &args(&["--cli", "claude", "--cwd", "/ws/app", "-p", "fix"]),
         );
-        assert!(msg.contains("cd /ws/app && agent-yes --cli claude -p fix"), "{msg}");
+        assert!(
+            msg.contains("cd /ws/app && agent-yes --cli claude -p fix"),
+            "{msg}"
+        );
         assert!(msg.contains("--cwd is deprecated"));
     }
 

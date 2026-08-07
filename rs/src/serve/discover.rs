@@ -16,7 +16,9 @@ fn now_ms() -> i64 {
 }
 
 fn read_jsonl(path: &std::path::Path) -> Vec<Value> {
-    let Ok(raw) = std::fs::read_to_string(path) else { return vec![] };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return vec![];
+    };
     raw.lines()
         .map(str::trim)
         .filter(|l| !l.is_empty())
@@ -29,8 +31,14 @@ fn read_jsonl(path: &std::path::Path) -> Vec<Value> {
 pub fn notes(home: &std::path::Path) -> Value {
     let mut map = Map::new();
     for v in read_jsonl(&home.join("notes.jsonl")) {
-        let Some(pid) = v.get("pid").and_then(|p| p.as_i64()) else { continue };
-        match v.get("note").and_then(|n| n.as_str()).filter(|s| !s.is_empty()) {
+        let Some(pid) = v.get("pid").and_then(|p| p.as_i64()) else {
+            continue;
+        };
+        match v
+            .get("note")
+            .and_then(|n| n.as_str())
+            .filter(|s| !s.is_empty())
+        {
             Some(note) => {
                 map.insert(pid.to_string(), json!(note));
             }
@@ -78,14 +86,28 @@ pub fn message_edges(cwds: &[String]) -> Vec<Value> {
     let now = now_ms();
     let mut best: HashMap<(i64, i64), (i64, Option<String>)> = HashMap::new();
     for cwd in cwds.iter().collect::<HashSet<_>>() {
-        for rec in read_jsonl(&std::path::Path::new(cwd).join(".agent-yes").join("outbox.jsonl")) {
-            let Some(at) = rec.get("at").and_then(|x| x.as_i64()) else { continue };
+        for rec in read_jsonl(
+            &std::path::Path::new(cwd)
+                .join(".agent-yes")
+                .join("outbox.jsonl"),
+        ) {
+            let Some(at) = rec.get("at").and_then(|x| x.as_i64()) else {
+                continue;
+            };
             if now - at > READ_WINDOW_MS {
                 continue;
             }
-            let by = rec.get("from").and_then(|f| f.get("pid")).and_then(|p| p.as_i64());
-            let target = rec.get("to").and_then(|f| f.get("pid")).and_then(|p| p.as_i64());
-            let (Some(by), Some(target)) = (by, target) else { continue };
+            let by = rec
+                .get("from")
+                .and_then(|f| f.get("pid"))
+                .and_then(|p| p.as_i64());
+            let target = rec
+                .get("to")
+                .and_then(|f| f.get("pid"))
+                .and_then(|p| p.as_i64());
+            let (Some(by), Some(target)) = (by, target) else {
+                continue;
+            };
             if by == 0 || target == 0 || by == target {
                 continue; // agent→agent only
             }
@@ -120,10 +142,18 @@ fn snippet_at(text: &str, ql: &str) -> Option<(usize, String)> {
     let idx = text.to_lowercase().rfind(ql)?;
     // Byte indices from the lowercased copy can land mid-char in the original
     // (lowercasing can change byte length), so clamp to char boundaries.
-    let lo = (0..=idx.saturating_sub(60)).rev().find(|i| text.is_char_boundary(*i)).unwrap_or(0);
+    let lo = (0..=idx.saturating_sub(60))
+        .rev()
+        .find(|i| text.is_char_boundary(*i))
+        .unwrap_or(0);
     let want = (idx + ql.len() + 60).min(text.len());
-    let hi = (want..=text.len()).find(|i| text.is_char_boundary(*i)).unwrap_or(text.len());
-    let snippet = text[lo..hi].split_whitespace().collect::<Vec<_>>().join(" ");
+    let hi = (want..=text.len())
+        .find(|i| text.is_char_boundary(*i))
+        .unwrap_or(text.len());
+    let snippet = text[lo..hi]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     Some((idx, snippet))
 }
 

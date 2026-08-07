@@ -7,17 +7,17 @@ the Bun/Node TS `ay serve`; room `r7bcb6271a973` by the standalone Rust
 the same agent FIFOs, so the only variable is the serve implementation.
 
 Measured 2026-08-01 on the primary dev host (v1.251.0), with the TS serve at its
-real ~40% CPU (the live daemon this session runs under) — i.e. an *under-load*
+real ~40% CPU (the live daemon this session runs under) — i.e. an _under-load_
 comparison, the condition where console jank is actually felt.
 
 ## Results
 
 ### Open-time — cold WebRTC connect + first relayed request (5 interleaved trials)
 
-| daemon | median | range |
-| --- | --- | --- |
+| daemon              | median      | range                   |
+| ------------------- | ----------- | ----------------------- |
 | TS `ay serve` (bun) | **1466 ms** | 1274–2525 ms (fat tail) |
-| Rust `ayrs serve` | **357 ms** | 339–467 ms (tight) |
+| Rust `ayrs serve`   | **357 ms**  | 339–467 ms (tight)      |
 
 → **ayrs ~4.1× faster to open**, with far lower variance.
 
@@ -26,19 +26,19 @@ comparison, the condition where console jank is actually felt.
 Isolates the daemon's request-handling (localhost connect is common-mode ~0 and
 cancels). Both authenticate with the shared `~/.agent-yes/.serve-token` bearer.
 
-| daemon | p50 | p95 | max |
-| --- | --- | --- | --- |
-| TS `ay serve` (bun) | 26.5 ms | **162.7 ms** | 174 ms |
-| Rust `ayrs serve` | **9.1 ms** | **24.3 ms** | 61 ms |
+| daemon              | p50        | p95          | max    |
+| ------------------- | ---------- | ------------ | ------ |
+| TS `ay serve` (bun) | 26.5 ms    | **162.7 ms** | 174 ms |
+| Rust `ayrs serve`   | **9.1 ms** | **24.3 ms**  | 61 ms  |
 
 → **ayrs ~2.9× faster at p50, ~6.7× faster at p95.**
 
 ### Resource cost (live)
 
-| daemon | RSS | CPU (under load) |
-| --- | --- | --- |
-| TS `ay serve` (bun) | ~250 MB | ~40% |
-| Rust `ayrs serve` | ~33 MB | ~0.3% |
+| daemon              | RSS     | CPU (under load) |
+| ------------------- | ------- | ---------------- |
+| TS `ay serve` (bun) | ~250 MB | ~40%             |
+| Rust `ayrs serve`   | ~33 MB  | ~0.3%            |
 
 → **~8× less memory**, a fraction of the CPU.
 
@@ -76,19 +76,20 @@ The default `bun run build:rs` (`cargo install --path rs --features swarm`,
 release + full LTO) is slow to iterate on. Benchmarked incremental rebuild (touch
 one source file, rebuild the `ayrs` bin):
 
-| build | incremental | vs default |
-| --- | --- | --- |
-| default: `cargo install`, release + LTO + swarm | ~145 s | 1× |
-| `cargo build`, release, **LTO off**, swarm | ~27 s | 5.4× |
-| `cargo build`, release, LTO off, **no swarm** | ~26 s | 5.6× |
-| `cargo build`, **dev profile (opt0)**, no swarm | ~3 s | **48×** |
+| build                                           | incremental | vs default |
+| ----------------------------------------------- | ----------- | ---------- |
+| default: `cargo install`, release + LTO + swarm | ~145 s      | 1×         |
+| `cargo build`, release, **LTO off**, swarm      | ~27 s       | 5.4×       |
+| `cargo build`, release, LTO off, **no swarm**   | ~26 s       | 5.6×       |
+| `cargo build`, **dev profile (opt0)**, no swarm | ~3 s        | **48×**    |
 
 Two independent causes, both large:
+
 1. **`cargo install` can't reuse the incremental cache** — it builds in a temp
    target dir, so it rebuilds the whole graph (~110 s) even when `cargo build`
    (which reuses `rs/target`) is ~27 s. The fast paths use `cargo build` + copy.
 2. **Full LTO dominates the rest** — it relinks the entire webrtc binary on every
-   change (145 s → 27 s just from `LTO off`). `swarm` barely affects *incremental*
+   change (145 s → 27 s just from `LTO off`). `swarm` barely affects _incremental_
    time (its ~65 libp2p crates are already cached) but matters on clean builds;
    `ayrs` doesn't use libp2p, so the fast paths drop it.
 
@@ -129,9 +130,9 @@ speeds up every clean/CI build.
   daemon (which could freeze its JS event loop while alive → needed the
   healthcheck-restart) the Rust host has no such "alive-but-wedged" failure mode,
   so restart-on-crash suffices. Verified: SIGKILL → oxmgr respawns cleanly, old PID
-  reaped (the oxmgr *daemon* reaps its children), host-lock + room preserved.
+  reaped (the oxmgr _daemon_ reaps its children), host-lock + room preserved.
 
-  Gotcha: if you kill a *standalone* (non-oxmgr) ayrs, its parent may be the PID-1
+  Gotcha: if you kill a _standalone_ (non-oxmgr) ayrs, its parent may be the PID-1
   oxmgr-runtime, which does NOT reap → the process lingers as a `<defunct>` zombie.
   ayrs's two-hosts-in-one-room guard reads `~/.agent-yes/.share-host-<room>.pid` and
   does `kill -0` on it — which returns "alive" for a zombie — so a fresh start then

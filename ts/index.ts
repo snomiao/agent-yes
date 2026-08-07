@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { execaCommandSync, parseCommandString } from "execa";
 import { fromWritable } from "from-node-stream";
 import { mkdir, readFile, unlink, writeFile } from "fs/promises";
@@ -278,6 +279,41 @@ export default async function agentYes({
     cliArgs = [...cliArgs, ...cliConf.yesArgs];
   }
 
+  // The AGENT_YES_PID we INHERITED is the wrapper pid of the agent that spawned
+  // us — see the ptyEnv block below, which reads the same value before re-stamping
+  // it with our own pid. Resolved here (before any prompt decoration) because the
+  // `<ay-init-msg>` wrapper has to go around the RAW task, with the SKILL.md
+  // header and the peer hint prepended outside it: those are ambient guidance, not
+  // part of what the parent asked for.
+  const inheritedParentPid = ((): number | undefined => {
+    const n = Number((env ?? (process.env as Record<string, string>)).AGENT_YES_PID);
+    return Number.isInteger(n) && n > 0 ? n : undefined;
+  })();
+
+  // The task as the caller wrote it, before any wrapping/prefixing and before
+  // promptArg clears it — used for the registry (so `ay ls` shows the agent's
+  // role, not wrapper boilerplate) and to remind the parent what it asked for
+  // when a report fires.
+  const originalPrompt = prompt;
+
+  // Wrap a sub-agent's initial prompt in `<ay-init-msg …>` — same attribution +
+  // reply route `ay send` puts on every later message, plus the reporting duty.
+  // No-ops for a top-level (human-launched) agent and for an interactive session
+  // with no prompt. See ts/initMsg.ts (mirrored in rs/src/init_msg.rs).
+  if (prompt && inheritedParentPid) {
+    try {
+      const { resolveSpawner } = await import("./parentLink.ts");
+      const spawner = await resolveSpawner(inheritedParentPid);
+      if (spawner) {
+        const { buildInitMsg } = await import("./initMsg.ts");
+        prompt = buildInitMsg(prompt, spawner, randomBytes(4).toString("hex"));
+      }
+    } catch (error) {
+      // Attribution is never worth failing a spawn over.
+      if (verbose) logger.warn("[init-msg] failed to wrap initial prompt:", { error });
+    }
+  }
+
   // If enabled, read SKILL.md header and prepend to the prompt for non-Claude agents
   try {
     const workingDir = cwd ?? process.cwd();
@@ -416,12 +452,10 @@ export default async function agentYes({
 
   // Spawn the agent CLI process
   const ptyEnv = { ...(env ?? (process.env as Record<string, string>)) };
-  // Capture the AGENT_YES_PID we INHERITED (the wrapper of the parent agent that
-  // launched this nested `ay`) before we overwrite it with our own pid below.
-  // null when started from a human shell → this agent is a tree root.
-  const inheritedAyPid = Number(ptyEnv.AGENT_YES_PID);
-  const parentPid =
-    Number.isInteger(inheritedAyPid) && inheritedAyPid > 0 ? inheritedAyPid : undefined;
+  // The AGENT_YES_PID we INHERITED (the wrapper of the parent agent that launched
+  // this nested `ay`), read above from the same env before we overwrite it with
+  // our own pid here. undefined when started from a human shell → tree root.
+  const parentPid = inheritedParentPid;
   ptyEnv.AGENT_YES_PID = String(process.pid);
   // A caller-injected AGENT_YES_AGENT_ID (from `ay serve`'s /api/spawn) is meant
   // for THIS agent's record only — pidStore.registerProcess reads it from our own
@@ -504,7 +538,11 @@ export default async function agentYes({
       pid: shell.pid,
       cli,
       args: cliArgs,
-      prompt,
+      // The task as the user/parent wrote it — NOT the delivered `prompt`, which
+      // by now carries the `<ay-init-msg>` wrapper (and any SKILL.md header /
+      // peer hint). `ay ls` shows this field as the agent's role; a wall of
+      // wrapper boilerplate there would bury the one line that identifies it.
+      prompt: originalPrompt,
       cwd: workingDir,
       // We inject our own pid as AGENT_YES_PID into the agent's env above; record
       // it so a child `ay send` can map that env value back to this agent.
@@ -560,7 +598,7 @@ export default async function agentYes({
       context: ctx,
       cwd: workingDir,
       cli,
-      prompt,
+      prompt: originalPrompt,
       startTime: Date.now(),
       stdoutBuffer: [],
     });
@@ -655,7 +693,13 @@ export default async function agentYes({
       shellWrite = (data: string) => shell.write(data);
       // Register process in pidStore (non-blocking)
       try {
-        await pidStore.registerProcess({ pid: shell.pid, cli, args, prompt, cwd: workingDir });
+        await pidStore.registerProcess({
+          pid: shell.pid,
+          cli,
+          args,
+          prompt: originalPrompt,
+          cwd: workingDir,
+        });
       } catch (error) {
         logger.warn(`[pidStore] Failed to register restarted process ${shell.pid}:`, error);
       }
@@ -672,7 +716,7 @@ export default async function agentYes({
           context: ctx,
           cwd: workingDir,
           cli,
-          prompt,
+          prompt: originalPrompt,
           startTime: Date.now(),
           stdoutBuffer: [],
         });
@@ -766,7 +810,7 @@ export default async function agentYes({
           pid: shell.pid,
           cli,
           args: restoreArgs,
-          prompt,
+          prompt: originalPrompt,
           cwd: workingDir,
         });
       } catch (error) {
@@ -784,7 +828,7 @@ export default async function agentYes({
           context: ctx,
           cwd: workingDir,
           cli,
-          prompt,
+          prompt: originalPrompt,
           startTime: Date.now(),
           stdoutBuffer: [],
         });
@@ -995,6 +1039,22 @@ export default async function agentYes({
   // Clear heartbeat on exit
   const cleanupHeartbeat = () => clearInterval(heartbeatInterval);
   shell.onExit(cleanupHeartbeat);
+
+  // Report to whoever spawned us when this agent settles idle (done), parks on a
+  // question (stuck), or exits. `<ay-init-msg>` asks the AGENT to do this; this
+  // loop is the guarantee, because an agent that has run out of context, crashed,
+  // or simply forgotten is exactly the case the parent is waiting on. No-ops
+  // entirely for a top-level agent. See ts/parentPingLoop.ts.
+  const { startParentPingLoop } = await import("./parentPingLoop.ts");
+  const parentPingLoop = startParentPingLoop({
+    parentPid,
+    selfWrapperPid: process.pid,
+    self: { cli, pid: shell.pid, cwd: workingDir, prompt: originalPrompt ?? null },
+    patterns: { ready: conf.ready, working: conf.working, needsInput: conf.needsInput },
+    // 48 lines: enough to carry a menu plus the question above it, matching what
+    // `ay notifyd` sends as evidence.
+    screen: () => removeControlCharacters(xtermProxy.tail(48)).split("\n"),
+  });
 
   if (exitOnIdle)
     (async () => {
@@ -1386,6 +1446,11 @@ export default async function agentYes({
   // and then get its exitcode
   const exitCode = await pendingExitCode.promise;
   logger.info(`[${cli}-yes] ${cli} exited with code ${exitCode}`);
+
+  // Final report to the parent — awaited (not fire-and-forget) so the message is
+  // actually handed to `ay send` before this process goes away. Bounded by
+  // deliverPing's own timeout and never throws.
+  await parentPingLoop.pingExit(exitCode ?? null);
 
   // Final pidStore cleanup
   await pidStore.close();

@@ -123,7 +123,7 @@ async function compactNotes(): Promise<void> {
 // wrong agent (e.g. you tail "babaiban" but a send resolves to "qq-cli").
 // ---------------------------------------------------------------------------
 
-const READ_WINDOW_MS = 60_000; // "read recently" = within the last minute
+export const READ_WINDOW_MS = 60_000; // "read recently" = within the last minute
 
 // Max time writeToIpc will keep retrying a backed-up FIFO before erroring. A live
 // agent drains its stdin in milliseconds; only a wedged reader hits this.
@@ -182,7 +182,7 @@ async function recordRead(by: string, target: number): Promise<void> {
   }
 }
 
-async function lastReadAt(by: string, target: number): Promise<number | null> {
+export async function lastReadAt(by: string, target: number): Promise<number | null> {
   const map = await readReads();
   return map.get(`${by}${READS_KEY_SEP}${target}`) ?? null;
 }
@@ -606,11 +606,20 @@ async function buildAgentContextSection(self: GlobalPidRecord): Promise<string> 
     : parent
       ? `Spawned by agent pid ${parent.pid} (${parent.cli}) in ${shortenPath(parent.cwd)}.`
       : `Nested under a parent (wrapper pid ${self.parent_pid}) whose record isn't in the local registry.`;
+  // The reporting duty is stated in the `<ay-init-msg>` block wrapping this
+  // agent's initial prompt, but that block scrolls out of a long session (or is
+  // compacted away) long before the agent finishes. `ay help` is where an agent
+  // goes when it has lost the thread, so restate the obligation here.
+  const dutyLine = parent
+    ? `  You owe it a report: \`ay send ${parent.agent_id || parent.pid} "..."\` when you finish, and\n` +
+      `  when you are blocked. It is not watching your terminal.\n`
+    : ``;
 
   return (
     `You are running inside an agent:\n` +
     `  ${whoAmI}\n` +
     `  ${parentLine}\n` +
+    dutyLine +
     `\n` +
     `As an agent, you can:\n` +
     `  Spawn a sub-agent:\n` +
