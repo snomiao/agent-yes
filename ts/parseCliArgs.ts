@@ -184,8 +184,13 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
       alias: "v",
     })
     .parserConfiguration({
+      // Unknown options (the wrapped CLI's flags, e.g. --model) stay in `_`
+      // untouched and are forwarded to the child below. Known agent-yes
+      // options are consumed WHEREVER they appear — the usage string promises
+      // `$0 [cli] [agent-yes args] [agent-cli args]`, and with the former
+      // "halt-at-non-option" everything after the cli positional was skipped,
+      // so `ay claude --timeout=30s` silently dropped the timeout (#349).
       "unknown-options-as-args": true,
-      "halt-at-non-option": true,
     })
     .parseSync();
 
@@ -217,12 +222,27 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
 
   const cliArgsForSpawn = (() => {
     if (parsedArgv._[0] && !cliName) {
-      // Explicit CLI name provided as positional arg — separate flags from bare words
+      // Explicit CLI name provided as positional arg — flags agent-yes itself
+      // consumed are filtered out (same rule as the cli-bound branch below),
+      // remaining flags go to the child, bare words become prompt text.
       const allAfterCli = rawArgs.slice((cliArgIndex ?? 0) + 1, dashIndex ?? undefined);
       const result: string[] = [];
       for (let i = 0; i < allAfterCli.length; i++) {
         const arg = allAfterCli[i]!;
-        if (arg.startsWith("-")) {
+        const [flag] = arg.split("=");
+        // Check both the flag itself and its --no- negation (yargs stores --no-x as key "x")
+        const isConsumed =
+          (flag && yargsConsumed.has(flag)) ||
+          (flag?.startsWith("--no-") && yargsConsumed.has(`--${flag.slice(5)}`));
+        if (isConsumed) {
+          // Skip consumed flag and its value if separate
+          if (!arg.includes("=") && i + 1 < allAfterCli.length) {
+            const nextArg = allAfterCli[i + 1];
+            if (nextArg && !nextArg.startsWith("-")) {
+              i++; // Skip value
+            }
+          }
+        } else if (arg.startsWith("-")) {
           result.push(arg);
           // Consume the next arg as the flag's value if separate (--flag value)
           if (!arg.includes("=") && i + 1 < allAfterCli.length) {

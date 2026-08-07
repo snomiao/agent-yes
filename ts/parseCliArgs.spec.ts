@@ -430,14 +430,43 @@ describe("CLI argument parsing", () => {
     expect(result.useStdinAppend).toBe(true);
   });
 
-  it("respects --no-stdpush opt-out only when placed before the CLI positional", () => {
-    // halt-at-non-option means agent-yes flags must precede the CLI positional.
+  it("respects --no-stdpush opt-out on either side of the CLI positional", () => {
+    // Usage promises `ay [cli] [agent-yes args] [agent-cli args]` — agent-yes
+    // flags are consumed after the CLI name too (#349).
     const beforeCli = parseCliArgs(["node", "/path/to/ay", "--no-stdpush", "claude"]);
     const afterCli = parseCliArgs(["node", "/path/to/ay", "claude", "--no-stdpush"]);
 
     expect(beforeCli.useStdinAppend).toBe(false);
-    expect(afterCli.useStdinAppend).toBe(true);
-    expect(afterCli.cliArgs).toContain("--no-stdpush");
+    expect(afterCli.useStdinAppend).toBe(false);
+    expect(afterCli.cliArgs).not.toContain("--no-stdpush");
+  });
+
+  it("consumes agent-yes flags after the CLI name and forwards unknown flags (#349)", () => {
+    // The reporter's table: `ay claude --no-rust` / `--timeout=30s` were
+    // silently forwarded to the child instead of applying to agent-yes.
+    const noRust = parseCliArgs(["node", "/path/to/ay", "claude", "--no-rust"]);
+    expect(noRust.useRust).toBe(false);
+    expect(noRust.cliArgs).toEqual([]);
+
+    const timeout = parseCliArgs(["node", "/path/to/ay", "claude", "--timeout=30s"]);
+    expect(timeout.exitOnIdle).toBe(30000);
+    expect(timeout.cliArgs).toEqual([]);
+
+    // Separate-value form, mixed with prompt words and a child flag.
+    const mixed = parseCliArgs([
+      "node",
+      "/path/to/ay",
+      "claude",
+      "--timeout",
+      "30s",
+      "--model",
+      "opus",
+      "fix",
+      "bugs",
+    ]);
+    expect(mixed.exitOnIdle).toBe(30000);
+    expect(mixed.cliArgs).toEqual(["--model", "opus"]); // unknown → child
+    expect(mixed.prompt).toBe("fix bugs");
   });
 
   it("consumes --attach as an agent-yes flag before the CLI positional", () => {
