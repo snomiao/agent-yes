@@ -464,12 +464,21 @@ function loginShellEnv(): Record<string, string> | null {
   loginShellEnvCache = null;
   if (process.platform === "win32") return loginShellEnvCache;
   try {
-    const shell = process.env.SHELL || "/bin/sh";
+    // $SHELL when the daemon has one; a launchd/systemd env usually doesn't,
+    // so fall back through the common defaults (zsh first — the macOS default).
+    const shell =
+      [process.env.SHELL, "/bin/zsh", "/bin/bash", "/bin/sh"].find(
+        (s): s is string => Boolean(s && existsSync(s)),
+      ) ?? "/bin/sh";
     // Delimiters fence off the env dump from any banner/prompt noise the rc files
     // print to stdout; `env -0` is NUL-separated so values with newlines survive.
+    // `-i` (interactive) on top of `-l`: PATH exports are commonly scattered
+    // across .zshenv/.zprofile/.zshrc, and a plain login shell never reads
+    // .zshrc — silently dropping those entries. The timeout guards against an
+    // rc file that blocks under -i.
     const delim = "_AY_SHELL_ENV_DELIM_";
     const res = Bun.spawnSync(
-      [shell, "-lc", `printf %s "${delim}"; env -0; printf %s "${delim}"`],
+      [shell, "-lic", `printf %s "${delim}"; env -0; printf %s "${delim}"`],
       {
         stdin: "ignore",
         stderr: "ignore",
@@ -490,7 +499,15 @@ function loginShellEnv(): Record<string, string> | null {
       env[pair.slice(0, eq)] = pair.slice(eq + 1);
     }
     // Require a usable result — a PATH carrying ~/.bun/bin is the whole point.
-    if (env.PATH) loginShellEnvCache = env;
+    if (env.PATH) {
+      // Order-preserving dedup: rc files re-prepend the same dirs on every
+      // nesting level (.zshenv/.zprofile/.zshrc each adding ~/.bun/bin again).
+      const seen = new Set<string>();
+      env.PATH = env.PATH.split(":")
+        .filter((p) => p && !seen.has(p) && (seen.add(p), true))
+        .join(":");
+      loginShellEnvCache = env;
+    }
   } catch {
     // best-effort; fall back to process.env
   }
