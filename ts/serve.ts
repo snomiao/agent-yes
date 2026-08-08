@@ -532,6 +532,43 @@ function originOwnerRepo(cwd: string): { owner: string; repo: string } | null {
   }
 }
 
+// Run a host command and capture its output — used by the /api/ws/repos and
+// /api/ws/branches listing endpoints (git ls-remote / gh). Runs under the
+// recovered login-shell env (freshAgentEnv) because the oxmgr/launchd daemon's
+// raw PATH lacks Homebrew/bun, so `git`/`gh` would otherwise be missing — the
+// same reason runProvisionHook does this. Never throws; a timeout kills the
+// child and reports ok:false.
+async function runCapture(
+  argv: string[],
+  opts?: { cwd?: string; timeoutMs?: number },
+): Promise<{ ok: boolean; stdout: string; stderr: string }> {
+  try {
+    const child = Bun.spawn(argv, {
+      cwd: opts?.cwd,
+      env: freshAgentEnv(),
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const timeoutMs = opts?.timeoutMs ?? 15_000;
+    const code = await Promise.race([
+      child.exited,
+      new Promise<number>((r) => setTimeout(() => r(124), timeoutMs)),
+    ]);
+    if (code === 124) child.kill();
+    const [stdout, stderr] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    return { ok: code === 0, stdout, stderr };
+  } catch (e) {
+    return { ok: false, stdout: "", stderr: (e as Error).message };
+  }
+}
+
+// 60s memo for /api/ws/repos' gh side (see the endpoint for why).
+let ghRepoListMemo: { t: number; ok: boolean; repos: string[]; error?: string } | null = null;
+
 type ProvisionHookResult =
   | { ran: false }
   | { ran: true; ok: boolean; code: number | null; detail: string };
@@ -3062,6 +3099,159 @@ export async function cmdServe(rest: string[]): Promise<number> {
       }
     }
 
+    // GET /api/ws/repos — the repos this host can provision from: every
+    // owner/repo already present under the workspace layout (with its
+    // provisioned branches), plus — best-effort — the repos `gh repo list` can
+    // see with this host's auth. gh being missing/unauthenticated must never
+    // fail the endpoint (two-account gh setups break routinely); the UI gets
+    // `gh.ok=false` + a short reason and still renders the local repos.
+    if (req.method === "GET" && p === "/api/ws/repos") {
+      const ws = await import("./ws.ts");
+      try {
+        await ws.loadProvision();
+      } catch (e) {
+        return new Response((e as Error).message, { status: 501 });
+      }
+      let wsRoot: string;
+      let workspaces: Awaited<ReturnType<typeof ws.collectWorkspaces>>["workspaces"];
+      try {
+        ({ wsRoot, workspaces } = await ws.collectWorkspaces());
+      } catch (e) {
+        return new Response(`workspace walk failed: ${(e as Error).message}`, { status: 500 });
+      }
+      const byRepo = new Map<
+        string,
+        { owner: string; repo: string; local: boolean; branches: { name: string; path: string }[] }
+      >();
+      for (const w of workspaces) {
+        const key = `${w.owner}/${w.repo}`;
+        const entry = byRepo.get(key) ?? { owner: w.owner, repo: w.repo, local: true, branches: [] };
+        entry.branches.push({ name: w.branch, path: w.path });
+        byRepo.set(key, entry);
+      }
+      // gh repo list is slow (network + up to 10s timeout) and the UI hits this
+      // endpoint on every form open / host switch — memoize the gh side briefly.
+      const gh: { ok: boolean; error?: string } = { ok: false };
+      let ghRepos: string[] = [];
+      const memo = ghRepoListMemo;
+      if (memo && performance.now() - memo.t < 60_000) {
+        gh.ok = memo.ok;
+        if (memo.error) gh.error = memo.error;
+        ghRepos = memo.repos;
+      } else {
+        const r = await runCapture(
+          ["gh", "repo", "list", "--limit", "200", "--json", "nameWithOwner"],
+          { timeoutMs: 10_000 },
+        );
+        if (r.ok) {
+          try {
+            ghRepos = (JSON.parse(r.stdout) as { nameWithOwner: string }[]).map(
+              (x) => x.nameWithOwner,
+            );
+            gh.ok = true;
+          } catch {
+            gh.error = "gh returned unparseable JSON";
+          }
+        } else {
+          gh.error = (r.stderr.trim() || "gh unavailable").slice(0, 200);
+        }
+        ghRepoListMemo = { t: performance.now(), ok: gh.ok, repos: ghRepos, error: gh.error };
+      }
+      for (const nameWithOwner of ghRepos) {
+        const [owner, repo] = nameWithOwner.split("/");
+        if (owner && repo && !byRepo.has(nameWithOwner))
+          byRepo.set(nameWithOwner, { owner, repo, local: false, branches: [] });
+      }
+      const repos = [...byRepo.values()].sort((a, b) =>
+        // provisioned repos first, then alphabetical — the picker's natural order
+        a.local !== b.local
+          ? a.local
+            ? -1
+            : 1
+          : `${a.owner}/${a.repo}`.localeCompare(`${b.owner}/${b.repo}`),
+      );
+      return Response.json({ schema: ws.WS_JSON_SCHEMA, wsRoot, repos, gh });
+    }
+
+    // GET /api/ws/branches?repo=<owner>/<repo> — the branches a provision of
+    // that repo could target. Remote branches come from `git ls-remote --heads
+    // origin` run inside an existing local checkout (uses that checkout's
+    // credentials), falling back to `gh api .../branches` when the repo has no
+    // local checkout yet. Local-only branches (provisioned but never pushed)
+    // are merged in. The repo param is strictly validated and passed as argv —
+    // these endpoints are reachable with just a share token.
+    if (req.method === "GET" && p === "/api/ws/branches") {
+      const repoParam = url.searchParams.get("repo") ?? "";
+      const m = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(repoParam);
+      // "." / ".." pass the charset but would traverse the `gh api repos/…` URL
+      if (!m || m[1] === "." || m[1] === ".." || m[2] === "." || m[2] === "..")
+        return new Response("missing/invalid ?repo=<owner>/<repo>", { status: 400 });
+      const [, owner, repo] = m as unknown as [string, string, string];
+      const ws = await import("./ws.ts");
+      let prov: Awaited<ReturnType<typeof ws.loadProvision>>;
+      try {
+        prov = await ws.loadProvision();
+      } catch (e) {
+        return new Response((e as Error).message, { status: 501 });
+      }
+      const wsRoot = prov.resolveWsRoot(getProvisionRoot());
+      // Provisioned local checkouts of this repo (branch → path).
+      const localByBranch = new Map<string, string>();
+      try {
+        for (const w of await ws.walkWorkspaces(wsRoot)) {
+          if (w.owner === owner && w.repo === repo) localByBranch.set(w.branch, w.path);
+        }
+      } catch {
+        /* no local checkouts is fine */
+      }
+      let remote: string[] = [];
+      let source = "";
+      let error: string | undefined;
+      const anchor = localByBranch.values().next().value as string | undefined;
+      if (anchor) {
+        const r = await runCapture(["git", "-C", anchor, "ls-remote", "--heads", "origin"]);
+        if (r.ok) {
+          remote = [...r.stdout.matchAll(/\trefs\/heads\/(.+)/g)].map((x) => x[1]!.trim());
+          source = "ls-remote";
+        } else {
+          error = (r.stderr.trim() || "git ls-remote failed").slice(0, 200);
+        }
+      }
+      if (!source) {
+        const r = await runCapture([
+          "gh",
+          "api",
+          `repos/${owner}/${repo}/branches`,
+          "--paginate",
+          "--jq",
+          ".[].name",
+        ]);
+        if (r.ok) {
+          remote = r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+          source = "gh";
+          error = undefined;
+        } else if (!error) {
+          error = (r.stderr.trim() || "gh unavailable").slice(0, 200);
+        }
+      }
+      const names = [...new Set([...remote, ...localByBranch.keys()])].sort((a, b) =>
+        a.localeCompare(b),
+      );
+      const branches = names.map((name) => ({
+        name,
+        remote: remote.includes(name),
+        provisioned: localByBranch.has(name),
+        ...(localByBranch.has(name) ? { path: localByBranch.get(name)! } : {}),
+      }));
+      return Response.json({
+        schema: ws.WS_JSON_SCHEMA,
+        repo: `${owner}/${repo}`,
+        source: source || "local-only",
+        branches,
+        ...(error ? { error } : {}),
+      });
+    }
+
     // GET /api/notes
     if (req.method === "GET" && p === "/api/notes") {
       const notes = await readNotes();
@@ -3833,6 +4023,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         from?: string;
         prompt?: string;
         yes?: boolean;
+        create?: boolean;
         fork?: { fromCwd?: string; branch?: string };
       };
       try {
@@ -3978,7 +4169,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
           provision: (
             spec: Spec,
             opts?: { wsRoot?: string },
-          ) => Promise<{ ok: boolean; folder: string; action: string; error?: string }>;
+          ) => Promise<{ ok: boolean; folder: string; action: string; error?: string; reason?: string }>;
+          createBranch?: (
+            spec: Spec,
+            opts?: { wsRoot?: string },
+          ) => Promise<{ ok: boolean; folder: string; action: string; error?: string; reason?: string }>;
         };
         try {
           prov = (await importProvisionModule()) as typeof prov;
@@ -4029,14 +4224,32 @@ export async function cmdServe(rest: string[]): Promise<number> {
             { status: 403 },
           );
         }
-        let result: { ok: boolean; folder: string; action: string; error?: string };
+        let result: { ok: boolean; folder: string; action: string; error?: string; reason?: string };
         try {
           const wsRoot = getProvisionRoot();
           result = await prov.provision(spec, wsRoot ? { wsRoot } : undefined);
+          // `create:true` = the "ay ws new --create" semantics: when the branch
+          // doesn't exist on the remote, branch it off the default locally.
+          // Runs INSIDE the hook/allowlist gate above — same repo, same risk.
+          if (
+            !result?.ok &&
+            body.create === true &&
+            result?.reason === "branch-not-found" &&
+            typeof prov.createBranch === "function"
+          ) {
+            result = await prov.createBranch(spec, wsRoot ? { wsRoot } : undefined);
+          }
         } catch (e) {
           return new Response(`provision failed: ${(e as Error).message}`, { status: 502 });
         }
-        if (!result?.ok) return new Response(result?.error ?? "provision failed", { status: 502 });
+        if (!result?.ok)
+          return new Response(
+            (result?.error ?? "provision failed") +
+              (result?.reason === "branch-not-found" && body.create !== true
+                ? "\n(branch missing on the remote — retry with create:true to branch off the default)"
+                : ""),
+            { status: 502 },
+          );
         cwd = result.folder;
         provisioned = { action: result.action, folder: result.folder };
       } else {
