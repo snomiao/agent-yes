@@ -2819,4 +2819,71 @@ describe("subcommands.cmdSend double-envelope warning", () => {
       await rm(tmp, { recursive: true, force: true }).catch(() => null);
     }
   });
+
+  it.skipIf(!itUnix)("a sender with a role gets it rendered into the envelope header", async () => {
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const { spawnSync } = await import("child_process");
+    const tmp = await mkdtemp(path.join(tmpdir(), "ay-fifo-"));
+    try {
+      const fifo = path.join(tmp, "role.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const fs = await import("fs");
+      const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR);
+      await appendGlobalPid({
+        pid: process.pid,
+        cli: "claude",
+        prompt: null,
+        cwd: "/repo/alpha",
+        log_file: null,
+        fifo_file: fifo,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: Date.now(),
+      });
+      await appendGlobalPid({
+        pid: 900001,
+        cli: "claude",
+        prompt: null,
+        cwd: "/repo/beta",
+        log_file: null,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: Date.now(),
+        wrapper_pid: 424242,
+        agent_id: "cccc0000dddd",
+        role: "crm",
+      });
+      const savedAyPid = process.env.AGENT_YES_PID;
+      process.env.AGENT_YES_PID = "424242";
+      const origOut = process.stdout.write.bind(process.stdout);
+      (process.stdout as any).write = () => true;
+      try {
+        const code = await runSubcommand([
+          "bun",
+          "cli.js",
+          "send",
+          String(process.pid),
+          "hello from crm",
+          "--force",
+        ]);
+        expect(code).toBe(0);
+      } finally {
+        process.stdout.write = origOut;
+        if (savedAyPid === undefined) delete process.env.AGENT_YES_PID;
+        else process.env.AGENT_YES_PID = savedAyPid;
+      }
+      const buf = Buffer.alloc(4096);
+      const n = fs.readSync(rdwrFd, buf, 0, buf.length, null);
+      const received = buf.subarray(0, n).toString();
+      expect(received).toMatch(
+        /^<ay-msg [0-9a-f]{8} from claude #900001 \(crm\) @ \/repo\/beta — reply: ay send cccc0000dddd "\.\.\.">/,
+      );
+      fs.closeSync(rdwrFd);
+    } finally {
+      await rm(tmp, { recursive: true, force: true }).catch(() => null);
+    }
+  });
 });
