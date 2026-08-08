@@ -19,11 +19,18 @@ use std::env;
 
 /// Management subcommands handled by the TypeScript CLI, not this runner.
 /// MUST mirror `SUBCOMMANDS` in ts/subcommands.ts — keep the two in sync.
+/// Enforced by the "SUBCOMMANDS ↔ rs/src/cli.rs mirror" test in
+/// ts/subcommands.spec.ts, which parses this list. Drift is silent and one-way
+/// nasty: a name present only in TS makes this runner treat it as an agent CLI
+/// to launch instead of delegating, so `agent-yes <name>` tries to spawn a
+/// program called `<name>` rather than running the subcommand.
 pub const SUBCOMMANDS: &[&str] = &[
     "ls", "list", "ps", "status", "whoami", "result", "notify", "notifyd", "read", "cat", "tail",
-    "head", "send", "msgs", "role", "spawn", "attach", "stop", "exit", "restart", "note", "ch",
+    "head", "hist", "history", "send", "msgs", "key", "select", "role", "spawn", "attach", "stop",
+    "exit", "restart", "note", "ch",
     "channels",
-    "term", "widget", "mint", "serve", "schedule", "remote", "expose", "callback", "reap", "help",
+    "term", "widget", "mint", "serve", "schedule", "remote", "expose", "callback", "reap", "todo",
+    "tray", "help",
 ];
 
 /// Subcommands reserved for the generic manager entry (`ay`/`agent-yes`), not a

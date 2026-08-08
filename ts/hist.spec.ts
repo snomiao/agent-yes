@@ -68,6 +68,21 @@ describe("renderRecord", () => {
     expect(/\x1b\[/.test(out)).toBe(false);
   });
 
+  it("stays ANSI-free when color is off AND the turn is truncated", () => {
+    // The truncation note carried hardcoded dim/reset, so `ay hist | cat` leaked
+    // escapes on exactly the turns long enough to be shortened. The max:0 case
+    // above never truncates, so it cannot catch this.
+    const out = renderRecord({ ...rec, text: "x".repeat(900) }, { color: false, max: 600 });
+    expect(out).toContain("(+300 chars");
+    // eslint-disable-next-line no-control-regex
+    expect(/\x1b\[/.test(out)).toBe(false);
+  });
+
+  it("still tints the truncation note when color is on", () => {
+    const out = renderRecord({ ...rec, text: "x".repeat(900) }, { color: true, max: 600 });
+    expect(out).toContain(`${"\x1b[2m"}(+300 chars`);
+  });
+
   it("colors user and agent turns differently when color is on", () => {
     const user = renderRecord(rec, { color: true, max: 0 });
     const agent = renderRecord({ ...rec, role: "assistant" }, { color: true, max: 0 });

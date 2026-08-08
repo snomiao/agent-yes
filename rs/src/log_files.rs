@@ -190,6 +190,12 @@ mod tests {
 
     #[test]
     fn test_compact_tail_keeps_trailing_bytes_in_place() {
+        // `MetadataExt::ino` is Unix-only, and importing it unconditionally made
+        // the whole test binary fail to COMPILE on Windows — so no Rust test in
+        // this crate could run there at all. The byte-level assertions below are
+        // platform-independent and stay live everywhere; only the inode identity
+        // check is gated.
+        #[cfg(unix)]
         use std::os::unix::fs::MetadataExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("big.raw.log");
@@ -198,6 +204,7 @@ mod tests {
             .flat_map(|i| format!("{:015}\n", i).into_bytes())
             .collect();
         fs::write(&path, &body).unwrap();
+        #[cfg(unix)]
         let ino_before = fs::metadata(&path).unwrap().ino();
         let keep = 64 * 1024;
         let len = compact_tail(&path, keep).unwrap();
@@ -207,6 +214,7 @@ mod tests {
         // The kept bytes are the file's true tail.
         assert_eq!(&on_disk[..], &body[body.len() - keep as usize..]);
         // Same inode — in-place, so live-tail followers keep their fd valid.
+        #[cfg(unix)]
         assert_eq!(fs::metadata(&path).unwrap().ino(), ino_before);
     }
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "fs/promises";
 import { appendFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -2998,5 +2998,25 @@ describe("subcommands.cmdSend double-envelope warning", () => {
     } finally {
       await rm(tmp, { recursive: true, force: true }).catch(() => null);
     }
+  });
+});
+
+describe("SUBCOMMANDS mirror in rs/src/cli.rs", () => {
+  // The Rust runner keeps its OWN copy of this list and only delegates names it
+  // recognises to this JS layer. A name added here alone is not a no-op: the
+  // runner falls through and treats it as an agent CLI to launch, so
+  // `agent-yes <name>` tries to spawn a program called `<name>`. Nothing at
+  // runtime flags the drift — this test is the only guard.
+  it("lists exactly the same names on both sides", async () => {
+    const { SUBCOMMANDS } = await import("./subcommands.ts");
+    const src = await readFile(path.resolve(import.meta.dirname, "../rs/src/cli.rs"), "utf8");
+    const block = /pub const SUBCOMMANDS: &\[&str\] = &\[([\s\S]*?)\];/.exec(src);
+    expect(block, "SUBCOMMANDS not found in rs/src/cli.rs").toBeTruthy();
+    const rust = new Set([...block![1]!.matchAll(/"([^"]+)"/g)].map((m) => m[1]!));
+
+    expect({
+      missingInRust: [...SUBCOMMANDS].filter((n) => !rust.has(n)),
+      missingInTs: [...rust].filter((n) => !SUBCOMMANDS.has(n)),
+    }).toEqual({ missingInRust: [], missingInTs: [] });
   });
 });
