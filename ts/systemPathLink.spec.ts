@@ -4,7 +4,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { linkBunBinsToSystemPath } from "./systemPathLink.ts";
 
-describe("systemPathLink.linkBunBinsToSystemPath", () => {
+// The linker is POSIX-only by design (it targets /usr/local/bin; win32 returns
+// null immediately), so the filesystem suite only runs on POSIX.
+describe.skipIf(process.platform === "win32")("systemPathLink.linkBunBinsToSystemPath", () => {
   let root: string;
   let bunDir: string;
   let target: string;
@@ -55,5 +57,11 @@ describe("systemPathLink.linkBunBinsToSystemPath", () => {
 
   it("returns null when the bun dir is absent", () => {
     expect(linkBunBinsToSystemPath({ bunDir: path.join(root, "nope"), target })).toBeNull();
+  });
+});
+
+describe.skipIf(process.platform !== "win32")("systemPathLink on Windows", () => {
+  it("is a no-op (returns null) — Windows uses a different PATH model", () => {
+    expect(linkBunBinsToSystemPath()).toBeNull();
   });
 });
