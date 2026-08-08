@@ -340,6 +340,16 @@ pub struct AgentContext {
     // unresponsive flag) from inside the loop.
     pid: u32,
 
+    // Terminal-title capture (see title_scanner.rs). `latest_title` is what the
+    // child CLI most recently set; `written_title`/`title_written_at` throttle
+    // the pid_store rewrite (registry writes take the cross-runtime lock, and
+    // claude refreshes its title every few seconds — write only on change and
+    // at most every TITLE_WRITE_MIN_MS).
+    title_scanner: crate::title_scanner::TitleScanner,
+    latest_title: Option<String>,
+    written_title: Option<String>,
+    title_written_at: Option<Instant>,
+
     // Liveness tracking. `last_stdin_at` is stamped whenever we send a
     // high-signal poke (user/FIFO input, auto-Enter, auto-retry, typing
     // response, idle action); `last_output_at` advances on every PTY chunk.
@@ -421,6 +431,10 @@ impl AgentContext {
             last_checked_screen_hash: None,
             used_alt_screen: false,
             pid,
+            title_scanner: crate::title_scanner::TitleScanner::new(),
+            latest_title: None,
+            written_title: None,
+            title_written_at: None,
             last_stdin_at: None,
             last_output_at: Instant::now(),
             poke_unresponsive: false,
@@ -920,6 +934,10 @@ impl AgentContext {
                     // check (so a clean exit never flashes "unresponsive").
                     self.check_responsiveness();
 
+                    // A title change that arrived during the write-throttle
+                    // window flushes here even if the CLI goes quiet after it.
+                    self.maybe_flush_title();
+
                     // Check for idle timeout
                     if let Some(timeout) = timeout_ms {
                         let idle = self.idle_waiter.idle_time_ms();
@@ -1018,6 +1036,13 @@ impl AgentContext {
         // wolf), which is the intended conservative behaviour. See
         // check_responsiveness.
         self.last_output_at = Instant::now();
+
+        // Track the child's terminal title (OSC 0/2) — the flush to the pid
+        // store is throttled separately in maybe_flush_title().
+        if let Some(title) = self.title_scanner.feed(output) {
+            self.latest_title = Some(title);
+        }
+        self.maybe_flush_title();
 
         // Forward raw PTY bytes to stdout only in TTY passthrough mode. In
         // plain (non-TTY) mode we suppress the raw stream and emit rendered
@@ -1445,6 +1470,28 @@ impl AgentContext {
     /// Updates this detector's sub-state and republishes the unified flag. No-op
     /// when the timeout is 0 (this detector disabled for the CLI) — the other
     /// detector can still publish.
+    /// Publish the latest captured terminal title to the pid store. Change-
+    /// gated AND rate-limited: registry writes take the cross-runtime lock and
+    /// rewrite the file, while claude retitles every few seconds — steady state
+    /// must cost zero writes, and a burst of retitles collapses to one write
+    /// per window (the tick loop calls this again, so the final title always
+    /// lands within the window).
+    fn maybe_flush_title(&mut self) {
+        const TITLE_WRITE_MIN_MS: u64 = 2_000;
+        let Some(latest) = self.latest_title.clone() else { return };
+        if self.written_title.as_deref() == Some(latest.as_str()) {
+            return;
+        }
+        if let Some(at) = self.title_written_at {
+            if at.elapsed().as_millis() < TITLE_WRITE_MIN_MS as u128 {
+                return;
+            }
+        }
+        crate::pid_store::PidStore::new().update_title(self.pid, &latest);
+        self.written_title = Some(latest);
+        self.title_written_at = Some(Instant::now());
+    }
+
     fn check_responsiveness(&mut self) {
         let timeout_ms = self.cli_config.unresponsive_timeout_ms;
         if timeout_ms == 0 {
