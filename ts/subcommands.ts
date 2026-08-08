@@ -353,6 +353,8 @@ const SUBCOMMANDS = new Set([
   "cat",
   "tail",
   "head",
+  "hist",
+  "history",
   "send",
   "msgs",
   "key",
@@ -481,6 +483,9 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdRead(rest, { mode: "tail" });
       case "head":
         return await cmdRead(rest, { mode: "head" });
+      case "hist":
+      case "history":
+        return await (await import("./hist.ts")).cmdHist(rest);
       case "send":
         return await cmdSend(rest);
       case "msgs":
@@ -658,6 +663,8 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay read <keyword> [page opts]       paginate: --last/--head N, --range A:B,\n` +
       `                                        --before-line L [--limit N]\n` +
       `  ay cat <keyword>                    full log\n` +
+      `  ay hist [-n 6] [--all] [--json]     past agent conversations (claude/codex transcripts,\n` +
+      `                                        incl. exited sessions) — this cwd unless --all\n` +
       `  ay head <keyword>                   first N lines\n` +
       `  ay send <keyword> <msg>             send a message (keyword '.' = agent in this cwd)\n` +
       `  ay msgs [keyword] [--in|--out]      inter-agent message log (sent + received)\n` +
