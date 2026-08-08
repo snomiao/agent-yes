@@ -1,0 +1,592 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>agent-yes — naming &amp; positioning</title>
+    <meta
+      name="description"
+      content="Positioning research for agent-yes: keep the name, lead with the encrypted remote console. Market read, taglines, first-run, README fixes, traction."
+    />
+    <meta name="robots" content="noindex" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='14' font-size='14'%3E%E2%9C%93%3C/text%3E%3C/svg%3E"
+    />
+    <style>
+      :root {
+        --bg: #0d1117;
+        --panel: #161b22;
+        --panel2: #1c232c;
+        --border: #30363d;
+        --fg: #e6edf3;
+        --muted: #9198a1;
+        --accent: #2f81f7;
+        --green: #3fb950;
+        --amber: #d29922;
+        --red: #f85149;
+        --purple: #bc8cff;
+        --code: #1f2530;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #ffffff;
+          --panel: #f6f8fa;
+          --panel2: #eef1f4;
+          --border: #d0d7de;
+          --fg: #1f2328;
+          --muted: #59636e;
+          --accent: #0969da;
+          --green: #1a7f37;
+          --amber: #9a6700;
+          --red: #cf222e;
+          --purple: #8250df;
+          --code: #eff2f5;
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+      }
+      body {
+        background: var(--bg);
+        color: var(--fg);
+        font:
+          15px/1.65 -apple-system,
+          BlinkMacSystemFont,
+          "Segoe UI",
+          Helvetica,
+          Arial,
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      code,
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 0.9em;
+      }
+      .wrap {
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 0 20px;
+      }
+      header.top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 20px 0;
+        flex-wrap: wrap;
+        gap: 8px;
+      }
+      .brand {
+        font-weight: 700;
+        font-size: 18px;
+      }
+      .brand .tick {
+        color: var(--green);
+      }
+      .badge {
+        font-size: 11px;
+        color: var(--muted);
+        border: 1px solid var(--border);
+        border-radius: 999px;
+        padding: 3px 10px;
+      }
+      .hero {
+        padding: 26px 0 8px;
+      }
+      .kicker {
+        text-transform: uppercase;
+        letter-spacing: 0.14em;
+        font-size: 12px;
+        color: var(--accent);
+        font-weight: 600;
+        margin: 0 0 12px;
+      }
+      h1 {
+        font-size: clamp(26px, 4.6vw, 38px);
+        line-height: 1.12;
+        letter-spacing: -0.02em;
+        margin: 0 0 10px;
+      }
+      .lede {
+        margin: 18px 0 0;
+        padding: 16px 18px;
+        background: linear-gradient(180deg, var(--panel) 0%, var(--bg) 140%);
+        border: 1px solid var(--border);
+        border-left: 3px solid var(--green);
+        border-radius: 10px;
+        font-size: 17px;
+        line-height: 1.5;
+      }
+      .lede b {
+        color: var(--fg);
+      }
+      .lede .src {
+        display: block;
+        margin-top: 8px;
+        font-size: 13px;
+        color: var(--muted);
+      }
+      h2 {
+        font-size: 20px;
+        letter-spacing: -0.01em;
+        margin: 44px 0 8px;
+        padding-top: 22px;
+        border-top: 1px solid var(--border);
+      }
+      h2 .n {
+        color: var(--muted);
+        font-weight: 600;
+        margin-right: 10px;
+      }
+      p.lead {
+        color: var(--muted);
+        margin: 4px 0 14px;
+      }
+      h3 {
+        font-size: 14px;
+        margin: 20px 0 8px;
+      }
+      ul {
+        margin: 8px 0;
+        padding-left: 20px;
+      }
+      li {
+        margin: 6px 0;
+      }
+      li b {
+        color: var(--fg);
+      }
+      .muted {
+        color: var(--muted);
+      }
+      /* positioning stack */
+      .stack {
+        display: grid;
+        gap: 8px;
+        margin: 16px 0 6px;
+      }
+      .layer {
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 12px 16px;
+        background: var(--panel);
+      }
+      .layer .lt {
+        font-weight: 650;
+        font-size: 14px;
+      }
+      .layer .ls {
+        color: var(--muted);
+        font-size: 13px;
+        margin-top: 2px;
+      }
+      .layer.you {
+        border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+      }
+      .layer.hub {
+        border-color: color-mix(in srgb, var(--green) 50%, var(--border));
+        background: var(--panel2);
+      }
+      .layer.hub .lt {
+        color: var(--green);
+      }
+      .layer.agents {
+        border-style: dashed;
+      }
+      .arrow {
+        text-align: center;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1;
+      }
+      /* cards / grids */
+      .grid2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+        margin: 14px 0;
+      }
+      @media (max-width: 680px) {
+        .grid2 {
+          grid-template-columns: 1fr;
+        }
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px;
+      }
+      .card h3 {
+        margin-top: 0;
+      }
+      .card.cut {
+        border-left: 3px solid var(--red);
+      }
+      .card.lead {
+        border-left: 3px solid var(--green);
+      }
+      .card.use {
+        border-left: 3px solid var(--accent);
+      }
+      .card.not {
+        border-left: 3px solid var(--amber);
+      }
+      .card ul {
+        font-size: 13.5px;
+        color: var(--muted);
+      }
+      .card ul b {
+        color: var(--fg);
+        font-weight: 600;
+      }
+      pre {
+        background: var(--code);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px;
+        overflow-x: auto;
+        font-size: 13px;
+        line-height: 1.7;
+        margin: 12px 0;
+      }
+      pre .c {
+        color: var(--muted);
+      }
+      pre .g {
+        color: var(--green);
+      }
+      .tags {
+        display: grid;
+        gap: 8px;
+        margin: 12px 0;
+      }
+      .tag {
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 10px 14px;
+        background: var(--panel);
+        font-size: 15px;
+      }
+      .tag.pick {
+        border-color: color-mix(in srgb, var(--green) 50%, var(--border));
+      }
+      .tag .pin {
+        color: var(--green);
+        font-size: 12px;
+        font-weight: 600;
+        margin-right: 8px;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 12px 0;
+        font-size: 13.5px;
+      }
+      th,
+      td {
+        text-align: left;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--border);
+        vertical-align: top;
+      }
+      th {
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      details {
+        margin: 10px 0;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 10px 14px;
+        background: var(--panel);
+      }
+      summary {
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 14px;
+      }
+      details[open] summary {
+        margin-bottom: 8px;
+      }
+      .callout {
+        border: 1px solid color-mix(in srgb, var(--amber) 45%, var(--border));
+        border-left: 3px solid var(--amber);
+        background: color-mix(in srgb, var(--amber) 8%, var(--bg));
+        border-radius: 10px;
+        padding: 14px 16px;
+        margin: 14px 0;
+      }
+      .callout b {
+        color: var(--fg);
+      }
+      footer {
+        border-top: 1px solid var(--border);
+        margin-top: 46px;
+        padding: 20px 0 48px;
+        color: var(--muted);
+        font-size: 13px;
+      }
+      footer a {
+        margin-right: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="top">
+        <div class="brand"><span class="tick">✓</span> agent-yes</div>
+        <span class="badge">internal · positioning research · not deployed</span>
+      </header>
+
+      <section class="hero">
+        <p class="kicker">Naming &amp; positioning</p>
+        <h1>Keep the name. Change the lede.</h1>
+        <p class="muted">
+          <code>agent-yes</code> (domain, <code>ay</code>/<code>cy</code> binaries, the green ✓) is
+          a brand asset — don't reset it. The real problem a first-time user hit isn't the
+          <em>name</em>; it's that the biggest value is buried under "auto-yes wrapper" framing.
+          Lead instead with the part that's genuinely yours:
+        </p>
+        <div class="lede">
+          <b
+            >Run any AI coding agent unattended — then watch and steer it from your phone over one
+            end-to-end-encrypted link.</b
+          >
+          <span class="src">↑ the one-liner that should be the first sentence everywhere.</span>
+        </div>
+      </section>
+
+      <h2><span class="n">01</span>Where you actually sit</h2>
+      <p class="lead">
+        You're not another agent in a crowded field — you're the layer that runs, watches and steers
+        <em>any</em> of them. Position above the agents, not beside them.
+      </p>
+      <div class="stack">
+        <div class="layer you">
+          <div class="lt">You — laptop &amp; phone</div>
+          <div class="ls">watch · send input · spawn · attach — from anywhere</div>
+        </div>
+        <div class="arrow">▲ one E2E-encrypted link (zero-knowledge relay)</div>
+        <div class="layer hub">
+          <div class="lt">agent-yes — the harness / remote console</div>
+          <div class="ls">
+            auto-answers routine prompts · <code>ay serve</code> live console ·
+            <code>cy ls/tail/send/attach</code>
+          </div>
+        </div>
+        <div class="arrow">▲ wraps the PTY of</div>
+        <div class="layer agents">
+          <div class="lt">the agents (crowded, commoditized)</div>
+          <div class="ls">
+            Claude Code · Codex · OpenCode · Goose · Aider · Cline · Gemini CLI · …
+          </div>
+        </div>
+      </div>
+      <ul>
+        <li>
+          <b>Don't compete with the agents — ride all of them.</b> The clean, less-crowded slot is
+          "harness / control-plane." (There's even an <i>awesome-cli-coding-agents</i> directory
+          whose category is exactly "harnesses that orchestrate them" — get listed.)
+        </li>
+        <li>
+          <b>Vs unattended orchestrators</b> (Aeon, Kodo, Agentic) — those are headless CI/cron.
+          Your wedge is <b>interactive remote supervision</b>: the encrypted console + phone
+          steering. Nobody else leads with that.
+        </li>
+        <li>
+          <b>"auto-yes" is contested &amp; commoditized</b> — there's already an npm
+          <code>auto-yes</code> (<code>ay</code>) PTY auto-responder, plus your own older
+          <code>claude-yes</code>/<code>yes-claude</code>. The console is yours alone → lead with
+          it.
+        </li>
+      </ul>
+
+      <h2><span class="n">02</span>The name — keep <code>agent-yes</code>, but…</h2>
+      <div class="grid2">
+        <div class="card lead">
+          <h3>✓ Why keep it</h3>
+          <ul>
+            <li>Descriptive of the original wedge; memorable; the green ✓ reinforces it.</li>
+            <li>
+              <b><code>ay</code> / <code>cy</code> / <code>*-yes</code></b> aliases are genuinely
+              good and instantly understandable.
+            </li>
+            <li>Domain + binaries + brand are already established — a rename is pure cost.</li>
+          </ul>
+        </div>
+        <div class="card cut">
+          <h3>⚠ Why reposition</h3>
+          <ul>
+            <li>Undersells the console / share / remote-steer story.</li>
+            <li>
+              <b>"yes" reads as reckless approval</b> — awkward next to your own prompt-injection
+              warning.
+            </li>
+            <li>"agent yes" is SEO-muddy and sounds like a behavior patch, not infrastructure.</li>
+          </ul>
+        </div>
+      </div>
+      <details>
+        <summary>If you ever did rename (not recommended now) — candidates</summary>
+        <p class="muted" style="font-size: 13.5px">
+          Leaning to the control-surface story: <b>AgentDeck</b>, <b>AgentRelay</b>,
+          <b>AgentWire</b>
+          (encrypted connection vibe). Others brainstormed: AgentLink, Teleagent, Yesrun, AyeAye,
+          Overseer — most are collision-heavy or carry baggage. None justify resetting the brand.
+        </p>
+      </details>
+
+      <h2><span class="n">03</span>Taglines</h2>
+      <div class="tags">
+        <div class="tag pick">
+          <span class="pin">PICK</span>Unattended coding agents, remotely steerable.
+        </div>
+        <div class="tag">A secure web console for your AI coding CLIs.</div>
+        <div class="tag">Let agents run. Stay in control.</div>
+      </div>
+
+      <h2><span class="n">04</span>The 30-second first-run (lead with the magic)</h2>
+      <p class="lead">Three commands, then the phone moment — not a feature list.</p>
+      <pre><span class="c"># install</span>
+curl https://agent-yes.com/setup.sh | sh
+
+<span class="c"># run an agent — routine confirmations &amp; retries handled, so it keeps going</span>
+ay claude
+
+<span class="c"># expose it: prints ONE end-to-end-encrypted link</span>
+<span class="g">ay serve --share</span>   <span class="c"># → open on your phone: watch · send input · spawn · attach</span></pre>
+      <p class="muted" style="font-size: 13.5px">
+        The 30-second story:
+        <i
+          >"Start Claude/Codex/Gemini through <code>ay</code>; it auto-handles routine prompts so
+          the session keeps moving. Run <code>ay serve --share</code> for an encrypted console link
+          — open it anywhere to monitor, steer, or attach."</i
+        >
+      </p>
+
+      <h2><span class="n">05</span>README / landing fixes</h2>
+      <p class="lead">
+        This is Connie's actual complaint — communicate the value &amp; workflow faster.
+      </p>
+      <div class="grid2">
+        <div class="card cut">
+          <h3>Cut / demote</h3>
+          <ul>
+            <li>The long supported-CLI table up top.</li>
+            <li>Implementation deep-dives before the first demo.</li>
+            <li>The libp2p swarm (mark experimental, move down).</li>
+            <li>"auto-yes" as the headline.</li>
+          </ul>
+        </div>
+        <div class="card lead">
+          <h3>Lead with</h3>
+          <ul>
+            <li>A <b>GIF</b>: laptop terminal + phone console, agent continuing past a prompt.</li>
+            <li>The one-liner, then the <b>3 commands</b>.</li>
+            <li>A short <b>safety note</b>: what's auto-answered, how to interrupt.</li>
+          </ul>
+        </div>
+        <div class="card use">
+          <h3>Add — "When to use"</h3>
+          <ul>
+            <li>Overnight refactors &amp; long test/fix loops.</li>
+            <li>Monitoring from your phone.</li>
+            <li>Multiple agents on a remote box.</li>
+          </ul>
+        </div>
+        <div class="card not">
+          <h3>Add — "What this is NOT"</h3>
+          <ul>
+            <li>Not a security sandbox.</li>
+            <li>Not a substitute for reviewing diffs.</li>
+            <li>Not blind auto-approval of dangerous commands.</li>
+          </ul>
+        </div>
+      </div>
+
+      <h2><span class="n">06</span>Traction</h2>
+      <table>
+        <tr>
+          <th>Channel</th>
+          <th>Framing</th>
+        </tr>
+        <tr>
+          <td>Show HN</td>
+          <td>
+            "Show HN: an encrypted web console for unattended AI coding agents" — broader &amp; less
+            reckless than "auto-yes for Claude".
+          </td>
+        </tr>
+        <tr>
+          <td>Reddit</td>
+          <td>
+            r/selfhosted ("expose your agent with one encrypted link") · r/LocalLLaMA · r/ClaudeAI ·
+            r/programming (PTY + E2EE + WebRTC).
+          </td>
+        </tr>
+        <tr>
+          <td>Directories</td>
+          <td>Get into <i>awesome-cli-coding-agents</i> under harnesses / runners.</td>
+        </tr>
+        <tr>
+          <td>The one asset</td>
+          <td>
+            A <b>30–45s split-screen demo GIF</b> (terminal starts <code>ay serve --share</code> →
+            phone opens link → agent runs → prompt auto-answered → you steer remotely). Highest
+            leverage thing to make.
+          </td>
+        </tr>
+      </table>
+
+      <h2><span class="n">07</span>The one risk to avoid</h2>
+      <div class="callout">
+        Don't read as a <b>reckless permission-bypass</b>. The winning frame isn't "it says yes to
+        everything" — it's
+        <b>"keeps agents moving while giving you encrypted remote visibility and control."</b>
+      </div>
+
+      <footer>
+        <div>
+          Internal positioning notes for
+          <a href="https://github.com/snomiao/agent-yes">agent-yes</a>
+          — landscape scan + codex brainstorm + synthesis. Not deployed (names competitors).
+        </div>
+        <div style="margin-top: 8px">
+          Sources:
+          <a href="https://github.com/bradAGI/awesome-cli-coding-agents"
+            >awesome-cli-coding-agents</a
+          >
+          ·
+          <a href="https://pinggy.io/blog/best_open_source_cli_coding_agents/"
+            >open-source CLI agents</a
+          >
+          · <a href="https://npmx.dev/package/claude-yes">auto-yes / claude-yes (npm)</a> ·
+          <a
+            href="https://www.digitalapplied.com/blog/claude-code-auto-mode-autonomous-permission-decisions-guide"
+            >Claude Code Auto Mode</a
+          >
+          ·
+          <a
+            href="https://www.softwareseni.com/how-to-run-ai-coding-agents-unattended-without-risking-your-production-systems/"
+            >running agents unattended safely</a
+          >
+        </div>
+      </footer>
+    </div>
+  </body>
+</html>

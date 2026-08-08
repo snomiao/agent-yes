@@ -36,9 +36,7 @@ describe("osProcessStartToken", () => {
   const stat = `7 (agent) ${after("555")}`;
 
   it("uses /proc on linux", () => {
-    expect(
-      osProcessStartToken(7, { platform: "linux", readProcStat: () => stat }),
-    ).toBe("555");
+    expect(osProcessStartToken(7, { platform: "linux", readProcStat: () => stat })).toBe("555");
   });
 
   it("uses ps lstart on darwin/bsd", () => {
