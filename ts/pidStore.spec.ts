@@ -63,6 +63,32 @@ describe("PidStore", () => {
       expect(rec._id).toBeTypeOf("string");
     });
 
+    it("picks up a sane AGENT_YES_ROLE and ignores a forgeable one", async () => {
+      const saved = process.env.AGENT_YES_ROLE;
+      try {
+        process.env.AGENT_YES_ROLE = "pm";
+        const rec = await store.registerProcess({
+          pid: 12346,
+          cli: "claude",
+          args: [],
+          cwd: "/tmp",
+        });
+        expect(rec.role).toBe("pm");
+
+        process.env.AGENT_YES_ROLE = "a b > forged";
+        const rec2 = await store.registerProcess({
+          pid: 12347,
+          cli: "claude",
+          args: [],
+          cwd: "/tmp",
+        });
+        expect(rec2.role).toBeUndefined();
+      } finally {
+        if (saved === undefined) delete process.env.AGENT_YES_ROLE;
+        else process.env.AGENT_YES_ROLE = saved;
+      }
+    });
+
     it("should upsert when registering same pid", async () => {
       await store.registerProcess({
         pid: 12345,
