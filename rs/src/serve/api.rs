@@ -1262,17 +1262,28 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
             }
         }
 
-        // /api/expose drives the edge relay through the JS codehost/tunnel
-        // module; the Rust daemon has no relay client, so it declines rather
-        // than shipping a weaker look-alike.
-        ("POST", "/api/expose") | ("GET", "/api/exposes") => text(
-            501,
-            "expose needs the JS codehost/tunnel relay client — use `ay serve`",
-        ),
-        ("DELETE", p) if p.starts_with("/api/expose/") => text(
-            501,
-            "expose needs the JS codehost/tunnel relay client — use `ay serve`",
-        ),
+        // ── Port exposures through the edge relay (ts/expose.ts port) ───────
+        ("POST", "/api/expose") => {
+            let Ok(v) = serde_json::from_str::<Value>(body) else {
+                return text(400, "invalid JSON body");
+            };
+            let port = v.get("port").and_then(|p| p.as_u64()).unwrap_or(0);
+            if port < 1 || port > 65535 {
+                return text(400, "valid port required");
+            }
+            let relay = v.get("relay").and_then(|r| r.as_str());
+            match crate::serve::expose::ensure(port as u16, relay).await {
+                Ok(out) => json_res(200, &out),
+                Err(e) => text(502, format!("expose failed: {e:#}")),
+            }
+        }
+        ("GET", "/api/exposes") => json_res(200, &crate::serve::expose::list().await),
+        ("DELETE", p) if p.starts_with("/api/expose/") => {
+            match p["/api/expose/".len()..].parse::<u16>() {
+                Ok(port) if crate::serve::expose::stop(port).await => text(200, "revoked"),
+                _ => text(404, "no such exposure"),
+            }
+        }
 
         ("OPTIONS", _) => text(204, ""),
         _ => text(404, "not found"),

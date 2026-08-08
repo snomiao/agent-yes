@@ -8,6 +8,7 @@ pub mod api;
 pub mod control;
 pub mod discover;
 pub mod e2e;
+pub mod expose;
 pub mod graph;
 pub mod http;
 pub mod meta;
