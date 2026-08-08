@@ -452,6 +452,59 @@ describe("console DOM behaviour", () => {
     }
   });
 
+  it("New-agent form provisions from a picked repo/branch (create for new names)", async () => {
+    // The + New agent form's repo picker (GET /api/ws/repos) and branch picker
+    // (GET /api/ws/branches) compose a `from` spec: an existing remote branch
+    // spawns plain {from}; a branch name NOT on the remote adds create:true so
+    // the host branches it off the default (ws new --create semantics).
+    const { ctx, page } = await openConsole(browser, url);
+    const spawns: any[] = [];
+    page.on("request", (r) => {
+      if (r.method() === "POST" && new URL(r.url()).pathname === "/api/spawn") {
+        try {
+          spawns.push(r.postDataJSON());
+        } catch {}
+      }
+    });
+    try {
+      await page.click("#newbtn");
+      // repo picker fills async from /api/ws/repos — placeholder + 3 repos
+      await expect.poll(() => page.locator("#nf-repo option").count()).toBe(4);
+      expect(await page.locator("#nf-repo").innerText()).toContain("acme/newrepo (gh)");
+
+      // pick a repo → branch row appears, datalist fills from /api/ws/branches
+      await page.selectOption("#nf-repo", "acme/widgets");
+      await expect.poll(() => page.locator("#nf-branch-row").isVisible()).toBe(true);
+      await expect.poll(() => page.locator("#nf-branch-list option").count()).toBe(2);
+
+      // a NEW branch name → hint flags the create, spawn carries create:true
+      await page.fill("#nf-branch", "feat-x");
+      await expect
+        .poll(() => page.locator("#nf-branch-hint").innerText())
+        .toContain("new branch will be created");
+      await page.selectOption("#nf-cli", "claude");
+      await page.click("#nf-go");
+      await expect.poll(() => spawns.length).toBe(1);
+      expect(spawns[0].from).toBe("acme/widgets@feat-x");
+      expect(spawns[0].create).toBe(true);
+      expect(spawns[0].cwd).toBeUndefined();
+
+      // an EXISTING remote branch → plain {from}, no create
+      await page.click("#newbtn");
+      await expect.poll(() => page.locator("#nf-repo option").count()).toBe(4);
+      await page.selectOption("#nf-repo", "acme/widgets");
+      await expect.poll(() => page.locator("#nf-branch-list option").count()).toBe(2);
+      await page.fill("#nf-branch", "main");
+      await page.selectOption("#nf-cli", "claude");
+      await page.click("#nf-go");
+      await expect.poll(() => spawns.length).toBe(2);
+      expect(spawns[1].from).toBe("acme/widgets@main");
+      expect(spawns[1].create).toBeUndefined();
+    } finally {
+      await ctx.close();
+    }
+  });
+
   it("key bar + composer apply sticky Ctrl/Alt and never leak the modifier", async () => {
     const { ctx, page } = await openConsole(
       browser,
