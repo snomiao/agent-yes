@@ -535,10 +535,28 @@ clis:
 
   opencode:
     help: https://opencode.ai/
+    # opencode's positional arg is a PROJECT DIRECTORY, not a prompt — passing
+    # one makes it try to `cd` into it and die. The prompt goes via --prompt,
+    # which starts the TUI with the message already sent.
+    promptArg: --prompt
     install:
       bash: "curl -fsSL https://opencode.ai/install | bash"
       npm: "npm i -g opencode-ai"
-    enter: []
+    enter:
+      # Permission confirm dialog ("△ Always allow — This will allow the
+      # following patterns until OpenCode is restarted"). Focus defaults to the
+      # Confirm button and the footer advertises "enter confirm" (verified live
+      # on OpenCode 1.18.15: a bare Enter accepted and the run resumed).
+      # Anchored on the dialog chrome — the "Always allow" heading plus the
+      # button row whose same line carries the "⇆ select  enter confirm"
+      # footer — so prose merely mentioning Confirm/Cancel can't trigger it.
+      # [\s\S]{0,4000} spans the heading→button gap across the wide TUI rows.
+      - pattern: 'Always allow[\s\S]{0,4000}Confirm\s+Cancel[^\n]*⇆ select\s+enter confirm'
+    # Any other OpenCode confirm dialog (one the enter list doesn't auto-accept)
+    # still surfaces as needs_input instead of hanging silently.
+    needsInput:
+      - pattern: 'Confirm\s+Cancel[^\n]*⇆ select\s+enter confirm'
+        flags: m
     ready: []
 
   # Bare interactive shells. Unlike the agent CLIs above, these aren't AI tools
