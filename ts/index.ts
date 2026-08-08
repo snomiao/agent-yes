@@ -18,6 +18,7 @@ import { acquireLock, releaseLock, shouldUseLock } from "./runningLock.ts";
 import { logger } from "./logger.ts";
 import { createFifoStream } from "./beta/fifo.ts";
 import { PidStore } from "./pidStore.ts";
+import { TitlePublisher, TitleScanner } from "./titleScanner.ts";
 import { sendEnter, sendMessage } from "./core/messaging.ts";
 import {
   AUTO_RETRY_GIVE_UP_MS,
@@ -460,10 +461,6 @@ export default async function agentYes({
   // `ay`) don't inherit it and register under the same id (which would make that
   // id ambiguous). The wrapper's own process.env still carries it for pidStore.
   delete ptyEnv.AGENT_YES_AGENT_ID;
-  // Same reasoning for AGENT_YES_ROLE: it names THIS agent's lane (pidStore
-  // reads it from our own env at registration). A subagent is its own lane, so
-  // don't let it inherit the parent's role.
-  delete ptyEnv.AGENT_YES_ROLE;
   // Strip the parent Claude Code session markers so the wrapped CLI is a CLEAN
   // top-level session. Without this, an `ay claude` launched from inside another
   // Claude Code session (or this claude's Bash tool) inherits
@@ -524,12 +521,23 @@ export default async function agentYes({
   // Wire up the xterm proxy to write back to the PTY
   shellWrite = (data: string) => shell.write(data);
 
+  // Capture the child CLI's terminal title (OSC 0/2) into the registry so
+  // `ay whoami` / `ay ls --json` can answer "what is this agent doing".
+  // TitlePublisher change-gates + rate-limits the registry writes.
+  const titleScanner = new TitleScanner();
+  const titlePublisher = new TitlePublisher((title) => {
+    pidStore.updateTitle(shell.pid, title).catch(() => null);
+  });
+
   // Attach data handler IMMEDIATELY after spawn to avoid losing early PTY output.
   // node-pty emits 'data' events eagerly — if no listener is attached, events are lost.
   function onData(data: string) {
     const currentPid = shell.pid;
     xtermProxy.write(data);
     globalAgentRegistry.appendStdout(currentPid, data);
+    const title = titleScanner.feed(data);
+    if (title) titlePublisher.observe(title);
+    else titlePublisher.poll();
   }
   shell.onData(onData);
 

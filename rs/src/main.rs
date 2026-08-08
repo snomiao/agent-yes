@@ -17,6 +17,7 @@ mod ready_manager;
 mod reaper;
 mod running_lock;
 mod swarm;
+mod title_scanner;
 mod utils;
 mod vterm;
 mod webhook;
