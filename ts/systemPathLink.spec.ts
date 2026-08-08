@@ -4,9 +4,12 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { linkBunBinsToSystemPath } from "./systemPathLink.ts";
 
-// The linker is POSIX-only by design (it targets /usr/local/bin; win32 returns
-// null immediately), so the filesystem suite only runs on POSIX.
-describe.skipIf(process.platform === "win32")("systemPathLink.linkBunBinsToSystemPath", () => {
+// linkBunBinsToSystemPath is POSIX-only by design (it returns null on win32 —
+// Windows uses a different PATH model), so the behavioral tests only run where
+// the code path exists.
+const itPosix = it.skipIf(process.platform === "win32");
+
+describe("systemPathLink.linkBunBinsToSystemPath", () => {
   let root: string;
   let bunDir: string;
   let target: string;
@@ -20,7 +23,7 @@ describe.skipIf(process.platform === "win32")("systemPathLink.linkBunBinsToSyste
   });
   afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-  it("symlinks every bun bin into the target dir", () => {
+  itPosix("symlinks every bun bin into the target dir", () => {
     const r = linkBunBinsToSystemPath({ bunDir, target })!;
     expect(r.linked.sort()).toEqual(["ay", "cy", "qq"]);
     for (const name of ["ay", "cy", "qq"]) {
@@ -30,7 +33,7 @@ describe.skipIf(process.platform === "win32")("systemPathLink.linkBunBinsToSyste
     }
   });
 
-  it("never clobbers a foreign (real) binary already in the target", () => {
+  itPosix("never clobbers a foreign (real) binary already in the target", () => {
     mkdirSync(target, { recursive: true });
     writeFileSync(path.join(target, "cy"), "#!/bin/sh\n# a different real cy\n");
     const r = linkBunBinsToSystemPath({ bunDir, target })!;
@@ -39,14 +42,14 @@ describe.skipIf(process.platform === "win32")("systemPathLink.linkBunBinsToSyste
     expect(lstatSync(path.join(target, "cy")).isSymbolicLink()).toBe(false); // still the real file
   });
 
-  it("is idempotent — re-running skips links it already owns", () => {
+  itPosix("is idempotent — re-running skips links it already owns", () => {
     linkBunBinsToSystemPath({ bunDir, target });
     const r2 = linkBunBinsToSystemPath({ bunDir, target })!;
     expect(r2.linked).toEqual([]);
     expect(r2.skipped.sort()).toEqual(["ay", "cy", "qq"]);
   });
 
-  it("refreshes a dangling symlink it owns (name points into bunDir but target gone)", () => {
+  itPosix("refreshes a dangling symlink it owns (name points into bunDir but target gone)", () => {
     mkdirSync(target, { recursive: true });
     // a stale link named "ay" pointing at a now-missing path INSIDE bunDir
     symlinkSync(path.join(bunDir, "ay-old-removed"), path.join(target, "ay"));
@@ -58,10 +61,9 @@ describe.skipIf(process.platform === "win32")("systemPathLink.linkBunBinsToSyste
   it("returns null when the bun dir is absent", () => {
     expect(linkBunBinsToSystemPath({ bunDir: path.join(root, "nope"), target })).toBeNull();
   });
-});
 
-describe.skipIf(process.platform !== "win32")("systemPathLink on Windows", () => {
-  it("is a no-op (returns null) — Windows uses a different PATH model", () => {
-    expect(linkBunBinsToSystemPath()).toBeNull();
+  it("returns null on win32 regardless of inputs", () => {
+    if (process.platform !== "win32") return; // covered implicitly elsewhere
+    expect(linkBunBinsToSystemPath({ bunDir, target })).toBeNull();
   });
 });
