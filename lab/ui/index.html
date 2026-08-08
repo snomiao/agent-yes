@@ -1381,7 +1381,9 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
-      /* compact view: one line per agent — dot + cli + live title (or prompt), age */
+      /* compact view: one line per agent — dot + cli + live title (or prompt),
+         age. The agent's cwd lives in the right-pane title bar (.rcwd), not
+         here — a 2nd line per row costs half the list's density. */
       .row.crow {
         display: flex;
         align-items: center;
@@ -1499,6 +1501,19 @@
         align-items: center;
         gap: 10px;
       }
+      .rnamewrap {
+        display: flex;
+        flex-direction: column;
+        flex: 0 1 auto;
+        min-width: 0;
+        gap: 2px;
+      }
+      .rnameline {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        min-width: 0;
+      }
       .rhead .name {
         font-size: 15px;
         /* shrink + ellipsis so a long agent title can't shove the live/⋯
@@ -1508,6 +1523,29 @@
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
+      }
+      .rcwd {
+        display: flex;
+        font-family: var(--mono);
+        font-size: 11px;
+        color: var(--muted);
+        min-width: 0;
+      }
+      .rcwd-lead {
+        flex: none;
+      }
+      .rcwd-path {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        /* Absolute paths share a long, boring prefix (/Users/x/ws/…) — the
+           informative part is the tail, so ellipsize from the left/start
+           instead of the (default) end. Characters stay in reading order
+           (this only flips which end gets clipped, via the bidi algorithm). */
+        direction: rtl;
+        text-align: left;
       }
       /* back-to-list affordance — only surfaces in the single-column mobile view */
       .rback {
@@ -1869,6 +1907,9 @@
         overflow: hidden;
         text-overflow: ellipsis;
       }
+      .ctxmenu-item.danger {
+        color: var(--red, #f85149);
+      }
       .ctxmenu-sep {
         height: 1px;
         margin: 4px 6px;
@@ -1982,8 +2023,16 @@
       <div class="right">
         <div class="rhead" id="rhead" style="display: none">
           <button class="rback" id="rback" title="back to list" aria-label="back to list">‹</button>
-          <span class="dot" id="rdot"></span>
-          <span class="name" id="rname"></span>
+          <div class="rnamewrap">
+            <div class="rnameline">
+              <span class="dot" id="rdot"></span>
+              <span class="name" id="rname"></span>
+            </div>
+            <div class="rcwd" id="rcwd">
+              <span class="rcwd-lead" id="rcwdlead"></span
+              ><span class="rcwd-path" id="rcwdpath"></span>
+            </div>
+          </div>
           <span class="badge" id="rpid"></span>
           <span class="robadge" title="view-only share — you can watch but not steer this agent"
             >👁 read-only</span
@@ -4797,6 +4846,7 @@ my.translate = async (text, lang) => {
           it.className = "ctxmenu-item";
           it.textContent = label;
           it.setAttribute("role", "menuitem");
+          if (opts && opts.danger) it.classList.add("danger");
           if (opts && opts.hint) {
             const h = document.createElement("span");
             h.className = "ctxmenu-hint";
@@ -4911,17 +4961,35 @@ my.translate = async (text, lang) => {
 
         openCtxMenu(menu, ev);
       }
-      // Right-click menu for a left-panel agent row: pin/unpin to the top of the
-      // list (a pin also surfaces the agent in /r/'s screen-fixed palette).
+      // Right-click menu for a left-panel agent row. Same agent actions as the
+      // terminal header's ⋯ overflow menu (share / stop / restart / force-kill),
+      // but bound to the RIGHT-CLICKED row rather than the selected agent — so you
+      // can act on an agent without switching to it first. Plus pin/unpin to the
+      // top of the list (a pin also surfaces the agent in /r/'s screen-fixed
+      // palette). View prefs (font size, perf HUD) stay in the ⋯ menu: they're
+      // properties of the terminal pane, not of an agent.
       function showAgentMenu(ev, key) {
         ev.preventDefault();
         hideTermMenu();
         const e = entries.find((x) => x._key === key);
         if (!e) return;
-        const { menu, addItem } = ctxMenuShell();
+        const { menu, addItem, addSep } = ctxMenuShell();
         const name = cliLabel(e) || ident(e) || "pid " + e.pid;
-        if (isPinned(key)) addItem("Unpin “" + name + "”", { hint: "📌" }, () => togglePin(key));
-        else addItem("Pin “" + name + "” to top", { hint: "📌" }, () => togglePin(key));
+        addItem(name, { disabled: true, hint: "pid " + e.pid }, () => {});
+        addSep();
+        if (isPinned(key)) addItem("Unpin from top", { hint: "📌" }, () => togglePin(key));
+        else addItem("Pin to top", { hint: "📌" }, () => togglePin(key));
+        // A shared read-only view can't re-share or steer its host's agent —
+        // mirrors the .app.steer-agent rule that hides these in the ⋯ menu.
+        if (!isReadonlyEnt(e) && !sharePermOf(e)) {
+          addSep();
+          addItem("👁 Share (view-only)", {}, () => shareAgent("r", e));
+          addItem("✏️ Share (read-write)…", {}, () => shareAgent("rw", e));
+          addSep();
+          addItem("⏹ Stop agent", {}, () => stopAgent(false, e));
+          addItem("↻ Restart (resume)", {}, () => restartAgent(e));
+          addItem("✕ Force-kill (SIGKILL)", { danger: true }, () => stopAgent(true, e));
+        }
         openCtxMenu(menu, ev);
       }
       // Lightweight editor: overlay + textarea of `Label | template` lines. Save
@@ -5870,6 +5938,14 @@ my.translate = async (text, lang) => {
         $("rname").textContent = rname;
         refreshDocTitle(); // tab title follows the selected agent (name + status)
         $("rpid").textContent = "pid " + e.pid;
+        // Split off the leading "/" before the rtl-ellipsis path span — it sits
+        // at the bidi paragraph edge and would otherwise get reordered to the
+        // far end of the line (see the .rcwd-path comment).
+        const cwd = e.cwd || "";
+        const cwdLead = cwd.startsWith("/") ? "/" : "";
+        $("rcwdlead").textContent = cwdLead;
+        $("rcwdpath").textContent = cwd.slice(cwdLead.length);
+        $("rcwd").title = cwd;
 
         // Render the agent's native TUI with xterm.js by feeding it the raw PTY
         // stream (ANSI/cursor control intact) — see /api/tail?raw=1.
@@ -7906,6 +7982,7 @@ my.translate = async (text, lang) => {
         const res = await target.tx.post("/api/spawn", {
           cli: spec.cli || "claude",
           from: spec.from || undefined,
+          create: spec.create || undefined,
           fork: spec.fork || undefined,
           cwd: spec.cwd || undefined,
           prompt: spec.prompt || undefined,
@@ -8029,6 +8106,8 @@ my.translate = async (text, lang) => {
       ${hostRow}
       <div class="nfield"><label>Working dir</label><input id="nf-cwd" list="nf-cwd-list" value="${esc(cwd)}" placeholder="(host default — ignored when Spawn from is set)" spellcheck="false" autocapitalize="off" /><datalist id="nf-cwd-list">${cwdOptions(target ? target.id : "")}</datalist></div>
       <div class="nfield"><label>CLI</label><select id="nf-cli">${cliOptions(null, preferredCli)}</select></div>
+      <div class="nfield"><label>Provision repo — optional</label><select id="nf-repo"><option value="" selected>(none — use working dir or spawn-from)</option></select></div>
+      <div class="nfield" id="nf-branch-row" style="display:none"><label>Branch</label><input id="nf-branch" list="nf-branch-list" placeholder="(repo default) — pick one, or type a new name to create it" spellcheck="false" autocapitalize="off" /><datalist id="nf-branch-list"></datalist><div class="lhint" id="nf-branch-hint" style="display:none"></div></div>
       <div class="nfield"><label>Spawn from — optional</label><input id="nf-from" placeholder="github URL / owner/repo@branch — provisions a worktree" spellcheck="false" autocapitalize="off" /></div>
       <div class="nfield"><label>Prompt — optional</label><textarea id="nf-prompt" rows="3" placeholder="initial message to send the agent…"></textarea></div>
       <div class="lrow">
@@ -8046,8 +8125,95 @@ my.translate = async (text, lang) => {
           const dl = $("nf-cwd-list");
           if (dl) dl.innerHTML = cwdOptions(ev.target.value);
           showHook(sources.get(ev.target.value));
+          loadRepoPicker(sources.get(ev.target.value));
+        });
+        $("nf-repo")?.addEventListener("change", () => {
+          const repo = $("nf-repo").value;
+          const row = $("nf-branch-row");
+          if (row) row.style.display = repo ? "" : "none";
+          if (repo) loadBranchPicker(spawnTarget($("newform").dataset.room), repo);
+          else nfRemoteBranches = null;
+        });
+        $("nf-branch-row")?.addEventListener("input", (ev) => {
+          if (ev.target.id === "nf-branch") updateBranchHint();
         });
         showHook(target);
+        loadRepoPicker(target);
+      }
+
+      // ---- provisioning picker (repo → branch) for the New-agent form -------
+      // Data comes from the target host's /api/ws/repos and /api/ws/branches.
+      // Both are best-effort on the server (gh may be unauthenticated); here a
+      // fetch failure just leaves the pickers empty — the free-text "Spawn
+      // from" field still works.
+      let nfRemoteBranches = null; // Set of remote branch names for the picked repo
+      function loadRepoPicker(target) {
+        const selEl = $("nf-repo");
+        if (!selEl || !target?.tx?.fetchJSON) return;
+        const forId = target.id;
+        target.tx
+          .fetchJSON("/api/ws/repos")
+          .then((d) => {
+            // a slow answer for a host the user switched away from must not
+            // paint the new host's repo list (same guard as showHook)
+            if ($("newform").dataset.room !== forId) return;
+            const cur = selEl.value;
+            const repos = (d && d.repos) || [];
+            selEl.innerHTML =
+              `<option value="">(none — use working dir or spawn-from)</option>` +
+              repos
+                .map((r) => {
+                  const full = `${r.owner}/${r.repo}`;
+                  return `<option value="${esc(full)}"${full === cur ? " selected" : ""}>${esc(full)}${r.local ? "" : " (gh)"}</option>`;
+                })
+                .join("");
+          })
+          .catch(() => {});
+      }
+      function loadBranchPicker(target, repo) {
+        const dl = $("nf-branch-list");
+        const hint = $("nf-branch-hint");
+        nfRemoteBranches = null;
+        if (dl) dl.innerHTML = "";
+        if (hint) {
+          hint.textContent = "fetching branches…";
+          hint.style.display = "";
+        }
+        if (!target?.tx?.fetchJSON) return;
+        const want = repo;
+        target.tx
+          .fetchJSON("/api/ws/branches?repo=" + encodeURIComponent(repo))
+          .then((d) => {
+            if ($("nf-repo")?.value !== want) return; // user picked another repo meanwhile
+            const branches = (d && d.branches) || [];
+            nfRemoteBranches = new Set(branches.filter((b) => b.remote).map((b) => b.name));
+            if (dl)
+              dl.innerHTML = branches
+                .map(
+                  (b) =>
+                    `<option value="${esc(b.name)}">${b.provisioned ? "provisioned" : b.remote ? "remote" : "local"}</option>`,
+                )
+                .join("");
+            updateBranchHint(d && d.error);
+          })
+          .catch(() => {
+            if (hint) hint.textContent = "branch list unavailable — type a branch name";
+          });
+      }
+      function updateBranchHint(fetchError) {
+        const hint = $("nf-branch-hint");
+        if (!hint) return;
+        const br = ($("nf-branch")?.value || "").trim();
+        if (nfRemoteBranches == null) {
+          if (fetchError) hint.textContent = `branch list unavailable (${fetchError})`;
+          return;
+        }
+        if (br && !nfRemoteBranches.has(br)) {
+          hint.textContent = `“${br}” is not on the remote — a new branch will be created off the default`;
+        } else {
+          hint.textContent = `${nfRemoteBranches.size} remote branches — empty = repo default; a new name creates a branch`;
+        }
+        hint.style.display = "";
       }
 
       // Surface whether the target host runs a spawn hook (a trusted local command
@@ -8092,10 +8258,26 @@ my.translate = async (text, lang) => {
         try {
           localStorage.setItem(LAST_CLI_KEY, cli);
         } catch {}
+        // The repo/branch pickers win over the free-text "Spawn from" field:
+        // picked repo [+ branch] → a `from` spec; a branch name that isn't on
+        // the remote asks the server to create it (create:true, ws new --create).
+        let from = $("nf-from")?.value.trim() || "";
+        let create = false;
+        const pickedRepo = $("nf-repo")?.value || "";
+        if (pickedRepo) {
+          const br = ($("nf-branch")?.value || "").trim();
+          from = br ? `${pickedRepo}@${br}` : pickedRepo;
+          // Unknown remote list (fetch failed) → still send create: the server
+          // only uses it after the branch turns out missing, so it's harmless
+          // for existing branches and saves an un-actionable 502 for new ones.
+          create = !!(br && (!nfRemoteBranches || !nfRemoteBranches.has(br)));
+        }
         const spec = {
           cli,
-          from: $("nf-from")?.value.trim() || "",
-          cwd: $("nf-cwd").value.trim(),
+          from,
+          create,
+          // a provision spec decides the cwd server-side — don't send a stale one
+          cwd: from ? "" : $("nf-cwd").value.trim(),
           prompt: $("nf-prompt").value,
         };
         const room = $("newform").dataset.room || undefined;

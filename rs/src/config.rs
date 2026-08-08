@@ -1,8 +1,8 @@
 //! CLI tool configuration module
 
 use crate::config_loader::{
-    compile_regex_list, load_cascading_config, CliConfigOverride, ConfigFile,
-    InstallConfigOverride, RegexSource,
+    compile_regex_list,
+    load_cascading_config, CliConfigOverride, ConfigFile, InstallConfigOverride, RegexSource,
 };
 use anyhow::{anyhow, Context, Result};
 use regex::Regex;
@@ -272,7 +272,8 @@ mod tests {
         assert!(!configs.is_empty());
         for (cli, config) in &configs {
             for reason in RETRY_REASONS {
-                for (attempt, since, next) in [(1u32, 0u64, 8u64), (5, 500, 128), (12, 30_000, 256)]
+                for (attempt, since, next) in
+                    [(1u32, 0u64, 8u64), (5, 500, 128), (12, 30_000, 256)]
                 {
                     let msg = build_retry_message(attempt, reason, since, next);
                     let groups: [(&str, &Vec<Regex>); 5] = [
@@ -301,6 +302,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn test_opencode_patterns() {
+        let config = get_cli_config("opencode").unwrap();
+        // Real screen excerpt from OpenCode 1.18.15's permission dialog (wide
+        // TUI rows collapsed): Enter accepts because focus defaults to Confirm.
+        let dialog = "△ Always allow\n\nThis will allow the following patterns until OpenCode is restarted\n\n- /Users/sno/*\n\n Confirm   Cancel                                  ⇆ select  enter confirm";
+        assert!(config.enter.iter().any(|rx| rx.is_match(dialog)));
+        // Prose merely mentioning the buttons must NOT trigger an Enter.
+        assert!(!config
+            .enter
+            .iter()
+            .any(|rx| rx.is_match("click Confirm or Cancel in the Always allow dialog")));
+        // Any confirm dialog (even one enter doesn't auto-accept) surfaces as
+        // needs_input instead of hanging silently.
+        assert!(config
+            .needs_input
+            .iter()
+            .any(|rx| rx.is_match(" Confirm   Cancel        ⇆ select  enter confirm")));
+        // The prompt goes via --prompt (positional arg is a project dir).
+        assert_eq!(config.prompt_arg, "--prompt");
     }
 
     #[test]
@@ -385,8 +408,9 @@ mod tests {
             .iter()
             .any(|rx| rx.is_match("processed 529 files in 500ms")));
         // Rate-limit is anchored to the API Error chrome: real 429 banners retry…
-        assert!(config.auto_retry.iter().any(|rx| rx
-            .is_match(r#"API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}"#)));
+        assert!(config.auto_retry.iter().any(|rx| rx.is_match(
+            r#"API Error: 429 {"type":"error","error":{"type":"rate_limit_error"}}"#
+        )));
         // …but ordinary screen content that merely mentions rate limits must
         // NOT — a rendered task list ("client ignores rate-limit drop") and an
         // agent's own summary (INGEST_RATE_LIMIT_PER_MIN) both armed spurious
@@ -600,17 +624,13 @@ mod tests {
     #[test]
     fn test_opencode_config() {
         let config = get_cli_config("opencode").unwrap();
-        // NOT the `last-arg` default: opencode's TUI reads a bare positional as a
-        // DIRECTORY to open, so `opencode "fix the bug"` died with "Failed to
-        // change directory to <cwd>/fix the bug" (and ENAMETOOLONG once the prompt
-        // got long). The prompt has to be typed into the live session instead.
-        assert_eq!(config.prompt_arg, "typed");
+        assert_eq!(config.prompt_arg, "--prompt");
         assert!(config.binary.is_none());
         assert!(config.install.bash.is_some());
         assert!(config.install.npm.is_some());
         assert_eq!(config.help, Some("https://opencode.ai/".into()));
         assert!(config.ready.is_empty());
-        assert!(config.enter.is_empty());
+        assert!(!config.enter.is_empty());
         assert!(config.fatal.is_empty());
         assert!(!config.no_eol);
     }

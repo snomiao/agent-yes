@@ -1,6 +1,6 @@
 {
   "name": "agent-yes",
-  "version": "1.254.0",
+  "version": "1.262.0",
   "description": "A wrapper tool that automates interactions with various AI CLI tools by automatically handling common prompts and responses.",
   "keywords": [
     "ai",
@@ -135,6 +135,7 @@
   },
   "dependencies": {
     "@snomiao/bun-pty": "^0.3.4",
+    "@snomiao/ws-provision": "^0.1.0",
     "@xterm/headless": "^6.0.0",
     "bun-pty": "^0.4.8",
     "execa": "^9.6.1",
@@ -163,7 +164,7 @@
     "@vitest/coverage-v8": "4.1.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
-    "codehost": "^0.32.0",
+    "codehost": "^0.39.0",
     "html2canvas-pro": "^2.3.1",
     "husky": "^9.1.7",
     "lint-staged": "^16.2.7",

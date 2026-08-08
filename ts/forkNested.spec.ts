@@ -1,8 +1,13 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { appendFileSync, mkdtempSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { buildSpawnTutorial, shouldForkNested, waitForFifo } from "./forkNested";
+import {
+  buildSpawnTutorial,
+  predictedLogPath,
+  shouldForkNested,
+  waitForRegistration,
+} from "./forkNested";
 
 describe("shouldForkNested", () => {
   it("forks when nested (AGENT_YES_PID set) and stdout is not a TTY", () => {
@@ -24,13 +29,15 @@ describe("shouldForkNested", () => {
   });
 });
 
-describe("waitForFifo", () => {
+describe("waitForRegistration", () => {
   let home: string;
   let prevHome: string | undefined;
 
+  const appendPid = (record: Record<string, unknown>) =>
+    appendFileSync(path.join(home, "pids.jsonl"), JSON.stringify(record) + "\n");
+
   beforeEach(() => {
     home = mkdtempSync(path.join(tmpdir(), "ay-forknested-"));
-    mkdirSync(path.join(home, "fifo"), { recursive: true });
     prevHome = process.env.AGENT_YES_HOME;
     process.env.AGENT_YES_HOME = home;
   });
@@ -41,20 +48,57 @@ describe("waitForFifo", () => {
     rmSync(home, { recursive: true, force: true });
   });
 
-  it("resolves true as soon as the wrapper's stdin FIFO is registered", async () => {
-    // Register the endpoint a poll-tick after the wait starts, like a real spawn.
-    setTimeout(() => writeFileSync(path.join(home, "fifo", "111.stdin"), ""), 60);
-    await expect(waitForFifo(111, 2000)).resolves.toBe(true);
+  it("resolves true once the pid registry has a live record for this pid", async () => {
+    // Register the pid a poll-tick after the wait starts, like a real spawn.
+    setTimeout(
+      () =>
+        appendPid({
+          pid: 111,
+          cli: "claude",
+          prompt: null,
+          cwd: "/tmp",
+          log_file: null,
+          status: "active",
+          exit_code: null,
+          exit_reason: null,
+          started_at: Date.now(),
+        }),
+      60,
+    );
+    await expect(waitForRegistration(111, 2000)).resolves.toBe(true);
   });
 
-  it("times out false when the child never registers", async () => {
-    await expect(waitForFifo(222, 120)).resolves.toBe(false);
+  it("times out false when the agent never registers", async () => {
+    await expect(waitForRegistration(222, 120)).resolves.toBe(false);
+  });
+
+  it("does NOT count a record whose status is already exited", async () => {
+    appendPid({
+      pid: 333,
+      cli: "claude",
+      prompt: null,
+      cwd: "/tmp",
+      log_file: null,
+      status: "exited",
+      exit_code: 1,
+      exit_reason: "crash",
+      started_at: Date.now(),
+    });
+    await expect(waitForRegistration(333, 120)).resolves.toBe(false);
   });
 
   it("fails fast when aborted() reports the child already died", async () => {
     const start = Date.now();
-    await expect(waitForFifo(333, 5000, () => true)).resolves.toBe(false);
+    await expect(waitForRegistration(444, 5000, () => true)).resolves.toBe(false);
     expect(Date.now() - start).toBeLessThan(1000); // no full-timeout wait
+  });
+});
+
+describe("predictedLogPath", () => {
+  it("matches the Rust wrapper's <cwd>/.agent-yes/<pid>.raw.log convention", () => {
+    expect(predictedLogPath("/home/u/proj", 4242)).toBe(
+      path.join("/home/u/proj", ".agent-yes", "4242.raw.log"),
+    );
   });
 });
 

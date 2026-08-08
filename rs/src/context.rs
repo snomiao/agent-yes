@@ -621,6 +621,11 @@ impl AgentContext {
 
         // Set terminal to raw mode for proper signal handling
         let _raw_mode = terminal::enable_raw_mode();
+        // Windows: also enable VT input so keys arrive as VT bytes (Backspace =
+        // 0x7f, not 0x08 — which ConPTY would hand to the child as
+        // Ctrl+Backspace = delete-word, #349). See enable_vt_input.
+        #[cfg(windows)]
+        let saved_console_in_mode = crate::pty_spawner::enable_vt_input();
 
         // Watch channel for terminal resize events (SIGWINCH → child PTY).
         // watch semantics: sender never blocks, receiver always sees the latest value.
@@ -951,6 +956,12 @@ impl AgentContext {
 
         // Restore terminal mode
         let _ = terminal::disable_raw_mode();
+        // disable_raw_mode only ORs crossterm's own bits back — put the input
+        // mode back exactly as we found it (clears VT input if we enabled it).
+        #[cfg(windows)]
+        if let Some(mode) = saved_console_in_mode {
+            crate::pty_spawner::restore_console_input_mode(mode);
+        }
 
         // Cancel stdin reader and stdout writer
         stdin_handle.abort();

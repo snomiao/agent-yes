@@ -9,6 +9,7 @@ import {
   appendGlobalPid,
   maybeCompactGlobalPids,
   pruneOldLogs,
+  sanitizeRole,
   updateGlobalPidStatus,
 } from "./globalPidIndex.ts";
 
@@ -29,6 +30,8 @@ export interface PidRecord {
   agentId?: string;
   /** Permission posture at spawn time; mirrored to the global index. */
   permissions?: AgentPermissions;
+  /** Self-declared lane/role name; mirrored to the global index as `role`. */
+  role?: string;
 }
 
 export class PidStore {
@@ -92,6 +95,11 @@ export class PidStore {
       existing?.agentId ??
       (injected && /^[0-9a-f]{6,32}$/i.test(injected) ? injected : randomBytes(6).toString("hex"));
 
+    // A caller-set AGENT_YES_ROLE names the lane this agent plays ("pm", "crm",
+    // …) for the `ay send` envelope. Picked up once at registration; index.ts
+    // strips it from the wrapped CLI's env so subagents don't inherit it.
+    const role = sanitizeRole(process.env.AGENT_YES_ROLE) ?? existing?.role;
+
     const record: Omit<PidRecord, "_id"> = {
       pid,
       cli,
@@ -105,6 +113,7 @@ export class PidStore {
       exitReason: "",
       startedAt: now,
       agentId,
+      ...(role ? { role } : {}),
     };
 
     if (existing) {
@@ -140,6 +149,7 @@ export class PidStore {
       parent_pid: parentPid ?? null,
       agent_id: agentId,
       permissions: permissions ?? null,
+      role: role ?? null,
     })
       .then(() => maybeCompactGlobalPids())
       .catch(() => null);

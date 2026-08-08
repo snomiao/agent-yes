@@ -113,3 +113,41 @@ test("parseMenu: a 'N.M' version in an option label isn't mistaken for another o
   expect(menu!.cursor).toBe(1);
   expect(menu!.options).toEqual([1, 2]);
 });
+
+// Claude renders its permission / AskUserQuestion dialogs INSIDE a rounded box,
+// so every option row arrives with a leading "│" border (the shipped config's own
+// markers show this: a typingRespond keyed on '│ Do you want to use this API key\?'
+// and gemini `enter` rows like "│ ● 1. Yes, allow once"). Option rows must still be
+// collected through that border — otherwise `ay select N` can only ever pick the
+// option the cursor already sits on.
+test("parseMenu: collects options through a box border (claude permission dialog)", () => {
+  const screen = [
+    "╭──────────────────────────────────────────────────────────╮",
+    "│ Do you want to proceed?                                  │",
+    "│ ❯ 1. Yes                                                 │",
+    "│   2. Yes, and don't ask again for rm commands in /repo   │",
+    "│   3. No, and tell Claude what to do differently (esc)    │",
+    "╰──────────────────────────────────────────────────────────╯",
+  ];
+  const menu = parseMenu(screen, claude);
+  expect(menu!.cursor).toBe(1);
+  expect(menu!.options).toEqual([1, 2, 3]);
+});
+
+test("parseMenu: collects boxed bullet rows (gemini '│ ● 1. Yes, allow once')", () => {
+  const screen = [
+    "│ Apply this change?          │",
+    "│ ❯ 1. Yes, allow once        │",
+    "│ ● 2. Yes, allow always      │",
+    "│ ● 3. No (esc)               │",
+  ];
+  const menu = parseMenu(screen, claude);
+  expect(menu!.cursor).toBe(1);
+  expect(menu!.options).toEqual([1, 2, 3]);
+});
+
+test("parseMenu: a boxed 'N.M' version still isn't mistaken for an option", () => {
+  const screen = ["│ Cleanup?              │", "│ ❯ 1. Delete 3.5GB     │", "│   2. Keep             │"];
+  const menu = parseMenu(screen, claude);
+  expect(menu!.options).toEqual([1, 2]);
+});

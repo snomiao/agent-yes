@@ -24,9 +24,13 @@ const prov = vi.hoisted(() => ({
   provision: vi.fn(),
   createBranch: vi.fn(),
   forkWorktree: vi.fn(),
+  gitAuthHint: vi.fn(),
 }));
 
-vi.mock("codehost/provision", () => ({
+// loadProvision prefers @snomiao/ws-provision (a real installed dependency) and
+// falls back to codehost/provision, so BOTH must be mocked to the same shims —
+// otherwise the preferred path would bypass the mocks and hit real git.
+const provMockFactory = vi.hoisted(() => () => ({
   resolveWsRoot: (w?: string) => w ?? prov.wsRoot,
   folderFor: (spec: { owner: string; repo: string; branch: string }, wsRoot?: string) =>
     path.join(wsRoot ?? prov.wsRoot, spec.owner, spec.repo, "tree", spec.branch),
@@ -35,7 +39,10 @@ vi.mock("codehost/provision", () => ({
   provision: (spec: unknown, opts?: unknown) => prov.provision(spec, opts),
   createBranch: (spec: unknown, opts?: unknown) => prov.createBranch(spec, opts),
   forkWorktree: (opts: unknown) => prov.forkWorktree(opts),
+  gitAuthHint: (host?: string) => prov.gitAuthHint(host),
 }));
+vi.mock("@snomiao/ws-provision", provMockFactory);
+vi.mock("codehost/provision", provMockFactory);
 
 describe("isPathInside", () => {
   it("contains itself and descendants", () => {
@@ -206,6 +213,7 @@ describe("cmdWs (mocked provision)", () => {
     prov.provision.mockReset();
     prov.createBranch.mockReset();
     prov.forkWorktree.mockReset();
+    prov.gitAuthHint.mockReset().mockReturnValue([]);
     out = [];
     err = [];
     vi.spyOn(process.stdout, "write").mockImplementation((s: any) => (out.push(String(s)), true));
@@ -418,6 +426,26 @@ describe("cmdWs (mocked provision)", () => {
     expect(await cmdWs(["new", "o/r"])).toBe(1);
     const msg = err.join("");
     expect(msg).toContain("repo-not-found");
+    expect(msg).not.toContain("--create");
+  });
+
+  it("new: auth-missing prints codehost's gitAuthHint lines", async () => {
+    prov.provision.mockResolvedValue({
+      ok: false,
+      action: "error",
+      reason: "auth-missing",
+      error: "could not read Username",
+    });
+    prov.gitAuthHint.mockReturnValue([
+      "⚠ this repo may be private, and no github.com credentials are available on this host.",
+      "To fix, run on the host:",
+      "   gh auth login && gh auth setup-git",
+      "then retry this link.",
+    ]);
+    expect(await cmdWs(["new", "o/r"])).toBe(1);
+    const msg = err.join("");
+    expect(msg).toContain("auth-missing");
+    expect(msg).toContain("gh auth login && gh auth setup-git");
     expect(msg).not.toContain("--create");
   });
 

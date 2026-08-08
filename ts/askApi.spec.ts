@@ -41,18 +41,18 @@ describe("askApi", () => {
     const choice = await s.create({ summary: "pick a channel", kind: "decision" });
     await s.setBlock(choice._id, {
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       question: "canary or beta?",
       options: ["canary", "beta"],
     });
     const action = await s.create({ summary: "finish oauth", kind: "human" });
     await s.setBlock(action._id, {
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       actionLink: "https://example/oauth",
     });
     const bare = await s.create({ summary: "just fyi", kind: "human" });
-    await s.setBlock(bare._id, { type: "blocked-by-human", who: "taku" });
+    await s.setBlock(bare._id, { type: "blocked-by-human", who: "alice" });
     const notHuman = await s.create({ summary: "not an ask", kind: "code" });
     await s.setBlock(notHuman._id, { type: "blocked-by-external", signal: "ci" });
     const unblocked = await s.create({ summary: "no block at all", kind: "code" });
@@ -74,7 +74,7 @@ describe("askApi", () => {
   it("listAsks aggregates across multiple project roots, skipping ones with no store at all", async () => {
     const sA = await openStore(ROOT_A);
     const tA = await sA.create({ summary: "a", kind: "human" });
-    await sA.setBlock(tA._id, { type: "blocked-by-human", who: "taku" });
+    await sA.setBlock(tA._id, { type: "blocked-by-human", who: "alice" });
     const sB = await openStore(ROOT_B);
     const tB = await sB.create({ summary: "b", kind: "human" });
     await sB.setBlock(tB._id, { type: "blocked-by-human", who: "cto" });
@@ -88,7 +88,7 @@ describe("askApi", () => {
   it("listAsks isolates a per-project failure — one unreadable/broken store must not take down the whole cross-project panel (codex-review round-14 Important)", async () => {
     const sA = await openStore(ROOT_A);
     const tA = await sA.create({ summary: "healthy ask", kind: "human" });
-    await sA.setBlock(tA._id, { type: "blocked-by-human", who: "taku" });
+    await sA.setBlock(tA._id, { type: "blocked-by-human", who: "alice" });
 
     // ROOT_B's todos.jsonl is a DIRECTORY, not a file — a real, easy way to
     // force listAsksForProject(ROOT_B) to genuinely reject (EISDIR) rather
@@ -102,11 +102,11 @@ describe("askApi", () => {
   it("answerAsk on a bare acknowledge-shape ask: clears the block, advances the human kind's pending->decided gate as the asked human, then decided->done is ungated", async () => {
     const s = await openStore(ROOT_A);
     const t = await s.create({ summary: "just fyi", kind: "human" });
-    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku" });
+    await s.setBlock(t._id, { type: "blocked-by-human", who: "alice" });
     const { record: answered } = await answerAsk(ROOT_A, t._id, { acknowledged: true });
     expect(answered.block).toBeNull();
     expect(answered.state).toBe("decided"); // human-replied gate satisfied, advanced
-    expect(answered.verifyEvidence[0]).toMatchObject({ gate: "human-replied", validator: "taku" });
+    expect(answered.verifyEvidence[0]).toMatchObject({ gate: "human-replied", validator: "alice" });
   });
 
   it("answerAsk on a choice-shape ask records the choice text as evidence note, and rejects a choice not among the offered options", async () => {
@@ -114,7 +114,7 @@ describe("askApi", () => {
     const t = await s.create({ summary: "pick a channel", kind: "decision" });
     await s.setBlock(t._id, {
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       options: ["canary", "beta"],
     });
     await expect(answerAsk(ROOT_A, t._id, { choice: "stable" })).rejects.toThrow(
@@ -130,7 +130,7 @@ describe("askApi", () => {
     const t = await s.create({ summary: "x", kind: "human" });
     await s.setBlock(t._id, {
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       options: ["canary", "beta"],
       actionLink: "https://example/oauth",
     });
@@ -148,9 +148,9 @@ describe("askApi", () => {
 
   it("answerAsk leaves the task's block INTACT (not silently cleared) if the gate/transition step fails — atomicity means a failure never strands the task in limbo (codex-review round-9 Important)", async () => {
     const s = await openStore(ROOT_A);
-    const t = await s.create({ summary: "pick a channel", kind: "decision", owner: "taku" });
-    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku", options: ["a", "b"] });
-    // "taku" is both the task's owner AND the asked human — approve() will
+    const t = await s.create({ summary: "pick a channel", kind: "decision", owner: "alice" });
+    await s.setBlock(t._id, { type: "blocked-by-human", who: "alice", options: ["a", "b"] });
+    // "alice" is both the task's owner AND the asked human — approve() will
     // throw "independent verification required" for this specific task,
     // simulating a mid-sequence failure without needing to mock anything.
     await expect(answerAsk(ROOT_A, t._id, { choice: "a" })).rejects.toThrow(
@@ -164,7 +164,7 @@ describe("askApi", () => {
     const stillBlocked = (await openStore(ROOT_A)).get(t._id)!;
     expect(stillBlocked.block).toEqual({
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       options: ["a", "b"],
     });
     expect(stillBlocked.state).toBe("deciding"); // unchanged
@@ -173,11 +173,11 @@ describe("askApi", () => {
   it("answerAsk NEVER erases a block that was replaced by a DIFFERENT one WHILE the answer was being processed — the final clear only removes the SPECIFIC block this call decided to answer, not whatever block happens to be there by the time it gets around to clearing (codex-review round-15 Important)", async () => {
     const s = await openStore(ROOT_A);
     const t = await s.create({ summary: "x", kind: "human" });
-    const original = { type: "blocked-by-human", who: "taku", question: "original ask" } as const;
+    const original = { type: "blocked-by-human", who: "alice", question: "original ask" } as const;
     await s.setBlock(t._id, original);
     const newerBlock = {
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       question: "a brand new ask",
     } as const;
 
@@ -219,7 +219,7 @@ describe("askApi", () => {
   it("a naive retry after answerAsk already fully succeeded is cleanly refused — it never duplicates evidence or re-transitions, because the gate/transition/clear are now ONE atomic write with no partial-completion state for a retry to resume from (codex-review round-18: replaces the old approve()+transition()+clearBlockIfMatches composition's retry-idempotency workaround, which is no longer needed)", async () => {
     const s = await openStore(ROOT_A);
     const t = await s.create({ summary: "pick a channel", kind: "decision" });
-    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku", options: ["a", "b"] });
+    await s.setBlock(t._id, { type: "blocked-by-human", who: "alice", options: ["a", "b"] });
     const { record: first } = await answerAsk(ROOT_A, t._id, { choice: "a" });
     expect(first.state).toBe("decided");
     expect(first.verifyEvidence).toHaveLength(1);
@@ -237,7 +237,7 @@ describe("askApi", () => {
   it("answerAsk IGNORES an unvalidated `choice` sent alongside `acknowledged: true` on a non-choice-shape ask — an arbitrary attacker-supplied string must never become the recorded/relayed answer just because it rode along with a valid acknowledgement (codex-review round-14 Important)", async () => {
     const s = await openStore(ROOT_A);
     const bare = await s.create({ summary: "just fyi", kind: "human" });
-    await s.setBlock(bare._id, { type: "blocked-by-human", who: "taku" });
+    await s.setBlock(bare._id, { type: "blocked-by-human", who: "alice" });
     const bareResult = await answerAsk(ROOT_A, bare._id, {
       acknowledged: true,
       choice: "attacker-controlled garbage\nrm -rf /",
@@ -248,7 +248,7 @@ describe("askApi", () => {
     const action = await s.create({ summary: "finish oauth", kind: "human" });
     await s.setBlock(action._id, {
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       actionLink: "https://example/oauth",
     });
     const actionResult = await answerAsk(ROOT_A, action._id, {
@@ -261,7 +261,7 @@ describe("askApi", () => {
   it("answerAsk requires an actual answer for a choice-shape ask (no bare acknowledged)", async () => {
     const s = await openStore(ROOT_A);
     const t = await s.create({ summary: "pick a channel", kind: "decision" });
-    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku", options: ["a", "b"] });
+    await s.setBlock(t._id, { type: "blocked-by-human", who: "alice", options: ["a", "b"] });
     await expect(answerAsk(ROOT_A, t._id, { acknowledged: true })).rejects.toThrow(
       /requires a choice/,
     );
@@ -284,7 +284,7 @@ describe("askApi", () => {
     const t = await s.create({ summary: "x", kind: "code" }); // doing -> merged is ungated
     await s.setBlock(t._id, {
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       question: "still working on this?",
     });
     const { record: answered } = await answerAsk(ROOT_A, t._id, { acknowledged: true });
@@ -305,7 +305,7 @@ describe("askApi", () => {
     await s.transition(t._id, "merged");
     await s.transition(t._id, "shipped");
     await s.transition(t._id, "verifying");
-    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku", question: "any concerns?" });
+    await s.setBlock(t._id, { type: "blocked-by-human", who: "alice", question: "any concerns?" });
     const { record: answered } = await answerAsk(ROOT_A, t._id, { acknowledged: true });
     expect(answered.block).toBeNull();
     expect(answered.state).toBe("verifying"); // unchanged — code kind never auto-transitions on a human answer
@@ -317,7 +317,7 @@ describe("askApi", () => {
     const t = await s.create({ summary: "pick a channel", kind: "decision" });
     const identicalBlock: TodoBlock = {
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       question: "canary or beta?",
       options: ["canary", "beta"],
     };
@@ -350,7 +350,7 @@ describe("askApi", () => {
   it("answerAsk without expectedBlockRev (a direct/programmatic caller that doesn't track it) still works exactly as before — the check is opt-in, not required", async () => {
     const s = await openStore(ROOT_A);
     const t = await s.create({ summary: "x", kind: "human" });
-    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku" });
+    await s.setBlock(t._id, { type: "blocked-by-human", who: "alice" });
     const { record: answered } = await answerAsk(ROOT_A, t._id, { acknowledged: true });
     expect(answered.block).toBeNull();
     expect(answered.state).toBe("decided");

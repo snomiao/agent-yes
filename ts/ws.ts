@@ -52,7 +52,7 @@ interface ProvisionResult {
   action: string;
   git?: GitStatus;
   error?: string;
-  reason?: "branch-not-found" | "repo-not-found" | "other";
+  reason?: "branch-not-found" | "repo-not-found" | "auth-missing" | "other";
 }
 interface Provision {
   resolveWsRoot(wsRoot?: string): string;
@@ -67,15 +67,31 @@ interface Provision {
     wsRoot?: string;
     wip?: boolean;
   }): Promise<ProvisionResult>;
+  gitAuthHint(host?: string): string[];
+}
+
+/**
+ * Provisioning implementation, resolved at call time. @snomiao/ws-provision is
+ * the canonical zero-dependency package (a regular dependency, so npm installs
+ * of agent-yes always have it); codehost/provision — which re-exports the same
+ * module — stays as a fallback for bun-linked dev setups pinned to a codehost
+ * checkout. Shared by `ay ws` and serve's fork/spawn-from provisioning.
+ */
+export async function importProvisionModule(): Promise<unknown> {
+  try {
+    return await import("@snomiao/ws-provision");
+  } catch {
+    return await import("codehost/provision"); // let THIS failure surface to the caller
+  }
 }
 
 export async function loadProvision(): Promise<Provision> {
   try {
-    return (await import("codehost/provision")) as unknown as Provision;
+    return (await importProvisionModule()) as Provision;
   } catch (e) {
     throw new Error(
-      `'ay ws' needs the 'codehost' package (codehost/provision) — install it ` +
-        `(npm i -g codehost) or 'bun link' it for local dev: ${(e as Error).message}`,
+      `'ay ws' needs a provision implementation — '@snomiao/ws-provision' (bundled ` +
+        `as a dependency) or 'codehost/provision' (bun-linked dev): ${(e as Error).message}`,
     );
   }
 }
@@ -485,6 +501,9 @@ async function cmdWsNew(args: string[]): Promise<number> {
           ? `  (branch missing on the remote — re-run with --create to branch off the default)\n`
           : ""),
     );
+    if (res.reason === "auth-missing") {
+      for (const line of prov.gitAuthHint()) process.stderr.write(`  ${line}\n`);
+    }
     return 1;
   }
   process.stdout.write(`${res.action}  ${res.folder}\n`);

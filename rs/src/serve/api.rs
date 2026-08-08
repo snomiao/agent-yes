@@ -607,8 +607,23 @@ fn matches_keyword(r: &PidRecord, kw: &str) -> bool {
     if kw.is_empty() {
         return true;
     }
-    if r.pid.to_string() == kw {
-        return true;
+    // A purely-numeric keyword is an IDENTITY selector — exact pid, or an
+    // agent_id prefix (ids are 12 random hex, so they can be all-digits). Never
+    // fall through to the cwd/cli/prompt substring rules: a pid frequently
+    // appears inside OTHER agents' prompts (a resume prompt listing peer pids,
+    // a shared `/w/#room:<pid>` URL), and a newer such record would win the
+    // newest-first tiebreak in resolve_one — sending the console's tail/stdin
+    // for `#room:<pid>` to a sibling's terminal. Mirrors ts/subcommands.ts
+    // matchKeyword (fix #72), which never reached this Rust port.
+    if kw.chars().all(|c| c.is_ascii_digit()) {
+        if r.pid.to_string() == kw {
+            return true;
+        }
+        return r
+            .agent_id
+            .as_deref()
+            .map(|id| id.starts_with(&kw.to_ascii_lowercase()))
+            .unwrap_or(false);
     }
     if let Some(id) = &r.agent_id {
         if id.starts_with(&kw.to_ascii_lowercase()) {
@@ -630,6 +645,15 @@ fn resolve_one(kw: &str) -> Result<PidRecord, String> {
         .filter(|r| matches_keyword(r, kw))
         .collect();
     recs.sort_by_key(|r| -r.started_at);
+    // Exact identity beats everything: when the keyword IS a record's pid, that
+    // record wins even if an all-digit agent_id prefix also matched (parity with
+    // ts/subcommands.ts resolveOne).
+    if kw.chars().all(|c| c.is_ascii_digit()) {
+        let by_pid: Vec<&PidRecord> = recs.iter().filter(|r| r.pid.to_string() == kw).collect();
+        if by_pid.len() == 1 {
+            return Ok(by_pid[0].clone());
+        }
+    }
     // prefer a living agent over exited ones
     if let Some(r) = recs
         .iter()
@@ -1056,7 +1080,7 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
         .collect()
 }
 
-fn url_decode(s: &str) -> String {
+pub(crate) fn url_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(s.len());
     let b = s.as_bytes();
     let mut i = 0;
@@ -1312,21 +1336,65 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
             Err(_) => text(400, "invalid JSON body"),
         },
 
-        // /api/share + /api/expose mint scoped share tokens and drive the edge
-        // relay through the JS agentShare/expose modules; the Rust daemon has
-        // no scoped-token store or relay client, so it declines rather than
-        // shipping a weaker look-alike.
-        ("POST", "/api/share")
-        | ("GET", "/api/shares")
-        | ("POST", "/api/expose")
-        | ("GET", "/api/exposes") => text(
-            501,
-            "share/expose need the JS scoped-token + relay modules — use `ay serve`",
-        ),
-        ("DELETE", p) if p.starts_with("/api/share/") || p.starts_with("/api/expose/") => text(
-            501,
-            "share/expose need the JS scoped-token + relay modules — use `ay serve`",
-        ),
+        // ── Single-agent view-only shares (ts/agentShare.ts port) ───────────
+        // Mint / list / revoke scoped share rooms. Reachable by whoever already
+        // holds full control of this host — a scoped viewer can't get here (its
+        // scope filter default-denies /api/share*).
+        ("POST", "/api/share") => {
+            let Ok(v) = serde_json::from_str::<Value>(body) else {
+                return text(400, "invalid JSON body");
+            };
+            let Some(agent) = v.get("agent").and_then(|a| a.as_str()).filter(|a| !a.is_empty())
+            else {
+                return text(400, "agent required");
+            };
+            let perm = v.get("perm").and_then(|p| p.as_str()).unwrap_or("r");
+            if perm != "r" && perm != "rw" {
+                return text(400, format!("invalid perm {perm} (want r or rw)"));
+            }
+            match crate::serve::agent_share::create(
+                agent,
+                perm,
+                crate::serve::share::DEFAULT_SIGHOST,
+            )
+            .await
+            {
+                Ok(share) => json_res(200, &share),
+                Err((status, msg)) => text(status, msg),
+            }
+        }
+        ("GET", "/api/shares") => json_res(200, &crate::serve::agent_share::list_json()),
+        ("DELETE", p) if p.starts_with("/api/share/") => {
+            let id = url_decode(&p["/api/share/".len()..]);
+            if crate::serve::agent_share::revoke(&id) {
+                text(200, "revoked")
+            } else {
+                text(404, "no such share")
+            }
+        }
+
+        // ── Port exposures through the edge relay (ts/expose.ts port) ───────
+        ("POST", "/api/expose") => {
+            let Ok(v) = serde_json::from_str::<Value>(body) else {
+                return text(400, "invalid JSON body");
+            };
+            let port = v.get("port").and_then(|p| p.as_u64()).unwrap_or(0);
+            if port < 1 || port > 65535 {
+                return text(400, "valid port required");
+            }
+            let relay = v.get("relay").and_then(|r| r.as_str());
+            match crate::serve::expose::ensure(port as u16, relay).await {
+                Ok(out) => json_res(200, &out),
+                Err(e) => text(502, format!("expose failed: {e:#}")),
+            }
+        }
+        ("GET", "/api/exposes") => json_res(200, &crate::serve::expose::list().await),
+        ("DELETE", p) if p.starts_with("/api/expose/") => {
+            match p["/api/expose/".len()..].parse::<u16>() {
+                Ok(port) if crate::serve::expose::stop(port).await => text(200, "revoked"),
+                _ => text(404, "no such exposure"),
+            }
+        }
 
         ("OPTIONS", _) => text(204, ""),
         _ => text(404, "not found"),
@@ -1353,6 +1421,40 @@ mod tests {
             Some("⠋ Working on it")
         );
         assert_eq!(parse_status_text(&["plain text".to_string()]), None);
+    }
+
+    #[test]
+    fn numeric_keyword_is_identity_not_substring() {
+        // Regression: after a fleet restore, one agent's resume prompt listed a
+        // peer's pid. That record was newer, so `/w/#room:<pid>` tail+stdin
+        // resolved to the wrong terminal while the pane header showed the
+        // requested pid.
+        let rec = |j: serde_json::Value| -> PidRecord { serde_json::from_value(j).unwrap() };
+        let target = rec(json!({
+            "pid": 1111, "cli": "claude", "cwd": "/repo/alpha",
+            "prompt": "resume your lane",
+            "log_file": null, "status": "active", "exit_code": null,
+            "exit_reason": null, "started_at": 1_000, "agent_id": "aaaa0000bbbb"
+        }));
+        let peer = rec(json!({
+            "pid": 2222, "cli": "claude", "cwd": "/repo/beta",
+            "prompt": "peers respawned: alpha 1111, gamma 3333",
+            "log_file": null, "status": "active", "exit_code": null,
+            "exit_reason": null, "started_at": 2_000, "agent_id": "cccc0000dddd"
+        }));
+        // pid match stays exact; the pid inside another agent's prompt no longer matches
+        assert!(matches_keyword(&target, "1111"));
+        assert!(!matches_keyword(&peer, "1111"));
+        // numeric keyword still reaches an all-digit agent_id prefix
+        let digits = rec(json!({
+            "pid": 42, "cli": "claude", "cwd": "/x", "prompt": null,
+            "log_file": null, "status": "active", "exit_code": null,
+            "exit_reason": null, "started_at": 3_000, "agent_id": "111134abcdef"
+        }));
+        assert!(matches_keyword(&digits, "1111"));
+        // non-numeric keywords keep the substring rules
+        assert!(matches_keyword(&peer, "repo/beta"));
+        assert!(matches_keyword(&peer, "gamma"));
     }
 
     #[test]

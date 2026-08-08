@@ -162,6 +162,57 @@ pub fn console_size() -> Option<(u16, u16)> {
     }
 }
 
+/// Turn on `ENABLE_VIRTUAL_TERMINAL_INPUT` on the console's input handle and
+/// return the previous mode so the caller can restore it on exit.
+///
+/// crossterm's `enable_raw_mode()` only clears LINE/ECHO/PROCESSED on the
+/// input handle — it leaves VT input off, so the console delivers Backspace as
+/// 0x08 (and special keys as key events rather than CSI sequences). ConPTY
+/// then re-interprets a forwarded 0x08 as Ctrl+Backspace for the child, which
+/// is how "Backspace deletes a whole word" (#349) happens. With VT input on,
+/// Backspace arrives as 0x7f — the byte every VT terminal sends — matching
+/// what Node's `setRawMode(true)` (the TS runtime) already does.
+///
+/// Returns `None` (and changes nothing) when stdin isn't a console — piped or
+/// redirected input has no console mode to speak of.
+#[cfg(windows)]
+pub fn enable_vt_input() -> Option<u32> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, GetStdHandle, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_INPUT,
+        STD_INPUT_HANDLE,
+    };
+    unsafe {
+        let h = GetStdHandle(STD_INPUT_HANDLE);
+        if h == INVALID_HANDLE_VALUE || h.is_null() {
+            return None;
+        }
+        let mut mode: u32 = 0;
+        if GetConsoleMode(h, &mut mode) == 0 {
+            return None; // not a console (piped/redirected stdin)
+        }
+        if SetConsoleMode(h, mode | ENABLE_VIRTUAL_TERMINAL_INPUT) == 0 {
+            return None;
+        }
+        Some(mode)
+    }
+}
+
+/// Restore the console input mode saved by [`enable_vt_input`]. Called after
+/// crossterm's `disable_raw_mode()` (which only ORs its own three bits back and
+/// would otherwise leave VT input stuck on for the parent shell).
+#[cfg(windows)]
+pub fn restore_console_input_mode(mode: u32) {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::System::Console::{GetStdHandle, SetConsoleMode, STD_INPUT_HANDLE};
+    unsafe {
+        let h = GetStdHandle(STD_INPUT_HANDLE);
+        if h != INVALID_HANDLE_VALUE && !h.is_null() {
+            let _ = SetConsoleMode(h, mode);
+        }
+    }
+}
+
 /// Max age of an externally-supplied winsize before we ignore it. After this,
 /// a stale attach client that died holding the lock would otherwise pin our
 /// PTY at the wrong size forever.
@@ -487,6 +538,11 @@ pub async fn spawn_agent(
     // don't inherit it and register under the same id — which would make that id
     // ambiguous. Our own process env still carries it for new_agent_id().
     cmd.env_remove("AGENT_YES_AGENT_ID");
+
+    // Same reasoning for AGENT_YES_ROLE: it names THIS agent's lane (pid_store
+    // reads it from our env at registration). A subagent is its own lane, so
+    // don't let it inherit the parent's role. Mirrors ts/index.ts.
+    cmd.env_remove("AGENT_YES_ROLE");
 
     // Strip the parent Claude Code session markers so the wrapped CLI is a CLEAN
     // top-level session. Without this, an `ay claude` launched from inside another

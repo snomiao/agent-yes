@@ -4,7 +4,7 @@
  * of requiring every state change to be typed by hand.
  *
  * `reconcileTodos` is pure — decision logic only, no I/O — exactly the same
- * "decide" / "do" split `symval-dev-cli`'s existing `watchdog.ts`
+ * "decide" / "do" split a private sibling CLI's existing `watchdog.ts`
  * (`decideActions`) already uses successfully: the hard-to-get-right parts
  * (edge cases) live in a function that takes plain data in and returns plain
  * data out, so they are trivially unit-testable without a real store, real
