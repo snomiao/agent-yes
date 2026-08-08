@@ -89,6 +89,11 @@ export default defineConfig({
         // (its store backend store.browser.ts IS covered, and it delegates all CRDT
         // logic to the covered core). Same rationale as peer.ts.
         "ts/channels/browser.ts",
+        // POSIX-only /usr/local/bin symlinker — returns null immediately on
+        // win32 (different PATH model), so its filesystem suite is skipped
+        // there and the module would sink the Windows coverage gate. Fully
+        // covered by systemPathLink.spec.ts on POSIX runners.
+        ...(process.platform === "win32" ? ["ts/systemPathLink.ts"] : []),
         // `ay term` CLI shell — thin dispatcher over buildTermEmbedSnippet (pure,
         // unit-tested in ts/terminal.spec.ts); the flag/stderr-guidance branches are
         // integration-only. Same rationale as ts/channels.ts.
