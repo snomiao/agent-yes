@@ -147,6 +147,7 @@ mod tests {
             parent_pid: None,
             agent_id: agent_id.map(String::from),
             permissions: None,
+            role: None,
         }
     }
 
