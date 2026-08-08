@@ -305,6 +305,28 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_patterns() {
+        let config = get_cli_config("opencode").unwrap();
+        // Real screen excerpt from OpenCode 1.18.15's permission dialog (wide
+        // TUI rows collapsed): Enter accepts because focus defaults to Confirm.
+        let dialog = "△ Always allow\n\nThis will allow the following patterns until OpenCode is restarted\n\n- /Users/sno/*\n\n Confirm   Cancel                                  ⇆ select  enter confirm";
+        assert!(config.enter.iter().any(|rx| rx.is_match(dialog)));
+        // Prose merely mentioning the buttons must NOT trigger an Enter.
+        assert!(!config
+            .enter
+            .iter()
+            .any(|rx| rx.is_match("click Confirm or Cancel in the Always allow dialog")));
+        // Any confirm dialog (even one enter doesn't auto-accept) surfaces as
+        // needs_input instead of hanging silently.
+        assert!(config
+            .needs_input
+            .iter()
+            .any(|rx| rx.is_match(" Confirm   Cancel        ⇆ select  enter confirm")));
+        // The prompt goes via --prompt (positional arg is a project dir).
+        assert_eq!(config.prompt_arg, "--prompt");
+    }
+
+    #[test]
     fn test_claude_patterns() {
         let config = get_cli_config("claude").unwrap();
         assert!(config.ready[0].is_match("? for shortcuts"));
@@ -602,13 +624,13 @@ mod tests {
     #[test]
     fn test_opencode_config() {
         let config = get_cli_config("opencode").unwrap();
-        assert_eq!(config.prompt_arg, "last-arg");
+        assert_eq!(config.prompt_arg, "--prompt");
         assert!(config.binary.is_none());
         assert!(config.install.bash.is_some());
         assert!(config.install.npm.is_some());
         assert_eq!(config.help, Some("https://opencode.ai/".into()));
         assert!(config.ready.is_empty());
-        assert!(config.enter.is_empty());
+        assert!(!config.enter.is_empty());
         assert!(config.fatal.is_empty());
         assert!(!config.no_eol);
     }
