@@ -68,6 +68,11 @@ export default defineConfig({
         // HTTP server and remote config — integration-test only (requires a
         // running server and network); unit coverage not meaningful here.
         "ts/serve.ts",
+        // `ay hist` CLI shell — a thin yargs dispatcher over the covered
+        // histStore.ts; its pure render helpers are unit-tested via
+        // ts/hist.spec.ts, and the remaining branches are flag plumbing +
+        // TTY/stderr output (same rationale as ts/channels.ts / callback.ts).
+        "ts/hist.ts",
         // `ay callback` CLI + store IO — thin shell over callbackCore.ts (which
         // IS covered); the mint path needs a live agent record and daemon URL.
         "ts/callback.ts",
