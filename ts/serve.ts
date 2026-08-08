@@ -1,4 +1,15 @@
-import { appendFile, mkdir, open, readdir, readFile, stat, unlink, writeFile } from "fs/promises";
+import {
+  appendFile,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  unlink,
+  writeFile,
+} from "fs/promises";
 import { existsSync, renameSync, watch, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -564,6 +575,38 @@ async function runCapture(
   } catch (e) {
     return { ok: false, stdout: "", stderr: (e as Error).message };
   }
+}
+
+// A non-GitHub git source (gitlab, self-hosted, …) for /api/spawn's raw-clone
+// path. github.com inputs return null — those go through the provision module
+// (gh auth, setup-repo.sh). Accepts scp-style git@host:path, ssh://, git://,
+// http(s):// — bare owner/repo is github-first and never lands here.
+export function parseGitUrl(s: string): { url: string; owner: string; repo: string } | null {
+  let host = "";
+  let pathPart = "";
+  const scp = /^git@([^:/\s]+):([^\s]+?)(?:\.git)?\/?$/.exec(s);
+  if (scp) {
+    host = scp[1]!;
+    pathPart = scp[2]!;
+  } else {
+    let u: URL;
+    try {
+      u = new URL(s);
+    } catch {
+      return null;
+    }
+    if (!/^(https?|ssh|git)$/.test(u.protocol.replace(":", ""))) return null;
+    host = u.hostname;
+    pathPart = u.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
+  }
+  if (/(^|\.)github\.com$/i.test(host)) return null;
+  const segs = pathPart.split("/").filter(Boolean);
+  if (segs.length < 2) return null;
+  const owner = segs[segs.length - 2]!;
+  const repo = segs[segs.length - 1]!.replace(/\.git$/, "");
+  if (!owner || !repo || owner === "." || owner === ".." || repo === "." || repo === "..")
+    return null;
+  return { url: s.replace(/\/+$/, ""), owner, repo };
 }
 
 // 60s memo for /api/ws/repos' gh side (see the endpoint for why).
@@ -4024,6 +4067,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         prompt?: string;
         yes?: boolean;
         create?: boolean;
+        branch?: string; // raw-clone path only (github specs embed the branch in `from`)
         fork?: { fromCwd?: string; branch?: string };
       };
       try {
@@ -4161,6 +4205,105 @@ export async function cmdServe(rest: string[]): Promise<number> {
           );
         cwd = result.folder;
         provisioned = { action: result.action, folder: result.folder };
+      } else if (from && parseGitUrl(from)) {
+        // Non-GitHub git URL (gitlab, self-hosted, …): raw `git clone` into the
+        // standard layout <wsRoot>/<owner>/<repo>/tree/<branch> — no provision
+        // module, no setup-repo.sh. Same admission gates as the github path:
+        // provision hook first (it may select credentials), else the allowlist.
+        const gitSrc = parseGitUrl(from)!;
+        const branch = typeof body.branch === "string" ? body.branch.trim() : "";
+        // the branch lands in a filesystem path (tree/<branch>) — no empty/./..
+        // segments, no option-looking names
+        const badBranch = (b: string) =>
+          b.startsWith("-") || b.split("/").some((s) => !s || s === "." || s === "..");
+        if (branch && badBranch(branch))
+          return new Response(`invalid branch name: ${branch}`, { status: 400 });
+        const gitHook = await runProvisionHook(getProvisionRoot() ?? homedir(), {
+          KOHO_ACTION: "from",
+          KOHO_SOURCE: from,
+          KOHO_OWNER: gitSrc.owner,
+          KOHO_REPO: gitSrc.repo,
+          KOHO_BRANCH: branch,
+          KOHO_WS_ROOT: getProvisionRoot() ?? "",
+        });
+        if (gitHook.ran) {
+          if (!gitHook.ok)
+            return new Response(
+              `provision hook denied '${gitSrc.owner}/${gitSrc.repo}' (exit ${gitHook.code})` +
+                (gitHook.detail ? `:\n${gitHook.detail}` : ""),
+              { status: 403 },
+            );
+        } else if (!isProvisionAllowed(gitSrc.owner, gitSrc.repo)) {
+          return new Response(
+            `provisioning '${gitSrc.owner}/${gitSrc.repo}' is not allowed — add the owner to ` +
+              `provisionAllowlist in ~/.agent-yes/config.json (or "*" to allow all), ` +
+              `or set a provisionHook to gate it yourself`,
+            { status: 403 },
+          );
+        }
+        const wsRootDir = getProvisionRoot() ?? path.join(homedir(), "ws");
+        const base = path.join(wsRootDir, gitSrc.owner, gitSrc.repo, "tree");
+        const destFor = (b: string) => path.join(base, b);
+        if (branch && existsSync(path.join(destFor(branch), ".git"))) {
+          // already provisioned — reuse; a fetch/pull is the agent's business
+          cwd = destFor(branch);
+          provisioned = { action: "existing", folder: cwd };
+        } else {
+          const tmp = path.join(base, `.clone-${process.pid}-${Date.now().toString(36)}`);
+          try {
+            await mkdir(base, { recursive: true });
+          } catch (e) {
+            return new Response(`cannot create ${base}: ${(e as Error).message}`, { status: 500 });
+          }
+          const cloneMs = 300_000;
+          let created = false;
+          let r = await runCapture(
+            branch
+              ? ["git", "clone", "--branch", branch, "--", gitSrc.url, tmp]
+              : ["git", "clone", "--", gitSrc.url, tmp],
+            { timeoutMs: cloneMs },
+          );
+          if (!r.ok && branch && body.create === true) {
+            // branch may not exist yet — clone the default and branch off it
+            await rm(tmp, { recursive: true, force: true }).catch(() => {});
+            r = await runCapture(["git", "clone", "--", gitSrc.url, tmp], { timeoutMs: cloneMs });
+            if (r.ok) {
+              const co = await runCapture(["git", "-C", tmp, "checkout", "-b", branch]);
+              if (!co.ok) r = co;
+              else created = true;
+            }
+          }
+          if (!r.ok) {
+            await rm(tmp, { recursive: true, force: true }).catch(() => {});
+            return new Response(
+              `git clone failed: ${(r.stderr.trim() || "unknown").slice(0, 500)}` +
+                (branch && body.create !== true
+                  ? "\n(if the branch doesn't exist yet, retry with create:true)"
+                  : ""),
+              { status: 502 },
+            );
+          }
+          const head = await runCapture(["git", "-C", tmp, "rev-parse", "--abbrev-ref", "HEAD"]);
+          let actual = branch || (head.ok ? head.stdout.trim() : "") || "main";
+          if (badBranch(actual)) actual = "main";
+          const dest = destFor(actual);
+          if (existsSync(dest)) {
+            // raced/already there — keep the existing checkout, drop ours
+            await rm(tmp, { recursive: true, force: true }).catch(() => {});
+          } else {
+            try {
+              await mkdir(path.dirname(dest), { recursive: true });
+              await rename(tmp, dest);
+            } catch (e) {
+              await rm(tmp, { recursive: true, force: true }).catch(() => {});
+              return new Response(`cannot place checkout at ${dest}: ${(e as Error).message}`, {
+                status: 500,
+              });
+            }
+          }
+          cwd = dest;
+          provisioned = { action: created ? "cloned+new-branch" : "cloned", folder: dest };
+        }
       } else if (from) {
         type Spec = { owner: string; repo: string; branch: string };
         let prov: {

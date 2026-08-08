@@ -7982,6 +7982,7 @@ my.translate = async (text, lang) => {
         const res = await target.tx.post("/api/spawn", {
           cli: spec.cli || "claude",
           from: spec.from || undefined,
+          branch: spec.branch || undefined,
           create: spec.create || undefined,
           fork: spec.fork || undefined,
           cwd: spec.cwd || undefined,
@@ -8104,11 +8105,10 @@ my.translate = async (text, lang) => {
         $("newform").innerHTML = `<div class="lcard">
       <div class="ltitle">New agent · ${esc(sourceLabel(target) || "local")}</div>
       ${hostRow}
-      <div class="nfield"><label>Working dir</label><input id="nf-cwd" list="nf-cwd-list" value="${esc(cwd)}" placeholder="(host default — ignored when Spawn from is set)" spellcheck="false" autocapitalize="off" /><datalist id="nf-cwd-list">${cwdOptions(target ? target.id : "")}</datalist></div>
+      <div class="nfield"><label>Working dir</label><input id="nf-cwd" list="nf-cwd-list" value="${esc(cwd)}" placeholder="(host default — ignored when a Provision repo is set)" spellcheck="false" autocapitalize="off" /><datalist id="nf-cwd-list">${cwdOptions(target ? target.id : "")}</datalist></div>
       <div class="nfield"><label>CLI</label><select id="nf-cli">${cliOptions(null, preferredCli)}</select></div>
-      <div class="nfield"><label>Provision repo — optional</label><select id="nf-repo"><option value="" selected>(none — use working dir or spawn-from)</option></select></div>
+      <div class="nfield"><label>Provision repo — optional</label><input id="nf-repo" list="nf-repo-list" placeholder="owner/repo · github URL · git URL (gitlab etc.) — provisions a worktree" spellcheck="false" autocapitalize="off" /><datalist id="nf-repo-list"></datalist><div class="lhint" id="nf-repo-hint" style="display:none"></div></div>
       <div class="nfield" id="nf-branch-row" style="display:none"><label>Branch</label><input id="nf-branch" list="nf-branch-list" placeholder="(repo default) — pick one, or type a new name to create it" spellcheck="false" autocapitalize="off" /><datalist id="nf-branch-list"></datalist><div class="lhint" id="nf-branch-hint" style="display:none"></div></div>
-      <div class="nfield"><label>Spawn from — optional</label><input id="nf-from" placeholder="github URL / owner/repo@branch — provisions a worktree" spellcheck="false" autocapitalize="off" /></div>
       <div class="nfield"><label>Prompt — optional</label><textarea id="nf-prompt" rows="3" placeholder="initial message to send the agent…"></textarea></div>
       <div class="lrow">
         <button class="lfleet" id="nf-go">▷ Launch</button>
@@ -8127,13 +8127,7 @@ my.translate = async (text, lang) => {
           showHook(sources.get(ev.target.value));
           loadRepoPicker(sources.get(ev.target.value));
         });
-        $("nf-repo")?.addEventListener("change", () => {
-          const repo = $("nf-repo").value;
-          const row = $("nf-branch-row");
-          if (row) row.style.display = repo ? "" : "none";
-          if (repo) loadBranchPicker(spawnTarget($("newform").dataset.room), repo);
-          else nfRemoteBranches = null;
-        });
+        $("nf-repo")?.addEventListener("change", onRepoChange);
         $("nf-branch-row")?.addEventListener("input", (ev) => {
           if (ev.target.id === "nf-branch") updateBranchHint();
         });
@@ -8141,15 +8135,39 @@ my.translate = async (text, lang) => {
         loadRepoPicker(target);
       }
 
-      // ---- provisioning picker (repo → branch) for the New-agent form -------
-      // Data comes from the target host's /api/ws/repos and /api/ws/branches.
-      // Both are best-effort on the server (gh may be unauthenticated); here a
-      // fetch failure just leaves the pickers empty — the free-text "Spawn
-      // from" field still works.
+      // ---- provisioning picker (repo combobox → branch) for the New-agent form
+      // The repo field is a COMBOBOX: a datalist filled from the target host's
+      // /api/ws/repos (local checkouts + gh-visible repos), but free text always
+      // works — owner/repo, a full github URL (repo or /tree/<branch> URL), or
+      // any other git URL (gitlab etc. — the host raw-`git clone`s those).
+      // The listing endpoints are best-effort; a fetch failure just leaves the
+      // datalist empty and shows a short hint, manual input still provisions.
       let nfRemoteBranches = null; // Set of remote branch names for the picked repo
+
+      // What the repo field's text means. github-first: bare owner/repo IS a
+      // github repo; only scheme/git@ inputs on other hosts become raw git URLs.
+      function parseRepoInput(v) {
+        v = (v || "").trim();
+        if (!v) return null;
+        let m =
+          /^https?:\/\/github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?(?:\/tree\/([^\s?#]+))?\/?$/i.exec(
+            v,
+          );
+        if (m) return { kind: "github", owner: m[1], repo: m[2], branch: m[3] || "" };
+        m = /^git@github\.com:([^/\s]+)\/([^/\s]+?)(?:\.git)?$/i.exec(v);
+        if (m) return { kind: "github", owner: m[1], repo: m[2], branch: "" };
+        m = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(v);
+        if (m && m[1] !== "." && m[1] !== "..")
+          return { kind: "github", owner: m[1], repo: m[2], branch: "" };
+        if (/^(git@[^:\s]+:|ssh:\/\/|git:\/\/|https?:\/\/)\S+$/.test(v))
+          return { kind: "git", url: v.replace(/\/+$/, "") };
+        return null;
+      }
       function loadRepoPicker(target) {
-        const selEl = $("nf-repo");
-        if (!selEl || !target?.tx?.fetchJSON) return;
+        const dl = $("nf-repo-list");
+        const hint = $("nf-repo-hint");
+        if (!dl) return;
+        if (!target?.tx?.fetchJSON) return;
         const forId = target.id;
         target.tx
           .fetchJSON("/api/ws/repos")
@@ -8157,18 +8175,49 @@ my.translate = async (text, lang) => {
             // a slow answer for a host the user switched away from must not
             // paint the new host's repo list (same guard as showHook)
             if ($("newform").dataset.room !== forId) return;
-            const cur = selEl.value;
             const repos = (d && d.repos) || [];
-            selEl.innerHTML =
-              `<option value="">(none — use working dir or spawn-from)</option>` +
-              repos
-                .map((r) => {
-                  const full = `${r.owner}/${r.repo}`;
-                  return `<option value="${esc(full)}"${full === cur ? " selected" : ""}>${esc(full)}${r.local ? "" : " (gh)"}</option>`;
-                })
-                .join("");
+            dl.innerHTML = repos
+              .map(
+                (r) =>
+                  `<option value="${esc(`${r.owner}/${r.repo}`)}">${r.local ? "provisioned" : "gh"}</option>`,
+              )
+              .join("");
+            if (hint && d && d.gh && !d.gh.ok && d.gh.error) {
+              hint.textContent = `gh listing unavailable (${d.gh.error}) — type a repo or URL`;
+              hint.style.display = "";
+            } else if (hint) hint.style.display = "none";
           })
-          .catch(() => {});
+          .catch(() => {
+            if ($("newform").dataset.room !== forId) return;
+            if (hint) {
+              hint.textContent =
+                "repo list unavailable on this host — type owner/repo or a git URL";
+              hint.style.display = "";
+            }
+          });
+      }
+      function onRepoChange() {
+        const parsed = parseRepoInput($("nf-repo")?.value || "");
+        const row = $("nf-branch-row");
+        const hint = $("nf-branch-hint");
+        nfRemoteBranches = null;
+        if (row) row.style.display = parsed ? "" : "none";
+        if (!parsed) return;
+        if (parsed.kind === "github") {
+          if (parsed.branch && $("nf-branch")) $("nf-branch").value = parsed.branch;
+          loadBranchPicker(
+            spawnTarget($("newform").dataset.room),
+            `${parsed.owner}/${parsed.repo}`,
+          );
+        } else {
+          const dl = $("nf-branch-list");
+          if (dl) dl.innerHTML = "";
+          if (hint) {
+            hint.textContent =
+              "non-GitHub git URL — the host runs a raw `git clone`; branch optional (a new name creates it)";
+            hint.style.display = "";
+          }
+        }
       }
       function loadBranchPicker(target, repo) {
         const dl = $("nf-branch-list");
@@ -8184,7 +8233,9 @@ my.translate = async (text, lang) => {
         target.tx
           .fetchJSON("/api/ws/branches?repo=" + encodeURIComponent(repo))
           .then((d) => {
-            if ($("nf-repo")?.value !== want) return; // user picked another repo meanwhile
+            // user picked another repo meanwhile (value may be a URL — normalize)
+            const cur = parseRepoInput($("nf-repo")?.value || "");
+            if (!cur || cur.kind !== "github" || `${cur.owner}/${cur.repo}` !== want) return;
             const branches = (d && d.branches) || [];
             nfRemoteBranches = new Set(branches.filter((b) => b.remote).map((b) => b.name));
             if (dl)
@@ -8258,23 +8309,37 @@ my.translate = async (text, lang) => {
         try {
           localStorage.setItem(LAST_CLI_KEY, cli);
         } catch {}
-        // The repo/branch pickers win over the free-text "Spawn from" field:
-        // picked repo [+ branch] → a `from` spec; a branch name that isn't on
-        // the remote asks the server to create it (create:true, ws new --create).
-        let from = $("nf-from")?.value.trim() || "";
+        // The repo combobox decides provisioning: a github repo [+ branch]
+        // becomes a `from` spec (a branch name that isn't on the remote asks
+        // the server to create it — create:true, ws new --create); any other
+        // git URL is sent as-is with the branch alongside (raw clone path).
+        let from = "";
+        let branch = "";
         let create = false;
-        const pickedRepo = $("nf-repo")?.value || "";
-        if (pickedRepo) {
-          const br = ($("nf-branch")?.value || "").trim();
-          from = br ? `${pickedRepo}@${br}` : pickedRepo;
+        const parsed = parseRepoInput($("nf-repo")?.value || "");
+        const br = ($("nf-branch")?.value || "").trim();
+        if (parsed && parsed.kind === "github") {
+          from = br ? `${parsed.owner}/${parsed.repo}@${br}` : `${parsed.owner}/${parsed.repo}`;
           // Unknown remote list (fetch failed) → still send create: the server
           // only uses it after the branch turns out missing, so it's harmless
           // for existing branches and saves an un-actionable 502 for new ones.
           create = !!(br && (!nfRemoteBranches || !nfRemoteBranches.has(br)));
+        } else if (parsed && parsed.kind === "git") {
+          from = parsed.url;
+          branch = br;
+          create = !!br;
+        } else if ($("nf-repo")?.value.trim()) {
+          // unparseable text must not silently fall through to a plain-cwd spawn
+          $("nf-repo").focus();
+          alert(
+            "Provision repo not recognized — use owner/repo, a github URL, or a git URL (git@… / https://…)",
+          );
+          return;
         }
         const spec = {
           cli,
           from,
+          branch,
           create,
           // a provision spec decides the cwd server-side — don't send a stale one
           cwd: from ? "" : $("nf-cwd").value.trim(),
