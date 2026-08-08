@@ -2675,6 +2675,119 @@ describe("subcommands.cmdWhoami", () => {
   });
 });
 
+describe("subcommands.cmdRole", () => {
+  async function registerAgent(over: Record<string, unknown> = {}) {
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: 910001,
+      cli: "claude",
+      prompt: null,
+      cwd: "/repo/lane",
+      log_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: 515151,
+      agent_id: "eeee0000ffff",
+      ...over,
+    } as any);
+  }
+
+  function capture() {
+    const out: string[] = [];
+    const err: string[] = [];
+    const origOut = process.stdout.write.bind(process.stdout);
+    const origErr = process.stderr.write.bind(process.stderr);
+    (process.stdout as any).write = (s: any) => (out.push(String(s)), true);
+    (process.stderr as any).write = (s: any) => (err.push(String(s)), true);
+    return {
+      out,
+      err,
+      restore() {
+        process.stdout.write = origOut;
+        process.stderr.write = origErr;
+      },
+    };
+  }
+
+  async function withAgentEnv<T>(fn: () => Promise<T>): Promise<T> {
+    const saved = process.env.AGENT_YES_PID;
+    process.env.AGENT_YES_PID = "515151";
+    try {
+      return await fn();
+    } finally {
+      if (saved === undefined) delete process.env.AGENT_YES_PID;
+      else process.env.AGENT_YES_PID = saved;
+    }
+  }
+
+  it("self get/set/clear round-trips via agent context", async () => {
+    const { runSubcommand } = await loadModule();
+    await registerAgent();
+    await withAgentEnv(async () => {
+      let cap = capture();
+      try {
+        expect(await runSubcommand(["bun", "cli.js", "role", "pm"])).toBe(0);
+        expect(cap.out.join("")).toContain('role set to "pm"');
+      } finally {
+        cap.restore();
+      }
+      cap = capture();
+      try {
+        expect(await runSubcommand(["bun", "cli.js", "role"])).toBe(0);
+        expect(cap.out.join("")).toBe("pm\n");
+        expect(await runSubcommand(["bun", "cli.js", "role", "--clear"])).toBe(0);
+        expect(await runSubcommand(["bun", "cli.js", "role"])).toBe(0);
+        expect(cap.out.join("")).toContain("role cleared");
+      } finally {
+        cap.restore();
+      }
+    });
+  });
+
+  it("keyword set and keyword clear work from a human shell", async () => {
+    const { runSubcommand } = await loadModule();
+    await registerAgent();
+    let cap = capture();
+    try {
+      expect(await runSubcommand(["bun", "cli.js", "role", "910001", "crm"])).toBe(0);
+      expect(cap.out.join("")).toContain('role set to "crm"');
+      expect(await runSubcommand(["bun", "cli.js", "role", "910001", "--clear"])).toBe(0);
+      expect(cap.out.join("")).toContain("role cleared");
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it("rejects header-forging role values", async () => {
+    const { runSubcommand } = await loadModule();
+    await registerAgent();
+    const cap = capture();
+    try {
+      expect(await runSubcommand(["bun", "cli.js", "role", "910001", "a b>"])).toBe(1);
+      expect(cap.err.join("")).toContain("invalid role");
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it("errors without agent context when no keyword is given", async () => {
+    const { runSubcommand } = await loadModule();
+    const saved = process.env.AGENT_YES_PID;
+    delete process.env.AGENT_YES_PID;
+    const cap = capture();
+    try {
+      expect(await runSubcommand(["bun", "cli.js", "role"])).toBe(1);
+      expect(await runSubcommand(["bun", "cli.js", "role", "somename"])).toBe(1);
+      expect(cap.err.join("")).toContain("no agent context");
+    } finally {
+      cap.restore();
+      if (saved !== undefined) process.env.AGENT_YES_PID = saved;
+    }
+  });
+});
+
 describe("subcommands.cmdSend double-envelope warning", () => {
   const itUnix = process.platform === "linux" || process.platform === "darwin";
 
