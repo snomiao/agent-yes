@@ -539,6 +539,11 @@ pub async fn spawn_agent(
     // ambiguous. Our own process env still carries it for new_agent_id().
     cmd.env_remove("AGENT_YES_AGENT_ID");
 
+    // Same reasoning for AGENT_YES_ROLE: it names THIS agent's lane (pid_store
+    // reads it from our env at registration). A subagent is its own lane, so
+    // don't let it inherit the parent's role. Mirrors ts/index.ts.
+    cmd.env_remove("AGENT_YES_ROLE");
+
     // Strip the parent Claude Code session markers so the wrapped CLI is a CLEAN
     // top-level session. Without this, an `ay claude` launched from inside another
     // Claude Code session inherits CLAUDE_CODE_CHILD_SESSION — the child claude then

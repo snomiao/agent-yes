@@ -14,6 +14,7 @@ cy cat  <keyword>                       # read の全文エイリアス（窓指
 cy tail <keyword> [-f] [-n N] [--latest]  # 末尾 N 行（既定 96）、-f で追従
 cy head <keyword> [-n N] [--latest]     # 既定 N=96
 cy send <keyword> <msg> [--code=enter|esc|ctrl-c|ctrl-y|ctrl-d|ctrl-\|tab|none|raw:0xNN]
+cy role [name] | cy role <keyword> <name> [--clear]   # 送信 envelope に載る lane/role 名
 cy attach <keyword> [--escape ctrl-\] [--latest] [--cwd <dir>]
 cy stop <keyword> [--method=auto|graceful|double-ctrl-c]
 ```
@@ -100,6 +101,24 @@ Rust 側はパイプを **自プロセスで O_RDWR で開いたまま** にし�
 呼べる（koho の `terminal-ws-lib.ts` と同じ手法）。受信側ではバイトを
 ユーザの stdin と同じ `stdin_tx` チャンネルへ流すため、`/auto` 検出・
 `Ctrl+C` 処理・`stdin_ready` ゲートはそのまま適用される。
+
+### 送信 envelope と role 名
+
+エージェントからの `ay send` は本文を
+`<ay-msg <nonce> from <cli> #<pid> [(role)] @ <cwd> — reply: ay send <agent_id> "...">`
+で包んで届ける。`role` はエージェントが自己申告する lane 名
+（`pm` / `crm` など)で、受信側が cwd/pid から役割を推測する手間を省く。
+設定方法は 2 通り:
+
+- 起動時に環境変数 `AGENT_YES_ROLE=pm ay claude`(登録後に子プロセス env
+  からは strip されるので、subagent には継承されない)
+- 起動後に `ay role pm`(自分)/ `ay role <keyword> pm`(他エージェント)。
+  `--clear` で削除。
+
+役割名は `[A-Za-z0-9._-]{1,32}` に制限する(envelope の開きタグは nonce
+保護されないため、空白や `>` を含む値はヘッダ構造の偽造に使えてしまう)。
+なお、送受信の全文は `ay msgs` で双方の `.agent-yes/{inbox,outbox}.jsonl`
+から後追いできる(`ay cat` は端末描画のみで注入テキストを含まない)。
 
 `--code=` の値:
 

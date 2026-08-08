@@ -460,6 +460,10 @@ export default async function agentYes({
   // `ay`) don't inherit it and register under the same id (which would make that
   // id ambiguous). The wrapper's own process.env still carries it for pidStore.
   delete ptyEnv.AGENT_YES_AGENT_ID;
+  // Same reasoning for AGENT_YES_ROLE: it names THIS agent's lane (pidStore
+  // reads it from our own env at registration). A subagent is its own lane, so
+  // don't let it inherit the parent's role.
+  delete ptyEnv.AGENT_YES_ROLE;
   // Strip the parent Claude Code session markers so the wrapped CLI is a CLEAN
   // top-level session. Without this, an `ay claude` launched from inside another
   // Claude Code session (or this claude's Bash tool) inherits
