@@ -58,6 +58,12 @@ pub struct PidRecord {
     /// follow-up (see docs/agent-sharing.md). Mirrors the TS `agent_id`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
+    /// Self-declared lane/role name (e.g. "pm", "crm") rendered into the
+    /// `ay send` envelope header. From $AGENT_YES_ROLE at registration or set
+    /// later via `ay role` (TS side). Mirrors the TS `role`. Kept as a real
+    /// field (not dropped on rewrite) so compaction preserves TS-set roles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
     /// The permission posture this agent was SPAWNED with (yolo flag + the
     /// wrapper's robust/auto-continue flags). Stamped at registration because
     /// neither the CLI argv nor the wrapper flags survive into the index
@@ -85,6 +91,21 @@ fn new_agent_id() -> String {
 /// common case) out of the JSON so records stay compact and diff-friendly.
 fn is_false(b: &bool) -> bool {
     !*b
+}
+
+/// A caller-set AGENT_YES_ROLE names the lane this agent plays ("pm", "crm", …)
+/// for the `ay send` envelope. It renders into the envelope's open tag, which is
+/// not nonce-protected, so clamp to a safe charset here (mirrors sanitizeRole in
+/// ts/globalPidIndex.ts). pty_spawner strips the var from the wrapped CLI's env
+/// so subagents don't inherit the parent's role.
+fn role_from_env() -> Option<String> {
+    let raw = std::env::var("AGENT_YES_ROLE").ok()?;
+    let trimmed = raw.trim();
+    let ok = (1..=32).contains(&trimmed.len())
+        && trimmed
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-');
+    ok.then(|| trimmed.to_string())
 }
 
 pub struct PidStore {
@@ -157,6 +178,7 @@ impl PidStore {
                 .ok()
                 .and_then(|s| s.parse::<u32>().ok()),
             agent_id: Some(new_agent_id()),
+            role: role_from_env(),
             permissions,
         };
         // Hold the cross-runtime lock across the append so a concurrent rewrite
@@ -598,6 +620,7 @@ mod tests {
             wrapper_pid: None,
             parent_pid: None,
             agent_id: None,
+            role: None,
             permissions: None,
         }];
         store.write_all(&records).unwrap();
@@ -636,6 +659,7 @@ mod tests {
                 wrapper_pid: None,
                 parent_pid: None,
                 agent_id: None,
+                role: None,
                 permissions: None,
             }])
             .unwrap();
