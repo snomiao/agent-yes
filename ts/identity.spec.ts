@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import path from "path";
 import { formatIdentity, localHost, localUser, readGitBranch, tildify } from "./identity.ts";
 
@@ -102,7 +102,7 @@ describe("formatIdentity", () => {
   });
 
   it("tildifies the home directory like ay ls does", () => {
-    expect(tildify(path.join(require("os").homedir(), "ws"))).toBe("~/ws");
+    expect(tildify(path.join(homedir(), "ws"))).toBe(`~${path.sep}ws`);
     expect(tildify("/opt/x")).toBe("/opt/x");
   });
 });
