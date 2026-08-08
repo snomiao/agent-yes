@@ -5,6 +5,7 @@
 // Coexistence: the room persists in `~/.agent-yes/.share-room-ayrs` — a
 // DIFFERENT file from the TS daemon's `.share-room` — so the Rust host never
 // steals the signaling room out from under a running `ay serve --webrtc`.
+use super::agent_share::Scope;
 use super::api;
 use super::e2e;
 use anyhow::{anyhow, bail, Context, Result};
@@ -14,7 +15,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
 use webrtc::api::APIBuilder;
@@ -78,7 +79,7 @@ pub fn parse_share_url(s: &str) -> Result<RoomUrl> {
     })
 }
 
-fn mint_room(host: &str) -> RoomUrl {
+pub(super) fn mint_room(host: &str) -> RoomUrl {
     RoomUrl {
         room: format!("r{}", e2e::random_hex(6)),
         token: format!("{}{}", e2e::MARKER, e2e::random_hex(32)),
@@ -278,8 +279,20 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     eprintln!("[ayrs share] room {} via {}", room.room, room.host);
     println!("{link}");
 
+    // The master room never cancels; the dummy sender stays alive for the loop.
+    let (_cancel_tx, cancel_rx) = watch::channel(false);
+    let scope = Arc::new(Scope::Full);
     loop {
-        match connect_once(&room, &secret, &api_token, peers.clone()).await {
+        match connect_once(
+            &room,
+            &secret,
+            &api_token,
+            peers.clone(),
+            scope.clone(),
+            cancel_rx.clone(),
+        )
+        .await
+        {
             Ok(SessionEnd::Refresh) => {
                 // periodic re-hello (see ts/share.ts SIG_REFRESH_MS rationale)
                 continue;
@@ -296,6 +309,7 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
                 let link = format_share_link(&room.room, &secret, &room.host);
                 eprintln!("[ayrs share] room rotated: {link}");
             }
+            Ok(SessionEnd::Cancelled) => unreachable!("master room has no canceller"),
             Ok(SessionEnd::Dropped) => {
                 tokio::time::sleep(Duration::from_millis(1000)).await;
             }
@@ -307,10 +321,70 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     }
 }
 
+/// One scoped-share room (ts/agentShare.ts createScopedShare's startShare call):
+/// fresh unpersisted room, no claim lock, no rotation — a 1008 reject is fatal
+/// for the share rather than rotated, since the link was already handed out.
+/// Runs until `cancel` flips (revoke / TTL expiry), then closes every peer so
+/// browsers see an immediate DataChannel close.
+pub async fn run_scoped_session(
+    room: String,
+    secret: String,
+    sighost: String,
+    scope: Arc<Scope>,
+    mut cancel: watch::Receiver<bool>,
+) {
+    let room = RoomUrl {
+        room,
+        token: String::new(), // auth derives from the secret; token is unused here
+        host: sighost,
+    };
+    let peers: Peers = Arc::new(Mutex::new(HashMap::new()));
+    loop {
+        if *cancel.borrow() {
+            break;
+        }
+        match connect_once(
+            &room,
+            &secret,
+            "",
+            peers.clone(),
+            scope.clone(),
+            cancel.clone(),
+        )
+        .await
+        {
+            Ok(SessionEnd::Refresh) => continue,
+            Ok(SessionEnd::Cancelled) => break,
+            Ok(SessionEnd::Rejected) => {
+                eprintln!("[ayrs share] scoped room {} rejected by signaling server — share is dead until revoked/re-minted", room.room);
+                break;
+            }
+            Ok(SessionEnd::Dropped) => {
+                tokio::select! {
+                    _ = cancel.changed() => {}
+                    _ = tokio::time::sleep(Duration::from_millis(1000)) => {}
+                }
+            }
+            Err(e) => {
+                eprintln!("[ayrs share] scoped signaling error: {e:#}");
+                tokio::select! {
+                    _ = cancel.changed() => {}
+                    _ = tokio::time::sleep(Duration::from_millis(2000)) => {}
+                }
+            }
+        }
+    }
+    let ids: Vec<String> = peers.lock().await.keys().cloned().collect();
+    for id in ids {
+        close_peer(&peers, &id).await;
+    }
+}
+
 enum SessionEnd {
     Refresh,
     Rejected,
     Dropped,
+    Cancelled,
 }
 
 async fn connect_once(
@@ -318,6 +392,8 @@ async fn connect_once(
     secret: &str,
     api_token: &str,
     peers: Peers,
+    scope: Arc<Scope>,
+    mut cancel: watch::Receiver<bool>,
 ) -> Result<SessionEnd> {
     let scheme = if room.host.starts_with("localhost") || room.host.starts_with("127.") {
         "ws"
@@ -354,6 +430,12 @@ async fn connect_once(
 
     loop {
         tokio::select! {
+            _ = cancel.changed() => {
+                if *cancel.borrow() {
+                    let _ = sink.close().await;
+                    return Ok(SessionEnd::Cancelled);
+                }
+            }
             _ = &mut refresh => {
                 let _ = sink.close().await;
                 return Ok(SessionEnd::Refresh);
@@ -386,7 +468,7 @@ async fn connect_once(
                     }
                     Message::Text(t) => {
                         let Ok(m) = serde_json::from_str::<Value>(&t) else { continue };
-                        handle_signal(m, secret, api_token, &peers, &sig_tx).await;
+                        handle_signal(m, secret, api_token, &peers, &sig_tx, &scope).await;
                     }
                     _ => {}
                 }
@@ -401,6 +483,7 @@ async fn handle_signal(
     api_token: &str,
     peers: &Peers,
     sig_tx: &mpsc::UnboundedSender<SigOut>,
+    scope: &Arc<Scope>,
 ) {
     match m.get("type").and_then(|t| t.as_str()) {
         Some("pong") | Some("welcome") => {}
@@ -412,7 +495,9 @@ async fn handle_signal(
                 return;
             }
             eprintln!("[ayrs share] peer-join {peer_id}");
-            if let Err(e) = start_peer(peer_id.clone(), api_token, peers, sig_tx).await {
+            if let Err(e) =
+                start_peer(peer_id.clone(), api_token, peers, sig_tx, scope.clone()).await
+            {
                 eprintln!("[ayrs share] peer setup failed: {e:#}");
                 close_peer(peers, &peer_id).await;
             }
@@ -459,7 +544,7 @@ async fn handle_signal(
     }
 }
 
-fn value_to_id(v: &Value) -> String {
+pub(super) fn value_to_id(v: &Value) -> String {
     match v {
         Value::String(s) => s.clone(),
         other => other.to_string(),
@@ -481,6 +566,7 @@ async fn start_peer(
     api_token: &str,
     peers: &Peers,
     sig_tx: &mpsc::UnboundedSender<SigOut>,
+    scope: Arc<Scope>,
 ) -> Result<()> {
     let api = APIBuilder::new().build();
     let config = RTCConfiguration {
@@ -553,7 +639,13 @@ async fn start_peer(
             })
         }));
     }
-    spawn_receiver(peers.clone(), peer_id.clone(), in_rx, api_token.to_string());
+    spawn_receiver(
+        peers.clone(),
+        peer_id.clone(),
+        in_rx,
+        api_token.to_string(),
+        scope,
+    );
 
     // on open: start the mandatory key-confirmation handshake
     {
@@ -671,6 +763,7 @@ fn spawn_receiver(
     peer_id: String,
     mut in_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     api_token: String,
+    scope: Arc<Scope>,
 ) {
     tokio::spawn(async move {
         while let Some(frame) = in_rx.recv().await {
@@ -782,8 +875,9 @@ fn spawn_receiver(
                     let peers2 = peers.clone();
                     let peer_id2 = peer_id.clone();
                     let id2 = id.clone();
+                    let scope2 = scope.clone();
                     let handle = tokio::spawn(async move {
-                        serve_request(out_tx, id2.clone(), method, path, body).await;
+                        serve_request(out_tx, id2.clone(), method, path, body, scope2).await;
                         // done — drop our own abort registration
                         let mut map = peers2.lock().await;
                         if let Some(p) = map.get_mut(&peer_id2) {
@@ -811,8 +905,9 @@ async fn serve_request(
     method: String,
     path: String,
     body: String,
+    scope: Arc<Scope>,
 ) {
-    let res = api::handle(&method, &path, &body).await;
+    let res = super::agent_share::scoped_handle(&scope, &method, &path, &body).await;
     let _ = out_tx.send((
         0,
         json!({"t":"res","id":id,"status":res.status,"ct":res.content_type}),

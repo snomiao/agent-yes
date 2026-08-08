@@ -985,7 +985,7 @@ fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
         .collect()
 }
 
-fn url_decode(s: &str) -> String {
+pub(crate) fn url_decode(s: &str) -> String {
     let mut out = Vec::with_capacity(s.len());
     let b = s.as_bytes();
     let mut i = 0;
@@ -1225,20 +1225,53 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
             }
         }
 
-        // /api/share + /api/expose mint scoped share tokens and drive the edge
-        // relay through the JS agentShare/expose modules; the Rust daemon has
-        // no scoped-token store or relay client, so it declines rather than
-        // shipping a weaker look-alike.
-        ("POST", "/api/share")
-        | ("GET", "/api/shares")
-        | ("POST", "/api/expose")
-        | ("GET", "/api/exposes") => text(
+        // ── Single-agent view-only shares (ts/agentShare.ts port) ───────────
+        // Mint / list / revoke scoped share rooms. Reachable by whoever already
+        // holds full control of this host — a scoped viewer can't get here (its
+        // scope filter default-denies /api/share*).
+        ("POST", "/api/share") => {
+            let Ok(v) = serde_json::from_str::<Value>(body) else {
+                return text(400, "invalid JSON body");
+            };
+            let Some(agent) = v.get("agent").and_then(|a| a.as_str()).filter(|a| !a.is_empty())
+            else {
+                return text(400, "agent required");
+            };
+            let perm = v.get("perm").and_then(|p| p.as_str()).unwrap_or("r");
+            if perm != "r" && perm != "rw" {
+                return text(400, format!("invalid perm {perm} (want r or rw)"));
+            }
+            match crate::serve::agent_share::create(
+                agent,
+                perm,
+                crate::serve::share::DEFAULT_SIGHOST,
+            )
+            .await
+            {
+                Ok(share) => json_res(200, &share),
+                Err((status, msg)) => text(status, msg),
+            }
+        }
+        ("GET", "/api/shares") => json_res(200, &crate::serve::agent_share::list_json()),
+        ("DELETE", p) if p.starts_with("/api/share/") => {
+            let id = url_decode(&p["/api/share/".len()..]);
+            if crate::serve::agent_share::revoke(&id) {
+                text(200, "revoked")
+            } else {
+                text(404, "no such share")
+            }
+        }
+
+        // /api/expose drives the edge relay through the JS codehost/tunnel
+        // module; the Rust daemon has no relay client, so it declines rather
+        // than shipping a weaker look-alike.
+        ("POST", "/api/expose") | ("GET", "/api/exposes") => text(
             501,
-            "share/expose need the JS scoped-token + relay modules — use `ay serve`",
+            "expose needs the JS codehost/tunnel relay client — use `ay serve`",
         ),
-        ("DELETE", p) if p.starts_with("/api/share/") || p.starts_with("/api/expose/") => text(
+        ("DELETE", p) if p.starts_with("/api/expose/") => text(
             501,
-            "share/expose need the JS scoped-token + relay modules — use `ay serve`",
+            "expose needs the JS codehost/tunnel relay client — use `ay serve`",
         ),
 
         ("OPTIONS", _) => text(204, ""),
