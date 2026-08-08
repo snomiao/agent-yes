@@ -1,5 +1,16 @@
 # agent-yes
 
+## No real fleet data in committed artifacts
+
+This repo is public. Tests, fixtures, code comments, help examples, docs, and
+PR bodies must use **synthetic data only** — never copy real values from the
+operator's live fleet or terminals. That includes: real pids and agent ids,
+real cwd/worktree paths, org/repo/product names of private downstream
+projects, people's names, prompts, and terminal transcripts. Use neutral
+stand-ins instead (`pid 1111`, `/repo/alpha`, `/x/acme/acme/tree/...`,
+`"alice"`). When a regression came from a live incident, describe the
+_mechanism_ generically; keep the concrete details out of the commit.
+
 ## Scratch / debug / temp scripts → `./tmp/`
 
 Put throwaway debug, probe, capture, and scratch scripts (and their output —

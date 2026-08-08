@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { execaCommandSync, parseCommandString } from "execa";
 import { fromWritable } from "from-node-stream";
-import { mkdir, readFile, unlink, writeFile } from "fs/promises";
+import { mkdir, open, readFile, stat, unlink, writeFile } from "fs/promises";
 import path from "path";
 import DIE from "phpdie";
 import sflow from "sflow";
@@ -81,6 +81,37 @@ export { reconcileTodos } from "./todoAutomation.ts";
 export type { TodoAction, LiveAgent } from "./todoAutomation.ts";
 export { listAsks, listAsksForProject, answerAsk, hasTodoStore } from "./askApi.ts";
 export type { AskItem, AnswerInput, AnswerResult } from "./askApi.ts";
+
+// Raw PTY logs are an append-only capture; the reader (`readLogForRender`) only
+// ever replays the trailing ~64 MiB, so older bytes are dead weight on disk (a
+// runaway capture was seen at ~1 GB). Once the file passes RAW_LOG_TRIGGER_BYTES,
+// compact it to its last RAW_LOG_KEEP_BYTES (kept above the render window so no
+// visible output is lost). Mirrors the Rust runtime's LogWriter cap in
+// rs/src/log_files.rs — keep the two in sync.
+const RAW_LOG_KEEP_BYTES = 80 * 1024 * 1024;
+const RAW_LOG_TRIGGER_BYTES = 160 * 1024 * 1024;
+
+/** Shrink a raw log to its trailing `keepBytes` **in place** (rewrite tail→front
+ * + truncate), returning the new length. Deliberately NOT temp-file+rename:
+ * rename swaps the inode, freezing any live follower (`ay serve` `/api/tail`,
+ * incl. the agent-yes.com viewer over WebRTC) whose fd is bound to the old inode.
+ * Rewriting the same inode lets serve's `if (size < offset) offset = size`
+ * "truncated/rotated" guard resume the stream. Mirrors rs/src/log_files.rs. */
+async function compactRawLogTail(logPath: string, keepBytes = RAW_LOG_KEEP_BYTES): Promise<number> {
+  const fh = await open(logPath, "r+");
+  try {
+    const { size } = await fh.stat();
+    if (size <= keepBytes) return size;
+    // Read the tail fully before overwriting the front so it can't be clobbered.
+    const buf = Buffer.allocUnsafe(keepBytes);
+    const { bytesRead } = await fh.read(buf, 0, keepBytes, size - keepBytes);
+    await fh.write(buf, 0, bytesRead, 0);
+    await fh.truncate(bytesRead);
+    return bytesRead;
+  } finally {
+    await fh.close();
+  }
+}
 
 export type AgentCliConfig = {
   // cli
@@ -463,6 +494,10 @@ export default async function agentYes({
   // `ay`) don't inherit it and register under the same id (which would make that
   // id ambiguous). The wrapper's own process.env still carries it for pidStore.
   delete ptyEnv.AGENT_YES_AGENT_ID;
+  // Same reasoning for AGENT_YES_ROLE: it names THIS agent's lane (pidStore
+  // reads it from our own env at registration). A subagent is its own lane, so
+  // don't let it inherit the parent's role.
+  delete ptyEnv.AGENT_YES_ROLE;
   // Strip the parent Claude Code session markers so the wrapped CLI is a CLEAN
   // top-level session. Without this, an `ay claude` launched from inside another
   // Claude Code session (or this claude's Bash tool) inherits
@@ -1284,8 +1319,13 @@ export default async function agentYes({
 
       // try stream the raw log for realtime debugging, including control chars, note: it will be a huge file
       return await mkdir(path.dirname(rawLogPath), { recursive: true })
-        .then(() => {
+        .then(async () => {
           logger.debug(`[${cli}-yes] raw logs streaming to ${rawLogPath}`);
+          // Track size (seeded from any pre-existing log) to cap disk growth
+          // without a stat() per chunk. See compactRawLogTail.
+          let rawWritten = await stat(rawLogPath)
+            .then((s) => s.size)
+            .catch(() => 0);
           return f
             .forEach(async (chars) => {
               // Detect alt-screen enter (DECSET 1049/1047/47) so we know whether
@@ -1294,6 +1334,10 @@ export default async function agentYes({
                 usedAltScreen = true;
               }
               await writeFile(rawLogPath, chars, { flag: "a" }).catch(() => null);
+              rawWritten += Buffer.byteLength(chars);
+              if (rawWritten > RAW_LOG_TRIGGER_BYTES) {
+                rawWritten = await compactRawLogTail(rawLogPath).catch(() => rawWritten);
+              }
             })
             .run();
         })

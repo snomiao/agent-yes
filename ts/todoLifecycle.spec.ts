@@ -10,7 +10,7 @@ import {
 } from "./todoLifecycle";
 
 describe("todoLifecycle", () => {
-  it("defines all five kinds with the exact graphs taku specified", () => {
+  it("defines all five kinds with the exact graphs the operator specified", () => {
     expect(Object.keys(LIFECYCLES).sort()).toEqual([
       "code",
       "decision",
@@ -53,7 +53,7 @@ describe("todoLifecycle", () => {
     expect(nextStates("code", "verify-failed")).toEqual(["doing"]);
   });
 
-  it("the human kind has no merge/ship/QA transitions at all (taku decision #6)", () => {
+  it("the human kind has no merge/ship/QA transitions at all (operator decision #6)", () => {
     const humanStates = new Set(statesOf("human"));
     for (const s of ["merged", "shipped", "verifying", "verify-failed"]) {
       expect(humanStates.has(s)).toBe(false);

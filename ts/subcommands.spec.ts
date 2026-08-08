@@ -28,6 +28,32 @@ async function loadModule() {
   return await import("./subcommands.ts");
 }
 
+describe("subcommands.readLogForRender", () => {
+  it("reads a small file whole (byte-identical)", async () => {
+    const { readLogForRender } = await loadModule();
+    const p = path.join(testHome, "small.log");
+    const body = Buffer.from("hello\nworld\n".repeat(100));
+    await writeFile(p, body);
+    const got = await readLogForRender(p);
+    expect(Buffer.from(got)).toEqual(body);
+  });
+
+  it("caps an oversized file to its trailing window", async () => {
+    const { readLogForRender } = await loadModule();
+    const p = path.join(testHome, "big.log");
+    // 300 KiB of distinct 16-byte lines; cap the read at 64 KiB.
+    const lines: string[] = [];
+    for (let i = 0; i < 300 * 64; i++) lines.push(String(i).padStart(15, "0"));
+    const body = Buffer.from(lines.join("\n") + "\n");
+    await writeFile(p, body);
+    const cap = 64 * 1024;
+    const got = await readLogForRender(p, cap);
+    expect(got.byteLength).toBe(cap);
+    // The window is the tail: it ends with the file's final bytes.
+    expect(Buffer.from(got).subarray(-16)).toEqual(body.subarray(-16));
+  });
+});
+
 describe("subcommands.controlCodeFromName", () => {
   it("maps named codes to the right control bytes", async () => {
     const { controlCodeFromName } = await loadModule();
@@ -2535,5 +2561,442 @@ describe("subcommands.resolveResumeArgs", () => {
       args: ["--continue"],
       strategy: "--continue (fallback)",
     });
+  });
+});
+
+describe("subcommands.cmdWhoami", () => {
+  const envKey = "AGENT_YES_PID";
+  let savedEnv: string | undefined;
+
+  beforeEach(() => {
+    savedEnv = process.env[envKey];
+    delete process.env[envKey];
+  });
+  afterEach(() => {
+    if (savedEnv === undefined) delete process.env[envKey];
+    else process.env[envKey] = savedEnv;
+  });
+
+  it("outside an agent (no AGENT_YES_PID) exits 1 with a human-shell hint", async () => {
+    const { runSubcommand } = await loadModule();
+    const stderr: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (s: any) => {
+      stderr.push(String(s));
+      return true;
+    };
+    try {
+      const code = await runSubcommand(["bun", "cli.js", "whoami"]);
+      expect(code).toBe(1);
+      expect(stderr.join("")).toMatch(/AGENT_YES_PID is unset/);
+    } finally {
+      process.stderr.write = orig;
+    }
+  });
+
+  it("a set-but-unregistered AGENT_YES_PID reports 'unregistered' in --json and exits 1", async () => {
+    const { runSubcommand } = await loadModule();
+    process.env[envKey] = "999999";
+    const stdout: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (s: any) => {
+      stdout.push(String(s));
+      return true;
+    };
+    try {
+      const code = await runSubcommand(["bun", "cli.js", "whoami", "--json"]);
+      expect(code).toBe(1);
+    } finally {
+      process.stdout.write = orig;
+    }
+    expect(JSON.parse(stdout.join(""))).toEqual({ agent: null, reason: "unregistered" });
+  });
+
+  it("resolves the caller via wrapper_pid and prints identity + reply address", async () => {
+    const mod = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid, // alive, so live-state derivation doesn't read it as exited
+      cli: "claude",
+      prompt: "whoami test",
+      cwd: "/repo/alpha",
+      log_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: 424242,
+      parent_pid: null,
+      agent_id: "aaaa0000bbbb",
+    });
+    process.env[envKey] = "424242";
+
+    const stdout: string[] = [];
+    const orig = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = (s: any) => {
+      stdout.push(String(s));
+      return true;
+    };
+    try {
+      const code = await mod.runSubcommand(["bun", "cli.js", "whoami", "--json"]);
+      expect(code).toBe(0);
+    } finally {
+      process.stdout.write = orig;
+    }
+    const parsed = JSON.parse(stdout.join(""));
+    expect(parsed).toMatchObject({
+      pid: process.pid,
+      cli: "claude",
+      cwd: "/repo/alpha",
+      agent_id: "aaaa0000bbbb",
+      wrapper_pid: 424242,
+      reply: "ay send aaaa0000bbbb",
+    });
+    expect(typeof parsed.state).toBe("string");
+
+    // Human-readable form carries the traceable envelope template.
+    const stdout2: string[] = [];
+    (process.stdout as any).write = (s: any) => {
+      stdout2.push(String(s));
+      return true;
+    };
+    try {
+      const code = await mod.runSubcommand(["bun", "cli.js", "whoami"]);
+      expect(code).toBe(0);
+    } finally {
+      process.stdout.write = orig;
+    }
+    const text = stdout2.join("");
+    expect(text).toMatch(/agent {5}claude #\d+ {2}\(agent_id aaaa0000bbbb\)/);
+    expect(text).toMatch(/reply {5}ay send aaaa0000bbbb/);
+    expect(text).toMatch(
+      /<ay-msg from claude #\d+ @ \/repo\/alpha — reply: ay send aaaa0000bbbb "\.\.\.">/,
+    );
+  });
+});
+
+describe("subcommands.cmdRole", () => {
+  async function registerAgent(over: Record<string, unknown> = {}) {
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: 910001,
+      cli: "claude",
+      prompt: null,
+      cwd: "/repo/lane",
+      log_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: 515151,
+      agent_id: "eeee0000ffff",
+      ...over,
+    } as any);
+  }
+
+  function capture() {
+    const out: string[] = [];
+    const err: string[] = [];
+    const origOut = process.stdout.write.bind(process.stdout);
+    const origErr = process.stderr.write.bind(process.stderr);
+    (process.stdout as any).write = (s: any) => (out.push(String(s)), true);
+    (process.stderr as any).write = (s: any) => (err.push(String(s)), true);
+    return {
+      out,
+      err,
+      restore() {
+        process.stdout.write = origOut;
+        process.stderr.write = origErr;
+      },
+    };
+  }
+
+  async function withAgentEnv<T>(fn: () => Promise<T>): Promise<T> {
+    const saved = process.env.AGENT_YES_PID;
+    process.env.AGENT_YES_PID = "515151";
+    try {
+      return await fn();
+    } finally {
+      if (saved === undefined) delete process.env.AGENT_YES_PID;
+      else process.env.AGENT_YES_PID = saved;
+    }
+  }
+
+  it("self get/set/clear round-trips via agent context", async () => {
+    const { runSubcommand } = await loadModule();
+    await registerAgent();
+    await withAgentEnv(async () => {
+      let cap = capture();
+      try {
+        expect(await runSubcommand(["bun", "cli.js", "role", "pm"])).toBe(0);
+        expect(cap.out.join("")).toContain('role set to "pm"');
+      } finally {
+        cap.restore();
+      }
+      cap = capture();
+      try {
+        expect(await runSubcommand(["bun", "cli.js", "role"])).toBe(0);
+        expect(cap.out.join("")).toBe("pm\n");
+        expect(await runSubcommand(["bun", "cli.js", "role", "--clear"])).toBe(0);
+        expect(await runSubcommand(["bun", "cli.js", "role"])).toBe(0);
+        expect(cap.out.join("")).toContain("role cleared");
+      } finally {
+        cap.restore();
+      }
+    });
+  });
+
+  it("keyword set and keyword clear work from a human shell", async () => {
+    const { runSubcommand } = await loadModule();
+    await registerAgent();
+    let cap = capture();
+    try {
+      expect(await runSubcommand(["bun", "cli.js", "role", "910001", "crm"])).toBe(0);
+      expect(cap.out.join("")).toContain('role set to "crm"');
+      expect(await runSubcommand(["bun", "cli.js", "role", "910001", "--clear"])).toBe(0);
+      expect(cap.out.join("")).toContain("role cleared");
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it("rejects header-forging role values", async () => {
+    const { runSubcommand } = await loadModule();
+    await registerAgent();
+    const cap = capture();
+    try {
+      expect(await runSubcommand(["bun", "cli.js", "role", "910001", "a b>"])).toBe(1);
+      expect(cap.err.join("")).toContain("invalid role");
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it("errors without agent context when no keyword is given", async () => {
+    const { runSubcommand } = await loadModule();
+    const saved = process.env.AGENT_YES_PID;
+    delete process.env.AGENT_YES_PID;
+    const cap = capture();
+    try {
+      expect(await runSubcommand(["bun", "cli.js", "role"])).toBe(1);
+      expect(await runSubcommand(["bun", "cli.js", "role", "somename"])).toBe(1);
+      expect(cap.err.join("")).toContain("no agent context");
+    } finally {
+      cap.restore();
+      if (saved !== undefined) process.env.AGENT_YES_PID = saved;
+    }
+  });
+});
+
+describe("subcommands.cmdSend double-envelope warning", () => {
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
+
+  it.skipIf(!itUnix)(
+    "warns when an agent sender's body is already <ay-msg …>-wrapped (still delivers, still wraps)",
+    async () => {
+      const { runSubcommand } = await loadModule();
+      const { appendGlobalPid } = await import("./globalPidIndex.ts");
+      const { spawnSync } = await import("child_process");
+      const tmp = await mkdtemp(path.join(tmpdir(), "ay-fifo-"));
+      try {
+        const fifo = path.join(tmp, "warn.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        const fs = await import("fs");
+        const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR);
+        // Target agent (owns the fifo) …
+        await appendGlobalPid({
+          pid: process.pid,
+          cli: "claude",
+          prompt: null,
+          cwd: "/repo/alpha",
+          log_file: null,
+          fifo_file: fifo,
+          status: "active",
+          exit_code: null,
+          exit_reason: null,
+          started_at: Date.now(),
+        });
+        // … and a registered SENDER so cmdSend resolves an agent context and
+        // engages the auto-envelope path the warning guards.
+        await appendGlobalPid({
+          pid: 900001,
+          cli: "claude",
+          prompt: null,
+          cwd: "/repo/beta",
+          log_file: null,
+          status: "active",
+          exit_code: null,
+          exit_reason: null,
+          started_at: Date.now(),
+          wrapper_pid: 424242,
+          agent_id: "cccc0000dddd",
+        });
+        const savedAyPid = process.env.AGENT_YES_PID;
+        process.env.AGENT_YES_PID = "424242";
+        const stderr: string[] = [];
+        const origErr = process.stderr.write.bind(process.stderr);
+        (process.stderr as any).write = (s: any) => (stderr.push(String(s)), true);
+        const origOut = process.stdout.write.bind(process.stdout);
+        (process.stdout as any).write = () => true;
+        try {
+          const code = await runSubcommand([
+            "bun",
+            "cli.js",
+            "send",
+            String(process.pid),
+            '<ay-msg deadbeef from claude #900001 @ /repo/beta — reply: ay send 900001 "...">hi</ay-msg deadbeef>',
+            "--force",
+          ]);
+          expect(code).toBe(0);
+          expect(stderr.join("")).toMatch(/DOUBLE wrapper/);
+        } finally {
+          process.stderr.write = origErr;
+          process.stdout.write = origOut;
+          if (savedAyPid === undefined) delete process.env.AGENT_YES_PID;
+          else process.env.AGENT_YES_PID = savedAyPid;
+        }
+        // Delivered bytes carry BOTH envelopes — transport stamp outermost.
+        const buf = Buffer.alloc(8192);
+        const n = fs.readSync(rdwrFd, buf, 0, buf.length, null);
+        const received = buf.subarray(0, n).toString();
+        expect(received).toMatch(/^<ay-msg [0-9a-f]{8} from claude #900001 @ /);
+        expect(received).toContain("<ay-msg deadbeef");
+        fs.closeSync(rdwrFd);
+      } finally {
+        await rm(tmp, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)("plain agent-sender bodies do not trigger the warning", async () => {
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const { spawnSync } = await import("child_process");
+    const tmp = await mkdtemp(path.join(tmpdir(), "ay-fifo-"));
+    try {
+      const fifo = path.join(tmp, "plain.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const fs = await import("fs");
+      const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR);
+      await appendGlobalPid({
+        pid: process.pid,
+        cli: "claude",
+        prompt: null,
+        cwd: "/repo/alpha",
+        log_file: null,
+        fifo_file: fifo,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: Date.now(),
+      });
+      await appendGlobalPid({
+        pid: 900001,
+        cli: "claude",
+        prompt: null,
+        cwd: "/repo/beta",
+        log_file: null,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: Date.now(),
+        wrapper_pid: 424242,
+        agent_id: "cccc0000dddd",
+      });
+      const savedAyPid = process.env.AGENT_YES_PID;
+      process.env.AGENT_YES_PID = "424242";
+      const stderr: string[] = [];
+      const origErr = process.stderr.write.bind(process.stderr);
+      (process.stderr as any).write = (s: any) => (stderr.push(String(s)), true);
+      const origOut = process.stdout.write.bind(process.stdout);
+      (process.stdout as any).write = () => true;
+      try {
+        const code = await runSubcommand([
+          "bun",
+          "cli.js",
+          "send",
+          String(process.pid),
+          "plain body, quoting <ay-msg deadbeef …> mid-text is fine",
+          "--force",
+        ]);
+        expect(code).toBe(0);
+        expect(stderr.join("")).not.toMatch(/DOUBLE wrapper/);
+      } finally {
+        process.stderr.write = origErr;
+        process.stdout.write = origOut;
+        if (savedAyPid === undefined) delete process.env.AGENT_YES_PID;
+        else process.env.AGENT_YES_PID = savedAyPid;
+      }
+      fs.closeSync(rdwrFd);
+    } finally {
+      await rm(tmp, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it.skipIf(!itUnix)("a sender with a role gets it rendered into the envelope header", async () => {
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const { spawnSync } = await import("child_process");
+    const tmp = await mkdtemp(path.join(tmpdir(), "ay-fifo-"));
+    try {
+      const fifo = path.join(tmp, "role.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const fs = await import("fs");
+      const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR);
+      await appendGlobalPid({
+        pid: process.pid,
+        cli: "claude",
+        prompt: null,
+        cwd: "/repo/alpha",
+        log_file: null,
+        fifo_file: fifo,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: Date.now(),
+      });
+      await appendGlobalPid({
+        pid: 900001,
+        cli: "claude",
+        prompt: null,
+        cwd: "/repo/beta",
+        log_file: null,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: Date.now(),
+        wrapper_pid: 424242,
+        agent_id: "cccc0000dddd",
+        role: "crm",
+      });
+      const savedAyPid = process.env.AGENT_YES_PID;
+      process.env.AGENT_YES_PID = "424242";
+      const origOut = process.stdout.write.bind(process.stdout);
+      (process.stdout as any).write = () => true;
+      try {
+        const code = await runSubcommand([
+          "bun",
+          "cli.js",
+          "send",
+          String(process.pid),
+          "hello from crm",
+          "--force",
+        ]);
+        expect(code).toBe(0);
+      } finally {
+        process.stdout.write = origOut;
+        if (savedAyPid === undefined) delete process.env.AGENT_YES_PID;
+        else process.env.AGENT_YES_PID = savedAyPid;
+      }
+      const buf = Buffer.alloc(4096);
+      const n = fs.readSync(rdwrFd, buf, 0, buf.length, null);
+      const received = buf.subarray(0, n).toString();
+      expect(received).toMatch(
+        /^<ay-msg [0-9a-f]{8} from claude #900001 \(crm\) @ \/repo\/beta — reply: ay send cccc0000dddd "\.\.\.">/,
+      );
+      fs.closeSync(rdwrFd);
+    } finally {
+      await rm(tmp, { recursive: true, force: true }).catch(() => null);
+    }
   });
 });

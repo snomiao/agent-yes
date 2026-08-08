@@ -166,7 +166,7 @@ describe("renderDigest", () => {
         state: "shipped",
         tags: ["proj-y"],
         blockedBy: ["T2"],
-        block: { type: "blocked-by-human", who: "taku" },
+        block: { type: "blocked-by-human", who: "alice" },
       }),
     ];
     const out = renderDigest(tasks);

@@ -828,7 +828,7 @@ export class TodoStore {
     }));
   }
 
-  /** True when `from` transitively depends on `target` via `blockedBy` edges. Ported from the equivalent, already-tested algorithm in symval-dev-cli's store.ts. */
+  /** True when `from` transitively depends on `target` via `blockedBy` edges. Ported from the equivalent, already-tested algorithm in a private sibling CLI's store.ts. */
   private dependsOn(from: string, target: string, seen: Set<string> = new Set()): boolean {
     if (from === target) return true;
     if (seen.has(from)) return false;

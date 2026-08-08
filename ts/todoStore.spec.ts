@@ -388,7 +388,7 @@ describe("TodoStore", () => {
     expect(s.list({ blocked: true }).map((t) => t.summary)).toEqual(["b"]);
   });
 
-  it("a done task with a leftover block is not counted by --blocked (mirrors symval-dev-cli's equivalent fix)", async () => {
+  it("a done task with a leftover block is not counted by --blocked (mirrors a private sibling CLI's equivalent fix)", async () => {
     const s = await openStore(TEST_ROOT);
     const t = await s.create({ summary: "a", kind: "human" });
     await s.setBlock(t._id, { type: "blocked-by-human", who: "x" });
@@ -534,7 +534,7 @@ describe("TodoStore", () => {
     await expect(s.markOrphaned(t._id, "dead-agent", [])).rejects.toThrow(/already "orphaned"/);
 
     const done = await s.create({ summary: "y", kind: "human", owner: "dead-agent" });
-    await s.approve(done._id, "human-replied", "taku");
+    await s.approve(done._id, "human-replied", "alice");
     await s.transition(done._id, "decided");
     await s.transition(done._id, "done");
     await expect(s.markOrphaned(done._id, "dead-agent", [])).rejects.toThrow(/already "done"/);
@@ -566,12 +566,12 @@ describe("TodoStore", () => {
     const cleared = await s.clearWaitingOnAgentBlock(t._id, "a1");
     expect(cleared.block).toBeNull();
 
-    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku" });
+    await s.setBlock(t._id, { type: "blocked-by-human", who: "alice" });
     await expect(s.clearWaitingOnAgentBlock(t._id, "a1")).rejects.toThrow(
       /block changed since this was decided/,
     );
     // refused, not erased: the newer block is still exactly what it was
-    expect(s.get(t._id)?.block).toEqual({ type: "blocked-by-human", who: "taku" });
+    expect(s.get(t._id)?.block).toEqual({ type: "blocked-by-human", who: "alice" });
   });
 
   it("clearBlockIfMatches() — the generalized guard — clears only when the FRESH record's blockRev still equals the snapshot, and refuses (without erasing) a block that changed since decided (codex-review round-15 Important)", async () => {
@@ -579,7 +579,7 @@ describe("TodoStore", () => {
     const t = await s.create({ summary: "x", kind: "code" });
     const original = {
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       question: "canary or beta?",
     } as const;
     const afterSet = await s.setBlock(t._id, original);
@@ -588,7 +588,7 @@ describe("TodoStore", () => {
 
     const afterReplace = await s.setBlock(t._id, {
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       question: "a NEW question",
     });
     await expect(s.clearBlockIfMatches(t._id, (afterReplace.blockRev ?? 0) - 1)).rejects.toThrow(
@@ -597,7 +597,7 @@ describe("TodoStore", () => {
     // refused, not erased: the newer block survives untouched
     expect(s.get(t._id)?.block).toEqual({
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       question: "a NEW question",
     });
   });
@@ -607,7 +607,7 @@ describe("TodoStore", () => {
     const t = await s.create({ summary: "x", kind: "code" });
     const identicalBlock = {
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       question: "canary or beta?",
     } as const;
     const firstSet = await s.setBlock(t._id, identicalBlock);
@@ -628,44 +628,44 @@ describe("TodoStore", () => {
     const t = await s.create({ summary: "pick a channel", kind: "decision" });
     const afterSet = await s.setBlock(t._id, {
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       options: ["canary", "beta"],
     });
     const answered = await s.answerHumanBlock(t._id, afterSet.blockRev ?? 0, {
       name: "human-decided",
       toState: "decided",
-      validator: "taku",
+      validator: "alice",
       note: "canary",
     });
     expect(answered.block).toBeNull();
     expect(answered.state).toBe("decided");
     expect(answered.verifyEvidence).toEqual([
-      expect.objectContaining({ gate: "human-decided", validator: "taku", note: "canary" }),
+      expect.objectContaining({ gate: "human-decided", validator: "alice", note: "canary" }),
     ]);
   });
 
   it("answerHumanBlock() refuses (without applying anything) a stale expectedBlockRev, and separately refuses independent-verification violations (validator === owner) — matching approve()'s own unconditional rule (codex-review round-18 Important)", async () => {
     const s = await openStore(TEST_ROOT);
     const t = await s.create({ summary: "x", kind: "decision" });
-    const afterSet = await s.setBlock(t._id, { type: "blocked-by-human", who: "taku" });
-    await s.setBlock(t._id, { type: "blocked-by-human", who: "taku" }); // bumps blockRev again
+    const afterSet = await s.setBlock(t._id, { type: "blocked-by-human", who: "alice" });
+    await s.setBlock(t._id, { type: "blocked-by-human", who: "alice" }); // bumps blockRev again
     await expect(
       s.answerHumanBlock(t._id, afterSet.blockRev ?? 0, {
         name: "human-decided",
         toState: "decided",
-        validator: "taku",
+        validator: "alice",
         note: "acknowledged",
       }),
     ).rejects.toThrow(/this ask has changed since it was loaded/);
     expect(s.get(t._id)?.state).toBe("deciding"); // unchanged — refused before any write
 
-    const owned = await s.create({ summary: "y", kind: "decision", owner: "taku" });
-    const ownedBlock = await s.setBlock(owned._id, { type: "blocked-by-human", who: "taku" });
+    const owned = await s.create({ summary: "y", kind: "decision", owner: "alice" });
+    const ownedBlock = await s.setBlock(owned._id, { type: "blocked-by-human", who: "alice" });
     await expect(
       s.answerHumanBlock(owned._id, ownedBlock.blockRev ?? 0, {
         name: "human-decided",
         toState: "decided",
-        validator: "taku", // same identity as owner
+        validator: "alice", // same identity as owner
         note: "acknowledged",
       }),
     ).rejects.toThrow(/independent verification required/);
@@ -676,7 +676,7 @@ describe("TodoStore", () => {
   it("answerHumanBlock() re-validates canTransition against the FRESH state, not a value captured before the call — a state change UNRELATED to block (so invisible to the blockRev check alone) must still be caught, matching transition()'s own concurrent-state-drift defense (codex-review round-18 Important)", async () => {
     const s = await openStore(TEST_ROOT);
     const t = await s.create({ summary: "x", kind: "decision" });
-    const afterSet = await s.setBlock(t._id, { type: "blocked-by-human", who: "taku" });
+    const afterSet = await s.setBlock(t._id, { type: "blocked-by-human", who: "alice" });
     // Simulate a concurrent writer moving the task's STATE (not its block)
     // to "done" — the same append-only-merge-line technique the
     // markOrphaned() test above uses. blockRev is untouched, so the
@@ -690,7 +690,7 @@ describe("TodoStore", () => {
       s.answerHumanBlock(t._id, afterSet.blockRev ?? 0, {
         name: "human-decided",
         toState: "decided",
-        validator: "taku",
+        validator: "alice",
         note: "acknowledged",
       }),
     ).rejects.toThrow(/no transition done -> decided.*state changed concurrently/);

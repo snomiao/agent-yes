@@ -146,6 +146,7 @@ mod tests {
             wrapper_pid: wrapper,
             parent_pid: None,
             agent_id: agent_id.map(String::from),
+            role: None,
             permissions: None,
         }
     }

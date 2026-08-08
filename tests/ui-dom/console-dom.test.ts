@@ -322,6 +322,46 @@ describe("console DOM behaviour", () => {
     }
   });
 
+  it("right-clicking a row opens the full agent menu, acting on THAT row", async () => {
+    // The row menu used to offer only "Pin to top"; it now mirrors the terminal
+    // header's ⋯ menu (share / stop / restart / force-kill) — bound to the
+    // right-clicked agent, not the selected one.
+    const { ctx, page } = await openConsole(browser, url);
+    const posts: { path: string; body: any }[] = [];
+    page.on("request", (r) => {
+      const u = new URL(r.url());
+      if (r.method() === "POST" && u.pathname === "/api/kill") {
+        try {
+          posts.push({ path: u.pathname, body: r.postDataJSON() });
+        } catch {}
+      }
+    });
+    page.on("dialog", (d) => d.accept());
+    try {
+      // Open 101, then right-click a DIFFERENT row (102).
+      await page.click('.list .row[data-key="local#101"]');
+      await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#101");
+      await page.click('.list .row[data-key="local#102"]', { button: "right" });
+      await expect.poll(() => page.locator(".ctxmenu").isVisible()).toBe(true);
+      const items = (await page.locator(".ctxmenu").innerText()).toLowerCase();
+      expect(items).toContain("pin to top");
+      expect(items).toContain("share (view-only)");
+      expect(items).toContain("share (read-write)");
+      expect(items).toContain("stop agent");
+      expect(items).toContain("restart");
+      expect(items).toContain("force-kill");
+
+      // Force-kill targets 102 (the right-clicked row), not the open 101.
+      await page.locator(".ctxmenu-item", { hasText: "Force-kill" }).click();
+      await expect.poll(() => posts.length).toBe(1);
+      expect(posts[0].body.keyword).toBe("102");
+      // The selection never moved.
+      expect(await page.locator(".row.sel").getAttribute("data-key")).toBe("local#101");
+    } finally {
+      await ctx.close();
+    }
+  });
+
   it("Cmd+K /filter sets and clears the left panel filter box", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
@@ -407,6 +447,59 @@ describe("console DOM behaviour", () => {
       await expect.poll(() => spawns.length).toBe(2);
       expect(spawns[1].from).toBe("acme/newrepo@dev");
       expect(spawns[1].cwd).toBeUndefined();
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("New-agent form provisions from a picked repo/branch (create for new names)", async () => {
+    // The + New agent form's repo picker (GET /api/ws/repos) and branch picker
+    // (GET /api/ws/branches) compose a `from` spec: an existing remote branch
+    // spawns plain {from}; a branch name NOT on the remote adds create:true so
+    // the host branches it off the default (ws new --create semantics).
+    const { ctx, page } = await openConsole(browser, url);
+    const spawns: any[] = [];
+    page.on("request", (r) => {
+      if (r.method() === "POST" && new URL(r.url()).pathname === "/api/spawn") {
+        try {
+          spawns.push(r.postDataJSON());
+        } catch {}
+      }
+    });
+    try {
+      await page.click("#newbtn");
+      // repo picker fills async from /api/ws/repos — placeholder + 3 repos
+      await expect.poll(() => page.locator("#nf-repo option").count()).toBe(4);
+      expect(await page.locator("#nf-repo").innerText()).toContain("acme/newrepo (gh)");
+
+      // pick a repo → branch row appears, datalist fills from /api/ws/branches
+      await page.selectOption("#nf-repo", "acme/widgets");
+      await expect.poll(() => page.locator("#nf-branch-row").isVisible()).toBe(true);
+      await expect.poll(() => page.locator("#nf-branch-list option").count()).toBe(2);
+
+      // a NEW branch name → hint flags the create, spawn carries create:true
+      await page.fill("#nf-branch", "feat-x");
+      await expect
+        .poll(() => page.locator("#nf-branch-hint").innerText())
+        .toContain("new branch will be created");
+      await page.selectOption("#nf-cli", "claude");
+      await page.click("#nf-go");
+      await expect.poll(() => spawns.length).toBe(1);
+      expect(spawns[0].from).toBe("acme/widgets@feat-x");
+      expect(spawns[0].create).toBe(true);
+      expect(spawns[0].cwd).toBeUndefined();
+
+      // an EXISTING remote branch → plain {from}, no create
+      await page.click("#newbtn");
+      await expect.poll(() => page.locator("#nf-repo option").count()).toBe(4);
+      await page.selectOption("#nf-repo", "acme/widgets");
+      await expect.poll(() => page.locator("#nf-branch-list option").count()).toBe(2);
+      await page.fill("#nf-branch", "main");
+      await page.selectOption("#nf-cli", "claude");
+      await page.click("#nf-go");
+      await expect.poll(() => spawns.length).toBe(2);
+      expect(spawns[1].from).toBe("acme/widgets@main");
+      expect(spawns[1].create).toBeUndefined();
     } finally {
       await ctx.close();
     }

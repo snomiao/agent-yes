@@ -80,7 +80,7 @@ so config lives per host, never synced between peers.
   "provisionAllowlist": ["snomiao"],
   // koho-style: pick the account per owner, then allow (exit 0). This REPLACES
   // provisionAllowlist as the gate — a non-zero exit denies the provision.
-  "provisionHook": "case \"$KOHO_OWNER\" in symval) gh auth switch --user snomiao;; snomiao) gh auth switch --user snomiao;; *) echo \"unknown owner $KOHO_OWNER\"; exit 1;; esac",
+  "provisionHook": "case \"$KOHO_OWNER\" in acme) gh auth switch --user snomiao;; snomiao) gh auth switch --user snomiao;; *) echo \"unknown owner $KOHO_OWNER\"; exit 1;; esac",
 }
 ```
 

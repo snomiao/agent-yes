@@ -76,9 +76,13 @@ export interface MenuState {
   question: string;
 }
 
-// An option row: an optional cursor glyph / bullet, then "N. " (the trailing
-// space rejects version-like "3.5GB" that isn't a menu option).
-const OPTION_LINE = /^[\s❯›>▶◉○●·*-]*?(\d+)\.\s/;
+// An option row: an optional box border / cursor glyph / bullet, then "N. " (the
+// trailing space rejects version-like "3.5GB" that isn't a menu option). The `│`
+// matters: claude/gemini render their permission + AskUserQuestion menus inside a
+// rounded box, so real option rows arrive as "│ ❯ 1. Yes" — without it only the
+// cursor row is ever collected and `ay select N` can't reach any other option.
+// Keep `-` last in the class so it stays a literal rather than a range.
+const OPTION_LINE = /^[\s❯›>▶◉○●·│*-]*?(\d+)\.\s/;
 
 /**
  * Parse the selection menu a `needs_input` agent is parked on into a cursor

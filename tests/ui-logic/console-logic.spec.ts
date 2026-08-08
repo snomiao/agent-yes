@@ -79,9 +79,9 @@ describe("repoBranch", () => {
   it("surfaces a submodule leaf below the worktree as `sub`", () => {
     // cwd inside a submodule keeps the superproject's owner/repo/branch (git
     // resolves it that way) but exposes the submodule dir so it's distinguishable.
-    expect(repoBranch(agent({ cwd: "/x/symval/symval/tree/share/lib/bot" }))).toEqual({
-      owner: "symval",
-      repo: "symval",
+    expect(repoBranch(agent({ cwd: "/x/acme/acme/tree/share/lib/bot" }))).toEqual({
+      owner: "acme",
+      repo: "acme",
       branch: "share",
       sub: "bot",
     });
@@ -192,8 +192,8 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
   });
   it("appends a submodule leaf with → when the cwd is nested", () => {
     const list = [
-      agent({ cwd: "/x/symval/symval/tree/share/lib/bot" }),
-      agent({ cwd: "/x/symval/symval/tree/share/lib/api" }),
+      agent({ cwd: "/x/acme/acme/tree/share/lib/bot" }),
+      agent({ cwd: "/x/acme/acme/tree/share/lib/api" }),
     ];
     const ctx = identContext(list);
     // owner/repo/branch uniform → blanked; only the submodule leaf differs.
@@ -204,11 +204,11 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
 
 describe("compactIdent (parent-relative omission in a tree)", () => {
   it("omits fields a subagent shares with its tree parent, keeping the submodule delta", () => {
-    const parent = agent({ cwd: "/x/symval/symval/tree/share" });
+    const parent = agent({ cwd: "/x/acme/acme/tree/share" });
     const list = [
       parent,
-      agent({ cwd: "/x/symval/symval/tree/share/lib/bot" }),
-      agent({ cwd: "/x/symval/symval/tree/syn" }),
+      agent({ cwd: "/x/acme/acme/tree/share/lib/bot" }),
+      agent({ cwd: "/x/acme/acme/tree/syn" }),
     ];
     const ctx = identContext(list);
     // Same owner/repo/branch as the parent → blanked; only →bot remains.
@@ -218,8 +218,8 @@ describe("compactIdent (parent-relative omission in a tree)", () => {
     expect(compactIdent(list[2], ctx, 3, parent)).toBe("//syn");
   });
   it("hides the identity entirely for a subagent in the very same checkout", () => {
-    const parent = agent({ cwd: "/x/symval/symval/tree/share" });
-    const child = agent({ cwd: "/x/symval/symval/tree/share" });
+    const parent = agent({ cwd: "/x/acme/acme/tree/share" });
+    const child = agent({ cwd: "/x/acme/acme/tree/share" });
     const ctx = identContext([parent, child, agent()]);
     const id = compactIdent(child, ctx, 3, parent);
     expect(id).toBe("//");
@@ -229,12 +229,12 @@ describe("compactIdent (parent-relative omission in a tree)", () => {
 
 describe("layeredRows parentEntry", () => {
   it("links a subagent row to its superagent's entry, null for roots/headers", () => {
-    const root = agent({ pid: 1, wrapper_pid: 1, cwd: "/x/symval/symval/tree/share" });
+    const root = agent({ pid: 1, wrapper_pid: 1, cwd: "/x/acme/acme/tree/share" });
     const child = agent({
       pid: 2,
       wrapper_pid: 2,
       parent_pid: 1,
-      cwd: "/x/symval/symval/tree/share/lib/bot",
+      cwd: "/x/acme/acme/tree/share/lib/bot",
     });
     const rows = layeredRows([root, child]);
     const rootRow = rows.find((r) => r.entry?.pid === 1);
@@ -815,6 +815,27 @@ describe("selSegments", () => {
     const s1 = parseSel("0,10-0,20")!; // single bottom line, cols 10..20 in an 80-wide peer
     const seg = selSegments(s1, 0, 0, 24, 80, 160)[0]; // we are 160 wide
     expect(seg).toEqual({ row: 0, a: 20, b: 40 }); // 10/80*160=20, 20/80*160=40
+  });
+
+  // The row-edge sentinel is OUR right edge (myCols), already in our coordinate
+  // space — only the peer's own columns (cA/cB) go through the peer→us mapping.
+  it("ends a multi-row selection at OUR right edge when the peer is NARROWER", () => {
+    // peer 80 wide, we are 160. Two rows: top starts at peer col 70, bottom ends at 5.
+    const s = parseSel("1,70-0,5")!; // myLast 10 → top row 9, bottom row 10
+    expect(selSegments(s, 10, 0, 24, 80, 160)).toEqual([
+      { row: 9, a: 140, b: 160 }, // top: 70/80*160=140 → our edge (160), NOT 320
+      { row: 10, a: 0, b: 10 }, // bottom: 0 → 5/80*160=10
+    ]);
+  });
+
+  it("keeps middle rows FULL width when the peer is WIDER", () => {
+    // peer 160 wide, we are 80. Three rows: top from peer col 100, bottom to col 20.
+    const s = parseSel("2,100-0,20")!; // myLast 10 → rows 8,9,10
+    expect(selSegments(s, 10, 0, 24, 160, 80)).toEqual([
+      { row: 8, a: 50, b: 80 }, // top: 100/160*80=50 → our edge (80)
+      { row: 9, a: 0, b: 80 }, // middle: full width of OUR 80 cols, not 40
+      { row: 10, a: 0, b: 10 }, // bottom: 0 → 20/160*80=10
+    ]);
   });
 
   it("returns [] for null", () => {

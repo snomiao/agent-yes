@@ -53,7 +53,7 @@ describe("formatMessage", () => {
   const base: Message = {
     id: "a@h",
     author: "a",
-    name: "taku",
+    name: "alice",
     role: "human",
     hlc: "h",
     text: "hello",
@@ -62,7 +62,7 @@ describe("formatMessage", () => {
     ms: Date.UTC(2026, 0, 1, 3, 4, 5),
   };
   it("renders time, name(role initial), and text", () => {
-    expect(formatMessage(base)).toBe("03:04:05  taku(h): hello");
+    expect(formatMessage(base)).toBe("03:04:05  alice(h): hello");
   });
   it("shows (deleted) and reaction counts", () => {
     expect(formatMessage({ ...base, deleted: true, text: "" })).toContain("(deleted)");
@@ -88,17 +88,17 @@ describe("ay ch CLI (local-only)", () => {
   });
 
   it("mk → send → read round-trips a message", async () => {
-    const mk = await capture(() => cmdCh(["mk", "demo", "--name", "taku", "--role", "human"]));
+    const mk = await capture(() => cmdCh(["mk", "demo", "--name", "alice", "--role", "human"]));
     expect(mk.code).toBe(0);
     expect(mk.out).toContain("ay://ch/");
 
     const reg = await readRegistry(cwd);
     expect(reg.channels.demo).toBeTruthy();
-    expect(reg.channels.demo!.name).toBe("taku");
+    expect(reg.channels.demo!.name).toBe("alice");
 
     expect((await capture(() => cmdCh(["send", "demo", "hello", "world"]))).code).toBe(0);
     const read = await capture(() => cmdCh(["read", "demo"]));
-    expect(read.out).toContain("taku(h): hello world");
+    expect(read.out).toContain("alice(h): hello world");
   });
 
   it("lists channels with message counts", async () => {

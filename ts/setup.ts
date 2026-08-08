@@ -57,6 +57,23 @@ export async function cmdSetup(rest: string[]): Promise<number> {
     );
   }
 
+  // 1b. Make the bun-global CLIs resolvable in EVERY shell — including the
+  //     non-interactive non-login shells Claude Code's Bash tool runs, whose
+  //     PATH snapshot may lack ~/.bun/bin. Symlinks them into /usr/local/bin
+  //     (on PATH in every context). Best-effort; never blocks setup.
+  try {
+    const { linkBunBinsToSystemPath } = await import("./systemPathLink.ts");
+    const r = linkBunBinsToSystemPath();
+    if (r && (r.linked.length || r.refreshed.length)) {
+      const n = r.linked.length + r.refreshed.length;
+      process.stdout.write(
+        `linked ${n} CLI${n === 1 ? "" : "s"} into ${r.target} (resolvable in non-login shells)\n`,
+      );
+    }
+  } catch {
+    /* non-fatal */
+  }
+
   if (noShare) return 0;
 
   // 2. Share to agent-yes.com as a boot-persistent daemon. `ay serve install`

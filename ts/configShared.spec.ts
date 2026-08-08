@@ -62,6 +62,28 @@ describe("configShared", () => {
     expect(clis.codex.ready?.some((regex) => regex.test("⏎ send"))).toBe(true);
   });
 
+  it("auto-confirms opencode's Always-allow permission dialog", async () => {
+    const clis = await loadSharedCliDefaults(import.meta.url);
+    expect(clis.opencode).toBeDefined();
+    expect(clis.opencode.promptArg).toBe("--prompt");
+    // Real screen excerpt from OpenCode 1.18.15 (focus defaults to Confirm,
+    // footer advertises "enter confirm" — a bare Enter accepts).
+    const dialog =
+      "△ Always allow\n\nThis will allow the following patterns until OpenCode is restarted\n\n- /Users/sno/*\n\n Confirm   Cancel                                  ⇆ select  enter confirm";
+    expect(clis.opencode.enter?.some((regex) => regex.test(dialog))).toBe(true);
+    // Prose merely mentioning the buttons must not trigger an Enter.
+    expect(
+      clis.opencode.enter?.some((regex) =>
+        regex.test("click Confirm or Cancel in the Always allow dialog"),
+      ),
+    ).toBe(false);
+    expect(
+      clis.opencode.needsInput?.some((regex) =>
+        regex.test(" Confirm   Cancel        ⇆ select  enter confirm"),
+      ),
+    ).toBe(true);
+  });
+
   it("finds the shared defaults file by walking upward", async () => {
     const found = await findSharedCliDefaultsPath(import.meta.url);
     expect(found.endsWith("default.config.yaml")).toBe(true);

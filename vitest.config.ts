@@ -120,6 +120,11 @@ export default defineConfig({
         // e2e (wrangler dev + real HTTP/SSE/WS), not unit-testable (same
         // rationale as share.ts / webrtcRemote.ts).
         "ts/expose.ts",
+        // linkBunBinsToSystemPath is POSIX-only by design (returns null on
+        // win32 before touching anything), so on Windows nearly all of its
+        // branches are unreachable and the file would sink the coverage gate.
+        // Measured on POSIX runners, where the code path actually exists.
+        ...(process.platform === "win32" ? ["ts/systemPathLink.ts"] : []),
         // Guided onboarding — the workspace-setting path is unit-tested
         // (setup.spec.ts); the TTY prompt and the daemon install it delegates to
         // are integration-only.

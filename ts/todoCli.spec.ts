@@ -194,11 +194,11 @@ describe("ay todo CLI", () => {
       "--type",
       "blocked-by-human",
       "--who",
-      "taku",
+      "alice",
       "--question",
       "canary or beta?",
     );
-    expect(human.out).toContain("waiting on taku: canary or beta?");
+    expect(human.out).toContain("waiting on alice: canary or beta?");
     const unblocked = await run("unblock", "T1");
     expect(unblocked.out).toContain("unblocked T1");
 
@@ -229,16 +229,16 @@ describe("ay todo CLI", () => {
       "--type",
       "blocked-by-human",
       "--who",
-      "taku",
+      "alice",
       "--action-link",
       "https://example/oauth",
     );
-    expect(action.out).toContain("taku");
+    expect(action.out).toContain("alice");
     expect(action.out).toContain("https://example/oauth");
     const got = await run("get", "T1", "--format", "json");
     expect(JSON.parse(got.out).block).toEqual({
       type: "blocked-by-human",
-      who: "taku",
+      who: "alice",
       actionLink: "https://example/oauth",
     });
   });
@@ -252,7 +252,7 @@ describe("ay todo CLI", () => {
         "--type",
         "blocked-by-human",
         "--who",
-        "taku",
+        "alice",
         "--options",
         "a",
         "b",
@@ -271,7 +271,7 @@ describe("ay todo CLI", () => {
         "--type",
         "blocked-by-human",
         "--who",
-        "taku",
+        "alice",
         "--action-link",
         "javascript:alert(1)",
       ),
@@ -283,7 +283,7 @@ describe("ay todo CLI", () => {
         "--type",
         "blocked-by-human",
         "--who",
-        "taku",
+        "alice",
         "--action-link",
         "data:text/html,x",
       ),
@@ -294,7 +294,7 @@ describe("ay todo CLI", () => {
       "--type",
       "blocked-by-human",
       "--who",
-      "taku",
+      "alice",
       "--action-link",
       "https://example/oauth",
     );
@@ -309,7 +309,7 @@ describe("ay todo CLI", () => {
       "--type",
       "blocked-by-human",
       "--who",
-      "taku",
+      "alice",
       "--action-link",
       "https://example/oauth\tinjected",
     );
@@ -455,7 +455,7 @@ describe("ay todo CLI", () => {
     expect(got.out).toContain("[criteria: reviewed by a human]");
   });
 
-  it("--help resolves cleanly (exit 0, no throw) — a real yargs command tree auto-generates the verb listing (taku feedback); yargs' own help writer bypasses the stdout mock in this harness, so content is verified manually rather than asserted here", async () => {
+  it("--help resolves cleanly (exit 0, no throw) — a real yargs command tree auto-generates the verb listing (operator feedback); yargs' own help writer bypasses the stdout mock in this harness, so content is verified manually rather than asserted here", async () => {
     const cap = captureStdout();
     let code: number | undefined;
     try {

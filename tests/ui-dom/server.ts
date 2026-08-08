@@ -18,6 +18,8 @@
  *   POST /api/restart           → { ok: true }  (Cmd+K /restart, ⋯ Restart)
  *   GET  /api/ws                → WORKSPACES fixture  (Cmd+K /ws browser)
  *   GET  /api/ws/status?path=   → one workspace + a fixed dirty git state
+ *   GET  /api/ws/repos          → provisionable repos  (New-agent repo picker)
+ *   GET  /api/ws/branches?repo= → a repo's branch list (New-agent branch picker)
  *   POST /api/spawn             → { ok: true }  (Enter on a /ws row)
  */
 import http from "http";
@@ -176,6 +178,41 @@ export async function startServer(
               hasUpstream: true,
             },
           },
+        }),
+      );
+    }
+    // New-agent form provisioning pickers: the repos this host can provision
+    // from (local checkouts + gh-visible) and a repo's branch list.
+    if (req.method === "GET" && p === "/api/ws/repos") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(
+        JSON.stringify({
+          schema: "ay-ws/v1",
+          wsRoot: "/home/u/ws",
+          repos: [
+            { owner: "snomiao", repo: "agent-yes", local: true, branches: [{ name: "main", path: WORKSPACES[0]!.path }] },
+            { owner: "acme", repo: "widgets", local: true, branches: [{ name: "dev", path: WORKSPACES[1]!.path }] },
+            { owner: "acme", repo: "newrepo", local: false, branches: [] },
+          ],
+          gh: { ok: true },
+        }),
+      );
+    }
+    if (req.method === "GET" && p === "/api/ws/branches") {
+      const repo = url.searchParams.get("repo");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(
+        JSON.stringify({
+          schema: "ay-ws/v1",
+          repo,
+          source: "ls-remote",
+          branches:
+            repo === "acme/widgets"
+              ? [
+                  { name: "dev", remote: true, provisioned: true, path: WORKSPACES[1]!.path },
+                  { name: "main", remote: true, provisioned: false },
+                ]
+              : [],
         }),
       );
     }
