@@ -60,7 +60,9 @@ fn global_dir() -> PathBuf {
     if let Ok(h) = std::env::var("AGENT_YES_HOME") {
         return PathBuf::from(h);
     }
-    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".agent-yes")
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".agent-yes")
 }
 
 /// Load or mint the serve API bearer token — same file the TS daemon uses
@@ -106,7 +108,10 @@ fn read_records() -> Vec<PidRecord> {
             by_pid.insert(r.pid, r);
         }
     }
-    order.into_iter().filter_map(|p| by_pid.remove(&p)).collect()
+    order
+        .into_iter()
+        .filter_map(|p| by_pid.remove(&p))
+        .collect()
 }
 
 fn now_ms() -> i64 {
@@ -128,7 +133,9 @@ fn file_mtime_ms(path: &str) -> Option<i64> {
 const TYPING_WINDOW_MS: i64 = 3_000;
 
 fn is_user_typing(pid: u32) -> bool {
-    last_stdin_at(pid).map(|t| now_ms() - t < TYPING_WINDOW_MS).unwrap_or(false)
+    last_stdin_at(pid)
+        .map(|t| now_ms() - t < TYPING_WINDOW_MS)
+        .unwrap_or(false)
 }
 
 fn last_stdin_at(pid: u32) -> Option<i64> {
@@ -140,7 +147,8 @@ fn last_stdin_at(pid: u32) -> Option<i64> {
 
 type MetaCache = std::sync::Mutex<std::collections::HashMap<String, (u64, i64, Option<String>)>>;
 static TITLE_CACHE: once_cell::sync::Lazy<MetaCache> = once_cell::sync::Lazy::new(Default::default);
-static STATUS_CACHE: once_cell::sync::Lazy<MetaCache> = once_cell::sync::Lazy::new(Default::default);
+static STATUS_CACHE: once_cell::sync::Lazy<MetaCache> =
+    once_cell::sync::Lazy::new(Default::default);
 
 fn read_file_tail(path: &str, max: u64) -> std::io::Result<(u64, i64, Vec<u8>)> {
     let mut f = std::fs::File::open(path)?;
@@ -202,9 +210,10 @@ fn log_title(log_file: Option<&str>) -> Option<String> {
         return hit;
     }
     // /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g — last non-empty match wins.
-    static OSC_TITLE: once_cell::sync::Lazy<regex::bytes::Regex> = once_cell::sync::Lazy::new(|| {
-        regex::bytes::Regex::new(r"\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)").unwrap()
-    });
+    static OSC_TITLE: once_cell::sync::Lazy<regex::bytes::Regex> =
+        once_cell::sync::Lazy::new(|| {
+            regex::bytes::Regex::new(r"\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)").unwrap()
+        });
     let mut title: Option<String> = None;
     for m in OSC_TITLE.captures_iter(&buf) {
         let candidate = String::from_utf8_lossy(&m[1]);
@@ -233,8 +242,7 @@ fn parse_status_text(lines: &[String]) -> Option<String> {
         }
         let mut chars = line.chars();
         let first = chars.next()?;
-        let is_spinner =
-            ('\u{2800}'..='\u{28ff}').contains(&first) || SPINNERS.contains(first);
+        let is_spinner = ('\u{2800}'..='\u{28ff}').contains(&first) || SPINNERS.contains(first);
         if !is_spinner || !chars.next().map(|c| c.is_whitespace()).unwrap_or(false) {
             continue;
         }
@@ -270,7 +278,11 @@ fn log_status_text(log_file: Option<&str>) -> Option<String> {
     }
     let mut vt = crate::vterm::VTermProxy::new(50, 200);
     vt.process(&buf);
-    let rendered = if vt.alternate_screen() { vt.contents() } else { vt.dump_scrollback() };
+    let rendered = if vt.alternate_screen() {
+        vt.contents()
+    } else {
+        vt.dump_scrollback()
+    };
     let lines: Vec<String> = rendered.lines().map(|l| l.trim_end().to_string()).collect();
     let tail_start = lines.len().saturating_sub(40);
     let status = parse_status_text(&lines[tail_start..]);
@@ -288,7 +300,11 @@ fn render_tail_lines(log_file: &str, max: u64, n: usize) -> Option<(u64, i64, Ve
     }
     let mut vt = crate::vterm::VTermProxy::new(50, 200);
     vt.process(&buf);
-    let rendered = if vt.alternate_screen() { vt.contents() } else { vt.dump_scrollback() };
+    let rendered = if vt.alternate_screen() {
+        vt.contents()
+    } else {
+        vt.dump_scrollback()
+    };
     let mut lines: Vec<String> = rendered.lines().map(|l| l.trim_end().to_string()).collect();
     if n > 0 && lines.len() > n {
         lines.drain(..lines.len() - n);
@@ -337,7 +353,9 @@ fn json_cache_get(cache: &JsonCache, key: &str, size: u64, mtime: i64) -> Option
 /// elsewhere) and keeps the WHOLE render — the latest block is often scrolled
 /// well back from the final rows.
 fn log_tasks(log_file: Option<&str>) -> Value {
-    let Some(log_file) = log_file else { return Value::Null };
+    let Some(log_file) = log_file else {
+        return Value::Null;
+    };
     let Some((size, mtime)) = file_version(log_file) else {
         return Value::Null;
     };
@@ -355,7 +373,9 @@ fn log_tasks(log_file: Option<&str>) -> Value {
 }
 
 fn log_badges(log_file: Option<&str>) -> Vec<String> {
-    let Some(log_file) = log_file else { return vec![] };
+    let Some(log_file) = log_file else {
+        return vec![];
+    };
     let Some((size, mtime)) = file_version(log_file) else {
         return vec![];
     };
@@ -391,7 +411,9 @@ fn cli_patterns(cli: &str) -> std::sync::Arc<(Vec<regex::Regex>, Vec<regex::Rege
 }
 
 fn log_needs_input(log_file: Option<&str>, cli: &str) -> Value {
-    let Some(log_file) = log_file else { return Value::Null };
+    let Some(log_file) = log_file else {
+        return Value::Null;
+    };
     let pats = cli_patterns(cli);
     if pats.0.is_empty() {
         return Value::Null;
@@ -448,7 +470,9 @@ fn git_root(cwd: &str) -> Option<String> {
 
 fn git_status(cwd: Option<&str>) -> Value {
     let Some(cwd) = cwd else { return Value::Null };
-    let Some(cwd) = git_root(cwd) else { return Value::Null }; // not a repo
+    let Some(cwd) = git_root(cwd) else {
+        return Value::Null;
+    }; // not a repo
     let cwd = cwd.as_str();
     const GIT_TTL_MS: i64 = 10_000;
     type Cell = std::sync::Mutex<std::collections::HashMap<String, (i64, Value)>>;
@@ -469,7 +493,10 @@ fn git_status(cwd: Option<&str>) -> Value {
     if fresh {
         return stale;
     }
-    let claimed = INFLIGHT.lock().map(|mut s| s.insert(cwd.to_string())).unwrap_or(false);
+    let claimed = INFLIGHT
+        .lock()
+        .map(|mut s| s.insert(cwd.to_string()))
+        .unwrap_or(false);
     if claimed {
         let cwd = cwd.to_string();
         std::thread::spawn(move || {
@@ -515,7 +542,10 @@ fn with_meta(r: &PidRecord) -> Value {
         "stuck"
     } else if !question.is_null() {
         "needs_input"
-    } else if last_active.map(|t| now_ms() - t < ACTIVE_WINDOW_MS).unwrap_or(false) {
+    } else if last_active
+        .map(|t| now_ms() - t < ACTIVE_WINDOW_MS)
+        .unwrap_or(false)
+    {
         "active"
     } else {
         "idle"
@@ -527,12 +557,30 @@ fn with_meta(r: &PidRecord) -> Value {
     o.insert("title".into(), json!(log_title(r.log_file.as_deref())));
     o.insert(
         "status_text".into(),
-        if exited { Value::Null } else { json!(log_status_text(r.log_file.as_deref())) },
+        if exited {
+            Value::Null
+        } else {
+            json!(log_status_text(r.log_file.as_deref()))
+        },
     );
     o.insert("question".into(), question);
     // Exited agents get null/[]: their screen and repo state are no longer live.
-    o.insert("git".into(), if exited { Value::Null } else { git_status(Some(&r.cwd)) });
-    o.insert("tasks".into(), if exited { Value::Null } else { log_tasks(r.log_file.as_deref()) });
+    o.insert(
+        "git".into(),
+        if exited {
+            Value::Null
+        } else {
+            git_status(Some(&r.cwd))
+        },
+    );
+    o.insert(
+        "tasks".into(),
+        if exited {
+            Value::Null
+        } else {
+            log_tasks(r.log_file.as_deref())
+        },
+    );
     o.insert(
         "badges".into(),
         if exited {
@@ -547,7 +595,10 @@ fn with_meta(r: &PidRecord) -> Value {
         },
     );
     // TS falls back to started_at when there's no log yet (freshly spawned).
-    o.insert("last_active_at".into(), json!(last_active.unwrap_or(r.started_at)));
+    o.insert(
+        "last_active_at".into(),
+        json!(last_active.unwrap_or(r.started_at)),
+    );
     o.insert("last_stdin_at".into(), json!(last_stdin_at(r.pid)));
     v
 }
@@ -582,11 +633,17 @@ fn matches_keyword(r: &PidRecord, kw: &str) -> bool {
     let kwl = kw.to_lowercase();
     r.cwd.to_lowercase().contains(&kwl)
         || r.cli.to_lowercase().contains(&kwl)
-        || r.prompt.as_deref().map(|p| p.to_lowercase().contains(&kwl)).unwrap_or(false)
+        || r.prompt
+            .as_deref()
+            .map(|p| p.to_lowercase().contains(&kwl))
+            .unwrap_or(false)
 }
 
 fn resolve_one(kw: &str) -> Result<PidRecord, String> {
-    let mut recs: Vec<PidRecord> = read_records().into_iter().filter(|r| matches_keyword(r, kw)).collect();
+    let mut recs: Vec<PidRecord> = read_records()
+        .into_iter()
+        .filter(|r| matches_keyword(r, kw))
+        .collect();
     recs.sort_by_key(|r| -r.started_at);
     // Exact identity beats everything: when the keyword IS a record's pid, that
     // record wins even if an all-digit agent_id prefix also matched (parity with
@@ -598,10 +655,15 @@ fn resolve_one(kw: &str) -> Result<PidRecord, String> {
         }
     }
     // prefer a living agent over exited ones
-    if let Some(r) = recs.iter().find(|r| r.status != "exited" && is_process_alive(r.pid)) {
+    if let Some(r) = recs
+        .iter()
+        .find(|r| r.status != "exited" && is_process_alive(r.pid))
+    {
         return Ok(r.clone());
     }
-    recs.into_iter().next().ok_or_else(|| format!("no agent matches {kw:?}"))
+    recs.into_iter()
+        .next()
+        .ok_or_else(|| format!("no agent matches {kw:?}"))
 }
 
 /// GET /api/search — content search over every agent's RENDERED screen text.
@@ -641,8 +703,12 @@ fn search_json(needle: &str, budget_ms: u64) -> Value {
             partial = true;
             break;
         }
-        let Some(log) = r.log_file.as_deref() else { continue };
-        let Some((_, _, lines)) = render_tail_lines(log, SEARCH_TAIL_BYTES, 0) else { continue };
+        let Some(log) = r.log_file.as_deref() else {
+            continue;
+        };
+        let Some((_, _, lines)) = render_tail_lines(log, SEARCH_TAIL_BYTES, 0) else {
+            continue;
+        };
         scanned += 1;
         if let Some(h) =
             crate::serve::discover::search_hit(r.pid, &r.cli, &r.cwd, &lines.join("\n"), &ql)
@@ -663,12 +729,18 @@ pub fn resolve_one_all(kw: &str) -> Result<PidRecord, String> {
 /// agree immediately instead of waiting for liveness to be re-derived.
 pub fn mark_exited(pid: u32, reason: &str) {
     let path = global_dir().join("pids.jsonl");
-    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
+    let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    else {
         return;
     };
     // Append-only: readers merge by pid with last-line-wins, so a partial record
     // would drop fields. Re-emit the whole record with the status patched.
-    let Some(mut rec) = read_records().into_iter().find(|r| r.pid == pid) else { return };
+    let Some(mut rec) = read_records().into_iter().find(|r| r.pid == pid) else {
+        return;
+    };
     rec.status = "exited".to_string();
     rec.exit_reason = Some(reason.to_string());
     if let Ok(line) = serde_json::to_string(&rec) {
@@ -715,13 +787,19 @@ fn spawn_ls_subscribe(all: bool, active: bool, keyword: String) -> mpsc::Receive
                     upsert.push(e.clone());
                 }
             }
-            let removed: Vec<i64> = known.keys().copied().filter(|p| !seen.contains(p)).collect();
+            let removed: Vec<i64> = known
+                .keys()
+                .copied()
+                .filter(|p| !seen.contains(p))
+                .collect();
             for p in &removed {
                 known.remove(p);
             }
             let frame = if first {
                 first = false;
-                Some(sse_frame(&json!({"full": true, "upsert": entries, "remove": []})))
+                Some(sse_frame(
+                    &json!({"full": true, "upsert": entries, "remove": []}),
+                ))
             } else if !upsert.is_empty() || !removed.is_empty() {
                 Some(sse_frame(&json!({"upsert": upsert, "remove": removed})))
             } else if last_ping.elapsed() >= Duration::from_millis(SSE_PING_MS) {
@@ -875,8 +953,16 @@ async fn handle_send(body: &str) -> ApiResponse {
     if kw.is_empty() {
         return text(400, "missing keyword");
     }
-    let msg = req.get("msg").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let code = req.get("code").and_then(|v| v.as_str()).unwrap_or("enter").to_lowercase();
+    let msg = req
+        .get("msg")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let code = req
+        .get("code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("enter")
+        .to_lowercase();
     let rec = match resolve_one(kw) {
         Ok(r) => r,
         Err(e) => return text(404, e),
@@ -891,10 +977,15 @@ async fn handle_send(body: &str) -> ApiResponse {
     };
     let result = if !msg.is_empty() && !trailing.is_empty() {
         // typed text first, control code 200 ms later (mirrors the TS daemon)
-        match write(msg.clone().into_bytes()).await.unwrap_or_else(|e| Err(std::io::Error::other(e))) {
+        match write(msg.clone().into_bytes())
+            .await
+            .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+        {
             Ok(()) => {
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                write(trailing.as_bytes().to_vec()).await.unwrap_or_else(|e| Err(std::io::Error::other(e)))
+                write(trailing.as_bytes().to_vec())
+                    .await
+                    .unwrap_or_else(|e| Err(std::io::Error::other(e)))
             }
             Err(e) => Err(e),
         }
@@ -947,7 +1038,9 @@ fn hostname() -> String {
 }
 
 fn whoami_host() -> String {
-    let user = std::env::var("USER").or_else(|_| std::env::var("USERNAME")).ok();
+    let user = std::env::var("USER")
+        .or_else(|_| std::env::var("USERNAME"))
+        .ok();
     match user {
         Some(u) if !u.is_empty() => format!("{u}@{}", hostname()),
         _ => hostname(),
@@ -955,7 +1048,9 @@ fn whoami_host() -> String {
 }
 
 fn host_info() -> Value {
-    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(0);
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(0);
     let mut loadavg = [0f64; 3];
     #[cfg(unix)]
     unsafe {
@@ -1020,7 +1115,12 @@ pub(crate) fn url_decode(s: &str) -> String {
 /// surface as an error to the viewer.
 fn perf_beacon(b: &Value) {
     let clip = |k: &str, n: usize| {
-        b.get(k).and_then(|v| v.as_str()).unwrap_or("").chars().take(n).collect::<String>()
+        b.get(k)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .chars()
+            .take(n)
+            .collect::<String>()
     };
     let line = json!({
         "t": now_ms(),
@@ -1034,15 +1134,25 @@ fn perf_beacon(b: &Value) {
     let file = home.join("perf-beacons.jsonl");
     std::fs::create_dir_all(&home).ok();
     use std::io::Write;
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&file) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)
+    {
         writeln!(f, "{line}").ok();
     }
-    if std::fs::metadata(&file).map(|m| m.len() > 4 * 1024 * 1024).unwrap_or(false) {
+    if std::fs::metadata(&file)
+        .map(|m| m.len() > 4 * 1024 * 1024)
+        .unwrap_or(false)
+    {
         if let Ok(bytes) = std::fs::read(&file) {
             // Cut at the midpoint, then resume at the next line start — that
             // also lands us back on a UTF-8 boundary.
             let mid = bytes.len() / 2;
-            let start = bytes[mid..].iter().position(|b| *b == b'\n').map(|i| mid + i + 1);
+            let start = bytes[mid..]
+                .iter()
+                .position(|b| *b == b'\n')
+                .map(|i| mid + i + 1);
             std::fs::write(&file, &bytes[start.unwrap_or(bytes.len())..]).ok();
         }
     }
@@ -1071,9 +1181,7 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
             body: Body::Stream(spawn_ls_subscribe(all, active, keyword.clone())),
         },
         ("GET", "/api/whoami") => json_res(200, &json!({ "host": whoami_host() })),
-        ("GET", "/api/version") => {
-            json_res(200, &json!({ "version": env!("CARGO_PKG_VERSION") }))
-        }
+        ("GET", "/api/version") => json_res(200, &json!({ "version": env!("CARGO_PKG_VERSION") })),
         ("GET", "/api/host") => json_res(200, &host_info()),
         ("GET", p) if p.starts_with("/api/size/") => {
             let kw = url_decode(&p["/api/size/".len()..]);
@@ -1135,8 +1243,10 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
         ("GET", "/api/spawn-config") => crate::serve::control::spawn_config(),
         ("GET", "/api/notes") => json_res(200, &crate::serve::discover::notes(&global_dir())),
         ("GET", "/api/graph") => {
-            let records: Vec<PidRecord> =
-                read_records().into_iter().filter(|r| r.status != "exited").collect();
+            let records: Vec<PidRecord> = read_records()
+                .into_iter()
+                .filter(|r| r.status != "exited")
+                .collect();
             let sizes = records
                 .iter()
                 .filter_map(|r| {
@@ -1206,8 +1316,11 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
         }
         ("GET", "/api/search") => {
             let needle = q.get("q").cloned().unwrap_or_default().trim().to_string();
-            let budget =
-                q.get("budget_ms").and_then(|v| v.parse::<u64>().ok()).unwrap_or(900).min(3_000);
+            let budget = q
+                .get("budget_ms")
+                .and_then(|v| v.parse::<u64>().ok())
+                .unwrap_or(900)
+                .min(3_000);
             tokio::task::spawn_blocking(move || search_json(&needle, budget))
                 .await
                 .map(|v| json_res(200, &v))
@@ -1256,15 +1369,13 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
         // POST /api/perf-beacon — a viewer that MEASURED slowness reports it.
         // Purely local: rows append to <AGENT_YES_HOME>/perf-beacons.jsonl so a
         // headless watcher can see slowness without driving a browser.
-        ("POST", "/api/perf-beacon") => {
-            match serde_json::from_str::<Value>(body) {
-                Ok(v) => {
-                    perf_beacon(&v);
-                    text(204, "")
-                }
-                Err(_) => text(400, "invalid JSON body"),
+        ("POST", "/api/perf-beacon") => match serde_json::from_str::<Value>(body) {
+            Ok(v) => {
+                perf_beacon(&v);
+                text(204, "")
             }
-        }
+            Err(_) => text(400, "invalid JSON body"),
+        },
 
         // ── Single-agent view-only shares (ts/agentShare.ts port) ───────────
         // Mint / list / revoke scoped share rooms. Reachable by whoever already
@@ -1274,7 +1385,10 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
             let Ok(v) = serde_json::from_str::<Value>(body) else {
                 return text(400, "invalid JSON body");
             };
-            let Some(agent) = v.get("agent").and_then(|a| a.as_str()).filter(|a| !a.is_empty())
+            let Some(agent) = v
+                .get("agent")
+                .and_then(|a| a.as_str())
+                .filter(|a| !a.is_empty())
             else {
                 return text(400, "agent required");
             };
@@ -1346,7 +1460,10 @@ mod tests {
             Some("✶ Verifying calendar meetings… (6m 30s · ↓ 19.5k tokens)")
         );
         let braille = vec!["⠋ Working on it".to_string()];
-        assert_eq!(parse_status_text(&braille).as_deref(), Some("⠋ Working on it"));
+        assert_eq!(
+            parse_status_text(&braille).as_deref(),
+            Some("⠋ Working on it")
+        );
         assert_eq!(parse_status_text(&["plain text".to_string()]), None);
     }
 

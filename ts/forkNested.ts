@@ -36,6 +36,25 @@ export function buildSpawnTutorial(cli: string, pid: number): string {
     `  ay ls                   # list running agents`,
     `  ay result get ${pid}    # read its final result when done`,
     `  ay exit ${pid}          # stop it`,
+    ``,
+    // Both halves of the contract, so the parent picks deliberately instead of
+    // defaulting to the bad option (babysitting `ay tail`, which re-blocks the
+    // very shell this detached spawn just freed).
+    //
+    // If your harness HAS a monitor loop, watching is strictly better: you get
+    // working/idle/needs_input transitions at your own cadence, with no message
+    // landing in your composer. The wrapper's push exists for the parent that
+    // ISN'T watching — and it steps aside automatically when you are (see
+    // ts/parentWatching.ts), so listing both here doesn't create duplicates.
+    `Two ways to keep up with it — use whichever fits your harness:`,
+    `  Monitor (preferred if you have a monitor/polling loop):`,
+    `    ay ls --watch --json          # NDJSON stream of state changes across agents`,
+    `    ay status ${pid}                 # one-shot: working | idle | needs_input | stopped`,
+    `    ay status ${pid} --wait-idle     # block until it's done (add --timeout=Ns)`,
+    `  Or do nothing: it was told to report back to you, and its wrapper will`,
+    `  message you if it finishes, gets stuck, or exits without reporting — the`,
+    `  report arrives in your own input as an <ay-report …> block. That fallback`,
+    `  stays quiet while you are actively watching, so the two don't duplicate.`,
   ].join("\n");
 }
 

@@ -214,3 +214,25 @@ describe("buildSpawnTutorial", () => {
     expect(out).toContain("ay exit 4242");
   });
 });
+
+describe("buildSpawnTutorial — the parent's half of the contract", () => {
+  it("offers the monitor route first, for a harness that has one", () => {
+    const out = buildSpawnTutorial("claude", 4242);
+    expect(out).toContain("ay ls --watch --json");
+    expect(out).toContain("ay status 4242");
+    expect(out).toContain("--wait-idle");
+  });
+
+  it("tells the parent the push is a fallback that yields to a watcher", () => {
+    const out = buildSpawnTutorial("claude", 4242);
+    expect(out).toContain("<ay-report");
+    expect(out).toMatch(/finishes, gets stuck, or exits/);
+    expect(out).toContain("stays quiet while you are actively watching");
+  });
+
+  it("still lists the drive commands (a parent may want to intervene early)", () => {
+    const out = buildSpawnTutorial("codex", 7);
+    expect(out).toContain("ay tail 7");
+    expect(out).toContain(`ay send 7 "..."`);
+  });
+});

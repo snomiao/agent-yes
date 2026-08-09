@@ -48,7 +48,10 @@ fn new_id() -> String {
     use rand::RngCore;
     let mut b = [0u8; 4];
     rand::thread_rng().fill_bytes(&mut b);
-    format!("v_{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>())
+    format!(
+        "v_{}",
+        b.iter().map(|x| format!("{x:02x}")).collect::<String>()
+    )
 }
 
 /// Drop expired viewers and return what's left, newest registration order-agnostic
@@ -87,12 +90,24 @@ pub fn register(body: &Value, pinned: Option<&str>) -> Value {
     let caps = body
         .get("caps")
         .and_then(|v| v.as_array())
-        .map(|a| a.iter().filter_map(|c| c.as_str().map(String::from)).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|c| c.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
     let v = Viewer {
         id: id.clone(),
-        url: body.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        title: body.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        url: body
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        title: body
+            .get("title")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         caps,
         last_seen: now_ms(),
     };
@@ -152,7 +167,11 @@ pub fn poll(vid: String) -> mpsc::Receiver<Vec<u8>> {
         // Only clear the pusher if it's still ours — a reconnect may have
         // replaced it while this heartbeat was in flight.
         let mut b = broker().lock().unwrap();
-        if b.pushers.get(&vid).map(|p| p.same_channel(&tx)).unwrap_or(false) {
+        if b.pushers
+            .get(&vid)
+            .map(|p| p.same_channel(&tx))
+            .unwrap_or(false)
+        {
             b.pushers.remove(&vid);
         }
     });
@@ -176,7 +195,11 @@ pub fn result(body: &Value) -> Value {
 
 /// POST /api/widget/read — issue a command to a viewer and await its result.
 /// `caps` is the scoped token's cap list (None for the master token).
-pub async fn read(body: &Value, sub: Option<&str>, caps: Option<&[String]>) -> Result<Value, (u16, String)> {
+pub async fn read(
+    body: &Value,
+    sub: Option<&str>,
+    caps: Option<&[String]>,
+) -> Result<Value, (u16, String)> {
     let viewer = body.get("viewer").and_then(|v| v.as_str()).unwrap_or("");
     let kind = body.get("kind").and_then(|v| v.as_str()).unwrap_or("");
     if viewer.is_empty() || kind.is_empty() {
@@ -201,7 +224,11 @@ pub async fn read(body: &Value, sub: Option<&str>, caps: Option<&[String]>) -> R
         };
         b.cmd_seq += 1;
         let cmd_id = format!("c{}_{}", b.cmd_seq, now_ms());
-        let url = b.viewers.get(&vid).map(|v| v.url.clone()).unwrap_or_default();
+        let url = b
+            .viewers
+            .get(&vid)
+            .map(|v| v.url.clone())
+            .unwrap_or_default();
         (vid, push, cmd_id, url)
     };
 
@@ -211,7 +238,8 @@ pub async fn read(body: &Value, sub: Option<&str>, caps: Option<&[String]>) -> R
     let _ = push.send(format!("data: {cmd}\n\n").into_bytes()).await;
 
     // Screenshot waits on a human one-time consent, so it gets a longer window.
-    let timeout = std::time::Duration::from_millis(if kind == "screenshot" { 30_000 } else { 10_000 });
+    let timeout =
+        std::time::Duration::from_millis(if kind == "screenshot" { 30_000 } else { 10_000 });
     let res = match tokio::time::timeout(timeout, rx).await {
         Ok(Ok(v)) => v,
         _ => {
@@ -226,7 +254,10 @@ pub async fn read(body: &Value, sub: Option<&str>, caps: Option<&[String]>) -> R
         map.insert("data".into(), res["data"].clone());
     } else {
         let e = res["error"].as_str().unwrap_or("failed").to_string();
-        map.insert("error".into(), Value::String(if e.is_empty() { "failed".into() } else { e }));
+        map.insert(
+            "error".into(),
+            Value::String(if e.is_empty() { "failed".into() } else { e }),
+        );
     }
     Ok(out)
 }
@@ -246,7 +277,10 @@ mod tests {
     #[test]
     fn a_scoped_subject_pins_the_registered_id() {
         let _g = reset();
-        let v = register(&json!({ "id": "chosen", "url": "http://x" }), Some("pinned"));
+        let v = register(
+            &json!({ "id": "chosen", "url": "http://x" }),
+            Some("pinned"),
+        );
         assert_eq!(v["viewerId"], json!("pinned"));
         // "*" and the master token let the widget pick.
         let v = register(&json!({ "id": "chosen" }), Some("*"));
@@ -257,7 +291,13 @@ mod tests {
     fn expired_viewers_drop_out_of_list_and_resolve() {
         let _g = reset();
         register(&json!({ "id": "stale", "url": "http://x" }), None);
-        broker().lock().unwrap().viewers.get_mut("stale").unwrap().last_seen = now_ms() - TTL_MS - 1;
+        broker()
+            .lock()
+            .unwrap()
+            .viewers
+            .get_mut("stale")
+            .unwrap()
+            .last_seen = now_ms() - TTL_MS - 1;
         assert_eq!(list().as_array().unwrap().len(), 0);
         assert_eq!(resolve(&mut broker().lock().unwrap(), "stale"), None);
     }
@@ -265,7 +305,10 @@ mod tests {
     #[test]
     fn resolve_falls_back_to_prefix_url_and_title() {
         let _g = reset();
-        register(&json!({ "id": "v_abcd", "url": "https://example.com/app", "title": "Dash" }), None);
+        register(
+            &json!({ "id": "v_abcd", "url": "https://example.com/app", "title": "Dash" }),
+            None,
+        );
         let mut b = broker().lock().unwrap();
         assert_eq!(resolve(&mut b, "v_ab").as_deref(), Some("v_abcd"));
         assert_eq!(resolve(&mut b, "example.com").as_deref(), Some("v_abcd"));
@@ -284,10 +327,14 @@ mod tests {
     #[tokio::test]
     async fn read_404s_an_unknown_viewer_and_409s_one_with_no_poll() {
         let _g = reset();
-        let err = read(&json!({ "viewer": "ghost", "kind": "dom" }), None, None).await.unwrap_err();
+        let err = read(&json!({ "viewer": "ghost", "kind": "dom" }), None, None)
+            .await
+            .unwrap_err();
         assert_eq!(err.0, 404);
         register(&json!({ "id": "v1" }), None);
-        let err = read(&json!({ "viewer": "v1", "kind": "dom" }), None, None).await.unwrap_err();
+        let err = read(&json!({ "viewer": "v1", "kind": "dom" }), None, None)
+            .await
+            .unwrap_err();
         assert_eq!(err.0, 409);
     }
 
@@ -312,9 +359,13 @@ mod tests {
     async fn a_screenshot_read_needs_the_screenshot_cap() {
         let _g = reset();
         register(&json!({ "id": "v1" }), None);
-        let err = read(&json!({ "viewer": "v1", "kind": "screenshot" }), None, Some(&[]))
-            .await
-            .unwrap_err();
+        let err = read(
+            &json!({ "viewer": "v1", "kind": "screenshot" }),
+            None,
+            Some(&[]),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(err.0, 403);
     }
 }

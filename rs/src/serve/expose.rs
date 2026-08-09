@@ -949,4 +949,3 @@ mod tests {
         assert!(relay_parts("agent-yes.com").is_err());
     }
 }
-

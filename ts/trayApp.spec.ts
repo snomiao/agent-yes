@@ -28,7 +28,33 @@ function setPlatform(value: string) {
 
 // Stub the Bun global's spawn so launchTray/stopTray never spawn real processes.
 const spawnMock = vi.fn();
-let originalBun: unknown;
+let originalSpawn: unknown;
+let hadBun: boolean;
+
+type BunLike = { spawn?: unknown };
+
+// Under the BUN runtime `globalThis.Bun` is both non-writable AND
+// NON-CONFIGURABLE, so it can be neither assigned (`globalThis.Bun = …` throws
+// "Attempted to assign to readonly property" in an ESM module, which is always
+// strict) nor redefined via Object.defineProperty. Its `spawn` property IS
+// writable, though — so we stub the method in place instead of swapping the
+// whole global. Under node there is no Bun global at all, so we define a minimal
+// stand-in and remove it again on restore.
+function installBunSpawn(fn: unknown): void {
+  const g = globalThis as { Bun?: BunLike };
+  if (!g.Bun) {
+    Object.defineProperty(globalThis, "Bun", { value: {}, configurable: true, writable: true });
+  }
+  (globalThis as { Bun: BunLike }).Bun.spawn = fn;
+}
+
+function restoreBunSpawn(spawn: unknown, present: boolean): void {
+  if (!present) {
+    delete (globalThis as { Bun?: BunLike }).Bun;
+    return;
+  }
+  (globalThis as { Bun: BunLike }).Bun.spawn = spawn;
+}
 function goodChild() {
   return { unref: vi.fn(), exited: Promise.resolve(0) };
 }
@@ -49,14 +75,15 @@ describe("trayApp", () => {
     mockRustBinary.findTrayLauncher.mockReturnValue(undefined);
     mockHome.agentYesHome.mockReturnValue("/tmp/ay-home");
     spawnMock.mockReturnValue(goodChild());
-    originalBun = (globalThis as { Bun?: unknown }).Bun;
-    (globalThis as { Bun?: unknown }).Bun = { spawn: spawnMock };
+    hadBun = "Bun" in globalThis;
+    originalSpawn = (globalThis as { Bun?: BunLike }).Bun?.spawn;
+    installBunSpawn(spawnMock);
     stdout = vi.spyOn(process.stdout, "write").mockReturnValue(true);
     stderr = vi.spyOn(process.stderr, "write").mockReturnValue(true);
   });
 
   afterEach(() => {
-    (globalThis as { Bun?: unknown }).Bun = originalBun;
+    restoreBunSpawn(originalSpawn, hadBun);
     setPlatform(originalPlatform);
     stdout.mockRestore();
     stderr.mockRestore();

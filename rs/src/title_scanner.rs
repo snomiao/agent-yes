@@ -23,12 +23,12 @@ const STORED_TITLE_LEN: usize = 256;
 enum State {
     #[default]
     Ground,
-    Esc,          // saw ESC
-    OscParam,     // saw ESC ] — collecting the numeric param
-    OscTitle,     // param was 0/2 and ';' consumed — collecting title chars
-    OscOther,     // some other OSC — skip to terminator
-    OscTitleEsc,  // inside title, saw ESC (maybe ST `ESC \`)
-    OscOtherEsc,  // inside other OSC, saw ESC
+    Esc,         // saw ESC
+    OscParam,    // saw ESC ] — collecting the numeric param
+    OscTitle,    // param was 0/2 and ';' consumed — collecting title chars
+    OscOther,    // some other OSC — skip to terminator
+    OscTitleEsc, // inside title, saw ESC (maybe ST `ESC \`)
+    OscOtherEsc, // inside other OSC, saw ESC
 }
 
 #[derive(Default)]
@@ -133,7 +133,10 @@ mod tests {
     #[test]
     fn parses_osc0_bel() {
         let mut s = TitleScanner::new();
-        assert_eq!(s.feed("\x1b]0;✳ fixing tests\x07"), Some("✳ fixing tests".into()));
+        assert_eq!(
+            s.feed("\x1b]0;✳ fixing tests\x07"),
+            Some("✳ fixing tests".into())
+        );
     }
 
     #[test]
@@ -158,11 +161,14 @@ mod tests {
     #[test]
     fn ignores_icon_only_and_unrelated_osc() {
         let mut s = TitleScanner::new();
-        assert_eq!(s.feed("\x1b]1;icon\x07\x1b]52;c;YWJj\x07\x1b]133;A\x07"), None);
+        assert_eq!(
+            s.feed("\x1b]1;icon\x07\x1b]52;c;YWJj\x07\x1b]133;A\x07"),
+            None
+        );
     }
 
     #[test]
-    fn ignores_non_osc_escapes_and_plain_text(){
+    fn ignores_non_osc_escapes_and_plain_text() {
         let mut s = TitleScanner::new();
         assert_eq!(s.feed("plain \x1b[31mred\x1b[0m text"), None);
     }
