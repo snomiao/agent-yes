@@ -64,6 +64,17 @@ fn spawn_detached(bin: &std::path::Path, args: &[String], cwd: &str) -> std::io:
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
+    // A launchd/systemd daemon carries the bare service env (PATH without
+    // ~/.bun/bin, ~/.cargo/bin, Homebrew, …) and would pass it verbatim to
+    // every agent — inside which bun/user CLIs are then "command not found".
+    // Overlay the recovered login-shell env instead: recovered values win,
+    // daemon-only vars pass through, and on recovery failure the daemon env is
+    // inherited unchanged. Mirrors freshAgentEnv in ts/serve.ts.
+    if let Some(env) = super::shell_env::login_shell_env() {
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+    }
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

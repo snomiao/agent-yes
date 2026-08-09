@@ -25,8 +25,6 @@ export interface MailParty {
   cli: string;
   cwd: string;
   agent_id?: string | null;
-  /** Self-declared lane/role name at send time, when the party had one set. */
-  role?: string;
 }
 
 /** A single delivered inter-agent message, stored verbatim in both mailboxes. */
