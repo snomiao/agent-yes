@@ -144,7 +144,9 @@ fn parse_delimited_env(out: &[u8]) -> Option<HashMap<String, String>> {
         if pair.is_empty() {
             continue;
         }
-        let Ok(pair) = std::str::from_utf8(pair) else { continue };
+        let Ok(pair) = std::str::from_utf8(pair) else {
+            continue;
+        };
         let Some(eq) = pair.find('=') else { continue };
         if eq == 0 {
             continue;

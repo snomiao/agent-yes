@@ -20,7 +20,9 @@ fn size_of(size: Option<(u16, u16)>) -> Value {
         Some((c, r)) if c > 0 && r > 0 => c as f64 / (2.0 * r as f64),
         _ => 2.0,
     };
-    let h = ((NODE_W as f64 / aspect).max(96.0)).min(NODE_W as f64 * 2.0).round() as i64;
+    let h = ((NODE_W as f64 / aspect).max(96.0))
+        .min(NODE_W as f64 * 2.0)
+        .round() as i64;
     json!({ "w": NODE_W, "h": h })
 }
 
@@ -137,8 +139,10 @@ pub fn build(input: GraphInput) -> Value {
         "outputs": [text_out],
     }));
 
-    let present: std::collections::HashSet<String> =
-        nodes.iter().filter_map(|n| n["id"].as_str().map(String::from)).collect();
+    let present: std::collections::HashSet<String> = nodes
+        .iter()
+        .filter_map(|n| n["id"].as_str().map(String::from))
+        .collect();
 
     // read edges: target's output → reader's input (the reader pulls).
     let mut edges: Vec<Value> = input
@@ -240,16 +244,25 @@ mod tests {
     #[test]
     fn parent_resolves_through_the_wrapper_pid() {
         // child.parent_pid points at the PARENT'S WRAPPER, not its agent pid.
-        let recs = [rec(10, "claude", Some(9), None), rec(20, "claude", None, Some(9))];
+        let recs = [
+            rec(10, "claude", Some(9), None),
+            rec(20, "claude", None, Some(9)),
+        ];
         let g = build_with(&recs, vec![]);
-        let child =
-            g["graph"]["nodes"].as_array().unwrap().iter().find(|n| n["id"] == "ay://agent-yes/20");
+        let child = g["graph"]["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["id"] == "ay://agent-yes/20");
         assert_eq!(child.unwrap()["parent"], json!("ay://agent-yes/10"));
     }
 
     #[test]
     fn env_edges_go_to_root_agents_only() {
-        let recs = [rec(10, "claude", Some(9), None), rec(20, "claude", None, Some(9))];
+        let recs = [
+            rec(10, "claude", Some(9), None),
+            rec(20, "claude", None, Some(9)),
+        ];
         let g = build_with(&recs, vec![]);
         let env: Vec<&Value> = g["graph"]["edges"]
             .as_array()
@@ -257,9 +270,15 @@ mod tests {
             .iter()
             .filter(|e| e["source"]["type"] == "environment")
             .collect();
-        let targets: Vec<&str> = env.iter().map(|e| e["target"]["node"].as_str().unwrap()).collect();
+        let targets: Vec<&str> = env
+            .iter()
+            .map(|e| e["target"]["node"].as_str().unwrap())
+            .collect();
         assert!(targets.contains(&"ay://agent-yes/10"));
-        assert!(!targets.contains(&"ay://agent-yes/20"), "child must inherit, not be wired");
+        assert!(
+            !targets.contains(&"ay://agent-yes/20"),
+            "child must inherit, not be wired"
+        );
     }
 
     #[test]

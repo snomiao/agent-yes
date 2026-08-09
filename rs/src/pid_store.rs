@@ -94,7 +94,6 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
-
 pub struct PidStore {
     path: PathBuf,
 }
@@ -325,7 +324,9 @@ impl PidStore {
         Ok(())
     }
 
-    fn read_all(&self) -> Result<Vec<PidRecord>> {
+    /// Every known record, last-line-per-pid merged. `pub(crate)` so the
+    /// init-msg wrapper can resolve "who spawned me" without a second reader.
+    pub(crate) fn read_all(&self) -> Result<Vec<PidRecord>> {
         if !self.path.exists() {
             return Ok(vec![]);
         }

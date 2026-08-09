@@ -18,9 +18,9 @@ use tokio::sync::{mpsc, watch};
 use tracing::{debug, error, info, warn};
 
 const HEARTBEAT_INTERVAL_MS: u64 = 50; // Check frequently for Enter timing and patterns
-// Min gap between "user is typing" activity-file writes. Small enough that the
-// badge/backoff sees typing within a fraction of a second, large enough that a
-// fast keystroke burst doesn't hammer the filesystem.
+                                       // Min gap between "user is typing" activity-file writes. Small enough that the
+                                       // badge/backoff sees typing within a fraction of a second, large enough that a
+                                       // fast keystroke burst doesn't hammer the filesystem.
 const STDIN_ACTIVITY_THROTTLE_MS: u64 = 250;
 const FORCE_READY_TIMEOUT_MS: u64 = 10000;
 const ENTER_IDLE_WAIT_MS: u64 = 50; // Wait for 50ms idle before sending Enter (reduced from 1000 due to cursor control sequences)
@@ -107,11 +107,7 @@ fn is_wedged(
     needs_input: bool,
     idle_secs: u64,
 ) -> bool {
-    wedge_timeout_secs > 0
-        && !working
-        && !ready
-        && !needs_input
-        && idle_secs >= wedge_timeout_secs
+    wedge_timeout_secs > 0 && !working && !ready && !needs_input && idle_secs >= wedge_timeout_secs
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1178,9 +1174,21 @@ impl AgentContext {
         };
         let action = if wedged {
             // Reuse the stall ladder: `working: true` here just means "tripped".
-            decide_stall_action(wedge_timeout, true, idle_secs, esc_elapsed, STALL_ESC_GRACE_SECS)
+            decide_stall_action(
+                wedge_timeout,
+                true,
+                idle_secs,
+                esc_elapsed,
+                STALL_ESC_GRACE_SECS,
+            )
         } else {
-            decide_stall_action(timeout, working, idle_secs, esc_elapsed, STALL_ESC_GRACE_SECS)
+            decide_stall_action(
+                timeout,
+                working,
+                idle_secs,
+                esc_elapsed,
+                STALL_ESC_GRACE_SECS,
+            )
         };
         let cause = if wedged {
             "no ready prompt, no spinner, no menu"
@@ -1276,8 +1284,7 @@ impl AgentContext {
                         .auto_retry_started_at
                         .map(|t| t.elapsed().as_secs())
                         .unwrap_or(0);
-                    let line =
-                        build_retry_message(self.auto_retry_streak, reason, since, next);
+                    let line = build_retry_message(self.auto_retry_streak, reason, since, next);
                     warn!(
                         "Auto-retry: typing retry nudge (attempt {}, reason: {})",
                         self.auto_retry_streak, reason
@@ -1478,7 +1485,9 @@ impl AgentContext {
     /// lands within the window).
     fn maybe_flush_title(&mut self) {
         const TITLE_WRITE_MIN_MS: u64 = 2_000;
-        let Some(latest) = self.latest_title.clone() else { return };
+        let Some(latest) = self.latest_title.clone() else {
+            return;
+        };
         if self.written_title.as_deref() == Some(latest.as_str()) {
             return;
         }
@@ -1786,7 +1795,10 @@ mod tests {
             classify_retry_reason("Claude usage limit reached"),
             RETRY_REASONS[3]
         );
-        assert_eq!(classify_retry_reason("You are being rate-limited"), RETRY_REASONS[4]);
+        assert_eq!(
+            classify_retry_reason("You are being rate-limited"),
+            RETRY_REASONS[4]
+        );
         assert_eq!(
             classify_retry_reason("API Error: 503 Service Unavailable"),
             RETRY_REASON_FALLBACK
@@ -1808,12 +1820,18 @@ mod tests {
     fn test_build_retry_message_is_one_line_with_context() {
         let msg = build_retry_message(3, RETRY_REASONS[0], 45, 64);
         assert!(!msg.contains('\n'), "must be a single line: {msg}");
-        assert!(msg.starts_with("retry ["), "keeps the imperative first: {msg}");
+        assert!(
+            msg.starts_with("retry ["),
+            "keeps the imperative first: {msg}"
+        );
         assert!(msg.contains("#3"));
         assert!(msg.contains("45s ago"));
         assert!(msg.contains("in 1m04s"));
         assert!(msg.contains("giving up after 8h"));
-        assert!(msg.contains("ignore it"), "needs the ignore-if-recovered clause");
+        assert!(
+            msg.contains("ignore it"),
+            "needs the ignore-if-recovered clause"
+        );
     }
 
     #[test]

@@ -1,0 +1,8 @@
+# The <ay-init-msg> golden fixture is asserted BYTE FOR BYTE against both
+# runtimes — ts/initMsg.spec.ts reads it with readFileSync, rs/src/init_msg.rs
+# embeds it with include_str! — so an agent cannot tell which runtime launched
+# it from the shape of its own prompt. That only holds if the file's bytes are
+# identical on every platform. Git's autocrlf (on by default for the Windows CI
+# runners) otherwise rewrites the LFs to CRLF at checkout, and the parity test
+# fails on windows-latest while passing everywhere else.
+tests/fixtures/*.golden.txt text eol=lf

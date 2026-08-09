@@ -139,22 +139,27 @@ function isCheckoutRoot(dir: string): boolean {
 }
 
 // List real subdirectories (no symlinks, no dotdirs), tolerating vanished dirs.
+//
+// The ITERATION is inside the try, not just the open. `opendir` is lazy on some
+// runtimes (notably Bun): the ENOENT for a missing directory surfaces from the
+// first `for await` step, not from the `await opendir(...)`, so a try that wraps
+// only the open lets it escape — walkWorkspaces would throw on a missing root
+// instead of returning [].
 async function subdirs(dir: string): Promise<string[]> {
   const out: string[] = [];
-  let d: Awaited<ReturnType<typeof opendir>>;
   try {
-    d = await opendir(dir);
-  } catch {
-    return out;
-  }
-  for await (const ent of d) {
-    if (ent.name.startsWith(".")) continue;
-    if (ent.isDirectory()) {
-      out.push(ent.name);
-    } else if (ent.isSymbolicLink()) {
-      // never follow symlinks — a link cycle under tree/ must not loop the walk
-      continue;
+    for await (const ent of await opendir(dir)) {
+      if (ent.name.startsWith(".")) continue;
+      if (ent.isDirectory()) {
+        out.push(ent.name);
+      } else if (ent.isSymbolicLink()) {
+        // never follow symlinks — a link cycle under tree/ must not loop the walk
+        continue;
+      }
     }
+  } catch {
+    // Vanished/unreadable dir — a partial listing is still the right answer.
+    return out.sort();
   }
   return out.sort();
 }
