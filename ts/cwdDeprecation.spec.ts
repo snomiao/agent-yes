@@ -55,9 +55,20 @@ describe("detectCwdDeprecation", () => {
     expect(dep!.suggestion).toBe("cd <dir> && cy claude");
   });
 
-  it("includes the deprecation notice in the message", () => {
+  it("says the flag is passed through, not handled", () => {
     const dep = detectCwdDeprecation(argv("/x/dist/cy.js", "--cwd", "/ws"));
-    expect(dep!.message).toContain("--cwd is deprecated");
+    expect(dep!.message).toContain("--cwd is not an agent-yes flag");
     expect(dep!.message).toContain("cd /ws && cy");
+  });
+
+  it("ignores a --cwd that appears after `--`", () => {
+    // Past the separator the token belongs to the CLI or the prompt. It is
+    // forwarded verbatim either way, so there is nothing to suggest.
+    expect(
+      detectCwdDeprecation(argv("/x/dist/cy.js", "claude", "--", "--cwd", "/ws/app")),
+    ).toBeNull();
+    expect(
+      detectCwdDeprecation(argv("/x/dist/cy.js", "claude", "--", "run with --cwd=/ws")),
+    ).toBeNull();
   });
 });

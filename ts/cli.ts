@@ -63,11 +63,12 @@ import { buildRustArgs } from "./buildRustArgs.ts";
   }
 }
 
-// Deprecation: `--cwd <dir>` on an agent run. Runs AFTER the subcommand fast
+// `--cwd <dir>` on an agent run reads like an agent-yes flag but isn't one — it
+// is forwarded to the target CLI, so the agent runs wherever `ay` was invoked.
+// Point at `cd <dir> && …` once, then continue. Runs AFTER the subcommand fast
 // path above, so subcommand `--cwd` FILTERS (ay ls/status/spawn/schedule) are
-// untouched — only a real agent launch reaches here. Warn once, then continue
-// (the flag still works); suppress the Rust runner's mirror of this warning so
-// it isn't printed twice when we spawn the Rust binary below.
+// untouched — only a real agent launch reaches here. Suppress the Rust runner's
+// mirror of this hint so it isn't printed twice when we spawn the binary below.
 {
   const { detectCwdDeprecation, SUPPRESS_CWD_WARN_ENV } = await import("./cwdDeprecation.ts");
   const dep = detectCwdDeprecation(process.argv);

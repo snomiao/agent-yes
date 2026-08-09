@@ -458,94 +458,6 @@ fn test_cwd_is_preserved() {
     );
 }
 
-#[cfg(unix)] // relies on a bash mock CLI (chmod +x, `:` PATH separator)
-#[test]
-fn test_cwd_flag_overrides_current_dir() {
-    // Verify that --cwd <path> makes the agent run in <path>, even when
-    // agent-yes itself was invoked from a different directory.
-    let temp_dir = tempdir().unwrap();
-    let invocation_dir = temp_dir.path().join("invocation");
-    let target_dir = temp_dir.path().join("target_workspace");
-    fs::create_dir(&invocation_dir).unwrap();
-    fs::create_dir(&target_dir).unwrap();
-
-    let bin_dir = temp_dir.path().join("bin");
-    fs::create_dir(&bin_dir).unwrap();
-    let _mock_cli_path = create_cwd_printing_cli(&bin_dir, "claude");
-
-    let original_path = std::env::var("PATH").unwrap_or_default();
-    let new_path = format!("{}:{}", bin_dir.display(), original_path);
-
-    let home_dir = temp_dir.path().join("home");
-    fs::create_dir_all(&home_dir).unwrap();
-
-    let mut cmd = cargo_bin_cmd!("agent-yes");
-    cmd.current_dir(&invocation_dir)
-        .env("PATH", new_path)
-        .env("HOME", &home_dir)
-        .arg("--cli")
-        .arg("claude")
-        .arg("--cwd")
-        .arg(&target_dir)
-        .arg("--timeout")
-        .arg("5s")
-        .arg("-p")
-        .arg("test");
-
-    let output = cmd.output().unwrap();
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-
-    let expected_pwd = target_dir.canonicalize().unwrap();
-    let unexpected_pwd = invocation_dir.canonicalize().unwrap();
-
-    assert!(
-        stdout.contains(&format!("PWD: {}", expected_pwd.display()))
-            || stderr.contains(&format!("PWD: {}", expected_pwd.display())),
-        "Expected PWD: {} but got stdout:\n{}\nstderr:\n{}",
-        expected_pwd.display(),
-        stdout,
-        stderr
-    );
-
-    // And make sure it's NOT the invocation dir
-    assert!(
-        !stdout.contains(&format!("PWD: {}", unexpected_pwd.display()))
-            && !stderr.contains(&format!("PWD: {}", unexpected_pwd.display())),
-        "Expected PWD to differ from invocation dir {}",
-        unexpected_pwd.display(),
-    );
-}
-
-#[cfg(unix)] // relies on a bash mock CLI (chmod +x, `:` PATH separator)
-#[test]
-fn test_cwd_flag_rejects_missing_directory() {
-    // --cwd pointing at a nonexistent path should make agent-yes fail fast.
-    let temp_dir = tempdir().unwrap();
-    let missing = temp_dir.path().join("does-not-exist");
-
-    let bin_dir = temp_dir.path().join("bin");
-    fs::create_dir(&bin_dir).unwrap();
-    let _mock_cli_path = create_cwd_printing_cli(&bin_dir, "claude");
-
-    let original_path = std::env::var("PATH").unwrap_or_default();
-    let new_path = format!("{}:{}", bin_dir.display(), original_path);
-    let home_dir = temp_dir.path().join("home");
-    fs::create_dir_all(&home_dir).unwrap();
-
-    let mut cmd = cargo_bin_cmd!("agent-yes");
-    cmd.env("PATH", new_path)
-        .env("HOME", &home_dir)
-        .arg("--cli")
-        .arg("claude")
-        .arg("--cwd")
-        .arg(&missing)
-        .arg("-p")
-        .arg("test");
-
-    cmd.assert().failure();
-}
-
 /// Integration test: `agent-yes` creates project-local logs, a per-pid
 /// global FIFO, and registers both absolute paths in `~/.agent-yes/pids.jsonl`
 /// populated. End-to-end byte flow through the FIFO is covered by the
@@ -670,4 +582,80 @@ exit 0
             "expected raw log to be removed after render, still present at {raw_log}"
         );
     }
+}
+
+/// Mock CLI that echoes the argv it was handed, so a test can assert exactly
+/// what agent-yes forwarded to the target CLI.
+#[cfg(unix)]
+fn create_arg_printing_cli(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    let script_path = dir.join(name);
+    let mut file = File::create(&script_path).unwrap();
+    writeln!(
+        file,
+        r#"#!/usr/bin/env bash
+echo "ARGV: $*"
+# Print ready pattern so agent-yes doesn't timeout
+echo "? for shortcuts"
+sleep 1
+exit 0
+"#
+    )
+    .unwrap();
+
+    let mut perms = fs::metadata(&script_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&script_path, perms).unwrap();
+
+    script_path
+}
+
+#[cfg(unix)] // relies on a bash mock CLI (chmod +x, `:` PATH separator)
+#[test]
+fn test_cwd_flag_is_forwarded_to_the_cli() {
+    // `--cwd` is NOT an agent-yes flag. It rides along to the target CLI like any
+    // other unknown option, and the agent runs where the wrapper runs — so the
+    // wrapper cwd, the agent cwd and the recorded cwd can never drift apart.
+    // To run somewhere else: `cd <dir> && ay …`.
+    let temp_dir = tempdir().unwrap();
+    let invocation_dir = temp_dir.path().join("invocation");
+    let other_dir = temp_dir.path().join("other_workspace");
+    fs::create_dir(&invocation_dir).unwrap();
+    fs::create_dir(&other_dir).unwrap();
+
+    let bin_dir = temp_dir.path().join("bin");
+    fs::create_dir(&bin_dir).unwrap();
+    let _mock_cli_path = create_arg_printing_cli(&bin_dir, "claude");
+
+    let original_path = std::env::var("PATH").unwrap_or_default();
+    let new_path = format!("{}:{}", bin_dir.display(), original_path);
+    let home_dir = temp_dir.path().join("home");
+    fs::create_dir_all(&home_dir).unwrap();
+
+    let mut cmd = cargo_bin_cmd!("agent-yes");
+    cmd.current_dir(&invocation_dir)
+        .env("PATH", new_path)
+        .env("HOME", &home_dir)
+        .arg("--cli")
+        .arg("claude")
+        .arg("--timeout")
+        .arg("5s")
+        .arg("--cwd")
+        .arg(&other_dir);
+
+    let output = cmd.output().expect("failed to run agent-yes");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    assert!(
+        stdout.contains("--cwd"),
+        "--cwd should reach the CLI verbatim.\nstdout: {}\nstderr: {}",
+        stdout,
+        stderr
+    );
+    // And the hint should point at the shell equivalent instead.
+    assert!(
+        stderr.contains("--cwd is not an agent-yes flag"),
+        "expected the cd hint.\nstderr: {}",
+        stderr
+    );
 }
