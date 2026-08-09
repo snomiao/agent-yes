@@ -59,7 +59,7 @@ function programName(scriptPath: string | undefined): string {
  * (`[exec, script, ...userArgs]`). Returns the hint, or null when no `--cwd`
  * appears before the `--` separator.
  */
-export function detectCwdDeprecation(argv: string[]): CwdPassthroughHint | null {
+export function detectCwdPassthrough(argv: string[]): CwdPassthroughHint | null {
   const prog = programName(argv[1]);
   const userArgs = argv.slice(2);
   // Past `--` the token is the CLI's or the prompt's — forwarded verbatim either

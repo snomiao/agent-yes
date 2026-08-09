@@ -70,8 +70,8 @@ import { buildRustArgs } from "./buildRustArgs.ts";
 // untouched — only a real agent launch reaches here. Suppress the Rust runner's
 // mirror of this hint so it isn't printed twice when we spawn the binary below.
 {
-  const { detectCwdDeprecation, SUPPRESS_CWD_WARN_ENV } = await import("./cwdDeprecation.ts");
-  const dep = detectCwdDeprecation(process.argv);
+  const { detectCwdPassthrough, SUPPRESS_CWD_WARN_ENV } = await import("./cwdPassthroughHint.ts");
+  const dep = detectCwdPassthrough(process.argv);
   if (dep) {
     console.warn(dep.message);
     process.env[SUPPRESS_CWD_WARN_ENV] = "1";
