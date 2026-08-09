@@ -21,8 +21,9 @@ use std::env;
 /// MUST mirror `SUBCOMMANDS` in ts/subcommands.ts — keep the two in sync.
 pub const SUBCOMMANDS: &[&str] = &[
     "ls", "list", "ps", "status", "whoami", "result", "notify", "notifyd", "read", "cat", "tail",
-    "head", "send", "msgs", "spawn", "attach", "stop", "exit", "restart", "note", "ch", "channels",
-    "term", "widget", "mint", "serve", "schedule", "remote", "expose", "callback", "reap", "help",
+    "head", "send", "key", "select", "msgs", "spawn", "attach", "stop", "exit", "restart", "note",
+    "todo", "ch", "channels", "term", "widget", "mint", "serve", "tray", "schedule", "remote",
+    "expose", "callback", "reap", "deepseek", "ds", "help",
 ];
 
 /// Subcommands reserved for the generic manager entry (`ay`/`agent-yes`), not a

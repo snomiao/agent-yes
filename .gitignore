@@ -21,6 +21,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .env.test.local
 .env.production.local
 .env.local
+# generated CODEX_HOME for `ay deepseek` (scripts/deepseek-codex.ts) — holds a
+# config pointing at the DeepSeek endpoint, never commit it
+.codex-deepseek/
 
 # caches
 .eslintcache

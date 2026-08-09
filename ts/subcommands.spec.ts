@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, rm, utimes, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "fs/promises";
 import { appendFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -121,6 +121,8 @@ describe("subcommands.isSubcommand", () => {
     expect(isSubcommand("stop")).toBe(true);
     expect(isSubcommand("tail")).toBe(true);
     expect(isSubcommand("send")).toBe(true);
+    expect(isSubcommand("deepseek")).toBe(true);
+    expect(isSubcommand("ds")).toBe(true);
     expect(isSubcommand("not-a-command")).toBe(false);
     expect(isSubcommand(undefined)).toBe(false);
   });
@@ -136,6 +138,35 @@ describe("subcommands.isSubcommand", () => {
     // Inspection subcommands stay universal — `cy ls` / `cy send` still work.
     expect(isSubcommand("ls", false)).toBe(true);
     expect(isSubcommand("send", false)).toBe(true);
+  });
+});
+
+describe("subcommands ↔ rs/src/cli.rs subcommand mirror", () => {
+  // The Rust runner keeps its OWN hardcoded copy of both lists (it must decide
+  // whether to re-exec the JS launcher before clap swallows the word as prompt
+  // text). Nothing enforced that copy, so it silently drifted: `key`, `select`,
+  // `todo`, `tray`, `deepseek` and `ds` existed only on the TS side, and running
+  // them on the Rust binary directly launched an agent with the subcommand as
+  // its prompt. Parse both sources and require them to stay identical.
+  const names = (src: string, re: RegExp): string[] =>
+    [...(src.match(re)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
+
+  it("keeps SUBCOMMANDS and MANAGER_SUBCOMMANDS identical in both runtimes", async () => {
+    const ts = await readFile(new URL("./subcommands.ts", import.meta.url), "utf8");
+    const rs = await readFile(new URL("../rs/src/cli.rs", import.meta.url), "utf8");
+    expect(names(rs, /pub const SUBCOMMANDS: &\[&str\] = &\[([\s\S]*?)\];/)).toEqual(
+      names(ts, /const SUBCOMMANDS = new Set\(\[([\s\S]*?)\]\)/),
+    );
+    expect(names(rs, /pub const MANAGER_SUBCOMMANDS: &\[&str\] = &\[([\s\S]*?)\];/)).toEqual(
+      names(ts, /const MANAGER_SUBCOMMANDS = new Set\(\[([\s\S]*?)\]\)/),
+    );
+  });
+
+  it("actually parsed something (guards against a regex that silently matches nothing)", async () => {
+    const rs = await readFile(new URL("../rs/src/cli.rs", import.meta.url), "utf8");
+    expect(names(rs, /pub const SUBCOMMANDS: &\[&str\] = &\[([\s\S]*?)\];/).length).toBeGreaterThan(
+      20,
+    );
   });
 });
 
