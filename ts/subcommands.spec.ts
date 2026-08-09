@@ -95,6 +95,8 @@ describe("subcommands.isSubcommand", () => {
     expect(isSubcommand("stop")).toBe(true);
     expect(isSubcommand("tail")).toBe(true);
     expect(isSubcommand("send")).toBe(true);
+    expect(isSubcommand("deepseek")).toBe(true);
+    expect(isSubcommand("ds")).toBe(true);
     expect(isSubcommand("not-a-command")).toBe(false);
     expect(isSubcommand(undefined)).toBe(false);
   });
