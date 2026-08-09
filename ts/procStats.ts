@@ -148,7 +148,7 @@ export interface ProcReaders {
   readPsTable?: () => Promise<string | null>;
 }
 
-async function defaultListPids(): Promise<number[]> {
+export async function defaultListPids(): Promise<number[]> {
   try {
     const entries = await readdir("/proc");
     const out: number[] = [];
@@ -163,7 +163,7 @@ async function defaultListPids(): Promise<number[]> {
   }
 }
 
-async function defaultReadStat(pid: number): Promise<string | null> {
+export async function defaultReadStat(pid: number): Promise<string | null> {
   try {
     return await readFile(`/proc/${pid}/stat`, "utf8");
   } catch {
@@ -173,7 +173,7 @@ async function defaultReadStat(pid: number): Promise<string | null> {
   }
 }
 
-async function defaultReadSys(name: string): Promise<string | null> {
+export async function defaultReadSys(name: string): Promise<string | null> {
   try {
     return await readFile(`/proc/${name}`, "utf8");
   } catch {
@@ -181,7 +181,7 @@ async function defaultReadSys(name: string): Promise<string | null> {
   }
 }
 
-async function defaultReadPsTable(): Promise<string | null> {
+export async function defaultReadPsTable(): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync("ps", ["-eo", "pid=,ppid=,rss=,time=,state="], {
       encoding: "utf8",

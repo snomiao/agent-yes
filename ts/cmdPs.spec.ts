@@ -1,7 +1,10 @@
+import { homedir } from "node:os";
+import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
   formatSystemLine,
   isSelfTree,
+  parsePpidFromStat,
   readPpidSync,
   renderTable,
   repoLabel,
@@ -47,6 +50,17 @@ describe("repoLabel", () => {
 
   it("falls back to the last segment outside a tree layout", () => {
     expect(repoLabel("/srv/plain-checkout")).toBe("plain-checkout");
+  });
+
+  it("falls back to the shortened path when there is no segment at all", () => {
+    // `/` and "" split into no segments; without the fallback the REPO column
+    // would print "undefined".
+    expect(repoLabel("/")).toBe("/");
+    expect(repoLabel("")).toBe("");
+  });
+
+  it("abbreviates a home-relative fallback with ~", () => {
+    expect(repoLabel(homedir())).toBe(path.basename(homedir()));
   });
 
   it("handles Windows-style separators too", () => {
@@ -349,5 +363,27 @@ describe("isSelfTree", () => {
 
   it("readPpidSync returns null for a pid that cannot be read", () => {
     expect(readPpidSync(-1)).toBeNull();
+  });
+});
+
+describe("parsePpidFromStat", () => {
+  // /proc/<pid>/stat field 2 is the process name in parens, UNESCAPED. Splitting
+  // on whitespace or the first ")" mis-reads every process whose name contains
+  // either, so the fields after comm can only be located from the LAST ")".
+  it("reads the ppid of an ordinary line", () => {
+    expect(parsePpidFromStat("1234 (bash) S 1200 1234 1234 0 -1 4194304")).toBe(1200);
+  });
+
+  it("survives a process name containing spaces and parens", () => {
+    expect(parsePpidFromStat("1234 (foo) bar (baz) S 999 1234 0")).toBe(999);
+  });
+
+  it("returns null when there is no comm field to anchor on", () => {
+    expect(parsePpidFromStat("garbage without parens")).toBeNull();
+  });
+
+  it("returns null when the ppid field is missing or not a number", () => {
+    expect(parsePpidFromStat("1234 (bash) S")).toBeNull();
+    expect(parsePpidFromStat("1234 (bash) S notanumber 1234")).toBeNull();
   });
 });

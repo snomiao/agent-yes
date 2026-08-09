@@ -314,18 +314,29 @@ export function isSelfTree(
   return false;
 }
 
+/**
+ * ppid out of one `/proc/<pid>/stat` line.
+ *
+ * Split from the read so the parsing — the part that can actually be wrong — is
+ * testable on hosts without /proc. Field 2 is `comm`, wrapped in parens and NOT
+ * escaped: a process named `foo) bar (baz` is legal, so the fields after it can
+ * only be found from the LAST `)`, never by splitting on whitespace.
+ */
+export function parsePpidFromStat(stat: string): number | null {
+  const close = stat.lastIndexOf(")");
+  if (close < 0) return null;
+  const ppid = Number(
+    stat
+      .slice(close + 1)
+      .trim()
+      .split(/\s+/)[1],
+  );
+  return Number.isFinite(ppid) ? ppid : null;
+}
+
 export function readPpidSync(pid: number): number | null {
   try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    const close = stat.lastIndexOf(")");
-    if (close < 0) return null;
-    const ppid = Number(
-      stat
-        .slice(close + 1)
-        .trim()
-        .split(/\s+/)[1],
-    );
-    return Number.isFinite(ppid) ? ppid : null;
+    return parsePpidFromStat(readFileSync(`/proc/${pid}/stat`, "utf8"));
   } catch {
     return null;
   }

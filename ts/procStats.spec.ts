@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
   buildChildIndex,
+  defaultListPids,
+  defaultReadPsTable,
+  defaultReadStat,
+  defaultReadSys,
   derivePageSize,
   descendantsOf,
   humanBytes,
@@ -406,5 +410,97 @@ describe("real host adapters", () => {
     expect(mine.procs).toBe(0);
     expect(mine.rss).toBe(0);
     expect(unattributed.procs).toBe(0);
+  });
+});
+
+describe("systemStats degradation", () => {
+  // Injected readers, so every branch runs on every platform — the real-adapter
+  // block above can only exercise whichever shape the host happens to have.
+  const noProcs = new Map<number, ProcSample>();
+  const proc = (over: Partial<ProcSample> = {}): ProcSample => ({
+    pid: 1,
+    ppid: 0,
+    rss: 0,
+    utime: 0,
+    stime: 0,
+    state: "S",
+    ...over,
+  });
+
+  it("prefers /proc loadavg and meminfo when both parse", async () => {
+    const sys = await systemStats(noProcs, {
+      readSys: async (name) =>
+        name === "loadavg"
+          ? "1.50 2.50 3.50 2/1234 5678"
+          : "MemTotal: 16000 kB\nMemAvailable: 4000 kB\nSwapTotal: 2000 kB\nSwapFree: 500 kB\n",
+    });
+    expect(sys.load).toEqual([1.5, 2.5, 3.5]);
+    expect(sys.memTotalBytes).toBe(16000 * 1024);
+    expect(sys.memAvailableBytes).toBe(4000 * 1024);
+    expect(sys.swapTotalBytes).toBe(2000 * 1024);
+    expect(sys.swapFreeBytes).toBe(500 * 1024);
+  });
+
+  it("falls back to node:os when /proc is unreadable", async () => {
+    const sys = await systemStats(noProcs, { readSys: async () => null });
+    // No /proc means no swap breakdown anywhere — the header just omits it.
+    expect(sys.swapTotalBytes).toBeNull();
+    expect(sys.swapFreeBytes).toBeNull();
+    expect(sys.memTotalBytes).toBeGreaterThan(0);
+    expect(sys.ncpu).toBeGreaterThan(0);
+  });
+
+  it("rejects a truncated loadavg rather than reporting NaN", async () => {
+    const sys = await systemStats(noProcs, {
+      readSys: async (name) => (name === "loadavg" ? "1.50 2.50" : null),
+    });
+    // Two fields is not a load average; it must not become [1.5, 2.5, NaN].
+    expect(sys.load === null || sys.load.every(Number.isFinite)).toBe(true);
+  });
+
+  it("rejects a non-numeric loadavg", async () => {
+    const sys = await systemStats(noProcs, {
+      readSys: async (name) => (name === "loadavg" ? "x y z" : null),
+    });
+    expect(sys.load === null || sys.load.every(Number.isFinite)).toBe(true);
+  });
+
+  it("counts zombies from the snapshot, not from /proc", async () => {
+    const procs = new Map<number, ProcSample>([
+      [1, proc({ pid: 1, state: "Z" })],
+      [2, proc({ pid: 2, state: "S" })],
+      [3, proc({ pid: 3, state: "Z" })],
+    ]);
+    const sys = await systemStats(procs, { readSys: async () => null });
+    expect(sys.zombies).toBe(2);
+  });
+});
+
+describe("default adapter failure paths", () => {
+  // Each adapter has a catch that turns "this host has no such thing" into an
+  // empty result instead of an exception — that is what lets `ay ps` degrade
+  // rather than crash off Linux. Reachable on every platform by asking for
+  // something that cannot exist.
+  it("defaultReadStat returns null for an impossible pid", async () => {
+    await expect(defaultReadStat(-1)).resolves.toBeNull();
+  });
+
+  it("defaultReadSys returns null for a file that is not there", async () => {
+    await expect(defaultReadSys("definitely-not-a-proc-file")).resolves.toBeNull();
+  });
+
+  it("defaultListPids returns a list or an empty array, never throws", async () => {
+    // Linux: the real pid list. Elsewhere: readdir("/proc") fails and the catch
+    // hands back [] so snapshotProcs can fall through to the `ps` path.
+    const pids = await defaultListPids();
+    expect(Array.isArray(pids)).toBe(true);
+    if (process.platform === "linux") expect(pids.length).toBeGreaterThan(0);
+    else expect(pids).toEqual([]);
+  });
+
+  it("defaultReadPsTable returns text where ps exists and null where it does not", async () => {
+    const table = await defaultReadPsTable();
+    if (process.platform === "win32") expect(table).toBeNull();
+    else expect(typeof table).toBe("string");
   });
 });
