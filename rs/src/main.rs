@@ -55,9 +55,9 @@ fn shell_display_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
     }
-    let safe = s.chars().all(|c| {
-        c.is_ascii_alphanumeric() || "_@%+=:,./~-".contains(c)
-    });
+    let safe = s
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./~-".contains(c));
     if safe {
         s.to_string()
     } else {
@@ -124,7 +124,12 @@ fn warn_cwd_deprecated() {
     let raw: Vec<String> = std::env::args().collect();
     let prog = raw
         .first()
-        .map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p.as_str()).to_string())
+        .map(|p| {
+            p.rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(p.as_str())
+                .to_string()
+        })
         .unwrap_or_else(|| "agent-yes".to_string());
     eprintln!("{}", build_cwd_migration(&prog, &raw[1..]));
 }
@@ -184,6 +189,16 @@ async fn main() -> Result<()> {
         if !canonical.is_dir() {
             return Err(anyhow::anyhow!("--cwd {:?} is not a directory", requested));
         }
+        // Move the wrapper itself, not just the string we thread downstream. Every
+        // consumer that reads `std::env::current_dir()` instead of taking `cwd` as a
+        // parameter — config_loader's project-config lookup, serve, swarm — would
+        // otherwise resolve against the launch directory while the agent runs
+        // somewhere else, which is precisely the display/search divergence that got
+        // `--cwd` deprecated. Doing it here, before the config load and before either
+        // run path, makes wrapper cwd == agent cwd == recorded cwd by construction —
+        // the same state `cd <dir> && ay …` produces.
+        std::env::set_current_dir(&canonical)
+            .map_err(|e| anyhow::anyhow!("Failed to enter --cwd {:?}: {}", requested, e))?;
         canonical.to_string_lossy().to_string()
     } else {
         std::env::current_dir()
@@ -726,7 +741,10 @@ mod cwd_deprecation_tests {
             "agent-yes",
             &args(&["--cli", "claude", "--cwd", "/ws/app", "-p", "fix"]),
         );
-        assert!(msg.contains("cd /ws/app && agent-yes --cli claude -p fix"), "{msg}");
+        assert!(
+            msg.contains("cd /ws/app && agent-yes --cli claude -p fix"),
+            "{msg}"
+        );
         assert!(msg.contains("--cwd is deprecated"));
     }
 
