@@ -357,10 +357,17 @@ describe("humanBytes", () => {
 
 describe("real host adapters", () => {
   // Every other test here injects fake readers, so the DEFAULT ones — /proc on
-  // Linux, the `ps` fallback everywhere else — were never executed. These call
-  // them for real: read-only, and the only check that the adapters actually work
-  // on the machine the code ships to.
-  it("snapshotProcs sees this very process on the real host", async () => {
+  // Linux, the `ps` fallback elsewhere — were never executed. These call them for
+  // real (read-only): the only check that the adapters work on the machine the
+  // code ships to.
+  //
+  // Windows has neither /proc nor a POSIX `ps`, so there is nothing to read
+  // there. The contract on that platform is "degrade to empty", not "throw", and
+  // that is what the win32 branch asserts — `ay ps` must stay a no-op rather
+  // than a crash.
+  const posix = process.platform !== "win32";
+
+  it.runIf(posix)("snapshotProcs sees this very process on the real host", async () => {
     const procs = await snapshotProcs();
     expect(procs.size).toBeGreaterThan(0);
     const self = procs.get(process.pid);
@@ -368,19 +375,30 @@ describe("real host adapters", () => {
     expect(self!.rss).toBeGreaterThan(0);
   });
 
-  it("systemStats reads the box vitals on the real host", async () => {
+  it.runIf(!posix)("snapshotProcs degrades to empty on Windows instead of throwing", async () => {
+    await expect(snapshotProcs()).resolves.toBeInstanceOf(Map);
+  });
+
+  it("systemStats reads whatever the real host exposes, without throwing", async () => {
     const sys = await systemStats(await snapshotProcs());
-    // load is unavailable on some sandboxes; memory should always be readable.
+    // Any single field can be unreadable depending on platform/sandbox; the
+    // contract is that it returns a well-formed record either way.
     expect(sys.memTotalBytes === null || sys.memTotalBytes > 0).toBe(true);
     expect(sys.ncpu === null || sys.ncpu > 0).toBe(true);
     expect(sys.zombies).toBeGreaterThanOrEqual(0);
   });
 
-  it("sampleTrees attributes this process's own tree", async () => {
+  it.runIf(posix)("sampleTrees attributes this process's own tree", async () => {
     const { trees, unattributed } = await sampleTrees([process.pid], { windowMs: 100 });
     const mine = trees.get(process.pid);
     expect(mine).toBeDefined();
     expect(mine!.procs).toBeGreaterThanOrEqual(1);
     expect(unattributed.procs).toBeGreaterThanOrEqual(0);
+  });
+
+  it.runIf(!posix)("sampleTrees returns an empty rollup on Windows", async () => {
+    const { trees, unattributed } = await sampleTrees([process.pid], { windowMs: 100 });
+    expect(trees.size).toBe(0);
+    expect(unattributed.procs).toBe(0);
   });
 });

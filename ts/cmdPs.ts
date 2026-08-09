@@ -39,7 +39,12 @@ function shortenPath(p: string): string {
 
 /** Trailing path segment that identifies a worktree — `/code/x/foo/tree/main` → `foo`. */
 export function repoLabel(cwd: string): string {
-  const parts = cwd.split(path.sep).filter(Boolean);
+  // Split on BOTH separators, not `path.sep`. Agent cwds come off the registry,
+  // which stores whatever the wrapper recorded — a posix path is perfectly
+  // normal on a Windows host (msys/WSL shells, or a record synced from another
+  // box). Keying on path.sep left the whole path unsplit there, so the REPO
+  // column printed the full path instead of the repo name.
+  const parts = cwd.split(/[\\/]+/).filter(Boolean);
   const treeAt = parts.lastIndexOf("tree");
   // The repo's own name is more useful than the branch dir every checkout shares.
   if (treeAt > 0) return parts[treeAt - 1] as string;

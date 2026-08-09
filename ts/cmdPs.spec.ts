@@ -49,6 +49,13 @@ describe("repoLabel", () => {
     expect(repoLabel("/srv/plain-checkout")).toBe("plain-checkout");
   });
 
+  it("handles Windows-style separators too", () => {
+    // The registry stores whatever the wrapper recorded, so both shapes reach
+    // here regardless of the host we are rendering on.
+    expect(repoLabel("C:\\code\\snomiao\\agent-yes\\tree\\main")).toBe("agent-yes");
+    expect(repoLabel("C:\\srv\\plain-checkout")).toBe("plain-checkout");
+  });
+
   it("does not index out of bounds on a root-level tree dir", () => {
     expect(repoLabel("/tree/main")).toBe("main");
   });
@@ -121,6 +128,40 @@ describe("renderTable", () => {
   });
 });
 
+// Hoisted mocks with a mutable fixture. The earlier version re-mocked inside a
+// helper with vi.resetModules() per call; when a reset raced, the REAL
+// listRecords ran and returned whatever agents happened to be on the box — which
+// looks like a pass locally (rows appear) and an empty table on CI (no agents).
+const fixture: {
+  records: Record<string, unknown>[];
+  trees: Map<number, TreeStats>;
+  unattributed: TreeStats;
+  system: SystemStats;
+} = {
+  records: [],
+  trees: new Map(),
+  unattributed: { pid: 0, rss: 0, cpuPercent: 0, procs: 0 },
+  system: sys(),
+};
+
+vi.mock("./subcommands.ts", () => ({
+  listRecords: vi.fn(async () => fixture.records),
+  deriveLiveState: vi.fn(async (r: { status: string }) => ({ state: r.status })),
+}));
+
+vi.mock("./procStats.ts", async () => {
+  const actual = await vi.importActual<typeof import("./procStats.ts")>("./procStats.ts");
+  return {
+    ...actual,
+    snapshotProcs: vi.fn(async () => new Map()),
+    systemStats: vi.fn(async () => fixture.system),
+    sampleTrees: vi.fn(async () => ({
+      trees: fixture.trees,
+      unattributed: fixture.unattributed,
+    })),
+  };
+});
+
 describe("cmdPs", () => {
   const rec = (over: Record<string, unknown> = {}) => ({
     pid: 100,
@@ -135,34 +176,20 @@ describe("cmdPs", () => {
     ...over,
   });
 
-  /** Swap in fake dependencies, run cmdPs with a fresh module graph, capture output. */
   async function run(
     rest: string[],
     opts: {
-      records?: ReturnType<typeof rec>[];
+      records?: Record<string, unknown>[];
       trees?: Map<number, TreeStats>;
       unattributed?: TreeStats;
-      system?: SystemStats | null;
+      system?: SystemStats;
     } = {},
   ) {
-    const records = opts.records ?? [rec()];
-    vi.resetModules();
-    vi.doMock("./subcommands.ts", () => ({
-      listRecords: vi.fn(async () => records),
-      deriveLiveState: vi.fn(async (r: { status: string }) => ({ state: r.status })),
-    }));
-    vi.doMock("./procStats.ts", async () => {
-      const actual = await vi.importActual<typeof import("./procStats.ts")>("./procStats.ts");
-      return {
-        ...actual,
-        snapshotProcs: vi.fn(async () => []),
-        systemStats: vi.fn(async () => opts.system ?? sys()),
-        sampleTrees: vi.fn(async () => ({
-          trees: opts.trees ?? new Map<number, TreeStats>(),
-          unattributed: opts.unattributed ?? stats({ procs: 0 }),
-        })),
-      };
-    });
+    fixture.records = opts.records ?? [rec()];
+    fixture.trees = opts.trees ?? new Map();
+    fixture.unattributed = opts.unattributed ?? stats({ pid: 0, procs: 0 });
+    fixture.system = opts.system ?? sys();
+
     const out: string[] = [];
     const err: string[] = [];
     const origOut = process.stdout.write.bind(process.stdout);
@@ -176,11 +203,15 @@ describe("cmdPs", () => {
     } finally {
       process.stdout.write = origOut;
       process.stderr.write = origErr;
-      vi.doUnmock("./subcommands.ts");
-      vi.doUnmock("./procStats.ts");
-      vi.resetModules();
     }
   }
+
+  /** pids in render order, from the table body. */
+  const pids = (out: string) =>
+    out
+      .split("\n")
+      .map((l) => l.trim().split(/\s+/)[0])
+      .filter((p) => /^\d+$/.test(p ?? ""));
 
   it("prints the box vitals header and a row per agent", async () => {
     const r = await run([], {
@@ -189,7 +220,7 @@ describe("cmdPs", () => {
     expect(r.code).toBe(0);
     expect(r.out).toContain("load 15.23");
     expect(r.out).toContain("PID");
-    expect(r.out).toContain("100");
+    expect(pids(r.out)).toEqual(["100"]);
     expect(r.out).toContain("foo");
   });
 
@@ -227,14 +258,6 @@ describe("cmdPs", () => {
       [2, stats({ pid: 2, rss: 30, cpuPercent: 10, procs: 7 })],
       [3, stats({ pid: 3, rss: 20, cpuPercent: 50, procs: 3 })],
     ]);
-    const pids = (out: string) =>
-      out
-        .split("\n")
-        .slice(1)
-        .map((l) => l.trim().split(/\s+/)[0])
-        .filter((p) => /^\d+$/.test(p));
-
-    expect(pids((await run(["--json"], { records, trees })).out.length ? "" : "")).toEqual([]);
     // rss is the default: biggest first.
     expect(pids((await run([], { records, trees })).out)).toEqual(["2", "3", "1"]);
     expect(pids((await run(["--sort", "cpu"], { records, trees })).out)).toEqual(["1", "3", "2"]);
@@ -246,7 +269,7 @@ describe("cmdPs", () => {
 
   it("renders a 0-usage row rather than dropping an agent the sampler missed", async () => {
     const r = await run([], { trees: new Map() });
-    expect(r.out).toContain("100");
+    expect(pids(r.out)).toEqual(["100"]);
     expect(r.out).toMatch(/100\s+claude\s+active\s+0\.0/);
   });
 
@@ -255,7 +278,7 @@ describe("cmdPs", () => {
     // so a relative --cwd can't silently match nothing.
     const r = await run(["--cwd", "."], { trees: new Map() });
     expect(r.code).toBe(0);
-    expect(r.out).toContain("PID");
+    expect(pids(r.out)).toEqual(["100"]);
   });
 
   it("clamps a nonsense --interval up to the 100ms floor instead of sampling for 0s", async () => {
@@ -269,14 +292,14 @@ describe("cmdPs", () => {
   it("--all asks for exited agents too", async () => {
     const r = await run(["--all"], { trees: new Map() });
     expect(r.code).toBe(0);
-    expect(r.out).toContain("PID");
+    expect(pids(r.out)).toEqual(["100"]);
   });
 
   it("--help prints usage without doing any work", async () => {
     const r = await run(["--help"]);
     expect(r.code).toBe(0);
     expect(r.out).toContain("Usage: ay ps");
-    expect(r.out).not.toContain("PID  CLI");
+    expect(pids(r.out)).toEqual([]);
   });
 
   it("omits the header entirely when no box stat could be read", async () => {
