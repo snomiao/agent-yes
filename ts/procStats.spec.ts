@@ -396,9 +396,15 @@ describe("real host adapters", () => {
     expect(unattributed.procs).toBeGreaterThanOrEqual(0);
   });
 
-  it.runIf(!posix)("sampleTrees returns an empty rollup on Windows", async () => {
+  it.runIf(!posix)("sampleTrees still yields a zero row per root on Windows", async () => {
+    // There is nothing to sample there, but every requested root MUST come back
+    // with an entry: cmdPs renders `trees.get(pid) ?? zero`, and a missing entry
+    // would drop the agent from the table entirely rather than showing it at 0.
     const { trees, unattributed } = await sampleTrees([process.pid], { windowMs: 100 });
-    expect(trees.size).toBe(0);
+    expect(trees.size).toBe(1);
+    const mine = trees.get(process.pid)!;
+    expect(mine.procs).toBe(0);
+    expect(mine.rss).toBe(0);
     expect(unattributed.procs).toBe(0);
   });
 });
