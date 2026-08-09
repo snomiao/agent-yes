@@ -28,9 +28,17 @@ import { buildRustArgs } from "./buildRustArgs.ts";
   const managerCommands = !invokedCliName(process.argv);
   // Intercept bare -h/--help so we show TS subcommands, not just Rust agent-runner options.
   const isHelpFlag = rawArg === "-h" || rawArg === "--help";
-  const { isSubcommand, runSubcommand, cmdHelp, isUnknownManagerToken } =
+  const { isSubcommand, runSubcommand, cmdHelp, isUnknownManagerToken, isBareManagerInvocation } =
     await import("./subcommands.ts");
   if (isHelpFlag && process.argv.length === 3) {
+    await cmdHelp(managerCommands);
+    process.exit(0);
+  }
+  // Bare `ay` / `agent-yes`: show help. `ay` is the fleet manager, so a
+  // zero-argument run is someone asking "what can this do?", not "launch an
+  // agent" — launching names a CLI (`ay claude …`), and `cy` remains the
+  // no-argument shortcut for claude. Mirrored in rs/src/cli.rs.
+  if (isBareManagerInvocation(process.argv, managerCommands)) {
     await cmdHelp(managerCommands);
     process.exit(0);
   }
