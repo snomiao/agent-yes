@@ -107,8 +107,8 @@ pub fn build(input: GraphInput) -> Value {
             "runtime": "native",
             "caps": {
                 "send": true, "kill": true, "spawn": true,
-                // The Rust daemon runs no JS hooks and does not provision.
-                "spawnHook": false, "provision": false, "skipPermissions": false,
+                // Provisioning is native (rs/src/serve/ws.rs); no JS spawn hook.
+                "spawnHook": false, "provision": true, "skipPermissions": false,
             },
         },
     }));

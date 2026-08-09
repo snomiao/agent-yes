@@ -1154,12 +1154,46 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
                 }),
             )
         }
-        // /api/ws + /api/ws/status walk the workspace root through the JS
-        // codehost/provision package; the TS daemon itself 501s without it.
-        ("GET", "/api/ws") | ("GET", "/api/ws/status") => text(
-            501,
-            "workspace routes need the JS codehost/provision package — use `ay serve`",
-        ),
+        // Workspace routes — native ports of the TS handlers (ts/serve.ts →
+        // rs/src/serve/ws.rs): the console's /ws browser and the New-agent
+        // form's repo/branch combobox. Directory walks + git/gh subprocesses,
+        // so each runs on the blocking pool.
+        ("GET", "/api/ws") => {
+            tokio::task::spawn_blocking(|| {
+                let records = read_records();
+                json_res(200, &crate::serve::ws::ls_json(&records))
+            })
+            .await
+            .unwrap_or_else(|e| text(500, e.to_string()))
+        }
+        ("GET", "/api/ws/status") => {
+            let Some(dir) = q.get("path").cloned().filter(|s| !s.is_empty()) else {
+                return text(400, "missing ?path=<workspace dir>");
+            };
+            tokio::task::spawn_blocking(move || {
+                let records = read_records();
+                match crate::serve::ws::status_json(&records, &dir) {
+                    Ok(v) => json_res(200, &v),
+                    Err((code, msg)) => text(code, msg),
+                }
+            })
+            .await
+            .unwrap_or_else(|e| text(500, e.to_string()))
+        }
+        ("GET", "/api/ws/repos") => {
+            tokio::task::spawn_blocking(|| json_res(200, &crate::serve::ws::repos_json()))
+                .await
+                .unwrap_or_else(|e| text(500, e.to_string()))
+        }
+        ("GET", "/api/ws/branches") => {
+            let repo = q.get("repo").cloned().unwrap_or_default();
+            tokio::task::spawn_blocking(move || match crate::serve::ws::branches_json(&repo) {
+                Ok(v) => json_res(200, &v),
+                Err((code, msg)) => text(code, msg),
+            })
+            .await
+            .unwrap_or_else(|e| text(500, e.to_string()))
+        }
         ("GET", "/api/edges") => {
             let cwds: Vec<String> = read_records().into_iter().map(|r| r.cwd).collect();
             json_res(
@@ -1181,7 +1215,14 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
         }
         ("POST", "/api/kill") => crate::serve::control::kill(body),
         ("POST", "/api/restart") => crate::serve::control::restart(body),
-        ("POST", "/api/spawn") => crate::serve::control::spawn(body),
+        // A provisioned spawn (`from` clone / `fork` worktree) can run git for
+        // minutes — keep it off the async workers.
+        ("POST", "/api/spawn") => {
+            let body = body.to_string();
+            tokio::task::spawn_blocking(move || crate::serve::control::spawn(&body))
+                .await
+                .unwrap_or_else(|e| text(500, e.to_string()))
+        }
 
         // ── Widget sensor broker ────────────────────────────────────────────
         // The Rust daemon issues master tokens only (no scoped-token minting),
