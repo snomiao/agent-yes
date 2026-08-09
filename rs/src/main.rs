@@ -50,7 +50,7 @@ fn detect_install_method() -> &'static str {
 /// Quote one argv token for display in a copy-pasteable shell command. Leaves
 /// shell-safe tokens (including a leading `~`/`~/path`, so `cd ~/foo` still
 /// expands) bare; single-quotes anything else. Mirrors `shellDisplayQuote` in
-/// ts/cwdDeprecation.ts.
+/// ts/cwdPassthroughHint.ts.
 fn shell_display_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
@@ -70,7 +70,7 @@ fn shell_display_quote(s: &str) -> String {
 /// `cd <dir> && <same command>` line. Returns None when no `--cwd` appears before
 /// the `--` separator — past it the token belongs to the CLI or the prompt, and
 /// agent-yes has no business reading it. Pure so it can be unit tested. Mirrors
-/// detectCwdDeprecation in ts/cwdDeprecation.ts.
+/// detectCwdPassthrough in ts/cwdPassthroughHint.ts.
 fn build_cwd_migration(prog: &str, user_args: &[String]) -> Option<String> {
     let end = user_args
         .iter()

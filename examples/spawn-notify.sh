@@ -31,9 +31,9 @@ task="$*"
 
 # 1) Fire-and-forget. nohup+disown so the agent outlives this waiter; agent-yes
 #    keeps its own PTY log under ~/.agent-yes, so /dev/null here loses nothing.
-#    `cd` in a subshell rather than `--cwd`: that flag is deprecated on an agent
-#    run, and anything in AY_FLAGS would sit before it, so agent-yes never parses
-#    it — it lands in the trailing args and the CLI dies on the unknown option.
+#    `cd` in a subshell rather than `--cwd`: on an agent run that flag is not an
+#    agent-yes flag at all — it is forwarded to the CLI, which dies on the unknown
+#    option. The subshell keeps this script's own cwd untouched for step 2.
 mkdir -p "$cwd"
 # shellcheck disable=SC2086
 ( cd "$cwd" && exec nohup ay "$cli" ${AY_FLAGS:-} -- "$task" >/dev/null 2>&1 ) &

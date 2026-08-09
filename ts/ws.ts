@@ -529,11 +529,10 @@ async function cmdWsFork(args: string[]): Promise<number> {
     return 1;
   }
   process.stdout.write(`${res.action}  ${res.folder}\n`);
-  // `cd <dir> && ay …`, never `ay … --cwd <dir>`: --cwd is deprecated on an agent
-  // run, and a CLI-specific flag placed before it (`ay claude --model X --cwd D`)
-  // is swallowed into clap's trailing args and forwarded to the target CLI, which
-  // dies on the unknown option. cd has neither problem and puts every relative
-  // path in the command in the same place as the agent.
+  // `cd <dir> && ay …`, never `ay … --cwd <dir>`: on an agent run `--cwd` is not
+  // an agent-yes flag at all — it is forwarded to the target CLI, which dies on
+  // the unknown option. cd has no such problem and puts every relative path in
+  // the command in the same place as the agent.
   process.stderr.write(`\n  cd ${res.folder} && ay claude -- "<prompt>"   # work there\n`);
   return 0;
 }
