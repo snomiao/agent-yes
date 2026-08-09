@@ -162,6 +162,24 @@ describe("subcommands.isUnknownManagerToken (footgun guard)", () => {
   });
 });
 
+describe("subcommands.isBareManagerInvocation", () => {
+  it("fires for a bare manager entry (`ay` with no args) → help, not a spawn", async () => {
+    const { isBareManagerInvocation } = await loadModule();
+    expect(isBareManagerInvocation(["bun", "/x/dist/agent-yes.js"], true)).toBe(true);
+  });
+  it("never fires for a cli-bound alias (bare `cy` still spawns claude)", async () => {
+    const { isBareManagerInvocation } = await loadModule();
+    expect(isBareManagerInvocation(["bun", "/x/dist/cy.js"], false)).toBe(false);
+  });
+  it("does not fire once any arg is present, including a flags-only run", async () => {
+    const { isBareManagerInvocation } = await loadModule();
+    // `ay claude`, `ay ls`, `ay --continue` each asked for something specific.
+    expect(isBareManagerInvocation(["bun", "/x/agent-yes.js", "claude"], true)).toBe(false);
+    expect(isBareManagerInvocation(["bun", "/x/agent-yes.js", "ls"], true)).toBe(false);
+    expect(isBareManagerInvocation(["bun", "/x/agent-yes.js", "--continue"], true)).toBe(false);
+  });
+});
+
 describe("subcommands.cmdHelp", () => {
   const capture = async (managerCommands?: boolean) => {
     const { cmdHelp } = await loadModule();
@@ -2746,7 +2764,9 @@ describe("subcommands.cmdSend double-envelope warning", () => {
         const buf = Buffer.alloc(8192);
         const n = fs.readSync(rdwrFd, buf, 0, buf.length, null);
         const received = buf.subarray(0, n).toString();
-        expect(received).toMatch(/^<ay-msg [0-9a-f]{8} from claude [A-Za-z0-9._-]+@[A-Za-z0-9._-]+:\/repo\/beta#900001 — /);
+        expect(received).toMatch(
+          /^<ay-msg [0-9a-f]{8} from claude [A-Za-z0-9._-]+@[A-Za-z0-9._-]+:\/repo\/beta#900001 — /,
+        );
         expect(received).toContain("<ay-msg deadbeef");
         fs.closeSync(rdwrFd);
       } finally {

@@ -26,6 +26,10 @@ bun add -g agent-yes      # or: npm install -g agent-yes
 
 Then: `ay claude` (run an agent with auto-yes) · `ay serve --share` (web console + shareable link) · live console at https://agent-yes.com
 
+`ay` on its own prints the command list — `ay` **is** agent-yes, the fleet manager, so
+starting an agent names a CLI (`ay claude`, `ay codex`, …). `cy` remains the one-word
+shortcut that launches claude with no arguments.
+
 For the local web console, install [Portless](https://portless.sh/) once with `npm install -g portless`, then run `ay serve`. It assigns a free internal port and serves the console at `https://agent-yes.localhost/`. `ay serve --port N` remains available for a fixed-port API listener.
 
 ## Features

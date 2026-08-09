@@ -71,6 +71,16 @@ fn should_delegate(first_arg: &str, exe_base: &str) -> bool {
     is_subcommand(first_arg, manager_commands)
 }
 
+/// Pure decision: is this a completely bare MANAGER invocation (`agent-yes` /
+/// `ay` with no user args)? Those print help instead of launching claude — `ay`
+/// means agent-yes, the fleet manager, so a zero-argument run is "what can this
+/// do?", not "start an agent". Mirrors `isBareManagerInvocation` in
+/// ts/subcommands.ts. A cli-bound alias is excluded: bare `cy` / `claude-yes`
+/// still spawns claude.
+fn is_bare_manager_invocation(has_args: bool, exe_base: &str) -> bool {
+    !has_args && invoked_cli_name(exe_base).is_none()
+}
+
 /// If this binary was invoked with a leading management subcommand, re-exec the
 /// JS launcher and return `Some(exit_code)` for the caller to exit with;
 /// otherwise return `None` so the normal agent-run proceeds.
@@ -79,11 +89,16 @@ fn should_delegate(first_arg: &str, exe_base: &str) -> bool {
 /// off `process.argv[2]` alone (a subcommand buried after flags is not one).
 pub fn maybe_delegate_subcommand() -> Option<i32> {
     let raw: Vec<String> = env::args().collect();
-    let first = raw.get(1)?; // raw[0] is the binary itself
     let exe_base = env::current_exe()
         .ok()
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
         .unwrap_or_default();
+    // raw[0] is the binary itself, so raw[1] is the first user arg.
+    let Some(first) = raw.get(1) else {
+        // No args at all: the manager entry shows help; a cli-bound alias runs.
+        return is_bare_manager_invocation(false, &exe_base)
+            .then(|| delegate_to_js(&["help".to_string()]));
+    };
     if !should_delegate(first, &exe_base) {
         return None;
     }
@@ -541,6 +556,20 @@ mod tests {
         assert!(!should_delegate("claude", "agent-yes"));
         assert!(!should_delegate("-p", "agent-yes"));
         assert!(!should_delegate("fix", "agent-yes"));
+    }
+
+    #[test]
+    fn test_is_bare_manager_invocation() {
+        // Bare manager entry → help (delegated to the JS CLI).
+        assert!(is_bare_manager_invocation(false, "agent-yes"));
+        assert!(is_bare_manager_invocation(false, "ay"));
+        // Bare cli-bound alias → still spawns its agent.
+        assert!(!is_bare_manager_invocation(false, "cy"));
+        assert!(!is_bare_manager_invocation(false, "claude-yes"));
+        assert!(!is_bare_manager_invocation(false, "codex-yes"));
+        // With args, nothing is "bare" — normal dispatch decides.
+        assert!(!is_bare_manager_invocation(true, "agent-yes"));
+        assert!(!is_bare_manager_invocation(true, "cy"));
     }
 
     #[test]

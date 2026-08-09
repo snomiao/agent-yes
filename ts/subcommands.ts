@@ -513,6 +513,22 @@ export function isUnknownManagerToken(
 }
 
 /**
+ * True for a completely bare MANAGER invocation — `ay` / `agent-yes` with no
+ * args at all. `ay` means agent-yes (the fleet manager), so it prints help
+ * instead of silently launching an agent; naming a CLI is what launches one
+ * (`ay claude`), and `cy` stays the zero-argument way to start claude.
+ *
+ * Never fires for a cli-bound alias (managerCommands=false): bare `cy` /
+ * `claude-yes` / `codex-yes` must keep spawning their agent.
+ *
+ * `argv` is process.argv, so length 2 = [runtime, script] with no user args;
+ * a flags-only run like `ay --continue` still launches (it asked for a run).
+ */
+export function isBareManagerInvocation(argv: string[], managerCommands: boolean): boolean {
+  return managerCommands && argv.length <= 2;
+}
+
+/**
  * Write to stdout and wait until it has actually been handed off.
  *
  * The CLI ends with `process.exit()`, which DISCARDS bytes still sitting in the
@@ -839,9 +855,10 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay ls   <token>@<host>:<port>       connect inline (no alias needed)\n` +
       `  ay send <token>@<host>:<port>:<kw> <msg>\n` +
       `\n` +
-      `Run an agent:\n` +
-      `  ay [claude|codex|gemini|...] [options] -- [prompt]\n` +
+      `Run an agent (naming a CLI is what launches one — bare 'ay' shows this help):\n` +
+      `  ay <claude|codex|gemini|...> [options] -- [prompt]\n` +
       `  ay claude -- "fix the bug in auth.ts"\n` +
+      `  cy [options] -- [prompt]            shortcut for 'ay claude' (bare 'cy' starts claude)\n` +
       `  ay claude --help                    full agent-runner options\n` +
       `\n` +
       `Labs (examples at https://github.com/snomiao/agent-yes/tree/main/lab):\n` +
