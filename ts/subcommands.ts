@@ -466,8 +466,11 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
     switch (sub) {
       case "ls":
       case "list":
-      case "ps":
         return await cmdLs(rest);
+      // `ps` was an alias for `ls`; it is now the RESOURCE view — same agents,
+      // rolled up per process tree with box vitals. See ts/cmdPs.ts.
+      case "ps":
+        return await (await import("./cmdPs.ts")).cmdPs(rest);
       case "status":
         return await cmdStatus(rest);
       case "result":
@@ -659,6 +662,8 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `\n` +
       `Management:\n` +
       `  ay ls [keyword]                     list running agents\n` +
+      `  ay ps [keyword]                     per-agent CPU/RSS, rolled up over each\n` +
+      `                                        agent's whole process tree, + box vitals\n` +
       `  ay tail [-f] [-n N] <keyword>       last N lines (96), -f to follow\n` +
       `  ay read <keyword> [page opts]       paginate: --last/--head N, --range A:B,\n` +
       `                                        --before-line L [--limit N]\n` +
@@ -1645,9 +1650,9 @@ async function cmdLs(rest: string[]): Promise<number> {
   const y = yargs(rest)
     .usage(
       "Usage: ay ls [keyword] [options]\n" +
-        "       ay list [keyword] [options]\n" +
-        "       ay ps   [keyword] [options]\n\n" +
-        "List running agents. Optionally filter by keyword (pid, cwd substring, or prompt substring).",
+        "       ay list [keyword] [options]\n\n" +
+        "List running agents. Optionally filter by keyword (pid, cwd substring, or prompt substring).\n" +
+        "For per-agent CPU/memory usage, see `ay ps`.",
     )
     .option("all", {
       type: "boolean",
