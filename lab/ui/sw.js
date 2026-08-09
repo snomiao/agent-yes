@@ -175,7 +175,16 @@ self.addEventListener("fetch", (e) => {
 // If the request came from a preview iframe, proxy it to that iframe's port
 // (appPath = the request's own path); otherwise fall back to the shell handler.
 async function maybePreviewFromClient(e, req, url) {
-  const clientId = e.clientId || e.resultingClientId;
+  // A top-level navigation has NO existing client — only a *reserved* one, named
+  // by resultingClientId. clients.get() never settles for a reserved client: it
+  // becomes gettable only once the navigation commits, which can't happen until
+  // this respondWith() settles. Awaiting it here deadlocked every navigation
+  // once the worker took control — the first tab (still uncontrolled) loaded
+  // fine, every later tab on the same origin hung blank forever. Preview
+  // navigations are already handled by the PREVIEW branch in the fetch listener
+  // above, so navigations never need the client lookup at all.
+  if (req.mode === "navigate") return shellFetch(req, url);
+  const clientId = e.clientId;
   if (clientId) {
     const client = await self.clients.get(clientId).catch(() => null);
     const cm = client && PREVIEW.exec(new URL(client.url).pathname);
