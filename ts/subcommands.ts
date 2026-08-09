@@ -18,12 +18,8 @@ import { fileURLToPath } from "node:url";
 import ms from "ms";
 import { homedir } from "os";
 import path from "path";
-import {
-  type GlobalPidRecord,
-  readGlobalPids,
-  sanitizeRole,
-  updateGlobalPidStatus,
-} from "./globalPidIndex.ts";
+import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./globalPidIndex.ts";
+import { formatIdentity } from "./identity.ts";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
 import { agentYesHome } from "./agentYesHome.ts";
@@ -328,7 +324,8 @@ async function cmdWhoami(rest: string[]): Promise<number> {
   const ageMin = Math.max(0, Math.round((Date.now() - self.started_at) / 60_000));
   const lines = [
     `agent     ${self.cli} #${self.pid}${self.agent_id ? `  (agent_id ${self.agent_id})` : ""}`,
-    `role      ${self.role ?? "-  (set with: ay role <name>)"}`,
+    `identity  ${formatIdentity({ cwd: self.cwd, pid: self.pid })}`,
+    `title     ${self.title ?? "-"}`,
     `state     ${state}${question ? ` — ${question}` : ""}`,
     `cwd       ${self.cwd}`,
     `started   ${new Date(self.started_at).toISOString()}  (${ageMin}m ago)`,
@@ -336,7 +333,7 @@ async function cmdWhoami(rest: string[]): Promise<number> {
     `log       ${self.log_file ?? "-"}`,
     `fifo      ${self.fifo_file ?? "-"}`,
     `reply     ${reply} "..."`,
-    `envelope  <ay-msg from ${self.cli} #${self.pid}${self.role ? ` (${self.role})` : ""} @ ${self.cwd} — reply: ${reply} "...">…</ay-msg>`,
+    `envelope  <ay-msg from ${self.cli} ${formatIdentity({ cwd: self.cwd, pid: self.pid })} — reply: ${reply} "...">…</ay-msg>`,
   ];
   process.stdout.write(lines.join("\n") + "\n");
   return 0;
@@ -387,7 +384,7 @@ async function readLocalTsPids(cwd: string): Promise<GlobalPidRecord[]> {
     exit_code: d.exitCode ?? null,
     exit_reason: d.exitReason ?? null,
     started_at: d.startedAt ?? 0,
-    role: d.role ?? null,
+    title: d.title ?? null,
   }));
 }
 
@@ -422,7 +419,6 @@ const SUBCOMMANDS = new Set([
   "head",
   "send",
   "msgs",
-  "role",
   "key",
   "select",
   "spawn",
@@ -593,8 +589,6 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdSend(rest);
       case "msgs":
         return await cmdMsgs(rest);
-      case "role":
-        return await cmdRole(rest);
       case "key":
         return await cmdKey(rest);
       case "select":
@@ -824,7 +818,6 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay head <keyword>                   first N lines\n` +
       `  ay send <keyword> <msg>             send a message (keyword '.' = agent in this cwd)\n` +
       `  ay msgs [keyword] [--in|--out]      inter-agent message log (sent + received)\n` +
-      `  ay role [name] | ay role <kw> <name>  lane/role name shown in the send envelope\n` +
       `  ay ch mk|join|send|read|tail <topic>  local-first E2E channels: AI ↔ humans on a topic (ay ch help)\n` +
       `  ay term embed <pid>                 <script> to embed a live read-only agent terminal in a page (ay term help)\n` +
       `  ay widget ls | read selection|dom   read an opted-in page widget's context (selection/DOM) (ay widget help)\n` +
@@ -3438,13 +3431,13 @@ async function cmdSend(rest: string[]): Promise<number> {
   let nonce: string | undefined;
   if (sender.agent && !isSlashCommand(body) && !raw) {
     nonce = randomBytes(4).toString("hex");
-    // The sender's self-declared role ("pm", "crm", …) rides along when set —
-    // recipients read dozens of these a day and a pid/cwd doesn't carry the
-    // lane name (cwd → role isn't always derivable). sanitizeRole guarantees
-    // the value can't forge header syntax.
-    const senderRole = sanitizeRole(sender.agent.role);
-    const roleTag = senderRole ? ` (${senderRole})` : "";
-    prefix = `<ay-msg ${nonce} from ${sender.agent.cli} #${sender.agent.pid}${roleTag} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${replyTarget} "...">\n`;
+    // The standardized identity (<user>@<host>:<path>:<branch>#<pid>) names the
+    // sender in one token: the branch usually carries the lane name for free
+    // (worktree checkouts name their purpose), so recipients don't translate
+    // cwd/pid into a role by hand. Every segment is clamped to a header-safe
+    // charset in identity.ts — the open tag is not nonce-protected.
+    const identity = formatIdentity({ cwd: sender.agent.cwd, pid: sender.agent.pid });
+    prefix = `<ay-msg ${nonce} from ${sender.agent.cli} ${identity} — reply: ay send ${replyTarget} "...">\n`;
     suffix = `\n</ay-msg ${nonce}>`;
     // A body that itself starts with an <ay-msg …> header is usually an agent
     // hand-wrapping what this send is about to wrap again — the recipient then
@@ -3525,7 +3518,6 @@ async function cmdSend(rest: string[]): Promise<number> {
             cli: sender.agent.cli,
             cwd: sender.agent.cwd,
             agent_id: sender.agent.agent_id,
-            role: sender.agent.role ?? undefined,
           }
         : null,
       to: {
@@ -3533,7 +3525,6 @@ async function cmdSend(rest: string[]): Promise<number> {
         cli: record.cli,
         cwd: record.cwd,
         agent_id: record.agent_id,
-        role: record.role ?? undefined,
       },
       body,
       code: trailing === "\r" ? undefined : codeName,
@@ -3702,87 +3693,6 @@ async function cmdMsgs(rest: string[]): Promise<number> {
     const line = tag + truncate(rec.body.replace(/\s+/g, " "), 100);
     process.stdout.write(`${when}  ${peer.padEnd(20)}${via}${flag}  ${line}\n`);
   }
-  return 0;
-}
-
-/**
- * `ay role [name]` / `ay role <keyword> <name>` — read or set an agent's
- * self-declared lane/role name ("pm", "crm", …). The role rides in the
- * `ay send` envelope header (`from claude #123 (pm) @ …`) so recipients don't
- * translate cwd/pid into a lane by hand — the emergent `[pm→qa]` body prefixes
- * exist exactly because the envelope lacked this. With no args: print the
- * calling agent's role. With one arg: set the calling agent's role (requires
- * agent context). With two args: resolve the keyword and set that agent's role.
- * `--clear` removes it. Roles are clamped by sanitizeRole (they render into the
- * non-nonce-protected open tag).
- */
-const ROLE_RESOLVE_OPTS: CommonOpts = {
-  all: false,
-  active: false,
-  cwdScope: null,
-  latest: false,
-  json: false,
-};
-
-async function cmdRole(rest: string[]): Promise<number> {
-  const y = yargs(rest)
-    .usage('Usage: ay role [name] | ay role <keyword> <name> | ay role [keyword] --clear')
-    .option("clear", { type: "boolean", default: false, description: "Remove the role" })
-    .help(false)
-    .version(false)
-    .exitProcess(false);
-  const argv = await y.parseAsync();
-  const args = argv._.slice(0).map(String);
-
-  // Figure out target + new value from arity: 0 args = self get (or self clear),
-  // 1 arg = self set (or keyword clear), 2 args = keyword set.
-  let target: GlobalPidRecord | null = null;
-  let newRole: string | undefined;
-  if (args.length === 2) {
-    target = await resolveOne(args[0]!, ROLE_RESOLVE_OPTS);
-    newRole = args[1]!;
-  } else if (args.length === 1 && argv.clear) {
-    target = await resolveOne(args[0]!, ROLE_RESOLVE_OPTS);
-  } else if (args.length === 1) {
-    target = await resolveSender();
-    if (!target) {
-      process.stderr.write(
-        "ay role: no agent context (AGENT_YES_PID unset or unregistered) — from a human shell, name the agent: ay role <keyword> <name>\n",
-      );
-      return 1;
-    }
-    newRole = args[0]!;
-  } else {
-    target = await resolveSender();
-    if (!target) {
-      process.stderr.write(
-        "ay role: no agent context — from a human shell, name the agent: ay role <keyword> [<name>|--clear]\n",
-      );
-      return 1;
-    }
-  }
-
-  if (newRole === undefined && !argv.clear) {
-    process.stdout.write(`${target.role ?? ""}\n`);
-    return 0;
-  }
-
-  let role: string | null = null;
-  if (!argv.clear) {
-    role = sanitizeRole(newRole);
-    if (!role) {
-      process.stderr.write(
-        `ay role: invalid role ${JSON.stringify(newRole)} — use 1-32 chars of [A-Za-z0-9._-]\n`,
-      );
-      return 1;
-    }
-  }
-  await updateGlobalPidStatus(target.pid, { role });
-  process.stdout.write(
-    role
-      ? `pid ${target.pid} (${target.cli}): role set to "${role}" — envelopes now read: from ${target.cli} #${target.pid} (${role}) @ ${shortenPath(target.cwd)}\n`
-      : `pid ${target.pid} (${target.cli}): role cleared\n`,
-  );
   return 0;
 }
 

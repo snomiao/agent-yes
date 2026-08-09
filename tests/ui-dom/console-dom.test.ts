@@ -466,14 +466,22 @@ describe("console DOM behaviour", () => {
         } catch {}
       }
     });
+    // the combobox fires its logic on `change` — fill() then commit like a user
+    const setRepo = async (v: string) => {
+      await page.fill("#nf-repo", v);
+      await page.dispatchEvent("#nf-repo", "change");
+    };
     try {
       await page.click("#newbtn");
-      // repo picker fills async from /api/ws/repos — placeholder + 3 repos
-      await expect.poll(() => page.locator("#nf-repo option").count()).toBe(4);
-      expect(await page.locator("#nf-repo").innerText()).toContain("acme/newrepo (gh)");
+      // repo combobox datalist fills async from /api/ws/repos — 3 repos
+      await expect.poll(() => page.locator("#nf-repo-list option").count()).toBe(3);
+      const values = await page
+        .locator("#nf-repo-list option")
+        .evaluateAll((os) => os.map((o) => (o as HTMLOptionElement).value));
+      expect(values).toContain("acme/newrepo");
 
       // pick a repo → branch row appears, datalist fills from /api/ws/branches
-      await page.selectOption("#nf-repo", "acme/widgets");
+      await setRepo("acme/widgets");
       await expect.poll(() => page.locator("#nf-branch-row").isVisible()).toBe(true);
       await expect.poll(() => page.locator("#nf-branch-list option").count()).toBe(2);
 
@@ -489,17 +497,29 @@ describe("console DOM behaviour", () => {
       expect(spawns[0].create).toBe(true);
       expect(spawns[0].cwd).toBeUndefined();
 
-      // an EXISTING remote branch → plain {from}, no create
+      // a github /tree/<branch> URL → normalized spec, branch prefilled
       await page.click("#newbtn");
-      await expect.poll(() => page.locator("#nf-repo option").count()).toBe(4);
-      await page.selectOption("#nf-repo", "acme/widgets");
+      await setRepo("https://github.com/acme/widgets/tree/main");
+      await expect.poll(() => page.locator("#nf-branch").inputValue()).toBe("main");
       await expect.poll(() => page.locator("#nf-branch-list option").count()).toBe(2);
-      await page.fill("#nf-branch", "main");
       await page.selectOption("#nf-cli", "claude");
       await page.click("#nf-go");
       await expect.poll(() => spawns.length).toBe(2);
       expect(spawns[1].from).toBe("acme/widgets@main");
       expect(spawns[1].create).toBeUndefined();
+      expect(spawns[1].branch).toBeUndefined();
+
+      // a non-GitHub git URL → sent raw with the branch alongside (raw clone)
+      await page.click("#newbtn");
+      await setRepo("https://gitlab.com/acme/tools.git");
+      await expect.poll(() => page.locator("#nf-branch-hint").innerText()).toContain("git clone");
+      await page.fill("#nf-branch", "dev");
+      await page.selectOption("#nf-cli", "claude");
+      await page.click("#nf-go");
+      await expect.poll(() => spawns.length).toBe(3);
+      expect(spawns[2].from).toBe("https://gitlab.com/acme/tools.git");
+      expect(spawns[2].branch).toBe("dev");
+      expect(spawns[2].create).toBe(true);
     } finally {
       await ctx.close();
     }

@@ -88,6 +88,11 @@ async fn main() -> anyhow::Result<()> {
                 Some(ServeAction::Status) => return serve::service::status(),
                 None => {}
             }
+            // Recover the login-shell env in the background now, so the first
+            // /api/spawn doesn't pay the shell's rc-file startup cost (see
+            // serve/shell_env.rs — launchd hands us a bare PATH).
+            serve::shell_env::warm();
+
             // --port and --webrtc are independent transports over the SAME API
             // surface; running both is the normal local+remote setup.
             let http = port.map(|p| tokio::spawn(serve::http::run(p)));

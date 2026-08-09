@@ -14,7 +14,6 @@ cy cat  <keyword>                       # read の全文エイリアス（窓指
 cy tail <keyword> [-f] [-n N] [--latest]  # 末尾 N 行（既定 96）、-f で追従
 cy head <keyword> [-n N] [--latest]     # 既定 N=96
 cy send <keyword> <msg> [--code=enter|esc|ctrl-c|ctrl-y|ctrl-d|ctrl-\|tab|none|raw:0xNN]
-cy role [name] | cy role <keyword> <name> [--clear]   # 送信 envelope に載る lane/role 名
 cy attach <keyword> [--escape ctrl-\] [--latest] [--cwd <dir>]
 cy stop <keyword> [--method=auto|graceful|double-ctrl-c]
 ```
@@ -102,21 +101,35 @@ Rust 側はパイプを **自プロセスで O_RDWR で開いたまま** にし�
 ユーザの stdin と同じ `stdin_tx` チャンネルへ流すため、`/auto` 検出・
 `Ctrl+C` 処理・`stdin_ready` ゲートはそのまま適用される。
 
-### 送信 envelope と role 名
+### 送信 envelope と標準 identity
 
 エージェントからの `ay send` は本文を
-`<ay-msg <nonce> from <cli> #<pid> [(role)] @ <cwd> — reply: ay send <agent_id> "...">`
-で包んで届ける。`role` はエージェントが自己申告する lane 名
-（`pm` / `crm` など)で、受信側が cwd/pid から役割を推測する手間を省く。
-設定方法は 2 通り:
+`<ay-msg <nonce> from <cli> <identity> — reply: ay send <agent_id> "...">`
+で包んで届ける。`<identity>` は全 surface 共通の標準形式:
 
-- 起動時に環境変数 `AGENT_YES_ROLE=pm ay claude`(登録後に子プロセス env
-  からは strip されるので、subagent には継承されない)
-- 起動後に `ay role pm`(自分)/ `ay role <keyword> pm`(他エージェント)。
-  `--clear` で削除。
+```
+<username>@<hostname>:<path>:<branch>#<pid>
+例: sno@Mac:~/ws/symval/symval/tree/crm:main#30402
+```
 
-役割名は `[A-Za-z0-9._-]{1,32}` に制限する(envelope の開きタグは nonce
-保護されないため、空白や `>` を含む値はヘッダ構造の偽造に使えてしまう)。
+- `branch` は cwd の git checkout から純 file read で解決する
+  (worktree の `gitdir:` 間接参照も辿る。detached HEAD は短縮 commit id、
+  repo 外ではセグメントごと省略)。worktree 運用では branch 名がそのまま
+  lane の役割を表すことが多い(`crm-yamamoto-wifi` / `fix/t173-tone-core`)。
+- パースは右端から: `#<pid>` を末尾から、`branch` は最後の `:` の後
+  (git の ref 名は `:` を含めない)、`username` は先頭の `@` まで。
+  途中の `path` は `:` や `@` を含み得るため、両端アンカーで読む。
+- 各セグメントは header-safe な文字集合に clamp される(envelope の開き
+  タグは nonce 保護されないため、空白や `>` はヘッダ偽造に使えてしまう)。
+
+### 端末 title の捕捉
+
+wrapper は子 CLI の PTY 出力から端末 title (OSC 0/2) を拾い、pid registry
+の `title` に保持する。claude / opencode は作業内容の要約を title に流し
+続けるので、`ay whoami` / `ay ls --json` で「そのエージェントが今なにを
+しているか」を画面を読まずに確認できる。書き込みは変化時のみ +
+2 秒スロットルで、定常状態のレジストリ書き込みはゼロ。
+
 なお、送受信の全文は `ay msgs` で双方の `.agent-yes/{inbox,outbox}.jsonl`
 から後追いできる(`ay cat` は端末描画のみで注入テキストを含まない)。
 
