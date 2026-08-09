@@ -203,8 +203,6 @@ pub struct CliArgs {
     pub queue: bool,
     pub use_skills: bool,
     pub skip_permissions: bool,
-    /// Working directory to run the agent in. None = use process current_dir.
-    pub cwd: Option<String>,
     /// Force raw TUI passthrough even when stdout is not a TTY.
     pub force_tty: bool,
     /// Force plain rendered text output even when stdout is a TTY.
@@ -282,10 +280,6 @@ struct Args {
     /// Pass --dangerously-skip-permissions to the CLI
     #[arg(short = 'y', long = "yes", default_value = "false")]
     yes: bool,
-
-    /// Deprecated: working directory for the agent. Prefer `cd <dir> && <command>`.
-    #[arg(long)]
-    cwd: Option<String>,
 
     /// Force raw TUI passthrough even when stdout is not a TTY (piped/redirected)
     #[arg(long = "force-tty", default_value = "false")]
@@ -400,7 +394,6 @@ fn resolve_args(args: Args, exe_name: &str) -> Result<CliArgs> {
         queue: args.queue,
         use_skills: args.use_skills,
         skip_permissions: args.yes,
-        cwd: args.cwd,
         force_tty: args.force_tty,
         no_tty: args.no_tty,
         swarm,
@@ -766,7 +759,6 @@ mod tests {
             queue: false,
             use_skills: false,
             yes: false,
-            cwd: None,
             force_tty: false,
             no_tty: false,
             swarm: None,
@@ -914,17 +906,16 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_args_cwd_default_none() {
-        let result = resolve_args(default_args(), "agent-yes").unwrap();
-        assert!(result.cwd.is_none());
-    }
-
-    #[test]
-    fn test_resolve_args_cwd_explicit() {
+    fn test_resolve_args_cwd_is_forwarded_to_the_cli() {
+        // `--cwd` is not an agent-yes flag: it rides along to the target CLI like
+        // any other unknown option, so agent-yes never has a cwd but its own.
         let mut args = default_args();
-        args.cwd = Some("/tmp".into());
+        args.args = vec!["--cwd".into(), "/tmp".into()];
         let result = resolve_args(args, "agent-yes").unwrap();
-        assert_eq!(result.cwd, Some("/tmp".into()));
+        assert_eq!(
+            result.cli_args,
+            vec!["--cwd".to_string(), "/tmp".to_string()]
+        );
     }
 
     #[test]
