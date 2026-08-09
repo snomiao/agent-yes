@@ -76,3 +76,83 @@ export async function waitForRegistration(
 export function predictedLogPath(cwd: string, pid: number): string {
   return path.join(cwd, ".agent-yes", `${pid}.raw.log`);
 }
+
+/** Outcome of {@link confirmAgentStarted}: started, or died with a reason to print. */
+export type StartConfirmation = { ok: true } | { ok: false; reason: string };
+
+/** Last `max` bytes of a file as text, or "" if it can't be read. Used to put the
+ *  agent's own error (e.g. `error: unknown option '--cwd'`) in the failure message
+ *  instead of making the caller go dig for it. */
+async function tailFile(file: string | null | undefined, max = 400): Promise<string> {
+  if (!file) return "";
+  try {
+    const { readFile } = await import("fs/promises");
+    const text = (await readFile(file, "utf8")).trim();
+    return text.length > max ? `…${text.slice(-max)}` : text;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Confirm a just-registered agent actually STARTED, rather than registering and
+ * dying a moment later.
+ *
+ * `waitForRegistration` is necessary but not sufficient: the wrapper writes its
+ * pid record before the target CLI has proven it can run, so a CLI that dies on
+ * startup (bad flag, missing binary) registers as `active` and only flips to
+ * `exited` afterwards. Returning as soon as the record appears therefore printed
+ * a success tutorial and exit 0 for an agent that was already dead — a fan-out
+ * could collapse in silence (#387).
+ *
+ * So after registration we hold a short grace window and watch for death. Failure
+ * is checked BEFORE liveness each tick: an agent that produced output and *then*
+ * died must still be reported dead. The raw-log check is only an early-exit
+ * optimisation — real PTY output means the CLI is up, so healthy spawns usually
+ * return in well under the grace instead of paying all of it. Timing out is
+ * success, keeping the previous behaviour for anything this can't decide.
+ */
+export async function confirmAgentStarted(
+  pid: number,
+  graceMs = 1500,
+  aborted?: () => boolean,
+): Promise<StartConfirmation> {
+  const { readGlobalPids } = await import("./globalPidIndex.ts");
+  const { stat } = await import("fs/promises");
+  const deadline = Date.now() + graceMs;
+
+  while (Date.now() < deadline) {
+    if (aborted?.()) return { ok: false, reason: `Agent pid ${pid} died during startup.` };
+
+    const record = (await readGlobalPids()).find((r) => r.pid === pid);
+    // Gone entirely: compaction drops records that are both dead and exited, so a
+    // vanished record is a death we merely failed to observe — not "keep waiting".
+    if (!record) {
+      return {
+        ok: false,
+        reason: `Agent pid ${pid} disappeared from the registry during startup.`,
+      };
+    }
+    if (record.status === "exited" || record.exit_code !== null) {
+      const why = record.exit_reason ?? `exit code ${record.exit_code}`;
+      const tail = await tailFile(record.log_file);
+      return {
+        ok: false,
+        reason:
+          `Agent pid ${pid} exited during startup (${why}).` +
+          (tail ? `\n${tail}` : "") +
+          `\nSee: ay tail ${pid}`,
+      };
+    }
+    // Positive proof of life: the wrapper only has PTY bytes to write once the CLI
+    // is actually running. Built from the RECORD's cwd, not ours — under `--cwd`
+    // they differ, and that divergence is exactly what this path gets wrong.
+    try {
+      if ((await stat(predictedLogPath(record.cwd, pid))).size > 0) return { ok: true };
+    } catch {
+      // No raw log yet — normal this early; keep watching for death instead.
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return { ok: true };
+}

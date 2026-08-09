@@ -157,8 +157,13 @@ if (config.useRust) {
     // agent so we don't block the parent's tool call for the whole session, then
     // print how to drive it and exit. `--attach`/AGENT_YES_ATTACH=1 opts out.
     const attach = config.attach || process.env.AGENT_YES_ATTACH === "1";
-    const { shouldForkNested, buildSpawnTutorial, waitForRegistration, predictedLogPath } =
-      await import("./forkNested.ts");
+    const {
+      shouldForkNested,
+      buildSpawnTutorial,
+      waitForRegistration,
+      confirmAgentStarted,
+      predictedLogPath,
+    } = await import("./forkNested.ts");
     if (
       shouldForkNested({
         isTTY: Boolean(process.stdout.isTTY),
@@ -196,13 +201,23 @@ if (config.useRust) {
         console.error(deathMsg);
         process.exit(1);
       }
-      forked.unref();
       if (!registered) {
+        forked.unref();
         console.error(
           `Agent pid ${forkedPid} spawned but never became addressable (ay tail/ay send) within 5s.\n` +
             `Log (if written yet): ${predictedLogPath(process.cwd(), forkedPid)}\n` +
             `It may still be starting up — retry: ay tail ${forkedPid}`,
         );
+        process.exit(1);
+      }
+      // Registration only proves the wrapper got far enough to write its record —
+      // the CLI can still die immediately after. Confirm it actually started before
+      // claiming success, or a caller fanning out reads "Spawned pid N" + exit 0 for
+      // a dead agent (#387). Keep the exit/error listeners live until this resolves.
+      const started = await confirmAgentStarted(forkedPid, 1500, () => deathMsg !== null);
+      forked.unref();
+      if (!started.ok) {
+        console.error(deathMsg ?? started.reason);
         process.exit(1);
       }
       console.log(buildSpawnTutorial(config.cli || "agent", forkedPid));
