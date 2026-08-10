@@ -7,13 +7,18 @@
  * `runTodoSubcommand`, so this file (and everything it pulls in) is only
  * loaded when `ay todo ...` is actually invoked.
  *
- * Store location: `--root <dir>` (default: current working directory) is
- * where `.agent-yes/todos.jsonl` lives, mirroring `PidStore`'s own
- * `<workingDir>/.agent-yes/...` convention. This module has no notion of any
- * particular consuming project's directory-resolution rules (e.g. "find the
- * monorepo root") — a project wanting that behavior supplies it by always
- * invoking with an explicit `--root`, or by calling `openStore()` as a
- * library from its own code instead of through this CLI.
+ * Store location: `--root <dir>` is where `.agent-yes/todos.jsonl` lives,
+ * mirroring `PidStore`'s own `<workingDir>/.agent-yes/...` convention. Left
+ * unset it resolves to the REPO's common root rather than the cwd, so agents
+ * in different worktrees share one list — see `todoRoot.ts` for why that
+ * matters and where the line is drawn.
+ *
+ * Cross-agent surface, on top of that shared store: `--owner me` resolves to
+ * the calling agent's registry id (`todoIdentity.ts`), `new` assigns to the
+ * caller by default, `claim` takes a task over while refusing to steal from a
+ * live agent, and `ls`/`get` annotate each owner with whether that agent is
+ * still alive. `reconcile` (already present) closes the loop by orphaning
+ * tasks whose owner agent exited.
  *
  * Argument parsing: a real yargs COMMAND TREE — one `yargs(argv)` instance
  * with a `CommandModule` per verb registered via `.command()`, `--root`/
@@ -39,13 +44,15 @@
  */
 
 import yargs, { type Argv, type CommandModule } from "yargs";
-import { openStore, CycleError, type TodoRecord } from "./todoStore.ts";
+import { openStore, CycleError, type TodoStore, type TodoRecord } from "./todoStore.ts";
 import { isKnownKind, LIFECYCLES, type LifecycleKind } from "./todoLifecycle.ts";
 import { describeBlock, type TodoBlock } from "./todoBlock.ts";
 import { renderDigest, renderTree, buildTreeJSON, unblockedTasks } from "./todoDigest.ts";
 import { reconcileTodos, type LiveAgent } from "./todoAutomation.ts";
 import { readGlobalPids } from "./globalPidIndex.ts";
 import { removeControlCharacters } from "./removeControlCharacters.ts";
+import { resolveTodoRoot } from "./todoRoot.ts";
+import { NO_OWNER, SELF_OWNER, ownerLiveness, resolveSelf } from "./todoIdentity.ts";
 
 function fail(message: string): never {
   throw new Error(message);
@@ -101,9 +108,26 @@ function renderRecord(t: TodoRecord): string {
   return lines.join("\n");
 }
 
-function renderList(tasks: TodoRecord[]): string {
+/**
+ * `owner` as displayed: the stored string plus, when it names an agent the
+ * registry knows, that agent's current status — `agt-7(exited)`. An owner with
+ * no registry entry (a human, or an agent that never registered) prints bare,
+ * because "unknown" there means "not an agent", not "possibly dead".
+ *
+ * This is the whole point of the shared store being readable across agents:
+ * the interesting question about a task someone else owns is almost always
+ * "is that someone still running?", and answering it by cross-referencing
+ * `ay ls` by hand is exactly the step that gets skipped.
+ */
+function ownerCell(t: TodoRecord, agents: LiveAgent[]): string {
+  if (!t.owner) return "";
+  const status = ownerLiveness(t.owner, agents);
+  return status === "unknown" ? t.owner : `${t.owner}(${status})`;
+}
+
+function renderList(tasks: TodoRecord[], agents: LiveAgent[] = []): string {
   if (tasks.length === 0) return "(no tasks match)";
-  const rows = tasks.map((t) => [t._id, t.state, t.kind, t.owner ?? "", t.summary]);
+  const rows = tasks.map((t) => [t._id, t.state, t.kind, ownerCell(t, agents), t.summary]);
   const header = ["ID", "STATE", "KIND", "OWNER", "SUMMARY"];
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)));
   const line = (xs: string[]) =>
@@ -115,12 +139,58 @@ function renderList(tasks: TodoRecord[]): string {
 }
 
 interface GlobalOpts {
-  root: string;
+  /** Undefined means "not specified" — resolved per call by `resolveTodoRoot` (repo root, not cwd). See `todoRoot.ts`. */
+  root: string | undefined;
   format: "table" | "json";
 }
 
 function emit(opts: GlobalOpts, obj: unknown, human: string): void {
   process.stdout.write((opts.format === "json" ? JSON.stringify(obj, null, 2) : human) + "\n");
+}
+
+/**
+ * Open the store every verb works against. Resolution is deferred to call
+ * time (rather than baked into a yargs `default:`) because the default is
+ * DERIVED — it shells out to git — and a yargs default is evaluated eagerly at
+ * parse time, on every invocation including `--help`.
+ */
+async function storeFor(opts: GlobalOpts): Promise<TodoStore> {
+  return openStore(await resolveTodoRoot(opts.root));
+}
+
+/**
+ * Turn an `--owner` value into what gets stored: `me` → this agent's
+ * `agent_id`, `none` → explicitly unowned, anything else verbatim.
+ *
+ * `me` is an ERROR outside an agent, never a silent fallback to a hostname or
+ * pid: those look like an agent assignment to a reader but match nothing in
+ * the agent index, so the task would sit permanently outside orphan recovery
+ * (see `todoIdentity.ts`).
+ */
+/**
+ * The agent snapshot every cross-agent view is read against.
+ *
+ * `liveOnly: false` deliberately: the interesting answer for an owner is often
+ * "that agent EXITED", which a live-only read cannot express — it would drop
+ * the record and make a dead owner indistinguishable from a human one. Same
+ * reasoning (and same call) as `reconcile`, which needs exited records to
+ * orphan against.
+ */
+async function liveAgents(): Promise<LiveAgent[]> {
+  return readGlobalPids({ liveOnly: false });
+}
+
+async function resolveOwnerArg(raw: string | undefined): Promise<string | undefined> {
+  if (raw === undefined) return undefined;
+  if (raw === NO_OWNER || raw === "") return undefined;
+  if (raw !== SELF_OWNER) return raw;
+  const self = await resolveSelf();
+  if (!self)
+    fail(
+      `--owner ${SELF_OWNER} needs an agent context: this process has no registered agent id ` +
+        `(run it inside an \`ay\`-managed agent, or pass an explicit --owner).`,
+    );
+  return self.agentId;
 }
 
 const newCmd: CommandModule<
@@ -155,11 +225,14 @@ const newCmd: CommandModule<
         describe:
           "definition of done for this task — what an independent validator should check before approving/verifying it",
       })
-      .option("owner", { type: "string" })
+      .option("owner", {
+        type: "string",
+        describe: `"me" (this agent), "${NO_OWNER}" to leave unowned, or any handle. Default: this agent when run inside one, else unowned`,
+      })
       .option("tag", { type: "string", array: true })
       .option("dep", { type: "string", array: true, describe: "blocker task id(s)" }),
   handler: async (argv) => {
-    const store = await openStore(argv.root);
+    const store = await storeFor(argv);
     // Join ALL summary words: an unquoted summary like
     // `ay todo new write the spec --kind doc` arrives as multiple array
     // entries under yargs' `<summary..>` variadic positional — using only
@@ -172,13 +245,20 @@ const newCmd: CommandModule<
         "usage: ay todo new <summary> --kind <kind> [--description ...] [--tier ...] [--acceptance-criteria ...] [--owner ...] [--tag t]... [--dep id]...",
       );
     }
+    // No `--owner` at all means "mine" when an agent is running this, so a
+    // task an agent creates for itself is visible as ITS work to every other
+    // agent (and eligible for orphan recovery) without a second command. A
+    // human shell has no agent id, so it falls through to unowned — the
+    // previous behavior for everyone. `--owner none` opts out explicitly.
+    const owner =
+      argv.owner === undefined ? (await resolveSelf())?.agentId : await resolveOwnerArg(argv.owner);
     const rec = await store.create({
       summary,
       kind: parseKind(argv.kind),
       description: argv.description,
       targetTier: argv.tier,
       acceptanceCriteria: argv["acceptance-criteria"],
-      owner: argv.owner,
+      owner,
       tags: argv.tag ?? [],
       blockedBy: argv.dep ?? [],
     });
@@ -202,19 +282,87 @@ const lsCmd: CommandModule<
     y
       .option("kind", { type: "string" })
       .option("state", { type: "string" })
-      .option("owner", { type: "string" })
+      .option("owner", {
+        type: "string",
+        describe: `owner handle, or "${SELF_OWNER}" for this agent`,
+      })
       .option("tag", { type: "string" })
       .option("blocked", { type: "boolean", default: false }),
   handler: async (argv) => {
-    const store = await openStore(argv.root);
+    const store = await storeFor(argv);
     const tasks = store.list({
       kind: argv.kind ? parseKind(argv.kind) : undefined,
       state: argv.state,
-      owner: argv.owner,
+      owner: await resolveOwnerArg(argv.owner),
       tag: argv.tag,
       blocked: argv.blocked,
     });
-    emit(argv, tasks, renderList(tasks));
+    const agents = await liveAgents();
+    // JSON keeps the record shape untouched and adds ONE derived field, rather
+    // than folding the status into `owner` the way the table does: a consumer
+    // filtering on `owner` must still see the same string that was stored.
+    emit(
+      argv,
+      tasks.map((t) => ({ ...t, ownerLiveness: ownerLiveness(t.owner, agents) })),
+      renderList(tasks, agents),
+    );
+  },
+};
+
+/**
+ * `ay todo claim <id>` — take ownership of a task.
+ *
+ * Refuses when the current owner is an agent the registry still reports as
+ * `active`/`idle`, because in a shared store the overwhelmingly likely reading
+ * of "task X is owned by a running agent" is that the agent is working on it
+ * right now; silently reassigning would put two agents on one task, each
+ * believing it is theirs. A dead owner (`exited`) or a non-agent owner is
+ * taken over without ceremony — that is the recovery path this verb exists
+ * for. `--force` covers the rest ("it's wedged, I'm taking it").
+ */
+const claimCmd: CommandModule<
+  GlobalOpts,
+  GlobalOpts & { id: string; owner: string | undefined; force: boolean }
+> = {
+  command: "claim <id>",
+  describe: "take ownership of a task (refuses to steal from a live agent)",
+  builder: (y) =>
+    y
+      .positional("id", { type: "string", demandOption: true })
+      .option("owner", {
+        type: "string",
+        describe: `who to assign to (default: "${SELF_OWNER}", this agent)`,
+      })
+      .option("force", {
+        type: "boolean",
+        default: false,
+        describe: "claim even if the current owner agent is still running",
+      }),
+  handler: async (argv) => {
+    const store = await storeFor(argv);
+    const before = store.get(argv.id);
+    if (!before) fail(`no such task: ${argv.id}`);
+    const next = await resolveOwnerArg(argv.owner ?? SELF_OWNER);
+    if (!next)
+      fail(`--owner ${NO_OWNER} is not a claim — use \`ay todo claim <id> --owner <who>\``);
+
+    const held = ownerLiveness(before.owner, await liveAgents());
+    if (
+      before.owner &&
+      before.owner !== next &&
+      !argv.force &&
+      (held === "active" || held === "idle")
+    ) {
+      fail(
+        `task ${argv.id} is owned by ${before.owner}, an agent that is still ${held}. ` +
+          `Re-run with --force to take it anyway.`,
+      );
+    }
+    // Pass the owner this decision was made against: the store re-checks it
+    // inside the write lock, so a second claimer that slipped in between the
+    // read above and this write loses loudly instead of silently overwriting.
+    const rec = await store.setOwner(argv.id, next, before.owner ?? null);
+    emit(argv, rec, `claimed ${rec._id} → ${next}\n${renderRecord(rec)}`);
   },
 };
 
@@ -223,7 +371,7 @@ const getCmd: CommandModule<GlobalOpts, GlobalOpts & { id: string }> = {
   describe: "show one task",
   builder: (y) => y.positional("id", { type: "string", demandOption: true }),
   handler: async (argv) => {
-    const store = await openStore(argv.root);
+    const store = await storeFor(argv);
     const rec = store.get(argv.id);
     if (!rec) fail(`no such task: ${argv.id}`);
     emit(argv, rec, renderRecord(rec));
@@ -238,7 +386,7 @@ const transitionCmd: CommandModule<GlobalOpts, GlobalOpts & { id: string; toStat
       .positional("id", { type: "string", demandOption: true })
       .positional("toState", { type: "string", demandOption: true }),
   handler: async (argv) => {
-    const store = await openStore(argv.root);
+    const store = await storeFor(argv);
     const rec = await store.transition(argv.id, argv.toState);
     emit(argv, rec, `transitioned ${rec._id} -> ${rec.state}\n${renderRecord(rec)}`);
   },
@@ -264,7 +412,7 @@ const approveCmd: CommandModule<
       .option("note", { type: "string" })
       .option("link", { type: "string" }),
   handler: async (argv) => {
-    const store = await openStore(argv.root);
+    const store = await storeFor(argv);
     const rec = await store.approve(argv.id, argv.gate, argv.validatorIdentity, {
       note: argv.note,
       link: argv.link,
@@ -286,7 +434,7 @@ const verifyCmd: CommandModule<GlobalOpts, GlobalOpts & { id: string; gate: stri
         .positional("id", { type: "string", demandOption: true })
         .positional("gate", { type: "string" }),
     handler: async (argv) => {
-      const store = await openStore(argv.root);
+      const store = await storeFor(argv);
       const rec = await store.verify(argv.id, argv.gate || undefined);
       emit(argv, rec, `verified ${rec._id} -> ${rec.state}\n${renderRecord(rec)}`);
     },
@@ -401,7 +549,7 @@ const blockCmd: CommandModule<
         block = { type: "waiting-on-agent", agentId: argv.agent };
         break;
     }
-    const store = await openStore(argv.root);
+    const store = await storeFor(argv);
     const rec = await store.setBlock(argv.id, block);
     emit(argv, rec, `blocked ${rec._id}: ${describeBlock(block)}\n${renderRecord(rec)}`);
   },
@@ -412,7 +560,7 @@ const unblockCmd: CommandModule<GlobalOpts, GlobalOpts & { id: string }> = {
   describe: "clear a task's block (does not touch blockedBy — see `dep`)",
   builder: (y) => y.positional("id", { type: "string", demandOption: true }),
   handler: async (argv) => {
-    const store = await openStore(argv.root);
+    const store = await storeFor(argv);
     const rec = await store.setBlock(argv.id, null);
     emit(argv, rec, `unblocked ${rec._id}\n${renderRecord(rec)}`);
   },
@@ -426,7 +574,7 @@ const setCriteriaCmd: CommandModule<GlobalOpts, GlobalOpts & { id: string; text:
       .positional("id", { type: "string", demandOption: true })
       .positional("text", { type: "string", array: true, demandOption: true }),
   handler: async (argv) => {
-    const store = await openStore(argv.root);
+    const store = await storeFor(argv);
     const text = argv.text.map(String).join(" ");
     const rec = await store.setAcceptanceCriteria(argv.id, text);
     emit(argv, rec, `set acceptance criteria on ${rec._id}\n${renderRecord(rec)}`);
@@ -454,7 +602,7 @@ const depCmd: CommandModule<
         describe: "task id it waits for",
       }),
   handler: async (argv) => {
-    const store = await openStore(argv.root);
+    const store = await storeFor(argv);
     try {
       const rec =
         argv.verb === "add"
@@ -478,7 +626,7 @@ const treeCmd: CommandModule<GlobalOpts, GlobalOpts & { id: string | undefined }
   builder: (y) =>
     y.positional("id", { type: "string", describe: "root task id (default: all roots)" }),
   handler: async (argv) => {
-    const store = await openStore(argv.root);
+    const store = await storeFor(argv);
     const tasks = store.all();
     if (argv.format === "json") {
       emit(argv, buildTreeJSON(tasks, argv.id), "");
@@ -492,7 +640,7 @@ const digestCmd: CommandModule<GlobalOpts, GlobalOpts> = {
   command: "digest",
   describe: "per-tag board: state counts, blockers, unblocked tasks",
   handler: async (argv) => {
-    const store = await openStore(argv.root);
+    const store = await storeFor(argv);
     const tasks = store.all();
     if (argv.format === "json") {
       emit(argv, { tasks, unblocked: unblockedTasks(tasks).map((t) => t._id) }, "");
@@ -507,7 +655,7 @@ const reconcileCmd: CommandModule<GlobalOpts, GlobalOpts> = {
   describe:
     "apply automation: orphan dead-owned tasks, clear stale waiting-on-agent blocks, auto-verify, report unblocked tasks",
   handler: async (argv) => {
-    const store = await openStore(argv.root);
+    const store = await storeFor(argv);
     // `liveOnly: false`: a task's owner needs to be checked against a KNOWN
     // agent whose latest record says `exited`, not just the currently-live
     // set — an exited-but-recorded agent is exactly the orphan signal (see
@@ -576,11 +724,15 @@ const reconcileCmd: CommandModule<GlobalOpts, GlobalOpts> = {
 };
 
 export async function runTodoSubcommand(rest0: string[]): Promise<number> {
-  await yargs(rest0)
+  const y = yargs(rest0)
     .scriptName("ay todo")
     .option("root", {
       type: "string",
-      default: process.cwd(),
+      // No `default:`. The default is derived (a git call) and yargs evaluates
+      // defaults eagerly on every parse — including `--help` — so it is
+      // resolved per verb in `storeFor` instead. `defaultDescription` keeps
+      // `--help` honest about what happens when the flag is omitted.
+      defaultDescription: "the repo's common root (shared across worktrees), else cwd",
       describe: "project root holding .agent-yes/todos.jsonl",
       global: true,
     })
@@ -604,13 +756,15 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
     .command(blockCmd)
     .command(unblockCmd)
     .command(depCmd)
+    .command(claimCmd)
     .command(treeCmd)
     .command(digestCmd)
     .command(reconcileCmd)
-    .demandCommand(
-      1,
-      'unknown "ay todo" verb (expected: new/ls/get/transition/approve/verify/set-criteria/block/unblock/dep/tree/digest/reconcile)',
-    )
+    // No `.demandCommand()`: "you typed no verb" is handled after the parse by
+    // printing help (see below), which lists every verb and its description —
+    // strictly more informative than the sentence demandCommand threw, and not
+    // an error condition in the first place. Unknown verbs and bad flags are
+    // still rejected, by `.strict()`.
     .strict()
     .help()
     .version(false)
@@ -626,7 +780,22 @@ export async function runTodoSubcommand(rest0: string[]): Promise<number> {
       // yargs' own validation errors, not just for `fail()` calls inside a
       // handler body.
       throw err ?? new Error(msg);
-    })
-    .parseAsync();
+    });
+
+  const argv = await y.parseAsync();
+
+  // `ay todo` with no verb is a person asking what this thing does, not a
+  // malformed command. It used to answer with a thrown Error — and, since the
+  // launcher prints uncaught errors with their stack, a wall of yargs
+  // internals ahead of the one useful line. A bare `ay` already prints help;
+  // this makes `ay todo` behave the same.
+  //
+  // Keyed on the parsed positionals, not on `rest0.length`: `ay todo --root
+  // /x` is equally verb-less and equally deserves help, and yargs has already
+  // sorted flags from commands by this point. Unknown verbs still fail via
+  // `.strict()` — this branch only fires when NOTHING was asked for.
+  if (argv._.length === 0) {
+    y.showHelp((s) => process.stdout.write(`${s}\n`));
+  }
   return 0;
 }

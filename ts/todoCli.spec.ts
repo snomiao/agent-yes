@@ -402,10 +402,13 @@ describe("ay todo CLI", () => {
     await expect(run("bogus")).rejects.toThrow(/unknown argument: bogus/i);
   });
 
-  it("no verb at all fails naming every expected one, via demandCommand", async () => {
-    await expect(run()).rejects.toThrow(
-      /unknown "ay todo" verb.*new\/ls\/get\/transition\/approve\/verify\/set-criteria\/block\/unblock\/dep\/tree\/digest\/reconcile/,
-    );
+  it("no verb at all prints help instead of throwing — a bare `ay todo` is a question, not a typo", async () => {
+    const { out } = await run();
+    expect(out).toContain("ay todo");
+    // Every verb listed, so the bare invocation is genuinely discoverable.
+    for (const verb of ["new", "ls", "claim", "reconcile", "digest"]) {
+      expect(out).toMatch(new RegExp(`\\b${verb}\\b`));
+    }
   });
 
   it("new --acceptance-criteria stores it, and get renders it; set-criteria updates it later (Milestone 1.5)", async () => {
@@ -556,5 +559,160 @@ describe("ay todo reconcile", () => {
 
     const second = await run("reconcile");
     expect(second.out).toContain("T2 is now unblocked"); // still reported, not silently retired
+  });
+});
+
+describe("ay todo cross-agent ownership", () => {
+  const AGENT_HOME = isWindows
+    ? path.join(process.env.TEMP || "C:\\Temp", "todocli-xagent-" + process.pid)
+    : "/tmp/todocli-xagent-" + process.pid;
+  let prevHome: string | undefined;
+  let prevPid: string | undefined;
+
+  const agent = (over: object) => ({
+    pid: 0,
+    cli: "claude",
+    prompt: null,
+    cwd: "/x",
+    log_file: null,
+    status: "active",
+    exit_code: null,
+    exit_reason: null,
+    started_at: 0,
+    ...over,
+  });
+
+  async function seedGlobalPids(records: object[]): Promise<void> {
+    await writeFile(
+      path.join(AGENT_HOME, "pids.jsonl"),
+      records.map((r) => JSON.stringify(r)).join("\n") + "\n",
+    );
+  }
+
+  /** Make this process look like the agent registered with `wrapper_pid`. */
+  function beAgent(wrapperPid: number | undefined): void {
+    if (wrapperPid === undefined) delete process.env.AGENT_YES_PID;
+    else process.env.AGENT_YES_PID = String(wrapperPid);
+  }
+
+  beforeEach(async () => {
+    await rm(TEST_ROOT, { recursive: true, force: true });
+    await rm(AGENT_HOME, { recursive: true, force: true });
+    prevHome = process.env.AGENT_YES_HOME;
+    prevPid = process.env.AGENT_YES_PID;
+    process.env.AGENT_YES_HOME = AGENT_HOME;
+    await mkdir(AGENT_HOME, { recursive: true });
+    await seedGlobalPids([
+      agent({ pid: 11, wrapper_pid: 10, agent_id: "lane-a", status: "active" }),
+      agent({ pid: 21, wrapper_pid: 20, agent_id: "lane-b", status: "idle" }),
+      agent({ pid: 31, wrapper_pid: 30, agent_id: "lane-dead", status: "exited", exit_code: 0 }),
+    ]);
+  });
+  afterEach(async () => {
+    await rm(TEST_ROOT, { recursive: true, force: true });
+    await rm(AGENT_HOME, { recursive: true, force: true });
+    if (prevHome === undefined) delete process.env.AGENT_YES_HOME;
+    else process.env.AGENT_YES_HOME = prevHome;
+    if (prevPid === undefined) delete process.env.AGENT_YES_PID;
+    else process.env.AGENT_YES_PID = prevPid;
+  });
+
+  it("new assigns to the calling agent by default, and --owner me resolves to the same id", async () => {
+    beAgent(10);
+    const created = await run("new", "mine", "--kind", "code");
+    expect(created.out).toContain("owner:   lane-a");
+    const explicit = await run("new", "also mine", "--kind", "code", "--owner", "me");
+    expect(explicit.out).toContain("owner:   lane-a");
+  });
+
+  it("new from a human shell stays unowned — the pre-existing behavior for anyone without an agent id", async () => {
+    beAgent(undefined);
+    const created = await run("new", "unowned", "--kind", "code");
+    expect(created.out).not.toContain("owner:");
+  });
+
+  it("--owner none opts out of the default assignment even inside an agent", async () => {
+    beAgent(10);
+    const created = await run("new", "deliberately unowned", "--kind", "code", "--owner", "none");
+    expect(created.out).not.toContain("owner:");
+  });
+
+  it("--owner me outside an agent fails loudly instead of inventing an identifier", async () => {
+    beAgent(undefined);
+    // Storing a hostname/pid here would look like an agent assignment while
+    // matching nothing in the agent index — permanently outside orphan
+    // recovery. Better to refuse.
+    await expect(run("new", "x", "--kind", "code", "--owner", "me")).rejects.toThrow(
+      /no registered agent id/i,
+    );
+  });
+
+  it("ls --owner me filters to the calling agent's own tasks", async () => {
+    beAgent(10);
+    await run("new", "mine", "--kind", "code");
+    beAgent(20);
+    await run("new", "theirs", "--kind", "code");
+
+    beAgent(10);
+    const mine = await run("ls", "--owner", "me");
+    expect(mine.out).toContain("mine");
+    expect(mine.out).not.toContain("theirs");
+  });
+
+  it("ls annotates each owner with that agent's liveness, so a dead owner is visible without cross-referencing `ay ls`", async () => {
+    beAgent(undefined);
+    await run("new", "stalled", "--kind", "code", "--owner", "lane-dead");
+    await run("new", "human work", "--kind", "code", "--owner", "alice");
+    const listed = await run("ls");
+    expect(listed.out).toContain("lane-dead(exited)");
+    // A human owner has no registry entry; "unknown" there would read as
+    // "might be dead", which is wrong — so it prints bare.
+    expect(listed.out).toContain("alice");
+    expect(listed.out).not.toContain("alice(");
+  });
+
+  it("--format json keeps `owner` verbatim and reports liveness in its own field", async () => {
+    beAgent(undefined);
+    await run("new", "stalled", "--kind", "code", "--owner", "lane-dead");
+    const listed = await run("ls", "--format", "json");
+    const [task] = JSON.parse(listed.out);
+    expect(task.owner).toBe("lane-dead"); // NOT "lane-dead(exited)" — filters still work
+    expect(task.ownerLiveness).toBe("exited");
+  });
+
+  it("claim takes over a task owned by an exited agent", async () => {
+    beAgent(undefined);
+    await run("new", "stalled", "--kind", "code", "--owner", "lane-dead");
+    beAgent(20);
+    const claimed = await run("claim", "T1");
+    expect(claimed.out).toContain("claimed T1 → lane-b");
+  });
+
+  it("claim refuses to steal from a still-running agent unless forced", async () => {
+    beAgent(10);
+    await run("new", "in flight", "--kind", "code");
+    beAgent(20);
+    await expect(run("claim", "T1")).rejects.toThrow(/owned by lane-a, an agent that is still/i);
+    const forced = await run("claim", "T1", "--force");
+    expect(forced.out).toContain("claimed T1 → lane-b");
+  });
+
+  it("claim takes an unowned task without ceremony", async () => {
+    beAgent(undefined);
+    await run("new", "free", "--kind", "code", "--owner", "none");
+    beAgent(10);
+    const claimed = await run("claim", "T1");
+    expect(claimed.out).toContain("claimed T1 → lane-a");
+  });
+
+  // The lost-update race itself (two claimers whose reads interleave) is
+  // guarded inside the store and tested there — `setOwner`'s expectedOwner
+  // check in todoStore.spec.ts — since it is not reachable through two
+  // sequential CLI calls: the liveness refusal above fires first.
+  it("claim --owner assigns to a named agent, not only to self", async () => {
+    beAgent(10);
+    await run("new", "delegated", "--kind", "code", "--owner", "none");
+    const claimed = await run("claim", "T1", "--owner", "lane-b");
+    expect(claimed.out).toContain("claimed T1 → lane-b");
   });
 });

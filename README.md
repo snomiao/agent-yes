@@ -204,6 +204,40 @@ cy stop <keyword>                      # graceful shutdown (claude/codex: /exit)
 so subcommands work whether the target agent is the TS or Rust runtime.
 Detailed reference (Japanese): [`docs/cy-subcommands.md`](./docs/cy-subcommands.md).
 
+### Shared task list across agents (`ay todo`)
+
+A lifecycle-tracked task list that every agent working on a repo reads and
+writes. The store is one append-only file at `<repo>/.agent-yes/todos.jsonl`,
+resolved from the repo's **common root** — so agents running in different git
+worktrees of the same repo share one list rather than each keeping a private
+one. Pass `--root <dir>` (or set `AGENT_YES_TODO_ROOT`) to point somewhere else.
+
+```bash
+ay todo                                 # help: every verb, with descriptions
+ay todo new fix the flaky test --kind code   # owner defaults to the calling agent
+ay todo ls                              # OWNER column marks dead agents: lane-3(exited)
+ay todo ls --owner me                   # just my tasks
+ay todo claim T4                        # take it over (refuses to steal from a live agent)
+ay todo claim T4 --force                # take it anyway
+ay todo block T4 --type waiting-on-agent --agent lane-2
+ay todo dep add T5 T4                   # T5 waits for T4 (cycles rejected)
+ay todo digest                          # per-tag board + "unblocked, resume these"
+ay todo reconcile                       # orphan tasks whose owner agent exited, clear stale blocks
+```
+
+Ownership is cross-referenced against the same agent registry `ay ls` reads, so
+"who owns this and are they still alive?" is answerable in one command:
+`--owner me` resolves to the calling agent's registry id, `ls` annotates each
+owner with that agent's live status, and `reconcile` orphans tasks whose owner
+exited (listing idle agents as reassignment candidates). Use `--owner none` to
+create a task nobody owns, and `--format json` for machine-readable output —
+JSON keeps `owner` verbatim and reports liveness in a separate `ownerLiveness`
+field, so filters that match on `owner` keep working.
+
+Tasks move through a lifecycle per `--kind`, and gated transitions require
+**independent verification**: whoever did the work cannot approve it. See
+`ts/todoStore.ts` for the gate model.
+
 ### Docker Usage
 
 You can run `agent-yes` in a Docker container with all AI CLI tools pre-installed.
