@@ -79,11 +79,17 @@ describe("resolveTodoRoot", () => {
       const repo = path.join(base, "repo");
       await mkdir(path.join(repo, "deep", "nested"), { recursive: true });
 
+      // -c user.*: CI runners have no global git identity, so a bare `git
+      // commit` exits 128 there while passing locally.
       const git = (args: string[], cwd: string) =>
-        execFileSync("git", args, { cwd, stdio: "ignore" });
-      await git(["init", "-q", "."], repo);
-      await git(["commit", "-q", "--allow-empty", "-m", "init"], repo);
-      await git(["worktree", "add", "-q", path.join(base, "wt"), "-b", "lane"], repo);
+        execFileSync(
+          "git",
+          ["-c", "user.email=test@example.com", "-c", "user.name=test", ...args],
+          { cwd, stdio: "ignore" },
+        );
+      git(["init", "-q", "."], repo);
+      git(["commit", "-q", "--allow-empty", "-m", "init"], repo);
+      git(["worktree", "add", "-q", path.join(base, "wt"), "-b", "lane"], repo);
 
       expect(await resolveTodoRoot(undefined, path.join(repo, "deep", "nested"), {})).toBe(repo);
       expect(await resolveTodoRoot(undefined, path.join(base, "wt"), {})).toBe(repo);

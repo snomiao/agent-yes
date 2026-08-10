@@ -80,7 +80,11 @@ export async function resolveTodoRoot(
   // so resolving against `cwd` is correct for both the relative and absolute
   // forms. `--path-format=absolute` would force one shape but needs git >=
   // 2.31 and buys nothing here.
+  // `path.resolve(cwd)` on the fallback, not a bare `cwd`: every other branch
+  // returns a resolved absolute path, and on Windows the two differ (a POSIX-
+  // shaped "/tmp/x" resolves to "D:\tmp\x"), so returning it raw would hand
+  // callers a path in a different shape depending on which branch fired.
   const common = (await runGit(["rev-parse", "--git-common-dir"], cwd))?.trim();
-  if (!common) return cwd;
+  if (!common) return path.resolve(cwd);
   return path.dirname(path.resolve(cwd, common));
 }
