@@ -96,6 +96,77 @@ fn spawn_detached(bin: &std::path::Path, args: &[String], cwd: &str) -> std::io:
     Ok(cmd.spawn()?.id())
 }
 
+#[cfg(all(test, unix))]
+mod spawn_detached_tests {
+    use super::*;
+
+    /// A spawned agent must outlive the daemon that spawned it.
+    ///
+    /// The daemon is restarted for ordinary reasons — an upgrade, a launchd
+    /// KeepAlive bounce, `ayrs serve install` — and every one of those would
+    /// take the whole local fleet down with it if agents shared the daemon's
+    /// session or process group. `setsid()` in the pre_exec hook above is the
+    /// only thing preventing that, and nothing else in the tree would fail if
+    /// it were dropped: agents would keep spawning and working, and the damage
+    /// would only appear on the next restart.
+    ///
+    /// So assert the observable property rather than the call: the child must
+    /// land in its OWN session, not ours.
+    ///
+    /// Session id comes from `libc::getsid`, NOT from `ps -o sess=` — on macOS
+    /// that column prints 0 for every process, which silently turns the
+    /// comparison below into 0 != 0 and fails a correct implementation.
+    #[test]
+    fn a_spawned_child_gets_its_own_session() {
+        let sh = std::path::PathBuf::from("/bin/sh");
+        let our_sid = unsafe { libc::getsid(0) };
+        assert!(our_sid > 0, "could not read our own session id");
+
+        let dir = tempfile::tempdir().unwrap();
+        let ready = dir.path().join("ready");
+        // Keep the child alive long enough to inspect it. `ps -o ppid=` would
+        // not do as the signal: an orphan is reparented to pid 1
+        // asynchronously, so reading it races. The session id is set by setsid
+        // at exec time and never changes — and we read it with getsid from
+        // here, where libc is already linked, rather than asking the child to
+        // report it (no portable shell or perl equivalent exists).
+        let pid = spawn_detached(
+            &sh,
+            &[
+                "-c".into(),
+                format!("touch {} && sleep 5", ready.display()),
+            ],
+            dir.path().to_str().unwrap(),
+        )
+        .expect("spawn_detached succeeds");
+        assert!(pid > 0, "spawn_detached returned a pid");
+
+        for _ in 0..100 {
+            if ready.exists() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(ready.exists(), "detached child never started");
+
+        let child_sid = unsafe { libc::getsid(pid as libc::pid_t) };
+        assert!(
+            child_sid > 0,
+            "could not read the child's session id (already exited?)"
+        );
+        assert_ne!(
+            child_sid, our_sid,
+            "spawn_detached put the agent in the spawner's session — a daemon \
+             restart would kill every agent it ever spawned (setsid lost?)"
+        );
+        // setsid makes the child a session LEADER: its sid equals its own pid.
+        assert_eq!(
+            child_sid, pid as libc::pid_t,
+            "the child is not a session leader — setsid did not take effect"
+        );
+    }
+}
+
 fn bad(status: u16, msg: impl Into<String>) -> super::api::ApiResponse {
     super::api::ApiResponse {
         status,
