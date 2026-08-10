@@ -1200,7 +1200,20 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
     ...over,
   });
 
-  async function withFifo(fn: (fifo: string) => Promise<void>) {
+  /**
+   * `fn` gets the fifo path plus `onKeystroke()`, which resolves once
+   * submitAndConfirm's trailing code actually lands on the fifo.
+   *
+   * Tests that need the agent to "react" MUST hang that reaction off
+   * `onKeystroke()` rather than a `setTimeout`. submitAndConfirm snapshots the
+   * log size and the current working-marker state BEFORE it writes to the fifo,
+   * and it only does that after `cliDefaults()` has parsed the config — so a
+   * wall-clock timer races that setup. Under load the setup wins, the "reaction"
+   * lands in the pre-write snapshot, and the assertion flips: growth gets folded
+   * into `sizeBefore`, and a busy marker reads as `wasAlreadyWorking` (which the
+   * false-positive guard below deliberately treats as NOT confirmed).
+   */
+  async function withFifo(fn: (fifo: string, onKeystroke: () => Promise<boolean>) => Promise<void>) {
     const { spawnSync } = await import("child_process");
     const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-"));
     const fifo = path.join(dir, "test.fifo");
@@ -1209,9 +1222,27 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
       if (r.status !== 0) return; // mkfifo unavailable — skip
       const fs = await import("fs");
       const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR); // keeps writes from blocking
+      // A SEPARATE non-blocking reader: rdwrFd is never read from, so the
+      // keystroke is still here to be observed. O_NONBLOCK is load-bearing —
+      // a blocking readSync on an empty fifo wedges the whole vitest worker.
+      const readFd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+      const onKeystroke = async (timeoutMs = 5_000): Promise<boolean> => {
+        const buf = Buffer.alloc(64);
+        const deadline = Date.now() + timeoutMs;
+        while (Date.now() < deadline) {
+          try {
+            if (fs.readSync(readFd, buf, 0, buf.length, null) > 0) return true;
+          } catch (err: any) {
+            if (err?.code !== "EAGAIN") throw err; // EAGAIN = nothing yet
+          }
+          await new Promise((r) => setTimeout(r, 5));
+        }
+        return false;
+      };
       try {
-        await fn(fifo);
+        await fn(fifo, onKeystroke);
       } finally {
+        fs.closeSync(readFd);
         fs.closeSync(rdwrFd);
       }
     } finally {
@@ -1227,11 +1258,16 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
         const log = path.join(dir, "a.log");
         await writeFile(log, "❯ \r\n"); // idle — no busy marker yet
         const { submitAndConfirm } = await loadModule();
-        await withFifo(async (fifo) => {
-          // The Enter kicks off work: the busy marker appears shortly after,
-          // well within the confirm window — a genuine idle→busy transition.
-          setTimeout(() => appendFileSync(log, BUSY), 100);
+        await withFifo(async (fifo, onKeystroke) => {
+          // The Enter kicks off work: the busy marker appears once the keystroke
+          // has actually landed — a genuine idle→busy transition, and one that
+          // provably happens AFTER submitAndConfirm's pre-write snapshot.
+          const reacted = onKeystroke().then((got) => {
+            if (got) appendFileSync(log, BUSY);
+            return got;
+          });
           const { confirmed, screen } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          expect(await reacted).toBe(true); // the fifo really carried the Enter
           expect(confirmed).toBe(true);
           expect(screen.join("\n")).toContain("esc to interrupt");
         });
@@ -1270,11 +1306,15 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
       const log = path.join(dir, "a.log");
       await writeFile(log, "❯ \r\n");
       const { submitAndConfirm } = await loadModule();
-      await withFifo(async (fifo) => {
-        // Simulate the CLI starting to respond shortly after Enter lands — well
-        // within the first attempt's confirm window.
-        setTimeout(() => appendFileSync(log, "some real response text appears here\r\n"), 100);
+      await withFifo(async (fifo, onKeystroke) => {
+        // The CLI starts responding once the Enter lands. Keyed off the actual
+        // keystroke so the growth cannot be folded into `sizeBefore`.
+        const reacted = onKeystroke().then((got) => {
+          if (got) appendFileSync(log, "some real response text appears here\r\n");
+          return got;
+        });
         const { confirmed } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+        expect(await reacted).toBe(true);
         expect(confirmed).toBe(true);
       });
     } finally {
