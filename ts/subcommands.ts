@@ -69,6 +69,7 @@ import type { AgentCliConfig } from "./index.ts";
 import yargs from "yargs";
 import { type ResolvedRemote, readRemotes, resolveRemoteSpec } from "./remotes.ts";
 import { isWebrtcSpec } from "./webrtcLink.ts";
+import { withIpcLock } from "./ipcLock.ts";
 
 // ---------------------------------------------------------------------------
 // notes store  (~/.agent-yes/notes.jsonl)
@@ -3540,21 +3541,33 @@ async function cmdSend(rest: string[]): Promise<number> {
   const canConfirm = trailing === "\r" && Boolean(fullBody) && !noWait;
   let confirmed = true;
   let lastScreen: string[] = [];
-  if (fullBody && trailing) {
-    await writeToIpc(fifoPath, fullBody);
-    if (canConfirm && record.log_file) {
-      // Wait for the paste to actually finish rendering — a long/multi-line body
-      // can take longer than any fixed guess, and sending Enter mid-paste gets
-      // swallowed by the CLI's bracketed-paste handling instead of submitting.
-      await waitForLogQuiet(record.log_file, SEND_SETTLE_QUIET_MS, SEND_SETTLE_MAX_MS);
-      ({ confirmed, screen: lastScreen } = await submitAndConfirm(record, fifoPath, trailing));
-    } else {
-      await new Promise((r) => setTimeout(r, 200));
-      await writeToIpc(fifoPath, trailing);
-    }
-  } else {
-    await writeToIpc(fifoPath, fullBody + trailing);
-  }
+  // The body and its Enter are ONE transaction: every gap between them (the
+  // paste-settle wait, the submit-confirm retries) is a window where another
+  // writer's bytes would land mid-message. See ts/ipcLock.ts.
+  await withIpcLock(
+    record.pid,
+    async () => {
+      if (fullBody && trailing) {
+        await writeToIpc(fifoPath, fullBody);
+        if (canConfirm && record.log_file) {
+          // Wait for the paste to actually finish rendering — a long/multi-line body
+          // can take longer than any fixed guess, and sending Enter mid-paste gets
+          // swallowed by the CLI's bracketed-paste handling instead of submitting.
+          await waitForLogQuiet(record.log_file, SEND_SETTLE_QUIET_MS, SEND_SETTLE_MAX_MS);
+          ({ confirmed, screen: lastScreen } = await submitAndConfirm(record, fifoPath, trailing));
+        } else {
+          await new Promise((r) => setTimeout(r, 200));
+          await writeToIpc(fifoPath, trailing);
+        }
+      } else {
+        await writeToIpc(fifoPath, fullBody + trailing);
+      }
+    },
+    (why) =>
+      process.stderr.write(
+        `warning: ay send writing pid ${record.pid} without the input lock (${why})\n`,
+      ),
+  );
   const payload = body + trailing;
   const status = confirmed ? "sent" : "sent but NOT confirmed submitted";
   process.stdout.write(
@@ -3844,7 +3857,14 @@ async function cmdKey(rest: string[]): Promise<number> {
   const force = Boolean(argv.force) || process.env.AGENT_YES_FORCE_SEND === "1";
   const sender = await enforceSendGuards(record, force);
 
-  await writeKeysPaced(record.fifo_file!, byteSeqs, Math.max(0, argv.pace));
+  await withIpcLock(
+    record.pid,
+    () => writeKeysPaced(record.fifo_file!, byteSeqs, Math.max(0, argv.pace)),
+    (why) =>
+      process.stderr.write(
+        `warning: ay key/select writing pid ${record.pid} without the input lock (${why})\n`,
+      ),
+  );
   process.stdout.write(`sent to pid ${record.pid} (${record.cli}): ${keyNames.join(" ")}\n`);
   await recordKeyEvent(sender, record, "key", keyNames.join(" "));
   return 0;
@@ -3919,7 +3939,14 @@ async function cmdSelect(rest: string[]): Promise<number> {
   // PARSED cursor position (not a blind "N-1 downs") so a non-first default works.
   const keyNames = menuSelectKeys(menu.cursor, n);
   const byteSeqs = keyNames.map((k) => controlCodeFromName(k));
-  await writeKeysPaced(record.fifo_file!, byteSeqs, Math.max(0, argv.pace));
+  await withIpcLock(
+    record.pid,
+    () => writeKeysPaced(record.fifo_file!, byteSeqs, Math.max(0, argv.pace)),
+    (why) =>
+      process.stderr.write(
+        `warning: ay key/select writing pid ${record.pid} without the input lock (${why})\n`,
+      ),
+  );
 
   const delta = n - menu.cursor;
   const moved =
@@ -4173,15 +4200,24 @@ async function cmdStop(rest: string[]): Promise<number> {
   }
 
   const fifoPath = record.fifo_file;
-  if (payload === "double-ctrl-c") {
-    await writeToIpc(fifoPath, "\x03");
-    await new Promise((r) => setTimeout(r, 200));
-    await writeToIpc(fifoPath, "\x03");
-  } else {
-    await writeToIpc(fifoPath, payload);
-    await new Promise((r) => setTimeout(r, 200));
-    await writeToIpc(fifoPath, "\r");
-  }
+  await withIpcLock(
+    record.pid,
+    async () => {
+      if (payload === "double-ctrl-c") {
+        await writeToIpc(fifoPath, "\x03");
+        await new Promise((r) => setTimeout(r, 200));
+        await writeToIpc(fifoPath, "\x03");
+      } else {
+        await writeToIpc(fifoPath, payload);
+        await new Promise((r) => setTimeout(r, 200));
+        await writeToIpc(fifoPath, "\r");
+      }
+    },
+    (why) =>
+      process.stderr.write(
+        `warning: ay stop writing pid ${record.pid} without the input lock (${why})\n`,
+      ),
+  );
 
   process.stdout.write(`stopping pid ${record.pid} (${record.cli}) via ${strategy}\n`);
   process.stderr.write(
@@ -4224,16 +4260,25 @@ async function gracefulExitAgent(
   await writeNote(record.pid, `↩ exit — ${reason}`).catch(() => {});
   const fifoPath = record.fifo_file;
   const graceful = GRACEFUL_EXIT_COMMANDS[record.cli];
-  if (graceful) {
-    await writeToIpc(fifoPath, graceful);
-    await new Promise((r) => setTimeout(r, 200));
-    await writeToIpc(fifoPath, "\r");
-    return { strategy: `'${graceful}' + Enter` };
-  }
-  await writeToIpc(fifoPath, "\x03");
-  await new Promise((r) => setTimeout(r, 200));
-  await writeToIpc(fifoPath, "\x03");
-  return { strategy: `double Ctrl+C (no known /exit for cli "${record.cli}")` };
+  return withIpcLock(
+    record.pid,
+    async () => {
+      if (graceful) {
+        await writeToIpc(fifoPath, graceful);
+        await new Promise((r) => setTimeout(r, 200));
+        await writeToIpc(fifoPath, "\r");
+        return { strategy: `'${graceful}' + Enter` };
+      }
+      await writeToIpc(fifoPath, "\x03");
+      await new Promise((r) => setTimeout(r, 200));
+      await writeToIpc(fifoPath, "\x03");
+      return { strategy: `double Ctrl+C (no known /exit for cli "${record.cli}")` };
+    },
+    (why) =>
+      process.stderr.write(
+        `warning: ay exit writing pid ${record.pid} without the input lock (${why})\n`,
+      ),
+  );
 }
 
 // ---------------------------------------------------------------------------

@@ -1213,7 +1213,9 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
    * into `sizeBefore`, and a busy marker reads as `wasAlreadyWorking` (which the
    * false-positive guard below deliberately treats as NOT confirmed).
    */
-  async function withFifo(fn: (fifo: string, onKeystroke: () => Promise<boolean>) => Promise<void>) {
+  async function withFifo(
+    fn: (fifo: string, onKeystroke: () => Promise<boolean>) => Promise<void>,
+  ) {
     const { spawnSync } = await import("child_process");
     const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-"));
     const fifo = path.join(dir, "test.fifo");
@@ -1564,6 +1566,69 @@ describe("subcommands.writeToIpc reliable delivery", () => {
       }
     },
   );
+});
+
+describe("withIpcLock prevents two writers splicing into one FIFO", () => {
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
+
+  // The failure this guards against is NOT "messages arrive in a surprising
+  // order" — it is one message cut in half by another. writeToIpc loops on
+  // EAGAIN/partial writes, and POSIX only promises atomicity up to PIPE_BUF
+  // (512 bytes on macOS), so two concurrent writers of a large payload
+  // interleave bytes mid-message. This test reproduces that against a real
+  // FIFO with a real slow reader, exactly like the delivery test above.
+  it.skipIf(!itUnix)("keeps each writer's payload contiguous", async () => {
+    const { writeToIpc } = await loadModule();
+    const { withIpcLock } = await import("./ipcLock.ts");
+    const { spawnSync } = await import("child_process");
+    const fs = await import("fs");
+    const tmp = await mkdtemp(path.join(tmpdir(), "ay-splice-"));
+    try {
+      const fifo = path.join(tmp, "splice.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const rfd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+      const chunks: Buffer[] = [];
+      const drain = setInterval(() => {
+        const b = Buffer.alloc(1000);
+        try {
+          const n = fs.readSync(rfd, b, 0, b.length, null);
+          if (n > 0) chunks.push(Buffer.from(b.subarray(0, n)));
+        } catch {
+          /* EAGAIN when momentarily empty */
+        }
+      }, 5);
+      try {
+        // Two 20KB payloads of distinct repeated characters, each written as a
+        // two-part transaction with a gap — the `ay send` shape (body, settle,
+        // Enter). Locked, each must appear as one unbroken run.
+        const a = "a".repeat(20_000);
+        const b = "b".repeat(20_000);
+        const txn = (ch: string, body: string) =>
+          withIpcLock(987654, async () => {
+            await writeToIpc(fifo, body);
+            await new Promise((r) => setTimeout(r, 30));
+            await writeToIpc(fifo, ch.toUpperCase());
+          });
+        await Promise.all([txn("a", a), txn("b", b)]);
+
+        const deadline = Date.now() + 5000;
+        const total = a.length + b.length + 2;
+        while (Buffer.concat(chunks).length < total && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 10));
+        }
+        const got = Buffer.concat(chunks).toString("utf8");
+        expect(got).toHaveLength(total);
+        // Whichever transaction went first, the stream is exactly one complete
+        // transaction followed by the other — never a's bytes inside b's run.
+        expect(got === a + "A" + b + "B" || got === b + "B" + a + "A").toBe(true);
+      } finally {
+        clearInterval(drain);
+        fs.closeSync(rfd);
+      }
+    } finally {
+      await rm(tmp, { recursive: true, force: true }).catch(() => null);
+    }
+  });
 });
 
 describe("subcommands.cmdSend safety guards", () => {

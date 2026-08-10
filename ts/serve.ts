@@ -58,6 +58,7 @@ import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
 import { CLAUDE_SESSION_PIN_ENV } from "./sessionEnv.ts";
 import { MAX_CALLBACK_MSG_BYTES, frameVisitorMessage, verifyCapability } from "./callbackCore.ts";
 import { isTerminalReply } from "./terminalReply.ts";
+import { withIpcLock } from "./ipcLock.ts";
 import { removeControlCharacters } from "./removeControlCharacters.ts";
 import { parseStatusText } from "./statusText.ts";
 import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
@@ -467,8 +468,8 @@ function loginShellEnv(): Record<string, string> | null {
     // $SHELL when the daemon has one; a launchd/systemd env usually doesn't,
     // so fall back through the common defaults (zsh first — the macOS default).
     const shell =
-      [process.env.SHELL, "/bin/zsh", "/bin/bash", "/bin/sh"].find(
-        (s): s is string => Boolean(s && existsSync(s)),
+      [process.env.SHELL, "/bin/zsh", "/bin/bash", "/bin/sh"].find((s): s is string =>
+        Boolean(s && existsSync(s)),
       ) ?? "/bin/sh";
     // Delimiters fence off the env dump from any banner/prompt noise the rc files
     // print to stdout; `env -0` is NUL-separated so values with newlines survive.
@@ -3185,7 +3186,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
       >();
       for (const w of workspaces) {
         const key = `${w.owner}/${w.repo}`;
-        const entry = byRepo.get(key) ?? { owner: w.owner, repo: w.repo, local: true, branches: [] };
+        const entry = byRepo.get(key) ?? {
+          owner: w.owner,
+          repo: w.repo,
+          local: true,
+          branches: [],
+        };
         entry.branches.push({ name: w.branch, path: w.path });
         byRepo.set(key, entry);
       }
@@ -3287,7 +3293,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
           ".[].name",
         ]);
         if (r.ok) {
-          remote = r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+          remote = r.stdout
+            .split("\n")
+            .map((s) => s.trim())
+            .filter(Boolean);
           source = "gh";
           error = undefined;
         } else if (!error) {
@@ -3744,13 +3753,27 @@ export async function cmdServe(rest: string[]): Promise<number> {
         if (!record.fifo_file)
           return new Response(`pid ${record.pid}: no fifo_file`, { status: 409 });
         const trailing = controlCodeFromName(code.toLowerCase());
-        if (msg && trailing) {
-          await writeToIpc(record.fifo_file, msg);
-          await new Promise((r) => setTimeout(r, 200));
-          await writeToIpc(record.fifo_file, trailing);
-        } else {
-          await writeToIpc(record.fifo_file, msg + trailing);
-        }
+        const fifo = record.fifo_file;
+        // One transaction: the body and its Enter must reach the agent with
+        // nothing spliced between them. The ~200ms settle gap below is a wide
+        // window for another writer (a second viewer, an `ay send`) to land
+        // bytes mid-message — see ts/ipcLock.ts.
+        await withIpcLock(
+          record.pid,
+          async () => {
+            if (msg && trailing) {
+              await writeToIpc(fifo, msg);
+              await new Promise((r) => setTimeout(r, 200));
+              await writeToIpc(fifo, trailing);
+            } else {
+              await writeToIpc(fifo, msg + trailing);
+            }
+          },
+          (why) =>
+            process.stderr.write(
+              `warning: /api/send writing pid ${record.pid} without the input lock (${why})\n`,
+            ),
+        );
         // Record this write for the stdin flash / sort. A payload that is purely a
         // terminal auto-reply (xterm answering the TUI's cursor/DA query, forwarded
         // over this same wire) is protocol noise, not input — stamp anyDaemonWriteAt
@@ -4329,11 +4352,23 @@ export async function cmdServe(rest: string[]): Promise<number> {
           provision: (
             spec: Spec,
             opts?: { wsRoot?: string },
-          ) => Promise<{ ok: boolean; folder: string; action: string; error?: string; reason?: string }>;
+          ) => Promise<{
+            ok: boolean;
+            folder: string;
+            action: string;
+            error?: string;
+            reason?: string;
+          }>;
           createBranch?: (
             spec: Spec,
             opts?: { wsRoot?: string },
-          ) => Promise<{ ok: boolean; folder: string; action: string; error?: string; reason?: string }>;
+          ) => Promise<{
+            ok: boolean;
+            folder: string;
+            action: string;
+            error?: string;
+            reason?: string;
+          }>;
         };
         try {
           prov = (await importProvisionModule()) as typeof prov;
@@ -4384,7 +4419,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
             { status: 403 },
           );
         }
-        let result: { ok: boolean; folder: string; action: string; error?: string; reason?: string };
+        let result: {
+          ok: boolean;
+          folder: string;
+          action: string;
+          error?: string;
+          reason?: string;
+        };
         try {
           const wsRoot = getProvisionRoot();
           result = await prov.provision(spec, wsRoot ? { wsRoot } : undefined);
@@ -4761,9 +4802,19 @@ export async function cmdServe(rest: string[]): Promise<number> {
       if (record.agent_id !== v.payload.agent || !record.fifo_file)
         return cbJson(409, { error: "agent unavailable" });
       const framed = frameVisitorMessage(v.payload.id, msg);
-      await writeToIpc(record.fifo_file, framed);
-      await new Promise((r) => setTimeout(r, 200));
-      await writeToIpc(record.fifo_file, controlCodeFromName("enter"));
+      const cbFifo = record.fifo_file;
+      await withIpcLock(
+        record.pid,
+        async () => {
+          await writeToIpc(cbFifo, framed);
+          await new Promise((r) => setTimeout(r, 200));
+          await writeToIpc(cbFifo, controlCodeFromName("enter"));
+        },
+        (why) =>
+          process.stderr.write(
+            `warning: callback writing pid ${record.pid} without the input lock (${why})\n`,
+          ),
+      );
       await noteStdinWrite(record.pid, record.fifo_file, true);
       await recordInbox({
         at: Date.now(),
