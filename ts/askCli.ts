@@ -189,7 +189,7 @@ const askCmd = (
       question,
       taskId: task._id,
       root,
-      asker: self ? { cli: target.cli, cwd: self.cwd, pid: self.pid } : null,
+      asker: self ? { cli: self.cli, cwd: self.cwd, pid: self.pid } : null,
     });
 
     // `--raw`: the envelope above is already complete, and `ay send` would
@@ -290,7 +290,7 @@ const answerCmd = (
         answer,
         taskId: task._id,
         root,
-        answerer: self ? { cli: "agent", cwd: self.cwd, pid: self.pid } : null,
+        answerer: self ? { cli: self.cli, cwd: self.cwd, pid: self.pid } : null,
       });
       try {
         const asker = await deps.resolveAgent(answered.owner);

@@ -34,8 +34,8 @@ const agentRec = (over: Partial<GlobalPidRecord>): GlobalPidRecord =>
     ...over,
   }) as GlobalPidRecord;
 
-const ASKER: SelfIdentity = { agentId: "lane-a", pid: 11, cwd: "/repo/lane-a" };
-const ANSWERER: SelfIdentity = { agentId: "lane-b", pid: 21, cwd: "/repo/lane-b" };
+const ASKER: SelfIdentity = { agentId: "lane-a", pid: 11, cwd: "/repo/lane-a", cli: "codex" };
+const ANSWERER: SelfIdentity = { agentId: "lane-b", pid: 21, cwd: "/repo/lane-b", cli: "claude" };
 
 /** Deps with a recording `send` and a registry of two agents. */
 function mkDeps(self: SelfIdentity | null, over: Partial<AskDeps> = {}) {
@@ -120,10 +120,16 @@ describe("ay ask", () => {
     expect(body).toContain("</ay-ask-msg ");
     expect(body).toContain("why is the build red?");
     expect(body).toContain("task T1");
+    // Attributed to the ASKER's own cli, not the target's — a codex agent
+    // asking a claude agent must not be announced as claude.
+    expect(body).toContain("from codex ");
     expect(body).toContain("ay answer T1");
     // The answer command carries the ASKER's store root: `ay answer` resolves
     // the store from its own cwd, and the two agents can be in different repos.
-    expect(body).toContain(TEST_ROOT);
+    // Compared through JSON.stringify, as the envelope embeds it — a Windows
+    // path's backslashes are escaped there, so asserting on the raw path would
+    // pass on POSIX and fail on Windows.
+    expect(body).toContain(JSON.stringify(TEST_ROOT));
   });
 
   it("returns immediately, printing how to monitor BOTH the question and the answerer", async () => {
