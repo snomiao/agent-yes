@@ -35,6 +35,8 @@ export interface SelfIdentity {
   agentId: string;
   pid: number;
   cwd: string;
+  /** The agent's own CLI ("claude", "codex", …) — envelopes attribute the sender with it. */
+  cli: string;
   title?: string | null;
 }
 
@@ -58,7 +60,7 @@ export async function resolveSelf(
   const recs = await readPids();
   const rec = recs.find((r) => r.wrapper_pid === envPid) ?? recs.find((r) => r.pid === envPid);
   if (!rec?.agent_id) return null;
-  return { agentId: rec.agent_id, pid: rec.pid, cwd: rec.cwd, title: rec.title };
+  return { agentId: rec.agent_id, pid: rec.pid, cwd: rec.cwd, cli: rec.cli, title: rec.title };
 }
 
 /** Live-ness of an owner string, for read-side views. `unknown` covers human owners and agents that never registered. */

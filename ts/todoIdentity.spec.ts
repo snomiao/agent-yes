@@ -22,7 +22,13 @@ describe("resolveSelf", () => {
       rec({ pid: 1, wrapper_pid: 9, agent_id: "other" }),
       rec({ pid: 2, wrapper_pid: 500, agent_id: "mine", cwd: "/repo/lane" }),
     ]);
-    expect(self).toEqual({ agentId: "mine", pid: 2, cwd: "/repo/lane", title: undefined });
+    expect(self).toEqual({
+      agentId: "mine",
+      pid: 2,
+      cwd: "/repo/lane",
+      cli: "claude",
+      title: undefined,
+    });
   });
 
   it("falls back to a pid match for a process that IS the wrapper", async () => {

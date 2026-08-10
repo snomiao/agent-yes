@@ -709,6 +709,43 @@ describe("ay todo cross-agent ownership", () => {
   // guarded inside the store and tested there — `setOwner`'s expectedOwner
   // check in todoStore.spec.ts — since it is not reachable through two
   // sequential CLI calls: the liveness refusal above fires first.
+  it("ls surfaces BOTH parties of an ask with their liveness — asker in OWNER, answerer in WAITING-ON", async () => {
+    beAgent(10);
+    await run("new", "why is the build red?", "--kind", "question");
+    await run("block", "T1", "--type", "waiting-on-agent", "--agent", "lane-dead");
+
+    const listed = await run("ls");
+    expect(listed.out).toContain("WAITING-ON");
+    expect(listed.out).toContain("lane-a(active)"); // the asker
+    expect(listed.out).toContain("lane-dead(exited)"); // the party that owes an answer
+  });
+
+  it("the WAITING-ON column stays hidden when nothing is waiting on an agent", async () => {
+    beAgent(10);
+    await run("new", "ordinary work", "--kind", "code");
+    expect((await run("ls")).out).not.toContain("WAITING-ON");
+  });
+
+  it("--format json reports the waited-on agent's liveness in its own field, and omits it entirely when nothing is waited on", async () => {
+    beAgent(10);
+    await run("new", "q", "--kind", "question");
+    await run("new", "plain", "--kind", "code");
+    await run("block", "T1", "--type", "waiting-on-agent", "--agent", "lane-dead");
+
+    const [q, plain] = JSON.parse((await run("ls", "--format", "json")).out);
+    expect(q.waitingOnLiveness).toBe("exited");
+    // Absent, not "unknown": a consumer must be able to tell "waiting on
+    // nobody" apart from "waiting on someone not in the registry".
+    expect("waitingOnLiveness" in plain).toBe(false);
+  });
+
+  it("get annotates the block line with whether that agent is still alive", async () => {
+    beAgent(10);
+    await run("new", "q", "--kind", "question");
+    await run("block", "T1", "--type", "waiting-on-agent", "--agent", "lane-dead");
+    expect((await run("get", "T1")).out).toContain("[lane-dead is exited]");
+  });
+
   it("claim --owner assigns to a named agent, not only to self", async () => {
     beAgent(10);
     await run("new", "delegated", "--kind", "code", "--owner", "none");

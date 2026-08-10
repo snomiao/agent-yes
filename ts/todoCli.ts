@@ -46,7 +46,7 @@
 import yargs, { type Argv, type CommandModule } from "yargs";
 import { openStore, CycleError, type TodoStore, type TodoRecord } from "./todoStore.ts";
 import { isKnownKind, LIFECYCLES, type LifecycleKind } from "./todoLifecycle.ts";
-import { describeBlock, type TodoBlock } from "./todoBlock.ts";
+import { blockedOnAgent, describeBlock, type TodoBlock } from "./todoBlock.ts";
 import { renderDigest, renderTree, buildTreeJSON, unblockedTasks } from "./todoDigest.ts";
 import { reconcileTodos, type LiveAgent } from "./todoAutomation.ts";
 import { readGlobalPids } from "./globalPidIndex.ts";
@@ -86,13 +86,22 @@ function parseKind(raw: string | undefined): LifecycleKind {
   return raw;
 }
 
-function renderRecord(t: TodoRecord): string {
+function renderRecord(t: TodoRecord, agents: LiveAgent[] = []): string {
+  // The party a task is WAITING ON is the other half of "who is holding this?"
+  // — `ay ask` records the answering agent there, so a question whose answerer
+  // died reads as such here instead of looking merely unanswered.
+  const waitingOn = blockedOnAgent(t.block);
+  const waitStatus = waitingOn ? ownerLiveness(waitingOn, agents) : "unknown";
   const lines = [
     `${t._id} [${t.state}] ${t.summary}`,
     `kind:    ${t.kind}${t.targetTier ? `  tier:${t.targetTier}` : ""}`,
     ...(t.owner ? [`owner:   ${t.owner}`] : []),
     ...(t.acceptanceCriteria ? [`acceptanceCriteria: ${t.acceptanceCriteria}`] : []),
-    ...(t.block ? [`block:   ${describeBlock(t.block)}`] : []),
+    ...(t.block
+      ? [
+          `block:   ${describeBlock(t.block)}${waitingOn && waitStatus !== "unknown" ? ` [${waitingOn} is ${waitStatus}]` : ""}`,
+        ]
+      : []),
     ...(t.blockedBy.length ? [`blockedBy: ${t.blockedBy.join(", ")}`] : []),
     ...(t.tags.length ? [`tags:    ${t.tags.join(", ")}`] : []),
     ...(t.satisfiedGates.length ? [`satisfiedGates: ${t.satisfiedGates.join(", ")}`] : []),
@@ -125,10 +134,38 @@ function ownerCell(t: TodoRecord, agents: LiveAgent[]): string {
   return status === "unknown" ? t.owner : `${t.owner}(${status})`;
 }
 
+/** Same treatment for the agent a task is WAITING ON — `ay ask`'s answerer. */
+function waitingOnCell(t: TodoRecord, agents: LiveAgent[]): string {
+  const who = blockedOnAgent(t.block);
+  if (!who) return "";
+  const status = ownerLiveness(who, agents);
+  return status === "unknown" ? who : `${who}(${status})`;
+}
+
 function renderList(tasks: TodoRecord[], agents: LiveAgent[] = []): string {
   if (tasks.length === 0) return "(no tasks match)";
-  const rows = tasks.map((t) => [t._id, t.state, t.kind, ownerCell(t, agents), t.summary]);
-  const header = ["ID", "STATE", "KIND", "OWNER", "SUMMARY"];
+  // The WAITING-ON column appears only when something is actually waiting on an
+  // agent, so an ordinary task list is not padded with an empty column — but
+  // when `ay ask` questions are in the list, both parties and both liveness
+  // states are on one line, which is the entire point of recording them.
+  const waiting = tasks.map((t) => waitingOnCell(t, agents));
+  const showWaiting = waiting.some(Boolean);
+  const rows = tasks.map((t, i) => [
+    t._id,
+    t.state,
+    t.kind,
+    ownerCell(t, agents),
+    ...(showWaiting ? [waiting[i]!] : []),
+    t.summary,
+  ]);
+  const header = [
+    "ID",
+    "STATE",
+    "KIND",
+    "OWNER",
+    ...(showWaiting ? ["WAITING-ON"] : []),
+    "SUMMARY",
+  ];
   const widths = header.map((h, i) => Math.max(h.length, ...rows.map((r) => r[i]!.length)));
   const line = (xs: string[]) =>
     xs
@@ -303,7 +340,16 @@ const lsCmd: CommandModule<
     // filtering on `owner` must still see the same string that was stored.
     emit(
       argv,
-      tasks.map((t) => ({ ...t, ownerLiveness: ownerLiveness(t.owner, agents) })),
+      tasks.map((t) => ({
+        ...t,
+        ownerLiveness: ownerLiveness(t.owner, agents),
+        // Present (as "unknown") only when the task actually waits on an
+        // agent, so a consumer can tell "not waiting on anyone" apart from
+        // "waiting on someone we cannot find in the registry".
+        ...(blockedOnAgent(t.block)
+          ? { waitingOnLiveness: ownerLiveness(blockedOnAgent(t.block)!, agents) }
+          : {}),
+      })),
       renderList(tasks, agents),
     );
   },
@@ -374,7 +420,7 @@ const getCmd: CommandModule<GlobalOpts, GlobalOpts & { id: string }> = {
     const store = await storeFor(argv);
     const rec = store.get(argv.id);
     if (!rec) fail(`no such task: ${argv.id}`);
-    emit(argv, rec, renderRecord(rec));
+    emit(argv, rec, renderRecord(rec, await liveAgents()));
   },
 };
 
@@ -697,6 +743,15 @@ const reconcileCmd: CommandModule<GlobalOpts, GlobalOpts> = {
             // failure and still reported "auto-verified").
             const result = await store.verify(action.taskId);
             applied.push(`auto-verified ${action.taskId} -> ${result.state}`);
+            break;
+          }
+          case "answerer-gone": {
+            // Report-only by design (see the action's doc comment): the answer
+            // is still owed, so nothing about the task is changed here.
+            applied.push(
+              `${action.taskId}: ${action.agentId} exited without answering` +
+                (action.owner ? ` (asked by ${action.owner})` : ""),
+            );
             break;
           }
           case "notify-unblocked": {

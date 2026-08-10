@@ -430,6 +430,8 @@ const SUBCOMMANDS = new Set([
   "restart",
   "note",
   "todo",
+  "ask",
+  "answer",
   "ch",
   "channels",
   "term",
@@ -629,6 +631,31 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdRestart(rest);
       case "note":
         return await cmdNote(rest);
+      case "ask":
+      case "answer": {
+        // `ay ask` needs `ay send`'s delivery path and this file's agent
+        // resolver, both of which live here — so they are handed over rather
+        // than imported, which would make askCli.ts and this module circular.
+        const { runAskSubcommand, runAnswerSubcommand } = await import("./askCli.ts");
+        const deps = {
+          // `all: true` — a question may legitimately be addressed to an agent
+          // that has since gone idle or exited (that is precisely the case
+          // worth recording), so the answerer's liveness is REPORTED rather
+          // than made a precondition for asking.
+          resolveAgent: (keyword: string) =>
+            resolveOne(keyword, {
+              all: true,
+              active: false,
+              json: false,
+              latest: false,
+              cwdScope: null,
+            }),
+          send: cmdSend,
+        };
+        return sub === "ask"
+          ? await runAskSubcommand(rest, deps)
+          : await runAnswerSubcommand(rest, deps);
+      }
       case "todo": {
         const { runTodoSubcommand } = await import("./todoCli.ts");
         return runTodoSubcommand(rest);
