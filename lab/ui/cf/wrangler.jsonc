@@ -15,8 +15,9 @@
     // is free for the marketing landing page. Copy the app (index.html + EVERY UI
     // script: room-client.js, console-logic.js, e2e.js, …) into ./public/w/, the
     // landing page to ./public/index.html (served at /), the architecture map to
-    // ./public/architecture.html (served at /architecture.html), the blog to
-    // ./public/blog/ (served at /blog/ — linked from the landing nav), and the
+    // ./public/architecture.html (served at /architecture.html), the generated
+    // lab to ./public/lab/ (served as lab.agent-yes.com — see worker.ts's
+    // LAB_HOST branch; the apex 301s the old /blog/* there), and the
     // install scripts to ./public/ (agent-yes.com/setup.sh | setup.ps1). A glob
     // (../*.js) avoids silently breaking when the UI gains a new import.
     // The _headers file (copied to ./public/_headers) applies the console CSP to
