@@ -5,6 +5,7 @@ mod config;
 mod config_loader;
 mod context;
 mod fifo;
+mod identity;
 mod idle_waiter;
 mod init_msg;
 mod installer;
@@ -252,12 +253,17 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             });
 
         match spawner {
-            Some(s) => init_msg::build_init_msg(
-                raw,
-                &s,
-                &init_msg::mint_nonce(),
-                dirs::home_dir().as_deref().and_then(|p| p.to_str()),
-            ),
+            Some(s) => {
+                // The spawner runs on THIS host (we resolved it from a local
+                // wrapper pid), so the local user/host and its cwd's branch are
+                // the right defaults — same call ts/index.ts makes.
+                let ident = identity::format_identity(&identity::IdentityParts {
+                    cwd: &s.cwd,
+                    pid: s.pid,
+                    ..Default::default()
+                });
+                init_msg::build_init_msg(raw, &s, &init_msg::mint_nonce(), &ident)
+            }
             None => raw.clone(),
         }
     });

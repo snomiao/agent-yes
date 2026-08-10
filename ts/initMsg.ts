@@ -63,17 +63,22 @@ export function replyTargetOf(spawner: InitSpawner): string {
  * Returns the prompt unchanged when there is no spawner (a top-level agent
  * started from a human shell has nobody to report to, and the block would be
  * pure noise on the overwhelmingly common path).
+ *
+ * `identity` is the spawner's standardized identity
+ * (`user@host:path:branch#pid`, see ts/identity.ts) — passed IN rather than
+ * computed here so the golden fixture can pin a machine-independent value, and
+ * so this stays a pure function of its arguments in both runtimes.
  */
 export function buildInitMsg(
   prompt: string,
   spawner: InitSpawner | null | undefined,
   nonce: string,
+  identity: string,
 ): string {
   if (!spawner) return prompt;
   const target = replyTargetOf(spawner);
-  const where = shortenHome(spawner.cwd);
   return [
-    `<ay-init-msg ${nonce} from ${spawner.cli} #${spawner.pid} @ ${where} — reply: ay send ${target} "...">`,
+    `<ay-init-msg ${nonce} from ${spawner.cli} ${identity} — reply: ay send ${target} "...">`,
     `<ay-task ${nonce}>`,
     prompt,
     `</ay-task ${nonce}>`,

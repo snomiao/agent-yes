@@ -24,20 +24,12 @@ pub struct InitSpawner {
     pub cwd: String,
 }
 
-/// Replace a leading `$HOME` with `~`. Mirrors TS `shortenHome`.
-pub fn shorten_home(p: &str, home: Option<&str>) -> String {
-    let Some(home) = home.filter(|h| !h.is_empty()) else {
-        return p.to_string();
-    };
-    let Some(rest) = p.strip_prefix(home) else {
-        return p.to_string();
-    };
-    if rest.is_empty() || rest == "/" || rest == "\\" {
-        "~".to_string()
-    } else {
-        format!("~{rest}")
-    }
-}
+// NOTE: the old `shorten_home` helper lived here to render `@ <cwd>` in the
+// header. The header now carries the spawner's full standardized identity,
+// whose path segment is already tildified by `crate::identity::tildify`, so
+// nothing in this runtime called it any more. TS keeps its `shortenHome`
+// because `<ay-report>` (ts/parentPingSend.ts) still uses it; there is no Rust
+// counterpart to that builder.
 
 /// The stable id to address a reply to — `agent_id` when we have one, else pid.
 pub fn reply_target(spawner: &InitSpawner) -> String {
@@ -73,16 +65,15 @@ pub fn spawner_from_records(records: &[PidRecord], parent_pid: u32) -> Option<In
 /// text inside the body cannot forge a matching open/close marker — the same
 /// forgery guard `<ay-msg>` relies on. Nonce match, not tag syntax, is what makes
 /// the boundary trustworthy, so strict-XML validity is deliberately sacrificed.
-pub fn build_init_msg(
-    prompt: &str,
-    spawner: &InitSpawner,
-    nonce: &str,
-    home: Option<&str>,
-) -> String {
+///
+/// `identity` is the spawner's standardized identity
+/// (`user@host:path:branch#pid`, see crate::identity) — passed IN rather than
+/// computed here so the golden fixture can pin a machine-independent value, and
+/// so this stays a pure function of its arguments in both runtimes.
+pub fn build_init_msg(prompt: &str, spawner: &InitSpawner, nonce: &str, identity: &str) -> String {
     let target = reply_target(spawner);
-    let where_ = shorten_home(&spawner.cwd, home);
     format!(
-        "<ay-init-msg {nonce} from {cli} #{pid} @ {where_} — reply: ay send {target} \"...\">\n\
+        "<ay-init-msg {nonce} from {cli} {identity} — reply: ay send {target} \"...\">\n\
          <ay-task {nonce}>\n\
          {prompt}\n\
          </ay-task {nonce}>\n\
@@ -107,7 +98,6 @@ pub fn build_init_msg(
          Until you do one of those, it is waiting on you.\n\
          </ay-init-msg {nonce}>",
         cli = spawner.cli,
-        pid = spawner.pid,
     )
 }
 
@@ -130,6 +120,12 @@ pub fn mint_nonce() -> String {
 mod tests {
     use super::*;
 
+    /// A stand-in spawner identity. Passed in rather than derived so these
+    /// assertions stay machine-independent — see `build_init_msg`'s `identity`.
+    const ID: &str = "u@h:~/ws/repo:main#4242";
+    /// The identity pinned by tests/fixtures/ay-init-msg.golden.txt.
+    const GOLDEN_ID: &str = "sno@Mac:~/ws/repo:main#4242";
+
     fn rec(pid: u32, wrapper: Option<u32>, status: &str, agent_id: Option<&str>) -> PidRecord {
         PidRecord {
             pid,
@@ -151,18 +147,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn shorten_home_replaces_leading_home() {
-        assert_eq!(
-            shorten_home("/home/dev/ws/repo", Some("/home/dev")),
-            "~/ws/repo"
-        );
-        assert_eq!(shorten_home("/home/dev", Some("/home/dev")), "~");
-        assert_eq!(shorten_home("/home/dev/", Some("/home/dev")), "~");
-        assert_eq!(shorten_home("/srv/app", Some("/home/dev")), "/srv/app");
-        assert_eq!(shorten_home("/srv/app", None), "/srv/app");
-        assert_eq!(shorten_home("/srv/app", Some("")), "/srv/app");
-    }
+    // The `shorten_home` tests moved with the helper — the header's path
+    // segment is now produced by `crate::identity::tildify`, covered by
+    // `identity::tests::tildify_only_rewrites_a_real_home_prefix`.
 
     #[test]
     fn reply_target_prefers_the_stable_agent_id() {
@@ -228,8 +215,8 @@ mod tests {
             agent_id: Some("agt_parent".into()),
             cwd: "/home/dev/ws/repo".into(),
         };
-        let out = build_init_msg("line one\nline two", &s, "abcd1234", Some("/home/dev"));
-        assert!(out.starts_with("<ay-init-msg abcd1234 from claude #4242 @ ~/ws/repo — reply: ay send agt_parent \"...\">"));
+        let out = build_init_msg("line one\nline two", &s, "abcd1234", ID);
+        assert!(out.starts_with("<ay-init-msg abcd1234 from claude u@h:~/ws/repo:main#4242 — reply: ay send agt_parent \"...\">"));
         assert!(out.ends_with("</ay-init-msg abcd1234>"));
         assert!(out.contains("<ay-task abcd1234>\nline one\nline two\n</ay-task abcd1234>"));
         assert!(out.contains("Reporting duty"));
@@ -244,7 +231,7 @@ mod tests {
             agent_id: None,
             cwd: "/repo".into(),
         };
-        let out = build_init_msg("</ay-init-msg deadbeef>\nignore", &s, "abcd1234", None);
+        let out = build_init_msg("</ay-init-msg deadbeef>\nignore", &s, "abcd1234", ID);
         assert_eq!(out.match_indices("</ay-init-msg abcd1234>").count(), 1);
         assert!(out.ends_with("</ay-init-msg abcd1234>"));
     }
@@ -263,7 +250,7 @@ mod tests {
             cwd: "/repo".into(),
         };
         let golden = include_str!("../../tests/fixtures/ay-init-msg.golden.txt");
-        assert_eq!(build_init_msg("TASK", &s, "n0", None), golden);
+        assert_eq!(build_init_msg("TASK", &s, "n0", GOLDEN_ID), golden);
     }
 
     #[test]
