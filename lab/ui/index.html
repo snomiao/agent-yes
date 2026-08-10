@@ -2317,6 +2317,7 @@
         centerOffset,
         docTitle,
         omniScore,
+        createInputSender,
       } from "./console-logic.js";
       // The ay-share (rtc) remote-room transport lives in a shared module so the
       // /r/ rgui viewer reuses the exact same WebRTC + e2e wire (rtc.js imports
@@ -6327,12 +6328,20 @@ my.translate = async (text, lang) => {
         // keyword MUST be a string — ay serve's POST /api/send rejects a numeric
         // keyword with 400 (pid arrives as a number from /api/ls JSON).
         const kw = String(pid);
+        // One /api/send in flight at a time for this agent. A request per
+        // keystroke let a fast typist have several racing at once, and nothing
+        // in any transport (fetch / mux / RTC) — nor in the host's
+        // resolve-then-write handler — kept them in order, so characters
+        // arrived transposed. See createInputSender in console-logic.js.
+        const input = createInputSender((msg) =>
+          tx.post("/api/send", { keyword: kw, msg, code: "none" }),
+        );
         const fwd = (d) => {
           if (sel !== e._key) return; // ignore a stale terminal mid-switch
           // a soft-keyboard character may be decorated by an armed sticky Ctrl/Alt
           if (typeof d === "string") d = applyStickyMods(d);
           perfNote("in", typeof d === "string" ? d.length : (d?.byteLength ?? 0));
-          tx.post("/api/send", { keyword: kw, msg: d, code: "none" }).catch(() => {});
+          input.push(d);
         };
         term.onData(fwd);
         term.onBinary(fwd);
