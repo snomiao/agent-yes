@@ -1075,7 +1075,19 @@ describe("createInputSender", () => {
     return { send, landed };
   }
 
-  const settle = () => new Promise((r) => setTimeout(r, 50));
+  /**
+   * Wait for an outcome, not for a duration. These tests deliberately give
+   * send() real latency, and serialized latency ADDS UP — a fixed sleep long
+   * enough on an idle laptop is a coin flip on a loaded CI runner, which is
+   * how ordering tests turn into flaky tests.
+   */
+  async function waitFor(cond: () => boolean, label: string): Promise<void> {
+    for (let i = 0; i < 400; i++) {
+      if (cond()) return;
+      await new Promise((r) => setTimeout(r, 5));
+    }
+    throw new Error(`timed out waiting for: ${label}`);
+  }
 
   it("delivers in order even when the first request is slower than the second", async () => {
     // Without serialization these two overlap and the fast one wins the race —
@@ -1084,7 +1096,7 @@ describe("createInputSender", () => {
     const input = createInputSender(send);
     input.push("a");
     input.push("b");
-    await settle();
+    await waitFor(() => landed.length === 2, "both keystrokes to land");
     expect(landed.join("")).toBe("ab");
   });
 
@@ -1094,7 +1106,9 @@ describe("createInputSender", () => {
     const { send, landed } = jitterySend(typed.map((_, i) => typed.length - i));
     const input = createInputSender(send);
     for (const ch of typed) input.push(ch);
-    await settle();
+    // Coalescing means fewer sends than keystrokes, so wait on the CONTENT
+    // having fully arrived rather than on a send count.
+    await waitFor(() => landed.join("").length === typed.length, "the whole burst to land");
     expect(landed.join("")).toBe(typed.join(""));
   });
 
@@ -1113,7 +1127,7 @@ describe("createInputSender", () => {
     expect(input.pending()).toBe(4);
 
     release!();
-    await settle();
+    await waitFor(() => input.pending() === 0, "the queued burst to flush");
     // Four keystrokes, one follow-up request — fewer round trips than the
     // per-keystroke version it replaces, not more.
     expect(sent).toEqual(["h", "ello"]);
@@ -1135,7 +1149,7 @@ describe("createInputSender", () => {
     input.push(mouse);
     input.push("c");
     release!();
-    await settle();
+    await waitFor(() => sent.length === 4, "every queued chunk to be sent");
     // "ab" coalesced into one payload; the binary chunk passed through
     // untouched rather than being concatenated into text; "c" still after it.
     expect(sent).toEqual(["open", "ab", mouse, "c"]);
@@ -1148,9 +1162,9 @@ describe("createInputSender", () => {
       return sent.length === 1 ? Promise.reject(new Error("network")) : Promise.resolve();
     });
     input.push("a");
-    await settle();
+    await waitFor(() => sent.length === 1, "the failing send to be attempted");
     input.push("b");
-    await settle();
+    await waitFor(() => sent.length === 2, "the next keystroke to go out anyway");
     expect(sent).toEqual(["a", "b"]);
   });
 });
