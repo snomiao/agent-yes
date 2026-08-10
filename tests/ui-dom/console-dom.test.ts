@@ -485,8 +485,18 @@ describe("console DOM behaviour", () => {
       await expect.poll(() => page.locator("#nf-branch-row").isVisible()).toBe(true);
       await expect.poll(() => page.locator("#nf-branch-list option").count()).toBe(2);
 
+      // picking a repo derives the Working dir from the ws standard layout
+      // (locked so it can't read as "clone into whatever dir was there")
+      await expect.poll(() => page.locator("#nf-cwd").isDisabled()).toBe(true);
+      await expect
+        .poll(() => page.locator("#nf-cwd").inputValue())
+        .toContain("/home/u/ws/acme/widgets/tree/");
+
       // a NEW branch name → hint flags the create, spawn carries create:true
       await page.fill("#nf-branch", "feat-x");
+      await expect
+        .poll(() => page.locator("#nf-cwd").inputValue())
+        .toBe("/home/u/ws/acme/widgets/tree/feat-x");
       await expect
         .poll(() => page.locator("#nf-branch-hint").innerText())
         .toContain("new branch will be created");
@@ -509,9 +519,12 @@ describe("console DOM behaviour", () => {
       expect(spawns[1].create).toBeUndefined();
       expect(spawns[1].branch).toBeUndefined();
 
-      // a non-GitHub git URL → sent raw with the branch alongside (raw clone)
+      // a non-GitHub git URL → cwd preview still derives from the layout
       await page.click("#newbtn");
       await setRepo("https://gitlab.com/acme/tools.git");
+      await expect
+        .poll(() => page.locator("#nf-cwd").inputValue())
+        .toContain("/home/u/ws/acme/tools/tree/");
       await expect.poll(() => page.locator("#nf-branch-hint").innerText()).toContain("git clone");
       await page.fill("#nf-branch", "dev");
       await page.selectOption("#nf-cli", "claude");

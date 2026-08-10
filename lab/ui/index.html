@@ -8129,7 +8129,10 @@ my.translate = async (text, lang) => {
         });
         $("nf-repo")?.addEventListener("change", onRepoChange);
         $("nf-branch-row")?.addEventListener("input", (ev) => {
-          if (ev.target.id === "nf-branch") updateBranchHint();
+          if (ev.target.id === "nf-branch") {
+            updateBranchHint();
+            updateProvisionCwd();
+          }
         });
         showHook(target);
         loadRepoPicker(target);
@@ -8143,6 +8146,7 @@ my.translate = async (text, lang) => {
       // The listing endpoints are best-effort; a fetch failure just leaves the
       // datalist empty and shows a short hint, manual input still provisions.
       let nfRemoteBranches = null; // Set of remote branch names for the picked repo
+      let nfWsRoot = ""; // target host's workspace root (from /api/ws/repos)
 
       // What the repo field's text means. github-first: bare owner/repo IS a
       // github repo; only scheme/git@ inputs on other hosts become raw git URLs.
@@ -8159,9 +8163,46 @@ my.translate = async (text, lang) => {
         m = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(v);
         if (m && m[1] !== "." && m[1] !== "..")
           return { kind: "github", owner: m[1], repo: m[2], branch: "" };
-        if (/^(git@[^:\s]+:|ssh:\/\/|git:\/\/|https?:\/\/)\S+$/.test(v))
-          return { kind: "git", url: v.replace(/\/+$/, "") };
+        if (/^(git@[^:\s]+:|ssh:\/\/|git:\/\/|https?:\/\/)\S+$/.test(v)) {
+          // owner/repo from the last two path segments — where the server's
+          // raw-clone path will place the checkout in the standard layout
+          const segs = v
+            .replace(/\/+$/, "")
+            .replace(/\.git$/, "")
+            .split(/[/:]/)
+            .filter(Boolean);
+          return {
+            kind: "git",
+            url: v.replace(/\/+$/, ""),
+            owner: segs.length >= 2 ? segs[segs.length - 2] : "",
+            repo: segs.length >= 2 ? segs[segs.length - 1] : "",
+          };
+        }
         return null;
+      }
+
+      // While a provision source is picked, the Working dir is DERIVED — show
+      // the ws-standard target <wsRoot>/<owner>/<repo>/tree/<branch> and lock
+      // the field so it can't read as "clone into whatever dir was there".
+      // Cleared → unlock and restore what the user had typed.
+      function updateProvisionCwd() {
+        const cwdEl = $("nf-cwd");
+        if (!cwdEl) return;
+        const parsed = parseRepoInput($("nf-repo")?.value || "");
+        if (!parsed || !parsed.owner || !parsed.repo) {
+          if (cwdEl.disabled) {
+            cwdEl.disabled = false;
+            cwdEl.value = cwdEl.dataset.userCwd || "";
+          }
+          return;
+        }
+        if (!cwdEl.disabled) cwdEl.dataset.userCwd = cwdEl.value;
+        let br = ($("nf-branch")?.value || "").trim() || parsed.branch || "";
+        if (!br && nfRemoteBranches) {
+          br = nfRemoteBranches.has("main") ? "main" : nfRemoteBranches.has("master") ? "master" : "";
+        }
+        cwdEl.disabled = true;
+        cwdEl.value = `${nfWsRoot || "~/ws"}/${parsed.owner}/${parsed.repo}/tree/${br || "…"}`;
       }
       function loadRepoPicker(target) {
         const dl = $("nf-repo-list");
@@ -8175,6 +8216,8 @@ my.translate = async (text, lang) => {
             // a slow answer for a host the user switched away from must not
             // paint the new host's repo list (same guard as showHook)
             if ($("newform").dataset.room !== forId) return;
+            nfWsRoot = (d && d.wsRoot) || "";
+            updateProvisionCwd();
             const repos = (d && d.repos) || [];
             dl.innerHTML = repos
               .map(
@@ -8202,6 +8245,7 @@ my.translate = async (text, lang) => {
         const hint = $("nf-branch-hint");
         nfRemoteBranches = null;
         if (row) row.style.display = parsed ? "" : "none";
+        updateProvisionCwd();
         if (!parsed) return;
         if (parsed.kind === "github") {
           if (parsed.branch && $("nf-branch")) $("nf-branch").value = parsed.branch;
@@ -8246,6 +8290,7 @@ my.translate = async (text, lang) => {
                 )
                 .join("");
             updateBranchHint(d && d.error);
+            updateProvisionCwd();
           })
           .catch(() => {
             if (hint) hint.textContent = "branch list unavailable — type a branch name";
