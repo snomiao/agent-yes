@@ -13,7 +13,7 @@
 // or any AES key. The signaling server only ever sees `authToken = HKDF(S,…)`,
 // which is one-way; the AES keys never leave the endpoints.
 //
-// See agent-yes.com/blog/e2ee-share-links for the design writeup.
+// See lab.agent-yes.com/2026-06-15-e2ee-share-links for the design writeup.
 
 export const V = 1;
 export const PROTO = `ay-e2e-${V}`; // "ay-e2e-1"

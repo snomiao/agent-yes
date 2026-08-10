@@ -76,7 +76,7 @@
     "lab/ui/sw.js",
     "ts/channels/*.ts",
     "ts/terminal/*.ts",
-    "lab/ui/blog/**"
+    "lab/ui/lab/**"
   ],
   "type": "module",
   "module": "ts/index.ts",

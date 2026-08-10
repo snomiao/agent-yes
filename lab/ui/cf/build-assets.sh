@@ -7,7 +7,8 @@
 #
 # Layout produced (see wrangler.jsonc for the full commentary):
 #   public/w/       — the console PWA (index.html + every UI script)
-#   public/index.html, architecture.html, blog/  — landing + docs
+#   public/index.html, architecture.html         — landing + docs
+#   public/lab/     — the lab, generated (served as lab.agent-yes.com)
 #   public/setup.sh, setup.ps1                   — install one-liners
 #   public/_headers — CSP for static assets (served before the Worker)
 #   public/r/ + public/rgui/ — the rgui forest page (built from lib/rgui)
@@ -20,8 +21,13 @@ cp ../index.html ../ch.html ../*.js ../manifest.webmanifest ../icon.svg ./public
 rm -rf ./public/w/vendor && cp -R ../vendor ./public/w/vendor
 cp ../landing.html ./public/index.html
 cp ../architecture.html ./public/architecture.html
+# The lab (design notes) is GENERATED from lab/ui/lab into ./public/lab, which
+# worker.ts serves as lab.agent-yes.com (its LAB_HOST branch rewrites / → /lab).
+# It replaced the old hand-written ./public/blog tree; the apex 301s /blog/* to
+# the lab, so nothing under public/blog is needed any more — the rm clears it out
+# of an incrementally-built local ./public (CI always starts from an empty one).
 rm -rf ./public/blog
-cp -R ../blog ./public/blog
+bun ../lab/build.ts ./public/lab
 cp ../setup.sh ../setup.ps1 ./public/
 
 # Stamp the console with the deploying commit (index.html's AY_BUILD
