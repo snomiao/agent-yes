@@ -56,6 +56,20 @@ function fail(message: string): never {
   throw new Error(message);
 }
 
+/**
+ * Quote a path for a command line someone (or some agent) will actually run.
+ *
+ * NOT `JSON.stringify`, which escapes backslashes: a Windows root would be
+ * embedded as `"C:\\Users\\x"`, and every shell there treats a backslash
+ * literally, so the command carries doubled separators. Path normalisation
+ * happens to absorb that today — but the reply command in the envelope below is
+ * copied verbatim by an agent, and a command that only works by accident is not
+ * one to hand out. Quote only when needed, escape only real quotes.
+ */
+function shellQuote(p: string): string {
+  return /[\s"]/.test(p) ? `"${p.replace(/"/g, '\\"')}"` : p;
+}
+
 const out = (s: string) => process.stdout.write(`${s}\n`);
 
 /** First line / first 72 chars of the question — the list view wants one line, `description` keeps the whole thing. */
@@ -75,7 +89,7 @@ function summarize(question: string): string {
  * exchange because delivery is same-host regardless.
  */
 function answerCommand(taskId: string, root: string): string {
-  return `ay answer ${taskId} --root ${JSON.stringify(root)} "<your answer>"`;
+  return `ay answer ${taskId} --root ${shellQuote(root)} "<your answer>"`;
 }
 
 /**
@@ -116,7 +130,7 @@ export function buildAnswerEnvelope(input: {
     ? `${input.answerer.cli} ${formatIdentity({ cwd: input.answerer.cwd, pid: input.answerer.pid })}`
     : "a human shell";
   return [
-    `<ay-answer-msg ${nonce} from ${from} — answers task ${input.taskId} — close it with: ay todo transition ${input.taskId} done --root ${JSON.stringify(input.root)}>`,
+    `<ay-answer-msg ${nonce} from ${from} — answers task ${input.taskId} — close it with: ay todo transition ${input.taskId} done --root ${shellQuote(input.root)}>`,
     input.answer,
     `</ay-answer-msg ${nonce}>`,
   ].join("\n");
@@ -227,9 +241,9 @@ const askCmd = (
 
     out(`asked ${answerer} → ${task._id}${delivered ? "" : "  (NOT DELIVERED)"}`);
     out(`  question: ${summarize(question)}`);
-    out(`  monitor the answer:   ay todo get ${task._id} --root ${JSON.stringify(root)}`);
+    out(`  monitor the answer:   ay todo get ${task._id} --root ${shellQuote(root)}`);
     out(`  monitor the answerer: ay status ${answerer}`);
-    out(`  both at once:         ay todo ls --blocked --root ${JSON.stringify(root)}`);
+    out(`  both at once:         ay todo ls --blocked --root ${shellQuote(root)}`);
   },
 });
 
@@ -309,11 +323,11 @@ const answerCmd = (
       out(
         notified
           ? `  told the asker: ${answered.owner}`
-          : `  could NOT reach the asker (${answered.owner}) — the answer is recorded on the task: ay todo get ${task._id} --root ${JSON.stringify(root)}`,
+          : `  could NOT reach the asker (${answered.owner}) — the answer is recorded on the task: ay todo get ${task._id} --root ${shellQuote(root)}`,
       );
     }
     out(
-      `  the asker closes it with: ay todo transition ${task._id} done --root ${JSON.stringify(root)}`,
+      `  the asker closes it with: ay todo transition ${task._id} done --root ${shellQuote(root)}`,
     );
   },
 });

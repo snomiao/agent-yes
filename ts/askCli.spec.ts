@@ -1,7 +1,7 @@
 import { describe, expect, it, beforeEach, afterEach, vi } from "vitest";
 import { rm, mkdir } from "fs/promises";
 import path from "path";
-import { runAskSubcommand, runAnswerSubcommand, type AskDeps } from "./askCli.ts";
+import { runAskSubcommand, runAnswerSubcommand, buildAskEnvelope, type AskDeps } from "./askCli.ts";
 import { openStore } from "./todoStore.ts";
 import type { GlobalPidRecord } from "./globalPidIndex.ts";
 import type { SelfIdentity } from "./todoIdentity.ts";
@@ -126,10 +126,11 @@ describe("ay ask", () => {
     expect(body).toContain("ay answer T1");
     // The answer command carries the ASKER's store root: `ay answer` resolves
     // the store from its own cwd, and the two agents can be in different repos.
-    // Compared through JSON.stringify, as the envelope embeds it — a Windows
-    // path's backslashes are escaped there, so asserting on the raw path would
-    // pass on POSIX and fail on Windows.
-    expect(body).toContain(JSON.stringify(TEST_ROOT));
+    // The root is shell-quoted, not JSON-escaped: an agent copies this command
+    // verbatim, and a Windows path whose backslashes were doubled would only
+    // work by accident (path normalisation absorbing the extra separators).
+    expect(body).toContain(`--root ${TEST_ROOT}`);
+    expect(body).not.toContain(TEST_ROOT.replace(/\\/g, "\\\\") + '"');
   });
 
   it("returns immediately, printing how to monitor BOTH the question and the answerer", async () => {
@@ -175,6 +176,17 @@ describe("ay ask", () => {
     const store = await openStore(TEST_ROOT);
     expect(store.get("T1")).not.toBeNull();
     expect(out).toContain("NOT DELIVERED");
+  });
+
+  it("quotes a root containing spaces, and leaves a plain one bare", async () => {
+    // Exercised directly: TEST_ROOT has no spaces, so the branch that matters
+    // for a real user (`/Users/me/My Repos/x`) would otherwise go untested.
+    expect(
+      buildAskEnvelope({ question: "q", taskId: "T1", root: "/plain/root", asker: null }),
+    ).toContain("--root /plain/root ");
+    expect(
+      buildAskEnvelope({ question: "q", taskId: "T1", root: "/has space/root", asker: null }),
+    ).toContain('--root "/has space/root"');
   });
 
   it("does NOT bypass `ay send`'s recency guard by default, but --force passes through", async () => {
