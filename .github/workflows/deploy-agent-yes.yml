@@ -21,7 +21,26 @@ on:
       - "lab/ui/**"
       - "scripts/build-rgui.ts"
       - ".github/workflows/deploy-agent-yes.yml"
+  # Deploying a NAMED REF is a race when the caller has just moved that ref:
+  # promote-release.yml pushed release 8b4f24f→5f55ed9 and dispatched this
+  # workflow 1.3s later, and the dispatch resolved `release` to the PRE-push
+  # commit — so prod redeployed the old site and reported success, while main
+  # and release both carried the fix. Nothing was red; the site was just stale.
+  # Both entry points therefore take an explicit commit, and the checkout below
+  # honours it. `sha` is optional: without it this deploys the ref it ran on,
+  # which is what a manual rollback dispatch wants.
   workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit to deploy (default: tip of the selected branch)"
+        required: false
+        type: string
+  workflow_call:
+    inputs:
+      sha:
+        description: "Commit to deploy"
+        required: false
+        type: string
 
 concurrency:
   group: deploy-agent-yes
@@ -37,6 +56,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          ref: ${{ inputs.sha || github.sha }}
+      # State the deployed commit in the log. The failure this guards against
+      # looked like a success, so "which commit went live" must be readable
+      # without cross-referencing the caller's run.
+      - name: Show what is being deployed
+        run: |
+          echo "deploying $(git rev-parse HEAD)"
+          echo "  $(git log -1 --format='%s')"
       # bun runs scripts/build-rgui.ts inside wrangler's build step.
       - uses: oven-sh/setup-bun@v2
       # worker.ts imports `codehost/tunnel` (a root-package npm dep) — without
