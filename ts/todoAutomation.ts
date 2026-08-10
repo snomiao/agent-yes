@@ -16,7 +16,7 @@
  * applies it (codex-review Important, see the action shapes below).
  */
 
-import { DONE_STATE, LIFECYCLES, ORPHANED_STATE } from "./todoLifecycle.ts";
+import { DONE_STATE, ORPHANED_STATE, transitionsOf } from "./todoLifecycle.ts";
 import { unblockedTasks } from "./todoDigest.ts";
 import type { TodoRecord } from "./todoStore.ts";
 
@@ -40,6 +40,13 @@ export type TodoAction =
   // `blocked-by-human`) since this action was decided (codex-review Important).
   | { type: "clear-waiting-on-agent"; taskId: string; expectedAgentId: string }
   | { type: "notify-unblocked"; taskId: string; owner: string }
+  // Report-only, like `notify-unblocked`: the agent that owes an answer to an
+  // `ay ask` question has exited without giving one. Deliberately mutates
+  // nothing — the question is still a real, open question, and silently
+  // clearing its block (or force-closing it) would destroy the one record that
+  // says an answer is outstanding. Surfacing it is what lets the asker decide
+  // to re-ask someone else.
+  | { type: "answerer-gone"; taskId: string; agentId: string; owner?: string }
   | { type: "auto-verify"; taskId: string };
 
 /**
@@ -111,6 +118,22 @@ export function reconcileTodos(
       orphanedThisTick.add(t._id);
       continue;
     }
+    if (t.block?.type === "waiting-on-answer") {
+      const block = t.block; // bind: the closure below loses the narrowing on `t.block`
+      const agent = agents.find((a) => a.agent_id === block.agentId);
+      // Only a KNOWN-exited answerer is reported. An agent id absent from the
+      // registry is not evidence of death (it may predate this host's index),
+      // and reporting it would cry wolf on every tick — the same asymmetry
+      // `deadOwnerAgent` above relies on.
+      if (agent?.status === "exited") {
+        actions.push({
+          type: "answerer-gone",
+          taskId: t._id,
+          agentId: block.agentId,
+          ...(t.owner ? { owner: t.owner } : {}),
+        });
+      }
+    }
     if (t.block?.type === "waiting-on-agent") {
       const agentId = t.block.agentId;
       const agent = agents.find((a) => a.agent_id === agentId);
@@ -121,7 +144,7 @@ export function reconcileTodos(
         actions.push({ type: "clear-waiting-on-agent", taskId: t._id, expectedAgentId: agentId });
       }
     }
-    const hasEligibleGate = LIFECYCLES[t.kind].transitions.some(
+    const hasEligibleGate = transitionsOf(t.kind).some(
       (edge) => edge.from === t.state && edge.gate && registeredGates.has(edge.gate),
     );
     if (hasEligibleGate) {

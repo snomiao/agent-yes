@@ -44,6 +44,7 @@ import { JsonlStore, type JsonlDoc } from "./JsonlStore.ts";
 import {
   DONE_STATE,
   LIFECYCLES,
+  transitionsOf,
   ORPHANED_STATE,
   canTransition,
   initialState,
@@ -407,7 +408,7 @@ export class TodoStore {
       // per-task array fields instead of the id sequence).
       await this.jsonl.load();
       const rec = this.mustGet(id);
-      const onGraph = LIFECYCLES[rec.kind].transitions.some(
+      const onGraph = transitionsOf(rec.kind).some(
         (t) => t.from === rec.state && t.gate === gateName,
       );
       if (!onGraph) {
@@ -474,7 +475,7 @@ export class TodoStore {
    */
   async verify(id: string, gateName?: string): Promise<TodoRecord> {
     const rec = this.mustGet(id);
-    const edges = LIFECYCLES[rec.kind].transitions.filter((t) => t.from === rec.state && t.gate);
+    const edges = transitionsOf(rec.kind).filter((t) => t.from === rec.state && t.gate);
     if (edges.length === 0)
       throw new Error(`task ${id}: no gated transition from state "${rec.state}"`);
     const targetEdge = gateName

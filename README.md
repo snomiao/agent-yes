@@ -238,6 +238,45 @@ Tasks move through a lifecycle per `--kind`, and gated transitions require
 **independent verification**: whoever did the work cannot approve it. See
 `ts/todoStore.ts` for the gate model.
 
+### Ask another agent a question (`ay ask`)
+
+`ay send` delivers a question but leaves no trace of it: if the asker moves on
+and the other agent dies, wedges, or simply never replies, nothing records that
+an answer is owed. `ay ask` delivers the same way — returning immediately — and
+also writes a task carrying **both** parties, so an unanswered question is
+self-describing.
+
+```bash
+ay ask lane-b "does the cache need invalidating before deploy?"
+#   asked lane-b → T4
+#     monitor the answer:   ay todo get T4 --root "/path/to/repo"
+#     monitor the answerer: ay status lane-b
+
+ay answer T4 --root "/path/to/repo" "yes — bump CACHE_VERSION first"
+```
+
+The task stores the asker as its `owner` and the answering agent as a
+`waiting-on-answer` block, so `ay todo ls` shows both, each with that agent's
+live status:
+
+```
+ID  STATE     KIND      OWNER           WAITING-ON      SUMMARY
+T4  pending   question  lane-a(active)  lane-b(exited)  does the cache need inv…
+```
+
+That is the failure mode a bare send cannot report: **whoever died holding the
+question is visible in one command.** `ay todo reconcile` says the same thing in
+words (`T4: lane-b exited without answering`) and orphans the task if the
+*asker* is the one that died — without ever closing the question itself, since
+the answer is still owed.
+
+Answering is gated on independent verification, which the store enforces: the
+validator must differ from the task's owner, so an asker can never quietly mark
+its own question answered. Targets are agents on this machine (same registry
+`ay ls` reads). `ay ask` respects `ay send`'s recency guard — pass `--force` to
+skip it; `ay answer` replies without it, since its recipient comes off the task
+record rather than from a typed keyword.
+
 ### Docker Usage
 
 You can run `agent-yes` in a Docker container with all AI CLI tools pre-installed.

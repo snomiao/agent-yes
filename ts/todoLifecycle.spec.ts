@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   LIFECYCLES,
+  transitionsOf,
   canTransition,
   initialState,
   isKnownKind,
@@ -10,13 +11,14 @@ import {
 } from "./todoLifecycle";
 
 describe("todoLifecycle", () => {
-  it("defines all five kinds with the exact graphs the operator specified", () => {
+  it("defines every kind with the exact graphs the operator specified", () => {
     expect(Object.keys(LIFECYCLES).sort()).toEqual([
       "code",
       "decision",
       "doc",
       "human",
       "investigation",
+      "question",
     ]);
     expect(statesOf("code")).toEqual([
       "doing",
@@ -28,6 +30,16 @@ describe("todoLifecycle", () => {
       "orphaned",
     ]);
     expect(statesOf("human")).toEqual(["pending", "decided", "done"]);
+    expect(statesOf("question")).toEqual(["pending", "answered", "done"]);
+  });
+
+  // Every agent on a machine shares one store while routinely running
+  // DIFFERENT builds, so an older binary reads records whose kind it has never
+  // heard of. Indexing LIFECYCLES directly throws there, taking down ls and
+  // reconcile for every task instead of just the uninterpretable one.
+  it("transitionsOf degrades to [] for a kind this build does not know, instead of throwing", () => {
+    expect(transitionsOf("question").length).toBeGreaterThan(0);
+    expect(transitionsOf("a-kind-from-a-newer-build")).toEqual([]);
   });
 
   it("initialState is each graph's first listed state", () => {
