@@ -338,7 +338,12 @@ export default async function agentYes({
       const spawner = await resolveSpawner(inheritedParentPid);
       if (spawner) {
         const { buildInitMsg } = await import("./initMsg.ts");
-        prompt = buildInitMsg(prompt, spawner, randomBytes(4).toString("hex"));
+        const { formatIdentity } = await import("./identity.ts");
+        // The spawner runs on THIS host (we resolved it from a local wrapper
+        // pid), so the local user/host and its cwd's branch are the right
+        // defaults — the same call rs/src/main.rs makes.
+        const identity = formatIdentity({ cwd: spawner.cwd, pid: spawner.pid });
+        prompt = buildInitMsg(prompt, spawner, randomBytes(4).toString("hex"), identity);
       }
     } catch (error) {
       // Attribution is never worth failing a spawn over.

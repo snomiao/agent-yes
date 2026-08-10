@@ -26,8 +26,10 @@ import { homedir, hostname, userInfo } from "node:os";
 import path from "node:path";
 
 /** Replace anything outside a conservative charset so a token can never break
- * out of the envelope header line. Collapses runs to a single `-`. */
-function safeToken(raw: string, max: number): string {
+ * out of the envelope header line. Collapses runs to a single `-`.
+ * Exported only so the shared cross-runtime case table
+ * (tests/fixtures/identity-cases.json) can pin it against the Rust port. */
+export function safeToken(raw: string, max: number): string {
   const cleaned = raw.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
   return cleaned.slice(0, max);
 }
@@ -89,16 +91,19 @@ export function readGitBranch(cwd: string): string | null {
 
 /** Branch names never contain `:`/space/`~`/`^` (git forbids them), but they
  * DO allow `/` and `#` — keep `/` (readable, unambiguous: parsing anchors on
- * `#<pid>` at the end) and clamp everything else defensively. */
-function safeBranch(raw: string): string {
+ * `#<pid>` at the end) and clamp everything else defensively.
+ * Exported only for the shared cross-runtime case table — see `safeToken`. */
+export function safeBranch(raw: string): string {
   const cleaned = raw.replace(/[^A-Za-z0-9._/#-]+/g, "-").replace(/^-+|-+$/g, "");
   return cleaned.slice(0, 64);
 }
 
-/** Abbreviate the home directory to `~`, mirroring how `ay ls` prints cwds. */
-export function tildify(p: string): string {
-  const home = homedir();
-  return p.startsWith(home) ? "~" + p.slice(home.length) : p;
+/** Abbreviate the home directory to `~`, mirroring how `ay ls` prints cwds.
+ * `home` is a seam (mirrored by the Rust port's `tildify`) so the shared
+ * cross-runtime case table can pin a home that is not the running machine's;
+ * omit it in production. */
+export function tildify(p: string, home: string = homedir()): string {
+  return home !== "" && p.startsWith(home) ? "~" + p.slice(home.length) : p;
 }
 
 export interface IdentityParts {
@@ -108,6 +113,8 @@ export interface IdentityParts {
   /** Pass null to omit the branch segment; omit the key to auto-detect. */
   branch?: string | null;
   pid: number;
+  /** Seam for `tildify` — see there. Omit in production. */
+  home?: string;
 }
 
 /**
@@ -119,6 +126,6 @@ export function formatIdentity(parts: IdentityParts): string {
   const user = parts.user ?? localUser();
   const host = parts.host ?? localHost();
   const branch = parts.branch === undefined ? readGitBranch(parts.cwd) : parts.branch;
-  const where = tildify(parts.cwd);
+  const where = tildify(parts.cwd, parts.home);
   return `${user}@${host}:${where}${branch ? `:${branch}` : ""}#${parts.pid}`;
 }

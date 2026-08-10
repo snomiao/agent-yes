@@ -1,8 +1,17 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdir, mkdtemp, rm, writeFile } from "fs/promises";
+import { readFileSync } from "fs";
 import { homedir, tmpdir } from "os";
 import path from "path";
-import { formatIdentity, localHost, localUser, readGitBranch, tildify } from "./identity.ts";
+import {
+  formatIdentity,
+  localHost,
+  localUser,
+  readGitBranch,
+  safeBranch,
+  safeToken,
+  tildify,
+} from "./identity.ts";
 
 let root: string;
 
@@ -70,6 +79,15 @@ describe("readGitBranch", () => {
     const repo = await gitFixture("bad", "something else entirely\n");
     expect(readGitBranch(repo)).toBeNull();
   });
+
+  it("returns null when .git exists but HEAD cannot be read at all", async () => {
+    // A HEAD that is a DIRECTORY makes readFileSync throw rather than return
+    // junk — a different path from the garbled-content case above. Identity is
+    // never worth failing a spawn over, so this degrades to "no branch".
+    const repo = path.join(root, "headless");
+    await mkdir(path.join(repo, ".git", "HEAD"), { recursive: true });
+    expect(readGitBranch(repo)).toBeNull();
+  });
 });
 
 describe("formatIdentity", () => {
@@ -104,5 +122,66 @@ describe("formatIdentity", () => {
   it("tildifies the home directory like ay ls does", () => {
     expect(tildify(path.join(homedir(), "ws"))).toBe(`~${path.sep}ws`);
     expect(tildify("/opt/x")).toBe("/opt/x");
+  });
+});
+
+/**
+ * The SAME table rs/src/identity.rs asserts
+ * (`identity::tests::matches_the_shared_case_table`).
+ *
+ * rs/src/identity.rs is a hand port of this module, and both build the
+ * `<ay-init-msg>` header that tests/fixtures/ay-init-msg.golden.txt pins byte
+ * for byte. That fixture holds a LITERAL identity string, so it cannot catch
+ * the two implementations drifting apart — this table can.
+ */
+describe("identity — shared cross-runtime case table", () => {
+  const cases = JSON.parse(
+    readFileSync(path.resolve(import.meta.dirname, "../tests/fixtures/identity-cases.json"), "utf8"),
+  ) as {
+    identity: {
+      name: string;
+      user: string;
+      host: string;
+      cwd: string;
+      home: string | null;
+      branch: string | null;
+      pid: number;
+      want: string;
+    }[];
+    safeToken: { name: string; raw: string; max: number; want: string }[];
+    safeBranch: { name: string; raw: string; want: string }[];
+  };
+
+  it("renders every identity case exactly as the Rust port does", () => {
+    expect(cases.identity.length).toBeGreaterThan(0);
+    for (const c of cases.identity) {
+      expect(
+        formatIdentity({
+          user: c.user,
+          host: c.host,
+          cwd: c.cwd,
+          // JSON null means "omit the segment" — never "auto-detect", which
+          // would read the filesystem and stop being cross-runtime comparable.
+          branch: c.branch,
+          pid: c.pid,
+          home: c.home ?? undefined,
+        }),
+        `identity case: ${c.name}`,
+      ).toBe(c.want);
+    }
+  });
+
+  it("clamps every safeToken case exactly as the Rust port does", () => {
+    expect(cases.safeToken.length).toBeGreaterThan(0);
+    for (const c of cases.safeToken) {
+      expect(safeToken(c.raw, c.max), `safeToken case: ${c.name}`).toBe(c.want);
+    }
+  });
+
+  it("clamps every safeBranch case exactly as the Rust port does", () => {
+    expect(cases.safeBranch.length).toBeGreaterThan(0);
+    for (const c of cases.safeBranch) {
+      expect(safeBranch(c.raw), `safeBranch case: ${c.name}`).toBe(c.want);
+    }
   });
 });

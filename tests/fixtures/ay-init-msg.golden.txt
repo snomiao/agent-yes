@@ -1,4 +1,4 @@
-<ay-init-msg n0 from claude #4242 @ /repo — reply: ay send agt_p "...">
+<ay-init-msg n0 from claude sno@Mac:~/ws/repo:main#4242 — reply: ay send agt_p "...">
 <ay-task n0>
 TASK
 </ay-task n0>
