@@ -17,7 +17,9 @@ share no parent. Nothing sits above them.
 
 That means the web console, `ay serve`, is a **stateless observer**. It reads a file to discover
 agents, tails files to render them, and writes a pipe to talk to them. Restart it, upgrade it,
-crash it, kill it with `SIGKILL` — no agent is disturbed, because no agent was ever its child.
+crash it, kill it with `SIGKILL` — no agent is disturbed, because every agent runs in its own
+session. Even the ones the console itself spawns are detached at birth, so none of them is ever
+in `ay serve`'s session or process group.
 
 The comparison worth making is with the obvious design: a daemon that spawns and supervises
 everything. That design is easier to write and gives you an in-memory registry for free. It also
@@ -66,7 +68,8 @@ is. Everything below is live today, from any terminal, against agents started by
 | **Provision** | `ay ws` (clone or refresh `<owner>/<repo>/tree/<branch>` workspaces), `ay setup`, `ay reap` |
 
 The pattern repeats: each of those is a small program over the same three files, which is why they
-compose. `ay ls --json` piped into `ay tail` is a fleet dashboard. `ay ls --watch` is a single
+compose. Looping the pids from `ay ls --json` into a per-pid `ay tail` is a fleet dashboard.
+`ay ls --watch` is a single
 NDJSON stream of state changes across every matched agent — one watcher for an entire fan-out,
 rather than N pollers.
 
@@ -94,13 +97,15 @@ Above the fabric there is exactly one handler:
 apiFetch(req: Request) → Response
 ```
 
-`ay serve`'s HTTP listener calls it. The WebRTC bridge calls it in-process. The port-exposure
-tunnel calls it. None of them is a control plane; they are pipes into the same function. Adding a
+`ay serve`'s HTTP listener calls it. The WebRTC bridge calls it in-process. Neither is a control
+plane; they are pipes into the same function. (The port-exposure tunnel sits on the other side of
+that line — it is *started* through the handler, by `POST /api/expose`, and then proxies raw bytes
+to a local port. A consumer, not a caller.) Adding a
 transport — a relay, a peer mesh, something not invented yet — means writing a caller, not a second
 system with its own notion of what an agent is.
 
 This is why a share link and a LAN URL and a localhost port all produce an identical console: they
-are the same handler reached three ways.
+are the same handler reached two ways.
 
 ## Where files are hard
 

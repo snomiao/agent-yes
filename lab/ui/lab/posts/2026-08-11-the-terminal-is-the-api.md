@@ -53,6 +53,9 @@ clis:
   someagent:
     promptArg: last-arg
     yesArgs: [--dangerously-skip-permissions]
+    enter:            # a prompt to answer — press Enter on it
+      - "Do you want to proceed\\?"
+      - "Yes, and don't ask again"
     ready:            # parked at a prompt, safe to type
       - '\? for shortcuts'
       - "^>[  ]"
@@ -65,8 +68,8 @@ clis:
     wedgeTimeoutSecs: 1800
 ```
 
-From those four states — `ready`, `working`, `needsInput`, `fatal` — you get auto-answering, but
-you also get something more valuable: **a machine-readable liveness signal for a program that was
+The `enter:` list is what actually presses the key. The four *screen states* — `ready`, `working`,
+`needsInput`, `fatal` — buy something less obvious and more valuable: **a machine-readable liveness signal for a program that was
 never designed to emit one.** `ay ls` can tell you an agent is `needs_input` rather than `active`
 because the pattern set says so. That single classification is what later makes notifications,
 watchdogs, task automation and the web console possible.

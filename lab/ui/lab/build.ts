@@ -162,6 +162,12 @@ function markdown(src: string): string {
       while (i < lines.length && lines[i]!.trim()) {
         const cur = lines[i]!;
         if (bullet.test(cur)) items.push(cur.replace(bullet, ""));
+        // A non-bullet line is a lazy continuation of the previous item — UNLESS
+        // it opens another block. Without this stop-set a fenced code block or
+        // heading written straight after a list (no blank line) is swallowed into
+        // the last <li> and then mangled by the inline pass. Same set as the
+        // paragraph loop below.
+        else if (/^(```|#{1,4}\s|\||>\s|<[a-zA-Z/!])/.test(cur)) break;
         else if (items.length) items[items.length - 1] += ` ${cur.trim()}`;
         else break;
         i++;
@@ -241,6 +247,12 @@ padding:16px 18px;margin:12px 0;color:inherit}
 footer{color:var(--muted);font-size:.9em;margin-top:52px;border-top:1px solid var(--border);
 padding-top:20px}
 .up{display:inline-block;margin:36px 0 0}
+.note{border-left:3px solid var(--accent);background:var(--card);padding:10px 16px;
+border-radius:0 8px 8px 0;margin:18px 0}
+.ok{color:var(--green)}
+.no{color:var(--red)}
+h2 a.anchor{color:var(--muted);text-decoration:none;margin-left:6px;opacity:0}
+h2:hover a.anchor{opacity:1}
 `.trim();
 
 const NAV = `

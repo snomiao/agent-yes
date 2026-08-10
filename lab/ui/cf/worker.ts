@@ -108,11 +108,26 @@ function withDocHeaders(res: Response): Response {
 // relying on the asset server's path normalization, which would answer with a
 // redirect whose Location still carried the internal /lab prefix.
 async function labFetch(url: URL, req: Request, env: Env): Promise<Response> {
-  // Normalize away a trailing slash first: relative links inside a page (./slug,
-  // and the shared nav's ./) resolve against a different base with one.
-  if (url.pathname.length > 1 && url.pathname.endsWith("/")) {
-    const to = new URL(url.pathname.replace(/\/+$/, ""), url);
-    to.search = url.search;
+  // Normalize the path before anything else looks at it. Two things matter here:
+  //
+  //   1. DUPLICATE SLASHES. Cloudflare does NOT collapse them, so `//evil.com/`
+  //      arrives intact. A path in that shape is a PROTOCOL-RELATIVE URL
+  //      reference, so resolving it against the request URL — `new URL(path, url)`
+  //      — reuses the scheme but takes the AUTHORITY from the path, yielding
+  //      https://evil.com/. That is an open redirect, cached by the browser
+  //      because it is a 301, on a link that previews as agent-yes.com. Collapse
+  //      first, and build the target by mutating a copy of the request URL
+  //      (assigning .pathname never re-parses an authority) so the origin is
+  //      structurally pinned rather than merely expected.
+  //   2. A TRAILING SLASH, which would make a page's relative links (./slug, and
+  //      the shared nav's ./) resolve against the wrong base.
+  //
+  // "/" is already canonical and never enters here (length > 1 guard); "//" and
+  // friends collapse to "/", so the `|| "/"` keeps that from redirecting to "".
+  const clean = url.pathname.replace(/\/{2,}/g, "/");
+  if (clean !== url.pathname || (clean.length > 1 && clean.endsWith("/"))) {
+    const to = new URL(url); // same origin by construction
+    to.pathname = clean.replace(/\/+$/, "") || "/";
     return Response.redirect(to.toString(), 301);
   }
   // Ask the asset server for the path SHAPE the lab publishes — extensionless,
@@ -182,10 +197,16 @@ export default {
     // Both 301 so the lab subdomain is the single canonical origin.
     if (url.pathname === "/blog" || url.pathname.startsWith("/blog/")) {
       const slug = url.pathname.replace(/^\/blog\/?/, "").split("/")[0] ?? "";
-      return Response.redirect(`${LAB_ORIGIN}/${BLOG_MOVED[slug] ?? ""}`, 301);
+      // hasOwn, not `?? ""`: a bare object literal inherits Object.prototype, so
+      // /blog/constructor would otherwise redirect to a stringified builtin.
+      const to = Object.hasOwn(BLOG_MOVED, slug) ? BLOG_MOVED[slug] : "";
+      return Response.redirect(`${LAB_ORIGIN}/${to}${url.search}`, 301);
     }
     if (url.pathname === "/lab" || url.pathname.startsWith("/lab/")) {
-      return Response.redirect(`${LAB_ORIGIN}${url.pathname.replace(/^\/lab\/?/, "/")}`, 301);
+      // Collapse duplicate slashes here too: /lab//evil.com/ would otherwise hand
+      // the lab host a protocol-relative path (see labFetch for why that matters).
+      const rest = url.pathname.replace(/^\/lab\/?/, "/").replace(/\/{2,}/g, "/");
+      return Response.redirect(`${LAB_ORIGIN}${rest}${url.search}`, 301);
     }
 
     // WebSocket to /<room> → signaling DO (this is the s.agent-yes.com path).

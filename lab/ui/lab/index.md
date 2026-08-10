@@ -52,7 +52,7 @@ The system reads cleanly top-down, and the
 | --- | --- |
 | **① Agent core** | The PTY wrapper. Spawns any agent CLI, matches ready / enter / fatal patterns, restarts on crash, resumes sessions, propagates terminal size. Rust is the primary binary; TypeScript is the reference implementation. |
 | **② Local fabric** | `pids.jsonl` (every agent, both runtimes), a FIFO per pid for stdin, a raw PTY log per agent for stdout. Files, not a daemon. |
-| **③ Exposure** | One transport-agnostic handler, `apiFetch(req) → Response`. HTTP, WebRTC and port tunnels are all just callers. |
+| **③ Exposure** | One transport-agnostic handler, `apiFetch(req) → Response`. HTTP and the WebRTC bridge are both just callers; port tunnels and libp2p peers fold in next. |
 | **④ Trust & discovery** | Signaling that is a rendezvous only, an HKDF key split so the relay never holds a key, and signed capability tokens that carry their own scope. |
 | **⑤ Reach surfaces** | The browser console, the CLI on another box, embeddable widgets, a system tray, peers. |
 

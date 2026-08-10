@@ -109,10 +109,11 @@ Not a bigger console. The measure is whether these become boring:
 - Ask a fleet a question and get an answer that survives every process that participated in it.
 - Have an agent publish something a person can reply to, in the place they read it.
 - Reconstruct, a week later, who asked for a change and who checked it.
-- Lose any single machine, daemon, or console and lose no work.
+- Lose any daemon or console and lose no work.
 
 The last one already holds — it is what the [local fabric](./2026-08-11-no-daemon-owns-your-agents)
-buys. The other four are the project.
+buys. The other four are the project, and so is the one not on the list: the fabric is per-machine
+files, so losing a *machine* still loses its agents, its logs and its task store.
 
 <p class="note">Start at the beginning: <a href="./2026-08-11-the-terminal-is-the-api">the terminal
 is the API</a> — why one small edit forced all of this.</p>
