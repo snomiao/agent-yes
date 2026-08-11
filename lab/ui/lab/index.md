@@ -79,6 +79,22 @@ machine, and any one person's attention.** The long version is a post below — 
 address space, a bus that humans are also on, and delegation with accountability, and it is honest
 about the four places the current system is still cluttered.
 
+## The ecosystem
+
+agent-yes is the fleet. Around it sit tools that give the fleet somewhere to *reach* — each a
+standalone CLI in its own right, each usable without the others:
+
+| | |
+| --- | --- |
+| **[agent-yes](https://github.com/snomiao/agent-yes)** | run, watch, message and delegate to a fleet of AI coding agents |
+| **[slack-term](https://github.com/snomiao/slack-term)** | the human-comms surface — read and write Slack from a terminal, with a confirm gate built for operators who are sometimes machines |
+
+The connective tissue is a shared stance rather than a shared library: file-based state over
+daemons, one command surface across two runtimes, gates on the irreversible and warnings on the
+merely unwise, and a hard rule that no real operational data lands in a public repo. Both projects
+arrived at the same interrupt-safety reasoning against completely different substrates — one over
+`pids.jsonl` and a FIFO, the other over Slack reactions.
+
 ---
 
 ## Notes
