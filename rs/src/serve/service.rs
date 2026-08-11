@@ -133,7 +133,9 @@ fn unit_path() -> Result<PathBuf> {
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn unit_path() -> Result<PathBuf> {
-    bail!("`ayrs serve install` is only supported on macOS (launchd) and Linux (systemd --user)")
+    bail!(
+        "`ayrs serve` service management is only supported on macOS (launchd) and Linux (systemd --user)"
+    )
 }
 
 fn xml_escape(s: &str) -> String {
@@ -425,6 +427,111 @@ pub fn uninstall() -> Result<()> {
     Ok(())
 }
 
+// --- restart ---------------------------------------------------------------
+
+/// The supervisor invocation `restart` issues, as (program, args). Split out so
+/// a test pins the exact command — on macOS the `-k` is the whole feature: plain
+/// `launchctl kickstart` starts the service only if it is NOT already running,
+/// so dropping the flag turns a restart into a silent no-op against a live
+/// daemon (and the stale binary keeps serving).
+#[cfg(target_os = "macos")]
+fn restart_argv(uid: u32) -> (String, Vec<String>) {
+    (
+        "launchctl".to_string(),
+        vec![
+            "kickstart".to_string(),
+            "-k".to_string(),
+            format!("gui/{uid}/{LABEL}"),
+        ],
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn restart_argv() -> (String, Vec<String>) {
+    (
+        "systemctl".to_string(),
+        vec![
+            "--user".to_string(),
+            "restart".to_string(),
+            LABEL.to_string(),
+        ],
+    )
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn exec_restart(prog: &str, args: &[String]) -> Result<String> {
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run(prog, &refs)
+}
+
+/// A restart only manages an EXISTING registration — it never writes a unit —
+/// so a missing one is a user error, not something to paper over by installing.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn ensure_installed(path: &std::path::Path) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    bail!(
+        "{LABEL} is not installed ({} missing) — run `ayrs serve install` first",
+        path.display()
+    )
+}
+
+/// Bounce the installed daemon in place, keeping the unit exactly as it is.
+///
+/// This is the command to run after `bun run build:rs` replaces the binary at
+/// the path the unit already names: the supervisor re-execs that path, so the
+/// new build takes over without rewriting (or re-deciding) any config. Unlike
+/// `install`, it never recomputes the service args, so it can't silently rotate
+/// the room or change the sighost — and unlike `uninstall`+`install`, it leaves
+/// boot-autostart untouched.
+///
+/// Safe for the local fleet: agents are spawned into their own session by
+/// `spawn_detached` (see `serve/control.rs`, asserted by
+/// `a_spawned_child_gets_its_own_session`), so bouncing the daemon does not take
+/// the agents it spawned down with it.
+pub fn restart() -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let path = unit_path()?;
+        ensure_installed(&path)?;
+        let uid = unsafe { libc::getuid() };
+        let (prog, args) = restart_argv(uid);
+        // A plist can exist without ever having been bootstrapped (hand-copied,
+        // or a `bootout` that left the file); kickstart then fails with "Could
+        // not find service". `install` is what loads it, so point there.
+        exec_restart(&prog, &args)
+            .with_context(|| format!("{LABEL} is not loaded — run `ayrs serve install`"))?;
+        println!("restarted {LABEL}");
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if systemd_user_available() {
+            let path = unit_path()?;
+            ensure_installed(&path)?;
+            let (prog, args) = restart_argv();
+            exec_restart(&prog, &args)?;
+            println!("restarted {LABEL}");
+        } else if let Some(oxmgr) = which("oxmgr") {
+            // Same fallback `install` uses on a host with no systemd --user bus
+            // (typically a container). oxmgr's `restart` takes an already
+            // registered name, so a failure here means it never was registered.
+            run(&oxmgr, &["restart", OXMGR_NAME])
+                .with_context(|| format!("'{OXMGR_NAME}' is not registered with oxmgr"))?;
+            println!("restarted {OXMGR_NAME} (via oxmgr)");
+        } else {
+            bail!("no systemd --user bus and no oxmgr on PATH — nothing to restart");
+        }
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        // Bails with the "only supported on macOS/Linux" message.
+        unit_path()?;
+    }
+
+    Ok(())
+}
+
 pub fn status() -> Result<()> {
     let path = unit_path()?;
     println!(
@@ -587,6 +694,27 @@ mod tests {
             super::super::share::resolve_share_urls(Some(&room_url), "ignored.example").unwrap();
         assert_eq!(webrtc, room_url);
         assert_eq!(console, format!("https://agent-yes.com/w/#r1:e1.{secret}"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn restart_kickstarts_the_loaded_unit_with_k() {
+        let (prog, args) = restart_argv(501);
+        assert_eq!(prog, "launchctl");
+        // `-k` is load-bearing: without it kickstart only starts a service that
+        // is NOT already running, so restarting a live daemon silently no-ops
+        // and the old binary keeps serving.
+        assert_eq!(args, vec!["kickstart", "-k", &format!("gui/501/{LABEL}")]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn restart_targets_the_user_unit() {
+        let (prog, args) = restart_argv();
+        assert_eq!(prog, "systemctl");
+        // `--user`: the unit is installed into the per-user manager, so a
+        // system-scope restart would look for a unit that does not exist there.
+        assert_eq!(args, vec!["--user", "restart", LABEL]);
     }
 
     #[cfg(target_os = "macos")]

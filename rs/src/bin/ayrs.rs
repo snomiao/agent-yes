@@ -66,6 +66,9 @@ enum ServeAction {
     Install,
     /// Stop and deregister the service
     Uninstall,
+    /// Bounce the installed service (picks up a rebuilt binary; keeps the unit,
+    /// the room and boot-autostart exactly as they are)
+    Restart,
     /// Show whether the service is installed and running
     Status,
 }
@@ -85,6 +88,7 @@ async fn main() -> anyhow::Result<()> {
                 // re-runs `ayrs serve --webrtc` which loads/mints as usual.
                 Some(ServeAction::Install) => return serve::service::install(&webrtc, &sighost),
                 Some(ServeAction::Uninstall) => return serve::service::uninstall(),
+                Some(ServeAction::Restart) => return serve::service::restart(),
                 Some(ServeAction::Status) => return serve::service::status(),
                 None => {}
             }
