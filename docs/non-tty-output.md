@@ -350,7 +350,6 @@ related private mode toggles `?47` / `?1047` / `?1048`.
 | -------------------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------- |
 | claude                                             | **Yes**     | DECSET 1049 fires immediately at startup; entire conversation runs on alt screen.                                 |
 | codex                                              | **No**      | No `?1049` / `?47` / `?1047` / `?1048` in captured output. Uses cursor positioning + colors on the normal screen. |
-| gemini                                             | unknown     | Not installed on test host; survey before v1 ship.                                                                |
 | amp, auggie, qwen, grok, copilot, cursor, opencode | unknown     | Survey before v1 ship.                                                                                            |
 
 **Implication**: the renderer must support **both** modes. Codex sessions

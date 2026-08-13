@@ -121,8 +121,6 @@ describe("subcommands.isSubcommand", () => {
     expect(isSubcommand("stop")).toBe(true);
     expect(isSubcommand("tail")).toBe(true);
     expect(isSubcommand("send")).toBe(true);
-    expect(isSubcommand("deepseek")).toBe(true);
-    expect(isSubcommand("ds")).toBe(true);
     expect(isSubcommand("not-a-command")).toBe(false);
     expect(isSubcommand(undefined)).toBe(false);
   });
@@ -145,9 +143,9 @@ describe("subcommands ↔ rs/src/cli.rs subcommand mirror", () => {
   // The Rust runner keeps its OWN hardcoded copy of both lists (it must decide
   // whether to re-exec the JS launcher before clap swallows the word as prompt
   // text). Nothing enforced that copy, so it silently drifted: `key`, `select`,
-  // `todo`, `tray`, `deepseek` and `ds` existed only on the TS side, and running
-  // them on the Rust binary directly launched an agent with the subcommand as
-  // its prompt. Parse both sources and require them to stay identical.
+  // `todo`, `tray` existed only on the TS side, and running them on the Rust
+  // binary directly launched an agent with the subcommand as its prompt. Parse
+  // both sources and require them to stay identical.
   const names = (src: string, re: RegExp): string[] =>
     [...(src.match(re)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
 
@@ -171,7 +169,7 @@ describe("subcommands ↔ rs/src/cli.rs subcommand mirror", () => {
 });
 
 describe("subcommands.isUnknownManagerToken (footgun guard)", () => {
-  const CLIS = ["claude", "codex", "gemini"];
+  const CLIS = ["claude", "codex"];
   it("flags a bare non-cli non-subcommand word on the manager entry", async () => {
     const { isUnknownManagerToken } = await loadModule();
     // `ay frobnicate` / a newer subcommand on an older build — neither a
@@ -351,7 +349,6 @@ describe("subcommands.stopTipForCli", () => {
     expect(stopTipForCli("claude", 1234)).toMatch(/ay stop 1234/);
     expect(stopTipForCli("claude", 1234)).toMatch(/\/exit/);
     expect(stopTipForCli("codex", 99)).toMatch(/ay stop 99/);
-    expect(stopTipForCli("gemini", 7)).toMatch(/\/quit/);
   });
 
   it("returns null for CLIs without a known graceful command", async () => {
@@ -362,11 +359,10 @@ describe("subcommands.stopTipForCli", () => {
 });
 
 describe("subcommands.GRACEFUL_EXIT_COMMANDS", () => {
-  it("maps the three known CLIs to their /exit-style commands", async () => {
+  it("maps the known CLIs to their /exit-style commands", async () => {
     const { GRACEFUL_EXIT_COMMANDS } = await loadModule();
     expect(GRACEFUL_EXIT_COMMANDS["claude"]).toBe("/exit");
     expect(GRACEFUL_EXIT_COMMANDS["codex"]).toBe("/exit");
-    expect(GRACEFUL_EXIT_COMMANDS["gemini"]).toBe("/quit");
   });
 });
 

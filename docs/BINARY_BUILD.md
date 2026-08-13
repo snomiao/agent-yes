@@ -19,7 +19,6 @@ This will create binaries in `dist/bin/`:
 - `codex-yes` (symlink/copy)
 - `copilot-yes` (symlink/copy)
 - `cursor-yes` (symlink/copy)
-- `gemini-yes` (symlink/copy)
 - `grok-yes` (symlink/copy)
 - `qwen-yes` (symlink/copy)
 

@@ -28,7 +28,6 @@ npm i -g \
     @anthropic-ai/claude-code \
     @qwen-code/qwen-code \
     @vibe-kit/grok-cli \
-    @google/gemini-cli \
     @openai/codex \
     @github/copilot \
     @augmentcode/auggie \
@@ -101,13 +100,6 @@ npm i -g @vibe-kit/grok-cli
 # Requires: GROQ_API_KEY
 ```
 
-#### Gemini CLI (Google)
-
-```bash
-npm i -g @google/gemini-cli
-# Requires: GEMINI_API_KEY
-```
-
 #### Codex (OpenAI)
 
 ```bash
@@ -143,7 +135,6 @@ npm i -g \
     @anthropic-ai/claude-code \
     @qwen-code/qwen-code \
     @vibe-kit/grok-cli \
-    @google/gemini-cli \
     @openai/codex \
     @github/copilot \
     @augmentcode/auggie \
@@ -194,9 +185,6 @@ export QWEN_API_KEY="your-qwen-key-here"
 # Grok CLI
 export GROQ_API_KEY="your-groq-key-here"
 
-# Gemini
-export GEMINI_API_KEY="your-gemini-key-here"
-
 # OpenAI (for Codex and OpenCode AI)
 export OPENAI_API_KEY="your-openai-key-here"
 
@@ -222,7 +210,6 @@ rustc --version
 claude-code --version
 qwen-code --version
 grok --version
-gemini --version
 codex --version
 copilot --version
 auggie --version

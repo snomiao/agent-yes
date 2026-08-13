@@ -131,7 +131,7 @@ describe("CLI argument parsing", () => {
       "/usr/local/bin/claude-yes",
       "--prompt",
       "test",
-      "gemini",
+      "codex",
     ]);
 
     // cliName (from script) takes precedence over positional arg

@@ -4104,13 +4104,13 @@
 
       // Wire the ⋯ overflow menu and restore the saved HUD preference.
       // Recovery actions for the SELECTED agent, both confirmed first (destructive):
-      //   Stop  — graceful: send the CLI's exit command (claude/codex /exit, gemini
-      //           /quit) + Enter over the existing /api/send stdin wire. (Ctrl+C / Ctrl+C×2
+      //   Stop  — graceful: send the CLI's exit command (claude/codex /exit) + Enter
+      //           over the existing /api/send stdin wire. (Ctrl+C / Ctrl+C×2
       //           you can already just type — and some agents rely on that pattern — so
       //           we don't reinvent it here.)
       //   Force — escalation a stuck agent can't ignore: a real SIGKILL of its process
       //           GROUP, server-side via POST /api/kill. Use when /exit does nothing.
-      const GRACEFUL_EXIT = { claude: "/exit", codex: "/exit", gemini: "/quit" };
+      const GRACEFUL_EXIT = { claude: "/exit", codex: "/exit" };
       // `ent` targets a specific agent (the Cmd+K /kill · /restart commands pass the
       // omnibox anchor); the ⋯-menu buttons omit it and act on the selected agent.
       async function stopAgent(force, ent) {
@@ -8050,15 +8050,7 @@ my.translate = async (text, lang) => {
       // picker (options from /api/spawn-config `clis`), preselected from the
       // chain: selected agent's cli → last used cli → explicit user pick.
       const LAST_CLI_KEY = "ay.lastSpawnCli";
-      const CLI_FALLBACK = [
-        "claude",
-        "codex",
-        "gemini",
-        "copilot",
-        "cursor-agent",
-        "goose",
-        "aider",
-      ];
+      const CLI_FALLBACK = ["claude", "codex", "copilot", "cursor-agent", "goose", "aider"];
       function cliOptions(clis, preferred) {
         const list = clis && clis.length ? clis : CLI_FALLBACK;
         const has = preferred && list.includes(preferred);
@@ -8208,7 +8200,11 @@ my.translate = async (text, lang) => {
         if (!cwdEl.disabled) cwdEl.dataset.userCwd = cwdEl.value;
         let br = ($("nf-branch")?.value || "").trim() || parsed.branch || "";
         if (!br && nfRemoteBranches) {
-          br = nfRemoteBranches.has("main") ? "main" : nfRemoteBranches.has("master") ? "master" : "";
+          br = nfRemoteBranches.has("main")
+            ? "main"
+            : nfRemoteBranches.has("master")
+              ? "master"
+              : "";
         }
         cwdEl.disabled = true;
         cwdEl.value = `${nfWsRoot || "~/ws"}/${parsed.owner}/${parsed.repo}/tree/${br || "…"}`;

@@ -198,7 +198,6 @@ multi-reader、FIFO も multi-writer。ただし複数の人間が同時にタ�
 | -------- | ------------------------ | ------------- |
 | `claude` | `/exit` + Enter          | double Ctrl+C |
 | `codex`  | `/exit` + Enter          | double Ctrl+C |
-| `gemini` | `/quit` + Enter          | double Ctrl+C |
 | その他   | （既知の graceful 無し） | double Ctrl+C |
 
 `cy stop <keyword>` はこれを 1 コマンドにまとめる。既定の `--method=auto`
@@ -209,7 +208,7 @@ double Ctrl+C にフォールバックする。明示したい場合:
 - `--method=double-ctrl-c` — 強制 Ctrl+C を 2 回（200ms 間隔）
 
 `cy send <kw> "" --code=ctrl-c` を打った時にも、対象が `claude` /
-`codex` / `gemini` ならヒント行が表示されて `ay stop` に誘導される。
+`codex` ならヒント行が表示されて `ay stop` に誘導される。
 
 ## 実装ファイル
 

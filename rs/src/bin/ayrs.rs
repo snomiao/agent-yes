@@ -17,6 +17,8 @@ mod config_loader;
 mod fifo;
 #[path = "../log_files.rs"]
 mod log_files;
+#[path = "../reaper.rs"]
+mod reaper;
 #[path = "../serve/mod.rs"]
 mod serve;
 #[path = "../vterm.rs"]
@@ -96,6 +98,12 @@ async fn main() -> anyhow::Result<()> {
             // /api/spawn doesn't pay the shell's rc-file startup cost (see
             // serve/shell_env.rs — launchd hands us a bare PATH).
             serve::shell_env::warm();
+
+            // Sweep the orphan-reaper registry on startup: kill the recorded
+            // process group of any PRIOR agent whose wrapper died without its
+            // own cleanup. Mirrors rs/src/main.rs. Also the defense layer that
+            // eventually clears any zombie an old (pre-fix) daemon left behind.
+            reaper::sweep();
 
             // --port and --webrtc are independent transports over the SAME API
             // surface; running both is the normal local+remote setup.

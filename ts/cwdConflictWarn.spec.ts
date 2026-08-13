@@ -31,7 +31,7 @@ describe("cwdConflictWarn.formatCwdConflictWarning", () => {
   });
 
   it("falls back to a placeholder when cwd has no basename or command is empty", () => {
-    const msg = formatCwdConflictWarning([{ pid: 9, cli: "gemini" }], "/", "   ")!;
+    const msg = formatCwdConflictWarning([{ pid: 9, cli: "codex" }], "/", "   ")!;
     expect(msg).toContain("../agent-work"); // basename('/') is empty → 'agent'
     expect(msg).toContain("&& ay <cli> …"); // empty origCmd → placeholder
   });

@@ -12,9 +12,7 @@
  */
 
 import { randomBytes } from "crypto";
-import { spawn } from "child_process";
 import { appendFile, mkdir, open, readFile, stat, writeFile } from "fs/promises";
-import { fileURLToPath } from "node:url";
 import ms from "ms";
 import { homedir } from "os";
 import path from "path";
@@ -445,8 +443,7 @@ const SUBCOMMANDS = new Set([
   "expose",
   "callback",
   "reap",
-  "deepseek",
-  "ds",
+  "gc",
   "help",
 ]);
 
@@ -715,9 +712,20 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         await reaper.sweep();
         return 0;
       }
-      case "deepseek":
-      case "ds":
-        return cmdDeepseek(rest);
+      case "gc": {
+        const { gcOldBinaryDirs } = await import("./rustBinary.ts");
+        const res = gcOldBinaryDirs();
+        if (res.removed.length === 0) {
+          process.stdout.write("no old agent-yes binary cache dirs to remove\n");
+        } else {
+          for (const v of res.removed) process.stdout.write(`removed ${v}\n`);
+          const mib = (res.freedBytes / 1024 / 1024).toFixed(1);
+          process.stdout.write(
+            `freed ${mib} MiB (${res.freedBytes} bytes) across ${res.removed.length} version dir(s)\n`,
+          );
+        }
+        return 0;
+      }
       case "help":
         return cmdHelp(managerCommands);
       default:
@@ -728,47 +736,6 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
     process.stderr.write(`ay ${sub}: ${msg}\n`);
     return 1;
   }
-}
-
-// ---------------------------------------------------------------------------
-// ay deepseek / ay ds
-// ---------------------------------------------------------------------------
-
-/**
- * `ay deepseek [-- <args>…]` / `ay ds …`: run the local DeepSeek adapter that
- * bridges Codex's Responses API to DeepSeek's chat completions, then spawn
- * `codex` pointed at it. The adapter script lives in this package's
- * `scripts/deepseek-codex.ts` and is Bun-only (Bun.serve / Bun.spawn), so it is
- * re-exec'd via the same bun runtime that's running us — never imported into
- * this process. Extra args are forwarded verbatim to `codex`.
- */
-export function cmdDeepseek(rest: string[]): Promise<number> {
-  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const script = path.join(root, "scripts", "deepseek-codex.ts");
-  const bunBin = process.execPath.split(/[/\\]/).at(-1)?.startsWith("bun")
-    ? process.execPath
-    : "bun";
-  const child = spawn(bunBin, [script, ...rest], {
-    cwd: process.cwd(),
-    env: { ...process.env, AGENT_YES_BIN: process.argv[1] },
-    stdio: "inherit",
-  });
-  return new Promise((resolve) => {
-    child.on("error", (err) => {
-      process.stderr.write(`ay deepseek: failed to start: ${err.message}\n`);
-      resolve(1);
-    });
-    child.on("exit", (code, signal) => {
-      if (signal) {
-        resolve(128 + (signal === "SIGINT" ? 2 : signal === "SIGTERM" ? 15 : 1));
-      } else {
-        resolve(code ?? 1);
-      }
-    });
-    for (const signal of ["SIGINT", "SIGTERM"] as const) {
-      process.on(signal, () => child.kill(signal));
-    }
-  });
 }
 
 // ---------------------------------------------------------------------------
@@ -896,7 +863,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay result <keyword> [--wait]        pull an agent's structured result envelope\n` +
       `  ay result set '<json>'              (inside an agent) deposit your result envelope\n` +
       `  ay reap                             kill process groups leaked by dead agents\n` +
-      `  ay deepseek|ds [-- <codex args>]    run codex via the local DeepSeek adapter (DEEPSEEK_API_KEY)\n` +
+      `  ay gc                               remove old-version binary cache dirs and report freed space\n` +
       wsLines +
       `\n` +
       `Remote:\n` +
@@ -912,7 +879,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay send <token>@<host>:<port>:<kw> <msg>\n` +
       `\n` +
       `Run an agent (naming a CLI is what launches one — bare 'ay' shows this help):\n` +
-      `  ay <claude|codex|gemini|...> [options] -- [prompt]\n` +
+      `  ay <claude|codex|...> [options] -- [prompt]\n` +
       `  ay claude -- "fix the bug in auth.ts"\n` +
       `  cy [options] -- [prompt]            shortcut for 'ay claude' (bare 'cy' starts claude)\n` +
       `  ay claude --help                    full agent-runner options\n` +
@@ -3085,7 +3052,7 @@ async function cmdSpawn(rest: string[]): Promise<number> {
     .option("cli", {
       type: "string",
       default: "claude",
-      description: "CLI to wrap (claude|codex|gemini|…)",
+      description: "CLI to wrap (claude|codex|…)",
     })
     .option("cwd", {
       type: "string",
@@ -3993,7 +3960,6 @@ export function stopTipForCli(cli: string, pid: number): string | null {
 /// Verified against current upstream CLIs:
 ///   claude   — `/exit`
 ///   codex    — `/exit`
-///   gemini   — `/quit`
 ///   bash/cmd/powershell — `exit` (the shell builtin; closes the session at a
 ///     bare prompt, far cleaner than Ctrl+C which would instead hit whatever
 ///     app is running in the foreground).
@@ -4002,7 +3968,6 @@ export function stopTipForCli(cli: string, pid: number): string | null {
 export const GRACEFUL_EXIT_COMMANDS: Record<string, string> = {
   claude: "/exit",
   codex: "/exit",
-  gemini: "/quit",
   bash: "exit",
   cmd: "exit",
   powershell: "exit",

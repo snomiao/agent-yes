@@ -24,7 +24,6 @@ install: release symlinks
 symlinks: release
 	cd target/release && \
 	ln -sf agent-yes claude-yes && \
-	ln -sf agent-yes gemini-yes && \
 	ln -sf agent-yes codex-yes && \
 	ln -sf agent-yes copilot-yes && \
 	ln -sf agent-yes cursor-yes && \

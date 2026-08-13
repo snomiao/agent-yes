@@ -57,7 +57,7 @@ describe("cliLabel", () => {
   });
   it("shows non-default CLIs", () => {
     expect(cliLabel(agent({ cli: "codex" }))).toBe("codex");
-    expect(cliLabel(agent({ cli: "gemini" }))).toBe("gemini");
+    expect(cliLabel(agent({ cli: "grok" }))).toBe("grok");
   });
   it("treats a missing cli as empty", () => {
     expect(cliLabel(agent({ cli: undefined }))).toBe("");
