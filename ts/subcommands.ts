@@ -1181,12 +1181,12 @@ async function runRemoteLs(
   if (records.length === 0) {
     process.stderr.write(
       remote.keyword
-        ? `no agents matched "${remote.keyword}" on ${remote.url}\n`
-        : `no running agents on ${remote.url}\n`,
+        ? `no agents matched "${remote.keyword}" on ${remote.label}\n`
+        : `no running agents on ${remote.label}\n`,
     );
     return 0;
   }
-  process.stderr.write(`[remote ${remote.url}]\n`);
+  process.stderr.write(`[remote ${remote.label}]\n`);
   const termWidth = (process.stdout as any).columns ?? 120;
   const widths = {
     pid: Math.max(3, ...records.map((r: any) => String(r.pid).length)),
@@ -1249,7 +1249,7 @@ async function runRemoteRead(
     let attempt = 0;
 
     process.stderr.write(
-      `[remote ${remote.url}  ${keyword}]\nfollowing... (Ctrl-C to stop, timeout: ${Math.round(reconnectTimeoutMs / 1000)}s)\n`,
+      `[remote ${remote.label}  ${keyword}]\nfollowing... (Ctrl-C to stop, timeout: ${Math.round(reconnectTimeoutMs / 1000)}s)\n`,
     );
 
     while (!ac.signal.aborted) {
@@ -1325,7 +1325,7 @@ async function runRemoteRead(
     return 1;
   }
   const text = await res.text();
-  process.stderr.write(`[remote ${remote.url}  ${keyword}]\n`);
+  process.stderr.write(`[remote ${remote.label}  ${keyword}]\n`);
   process.stdout.write(text);
   if (!text.endsWith("\n")) process.stdout.write("\n");
   return 0;
@@ -1359,7 +1359,7 @@ async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string):
     cwd?: string;
     agentId?: string;
   };
-  process.stdout.write(`sent to remote pid ${data.pid} (${remote.url}  ${keyword})\n`);
+  process.stdout.write(`sent to remote pid ${data.pid} (${remote.label}  ${keyword})\n`);
   // Record the sender's half of the exchange locally (the recipient's inbox is
   // recorded on the remote host by its /api/send handler). Only real bodies.
   if (msg && msg !== "-") {
@@ -1376,7 +1376,7 @@ async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string):
       code: code.toLowerCase() === "enter" ? undefined : code.toLowerCase(),
       confirmed: true,
       wrapped: false,
-      remote: remote.url,
+      remote: remote.label,
     });
   }
   return 0;
@@ -1419,7 +1419,7 @@ async function runRemoteSpawn(
     if (name === "TimeoutError" || name === "AbortError") {
       // The request may or may not have spawned — do NOT retry. Let the operator check.
       process.stderr.write(
-        `remote spawn: no response from ${remote.url} within ${Math.round(SPAWN_TIMEOUT_MS / 1000)}s — ` +
+        `remote spawn: no response from ${remote.label} within ${Math.round(SPAWN_TIMEOUT_MS / 1000)}s — ` +
           `result UNKNOWN (not retried).\n  ay ls ${hint}    # check whether it started\n`,
       );
       return 2;
@@ -1440,7 +1440,7 @@ async function runRemoteSpawn(
     provisioned?: { action: string };
   };
   process.stdout.write(
-    `spawned ${r.cli} on ${remote.url} in ${r.cwd}` +
+    `spawned ${r.cli} on ${remote.label} in ${r.cwd}` +
       `${r.hook ? " (via spawn hook)" : ""}` +
       `${r.provisioned ? ` (${r.provisioned.action})` : ""}\n`,
   );
