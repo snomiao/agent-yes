@@ -830,6 +830,11 @@ async function buildAgentContextSection(self: GlobalPidRecord): Promise<string> 
     `     --advisor is a claude-cli flag — only takes effect for claude/cy)\n` +
     `  List agents (your children nest under your own pid in the tree):\n` +
     `    ay ls --cwd ${shortenPath(self.cwd)}\n` +
+    `  Get notified when a sub-agent finishes / goes idle / crashes (preferred):\n` +
+    `    ay notify watch --unread\n` +
+    `    (one watch loop for your whole fan-out: needs_input / idle / exited edges land\n` +
+    `     in your inbox; a hard child crash is caught by the 2s liveness poll, which\n` +
+    `     nothing push-based can see)\n` +
     `  Watch agent state changes, scoped to your workspace:\n` +
     `    ay ls --watch --cwd ${shortenPath(self.cwd)}\n` +
     `    (NDJSON stream of state changes across every matched agent — one watcher\n` +
@@ -886,6 +891,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay exit <keyword> [reason]          graceful shutdown, recording who/why (= 'ay send <kw> exit')\n` +
       `  ay restart <keyword> [--fresh]      stop (if live) + relaunch resuming the session; --fresh replays the prompt\n` +
       `  ay status <keyword>                 agent status snapshot\n` +
+      `  ay notify watch --unread            get notified when sub-agents finish/stuck/crash (writes to inbox)\n` +
       `  ay whoami [--json]                  (inside an agent) your own registry identity + reply address\n` +
       `  ay result <keyword> [--wait]        pull an agent's structured result envelope\n` +
       `  ay result set '<json>'              (inside an agent) deposit your result envelope\n` +
@@ -1452,10 +1458,14 @@ async function runRemoteSpawn(
   if (r.agentId && !hint.includes("://")) {
     process.stderr.write(
       `\n  ay tail ${hint}:${r.agentId}            # watch its output\n` +
-        `  ay status ${hint}:${r.agentId} --wait   # block until it needs you\n`,
+        `  ay status ${hint}:${r.agentId} --wait   # block until it needs you\n` +
+        `  ay notify watch --unread       # get notified when it finishes/stuck/crashes\n`,
     );
   } else {
-    process.stderr.write(`\n  ay ls ${hint}    # the new ${r.cli} agent appears here\n`);
+    process.stderr.write(
+      `\n  ay ls ${hint}    # the new ${r.cli} agent appears here\n` +
+        `  ay notify watch --unread   # get notified when it finishes/stuck/crashes\n`,
+    );
   }
   return 0;
 }
@@ -5355,9 +5365,60 @@ function printNotifyEvents(events: NotifyEvent[], json: boolean): void {
   }
 }
 
+/** Full usage for `ay notify --help` / `ay notify watch --help`. Every verb and
+ *  option is listed so the caller never needs to enter the watch loop to find
+ *  out what the subcommand does. */
+function notifyHelp(): number {
+  process.stdout.write(
+    `ay notify — read sub-agent status-transition notifications (see docs/subagent-notify.md)\n\n` +
+      `A parent runs ONE command in its Monitor loop to get every child's\n` +
+      `needs_input / idle / exited edge, each with a payload (question / tail /\n` +
+      `git head) so it can act without tailing the child:\n\n` +
+      `  ay notify watch --unread          # tail your inbox; ensures the daemon is up\n\n` +
+      `Usage:\n` +
+      `  ay notify watch [--parent <pid>] [--since <seq>] [--since-ts <ms>] [--unread]\n` +
+      `                   [--ack] [--json] [--consumer <name>] [--interval <s>]\n` +
+      `                   [--no-ensure-daemon]\n` +
+      `  ay notify read  [--parent <pid>] [--since <seq>] [--since-ts <ms>] [--unread]\n` +
+      `                   [--ack] [--json] [--consumer <name>] [--postmortem]\n` +
+      `                   [--started-at <ms>]\n` +
+      `  ay notify cursor get|set <seq> [--parent <pid>] [--consumer <name>]\n\n` +
+      `Verbs:\n` +
+      `  watch    tail -f the inbox (at-least-once by default; --ack advances the cursor)\n` +
+      `  read     one-shot drain of the inbox\n` +
+      `  cursor   get/set the persisted unread cursor (multiple readers via --consumer)\n\n` +
+      `Options:\n` +
+      `  --parent <pid>      parent pid whose inbox to drain (default: $AGENT_YES_PID)\n` +
+      `  --since <seq>       only edges with seq greater than this\n` +
+      `  --since-ts <ms>     only edges at/after this epoch-ms\n` +
+      `  --unread            only edges past the saved cursor\n` +
+      `  --ack               advance the cursor past what's shown (at-least-once: off by default)\n` +
+      `  --json              emit raw NDJSON events\n` +
+      `  --consumer <name>   cursor identity (for multiple readers, default: parent)\n` +
+      `  --interval <s>      poll interval in seconds (watch, default: 2)\n` +
+      `  --no-ensure-daemon  don't start the notifyd singleton if not running (watch)\n` +
+      `  --postmortem        read-only: inspect an inbox whose parent has exited (read)\n` +
+      `  --started-at <ms>   disambiguate which incarnation to show (--postmortem)\n\n` +
+      `Daemon (ay notifyd):\n` +
+      `  ay notifyd run|start|status|stop    the detection engine (auto-started by watch)\n`,
+  );
+  return 0;
+}
+
 async function cmdNotify(rest: string[]): Promise<number> {
   const verb = rest[0];
   const args = rest.slice(1);
+  // --help / -h (at either the verb or the sub-verb position) returns the full
+  // usage immediately — it must never fall through into the watch loop.
+  if (
+    verb === "help" ||
+    verb === "--help" ||
+    verb === "-h" ||
+    args.includes("--help") ||
+    args.includes("-h")
+  ) {
+    return notifyHelp();
+  }
 
   if (verb === "cursor") return cmdNotifyCursor(args);
   if (verb !== "read" && verb !== "watch") {

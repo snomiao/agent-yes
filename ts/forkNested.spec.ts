@@ -212,6 +212,8 @@ describe("buildSpawnTutorial", () => {
     expect(out).toContain("ay ls");
     expect(out).toContain("ay result get 4242");
     expect(out).toContain("ay exit 4242");
+    expect(out).toContain("ay notify watch --unread");
+    expect(out).toContain("Monitor (preferred");
   });
 });
 
