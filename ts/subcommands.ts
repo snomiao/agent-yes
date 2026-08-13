@@ -445,6 +445,7 @@ const SUBCOMMANDS = new Set([
   "expose",
   "callback",
   "reap",
+  "gc",
   "deepseek",
   "ds",
   "help",
@@ -715,6 +716,20 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         await reaper.sweep();
         return 0;
       }
+      case "gc": {
+        const { gcOldBinaryDirs } = await import("./rustBinary.ts");
+        const res = gcOldBinaryDirs();
+        if (res.removed.length === 0) {
+          process.stdout.write("no old agent-yes binary cache dirs to remove\n");
+        } else {
+          for (const v of res.removed) process.stdout.write(`removed ${v}\n`);
+          const mib = (res.freedBytes / 1024 / 1024).toFixed(1);
+          process.stdout.write(
+            `freed ${mib} MiB (${res.freedBytes} bytes) across ${res.removed.length} version dir(s)\n`,
+          );
+        }
+        return 0;
+      }
       case "deepseek":
       case "ds":
         return cmdDeepseek(rest);
@@ -890,6 +905,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay result <keyword> [--wait]        pull an agent's structured result envelope\n` +
       `  ay result set '<json>'              (inside an agent) deposit your result envelope\n` +
       `  ay reap                             kill process groups leaked by dead agents\n` +
+      `  ay gc                               remove old-version binary cache dirs and report freed space\n` +
       `  ay deepseek|ds [-- <codex args>]    run codex via the local DeepSeek adapter (DEEPSEEK_API_KEY)\n` +
       wsLines +
       `\n` +

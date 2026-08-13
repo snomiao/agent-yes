@@ -60,9 +60,17 @@ fn which_in_path(name: &str) -> Option<std::path::PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Launch a detached, fully orphaned child that outlives this request AND is not
-/// in the daemon's process group — a restart must survive the agent it restarts,
-/// and a spawned agent must not die with the daemon.
+/// Launch a detached, fully orphaned child that outlives this request AND is
+/// not in the daemon's process group — a restart must survive the agent it
+/// restarts, and a spawned agent must not die with the daemon.
+///
+/// Unix uses the classic double-fork daemonize (PERFORMANCE-EVENT 2026-08-13):
+/// the intermediate child `setsid()`s, forks once more, and exits immediately —
+/// so the grandchild (the actual agent) is reparented to PID 1 and this daemon
+/// is NEVER its parent. No zombie can accrue here when the agent later exits.
+/// The grandchild reports its pid back over a pipe (the intermediate's pid is
+/// useless — it is gone by the time we return), and the intermediate itself is
+/// `wait()`ed synchronously. Windows has no such zombie problem: plain spawn.
 fn spawn_detached(bin: &std::path::Path, args: &[String], cwd: &str) -> std::io::Result<u32> {
     let mut cmd = std::process::Command::new(bin);
     cmd.args(args)
@@ -84,16 +92,87 @@ fn spawn_detached(bin: &std::path::Path, args: &[String], cwd: &str) -> std::io:
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        // setsid: new session + process group, so a later group-kill of the
-        // daemon can't take the agent with it.
+        // pid-report pipe: the grandchild writes its pid back to the daemon.
+        let mut fds = [0i32; 2];
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let (rd, wr) = (fds[0], fds[1]);
         unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
+            cmd.pre_exec(move || {
+                // Intermediate: a new session + process group, so a later
+                // group-kill of the daemon can't take the agent with it.
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                match libc::fork() {
+                    -1 => Err(std::io::Error::last_os_error()),
+                    // Grandchild: leave the intermediate's session too (that
+                    // leader is about to exit), report the real pid, then exec.
+                    0 => {
+                        libc::setsid();
+                        let pid = libc::getpid();
+                        let _ = libc::write(
+                            wr,
+                            &pid as *const _ as *const libc::c_void,
+                            std::mem::size_of::<libc::pid_t>(),
+                        );
+                        libc::close(wr);
+                        libc::close(rd);
+                        Ok(())
+                    }
+                    // Intermediate: exit NOW — the grandchild is reparented to
+                    // PID 1 and this daemon never owns it.
+                    _ => {
+                        libc::close(wr);
+                        libc::close(rd);
+                        libc::_exit(0);
+                    }
+                }
             });
         }
+        let mut child = cmd.spawn()?;
+        unsafe {
+            libc::close(wr);
+        }
+        // The grandchild writes its pid before it execs, so this returns in
+        // microseconds — or EOFs if the fork chain died, which surfaces as a
+        // spawn error below.
+        let mut pid_buf = [0u8; std::mem::size_of::<libc::pid_t>()];
+        let mut got = 0usize;
+        while got < pid_buf.len() {
+            let n = unsafe {
+                libc::read(
+                    rd,
+                    pid_buf[got..].as_mut_ptr() as *mut libc::c_void,
+                    pid_buf.len() - got,
+                )
+            };
+            if n > 0 {
+                got += n as usize;
+            } else if n < 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                continue; // interrupted — retry
+            } else {
+                break; // EOF (0) or a real error
+            }
+        }
+        unsafe {
+            libc::close(rd);
+        }
+        // Reap the intermediate (it exited the moment it forked).
+        let _ = child.wait();
+        if got != pid_buf.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "detached child did not report its pid",
+            ));
+        }
+        return Ok(i32::from_ne_bytes(pid_buf) as u32);
     }
-    Ok(cmd.spawn()?.id())
+    #[cfg(not(unix))]
+    {
+        return Ok(cmd.spawn()?.id());
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -105,7 +184,8 @@ mod spawn_detached_tests {
     /// The daemon is restarted for ordinary reasons — an upgrade, a launchd
     /// KeepAlive bounce, `ayrs serve install` — and every one of those would
     /// take the whole local fleet down with it if agents shared the daemon's
-    /// session or process group. `setsid()` in the pre_exec hook above is the
+    /// session or process group. The double-fork in `spawn_detached` above
+    /// (intermediate setsids + forks, exits; grandchild setsids again) is the
     /// only thing preventing that, and nothing else in the tree would fail if
     /// it were dropped: agents would keep spawning and working, and the damage
     /// would only appear on the next restart.
@@ -132,10 +212,7 @@ mod spawn_detached_tests {
         // report it (no portable shell or perl equivalent exists).
         let pid = spawn_detached(
             &sh,
-            &[
-                "-c".into(),
-                format!("touch {} && sleep 5", ready.display()),
-            ],
+            &["-c".into(), format!("touch {} && sleep 5", ready.display())],
             dir.path().to_str().unwrap(),
         )
         .expect("spawn_detached succeeds");
