@@ -82,7 +82,7 @@ export async function warnIfCwdOccupied(rawArgv: string[]): Promise<void> {
     const msg = formatCwdConflictWarning(occupants, here, origCmd);
     if (msg) {
       process.stderr.write(msg);
-      // Interactive CLIs (claude/codex/gemini) switch to the alternate screen
+      // Interactive CLIs (claude/codex) switch to the alternate screen
       // buffer on startup, which clears the terminal — the warning would flash
       // and vanish before a human could read it. Hold briefly (only on a real
       // conflict, only when attached to a TTY) so they get a beat to Ctrl-C and

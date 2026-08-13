@@ -5,9 +5,7 @@ import { buildRustArgs } from "./buildRustArgs";
 const SUPPORTED_CLIS = [
   "claude",
   "glm",
-  "openrouter",
   "pi",
-  "gemini",
   "codex",
   "copilot",
   "cursor",
@@ -118,26 +116,26 @@ describe("buildRustArgs", () => {
 
     it("skips --cli= when --cli= flag is already used", () => {
       const result = buildRustArgs(
-        argv("--cli=gemini", "--timeout", "30s"),
+        argv("--cli=codex", "--timeout", "30s"),
         "claude",
         SUPPORTED_CLIS,
       );
-      expect(result).toEqual(["--cli=gemini", "--timeout", "30s"]);
+      expect(result).toEqual(["--cli=codex", "--timeout", "30s"]);
       expect(result).not.toContain("--cli=claude");
     });
 
     it("skips --cli= when --cli flag is used (separate value)", () => {
       const result = buildRustArgs(
-        argv("--cli", "gemini", "--timeout", "30s"),
+        argv("--cli", "codex", "--timeout", "30s"),
         "claude",
         SUPPORTED_CLIS,
       );
-      expect(result).toEqual(["--cli", "gemini", "--timeout", "30s"]);
+      expect(result).toEqual(["--cli", "codex", "--timeout", "30s"]);
       expect(result).not.toContain("--cli=claude");
     });
 
     it("detects any supported CLI name in args", () => {
-      for (const cli of ["gemini", "codex", "copilot", "cursor", "grok"]) {
+      for (const cli of ["codex", "copilot", "cursor", "grok"]) {
         const result = buildRustArgs(argv("--timeout", "1m", cli), "claude", SUPPORTED_CLIS);
         expect(result).not.toContain("--cli=claude");
         expect(result[0]).toBe(`--cli=${cli}`);
@@ -319,13 +317,13 @@ describe("buildRustArgs", () => {
       expect(result).not.toContain("--cli=claude");
     });
 
-    it("gemini-yes --rust --timeout 2m --verbose -p 'hello'", () => {
+    it("codex-yes --rust --timeout 2m --verbose -p 'hello'", () => {
       const result = buildRustArgs(
         argv("--rust", "--timeout", "2m", "--verbose", "-p", "hello"),
-        "gemini",
+        "codex",
         SUPPORTED_CLIS,
       );
-      expect(result).toEqual(["--cli=gemini", "--timeout", "2m", "--verbose", "-p", "hello"]);
+      expect(result).toEqual(["--cli=codex", "--timeout", "2m", "--verbose", "-p", "hello"]);
     });
 
     it("claude-yes --rust --auto=no --timeout 10m", () => {

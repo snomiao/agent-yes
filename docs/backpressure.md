@@ -19,7 +19,7 @@ Neither implementation uses true end-to-end backpressure. Instead, they use:
 ```
                     ┌──────────────────────┐
                     │    Agent CLI Process  │
-                    │  (claude, gemini, …)  │
+                    │  (claude, codex, …)  │
                     └──────┬───────▲───────┘
                       PTY  │stdout │stdin
                     ┌──────▼───────┴───────┐

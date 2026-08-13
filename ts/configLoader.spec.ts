@@ -41,7 +41,7 @@ describe("configLoader", () => {
       `
 configDir: /custom/yaml/config
 clis:
-  gemini:
+  codex:
     defaultArgs:
       - --resume
 `,
@@ -49,7 +49,7 @@ clis:
 
     const config = await loadCascadingConfig({ projectDir: testDir });
     expect(config.configDir).toBe("/custom/yaml/config");
-    expect(config.clis?.gemini?.defaultArgs).toEqual(["--resume"]);
+    expect(config.clis?.codex?.defaultArgs).toEqual(["--resume"]);
   });
 
   it("should compile regex sources from YAML config", async () => {

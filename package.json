@@ -13,7 +13,6 @@
     "codex",
     "copilot",
     "cursor",
-    "gemini",
     "grok",
     "qwen",
     "wrapper"
@@ -40,12 +39,9 @@
     "copilot-yes": "./dist/copilot-yes.js",
     "cursor-yes": "./dist/cursor-yes.js",
     "cy": "./dist/cy.js",
-    "gemini-yes": "./dist/gemini-yes.js",
     "glm-yes": "./dist/glm-yes.js",
     "grok-yes": "./dist/grok-yes.js",
     "opencode-yes": "./dist/opencode-yes.js",
-    "openrouter-yes": "./dist/openrouter-yes.js",
-    "orcy": "./dist/orcy.js",
     "pi-yes": "./dist/pi-yes.js",
     "powershell-yes": "./dist/powershell-yes.js",
     "qwen-yes": "./dist/qwen-yes.js"
@@ -108,7 +104,6 @@
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
-    "deepseek": "bun scripts/deepseek-codex.ts",
     "build": "tsdown",
     "check:e2e": "bun scripts/check-e2e.ts",
     "cf": "bun scripts/cf.ts",

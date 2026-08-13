@@ -133,7 +133,7 @@ export type AgentCliConfig = {
   system?: string; // system prompt content to inject
 
   // status detect, and actions
-  ready?: RegExp[]; // regex matcher for stdin ready, or line index for gemini. Set to empty array [] to disable ready check entirely.
+  ready?: RegExp[]; // regex matcher for stdin ready. Set to empty array [] to disable ready check entirely.
   fatal?: RegExp[]; // array of regex to match for fatal errors
   working?: RegExp[]; // regex matcher for working status
   updateAvailable?: RegExp[]; // regex matcher for update available banners
@@ -451,11 +451,6 @@ export default async function agentYes({
       // just add --continue flag for claude
       cliArgs = ["--continue", ...cliArgs];
       await logger.debug(`resume|adding --continue flag for claude`);
-    } else if (cli === "gemini") {
-      // Gemini supports session resume natively via --resume flag
-      // Sessions are project/directory-specific by default (stored in ~/.gemini/tmp/<project_hash>/chats/)
-      cliArgs = ["--resume", ...cliArgs];
-      await logger.debug(`resume|adding --resume flag for gemini`);
     } else {
       throw new Error(
         `Resume option is not supported for cli: ${cli}, make a feature request if you want it. https://github.com/snomiao/agent-yes/issues`,
@@ -514,7 +509,7 @@ export default async function agentYes({
   // launching env; skip entries whose vars are unset so we never blank out an
   // inherited value (e.g. ANTHROPIC_AUTH_TOKEN when ZAI_API_KEY isn't exported).
   // `${VAR:-default}` falls back to `default` when VAR is unset/empty — used for
-  // overridable defaults like the model (openrouter → z-ai/glm-5.2).
+  // overridable defaults like the model (glm → z-ai/glm-5.2).
   if (cliConf?.env) {
     for (const [key, raw] of Object.entries(cliConf.env)) {
       let unresolved = false;
@@ -1412,7 +1407,6 @@ export default async function agentYes({
             // ready matcher: if matched, mark stdin ready
             if (conf.ready?.some((rx: RegExp) => line.match(rx))) {
               logger.debug(`ready |${line}`);
-              if (cli === "gemini" && lineIndex <= 80) return; // gemini initial noise, only after many lines
               ctx.stdinReady.ready();
               ctx.stdinFirstReady.ready();
             }

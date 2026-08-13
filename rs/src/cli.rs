@@ -23,8 +23,7 @@ pub const SUBCOMMANDS: &[&str] = &[
     "ls", "list", "ps", "status", "whoami", "result", "notify", "notifyd", "read", "cat", "tail",
     "head", "hist", "history", "send", "key", "select", "msgs", "spawn", "attach", "stop", "exit",
     "restart", "note", "todo", "ask", "answer", "ch", "channels", "term", "widget", "mint",
-    "serve", "tray", "schedule", "remote", "expose", "callback", "reap", "gc", "deepseek", "ds",
-    "help",
+    "serve", "tray", "schedule", "remote", "expose", "callback", "reap", "gc", "help",
 ];
 
 /// Subcommands reserved for the generic manager entry (`ay`/`agent-yes`), not a
@@ -60,7 +59,6 @@ fn invoked_cli_name(exe_base: &str) -> Option<String> {
     // Short aliases (must match CLI_ALIASES in ts/invokedCli.ts).
     match raw {
         "cy" => Some("claude".to_string()),
-        "orcy" => Some("openrouter".to_string()),
         other => Some(other.to_string()),
     }
 }
@@ -167,9 +165,7 @@ fn delegate_to_js(forward_args: &[String]) -> i32 {
 pub const SUPPORTED_CLIS: &[&str] = &[
     "claude",
     "glm",
-    "openrouter",
     "pi",
-    "gemini",
     "codex",
     "copilot",
     "cursor",
@@ -226,7 +222,7 @@ pub struct CliArgs {
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Automated interaction wrapper for AI coding assistants")]
 struct Args {
-    /// CLI tool to use (claude, gemini, codex, copilot, cursor, grok, qwen, auggie)
+    /// CLI tool to use (claude, codex, copilot, cursor, grok, qwen, auggie)
     #[arg(long, default_value = "claude")]
     cli: String,
 
@@ -532,8 +528,6 @@ mod tests {
         assert_eq!(invoked_cli_name("claude-yes"), Some("claude".into()));
         assert_eq!(invoked_cli_name("codex-yes"), Some("codex".into()));
         assert_eq!(invoked_cli_name("cy"), Some("claude".into()));
-        assert_eq!(invoked_cli_name("orcy"), Some("openrouter".into()));
-        assert_eq!(invoked_cli_name("gemini-yes.js"), Some("gemini".into()));
     }
 
     #[test]
@@ -570,7 +564,6 @@ mod tests {
     #[test]
     fn test_detect_cli_from_name_all() {
         assert_eq!(detect_cli_from_name("claude-yes"), Some("claude".into()));
-        assert_eq!(detect_cli_from_name("gemini-yes"), Some("gemini".into()));
         assert_eq!(detect_cli_from_name("codex-yes"), Some("codex".into()));
         assert_eq!(detect_cli_from_name("copilot-yes"), Some("copilot".into()));
         assert_eq!(detect_cli_from_name("cursor-yes"), Some("cursor".into()));
@@ -728,10 +721,10 @@ mod tests {
 
     #[test]
     fn test_supported_clis_count() {
-        assert_eq!(SUPPORTED_CLIS.len(), 16);
+        assert_eq!(SUPPORTED_CLIS.len(), 14);
         // The claude-compatible providers (run the `claude` binary via env) must
         // be present, else their `*-yes` bins fail validation in the Rust runtime.
-        for cli in ["glm", "openrouter", "pi"] {
+        for cli in ["glm", "pi"] {
             assert!(SUPPORTED_CLIS.contains(&cli), "missing {cli}");
         }
         // Each listed CLI must resolve to a real config (catches a name in this
@@ -789,9 +782,9 @@ mod tests {
     #[test]
     fn test_resolve_args_explicit_cli() {
         let mut args = default_args();
-        args.cli = "gemini".into();
+        args.cli = "codex".into();
         let result = resolve_args(args, "agent-yes").unwrap();
-        assert_eq!(result.cli, "gemini");
+        assert_eq!(result.cli, "codex");
     }
 
     #[test]
@@ -806,8 +799,8 @@ mod tests {
 
     #[test]
     fn test_resolve_args_binary_name_cli() {
-        let result = resolve_args(default_args(), "gemini-yes").unwrap();
-        assert_eq!(result.cli, "gemini");
+        let result = resolve_args(default_args(), "codex-yes").unwrap();
+        assert_eq!(result.cli, "codex");
     }
 
     #[test]

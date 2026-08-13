@@ -33,7 +33,7 @@ agent-yes start
   │
   ├─ [background] fetch registry.npmjs.org/agent-yes/latest   ← no delay
   │
-  ├─ [main] run agent (claude / gemini / codex / …)
+  ├─ [main] run agent (claude / codex / …)
   │
   └─ [after run] if newer version found:
         - print "Updating agent-yes x.y.z → x.y.z+1 …"

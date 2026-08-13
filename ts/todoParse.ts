@@ -1,7 +1,7 @@
 /**
  * Parse an agent's todo/task list out of its RENDERED TUI screen.
  *
- * Source of truth for EVERY CLI (claude, codex, gemini, …) is the screen the
+ * Source of truth for EVERY CLI (claude, codex, …) is the screen the
  * agent draws — never a CLI-specific session file. The durable copy is the
  * per-pid raw log (`<cwd>/.agent-yes/<pid>.raw.log`); rendering it through a
  * headless xterm (see renderRawLog) collapses the reflow/redraw frames into the

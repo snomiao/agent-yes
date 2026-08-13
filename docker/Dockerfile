@@ -42,7 +42,6 @@ RUN curl -fsSL https://gh.io/copilot-install | bash
 RUN npm i -g \
     @qwen-code/qwen-code \
     @vibe-kit/grok-cli \
-    @google/gemini-cli \
     @openai/codex \
     @augmentcode/auggie \
     opencode-ai

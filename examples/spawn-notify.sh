@@ -13,7 +13,7 @@
 # outlives this waiter.
 #
 # Usage:   spawn-notify <cwd> -- <task...>
-# Env:     CLI=claude          wrapped CLI (claude|codex|gemini|…)
+# Env:     CLI=claude          wrapped CLI (claude|codex|…)
 #          AY_FLAGS="-y"       extra flags for `ay <cli>` (e.g. -y for yolo)
 #          WAIT_MODE=--wait    --wait      → wake on idle|needs_input|stuck|stopped (recommended:
 #                                            also catches a blocked AskUserQuestion menu)

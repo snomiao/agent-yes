@@ -64,7 +64,6 @@ export async function createAutoResponseHandler(
   // ready matcher: if matched, mark stdin ready
   if (conf.ready?.some((rx: RegExp) => line.match(rx))) {
     logger.debug(`ready |${line}`);
-    if (cli === "gemini" && lineIndex <= 80) return; // gemini initial noise, only after many lines
     ctx.stdinReady.ready();
     ctx.stdinFirstReady.ready();
   }

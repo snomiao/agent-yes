@@ -117,7 +117,7 @@ test("parseMenu: a 'N.M' version in an option label isn't mistaken for another o
 // Claude renders its permission / AskUserQuestion dialogs INSIDE a rounded box,
 // so every option row arrives with a leading "│" border (the shipped config's own
 // markers show this: a typingRespond keyed on '│ Do you want to use this API key\?'
-// and gemini `enter` rows like "│ ● 1. Yes, allow once"). Option rows must still be
+// and `enter` rows like "│ ● 1. Yes, allow once"). Option rows must still be
 // collected through that border — otherwise `ay select N` can only ever pick the
 // option the cursor already sits on.
 test("parseMenu: collects options through a box border (claude permission dialog)", () => {
@@ -134,7 +134,7 @@ test("parseMenu: collects options through a box border (claude permission dialog
   expect(menu!.options).toEqual([1, 2, 3]);
 });
 
-test("parseMenu: collects boxed bullet rows (gemini '│ ● 1. Yes, allow once')", () => {
+test("parseMenu: collects boxed bullet rows ('│ ● 1. Yes, allow once')", () => {
   const screen = [
     "│ Apply this change?          │",
     "│ ❯ 1. Yes, allow once        │",
@@ -147,7 +147,11 @@ test("parseMenu: collects boxed bullet rows (gemini '│ ● 1. Yes, allow once'
 });
 
 test("parseMenu: a boxed 'N.M' version still isn't mistaken for an option", () => {
-  const screen = ["│ Cleanup?              │", "│ ❯ 1. Delete 3.5GB     │", "│   2. Keep             │"];
+  const screen = [
+    "│ Cleanup?              │",
+    "│ ❯ 1. Delete 3.5GB     │",
+    "│   2. Keep             │",
+  ];
   const menu = parseMenu(screen, claude);
   expect(menu!.options).toEqual([1, 2]);
 });

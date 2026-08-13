@@ -16,7 +16,6 @@ This document describes the environment available in the agent-yes Docker contai
     - `@anthropic-ai/claude-code`
     - `@qwen-code/qwen-code`
     - `@vibe-kit/grok-cli`
-    - `@google/gemini-cli`
     - `@openai/codex`
     - `@github/copilot`
     - `@augmentcode/auggie`
@@ -68,7 +67,6 @@ ANTHROPIC_API_KEY=your-key-here
 # For other agents (if installed)
 QWEN_API_KEY=your-key-here
 GROQ_API_KEY=your-key-here
-GEMINI_API_KEY=your-key-here
 OPENAI_API_KEY=your-key-here
 ```
 
@@ -81,7 +79,7 @@ To check which image you're running:
 docker images snomiao/agent-yes
 
 # Check available agents
-which claude-code qwen-code grok gemini codex copilot auggie opencode 2>/dev/null || echo "Mini image - no agents pre-installed"
+which claude-code qwen-code grok codex copilot auggie opencode 2>/dev/null || echo "Mini image - no agents pre-installed"
 
 # Check if Rust is installed
 rustc --version 2>/dev/null || echo "Rust not installed (mini image)"

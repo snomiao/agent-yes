@@ -460,27 +460,6 @@ mod tests {
     }
 
     #[test]
-    fn test_gemini_config() {
-        let config = get_cli_config("gemini").unwrap();
-        assert_eq!(config.prompt_arg, "last-arg");
-        assert!(config.binary.is_none());
-        assert!(config.install.npm.is_some());
-        assert!(config.install.bash.is_none());
-        assert!(!config.ready.is_empty());
-        assert!(config.ready[0].is_match("Type your message"));
-        assert!(config.working.is_empty());
-        assert!(!config.enter.is_empty());
-        assert!(!config.fatal.is_empty());
-        assert!(config.fatal[0].is_match("Error resuming session"));
-        assert_eq!(config.restore_args, vec!["--resume"]);
-        assert!(!config.restart_without_continue.is_empty());
-        assert!(!config.exit_command.is_empty());
-        assert!(config.update_available.is_empty());
-        assert!(!config.no_eol);
-        assert!(config.typing_respond.is_empty());
-    }
-
-    #[test]
     fn test_codex_config() {
         let config = get_cli_config("codex").unwrap();
         assert_eq!(config.prompt_arg, "first-arg");
@@ -685,8 +664,7 @@ clis:
     #[test]
     fn test_all_supported_clis() {
         let clis = vec![
-            "claude", "gemini", "codex", "copilot", "cursor", "grok", "qwen", "auggie", "amp",
-            "opencode",
+            "claude", "codex", "copilot", "cursor", "grok", "qwen", "auggie", "amp", "opencode",
         ];
         for cli in clis {
             let result = get_cli_config(cli);

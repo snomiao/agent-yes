@@ -14,9 +14,7 @@ use serde_json::{json, Value};
 pub const SUPPORTED_CLIS: &[&str] = &[
     "claude",
     "glm",
-    "openrouter",
     "pi",
-    "gemini",
     "codex",
     "copilot",
     "cursor",

@@ -25,7 +25,6 @@
       },
       "properties": {
         "claude": { "$ref": "#/definitions/AgentCliConfig" },
-        "gemini": { "$ref": "#/definitions/AgentCliConfig" },
         "codex": { "$ref": "#/definitions/AgentCliConfig" },
         "copilot": { "$ref": "#/definitions/AgentCliConfig" },
         "cursor": { "$ref": "#/definitions/AgentCliConfig" },

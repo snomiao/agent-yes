@@ -1,4 +1,4 @@
-# Agent-Yes! for Claude/Codex/Gemini/Cursor/Copilot/Qwen/Auggie
+# Agent-Yes! for Claude/Codex/Cursor/Copilot/Qwen/Auggie
 
 A wrapper tool that automates interactions with various AI CLI tools by automatically handling common prompts and responses. Originally designed for Claude CLI, now supports multiple AI coding assistants. Rewritten in Rust for improved performance and reliability.
 
@@ -34,7 +34,7 @@ For the local web console, install [Portless](https://portless.sh/) once with `n
 
 ## Features
 
-- **Multi-CLI Support**: Works with Claude, Gemini, Codex, Copilot, and Cursor CLI tools
+- **Multi-CLI Support**: Works with Claude, Codex, Copilot, and Cursor CLI tools
 - **Auto-Response**: Automatically responds to common prompts like "Yes, proceed" and "Yes"
 - **Continuous Operation**: Keeps the AI assistant running until your task is done, waiting for your next prompt
 - **Interactive Control**: You can still queue more prompts or cancel executing tasks with `ESC` or `Ctrl+C`
@@ -54,13 +54,6 @@ npm install -g @anthropic-ai/claude-code
 ```
 
 Learn more: https://www.anthropic.com/claude-code
-
-### Gemini
-
-```bash
-# Install Gemini CLI (if available)
-# Check Google's documentation for installation instructions
-```
 
 ### Codex
 
@@ -137,9 +130,6 @@ copilot-yes -- generate unit tests
 # Use Cursor directly
 cursor-yes -- optimize performance
 
-# Use Gemini directly
-gemini-yes -- debug this code
-
 # Use Auggie directly
 auggie-yes -- analyze code patterns
 
@@ -147,13 +137,6 @@ auggie-yes -- analyze code patterns
 # Anthropic-compatible endpoint. Set ZAI_API_KEY first
 # (https://z.ai/manage-apikey/apikey-list).
 ZAI_API_KEY=... glm-yes -- help me with this code
-
-# Use OpenRouter directly — runs Claude Code against OpenRouter's
-# Anthropic-compatible endpoint. Set OPENROUTER_API_KEY first
-# (https://openrouter.ai/keys). `orcy` is the short alias
-# (openrouter-claude-yes) and defaults to the z-ai/glm-5.2 model
-# (override via ANTHROPIC_DEFAULT_*_MODEL or ~/.claude/settings.json).
-OPENROUTER_API_KEY=... orcy -- help me with this code
 
 # Use Pi directly — minimal multi-provider coding agent
 # (https://github.com/earendil-works/pi)
@@ -195,7 +178,7 @@ cy stop <keyword>                      # graceful shutdown (claude/codex: /exit)
 
 - A **single** `--code=ctrl-c` does not stop `claude` / `codex` — they treat it
   as "cancel current turn" rather than "quit". Prefer `cy stop <keyword>` (which
-  sends `/exit` for claude/codex and `/quit` for gemini), or send Ctrl+C twice
+  sends `/exit` for claude/codex), or send Ctrl+C twice
   in quick succession. The `cy send … --code=ctrl-c` output prints a one-line
   hint pointing at this when it detects one of those CLIs.
 
@@ -267,7 +250,7 @@ T4  pending   question  lane-a(active)  lane-b(exited)  does the cache need inv�
 That is the failure mode a bare send cannot report: **whoever died holding the
 question is visible in one command.** `ay todo reconcile` says the same thing in
 words (`T4: lane-b exited without answering`) and orphans the task if the
-*asker* is the one that died — without ever closing the question itself, since
+_asker_ is the one that died — without ever closing the question itself, since
 the answer is still owed.
 
 Answering is gated on independent verification, which the store enforces: the
@@ -302,7 +285,7 @@ docker run --rm -v $(pwd):/workspace -w /workspace \
 # Run with other AI tools
 docker run --rm -v $(pwd):/workspace -w /workspace \
   ghcr.io/snomiao/agent-yes:latest \
-  --cli=gemini -- debug this code
+  --cli=codex -- debug this code
 ```
 
 **Persisting credentials:**
@@ -384,7 +367,6 @@ For deploying to cloud platforms like Google Cloud Run, AWS, Azure, see [Cloud D
 | Tool    | CLI Name  | Description                       | Installation/Update                                 |
 | ------- | --------- | --------------------------------- | --------------------------------------------------- |
 | Claude  | `claude`  | Anthropic's Claude Code (default) | `npm install -g @anthropic-ai/claude-code@latest`   |
-| Gemini  | `gemini`  | Google's Gemini CLI               | `npm install -g @google/gemini-cli@latest`          |
 | Codex   | `codex`   | OpenAI's Codex CLI                | `npm install -g @openai/codex-cli@latest`           |
 | Copilot | `copilot` | GitHub Copilot CLI                | `npm install -g @github/copilot@latest`             |
 | Cursor  | `cursor`  | Cursor agent CLI                  | See https://cursor.com/ja/docs/cli/installation     |
@@ -419,23 +401,6 @@ The tool will:
 - Terminal-based interface may not suit all developers
 - Closed ecosystem with limited community plugins
 - Requires API subscription for full features
-
-#### Gemini CLI (Google)
-
-**Pros:**
-
-- Free tier with generous limits (60 requests/min, 1,000/day)
-- Fully open source (Apache 2.0 license)
-- 1 million token context window
-- MCP integration for extensibility
-- GitHub Actions integration at no cost
-
-**Cons:**
-
-- Currently in preview with potential stability issues
-- Shared quotas between CLI and Code Assist
-- May produce factually incorrect outputs
-- Limited to English language support
 
 #### Codex CLI (OpenAI/Microsoft)
 
@@ -544,16 +509,16 @@ The tool will:
 - **For Solo Developers:** Claude Code (complex tasks) or Grok CLI (cost-conscious)
 - **For Teams:** Codex CLI (cloud collaboration) or Cursor CLI (parallel agents)
 - **For Enterprises:** Claude Code (performance) or Qwen Code (self-hosted)
-- **For Budget-Conscious:** Gemini CLI (free tier) or Qwen Code (open source)
+- **For Budget-Conscious:** Qwen Code (open source)
 - **For GitHub Users:** Copilot CLI (native integration)
 
 <!-- TODO: add usage As lib: call await claudeYes() and it returns render result -->
 
 ## Options
 
-- `--cli=<tool>`: Specify which AI CLI tool to use (claude, gemini, codex, copilot, cursor, grok, qwen, auggie). Defaults to `claude`.
+- `--cli=<tool>`: Specify which AI CLI tool to use (claude, codex, copilot, cursor, grok, qwen, auggie). Defaults to `claude`.
 - `--exit-on-idle=<seconds>`: Automatically exit when the AI tool becomes idle for the specified duration. Useful for automation scripts.
-- `--use-skills`: Automatically discover and prepend SKILL.md headers from the directory hierarchy (walks from current directory up to git root). Multiple SKILL.md files are merged with most specific first. Particularly useful to bring Claude Skills-like context to non-Claude agents such as Codex or Gemini. Supports nested skills for monorepos.
+- `--use-skills`: Automatically discover and prepend SKILL.md headers from the directory hierarchy (walks from current directory up to git root). Multiple SKILL.md files are merged with most specific first. Particularly useful to bring Claude Skills-like context to non-Claude agents such as Codex. Supports nested skills for monorepos.
 
 ## Advanced Features
 
@@ -605,7 +570,7 @@ await claudeYes({
 // Use other tools
 await claudeYes({
   prompt: "debug this function",
-  cli: "gemini",
+  cli: "codex",
   exitOnIdle: 60000,
 });
 
