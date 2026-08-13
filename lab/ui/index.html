@@ -1091,6 +1091,49 @@
         color: var(--accent);
         border-color: var(--accent);
       }
+      /* Settings (⚙) dropdown in the console toolbar — folds the view toggles
+         (subs/state/stale/ports/graph) behind one trigger to declutter the bar. */
+      .viewmenu {
+        position: relative;
+      }
+      .viewmenupanel {
+        position: absolute;
+        top: 30px;
+        right: 0;
+        z-index: 15;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        padding: 4px;
+        min-width: 150px;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
+      }
+      .viewmenupanel[hidden] {
+        display: none;
+      }
+      .viewmenuitem {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        width: 100%;
+        background: none;
+        border: none;
+        text-align: left;
+        font: inherit;
+        font-size: 12.5px;
+        color: var(--muted);
+        padding: 5px 8px;
+        border-radius: 6px;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      .viewmenuitem:hover {
+        background: var(--bg);
+        color: var(--fg);
+      }
+      .viewmenuitem.on {
+        color: var(--accent);
+      }
       .lcard .nfield {
         margin-top: 12px;
       }
@@ -1986,27 +2029,56 @@
               <span id="count" class="count"></span>
             </span>
             <span class="metaright">
-              <button id="foldbtn" class="viewbtn" title="fold subagent trees">⊞ subs</button>
-              <button id="sortbtn" class="viewbtn" title="cycle sort order">⇅ state</button>
-              <button
-                id="stalebtn"
-                class="viewbtn"
-                role="checkbox"
-                aria-checked="false"
-                title="show stale stopped agents (exited over 5 minutes ago)"
-              >
-                ◌ stale
-              </button>
-              <button id="portsbtn" class="viewbtn" title="manage exposed localhost ports">
-                ⇄ ports
-              </button>
-              <button
-                id="rguibtn"
-                class="viewbtn"
-                title="open the agent graph view (/r/) for this fleet"
-              >
-                ⌗ graph
-              </button>
+              <span class="viewmenu">
+                <button
+                  id="viewmenubtn"
+                  class="viewbtn"
+                  title="view settings"
+                  aria-haspopup="true"
+                  aria-expanded="false"
+                >
+                  ⚙ Settings ▾
+                </button>
+                <div class="viewmenupanel" id="viewmenupanel" hidden>
+                  <button
+                    id="foldbtn"
+                    class="viewmenuitem"
+                    type="button"
+                    title="fold subagent trees"
+                  >
+                    ⊞ subs
+                  </button>
+                  <button id="sortbtn" class="viewmenuitem" type="button" title="cycle sort order">
+                    ⇅ state
+                  </button>
+                  <button
+                    id="stalebtn"
+                    class="viewmenuitem"
+                    type="button"
+                    role="checkbox"
+                    aria-checked="false"
+                    title="show stale stopped agents (exited over 5 minutes ago)"
+                  >
+                    ◌ stale
+                  </button>
+                  <button
+                    id="portsbtn"
+                    class="viewmenuitem"
+                    type="button"
+                    title="manage exposed localhost ports"
+                  >
+                    ⇄ ports
+                  </button>
+                  <button
+                    id="rguibtn"
+                    class="viewmenuitem"
+                    type="button"
+                    title="open the agent graph view (/r/) for this fleet"
+                  >
+                    ⌗ graph
+                  </button>
+                </div>
+              </span>
               <button id="newbtn" class="newbtn" title="spawn a new agent on this fleet">
                 + New agent
               </button>
@@ -5327,6 +5399,27 @@ my.translate = async (text, lang) => {
           saved = localStorage.getItem("ay.perfHud") === "1";
         } catch {}
         setPerfHud(saved);
+      })();
+      (function viewMenuBoot() {
+        const btn = $("viewmenubtn"),
+          panel = $("viewmenupanel");
+        const closePanel = () => {
+          if (!panel) return;
+          panel.hidden = true;
+          btn?.setAttribute("aria-expanded", "false");
+        };
+        if (btn && panel) {
+          btn.addEventListener("click", (ev) => {
+            ev.stopPropagation();
+            panel.hidden = !panel.hidden;
+            btn.setAttribute("aria-expanded", String(!panel.hidden));
+          });
+          document.addEventListener("click", (ev) => {
+            if (!panel.hidden && !panel.contains(ev.target) && ev.target !== btn) closePanel();
+          });
+          // Any item click closes the dropdown after the item's own handler runs.
+          panel.addEventListener("click", closePanel);
+        }
       })();
 
       // The local source is only worth polling when this page is actually backed
