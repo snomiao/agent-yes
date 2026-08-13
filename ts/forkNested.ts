@@ -47,8 +47,11 @@ export function buildSpawnTutorial(cli: string, pid: number): string {
     // ISN'T watching — and it steps aside automatically when you are (see
     // ts/parentWatching.ts), so listing both here doesn't create duplicates.
     `Two ways to keep up with it — use whichever fits your harness:`,
-    `  Monitor (preferred if you have a monitor/polling loop):`,
-    `    ay ls --watch --json          # NDJSON stream of state changes across agents`,
+    `  Monitor (preferred, works even without a native monitor tool):`,
+    `    ay notify watch --unread      # get notified when it finishes / goes idle / crashes`,
+    `                                  # (a background daemon polls liveness every 2s, so even a`,
+    `                                  #  hard crash — this wrapper dies too — still reaches you)`,
+    `    ay ls --watch --json          # PULL alternative: NDJSON stream of state changes`,
     `    ay status ${pid}                 # one-shot: working | idle | needs_input | stopped`,
     `    ay status ${pid} --wait-idle     # block until it's done (add --timeout=Ns)`,
     `  Or do nothing: it was told to report back to you, and its wrapper will`,

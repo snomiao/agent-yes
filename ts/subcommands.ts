@@ -830,6 +830,11 @@ async function buildAgentContextSection(self: GlobalPidRecord): Promise<string> 
     `     --advisor is a claude-cli flag — only takes effect for claude/cy)\n` +
     `  List agents (your children nest under your own pid in the tree):\n` +
     `    ay ls --cwd ${shortenPath(self.cwd)}\n` +
+    `  Get notified when a sub-agent finishes / goes idle / crashes (preferred):\n` +
+    `    ay notify watch --unread\n` +
+    `    (one watch loop for your whole fan-out: needs_input / idle / exited edges land\n` +
+    `     in your inbox; a hard child crash is caught by the 2s liveness poll, which\n` +
+    `     nothing push-based can see)\n` +
     `  Watch agent state changes, scoped to your workspace:\n` +
     `    ay ls --watch --cwd ${shortenPath(self.cwd)}\n` +
     `    (NDJSON stream of state changes across every matched agent — one watcher\n` +
@@ -886,6 +891,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay exit <keyword> [reason]          graceful shutdown, recording who/why (= 'ay send <kw> exit')\n` +
       `  ay restart <keyword> [--fresh]      stop (if live) + relaunch resuming the session; --fresh replays the prompt\n` +
       `  ay status <keyword>                 agent status snapshot\n` +
+      `  ay notify watch --unread            get notified when sub-agents finish/stuck/crash (writes to inbox)\n` +
       `  ay whoami [--json]                  (inside an agent) your own registry identity + reply address\n` +
       `  ay result <keyword> [--wait]        pull an agent's structured result envelope\n` +
       `  ay result set '<json>'              (inside an agent) deposit your result envelope\n` +
@@ -1452,10 +1458,14 @@ async function runRemoteSpawn(
   if (r.agentId && !hint.includes("://")) {
     process.stderr.write(
       `\n  ay tail ${hint}:${r.agentId}            # watch its output\n` +
-        `  ay status ${hint}:${r.agentId} --wait   # block until it needs you\n`,
+        `  ay status ${hint}:${r.agentId} --wait   # block until it needs you\n` +
+        `  ay notify watch --unread       # get notified when it finishes/stuck/crashes\n`,
     );
   } else {
-    process.stderr.write(`\n  ay ls ${hint}    # the new ${r.cli} agent appears here\n`);
+    process.stderr.write(
+      `\n  ay ls ${hint}    # the new ${r.cli} agent appears here\n` +
+        `  ay notify watch --unread   # get notified when it finishes/stuck/crashes\n`,
+    );
   }
   return 0;
 }

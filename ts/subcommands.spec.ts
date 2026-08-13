@@ -232,6 +232,7 @@ describe("subcommands.cmdHelp", () => {
     expect(await capture()).toContain("ay setup"); // default = manager
     expect(await capture(false)).not.toContain("ay setup"); // cli-bound alias (cy)
     expect(await capture(false)).toContain("ay ls"); // universal commands still shown
+    expect(await capture()).toContain("ay notify watch --unread"); // Management entry
   });
 
   it("stays plain for a human shell (no AGENT_YES_PID)", async () => {
@@ -280,6 +281,7 @@ describe("subcommands.cmdHelp", () => {
       expect(out).toContain("Spawn a sub-agent");
       expect(out).toContain(`ay ls --cwd /work/parent/child`);
       expect(out).toContain(`ay ls --watch --cwd /work/parent/child`);
+      expect(out).toContain("ay notify watch --unread");
     } finally {
       if (saved === undefined) delete process.env.AGENT_YES_PID;
       else process.env.AGENT_YES_PID = saved;
