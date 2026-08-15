@@ -22,8 +22,8 @@ use std::env;
 pub const SUBCOMMANDS: &[&str] = &[
     "ls", "list", "ps", "status", "whoami", "result", "notify", "notifyd", "read", "cat", "tail",
     "head", "send", "msgs", "role", "spawn", "attach", "stop", "exit", "restart", "note", "ch",
-    "channels",
-    "term", "widget", "mint", "serve", "schedule", "remote", "expose", "callback", "reap", "help",
+    "channels", "term", "widget", "mint", "serve", "schedule", "remote", "expose", "callback",
+    "reap", "help",
 ];
 
 /// Subcommands reserved for the generic manager entry (`ay`/`agent-yes`), not a

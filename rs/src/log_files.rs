@@ -226,7 +226,11 @@ mod tests {
         let size = fs::metadata(&path).unwrap().len();
         // File was compacted, not left to grow past the trigger.
         assert!(size <= COMPACT_TRIGGER_BYTES, "size {} not capped", size);
-        assert!(size >= COMPACT_KEEP_BYTES, "size {} unexpectedly tiny", size);
+        assert!(
+            size >= COMPACT_KEEP_BYTES,
+            "size {} unexpectedly tiny",
+            size
+        );
         // Most recent output is retained.
         let mut tail = vec![0u8; 32];
         let mut f = fs::File::open(&path).unwrap();

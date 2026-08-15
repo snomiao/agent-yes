@@ -1344,7 +1344,10 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
             let Ok(v) = serde_json::from_str::<Value>(body) else {
                 return text(400, "invalid JSON body");
             };
-            let Some(agent) = v.get("agent").and_then(|a| a.as_str()).filter(|a| !a.is_empty())
+            let Some(agent) = v
+                .get("agent")
+                .and_then(|a| a.as_str())
+                .filter(|a| !a.is_empty())
             else {
                 return text(400, "agent required");
             };
