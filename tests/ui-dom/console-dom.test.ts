@@ -772,6 +772,63 @@ describe("console DOM behaviour", () => {
     }
   });
 
+  it("edge-to-edge mode runs the terminal under the title bar but never under the key bar", async () => {
+    // The whole hazard of this feature: xterm repaints a fixed grid whose LAST
+    // row is the live CLI input line, so if .log is allowed to run under the
+    // bottom bars the input becomes untappable. Bleeding upward is safe (the
+    // buffer is bottom-anchored, so it only exposes older scrollback), bleeding
+    // downward is not. This pins both halves of that contract.
+    const { ctx, page } = await openConsole(
+      browser,
+      url,
+      { width: 390, height: 844 },
+      { hasTouch: true, isMobile: true },
+    );
+    try {
+      await page.locator(".list .row").first().click();
+      await expect.poll(() => page.locator(".keybar").isVisible()).toBe(true);
+
+      const box = () =>
+        page.evaluate(() => {
+          const g = (sel: string) => {
+            const el = document.querySelector(sel) as HTMLElement;
+            const r = el.getBoundingClientRect();
+            return { top: r.top, bottom: r.bottom };
+          };
+          const log = document.getElementById("log")!;
+          const cs = getComputedStyle(log);
+          const r = log.getBoundingClientRect();
+          return {
+            head: g(".rhead"),
+            log: r.top,
+            // where the xterm grid is actually allowed to paint
+            logContentBottom: r.bottom - (parseFloat(cs.paddingBottom) || 0),
+            keybar: g(".keybar").top,
+          };
+        });
+
+      const before = await box();
+      expect(before.log).toBeGreaterThanOrEqual(before.head.bottom - 1); // header reserves space
+
+      await page.locator("#rmenubtn").click();
+      await page.locator("#islandsToggle").check();
+      await expect.poll(async () => (await box()).log).toBeLessThan(before.log);
+
+      const after = await box();
+      // top: the pane now starts at the very top of the header, i.e. the grid
+      // paints behind it instead of below it
+      expect(after.log).toBeLessThanOrEqual(after.head.top + 1);
+      // bottom: unchanged — the key bar still sits below everything the grid
+      // can paint into
+      expect(after.logContentBottom).toBeLessThanOrEqual(after.keybar + 1);
+      // (1px of slack: the header height is fractional, so pulling .log up by it
+      // reshuffles sub-pixel rounding on the bottom edge too)
+      expect(Math.abs(after.logContentBottom - before.logContentBottom)).toBeLessThanOrEqual(1);
+    } finally {
+      await ctx.close();
+    }
+  });
+
   it("new-agent modal: Working dir sits under Host, autocompletes, CLI needs an explicit pick", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
