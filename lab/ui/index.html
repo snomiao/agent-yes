@@ -3756,7 +3756,7 @@
       // sparkline with current rates (↓ output from the agent, ↑ input to it).
       function diagTipHtml() {
         const caps = termCaps();
-        if (!caps) return "";
+        if (!caps) return perfRowsHtml; // perf section is browser-side, not terminal-gated
         const you = caps.cols + "×" + caps.rows;
         const ag = agentSize ? agentSize.cols + "×" + agentSize.rows : null;
         const vp =
@@ -9155,8 +9155,10 @@ my.translate = async (text, lang) => {
       (function () {
         const pill = $("ctype");
         if (!pill) return;
-        const tip = pill.querySelector(".ctip");
-        if (!tip) return;
+        // The .ctip tooltip is injected dynamically by paintHeaderBadge() (it only
+        // exists once an agent's connection pill renders), so resolve it LAZILY on
+        // each event instead of capturing it at startup (it would be null here).
+        const tipEl = () => pill.querySelector(".ctip");
         const KEY = "ay.ctipPos";
         const HANDLE = 24; // px at the tooltip top that acts as the drag handle
         const THRESH = 4; // px of travel before a press counts as a drag
@@ -9164,8 +9166,8 @@ my.translate = async (text, lang) => {
         let drag = null;
         let suppressClick = false;
 
-        function apply() {
-          if (!pos) return;
+        function apply(tip) {
+          if (!pos || !tip) return;
           const tr = tip.getBoundingClientRect();
           if (!tr.width) return; // not rendered yet
           const maxX = Math.max(0, window.innerWidth - tr.width - 8);
@@ -9178,16 +9180,26 @@ my.translate = async (text, lang) => {
           const o = JSON.parse(localStorage.getItem(KEY) || "null");
           if (o && isFinite(o.x) && isFinite(o.y)) pos = { x: +o.x, y: +o.y };
         } catch {}
-        apply();
-        if (typeof ResizeObserver === "function") new ResizeObserver(apply).observe(tip);
-        else addEventListener("resize", apply);
+        if (typeof ResizeObserver === "function") {
+          // Re-apply once the tip first appears, then keep observing it.
+          const ro = new ResizeObserver(() => apply(tipEl()));
+          ro.observe(pill);
+        } else {
+          addEventListener("resize", () => apply(tipEl()));
+        }
 
         function unpin() {
           pill.classList.remove("pinned");
-          tip.classList.remove("dragging");
+          const tip = tipEl();
+          if (tip) tip.classList.remove("dragging");
           // Revert inline offsets so hover auto-positioning takes over again.
-          tip.style.left = "";
-          tip.style.top = "";
+          if (tip) {
+            tip.style.left = "";
+            tip.style.top = "";
+            tip.style.right = "";
+          }
+          // Restore the saved intent (without applying), so a later re-pin starts
+          // from a remembered spot rather than forgetting it.
         }
 
         pill.addEventListener("click", (e) => {
@@ -9204,19 +9216,28 @@ my.translate = async (text, lang) => {
           unpin();
         });
 
-        // Drag only the tooltip's top handle while pinned.
-        tip.addEventListener("pointerdown", (e) => {
+        // Drag the tooltip's top handle while pinned. Delegated on the pill (the
+        // tooltip is a child, so its pointer events bubble up here).
+        pill.addEventListener("pointerdown", (e) => {
           if (e.pointerType === "mouse" && e.button !== 0) return;
           if (!pill.classList.contains("pinned")) return;
+          const tip = tipEl();
+          if (!tip) return;
           const tr = tip.getBoundingClientRect();
-          if (e.clientY - tr.top > HANDLE) return; // not on the handle
+          if (!tr.width) return;
+          if (e.clientY - tr.top > HANDLE && !tip.contains(e.target)) return; // only via the handle
+          // The handle itself lives inside the tip; hit-test against it directly.
+          if (!tip.contains(e.target)) return;
+          if (e.clientY - tr.top > HANDLE) return;
           drag = { id: e.pointerId, x: e.clientX, y: e.clientY, ox: tr.left, oy: tr.top, moved: false };
           suppressClick = false;
           try { tip.setPointerCapture(e.pointerId); } catch {}
           e.preventDefault();
         });
-        tip.addEventListener("pointermove", (e) => {
+        pill.addEventListener("pointermove", (e) => {
           if (!drag || e.pointerId !== drag.id) return;
+          const tip = tipEl();
+          if (!tip) return;
           const dx = e.clientX - drag.x;
           const dy = e.clientY - drag.y;
           if (!drag.moved) {
@@ -9226,26 +9247,28 @@ my.translate = async (text, lang) => {
           }
           e.preventDefault();
           pos = { x: drag.ox + dx, y: drag.oy + dy };
-          apply();
+          apply(tip);
         });
         const end = (e) => {
           if (!drag || e.pointerId !== drag.id) return;
           const moved = drag.moved;
+          const tip = tipEl();
           drag = null;
-          tip.classList.remove("dragging");
-          try { tip.releasePointerCapture(e.pointerId); } catch {}
+          if (tip) tip.classList.remove("dragging");
+          if (tip) { try { tip.releasePointerCapture(e.pointerId); } catch {} }
           if (!moved) return;
-          pos = {
-            x: parseFloat(tip.style.left) || 8,
-            y: parseFloat(tip.style.top) || 8,
-          };
+          if (tip) {
+            pos = {
+              x: parseFloat(tip.style.left) || 8,
+              y: parseFloat(tip.style.top) || 8,
+            };
+          }
           try { localStorage.setItem(KEY, JSON.stringify(pos)); } catch {}
           suppressClick = true;
-          // Swallow the synthetic click a drag emits (would toggle pin off).
           setTimeout(() => (suppressClick = false), 0);
         };
-        tip.addEventListener("pointerup", end);
-        tip.addEventListener("pointercancel", end);
+        pill.addEventListener("pointerup", end);
+        pill.addEventListener("pointercancel", end);
       })();
       boot();
     </script>
