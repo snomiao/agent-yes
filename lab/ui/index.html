@@ -144,7 +144,10 @@
       }
 
       /* ---- left: list ---- */
+      /* position:relative anchors the floating "+ New agent" FAB (see .newbtn)
+         to this panel, so it rides the splitter instead of the viewport. */
       .left {
+        position: relative;
         display: flex;
         flex-direction: column;
         min-width: 0;
@@ -1053,25 +1056,81 @@
         margin-top: 16px;
       }
 
-      /* new-agent button (header) + spawn form (reuses the launch overlay shell) */
+      /* new-agent button (floating FAB) + spawn form (reuses the launch overlay shell) */
       .metaright {
         display: flex;
         align-items: center;
         gap: 10px;
       }
+      /* Floats over the bottom-right of the left panel and can be dragged
+         anywhere inside it (position persisted as right/bottom offsets — see the
+         drag IIFE near the splitter's). z-index sits above the list + its wire
+         overlay but below every modal/overlay, so it never covers a dialog.
+         The solid-accent look here is also the no-backdrop-filter fallback:
+         translucent without a blur behind it would be unreadable over rows. */
       .newbtn {
+        position: absolute;
+        right: 14px;
+        bottom: max(14px, var(--sab));
+        z-index: 10;
         background: var(--accent);
         color: var(--bg);
-        border: 0;
-        border-radius: 7px;
+        border: 1px solid transparent;
+        border-radius: 999px;
         font-weight: 600;
         font-size: 11.5px;
-        padding: 4px 11px;
+        padding: 7px 14px;
         cursor: pointer;
         line-height: 1.6;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
+        touch-action: none; /* pointermove must not be stolen by scroll-to-pan */
+        user-select: none;
+        -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent;
+        transition:
+          background 0.18s ease,
+          color 0.18s ease,
+          box-shadow 0.18s ease;
       }
       .newbtn:hover {
         filter: brightness(1.12);
+      }
+      .newbtn.dragging {
+        cursor: grabbing;
+        transition: none; /* follow the pointer 1:1, don't lag behind it */
+      }
+      /* Liquid-glass idle state, only where the platform can actually blur what's
+         behind the button (Safari/Chrome/Edge, and Firefox with the pref on).
+         Unfocused = translucent tinted glass with a specular rim; hover / keyboard
+         focus / drag snap it back to the opaque accent pill above. */
+      @supports (
+        ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) and
+          (background: color-mix(in srgb, red, blue))
+      ) {
+        .newbtn {
+          background: color-mix(in srgb, var(--accent) 16%, transparent);
+          color: var(--accent);
+          border-color: color-mix(in srgb, var(--fg) 18%, transparent);
+          -webkit-backdrop-filter: blur(14px) saturate(180%);
+          backdrop-filter: blur(14px) saturate(180%);
+          box-shadow:
+            0 4px 14px rgba(0, 0, 0, 0.22),
+            inset 0 1px 0 color-mix(in srgb, #fff 34%, transparent),
+            inset 0 -1px 0 color-mix(in srgb, #000 14%, transparent);
+        }
+        .newbtn:hover,
+        .newbtn:focus-visible,
+        .newbtn.dragging {
+          background: var(--accent);
+          color: var(--bg);
+          border-color: transparent;
+          box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .newbtn {
+          transition: none;
+        }
       }
       .viewbtn {
         background: transparent;
@@ -1181,8 +1240,10 @@
         overflow-y: auto;
         flex: 1;
         min-height: 0;
-        /* clear the home-indicator / gesture bar so the last row stays tappable */
-        padding-bottom: var(--sab);
+        /* clear the home-indicator / gesture bar so the last row stays tappable,
+           plus room for the floating New-agent FAB parked at the bottom-right —
+           without it the last row can never be scrolled out from under the button. */
+        padding-bottom: calc(var(--sab) + 60px);
       }
       .row {
         padding: 11px 18px;
@@ -2079,15 +2140,21 @@
                   </button>
                 </div>
               </span>
-              <button id="newbtn" class="newbtn" title="spawn a new agent on this fleet">
-                + New agent
-              </button>
               <span id="conn" class="connbadge" title="rooms — click to manage">● local</span>
             </span>
           </div>
           <div class="rooms" id="rooms" style="display: none"></div>
         </div>
         <div class="list" id="list"></div>
+        <!-- Floating spawn FAB: last child of .left so it paints over the list;
+             absolutely positioned + draggable inside the panel (see .newbtn). -->
+        <button
+          id="newbtn"
+          class="newbtn"
+          title="spawn a new agent on this fleet — drag to move the button"
+        >
+          + New agent
+        </button>
       </div>
 
       <div class="splitter" id="splitter" title="drag to resize"></div>
@@ -8829,6 +8896,115 @@ my.translate = async (text, lang) => {
         };
         sp.addEventListener("pointerup", end);
         sp.addEventListener("pointercancel", end);
+      })();
+
+      // ---- draggable floating "+ New agent" FAB ------------------------------
+      // The button floats over the bottom-right of the left panel and can be
+      // parked anywhere inside it. The position is stored as offsets from the
+      // panel's RIGHT/BOTTOM edges (not left/top) so it stays put when the
+      // splitter resizes the panel or the layout flips to the mobile column.
+      (function () {
+        const btn = $("newbtn");
+        const left = document.querySelector(".left");
+        if (!btn || !left) return;
+        const KEY = "ay.newbtnPos";
+        const EDGE = 8; // never let the button hang off the panel
+        const THRESH = 5; // px of travel before a press counts as a drag
+        let pos = null; // {r,b} the user's intent, pre-clamp
+        let drag = null;
+        let suppressClick = false;
+
+        // Clamp against the CURRENT panel box on every apply: a saved position
+        // from a wide panel must not push the button out of a narrow one, but
+        // `pos` keeps the original intent so widening restores it.
+        function apply() {
+          if (!pos) return;
+          const lr = left.getBoundingClientRect();
+          if (!lr.width || !lr.height) return; // panel hidden (mobile detail view)
+          const maxR = Math.max(EDGE, lr.width - btn.offsetWidth - EDGE);
+          const maxB = Math.max(EDGE, lr.height - btn.offsetHeight - EDGE);
+          btn.style.right = Math.min(Math.max(pos.r, EDGE), maxR) + "px";
+          btn.style.bottom = Math.min(Math.max(pos.b, EDGE), maxB) + "px";
+        }
+
+        try {
+          const s = JSON.parse(localStorage.getItem(KEY) || "null");
+          if (s && isFinite(s.r) && isFinite(s.b)) pos = { r: +s.r, b: +s.b };
+        } catch {}
+        apply();
+        // Re-clamp whenever the panel box changes — window resize, splitter drag
+        // (which never fires a window resize), or the mobile column flip.
+        if (typeof ResizeObserver === "function") new ResizeObserver(apply).observe(left);
+        else addEventListener("resize", apply);
+
+        btn.addEventListener("pointerdown", (e) => {
+          if (e.pointerType === "mouse" && e.button !== 0) return;
+          const lr = left.getBoundingClientRect();
+          const br = btn.getBoundingClientRect();
+          drag = {
+            id: e.pointerId,
+            x: e.clientX,
+            y: e.clientY,
+            r: lr.right - br.right,
+            b: lr.bottom - br.bottom,
+            moved: false,
+          };
+          suppressClick = false;
+          try {
+            btn.setPointerCapture(e.pointerId);
+          } catch {}
+        });
+
+        btn.addEventListener("pointermove", (e) => {
+          if (!drag || e.pointerId !== drag.id) return;
+          const dx = e.clientX - drag.x;
+          const dy = e.clientY - drag.y;
+          if (!drag.moved) {
+            if (Math.abs(dx) + Math.abs(dy) < THRESH) return;
+            drag.moved = true;
+            btn.classList.add("dragging");
+          }
+          e.preventDefault(); // no text selection / scroll chaining mid-drag
+          pos = { r: drag.r - dx, b: drag.b - dy };
+          apply();
+        });
+
+        const end = (e) => {
+          if (!drag || e.pointerId !== drag.id) return;
+          const moved = drag.moved;
+          drag = null;
+          btn.classList.remove("dragging");
+          try {
+            btn.releasePointerCapture(e.pointerId);
+          } catch {}
+          if (!moved) return;
+          // Persist what's actually on screen (the clamped value), so a later
+          // resize can't spring the button back to somewhere off-panel.
+          pos = { r: parseFloat(btn.style.right) || EDGE, b: parseFloat(btn.style.bottom) || EDGE };
+          try {
+            localStorage.setItem(KEY, JSON.stringify(pos));
+          } catch {}
+          suppressClick = true; // pointerup on a <button> still emits a click
+        };
+        btn.addEventListener("pointerup", end);
+        btn.addEventListener("pointercancel", end);
+
+        // Swallow the click a finished drag synthesizes. It has to be a CAPTURE
+        // listener on an ancestor: capture on document runs before the target's
+        // own bubble listener (showNew), which was registered first and would
+        // otherwise win.
+        document.addEventListener(
+          "click",
+          (e) => {
+            if (!suppressClick) return;
+            suppressClick = false;
+            if (e.target === btn || btn.contains(e.target)) {
+              e.stopPropagation();
+              e.preventDefault();
+            }
+          },
+          true,
+        );
       })();
       boot();
     </script>
