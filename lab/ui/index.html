@@ -235,6 +235,7 @@
         top: 150%;
         right: 0;
         z-index: 30;
+        pointer-events: auto; /* pinned + draggable overlay needs hit-testing */
         min-width: 240px;
         padding: 8px 10px;
         background: var(--panel); /* fallback when color-mix is unsupported */
@@ -256,6 +257,13 @@
       }
       .ctype:hover .ctip {
         display: block;
+      }
+      .ctype.pinned .ctip {
+        display: block; /* stays open until unpinned — drag-movable, click to toggle */
+        cursor: grab;
+      }
+      .ctype.pinned .ctip.dragging {
+        cursor: grabbing;
       }
       .ctip-h {
         color: var(--muted);
@@ -653,31 +661,6 @@
         text-align: center;
         font-variant-numeric: tabular-nums;
         color: var(--muted);
-      }
-      /* Live performance HUD — opt-in via the ⋯ menu, hidden by default. */
-      .perfhud {
-        position: absolute;
-        top: 44px;
-        right: 12px;
-        z-index: 14;
-        background: rgba(13, 17, 23, 0.82);
-        color: var(--fg);
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        padding: 7px 10px;
-        font-family: var(--mono);
-        font-size: 11px;
-        line-height: 1.5;
-        pointer-events: none;
-        white-space: pre;
-        backdrop-filter: blur(3px);
-      }
-      .perfhud[hidden] {
-        display: none;
-      }
-      .perfhud b {
-        color: var(--accent);
-        font-weight: 600;
       }
       /* Per-peer connection-type tag on peer-group headers in the tree. */
       .ghead .ctag {
@@ -2382,7 +2365,6 @@
           ></textarea>
           <button type="submit" class="cmpsend" title="Send to agent">Send</button>
         </form>
-        <div class="perfhud" id="perfhud" hidden></div>
       </div>
     </div>
 
@@ -3644,25 +3626,37 @@
         /* longtask API unavailable (Safari) — jank line just stays 0 */
       }
       const fmtBytes = (b) => (b >= 1024 ? (b / 1024).toFixed(1) + " KB" : Math.round(b) + " B");
+      // The perf readout now lives INSIDE the connection pill's hover tooltip (no
+      // standalone .perfhud div). This 1s tick samples the ring into a ready-to-render
+      // section; when the tooltip is pinned open we re-render it live so the numbers
+      // update while the user watches.
+      let perfRowsHtml = ""; // last rendered perf section (measured while perfOn)
       setInterval(() => {
-        const el = $("perfhud");
-        if (!perfOn || !el) {
+        if (!perfOn) {
           perfReset();
+          if (perfRowsHtml) {
+            perfRowsHtml = "";
+            // Repaint the pill tooltip so the stale perf section drops out.
+            paintHeaderBadge();
+          }
           return;
         }
         const fps = perf.frames; // window is ~1s
-        el.innerHTML =
-          `<b>fps</b>   ${fps}\n` +
-          `<b>echo</b>  ${perf.echoMs == null ? "—" : perf.echoMs + " ms"}\n` +
-          `<b>keys</b>  ${perf.inEvents}/s  ${fmtBytes(perf.inBytes)}/s\n` +
-          `<b>out</b>   ${perf.outWrites}/s  ${fmtBytes(perf.outBytes)}/s\n` +
-          `<b>jank</b>  ${Math.round(perf.jankMs)} ms/s`;
+        const next =
+          '<div class="ctip-sec ctip-perf">' +
+          `<div>fps&nbsp;&nbsp;${fps}</div>` +
+          `<div>echo&nbsp;${perf.echoMs == null ? "—" : perf.echoMs + " ms"}</div>` +
+          `<div>keys&nbsp;${perf.inEvents}/s&nbsp;${fmtBytes(perf.inBytes)}/s</div>` +
+          `<div>out&nbsp;&nbsp;${perf.outWrites}/s&nbsp;${fmtBytes(perf.outBytes)}/s</div>` +
+          `<div>jank&nbsp;${Math.round(perf.jankMs)} ms/s</div></div>`;
+        perfRowsHtml = next;
         perfReset(); // note: echoMs is preserved (last keystroke round-trip stays shown)
+        // Live-update only the pinned tooltip; hover-only ones re-render on next paint.
+        const ctype = $("ctype");
+        if (ctype && ctype.classList.contains("pinned")) paintHeaderBadge();
       }, 1000);
       function setPerfHud(on) {
         perfOn = on;
-        const el = $("perfhud");
-        if (el) el.hidden = !on;
         const cb = $("perfToggle");
         if (cb) cb.checked = on;
         try {
@@ -3670,8 +3664,12 @@
         } catch {}
         if (on) {
           perfReset();
+          perfRowsHtml = ""; // first paint measures fresh
           if (!perfRaf) perfRaf = requestAnimationFrame(perfFrameLoop);
-          if (el) el.textContent = "measuring…";
+          paintHeaderBadge();
+        } else {
+          perfRowsHtml = "";
+          paintHeaderBadge();
         }
       }
       // ---- header badge diagnostics: per-second I/O sparkline + terminal caps +
@@ -3758,7 +3756,7 @@
       // sparkline with current rates (↓ output from the agent, ↑ input to it).
       function diagTipHtml() {
         const caps = termCaps();
-        if (!caps) return "";
+        if (!caps) return perfRowsHtml; // perf section is browser-side, not terminal-gated
         const you = caps.cols + "×" + caps.rows;
         const ag = agentSize ? agentSize.cols + "×" + agentSize.rows : null;
         const vp =
@@ -3784,7 +3782,8 @@
           `<div class="ctip-sec">${vp}</div>` +
           `<div class="ctip-sec">${capHtml}</div>` +
           `<div class="ctip-sec">${traffic}</div>` +
-          (viewers ? `<div class="ctip-sec">${viewers}</div>` : "")
+          (viewers ? `<div class="ctip-sec">${viewers}</div>` : "") +
+          (perfRowsHtml || "")
         );
       }
       // Other viewers watching THIS agent (we exclude ourselves) + their viewports.
@@ -9146,6 +9145,130 @@ my.translate = async (text, lang) => {
           },
           true,
         );
+      })();
+
+      // ---- connection-pill tooltip: click-to-pin + drag-move -----------------
+      // The pill's debug tooltip (.ctip) opens on hover; clicking the pill pins it
+      // open (`.pinned`), and a second click (or clicking elsewhere) unpins. While
+      // pinned the tooltip can be dragged to float anywhere via a drag handle on its
+      // own top edge — position persists per session as viewport top/left offsets.
+      (function () {
+        const pill = $("ctype");
+        if (!pill) return;
+        // The .ctip tooltip is injected dynamically by paintHeaderBadge() (it only
+        // exists once an agent's connection pill renders), so resolve it LAZILY on
+        // each event instead of capturing it at startup (it would be null here).
+        const tipEl = () => pill.querySelector(".ctip");
+        const KEY = "ay.ctipPos";
+        const HANDLE = 24; // px at the tooltip top that acts as the drag handle
+        const THRESH = 4; // px of travel before a press counts as a drag
+        let pos = null; // {x,y} viewport top-left of the tooltip, pre-clamp
+        let drag = null;
+        let suppressClick = false;
+
+        function apply(tip) {
+          if (!pos || !tip) return;
+          const tr = tip.getBoundingClientRect();
+          if (!tr.width) return; // not rendered yet
+          const maxX = Math.max(0, window.innerWidth - tr.width - 8);
+          const maxY = Math.max(0, window.innerHeight - tr.height - 8);
+          tip.style.left = Math.min(Math.max(pos.x, 8), maxX) + "px";
+          tip.style.top = Math.min(Math.max(pos.y, 8), maxY) + "px";
+          tip.style.right = "auto";
+        }
+        try {
+          const o = JSON.parse(localStorage.getItem(KEY) || "null");
+          if (o && isFinite(o.x) && isFinite(o.y)) pos = { x: +o.x, y: +o.y };
+        } catch {}
+        if (typeof ResizeObserver === "function") {
+          // Re-apply once the tip first appears, then keep observing it.
+          const ro = new ResizeObserver(() => apply(tipEl()));
+          ro.observe(pill);
+        } else {
+          addEventListener("resize", () => apply(tipEl()));
+        }
+
+        function unpin() {
+          pill.classList.remove("pinned");
+          const tip = tipEl();
+          if (tip) tip.classList.remove("dragging");
+          // Revert inline offsets so hover auto-positioning takes over again.
+          if (tip) {
+            tip.style.left = "";
+            tip.style.top = "";
+            tip.style.right = "";
+          }
+          // Restore the saved intent (without applying), so a later re-pin starts
+          // from a remembered spot rather than forgetting it.
+        }
+
+        pill.addEventListener("click", (e) => {
+          if (suppressClick) return;
+          e.stopPropagation();
+          if (pill.classList.contains("pinned")) unpin();
+          else pill.classList.add("pinned");
+        });
+
+        // Click anywhere outside the pill region unpins (only when pinned).
+        document.addEventListener("pointerdown", (e) => {
+          if (!pill.classList.contains("pinned")) return;
+          if (pill.contains(e.target)) return;
+          unpin();
+        });
+
+        // Drag the tooltip's top handle while pinned. Delegated on the pill (the
+        // tooltip is a child, so its pointer events bubble up here).
+        pill.addEventListener("pointerdown", (e) => {
+          if (e.pointerType === "mouse" && e.button !== 0) return;
+          if (!pill.classList.contains("pinned")) return;
+          const tip = tipEl();
+          if (!tip) return;
+          const tr = tip.getBoundingClientRect();
+          if (!tr.width) return;
+          if (e.clientY - tr.top > HANDLE && !tip.contains(e.target)) return; // only via the handle
+          // The handle itself lives inside the tip; hit-test against it directly.
+          if (!tip.contains(e.target)) return;
+          if (e.clientY - tr.top > HANDLE) return;
+          drag = { id: e.pointerId, x: e.clientX, y: e.clientY, ox: tr.left, oy: tr.top, moved: false };
+          suppressClick = false;
+          try { tip.setPointerCapture(e.pointerId); } catch {}
+          e.preventDefault();
+        });
+        pill.addEventListener("pointermove", (e) => {
+          if (!drag || e.pointerId !== drag.id) return;
+          const tip = tipEl();
+          if (!tip) return;
+          const dx = e.clientX - drag.x;
+          const dy = e.clientY - drag.y;
+          if (!drag.moved) {
+            if (Math.abs(dx) + Math.abs(dy) < THRESH) return;
+            drag.moved = true;
+            tip.classList.add("dragging");
+          }
+          e.preventDefault();
+          pos = { x: drag.ox + dx, y: drag.oy + dy };
+          apply(tip);
+        });
+        const end = (e) => {
+          if (!drag || e.pointerId !== drag.id) return;
+          const moved = drag.moved;
+          const tip = tipEl();
+          drag = null;
+          if (tip) tip.classList.remove("dragging");
+          if (tip) { try { tip.releasePointerCapture(e.pointerId); } catch {} }
+          if (!moved) return;
+          if (tip) {
+            pos = {
+              x: parseFloat(tip.style.left) || 8,
+              y: parseFloat(tip.style.top) || 8,
+            };
+          }
+          try { localStorage.setItem(KEY, JSON.stringify(pos)); } catch {}
+          suppressClick = true;
+          setTimeout(() => (suppressClick = false), 0);
+        };
+        pill.addEventListener("pointerup", end);
+        pill.addEventListener("pointercancel", end);
       })();
       boot();
     </script>
