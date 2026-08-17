@@ -26,6 +26,70 @@ fn read_jsonl(path: &std::path::Path) -> Vec<Value> {
         .collect()
 }
 
+/// How far back a windowed scan reads. The edge views keep only records newer
+/// than `READ_WINDOW_MS`, so everything before that is parsed and thrown away:
+/// on one live fleet a single `/api/edges` parsed 22 MB across 43 outboxes and
+/// kept **one** line — twice a second, per viewer. 256 KB is orders of
+/// magnitude more than a minute of traffic produces, and still one read.
+const TAIL_SCAN_BYTES: u64 = 256 * 1024;
+
+/// `read_jsonl` for append-only logs that are only ever consumed through a
+/// recent time window. Two bounds, in order of how much they save:
+///
+///  1. **mtime gate** — a file last written before the window opened cannot
+///     hold an in-window record, because `at` is stamped when the line is
+///     appended, so mtime is never older than the newest `at`. Such a file is
+///     skipped without being opened. On a fleet where most agents are idle
+///     this drops nearly every file.
+///  2. **bounded backscan** — read at most the trailing `TAIL_SCAN_BYTES`
+///     rather than the whole file, dropping the leading partial line whenever
+///     the read didn't start at offset 0.
+///
+/// Deliberately NOT "stop at the first out-of-window line": several agents
+/// append to one project's outbox concurrently, so `at` is not monotonic
+/// between adjacent lines and an early break can miss a record a slower writer
+/// interleaved. Scanning the whole window stays cheap once the window is
+/// bounded in bytes.
+fn read_jsonl_window(path: &std::path::Path, now: i64, window_ms: i64) -> Vec<Value> {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return vec![];
+    };
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+    // mtime == 0 means "couldn't read it" — scan rather than silently skip. A
+    // future-dated mtime (clock skew) also falls through to the scan.
+    if mtime > 0 && now - mtime > window_ms {
+        return vec![];
+    }
+    let size = meta.len();
+    let start = size.saturating_sub(TAIL_SCAN_BYTES);
+    let Ok(mut f) = std::fs::File::open(path) else {
+        return vec![];
+    };
+    use std::io::{Read, Seek, SeekFrom};
+    if f.seek(SeekFrom::Start(start)).is_err() {
+        return vec![];
+    }
+    let mut buf = Vec::new();
+    if f.read_to_end(&mut buf).is_err() {
+        return vec![];
+    }
+    let text = String::from_utf8_lossy(&buf);
+    let mut lines = text.lines();
+    if start > 0 {
+        lines.next(); // partial first line — the tail of an earlier record
+    }
+    lines
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect()
+}
+
 /// GET /api/notes — pid → note, from the append-only ~/.agent-yes/notes.jsonl
 /// (last line wins; an empty note deletes the entry).
 pub fn notes(home: &std::path::Path) -> Value {
@@ -57,7 +121,7 @@ pub fn read_edges(home: &std::path::Path) -> Vec<Value> {
     let now = now_ms();
     // Append-only log, last write per (by, target) wins.
     let mut latest: HashMap<(String, i64), i64> = HashMap::new();
-    for v in read_jsonl(&home.join("reads.jsonl")) {
+    for v in read_jsonl_window(&home.join("reads.jsonl"), now, READ_WINDOW_MS) {
         let (Some(by), Some(target), Some(at)) = (
             v.get("by").and_then(|x| x.as_str()),
             v.get("target").and_then(|x| x.as_i64()),
@@ -86,10 +150,12 @@ pub fn message_edges(cwds: &[String]) -> Vec<Value> {
     let now = now_ms();
     let mut best: HashMap<(i64, i64), (i64, Option<String>)> = HashMap::new();
     for cwd in cwds.iter().collect::<HashSet<_>>() {
-        for rec in read_jsonl(
+        for rec in read_jsonl_window(
             &std::path::Path::new(cwd)
                 .join(".agent-yes")
                 .join("outbox.jsonl"),
+            now,
+            READ_WINDOW_MS,
         ) {
             let Some(at) = rec.get("at").and_then(|x| x.as_i64()) else {
                 continue;
@@ -260,5 +326,108 @@ mod tests {
         let text = "日本語のテキストがたくさん並んでいる状態で needle を探す 日本語";
         let h = search_hit(1, "claude", "/ws", text, "needle").unwrap();
         assert!(h["snippet"].as_str().unwrap().contains("needle"));
+    }
+
+    // ---- read_jsonl_window ---------------------------------------------------
+
+    /// Write `body` and stamp the file's mtime `age_ms` into the past, which is
+    /// what the mtime gate keys off.
+    fn write_aged(path: &std::path::Path, body: &str, age_ms: u64) {
+        std::fs::write(path, body).unwrap();
+        let when = std::time::SystemTime::now() - std::time::Duration::from_millis(age_ms);
+        let f = std::fs::File::options().write(true).open(path).unwrap();
+        f.set_modified(when).unwrap();
+    }
+
+    #[test]
+    fn window_scan_skips_a_file_whose_mtime_predates_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("outbox.jsonl");
+        let now = now_ms();
+        // In-window CONTENT, out-of-window mtime. The gate must still skip it:
+        // an append stamps both, so this combination cannot occur in practice,
+        // and asserting on it is what proves the read was actually elided.
+        write_aged(&p, &format!("{{\"at\":{now}}}\n"), 10 * 60_000);
+        assert!(read_jsonl_window(&p, now, READ_WINDOW_MS).is_empty());
+    }
+
+    #[test]
+    fn window_scan_reads_a_recently_written_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("outbox.jsonl");
+        let now = now_ms();
+        write_aged(&p, &format!("{{\"at\":{now},\"n\":1}}\n"), 0);
+        let got = read_jsonl_window(&p, now, READ_WINDOW_MS);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0]["n"], json!(1));
+    }
+
+    #[test]
+    fn window_scan_keeps_the_tail_and_drops_the_partial_first_line() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("outbox.jsonl");
+        let now = now_ms();
+        // Overshoot TAIL_SCAN_BYTES with padded records so the read starts
+        // mid-line, then assert the last record survives and the count is
+        // bounded by the scan window rather than the file.
+        let pad = "x".repeat(4096);
+        let mut body = String::new();
+        for i in 0..200 {
+            body.push_str(&format!("{{\"at\":{now},\"n\":{i},\"pad\":\"{pad}\"}}\n"));
+        }
+        write_aged(&p, &body, 0);
+        assert!(std::fs::metadata(&p).unwrap().len() > TAIL_SCAN_BYTES);
+        let got = read_jsonl_window(&p, now, READ_WINDOW_MS);
+        assert!(!got.is_empty());
+        assert_eq!(got.last().unwrap()["n"], json!(199));
+        assert!(got.len() < 200, "scan was not bounded: {} lines", got.len());
+        // Every parsed line is whole — a partial leading line would fail to
+        // deserialize and be dropped silently, so check the first one directly.
+        assert!(got[0]["n"].is_number());
+    }
+
+    #[test]
+    fn window_scan_tolerates_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("nope.jsonl");
+        assert!(read_jsonl_window(&p, now_ms(), READ_WINDOW_MS).is_empty());
+    }
+
+    #[test]
+    fn message_edges_still_reports_a_fresh_send() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("repo-alpha");
+        std::fs::create_dir_all(cwd.join(".agent-yes")).unwrap();
+        let now = now_ms();
+        write_aged(
+            &cwd.join(".agent-yes").join("outbox.jsonl"),
+            &format!(
+                "{{\"at\":{},\"from\":{{\"pid\":1111}},\"to\":{{\"pid\":2222}},\"kind\":\"send\"}}\n",
+                now - 1_000
+            ),
+            0,
+        );
+        let edges = message_edges(&[cwd.to_string_lossy().to_string()]);
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0]["by"], json!(1111));
+        assert_eq!(edges[0]["target"], json!(2222));
+        assert_eq!(edges[0]["kind"], json!("send"));
+    }
+
+    #[test]
+    fn message_edges_drops_a_stale_outbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let cwd = dir.path().join("repo-alpha");
+        std::fs::create_dir_all(cwd.join(".agent-yes")).unwrap();
+        let now = now_ms();
+        write_aged(
+            &cwd.join(".agent-yes").join("outbox.jsonl"),
+            &format!(
+                "{{\"at\":{},\"from\":{{\"pid\":1111}},\"to\":{{\"pid\":2222}}}}\n",
+                now - 10 * 60_000
+            ),
+            10 * 60_000,
+        );
+        assert!(message_edges(&[cwd.to_string_lossy().to_string()]).is_empty());
     }
 }
