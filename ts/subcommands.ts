@@ -484,6 +484,11 @@ const SEND_SUBMIT_MAX_RETRIES = 2; // total attempts = 1 + this
 // we give up, then send anyway with a warning rather than dropping the message.
 const SEND_TYPING_POLL_MS = 200;
 const SEND_TYPING_MAX_WAIT_MS = 10_000;
+// `ay send` body length cap. Longer text isn't a prompt to type at a live CLI's
+// stdin — it's a document, and pasting it mid-session fuses with / truncates the
+// agent's terminal. Reject it outright and point at the stdin/file path so the
+// full text survives instead of being silently mangled by a bracketed paste.
+const SEND_BODY_MAX_CHARS = 4096;
 
 /**
  * Whether `name` is a subcommand. `managerCommands` (default true, for the
@@ -3424,6 +3429,18 @@ async function cmdSend(rest: string[]): Promise<number> {
     }
   } else {
     body = rawMessage;
+  }
+
+  // Length cap: a body longer than this is a document, not a prompt — rejecting it
+  // is kinder than pasting it into a live CLI where bracketed-paste will fuse or
+  // truncate it. The `-` (stdin) path carries multi-line bodies verbatim too, so
+  // the hint points at a real alternative that doesn't silently lose text.
+  if (body.length > SEND_BODY_MAX_CHARS) {
+    throw new Error(
+      `message is ${body.length} chars, over the ${SEND_BODY_MAX_CHARS}-char limit. ` +
+        `Longer text isn't a terminal prompt — write it to a file and pipe it, ` +
+        `e.g. 'ay send <keyword> - < file.txt', or shorten to ≤${SEND_BODY_MAX_CHARS} chars.`,
+    );
   }
 
   // Who's sending, and have they actually looked at this target recently?
