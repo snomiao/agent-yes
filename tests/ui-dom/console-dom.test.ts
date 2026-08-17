@@ -290,14 +290,15 @@ describe("console DOM behaviour", () => {
       await expect.poll(() => page.locator("#omni").isVisible()).toBe(true);
 
       // "/" lists the commands; /restart, /kill, the /ws browser and the global
-      // /filter are all offered.
+      // /filter and /new are all offered.
       await page.fill("#omni-input", "/");
-      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(4);
+      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(5);
       const menu = (await page.locator("#omni-results").innerText()).toLowerCase();
       expect(menu).toContain("restart");
       expect(menu).toContain("kill");
       expect(menu).toContain("workspaces");
       expect(menu).toContain("filter");
+      expect(menu).toContain("new");
 
       // "/restart" narrows to one row; ⏎ fires POST /api/restart for pid 101.
       await page.fill("#omni-input", "/restart");
@@ -317,6 +318,15 @@ describe("console DOM behaviour", () => {
       await expect.poll(() => posts.filter((x) => x.path === "/api/kill").length).toBe(1);
       const kill = posts.find((x) => x.path === "/api/kill")!;
       expect(kill.body.keyword).toBe("101");
+
+      // "/new" opens the "+ New agent" spawn form (the header button's handler).
+      await page.keyboard.press("Control+k");
+      await expect.poll(() => page.locator("#omni").isVisible()).toBe(true);
+      await page.fill("#omni-input", "/new");
+      await expect.poll(() => page.locator("#omni-results .omni-row").count()).toBe(1);
+      await page.keyboard.press("Enter");
+      await page.waitForSelector("#newform .lcard");
+      expect(await page.locator("#newform .lcard").count()).toBe(1);
     } finally {
       await ctx.close();
     }
