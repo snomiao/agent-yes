@@ -3754,26 +3754,38 @@
           rows: term.rows,
         };
       }
-      // Two overlaid polylines (output green, input accent) normalised to the window
-      // max, so a tiny sparkline shows the I/O shape at a glance.
-      function sparkSvg(hist, w, h) {
+      // Two-row heatmap of per-second I/O traffic: the OUT row (top, green) and IN
+      // row (bottom, accent), one column per second. Each cell's fill opacity is the
+      // log-scaled fraction of that second's bytes vs the window max, so a hot burst
+      // reads as a solid block and idle seconds fade to near-transparent. Replaces the
+      // two overlaid polylines — a per-second grid shows WHERE the traffic concentrated
+      // (bursts vs steady) far more legibly than two thin lines with the same area.
+      function trafficHeatmap(hist, w, h) {
         const n = hist.length;
         if (!n) return "";
         const max = Math.max(1, ...hist.map((s) => Math.max(s.i, s.o)));
-        const xs = (i) => (n === 1 ? w - 1 : (i / (n - 1)) * (w - 1));
-        const ys = (v) => h - 1 - (v / max) * (h - 2);
-        const poly = (k, color) =>
-          `<polyline fill="none" stroke="${color}" stroke-width="1" points="${hist
-            .map((s, i) => xs(i).toFixed(1) + "," + ys(s[k]).toFixed(1))
-            .join(" ")}"/>`;
-        return `<svg class="ctip-spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${poly("o", "var(--green)")}${poly("i", "var(--accent)")}</svg>`;
+        const colW = w / n;
+        const rowH = (h - 2) / 2; // 1px gap between the two rows
+        // Log-scaled intensity: 0→0, max→1, with a floor so even small traffic is faintly visible.
+        const alpha = (v) => (v <= 0 ? 0 : Math.min(1, Math.log1p(v) / Math.log1p(max)));
+        const cells = [];
+        for (let i = 0; i < n; i++) {
+          const x = i * colW;
+          const aOut = alpha(hist[i].o);
+          const aIn = alpha(hist[i].i);
+          cells.push(
+            `<rect x="${x.toFixed(2)}" y="0" width="${(colW - 0.5).toFixed(2)}" height="${rowH.toFixed(2)}" fill="var(--green)" opacity="${aOut.toFixed(2)}"/>`,
+            `<rect x="${x.toFixed(2)}" y="${(rowH + 2).toFixed(2)}" width="${(colW - 0.5).toFixed(2)}" height="${rowH.toFixed(2)}" fill="var(--accent)" opacity="${aIn.toFixed(2)}"/>`,
+          );
+        }
+        return `<svg class="ctip-spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" shape-rendering="crispEdges">${cells.join("")}</svg>`;
       }
       // The diagnostics block appended to the connection-pill hover tooltip: viewport
       // (deduped when OUR size matches the agent's), terminal caps, and the live I/O
       // sparkline with current rates (↓ output from the agent, ↑ input to it).
       function diagTipHtml() {
         const caps = termCaps();
-        if (!caps) return "";
+        if (!caps) return perfRowsHtml; // perf section is browser-side, not terminal-gated
         const you = caps.cols + "×" + caps.rows;
         const ag = agentSize ? agentSize.cols + "×" + agentSize.rows : null;
         const vp =
@@ -3792,7 +3804,7 @@
           .join("");
         const last = traf.hist[traf.hist.length - 1] || { i: 0, o: 0 };
         const traffic =
-          `<div class="ctip-traf"><span class="ctip-k">i/o</span>${sparkSvg(traf.hist, 96, 22) || "—"}</div>` +
+          `<div class="ctip-traf"><span class="ctip-k">i/o</span>${trafficHeatmap(traf.hist, 96, 22) || "—"}</div>` +
           `<div><span class="ctip-k"></span>↓ ${fmtBytes(last.o)}/s&nbsp;&nbsp;↑ ${fmtBytes(last.i)}/s</div>`;
         const viewers = presenceHtml();
         return (
@@ -7211,6 +7223,11 @@ my.translate = async (text, lang) => {
         // in runOmni before this builder runs. Needs no anchor: workspaces exist
         // independently of any open agent.
         if ("ws".startsWith(cmdTerm)) rows.push({ kind: "wshint" });
+        // "/new" — the same spawn form the "+ New agent" button opens, reachable
+        // from the palette. Global like /ws and /filter: spawning needs no open
+        // agent (showNew prefills from the selection when there happens to be
+        // one), so it is offered unconditionally.
+        if ("new".startsWith(cmdTerm)) rows.push({ kind: "new" });
         // "/filter [tokens…]" — global: sets the left panel's filter box (#q) to the
         // arguments, same tokens the box itself takes (space = AND, repo:x tags).
         // With no args it clears the filter. Needs no anchor agent — it acts on the
@@ -7468,6 +7485,14 @@ my.translate = async (text, lang) => {
                   <div class="omni-sub">browse every workspace on the fleet — spawn into idle checkouts &nbsp;·&nbsp; ⏎ to open</div>
                 </div></div>`;
             }
+            if (r.kind === "new") {
+              return `<div class="omni-row omni-spawn${sc}" data-i="${i}">
+                <span class="dot active"></span>
+                <div class="omni-main">
+                  <div class="omni-title">＋ New agent <span style="opacity:.55">/new</span></div>
+                  <div class="omni-sub">open the spawn form — pick host, working dir and CLI &nbsp;·&nbsp; ⏎ to open</div>
+                </div></div>`;
+            }
             if (r.kind === "wsinfo") {
               return `<div class="omni-row${sc}" data-i="${i}">
                 <div class="omni-main"><div class="omni-sub">${esc(r.text)}</div></div></div>`;
@@ -7722,6 +7747,15 @@ my.translate = async (text, lang) => {
           $("omni-input").value = "/ws ";
           runOmni();
           return; // stays open — the browser replaces the command list
+        }
+        // "/new" — hand off to the very same opener the "+ New agent" button
+        // uses, so the form (host default, cwd prefill, CLI chain) behaves
+        // identically however it was reached. Closes the palette first: the
+        // spawn form is a modal of its own, not a narrowing of the command list.
+        if (row && row.kind === "new") {
+          closeOmni(false);
+          showNew();
+          return;
         }
         if (row && row.kind === "wsinfo") return; // informational, not activatable
         if (row && row.kind === "ws") {
@@ -9241,8 +9275,10 @@ my.translate = async (text, lang) => {
       (function () {
         const pill = $("ctype");
         if (!pill) return;
-        const tip = pill.querySelector(".ctip");
-        if (!tip) return;
+        // The .ctip tooltip is injected dynamically by paintHeaderBadge() (it only
+        // exists once an agent's connection pill renders), so resolve it LAZILY on
+        // each event instead of capturing it at startup (it would be null here).
+        const tipEl = () => pill.querySelector(".ctip");
         const KEY = "ay.ctipPos";
         const HANDLE = 24; // px at the tooltip top that acts as the drag handle
         const THRESH = 4; // px of travel before a press counts as a drag
@@ -9250,8 +9286,8 @@ my.translate = async (text, lang) => {
         let drag = null;
         let suppressClick = false;
 
-        function apply() {
-          if (!pos) return;
+        function apply(tip) {
+          if (!pos || !tip) return;
           const tr = tip.getBoundingClientRect();
           if (!tr.width) return; // not rendered yet
           const maxX = Math.max(0, window.innerWidth - tr.width - 8);
@@ -9264,16 +9300,26 @@ my.translate = async (text, lang) => {
           const o = JSON.parse(localStorage.getItem(KEY) || "null");
           if (o && isFinite(o.x) && isFinite(o.y)) pos = { x: +o.x, y: +o.y };
         } catch {}
-        apply();
-        if (typeof ResizeObserver === "function") new ResizeObserver(apply).observe(tip);
-        else addEventListener("resize", apply);
+        if (typeof ResizeObserver === "function") {
+          // Re-apply once the tip first appears, then keep observing it.
+          const ro = new ResizeObserver(() => apply(tipEl()));
+          ro.observe(pill);
+        } else {
+          addEventListener("resize", () => apply(tipEl()));
+        }
 
         function unpin() {
           pill.classList.remove("pinned");
-          tip.classList.remove("dragging");
+          const tip = tipEl();
+          if (tip) tip.classList.remove("dragging");
           // Revert inline offsets so hover auto-positioning takes over again.
-          tip.style.left = "";
-          tip.style.top = "";
+          if (tip) {
+            tip.style.left = "";
+            tip.style.top = "";
+            tip.style.right = "";
+          }
+          // Restore the saved intent (without applying), so a later re-pin starts
+          // from a remembered spot rather than forgetting it.
         }
 
         pill.addEventListener("click", (e) => {
@@ -9290,19 +9336,28 @@ my.translate = async (text, lang) => {
           unpin();
         });
 
-        // Drag only the tooltip's top handle while pinned.
-        tip.addEventListener("pointerdown", (e) => {
+        // Drag the tooltip's top handle while pinned. Delegated on the pill (the
+        // tooltip is a child, so its pointer events bubble up here).
+        pill.addEventListener("pointerdown", (e) => {
           if (e.pointerType === "mouse" && e.button !== 0) return;
           if (!pill.classList.contains("pinned")) return;
+          const tip = tipEl();
+          if (!tip) return;
           const tr = tip.getBoundingClientRect();
-          if (e.clientY - tr.top > HANDLE) return; // not on the handle
+          if (!tr.width) return;
+          if (e.clientY - tr.top > HANDLE && !tip.contains(e.target)) return; // only via the handle
+          // The handle itself lives inside the tip; hit-test against it directly.
+          if (!tip.contains(e.target)) return;
+          if (e.clientY - tr.top > HANDLE) return;
           drag = { id: e.pointerId, x: e.clientX, y: e.clientY, ox: tr.left, oy: tr.top, moved: false };
           suppressClick = false;
           try { tip.setPointerCapture(e.pointerId); } catch {}
           e.preventDefault();
         });
-        tip.addEventListener("pointermove", (e) => {
+        pill.addEventListener("pointermove", (e) => {
           if (!drag || e.pointerId !== drag.id) return;
+          const tip = tipEl();
+          if (!tip) return;
           const dx = e.clientX - drag.x;
           const dy = e.clientY - drag.y;
           if (!drag.moved) {
@@ -9312,26 +9367,28 @@ my.translate = async (text, lang) => {
           }
           e.preventDefault();
           pos = { x: drag.ox + dx, y: drag.oy + dy };
-          apply();
+          apply(tip);
         });
         const end = (e) => {
           if (!drag || e.pointerId !== drag.id) return;
           const moved = drag.moved;
+          const tip = tipEl();
           drag = null;
-          tip.classList.remove("dragging");
-          try { tip.releasePointerCapture(e.pointerId); } catch {}
+          if (tip) tip.classList.remove("dragging");
+          if (tip) { try { tip.releasePointerCapture(e.pointerId); } catch {} }
           if (!moved) return;
-          pos = {
-            x: parseFloat(tip.style.left) || 8,
-            y: parseFloat(tip.style.top) || 8,
-          };
+          if (tip) {
+            pos = {
+              x: parseFloat(tip.style.left) || 8,
+              y: parseFloat(tip.style.top) || 8,
+            };
+          }
           try { localStorage.setItem(KEY, JSON.stringify(pos)); } catch {}
           suppressClick = true;
-          // Swallow the synthetic click a drag emits (would toggle pin off).
           setTimeout(() => (suppressClick = false), 0);
         };
-        tip.addEventListener("pointerup", end);
-        tip.addEventListener("pointercancel", end);
+        pill.addEventListener("pointerup", end);
+        pill.addEventListener("pointercancel", end);
       })();
       boot();
     </script>

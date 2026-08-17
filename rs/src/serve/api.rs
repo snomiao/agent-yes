@@ -7,6 +7,7 @@
 // truth); data comes from the same files the TS daemon uses: pids.jsonl,
 // <cwd>/.agent-yes/<pid>.raw.log, and the per-pid stdin FIFOs.
 use crate::pid_store::{is_process_alive, PidRecord};
+use crate::serve::host_stats;
 use serde_json::{json, Value};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -1141,14 +1142,20 @@ fn host_info() -> Value {
     unsafe {
         libc::getloadavg(loadavg.as_mut_ptr(), 3);
     }
+    // `free` keeps Node os.freemem() semantics so this matches the TS daemon;
+    // `available` is the additive field a UI should prefer, because "free" alone
+    // under-reports usable memory by a wide margin (an order of magnitude is
+    // typical on macOS, where free excludes reclaimable inactive pages). See
+    // serve::host_stats for the full rationale.
+    let mem = host_stats::mem_stats();
     json!({
         "host": hostname(),
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "cpus": cpus,
         "loadavg": loadavg,
-        "mem": { "total": 0, "free": 0 },
-        "uptime": 0,
+        "mem": { "total": mem.total, "free": mem.free, "available": mem.available },
+        "uptime": host_stats::uptime_secs(),
         "caps": { "send": true, "kill": false, "spawn": false, "spawnHook": false, "provision": false },
     })
 }
