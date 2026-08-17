@@ -799,6 +799,20 @@
         font-family: var(--mono);
         font-size: 10.5px;
       }
+      /* Host CPU/mem chip on a room row. Same visual language as the agent rows'
+         git chip — mono, muted, amber only once the machine is actually under
+         pressure — so a healthy fleet stays quiet and a loaded one stands out.
+         `.rname` above is flex:1, so this needs no margin to sit right-aligned. */
+      .rooms .res {
+        font-family: var(--mono);
+        font-size: 10.5px;
+        color: var(--muted);
+        white-space: nowrap;
+        flex: none;
+      }
+      .rooms .res.warn {
+        color: var(--amber);
+      }
       .rooms .rx {
         color: var(--muted);
         cursor: pointer;
@@ -2506,6 +2520,9 @@
         sortEntries,
         SORT_MODES,
         taskLabel,
+        cpuPct,
+        memPct,
+        resLabel,
         badgesFor,
         advanceStdinFlashes,
         focusSummary,
@@ -8172,6 +8189,70 @@ my.translate = async (text, lang) => {
         return `<span class="rstat on" title="${c} live ${c === 1 ? "server" : "servers"}">● ${c}</span>`;
       }
 
+      // ---- per-room host resources (CPU / memory) --------------------------
+      // GET /api/host per source, cached by source id. Polled ONLY while the
+      // rooms panel is open: the numbers are just a readout, so an unopened
+      // panel must cost the fleet nothing. Older daemons that 404 simply never
+      // populate an entry and render no chip.
+      const hostStats = new Map(); // source id -> /api/host body
+      const HOST_POLL_MS = 15_000; // machine load moves slowly; don't be chatty
+      let hostPollTimer = null;
+
+      async function pollHostStats() {
+        const live = [...sources.values()].filter((s) => s.tx && s.live);
+        const got = await Promise.allSettled(
+          live.map(async (s) => [s.id, await s.tx.fetchJSON("/api/host")]),
+        );
+        let changed = false;
+        for (const p of got) {
+          if (p.status !== "fulfilled" || !p.value?.[1]) continue;
+          hostStats.set(p.value[0], p.value[1]);
+          changed = true;
+        }
+        if (changed) renderRoomsIfOpen();
+      }
+
+      function startHostPoll() {
+        if (hostPollTimer) return;
+        pollHostStats(); // paint on open rather than after the first interval
+        hostPollTimer = setInterval(pollHostStats, HOST_POLL_MS);
+      }
+      function stopHostPoll() {
+        clearInterval(hostPollTimer);
+        hostPollTimer = null;
+      }
+
+      const gb = (b) => (b / 1024 ** 3).toFixed(1) + "G";
+
+      // The room row's right-aligned CPU/mem chip. Label/severity come from
+      // resLabel (console-logic.js, unit-tested); this only builds the markup
+      // and the per-host tooltip breakdown.
+      function resChipHtml(name) {
+        const stats = roomSources(name)
+          .map((s) => hostStats.get(s.id))
+          .filter(Boolean);
+        if (!stats.length) return "";
+        const { label, warn } = resLabel(stats);
+        if (!label) return "";
+        const tip = stats
+          .map((h) => {
+            const c = cpuPct(h);
+            const m = memPct(h);
+            const load = (h.loadavg || []).map((n) => n.toFixed(2)).join(" ");
+            return (
+              `${h.host || "?"} · ${h.platform || "?"}/${h.arch || "?"} · ${h.cpus || "?"} cpus\n` +
+              `  load ${load}${c === null ? "" : ` (${c}% of cores)`}\n` +
+              (h.mem?.total
+                ? `  mem ${m === null ? "?" : m + "% used"} of ${gb(h.mem.total)}\n`
+                : "") +
+              (h.uptime ? `  up ${Math.floor(h.uptime / 3600)}h` : "")
+            );
+          })
+          .join("\n");
+        const multi = stats.length > 1 ? ` (worst of ${stats.length} machines)` : "";
+        return `<span class="res${warn ? " warn" : ""}" title="${esc(tip + multi)}">${esc(label)}</span>`;
+      }
+
       function renderRooms() {
         const r = loadRooms();
         const names = Object.keys(r).sort((a, b) => r[b].ts - r[a].ts);
@@ -8182,6 +8263,7 @@ my.translate = async (text, lang) => {
           ${roomStatus(n)}
           <span class="rname" data-room="${esc(n)}">${esc(n)}</span>
           <span class="rhost">${esc(r[n].host)}</span>
+          ${resChipHtml(n)}
           <span class="rx" data-del="${esc(n)}" title="forget">✕</span></div>`,
               )
               .join("")
@@ -8204,7 +8286,11 @@ my.translate = async (text, lang) => {
           renderRooms();
           el.style.display = "block";
           $("roomin")?.focus();
-        } else el.style.display = "none";
+          startHostPoll(); // CPU/mem chips only cost anything while visible
+        } else {
+          el.style.display = "none";
+          stopHostPoll();
+        }
       });
       $("rooms").addEventListener("click", (ev) => {
         const name = ev.target.closest(".rname");
