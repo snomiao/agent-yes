@@ -232,8 +232,15 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
         }
     }
 
-    // Build command arguments
-    let mut cmd_args = args.cli_args.clone();
+    // Build command arguments in the SAME order the TypeScript runtime builds
+    // them (ts/index.ts): default_args first, then user cli_args, then the
+    // prompt (front for `first-arg`, back for `last-arg`), then `-y` yolo args.
+    // Order matters for CLIs whose default_args are launcher flags that must
+    // precede the first positional — dsh-legacy needs `--profile headless` before the
+    // task it boots.
+    let mut cmd_args: Vec<String> = Vec::new();
+    cmd_args.extend(cli_config.default_args.iter().cloned());
+    cmd_args.extend(args.cli_args.iter().cloned());
 
     // Wrap a SUB-agent's initial prompt in `<ay-init-msg …>` — the same
     // attribution + reply route `ay send` puts on every later message, plus an
@@ -284,8 +291,10 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             }
             "typed" => {}
             flag if flag.starts_with("--") || flag.starts_with("-") => {
-                cmd_args.push(flag.to_string());
-                cmd_args.push(prompt.clone());
+                // `--flag <prompt>` goes at the FRONT (matching ts/index.ts):
+                // `[flag, prompt, …default_args, …cli_args]`.
+                cmd_args.insert(0, prompt.clone());
+                cmd_args.insert(0, flag.to_string());
             }
             _ => {}
         }
@@ -298,9 +307,6 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     } else {
         None
     };
-
-    // Add default args
-    cmd_args.extend(cli_config.default_args.iter().cloned());
 
     // Add the per-CLI "yolo" args if -y was passed. Each CLI declares its own
     // (claude: --dangerously-skip-permissions; codex:

@@ -9,6 +9,7 @@ describe("invokedCliName", () => {
     expect(invokedCliName(argv("/root/.bun/bin/cy"))).toBe("claude");
     expect(invokedCliName(argv("/usr/local/bin/claude-yes"))).toBe("claude");
     expect(invokedCliName(argv("/usr/local/bin/codex-yes"))).toBe("codex");
+    expect(invokedCliName(argv("/usr/local/bin/dsh-legacy-yes"))).toBe("dsh-legacy");
   });
 
   it("returns undefined for the generic manager entry", () => {

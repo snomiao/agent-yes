@@ -49,7 +49,7 @@ has no connection to, and how liveness is classified without polling the process
 There is a fourth, smaller file that matters more than its size suggests: **`~/.agent-yes/reaper.jsonl`.**
 Each wrapper records `(wrapper_pid, agent_pgid)` before it runs, and sweeps the registry on every
 startup. If a wrapper died in a way that gave it no chance to clean up — `SIGKILL`, OOM, a power
-cut — the *next* agent to start kills its orphaned process group. Recovery does not depend on the
+cut — the _next_ agent to start kills its orphaned process group. Recovery does not depend on the
 thing that crashed being alive to notice.
 
 ## What you can do with it
@@ -57,15 +57,15 @@ thing that crashed being alive to notice.
 The fabric is not an implementation detail; it is the reason the command surface is as wide as it
 is. Everything below is live today, from any terminal, against agents started by anyone:
 
-| | |
-| --- | --- |
-| **Inspect** | `ay ls` (fleet, with the parent/child forest), `ay ps` (CPU + RSS rolled up over each agent's whole process tree), `ay status`, `ay whoami` |
-| **Read** | `ay tail -f`, `ay read` (paginated), `ay cat`, `ay head`, `ay hist` (past conversations, including exited sessions) |
-| **Steer** | `ay send`, `ay key` (raw keystrokes — drives menus), `ay select` (pick option N of a blocked menu), `ay attach`, `ay restart`, `ay stop`, `ay exit` |
-| **Coordinate** | `ay todo` (a task store shared across agents), `ay ask` / `ay answer` (a question becomes a task, with the asker and answerer both recorded), `ay msgs`, `ay result` |
-| **Reach** | `ay serve` (HTTP + browser console), `ay serve --share` (E2E-encrypted WebRTC), `ay expose <port>` (a private URL onto a local port), `ay remote`, `ay schedule` |
-| **Embed** | `ay callback` (readers message one agent), `ay term embed` (a live read-only terminal in any page), `ay widget` (an agent reads the page a human is looking at), `ay mint` (scoped, short-TTL capability tokens) |
-| **Provision** | `ay ws` (clone or refresh `<owner>/<repo>/tree/<branch>` workspaces), `ay setup`, `ay reap` |
+|                |                                                                                                                                                                                                                  |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Inspect**    | `ay ls` (fleet, with the parent/child forest), `ay ps` (CPU + RSS rolled up over each agent's whole process tree), `ay status`, `ay whoami`                                                                      |
+| **Read**       | `ay tail -f`, `ay read` (paginated), `ay cat`, `ay head`, `ay hist` (past conversations, including exited sessions)                                                                                              |
+| **Steer**      | `ay send`, `ay key` (raw keystrokes — drives menus), `ay select` (pick option N of a blocked menu), `ay attach`, `ay restart`, `ay stop`, `ay exit`                                                              |
+| **Coordinate** | `ay todo` (a task store shared across agents), `ay ask` / `ay answer` (a question becomes a task, with the asker and answerer both recorded), `ay msgs`, `ay result`                                             |
+| **Reach**      | `ay serve` (HTTP + browser console), `ay serve --share` (E2E-encrypted WebRTC), `ay expose <port>` (a private URL onto a local port), `ay remote`, `ay schedule`                                                 |
+| **Embed**      | `ay callback` (readers message one agent), `ay term embed` (a live read-only terminal in any page), `ay widget` (an agent reads the page a human is looking at), `ay mint` (scoped, short-TTL capability tokens) |
+| **Provision**  | `ay ws` (clone or refresh `<owner>/<repo>/tree/<branch>` workspaces), `ay setup`, `ay reap`                                                                                                                      |
 
 The pattern repeats: each of those is a small program over the same three files, which is why they
 compose. Looping the pids from `ay ls --json` into a per-pid `ay tail` is a fleet dashboard.
@@ -99,7 +99,7 @@ apiFetch(req: Request) → Response
 
 `ay serve`'s HTTP listener calls it. The WebRTC bridge calls it in-process. Neither is a control
 plane; they are pipes into the same function. (The port-exposure tunnel sits on the other side of
-that line — it is *started* through the handler, by `POST /api/expose`, and then proxies raw bytes
+that line — it is _started_ through the handler, by `POST /api/expose`, and then proxies raw bytes
 to a local port. A consumer, not a caller.) Adding a
 transport — a relay, a peer mesh, something not invented yet — means writing a caller, not a second
 system with its own notion of what an agent is.
@@ -113,7 +113,7 @@ Honesty is the point of a lab, so: file-based coordination has real edges, and m
 ones have already drawn blood.
 
 **Concurrent appends interleave.** A pipe only guarantees atomicity below `PIPE_BUF`. Two agents
-writing a large message to the same FIFO at the same moment produced *byte-level* interleaving —
+writing a large message to the same FIFO at the same moment produced _byte-level_ interleaving —
 one logical message arriving in dozens of fragments, mixed with another's. The fix is an advisory
 lock around IPC writes, and the guarantee it provides is worth stating precisely: **messages do not
 interleave; they are not ordered.** Anything that needs ordering has to say so itself.
@@ -132,7 +132,7 @@ liveness is currently defended by several independent watchdogs instead of one s
 those is on the list, not done.
 
 None of these argue for a supervisor. They argue that "no central owner" moves the difficulty from
-*availability* to *concurrency* — and concurrency bugs, unlike outages, can be fixed once and stay
+_availability_ to _concurrency_ — and concurrency bugs, unlike outages, can be fixed once and stay
 fixed.
 
 <p class="note">Next: <a href="./2026-08-11-an-address-space-for-agents">an address space for

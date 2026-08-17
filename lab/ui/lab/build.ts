@@ -143,7 +143,9 @@ function markdown(src: string): string {
       const tr = body
         .map((r) => `<tr>${r.map((c) => `<td>${inline(escapeHtml(c))}</td>`).join("")}</tr>`)
         .join("");
-      out.push(`<div class="tw"><table><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table></div>`);
+      out.push(
+        `<div class="tw"><table><thead><tr>${th}</tr></thead><tbody>${tr}</tbody></table></div>`,
+      );
       continue;
     }
 
@@ -377,9 +379,8 @@ ${p.body}
   }
 
   const { meta, rest } = frontMatter(readFileSync(join(HERE, "index.md"), "utf8"));
-  const body = markdown(rest).replace(
-    /<p>&lt;!--posts--&gt;<\/p>|<!--posts-->/,
-    () => postList(posts),
+  const body = markdown(rest).replace(/<p>&lt;!--posts--&gt;<\/p>|<!--posts-->/, () =>
+    postList(posts),
   );
   writeFileSync(
     join(outDir, "index.html"),

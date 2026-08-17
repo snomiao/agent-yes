@@ -1268,14 +1268,12 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
         // rs/src/serve/ws.rs): the console's /ws browser and the New-agent
         // form's repo/branch combobox. Directory walks + git/gh subprocesses,
         // so each runs on the blocking pool.
-        ("GET", "/api/ws") => {
-            tokio::task::spawn_blocking(|| {
-                let records = read_records();
-                json_res(200, &crate::serve::ws::ls_json(&records))
-            })
-            .await
-            .unwrap_or_else(|e| text(500, e.to_string()))
-        }
+        ("GET", "/api/ws") => tokio::task::spawn_blocking(|| {
+            let records = read_records();
+            json_res(200, &crate::serve::ws::ls_json(&records))
+        })
+        .await
+        .unwrap_or_else(|e| text(500, e.to_string())),
         ("GET", "/api/ws/status") => {
             let Some(dir) = q.get("path").cloned().filter(|s| !s.is_empty()) else {
                 return text(400, "missing ?path=<workspace dir>");

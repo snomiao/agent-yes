@@ -617,6 +617,34 @@ mod tests {
     }
 
     #[test]
+    fn test_dsh_legacy_config() {
+        let config = get_cli_config("dsh-legacy").unwrap();
+        // Interactive TUI: the initial task rides as the last positional arg after
+        // the launcher's `--profile tui` flags (which MUST precede it).
+        assert_eq!(config.prompt_arg, "last-arg");
+        assert_eq!(config.default_args, vec!["--profile", "tui"]);
+        assert!(config.binary.is_none());
+        assert_eq!(
+            config.install.npm.as_deref(),
+            Some("npm install -g @deepseek-ai/dsh@latest")
+        );
+        assert_eq!(
+            config.help.as_deref(),
+            Some("https://github.com/deepseek-ai/deepseek-harness")
+        );
+        // Ready marker on the TUI prompt; approval auto-answers with `1`.
+        assert!(config.ready.iter().any(|rx| rx.is_match("❯ ")));
+        assert!(!config.typing_respond.is_empty());
+        assert!(config.typing_respond.contains_key("1\n"));
+        assert!(config.working.is_empty());
+        assert!(config.enter.is_empty());
+        assert!(config.fatal.is_empty());
+        assert!(config.yes_args.is_empty());
+        assert!(config.restore_args.is_empty());
+        assert!(!config.no_eol);
+    }
+
+    #[test]
     fn test_install_config_default() {
         let ic = InstallConfig::default();
         assert!(ic.single.is_none());
@@ -664,7 +692,18 @@ clis:
     #[test]
     fn test_all_supported_clis() {
         let clis = vec![
-            "claude", "codex", "copilot", "cursor", "grok", "qwen", "auggie", "amp", "opencode",
+            "claude",
+            "codex",
+            "copilot",
+            "cursor",
+            "grok",
+            "qwen",
+            "auggie",
+            "amp",
+            "opencode",
+            "dsh",
+            "dsh-tui",
+            "dsh-legacy",
         ];
         for cli in clis {
             let result = get_cli_config(cli);

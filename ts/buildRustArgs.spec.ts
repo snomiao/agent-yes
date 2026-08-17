@@ -14,6 +14,9 @@ const SUPPORTED_CLIS = [
   "auggie",
   "amp",
   "opencode",
+  "dsh",
+  "dsh-tui",
+  "dsh-legacy",
 ];
 
 // Helper: simulate argv as [node, script, ...userArgs]

@@ -421,6 +421,54 @@ clis:
         flags: m
     ready: []
 
+  # DeepSeek Harness (dsh-legacy) — the original DeepSeek Harness CLI
+  # (https://github.com/deepseek-ai/deepseek-harness). `dsh --profile tui`
+  # boots a persistent interactive session: the ready prompt is `❯ `, tool
+  # approval is a numbered `1. yes / 2. no` menu auto-answered with `1`, and the
+  # initial task rides as the positional arg. Reachable as `ay dsh-legacy …`.
+  dsh-legacy:
+    promptArg: last-arg
+    defaultArgs:
+      - --profile
+      - tui
+    install:
+      npm: "npm install -g @deepseek-ai/dsh@latest"
+    help: https://github.com/deepseek-ai/deepseek-harness
+    ready:
+      - "❯ "
+    typingRespond:
+      "1\n":
+        - '1\. yes'
+    working: []
+    enter: []
+    fatal: []
+
+  # DeepSeek Harness TUI — the `❯` prompt line driveable as a plain interactive
+  # agent (same shell pattern as `bash`: no spinner/menu markers, `promptArg:
+  # typed` sends the initial command by typing it into the session once ready).
+  dsh:
+    promptArg: typed
+    ready:
+      - pattern: "❯"
+        flags: m
+    working: []
+    enter: []
+    fatal: []
+    exitCommands:
+      - exit
+  # Alias — `ay dsh-tui` launches the dsh-tui binary (same drive pattern as dsh).
+  dsh-tui:
+    binary: dsh-tui
+    promptArg: typed
+    ready:
+      - pattern: "❯"
+        flags: m
+    working: []
+    enter: []
+    fatal: []
+    exitCommands:
+      - exit
+
   # Bare interactive shells. Unlike the agent CLIs above, these aren't AI tools
   # — they're a plain login shell you can drive from the console and launch
   # other agents inside (e.g. `ay bash 'claude'`). `promptArg: typed` means any

@@ -109,13 +109,38 @@
   ],
 
   "safeToken": [
-    { "name": "a space run becomes ONE dash", "raw": "John Smith", "max": 32, "want": "John-Smith" },
-    { "name": "a RUN of bad chars collapses to one dash", "raw": "a   b", "max": 32, "want": "a-b" },
-    { "name": "leading and trailing dashes are trimmed", "raw": "  weird  ", "max": 32, "want": "weird" },
+    {
+      "name": "a space run becomes ONE dash",
+      "raw": "John Smith",
+      "max": 32,
+      "want": "John-Smith"
+    },
+    {
+      "name": "a RUN of bad chars collapses to one dash",
+      "raw": "a   b",
+      "max": 32,
+      "want": "a-b"
+    },
+    {
+      "name": "leading and trailing dashes are trimmed",
+      "raw": "  weird  ",
+      "max": 32,
+      "want": "weird"
+    },
     { "name": "all-bad clamps to empty", "raw": "!!!", "max": 32, "want": "" },
     { "name": "dots and underscores survive", "raw": "a.b_c-d", "max": 32, "want": "a.b_c-d" },
-    { "name": "a header-breaking angle bracket is neutralised", "raw": "a>b", "max": 32, "want": "a-b" },
-    { "name": "a colon is neutralised so it cannot forge a segment", "raw": "a:b", "max": 32, "want": "a-b" },
+    {
+      "name": "a header-breaking angle bracket is neutralised",
+      "raw": "a>b",
+      "max": 32,
+      "want": "a-b"
+    },
+    {
+      "name": "a colon is neutralised so it cannot forge a segment",
+      "raw": "a:b",
+      "max": 32,
+      "want": "a-b"
+    },
     { "name": "an at-sign is neutralised", "raw": "a@b", "max": 32, "want": "a-b" },
     { "name": "a newline is neutralised", "raw": "a\nb", "max": 32, "want": "a-b" },
     { "name": "clamped to max length", "raw": "abcdefghij", "max": 4, "want": "abcd" },
@@ -129,6 +154,10 @@
     { "name": "a space run collapses to one dash", "raw": "my  branch", "want": "my-branch" },
     { "name": "a colon is neutralised — it would forge a segment", "raw": "a:b", "want": "a-b" },
     { "name": "leading and trailing dashes are trimmed", "raw": "-x-", "want": "x" },
-    { "name": "clamped to 64 chars", "raw": "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeeffffffffffgggggghhhh", "want": "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeeffffffffffgggg" }
+    {
+      "name": "clamped to 64 chars",
+      "raw": "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeeffffffffffgggggghhhh",
+      "want": "aaaaaaaaaabbbbbbbbbbccccccccccddddddddddeeeeeeeeeeffffffffffgggg"
+    }
   ]
 }

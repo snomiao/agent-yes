@@ -14,13 +14,13 @@ with the parts that are still missing marked as missing.</p>
 
 Today an agent already has an identity: a stable string of the form
 `user@host:path:branch#pid`, stamped into every message it sends. That is the seed of an address
-space, and the endgame is the sentence written on the architecture map: *anyone can expose their
-own AI agent to the network with a single link, self-contained and end-to-end encrypted.*
+space, and the endgame is the sentence written on the architecture map: _anyone can expose their
+own AI agent to the network with a single link, self-contained and end-to-end encrypted._
 
 Two pieces of that exist. Links work, and they are properly end-to-end encrypted: the secret rides
 the URL fragment, the relay only ever holds a value derived through HKDF, and frames are sealed
 with keys the server has never seen. Scoped tokens work too — `ay callback` mints a capability for
-exactly one agent, send-only, with a hard expiry carried *inside* the signed payload, so revocation
+exactly one agent, send-only, with a hard expiry carried _inside_ the signed payload, so revocation
 does not depend on server-side bookkeeping surviving.
 
 The piece that does not exist yet is the general case. There is still a master token: one value
@@ -30,14 +30,14 @@ is a special case built beside it rather than a slice out of it. The work is to 
 happens to include everything**, with view / steer / admin as separable grants and identity bound
 to something a person actually has (an OAuth account) rather than to possession of a string.
 
-The test for whether this is done is unglamorous and concrete: *can I hand a colleague a link that
-lets them watch one agent, in one repo, for two hours, and nothing else?* Right now the honest
+The test for whether this is done is unglamorous and concrete: _can I hand a colleague a link that
+lets them watch one agent, in one repo, for two hours, and nothing else?_ Right now the honest
 answer is "almost."
 
 ## Horizon 2 — a bus that humans are on
 
 The failure mode of agent tooling is that agents get a rich channel to each other and humans get a
-scrollback buffer. agent-yes is trying to avoid that by making the *page* the meeting point rather
+scrollback buffer. agent-yes is trying to avoid that by making the _page_ the meeting point rather
 than the terminal.
 
 Three primitives are already built and they point the same way. `ay callback` puts a message box on
@@ -76,7 +76,7 @@ reconstruct is an agent you can only use for work you were willing to lose.
 
 Three things are cluttered, and shipping features on top of clutter has a compounding cost:
 
-- **Three networking stacks that do not share a model** — HTTP, WebRTC + signaling, and a libp2p swarm. The fix is already named: make the swarm *a transport into `apiFetch`* rather than a parallel universe with its own idea of what an agent is. Then peers become just another reach surface.
+- **Three networking stacks that do not share a model** — HTTP, WebRTC + signaling, and a libp2p swarm. The fix is already named: make the swarm _a transport into `apiFetch`_ rather than a parallel universe with its own idea of what an agent is. Then peers become just another reach surface.
 - **Two runtimes that drift.** Rust is primary, TypeScript is the reference, and parity is currently defended by a hand-maintained table plus a few tests that parse both sources. That does not scale with surface area.
 - **Scattered state and several independent watchdogs.** One state directory and one liveness story, instead of a per-stack defence for each way a native dependency can freeze.
 
@@ -94,7 +94,7 @@ at a process whose entire job is to say yes. Prompt injection is not a hypotheti
 central threat model, and no amount of transport encryption touches it.
 
 The mitigations that exist are structural rather than clever: capabilities are send-only and
-single-agent where possible; visitor messages arrive wrapped in an explicit *untrusted* frame so
+single-agent where possible; visitor messages arrive wrapped in an explicit _untrusted_ frame so
 provenance is visible in the transcript rather than inferred; inter-agent messages carry attributed
 envelopes; injected text is deliberately kept inert against the wrapper's own pattern set, so a
 message can never trigger the automation that delivered it. The direction is more of that — **make
@@ -113,7 +113,7 @@ Not a bigger console. The measure is whether these become boring:
 
 The last one already holds — it is what the [local fabric](./2026-08-11-no-daemon-owns-your-agents)
 buys. The other four are the project, and so is the one not on the list: the fabric is per-machine
-files, so losing a *machine* still loses its agents, its logs and its task store.
+files, so losing a _machine_ still loses its agents, its logs and its task store.
 
 <p class="note">Start at the beginning: <a href="./2026-08-11-the-terminal-is-the-api">the terminal
 is the API</a> — why one small edit forced all of this.</p>

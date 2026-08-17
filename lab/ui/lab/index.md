@@ -19,7 +19,7 @@ That sounds like tooling. It is closer to a change of category.
 
 ## Why that is not a small difference
 
-Every agent CLI ships with the same assumption baked in: *a human is sitting right here.* It asks
+Every agent CLI ships with the same assumption baked in: _a human is sitting right here._ It asks
 before it edits. It draws a full-screen TUI for eyes that are watching. It dies when the terminal
 closes. Those are reasonable defaults, and they are also a ceiling — they cap an agent at exactly
 one person's attention, and attention is the scarcest thing in the building.
@@ -27,7 +27,7 @@ one person's attention, and attention is the scarcest thing in the building.
 agent-yes removes the assumption in the least invasive way available: it does not fork the CLIs, it
 does not need their APIs, and it does not wait for a vendor to ship a daemon mode. It runs the real
 binary in a pseudo-terminal and answers the questions a human would have answered. The terminal
-*is* the integration surface.
+_is_ the integration surface.
 
 What follows is the interesting part. Once one agent no longer needs a human in the loop, each
 capability forces the next:
@@ -48,16 +48,16 @@ because paying those bills honestly is more interesting than the original trick.
 The system reads cleanly top-down, and the
 [interactive architecture map](https://agent-yes.com/architecture.html) draws the same boxes as a graph:
 
-| Plane | What lives there |
-| --- | --- |
-| **① Agent core** | The PTY wrapper. Spawns any agent CLI, matches ready / enter / fatal patterns, restarts on crash, resumes sessions, propagates terminal size. Rust is the primary binary; TypeScript is the reference implementation. |
-| **② Local fabric** | `pids.jsonl` (every agent, both runtimes), a FIFO per pid for stdin, a raw PTY log per agent for stdout. Files, not a daemon. |
-| **③ Exposure** | One transport-agnostic handler, `apiFetch(req) → Response`. HTTP and the WebRTC bridge are both just callers; port tunnels and libp2p peers fold in next. |
-| **④ Trust & discovery** | Signaling that is a rendezvous only, an HKDF key split so the relay never holds a key, and signed capability tokens that carry their own scope. |
-| **⑤ Reach surfaces** | The browser console, the CLI on another box, embeddable widgets, a system tray, peers. |
+| Plane                   | What lives there                                                                                                                                                                                                      |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **① Agent core**        | The PTY wrapper. Spawns any agent CLI, matches ready / enter / fatal patterns, restarts on crash, resumes sessions, propagates terminal size. Rust is the primary binary; TypeScript is the reference implementation. |
+| **② Local fabric**      | `pids.jsonl` (every agent, both runtimes), a FIFO per pid for stdin, a raw PTY log per agent for stdout. Files, not a daemon.                                                                                         |
+| **③ Exposure**          | One transport-agnostic handler, `apiFetch(req) → Response`. HTTP and the WebRTC bridge are both just callers; port tunnels and libp2p peers fold in next.                                                             |
+| **④ Trust & discovery** | Signaling that is a rendezvous only, an HKDF key split so the relay never holds a key, and signed capability tokens that carry their own scope.                                                                       |
+| **⑤ Reach surfaces**    | The browser console, the CLI on another box, embeddable widgets, a system tray, peers.                                                                                                                                |
 
 The seam that holds it together is plane ③. Because `Bun.serve` and the WebRTC bridge already call
-the *same in-process* `apiFetch`, a new transport is a new caller and never a new control plane.
+the _same in-process_ `apiFetch`, a new transport is a new caller and never a new control plane.
 That is what turns "three stacks" back into one system.
 
 ## What is actually true today
@@ -81,12 +81,12 @@ about the four places the current system is still cluttered.
 
 ## The ecosystem
 
-agent-yes is the fleet. Around it sit tools that give the fleet somewhere to *reach* — each a
+agent-yes is the fleet. Around it sit tools that give the fleet somewhere to _reach_ — each a
 standalone CLI in its own right, each usable without the others:
 
-| | |
-| --- | --- |
-| **[agent-yes](https://github.com/snomiao/agent-yes)** | run, watch, message and delegate to a fleet of AI coding agents |
+|                                                         |                                                                                                                                    |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| **[agent-yes](https://github.com/snomiao/agent-yes)**   | run, watch, message and delegate to a fleet of AI coding agents                                                                    |
 | **[slack-term](https://github.com/snomiao/slack-term)** | the human-comms surface — read and write Slack from a terminal, with a confirm gate built for operators who are sometimes machines |
 
 The connective tissue is a shared stance rather than a shared library: file-based state over

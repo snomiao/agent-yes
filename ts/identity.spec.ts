@@ -136,7 +136,10 @@ describe("formatIdentity", () => {
  */
 describe("identity — shared cross-runtime case table", () => {
   const cases = JSON.parse(
-    readFileSync(path.resolve(import.meta.dirname, "../tests/fixtures/identity-cases.json"), "utf8"),
+    readFileSync(
+      path.resolve(import.meta.dirname, "../tests/fixtures/identity-cases.json"),
+      "utf8",
+    ),
   ) as {
     identity: {
       name: string;

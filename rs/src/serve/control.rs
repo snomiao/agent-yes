@@ -23,6 +23,9 @@ pub const SUPPORTED_CLIS: &[&str] = &[
     "auggie",
     "amp",
     "opencode",
+    "dsh",
+    "dsh-tui",
+    "dsh-legacy",
     "bash",
     "cmd",
     "powershell",
@@ -364,12 +367,25 @@ pub fn spawn(body: &str) -> super::api::ApiResponse {
     let Ok(b) = serde_json::from_str::<Value>(body) else {
         return bad(400, "invalid JSON body");
     };
-    let cli = b.get("cli").and_then(|v| v.as_str()).unwrap_or("claude").to_string();
+    let cli = b
+        .get("cli")
+        .and_then(|v| v.as_str())
+        .unwrap_or("claude")
+        .to_string();
     if !SUPPORTED_CLIS.contains(&cli.as_str()) {
         return bad(400, format!("unsupported cli: {cli}"));
     }
-    let prompt = b.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let from = b.get("from").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+    let prompt = b
+        .get("prompt")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let from = b
+        .get("from")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
     let create = b.get("create").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // Resolve the working directory: fork > from > plain cwd. A fork/from
@@ -378,9 +394,18 @@ pub fn spawn(body: &str) -> super::api::ApiResponse {
     let mut provisioned: Option<crate::serve::ws::Provisioned> = None;
     let cwd: String;
     if let Some(fork) = b.get("fork").filter(|v| !v.is_null()) {
-        let from_cwd =
-            fork.get("fromCwd").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
-        let branch = fork.get("branch").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let from_cwd = fork
+            .get("fromCwd")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let branch = fork
+            .get("branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if from_cwd.is_empty() || branch.is_empty() {
             return bad(400, "fork requires a non-empty fromCwd and branch");
         }
@@ -392,8 +417,14 @@ pub fn spawn(body: &str) -> super::api::ApiResponse {
                 ("KOHO_ACTION", "fork"),
                 ("KOHO_FROM_CWD", &from_cwd),
                 ("KOHO_BRANCH", &branch),
-                ("KOHO_OWNER", origin.as_ref().map(|o| o.0.as_str()).unwrap_or("")),
-                ("KOHO_REPO", origin.as_ref().map(|o| o.1.as_str()).unwrap_or("")),
+                (
+                    "KOHO_OWNER",
+                    origin.as_ref().map(|o| o.0.as_str()).unwrap_or(""),
+                ),
+                (
+                    "KOHO_REPO",
+                    origin.as_ref().map(|o| o.1.as_str()).unwrap_or(""),
+                ),
             ],
         ) {
             crate::serve::ws::HookResult::Denied(detail) => {
@@ -429,8 +460,16 @@ pub fn spawn(body: &str) -> super::api::ApiResponse {
         // github specs carry the branch inside `from`; the raw-clone path gets
         // it as a separate `branch` field. The explicit field wins.
         let branch = {
-            let explicit = b.get("branch").and_then(|v| v.as_str()).unwrap_or("").trim();
-            if explicit.is_empty() { src.branch.clone() } else { explicit.to_string() }
+            let explicit = b
+                .get("branch")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .trim();
+            if explicit.is_empty() {
+                src.branch.clone()
+            } else {
+                explicit.to_string()
+            }
         };
         let root = crate::serve::ws::ws_root();
         match crate::serve::ws::run_provision_hook(
@@ -446,7 +485,10 @@ pub fn spawn(body: &str) -> super::api::ApiResponse {
             crate::serve::ws::HookResult::Denied(detail) => {
                 return bad(
                     403,
-                    format!("provision hook denied '{}/{}':\n{detail}", src.owner, src.repo),
+                    format!(
+                        "provision hook denied '{}/{}':\n{detail}",
+                        src.owner, src.repo
+                    ),
                 );
             }
             crate::serve::ws::HookResult::NotConfigured => {
@@ -472,7 +514,12 @@ pub fn spawn(body: &str) -> super::api::ApiResponse {
             Err((code, msg)) => return bad(code, msg),
         }
     } else {
-        let plain = b.get("cwd").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
+        let plain = b
+            .get("cwd")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
         if plain.is_empty() {
             return bad(400, "missing cwd");
         }
@@ -536,13 +583,19 @@ mod tests {
     #[test]
     fn spawn_rejects_bad_provision_requests_before_any_side_effect() {
         // unparseable source → 400 (never falls through to a plain-cwd spawn)
-        assert_eq!(spawn(r#"{"cli":"claude","cwd":"/tmp","from":"../evil"}"#).status, 400);
+        assert_eq!(
+            spawn(r#"{"cli":"claude","cwd":"/tmp","from":"../evil"}"#).status,
+            400
+        );
         // an empty/garbled fork object is a client bug — 400, not a downgrade
         assert_eq!(
             spawn(r#"{"cli":"claude","cwd":"/tmp","fork":{"fromCwd":"","branch":"b"}}"#).status,
             400
         );
-        assert_eq!(spawn(r#"{"cli":"claude","cwd":"/tmp","fork":{"fromCwd":"/a"}}"#).status, 400);
+        assert_eq!(
+            spawn(r#"{"cli":"claude","cwd":"/tmp","fork":{"fromCwd":"/a"}}"#).status,
+            400
+        );
     }
 
     #[test]

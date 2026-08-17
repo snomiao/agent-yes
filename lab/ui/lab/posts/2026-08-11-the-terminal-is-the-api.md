@@ -13,7 +13,7 @@ project is the consequence.</p>
 ## The assumption baked into every agent CLI
 
 Claude Code, Codex, Gemini CLI, Copilot, Cursor, Qwen, Grok, Auggie — different vendors, different
-models, one shared premise: *a human is sitting right here.*
+models, one shared premise: _a human is sitting right here._
 
 It shows up in three places. The tool asks permission before it touches anything. It paints a
 full-screen TUI sized to the window it happens to be in. And it exits when its terminal goes away.
@@ -53,22 +53,22 @@ clis:
   someagent:
     promptArg: last-arg
     yesArgs: [--dangerously-skip-permissions]
-    enter:            # a prompt to answer — press Enter on it
+    enter: # a prompt to answer — press Enter on it
       - "Do you want to proceed\\?"
       - "Yes, and don't ask again"
-    ready:            # parked at a prompt, safe to type
+    ready: # parked at a prompt, safe to type
       - '\? for shortcuts'
       - "^>[  ]"
-    working:          # busy — do not interrupt
+    working: # busy — do not interrupt
       - esc to interrupt
-    needsInput:       # blocked on an interactive selection menu
+    needsInput: # blocked on an interactive selection menu
       - "Select an option"
-    fatal:            # unrecoverable — exit rather than loop
+    fatal: # unrecoverable — exit rather than loop
       - "authentication failed"
     wedgeTimeoutSecs: 1800
 ```
 
-The `enter:` list is what actually presses the key. The four *screen states* — `ready`, `working`,
+The `enter:` list is what actually presses the key. The four _screen states_ — `ready`, `working`,
 `needsInput`, `fatal` — buy something less obvious and more valuable: **a machine-readable liveness signal for a program that was
 never designed to emit one.** `ay ls` can tell you an agent is `needs_input` rather than `active`
 because the pattern set says so. That single classification is what later makes notifications,
@@ -87,7 +87,7 @@ answering the other, forever.
 **Spinners lie.** An agent can sit at 0% CPU with a spinner frame frozen on screen, having lost its
 API stream with no error. Nothing is broken enough to exit and nothing is alive enough to progress.
 
-**Some wedges paint nothing at all.** The nastiest observed state matched *none* of the patterns —
+**Some wedges paint nothing at all.** The nastiest observed state matched _none_ of the patterns —
 not ready, not working, not needs_input — and stayed that way for days at zero CPU. There is no
 pattern for "the screen has stopped meaning anything," so the only usable signal is time: total PTY
 silence in an unclassifiable state, past a threshold, is a wedge.
@@ -113,9 +113,9 @@ forced moves from one small edit.
 
 ## One agent, one URL
 
-The end state the chain points at is stated on the architecture map as a single sentence: *anyone
+The end state the chain points at is stated on the architecture map as a single sentence: _anyone
 can expose their own AI agent to the network with a single link, self-contained and end-to-end
-encrypted.*
+encrypted._
 
 Which means the unit of the system is not the chat, the repo, or the model. It is **the agent** —
 a long-lived process with an identity, a log, an inbox, a state, and an address. agent-yes is the

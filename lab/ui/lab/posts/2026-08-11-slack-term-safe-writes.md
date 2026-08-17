@@ -15,12 +15,12 @@ that <b>goes stale when the conversation moves</b>.</p>
 
 agent-yes gives a fleet of agents an address space — they can be listed, tailed, messaged and
 delegated to. But a fleet that can only talk to itself is a closed loop. The parts of the system
-that face *humans* are the ones that decide whether any of it is useful: `ay callback` puts a reply
+that face _humans_ are the ones that decide whether any of it is useful: `ay callback` puts a reply
 box on a published report, `ay ch` gives humans and agents one channel, and slack-term takes the
 fleet into the place work already happens.
 
 That last one carries a different risk profile from the rest. A callback widget is send-only into a
-terminal you own. Posting to `#general` is irreversible, public, and attributed to *you*. So the
+terminal you own. Posting to `#general` is irreversible, public, and attributed to _you_. So the
 interesting engineering is not the Slack API wrapper — it is everything built around the moment of
 writing.
 
@@ -59,19 +59,19 @@ That third one is the good idea. If anyone posts between your preview and your c
 you were given no longer verifies, and you are shown the conversation again before you can proceed.
 It is a time-of-check/time-of-use defense built out of content rather than a clock: **no timestamp,
 no expiry, no session — freshness is derived from the thing that would make you change your mind.**
-For `edit` and `delete`, the same trick binds the target's *current remote text*, so you cannot
+For `edit` and `delete`, the same trick binds the target's _current remote text_, so you cannot
 edit-over something that was rewritten while you were reading it.
 
 ## Gates block, guards warn
 
 Four heuristics fire around a send, and not one of them can stop it:
 
-| | |
-| --- | --- |
-| **near-duplicate** | character-bigram Dice similarity over normalized text; warns at ≥0.82 against messages already in the thread |
-| **unreplied** | the destination's last message is already yours — you are about to double-post, so it prints a ready-to-paste `slack edit` command for that message instead |
-| **self-DM** | DMing yourself with your own user token delivers but never notifies |
-| **mentions** | `@handle` tokens that could not be resolved will post as plain text and notify nobody |
+|                    |                                                                                                                                                             |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **near-duplicate** | character-bigram Dice similarity over normalized text; warns at ≥0.82 against messages already in the thread                                                |
+| **unreplied**      | the destination's last message is already yours — you are about to double-post, so it prints a ready-to-paste `slack edit` command for that message instead |
+| **self-DM**        | DMing yourself with your own user token delivers but never notifies                                                                                         |
+| **mentions**       | `@handle` tokens that could not be resolved will post as plain text and notify nobody                                                                       |
 
 All four are `console.error` and fall through. The only hard stop in the whole path is a missing or
 wrong `--code`.
@@ -94,12 +94,12 @@ Rerun with --code=3f9c
 
 Any script can defeat that in two lines — and the repo's own test suite does exactly that, regexing
 `--code=([0-9a-f]{4})` out of stderr at roughly 19 call sites. The Rust implementation says so in
-its own source: *"Always print the hash so scripts can capture and rerun."*
+its own source: _"Always print the hash so scripts can capture and rerun."_
 
 So the gate is not a permission boundary. It is a **forced-review step**: it makes the default path
 one where a human or an agent must look at a rendered preview of exactly what will be posted, where,
 and as whom, before anything happens. An agent determined to route around it can. The value is that
-nothing does so *by accident* — and accident, not malice, is what actually posts to the wrong
+nothing does so _by accident_ — and accident, not malice, is what actually posts to the wrong
 channel at 3am.
 
 Calling that out is better engineering than pretending otherwise, because a team that believes a
@@ -113,8 +113,8 @@ terminal — inside the confirm preview you are about to make a decision from.
 including a lone ESC, **and Unicode bidi controls** (LRM/RLM, LRE/RLE/PDF/LRO/RLO, LRI/RLI/FSI/PDI).
 
 Stripping ANSI is common. Remembering that a right-to-left override can visually reorder the line
-that is supposed to be telling you what you are about to send is not. Sanitizing *the preview
-itself* follows from taking the gate seriously: a preview that can be made to lie is worse than no
+that is supposed to be telling you what you are about to send is not. Sanitizing _the preview
+itself_ follows from taking the gate seriously: a preview that can be made to lie is worse than no
 preview, because it is trusted.
 
 The coverage is deliberate but not yet total — it is applied to the sender label and the mention
@@ -136,18 +136,18 @@ hook blocks.
 
 Two modes, and the docs are explicit about why both must exist:
 
-| mode | sees | role |
-| --- | --- | --- |
-| default | the **staged diff** — added lines only | commit hook |
-| `--all` | **every tracked file** | `prepublishOnly` + CI |
+| mode    | sees                                   | role                  |
+| ------- | -------------------------------------- | --------------------- |
+| default | the **staged diff** — added lines only | commit hook           |
+| `--all` | **every tracked file**                 | `prepublishOnly` + CI |
 
-The commit hook is *structurally blind* to data already sitting in the tree: committed once, never
+The commit hook is _structurally blind_ to data already sitting in the tree: committed once, never
 re-added by any later diff, therefore invisible to every future staged scan. That blind spot is not
 hypothetical — it is how real workspace data once reached npm, and the whole-tree gate exists
 specifically to close it. One scanner, three enforcement points (hook, CI, publish), no
 reimplementation per venue.
 
-The placeholder scheme deserves a mention because it is *machine-decidable* rather than a style
+The placeholder scheme deserves a mention because it is _machine-decidable_ rather than a style
 guide. A real Slack ID is a type letter followed by 8+ `[A-Z0-9]` **whose tail mixes letters and
 digits**; a `0000` run separately marks an ID as fake. Testing the tail rather than the whole string
 is load-bearing: the leading `C` of `C00000001` would otherwise count as "the letter" and make every
@@ -159,18 +159,18 @@ The affordances that only make sense when the operator is a machine:
 
 - **Reaction-as-ack is deliberately ungated** — "a reaction is trivial and fully reversible, and the
   whole point is a lightweight ack." The cheap polite action stays frictionless while the loud one
-  stays gated. 👀 for *seen*, ✅ for *done*, ⏳ for *working on it* — a thread that does not grow.
+  stays gated. 👀 for _seen_, ✅ for _done_, ⏳ for _working on it_ — a thread that does not grow.
 - **`--unreplied`** — "only conversations whose last word isn't mine." Whose ball it is, computed
   rather than guessed.
 - **`[+N replies]`** — Slack's history endpoint returns thread parents but no replies, so a naive
   renderer hides entire conversations. Marking them means a reader is never misled into thinking it
   has read everything.
 - **stdout is data, stderr is commentary** in the streaming path, so `slack tail "#general" | grep
-  deploy` sees messages and not chrome.
+deploy` sees messages and not chrome.
 - **Output is valid input** — a printed permalink or ISO stamp can be pasted straight back as a
   target, with strict parsers that throw rather than guess.
 - **`SKILL.md` ships in the npm tarball** with agent-skill frontmatter, so it triggers on how a user
-  *talks* ("any mentions?", "DM @person") rather than on the tool's name.
+  _talks_ ("any mentions?", "DM @person") rather than on the tool's name.
 
 Then there is `ts/todo.ts`, which encodes task state entirely in Slack reactions — 📌 marker,
 ✅/🚫/👀/⏳ progress, stacking reason flags — with no external store, so humans see the same state in
@@ -189,8 +189,8 @@ The second explains an ordering invariant:
 > that window drops the task out of every `todo ls` query permanently, with nothing left to point at
 > it.
 
-Add-first's worst case is a message carrying two progress reactions — harmless, *because the
-invariant is "at least one, readers collapse by priority" rather than "exactly one."* Choosing the
+Add-first's worst case is a message carrying two progress reactions — harmless, _because the
+invariant is "at least one, readers collapse by priority" rather than "exactly one."_ Choosing the
 weaker invariant is what makes the operation safe to interrupt. Removes are awaited serially because
 `Promise.all` would drop the ordering guarantee. That is the same reasoning agent-yes applies to its
 own file-based fabric, arrived at independently against a completely different substrate.
@@ -206,7 +206,7 @@ careful about every other boundary, this is the odd one out.
 
 **"Verified byte-for-byte" oversells the parity test.** The mechanism is real and well-built —
 byte-identical stdout from both runtimes against a mock server, with an isolated `HOME` so no real
-profile bleeds in — but it covers **2 of 23 commands** (`news`, `search`), and it *skips silently*
+profile bleeds in — but it covers **2 of 23 commands** (`news`, `search`), and it _skips silently_
 when the Rust binary or the fixtures are absent. A gate that skips by default is not a gate. Worse,
 the one thing that most needs to match across implementations — the write gate — is the thing that
 matches least: the Rust `send` uses `--confirm` rather than `--code`, binds neither the thread nor
@@ -214,7 +214,7 @@ the acting identity, and collapses to `sha256(message)` when its context fetch c
 
 The two runtimes are not really peers; one is the product and the other is a frozen subset. Compare
 agent-yes, which has the same TS/Rust split and solves it with the opposite polarity: it does not
-diff behavior, it *pins the surface* — a test parses both `ts/subcommands.ts` and `rs/src/cli.rs` as
+diff behavior, it _pins the surface_ — a test parses both `ts/subcommands.ts` and `rs/src/cli.rs` as
 text and fails when the subcommand lists disagree, and everything else lives in a parity table
 allowed to say "not planned." Enforce the surface, negotiate the behavior.
 

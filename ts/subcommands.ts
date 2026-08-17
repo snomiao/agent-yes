@@ -444,6 +444,7 @@ const SUBCOMMANDS = new Set([
   "callback",
   "reap",
   "gc",
+  "dsh-legacy",
   "help",
 ]);
 
@@ -712,6 +713,10 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         await reaper.sweep();
         return 0;
       }
+      case "dsh-legacy": {
+        const { cmdDsh } = await import("./cmdDsh.ts");
+        return await cmdDsh(rest);
+      }
       case "gc": {
         const { gcOldBinaryDirs } = await import("./rustBinary.ts");
         const res = gcOldBinaryDirs();
@@ -864,6 +869,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay result set '<json>'              (inside an agent) deposit your result envelope\n` +
       `  ay reap                             kill process groups leaked by dead agents\n` +
       `  ay gc                               remove old-version binary cache dirs and report freed space\n` +
+      `  ay dsh-legacy [args...]              launch the DeepSeek Harness terminal client (dsh-tui)\n` +
       wsLines +
       `\n` +
       `Remote:\n` +

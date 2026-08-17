@@ -364,15 +364,16 @@ For deploying to cloud platforms like Google Cloud Run, AWS, Azure, see [Cloud D
 
 ### Supported CLI Tools
 
-| Tool    | CLI Name  | Description                       | Installation/Update                                 |
-| ------- | --------- | --------------------------------- | --------------------------------------------------- |
-| Claude  | `claude`  | Anthropic's Claude Code (default) | `npm install -g @anthropic-ai/claude-code@latest`   |
-| Codex   | `codex`   | OpenAI's Codex CLI                | `npm install -g @openai/codex-cli@latest`           |
-| Copilot | `copilot` | GitHub Copilot CLI                | `npm install -g @github/copilot@latest`             |
-| Cursor  | `cursor`  | Cursor agent CLI                  | See https://cursor.com/ja/docs/cli/installation     |
-| Grok    | `grok`    | Vibe Kit's Grok CLI               | `npm install -g @vibe-kit/grok-cli@latest`          |
-| Qwen    | `qwen`    | Alibaba's Qwen Code CLI           | `npm install -g @qwen-code/qwen-code@latest`        |
-| Auggie  | `auggie`  | Augment Code's Auggie CLI         | `npm install -g @augmentcode-inc/auggie-cli@latest` |
+| Tool             | CLI Name     | Description                        | Installation/Update                                 |
+| ---------------- | ------------ | ---------------------------------- | --------------------------------------------------- |
+| Claude           | `claude`     | Anthropic's Claude Code (default)  | `npm install -g @anthropic-ai/claude-code@latest`   |
+| Codex            | `codex`      | OpenAI's Codex CLI                 | `npm install -g @openai/codex-cli@latest`           |
+| Copilot          | `copilot`    | GitHub Copilot CLI                 | `npm install -g @github/copilot@latest`             |
+| Cursor           | `cursor`     | Cursor agent CLI                   | See https://cursor.com/ja/docs/cli/installation     |
+| Grok             | `grok`       | Vibe Kit's Grok CLI                | `npm install -g @vibe-kit/grok-cli@latest`          |
+| Qwen             | `qwen`       | Alibaba's Qwen Code CLI            | `npm install -g @qwen-code/qwen-code@latest`        |
+| Auggie           | `auggie`     | Augment Code's Auggie CLI          | `npm install -g @augmentcode-inc/auggie-cli@latest` |
+| DeepSeek Harness | `dsh-legacy` | DeepSeek Harness (interactive TUI) | `npm install -g @deepseek-ai/dsh@latest`            |
 
 The tool will:
 
