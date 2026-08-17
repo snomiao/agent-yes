@@ -6015,6 +6015,15 @@ my.translate = async (text, lang) => {
       // autoPidExplicit distinguishes the two: an explicit link opens the agent
       // even on mobile (it's a deliberate "take me here"), whereas a merely
       // restored selection only re-highlights the row on a phone — see loadList.
+      // ?islands=1 / =0 — read and persisted HERE, before the ?pid= handler just
+      // below replaceState()s the query string away. islandsBoot runs hundreds of
+      // lines later, by which point location.search would be empty on a ?pid= link.
+      const ISLANDS_KEY = "ay.islands";
+      try {
+        const q = new URLSearchParams(location.search).get("islands");
+        if (q === "1" || q === "0") localStorage.setItem(ISLANDS_KEY, q);
+      } catch {}
+
       let autoPid = new URLSearchParams(location.search).get("pid");
       let autoPidExplicit = !!autoPid;
       if (autoPid) {
@@ -6863,7 +6872,6 @@ my.translate = async (text, lang) => {
       // and the host turns into a taller PTY — a change every viewer of that agent
       // feels. That's fine when it's asked for and rude when it isn't, so it takes
       // an explicit opt-in (⋯ menu, or ?islands=1 / ?islands=0 to flip and persist).
-      const ISLANDS_KEY = "ay.islands";
       let islandsOn = false;
       function measureIslands() {
         // Returns true when the reserved header height actually moved — callers
@@ -6894,9 +6902,7 @@ my.translate = async (text, lang) => {
       (function islandsBoot() {
         let want = null;
         try {
-          const q = new URLSearchParams(location.search).get("islands");
-          if (q === "1" || q === "0") want = q;
-          if (want === null) want = localStorage.getItem(ISLANDS_KEY);
+          want = localStorage.getItem(ISLANDS_KEY); // ?islands= already landed here
         } catch {}
         applyIslands(want === "1");
         // The header grows and shrinks on its own (title wrap, cwd line, the
