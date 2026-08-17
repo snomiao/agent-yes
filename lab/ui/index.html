@@ -3737,19 +3737,31 @@
           rows: term.rows,
         };
       }
-      // Two overlaid polylines (output green, input accent) normalised to the window
-      // max, so a tiny sparkline shows the I/O shape at a glance.
-      function sparkSvg(hist, w, h) {
+      // Two-row heatmap of per-second I/O traffic: the OUT row (top, green) and IN
+      // row (bottom, accent), one column per second. Each cell's fill opacity is the
+      // log-scaled fraction of that second's bytes vs the window max, so a hot burst
+      // reads as a solid block and idle seconds fade to near-transparent. Replaces the
+      // two overlaid polylines — a per-second grid shows WHERE the traffic concentrated
+      // (bursts vs steady) far more legibly than two thin lines with the same area.
+      function trafficHeatmap(hist, w, h) {
         const n = hist.length;
         if (!n) return "";
         const max = Math.max(1, ...hist.map((s) => Math.max(s.i, s.o)));
-        const xs = (i) => (n === 1 ? w - 1 : (i / (n - 1)) * (w - 1));
-        const ys = (v) => h - 1 - (v / max) * (h - 2);
-        const poly = (k, color) =>
-          `<polyline fill="none" stroke="${color}" stroke-width="1" points="${hist
-            .map((s, i) => xs(i).toFixed(1) + "," + ys(s[k]).toFixed(1))
-            .join(" ")}"/>`;
-        return `<svg class="ctip-spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none">${poly("o", "var(--green)")}${poly("i", "var(--accent)")}</svg>`;
+        const colW = w / n;
+        const rowH = (h - 2) / 2; // 1px gap between the two rows
+        // Log-scaled intensity: 0→0, max→1, with a floor so even small traffic is faintly visible.
+        const alpha = (v) => (v <= 0 ? 0 : Math.min(1, Math.log1p(v) / Math.log1p(max)));
+        const cells = [];
+        for (let i = 0; i < n; i++) {
+          const x = i * colW;
+          const aOut = alpha(hist[i].o);
+          const aIn = alpha(hist[i].i);
+          cells.push(
+            `<rect x="${x.toFixed(2)}" y="0" width="${(colW - 0.5).toFixed(2)}" height="${rowH.toFixed(2)}" fill="var(--green)" opacity="${aOut.toFixed(2)}"/>`,
+            `<rect x="${x.toFixed(2)}" y="${(rowH + 2).toFixed(2)}" width="${(colW - 0.5).toFixed(2)}" height="${rowH.toFixed(2)}" fill="var(--accent)" opacity="${aIn.toFixed(2)}"/>`,
+          );
+        }
+        return `<svg class="ctip-spark" width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" shape-rendering="crispEdges">${cells.join("")}</svg>`;
       }
       // The diagnostics block appended to the connection-pill hover tooltip: viewport
       // (deduped when OUR size matches the agent's), terminal caps, and the live I/O
@@ -3775,7 +3787,7 @@
           .join("");
         const last = traf.hist[traf.hist.length - 1] || { i: 0, o: 0 };
         const traffic =
-          `<div class="ctip-traf"><span class="ctip-k">i/o</span>${sparkSvg(traf.hist, 96, 22) || "—"}</div>` +
+          `<div class="ctip-traf"><span class="ctip-k">i/o</span>${trafficHeatmap(traf.hist, 96, 22) || "—"}</div>` +
           `<div><span class="ctip-k"></span>↓ ${fmtBytes(last.o)}/s&nbsp;&nbsp;↑ ${fmtBytes(last.i)}/s</div>`;
         const viewers = presenceHtml();
         return (
