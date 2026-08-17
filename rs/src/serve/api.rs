@@ -88,7 +88,7 @@ pub fn load_or_create_token() -> std::io::Result<String> {
 
 // ---- pids.jsonl -------------------------------------------------------------
 
-fn read_records() -> Vec<PidRecord> {
+pub(crate) fn read_records() -> Vec<PidRecord> {
     let path = global_dir().join("pids.jsonl");
     let Ok(content) = std::fs::read_to_string(&path) else {
         return Vec::new();
@@ -356,6 +356,51 @@ fn json_cache_get(cache: &JsonCache, key: &str, size: u64, mtime: i64) -> Option
     }
 }
 
+/// When `log_tasks` last recomputed, per log file. Separate from `TASKS_CACHE`
+/// so the cache's `(size, mtime)` contract — and the shared `json_cached`
+/// helper — stay exactly as they are.
+type StampMap = std::sync::Mutex<std::collections::HashMap<String, i64>>;
+static TASKS_STAMP: once_cell::sync::Lazy<StampMap> = once_cell::sync::Lazy::new(Default::default);
+
+/// The previously computed task count, if it was computed recently enough to
+/// keep serving. `None` means "recompute now", which is also what an entry with
+/// no recorded stamp gets — a first call always computes.
+fn tasks_recent_enough(log_file: &str) -> Option<Value> {
+    let fresh = TASKS_STAMP
+        .lock()
+        .ok()?
+        .get(log_file)
+        .is_some_and(|at| now_ms() - *at < TASKS_MAX_STALE_MS);
+    if !fresh {
+        return None;
+    }
+    // Any stored value under this key, whatever (size, mtime) produced it.
+    let map = TASKS_CACHE.lock().ok()?;
+    map.get(log_file).map(|(_, _, v)| v.clone())
+}
+
+fn stamp_tasks(log_file: &str) {
+    if let Ok(mut m) = TASKS_STAMP.lock() {
+        m.insert(log_file.to_string(), now_ms());
+    }
+}
+
+/// Longest a task count may be served after the log has already moved on.
+///
+/// The `(size, mtime)` key alone is the right invalidation rule for the cheap
+/// derived fields, but it has a pathology on the expensive one: an ACTIVE agent
+/// appends every tick, so its key changes every tick and `log_tasks` — the
+/// heaviest item in `with_meta`, a 256KB terminal replay plus a scrollback dump
+/// bounded only by the emulator's 10k-row history — recomputes on every poll,
+/// for every viewer.
+///
+/// Task counts do not move at that rate. They change when a task transitions,
+/// not when a character is printed, so serving a slightly stale count between
+/// recomputes costs the console nothing observable while cutting the work by
+/// the ratio of this value to the poll tick. Bounded by wall clock rather than
+/// by a tick count so it does not scale with the number of connected viewers.
+const TASKS_MAX_STALE_MS: i64 = 15_000;
+
 /// Task progress from the rendered todo block. Reads a 256KB window (vs 32KB
 /// elsewhere) and keeps the WHOLE render — the latest block is often scrolled
 /// well back from the final rows.
@@ -369,9 +414,16 @@ fn log_tasks(log_file: Option<&str>) -> Value {
     if let Some(v) = json_cache_get(&TASKS_CACHE, log_file, size, mtime) {
         return v;
     }
+    // Key miss, i.e. the log grew. Recompute at most every TASKS_MAX_STALE_MS.
+    if let Some(v) = tasks_recent_enough(log_file) {
+        return v;
+    }
     let Some((size, mtime, lines)) = render_tail_lines(log_file, 256 * 1024, 0) else {
         return Value::Null;
     };
+    // Stamped on the compute path only, so the staleness clock measures time
+    // between real renders rather than time between calls.
+    stamp_tasks(log_file);
     json_cached(&TASKS_CACHE, log_file, size, mtime, || {
         crate::serve::meta::parse_task_counts(&lines)
             .map(|t| json!({ "done": t.done, "total": t.total }))

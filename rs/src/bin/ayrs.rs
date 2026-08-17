@@ -105,6 +105,11 @@ async fn main() -> anyhow::Result<()> {
             // eventually clears any zombie an old (pre-fix) daemon left behind.
             reaper::sweep();
 
+            // Reclaim raw logs whose own writer cannot: an agent exec'd before
+            // log compaction shipped keeps that image for its whole life, so
+            // nothing inside it will ever cap its log (see serve/log_gc.rs).
+            serve::log_gc::spawn();
+
             // --port and --webrtc are independent transports over the SAME API
             // surface; running both is the normal local+remote setup.
             let http = port.map(|p| tokio::spawn(serve::http::run(p)));

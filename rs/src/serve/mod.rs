@@ -11,6 +11,7 @@ pub mod e2e;
 pub mod expose;
 pub mod graph;
 pub mod http;
+pub mod log_gc;
 pub mod meta;
 pub mod nego;
 pub mod service;
