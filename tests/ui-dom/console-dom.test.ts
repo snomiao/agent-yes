@@ -675,6 +675,51 @@ describe("console DOM behaviour", () => {
     }
   });
 
+  it("the New-agent FAB floats in the left panel, drags, and persists its spot", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      // It lives in the left panel (not the header meta row) and floats over the
+      // list, parked near the panel's bottom-right corner.
+      expect(await page.evaluate(() => !!document.querySelector(".left > #newbtn"))).toBe(true);
+      expect(
+        await page.evaluate(() => getComputedStyle(document.querySelector("#newbtn")!).position),
+      ).toBe("absolute");
+      const panel = (await page.locator(".left").boundingBox())!;
+      const before = (await page.locator("#newbtn").boundingBox())!;
+      expect(panel.x + panel.width - (before.x + before.width)).toBeLessThan(40); // right edge
+      expect(panel.y + panel.height - (before.y + before.height)).toBeLessThan(40); // bottom edge
+
+      // Dragging moves it and must NOT open the spawn form (pointerup on a
+      // <button> still synthesizes a click).
+      const cx = before.x + before.width / 2;
+      const cy = before.y + before.height / 2;
+      await page.mouse.move(cx, cy);
+      await page.mouse.down();
+      await page.mouse.move(cx - 160, cy - 200, { steps: 8 });
+      await page.mouse.up();
+      const after = (await page.locator("#newbtn").boundingBox())!;
+      expect(Math.round(before.x - after.x)).toBeGreaterThan(100);
+      expect(Math.round(before.y - after.y)).toBeGreaterThan(140);
+      expect(await page.locator("#newform").isVisible()).toBe(false);
+
+      // …and the new spot survives a reload (stored right/bottom offsets).
+      const saved = JSON.parse((await page.evaluate(() => localStorage.getItem("ay.newbtnPos")))!);
+      expect(saved.r).toBeGreaterThan(100);
+      expect(saved.b).toBeGreaterThan(140);
+      await page.reload();
+      await page.waitForSelector(".list .row", { timeout: 10_000 });
+      const reloaded = (await page.locator("#newbtn").boundingBox())!;
+      expect(Math.abs(reloaded.x - after.x)).toBeLessThan(2);
+      expect(Math.abs(reloaded.y - after.y)).toBeLessThan(2);
+
+      // A plain click still opens the spawn form.
+      await page.click("#newbtn");
+      await expect.poll(() => page.locator("#newform").isVisible()).toBe(true);
+    } finally {
+      await ctx.close();
+    }
+  });
+
   it("shows the install one-liner on the home page", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
