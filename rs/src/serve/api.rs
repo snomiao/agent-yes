@@ -205,10 +205,15 @@ fn strip_control(s: &str) -> String {
 /// non-empty one labels the console row. Cached per (size, mtime).
 fn log_title(log_file: Option<&str>) -> Option<String> {
     let log_file = log_file?;
-    let (size, mtime, buf) = read_file_tail(log_file, 65_536).ok()?;
+    // stat first, read second: the cache key IS (size, mtime), so consulting it
+    // before the 64 KB tail read turns a hit into one stat instead of one stat
+    // plus 64 KB of I/O. Over a fleet-sized list that is the difference between
+    // megabytes and nothing per poll tick. Same shape as log_tasks/log_badges.
+    let (size, mtime) = file_version(log_file)?;
     if let Some(hit) = cache_get(&TITLE_CACHE, log_file, size, mtime) {
         return hit;
     }
+    let (size, mtime, buf) = read_file_tail(log_file, 65_536).ok()?;
     // /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g — last non-empty match wins.
     static OSC_TITLE: once_cell::sync::Lazy<regex::bytes::Regex> =
         once_cell::sync::Lazy::new(|| {
@@ -272,10 +277,12 @@ fn parse_status_text(lines: &[String]) -> Option<String> {
 /// Cached per (size, mtime) so the 1s subscribe tick stays cheap.
 fn log_status_text(log_file: Option<&str>) -> Option<String> {
     let log_file = log_file?;
-    let (size, mtime, buf) = read_file_tail(log_file, 32_768).ok()?;
+    // stat-then-read, see log_title.
+    let (size, mtime) = file_version(log_file)?;
     if let Some(hit) = cache_get(&STATUS_CACHE, log_file, size, mtime) {
         return hit;
     }
+    let (size, mtime, buf) = read_file_tail(log_file, 32_768).ok()?;
     let mut vt = crate::vterm::VTermProxy::new(50, 200);
     vt.process(&buf);
     let rendered = if vt.alternate_screen() {
@@ -748,15 +755,41 @@ pub fn mark_exited(pid: u32, reason: &str) {
     }
 }
 
+/// Upper bound on the threads `ls_json` fans `with_meta` out over. `with_meta`
+/// is I/O plus terminal-emulator replay per agent, so it parallelizes cleanly;
+/// the cap keeps a big fleet from stampeding a box that is already running
+/// every one of those agents. Small and fixed rather than `available_par-
+/// allelism`: the daemon is a background service, not the workload.
+const LS_META_THREADS: usize = 8;
+
 fn ls_json(all: bool, active: bool, keyword: &str) -> Vec<Value> {
     let mut recs = read_records();
     recs.sort_by_key(|r| -r.started_at);
-    recs.iter()
+    let selected: Vec<&PidRecord> = recs
+        .iter()
         .filter(|r| all || r.status != "exited")
         .filter(|r| !active || is_process_alive(r.pid))
         .filter(|r| matches_keyword(r, keyword))
-        .map(with_meta)
-        .collect()
+        .collect();
+    if selected.len() < 2 {
+        return selected.into_iter().map(with_meta).collect();
+    }
+    // Sequentially this is O(agents) tail reads and screen replays on one
+    // thread, and the console re-runs it every LS_TICK_MS per viewer — a
+    // fleet-sized list measured whole seconds that way. Chunk it across a
+    // handful of scoped threads and stitch the results back in the original
+    // order, which the console relies on (newest first).
+    let chunk = selected.len().div_ceil(LS_META_THREADS.min(selected.len()));
+    std::thread::scope(|s| {
+        let handles: Vec<_> = selected
+            .chunks(chunk)
+            .map(|part| s.spawn(move || part.iter().map(|r| with_meta(r)).collect::<Vec<_>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect()
+    })
 }
 
 // ---- SSE helpers ------------------------------------------------------------
@@ -1302,7 +1335,11 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
             .await
             .unwrap_or_else(|e| text(500, e.to_string()))
         }
-        ("GET", "/api/edges") => {
+        // The console polls this every 1.5s per viewer and it touches one file
+        // per distinct cwd plus the pid index, so it belongs on the blocking
+        // pool for the same reason /api/ls does: run inline and each poll pins
+        // an async worker for the whole scan.
+        ("GET", "/api/edges") => tokio::task::spawn_blocking(|| {
             let cwds: Vec<String> = read_records().into_iter().map(|r| r.cwd).collect();
             json_res(
                 200,
@@ -1311,7 +1348,9 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
                     "sends": crate::serve::discover::message_edges(&cwds),
                 }),
             )
-        }
+        })
+        .await
+        .unwrap_or_else(|e| text(500, e.to_string())),
         ("GET", "/api/search") => {
             let needle = q.get("q").cloned().unwrap_or_default().trim().to_string();
             let budget = q
