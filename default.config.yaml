@@ -447,6 +447,7 @@ clis:
   # agent (same shell pattern as `bash`: no spinner/menu markers, `promptArg:
   # typed` sends the initial command by typing it into the session once ready).
   dsh:
+    binary: dsh-tui
     promptArg: typed
     ready:
       - pattern: "❯"
