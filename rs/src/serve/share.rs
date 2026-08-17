@@ -41,6 +41,19 @@ const PEER_OP_TIMEOUT_MS: u64 = 30_000;
 const PEER_CLOSE_TIMEOUT_MS: u64 = 10_000;
 const STUN_URL: &str = "stun:stun.l.google.com:19302";
 const MAX_ROTATES: u32 = 5;
+/// How long to wait between re-checks while parked behind a live room holder.
+///
+/// The only thing this poll does is one `kill(pid, 0)`, so the cost of a short
+/// interval is nil; what sets the floor is the OS supervisor. Under launchd
+/// (`KeepAlive = true`) a daemon that exits immediately is relaunched
+/// immediately, and the old fail-fast claim turned that into a fork/exec storm:
+/// tens of thousands of spawn→refuse→exit cycles, each one a fresh Gatekeeper
+/// exec evaluation, which shows up as sustained system-wide CPU burn in
+/// `syspolicyd` plus a multi-megabyte error log of the same refusal line.
+/// Parking in-process removes the churn entirely, so the interval only trades
+/// takeover latency after the holder dies. 5s keeps that handoff well under the
+/// signaling server's host-heartbeat window while polling ~12x/min.
+const CLAIM_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 fn global_dir() -> PathBuf {
     if let Ok(h) = std::env::var("AGENT_YES_HOME") {
@@ -201,24 +214,29 @@ fn room_lock_path(room: &str) -> std::path::PathBuf {
     global_dir().join(format!(".share-host-{room}.pid"))
 }
 
+/// Result of one non-blocking attempt at the room's advisory lock.
+#[derive(Debug, PartialEq, Eq)]
+enum ClaimOutcome {
+    /// The lock file now records our pid; we are the room's host.
+    Claimed,
+    /// A different, still-live pid holds the room. Carries the holder so the
+    /// caller can wait on it without re-parsing an error string.
+    HeldBy(i32),
+}
+
 /// Two `ayrs` hosts in the same signaling room both answer every `peer-join`,
 /// so each viewer's answer reaches the host that did *not* originate the offer
 /// and blows up with "invalid proposed signaling state transition from stable".
 /// Nothing recovers from that — the room just stops accepting viewers — so
-/// refuse to start rather than degrade the room that's already working.
-fn claim_room(room: &str) -> Result<()> {
-    claim_room_at(&room_lock_path(room), room)
-}
-
-fn claim_room_at(path: &std::path::Path, room: &str) -> Result<()> {
+/// never start a second host on a room that's already working.
+///
+/// This is the whole invariant, and none of the wrappers below relax it: they
+/// only differ in what happens *after* a refusal (bail vs. park and retry).
+fn try_claim_room_at(path: &std::path::Path) -> ClaimOutcome {
     if let Ok(txt) = std::fs::read_to_string(path) {
         if let Ok(pid) = txt.trim().parse::<i32>() {
             if pid != std::process::id() as i32 && crate::pid_store::is_process_alive(pid as u32) {
-                bail!(
-                    "another ayrs host (pid {pid}) is already serving room {room}\n\
-                     running two hosts in one room breaks WebRTC answering for every viewer.\n\
-                     stop it first (`ayrs serve uninstall`, or kill {pid}), or host a different room."
-                );
+                return ClaimOutcome::HeldBy(pid);
             }
         }
     }
@@ -226,7 +244,78 @@ fn claim_room_at(path: &std::path::Path, room: &str) -> Result<()> {
         std::fs::create_dir_all(p).ok();
     }
     std::fs::write(path, std::process::id().to_string()).ok();
-    Ok(())
+    ClaimOutcome::Claimed
+}
+
+fn held_by_error(pid: i32, room: &str) -> anyhow::Error {
+    anyhow!(
+        "another ayrs host (pid {pid}) is already serving room {room}\n\
+         running two hosts in one room breaks WebRTC answering for every viewer.\n\
+         stop it first (`ayrs serve uninstall`, or kill {pid}), or host a different room."
+    )
+}
+
+/// Fail-fast claim: refuse immediately if the room is held by a live pid.
+/// For callers that must not block (see the rotation path in `run_share`).
+fn claim_room_at(path: &std::path::Path, room: &str) -> Result<()> {
+    match try_claim_room_at(path) {
+        ClaimOutcome::Claimed => Ok(()),
+        ClaimOutcome::HeldBy(pid) => Err(held_by_error(pid, room)),
+    }
+}
+
+/// Parking claim: wait for the incumbent host to go away, then take over.
+///
+/// Returning an error here would hand control back to the OS supervisor, which
+/// (launchd `KeepAlive = true`, and equivalently under the other managers) just
+/// relaunches us — spawn, refuse, exit, repeat, forever. That fork/exec storm is
+/// far more damaging than the wait it was avoiding, so the daemon startup path
+/// parks in-process instead: the invariant is still "exactly one host per room",
+/// we simply queue for it rather than thrashing on it.
+///
+/// The banner is printed ONCE per distinct holder, not once per poll — the
+/// per-attempt log line is precisely what grew the daemon's stderr log into
+/// millions of identical rows.
+///
+/// Interruptibility: this awaits `tokio::time::sleep`, so a foreground run stays
+/// killable with Ctrl-C under SIGINT's default disposition. Deliberately NOT a
+/// `select!` on `tokio::signal::ctrl_c()` — awaiting that installs a
+/// process-wide handler that outlives this loop and would silently make Ctrl-C
+/// a no-op for the rest of the daemon's life (the `ayrs` binary installs no
+/// signal handler of its own; see `rs/src/bin/ayrs.rs`).
+async fn claim_room_blocking_at(
+    path: &std::path::Path,
+    room: &str,
+    interval: Duration,
+) -> Result<()> {
+    let mut announced: Option<i32> = None;
+    loop {
+        match try_claim_room_at(path) {
+            ClaimOutcome::Claimed => {
+                if announced.is_some() {
+                    eprintln!("[ayrs share] room {room} released — taking over as host");
+                }
+                return Ok(());
+            }
+            ClaimOutcome::HeldBy(pid) => {
+                if announced != Some(pid) {
+                    announced = Some(pid);
+                    eprintln!(
+                        "[ayrs share] {}\nwaiting for pid {pid} to exit (re-checking every {}s); \
+                         this message is not repeated.",
+                        held_by_error(pid, room),
+                        interval.as_secs().max(1)
+                    );
+                }
+                tokio::time::sleep(interval).await;
+            }
+        }
+    }
+}
+
+/// Daemon startup claim on the real lock path, with the production interval.
+async fn claim_room_blocking(room: &str) -> Result<()> {
+    claim_room_blocking_at(&room_lock_path(room), room, CLAIM_RETRY_INTERVAL).await
 }
 
 #[cfg(test)]
@@ -280,6 +369,87 @@ mod claim_tests {
         claim_room_at(&p, "r1").unwrap();
         claim_room_at(&p, "r1").unwrap();
     }
+
+    #[tokio::test]
+    async fn blocking_claim_returns_immediately_for_a_free_room() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("lock.pid");
+        // A free room must not sleep even once, so a tiny timeout is a real
+        // assertion here rather than just a CI guard.
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            claim_room_blocking_at(&p, "r1", Duration::from_secs(3600)),
+        )
+        .await
+        .expect("free room must not park")
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            std::process::id().to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn blocking_claim_parks_then_takes_over_when_the_holder_exits() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("lock.pid");
+        // Same live-process trick as `refuses_a_room_held_by_a_live_pid`: a real
+        // short-lived child, never pid 1 (kill(1,0) is EPERM for a normal user,
+        // which reads as "dead" and would make this test vacuous).
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        std::fs::write(&p, child.id().to_string()).unwrap();
+
+        // The reap is load-bearing: a killed-but-unwaited child stays a zombie,
+        // and `kill(zombie, 0)` keeps returning 0 — i.e. "alive" — so without
+        // `wait()` the park loop would spin forever.
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(100));
+            let _ = child.kill();
+            let _ = child.wait();
+        });
+
+        // Injected interval keeps the test at ~0.1s of real time; the outer
+        // timeout turns any regression into a fast failure instead of a hung CI.
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            claim_room_blocking_at(&p, "r1", Duration::from_millis(25)),
+        )
+        .await
+        .expect("park must take over once the holder exits")
+        .unwrap();
+
+        holder.join().unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&p).unwrap(),
+            std::process::id().to_string()
+        );
+    }
+
+    #[test]
+    fn fail_fast_and_parking_claims_disagree_on_a_live_holder() {
+        // The rotation call site depends on the fail-fast wrapper staying
+        // fail-fast: same lock file, same live holder, but it returns an error
+        // where `claim_room_blocking_at` would park. (It is a plain sync `fn`,
+        // so "does not block" is enforced by its type, not by a timeout.)
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("lock.pid");
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        std::fs::write(&p, child.id().to_string()).unwrap();
+        let err = claim_room_at(&p, "r1").unwrap_err().to_string();
+        assert_eq!(
+            try_claim_room_at(&p),
+            ClaimOutcome::HeldBy(child.id() as i32)
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(err.contains("already serving room r1"), "{err}");
+    }
 }
 
 pub async fn run_share(cfg: ShareConfig) -> Result<()> {
@@ -295,7 +465,11 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
         );
     }
     let mut secret = s;
-    claim_room(&room.room)?;
+    // Startup claim → PARK. This is the path the OS supervisor re-runs, so
+    // exiting here is what produced the relaunch storm. Waiting costs nothing:
+    // the room is already being served correctly by the incumbent, and we take
+    // over the moment it dies.
+    claim_room_blocking(&room.room).await?;
     let api_token = api::load_or_create_token().context("serve token")?;
 
     let peers: Peers = Arc::new(Mutex::new(HashMap::new()));
@@ -335,7 +509,15 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
                 room = mint_room(&room.host);
                 secret = e2e::parse_secret(&room.token)?.0;
                 persist_room(&room);
-                claim_room(&room.room)?;
+                // Rotation claim → FAIL FAST. `mint_room` just generated a
+                // fresh random room id, so a live foreign holder here is a
+                // collision or a bug, not the normal "the box already has a
+                // host" case; parking would wait on something that will never
+                // be released and hide the fault. Bailing does not resurrect
+                // the relaunch storm either: `persist_room` above already
+                // wrote the new room, so the supervisor's relaunch loads it
+                // and lands on the PARKING startup claim instead.
+                claim_room_at(&room_lock_path(&room.room), &room.room)?;
                 let link = format_share_link(&room.room, &secret, &room.host);
                 eprintln!("[ayrs share] room rotated: {link}");
             }
