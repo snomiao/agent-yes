@@ -1232,6 +1232,25 @@
         padding: 11px 18px;
         border-bottom: 1px solid var(--line2);
         cursor: pointer;
+        position: relative;
+        overflow: hidden;
+      }
+      /* Per-agent I/O heatmap backdrop: an absolute overlay painted BEHIND the row
+         text (the r1/rowtitle/etc. sit in normal flow, so they naturally stack above
+         it via the paint order of positioned vs static boxes — no z-index hacks). Low
+         contrast so the agent name stays readable; pointer-events off so it never
+         steals clicks. Right-edge bright (recent traffic) fades toward the left. */
+      .ioheat {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        z-index: 0;
+      }
+      /* Row content must paint ABOVE the heatmap overlay (positioned boxes render
+         over static ones regardless of DOM order, so lift the text layer explicitly). */
+      .row > :not(.ioheat) {
+        position: relative;
+        z-index: 1;
       }
       .row:hover {
         background: var(--panel);
@@ -3586,6 +3605,12 @@
         // Always-on header-badge traffic ring (independent of the opt-in HUD below).
         if (kind === "in") traf.cin += n || 0;
         else if (kind === "out") traf.cout += n || 0;
+        // Also accumulate into the selected agent's per-agent ring (left-panel heatmap).
+        if (sel) {
+          const r = ioRing(sel);
+          if (kind === "in") r.i += n || 0;
+          else if (kind === "out") r.o += n || 0;
+        }
         if (!perfOn) return;
         if (kind === "in") {
           perf.inEvents++;
@@ -3682,6 +3707,28 @@
       function trafReset() {
         traf.cin = traf.cout = 0;
         traf.hist = [];
+      }
+      // Per-agent I/O ring for the LEFT-PANEL heatmap. Only the SELECTED agent has
+      // live I/O (the fwd/term.write hooks fire for it alone), so this map holds a
+      // rolling window of the traffic each agent saw while it was selected. Other
+      // rows keep their last-known window (empty → transparent). Mirrors traf's
+      // shape but is keyed by composite _key, sampled on the same 1s tick below.
+      const IO_N = 60;
+      const ioByKey = new Map();
+      function ioRing(key) {
+        let r = ioByKey.get(key);
+        if (!r) {
+          r = { i: 0, o: 0, hist: [] };
+          ioByKey.set(key, r);
+        }
+        return r;
+      }
+      function ioReset(key) {
+        const r = ioByKey.get(key);
+        if (r) {
+          r.i = r.o = 0;
+          r.hist = [];
+        }
       }
       // The last winsize the agent's PTY reported (from /api/size), so the tooltip
       // can show OUR viewport vs the agent's render size. Reset on agent switch.
@@ -3817,6 +3864,15 @@
         traf.hist.push({ i: traf.cin, o: traf.cout });
         if (traf.hist.length > TRAF_N) traf.hist.shift();
         traf.cin = traf.cout = 0;
+        // Per-agent ring: sample the selected agent's current second, then repaint
+        // the list so its row heatmap advances (and paint the header badge).
+        const r = sel ? ioRing(sel) : null;
+        if (r) {
+          r.hist.push({ i: r.i, o: r.o });
+          if (r.hist.length > IO_N) r.hist.shift();
+          r.i = r.o = 0;
+          renderList();
+        }
         if (sel) paintHeaderBadge();
       }, 1000);
 
@@ -5908,6 +5964,30 @@ my.translate = async (text, lang) => {
           : "";
       }
 
+      // Build the low-contrast oklch heatmap backdrop for one agent row. The overlay
+      // sits BEHIND the text (absolute, low opacity), a horizontal gradient from
+      // transparent (old, left) → colour (recent, right). OUT (green) and IN (accent)
+      // are layered as two gradients so both directions read, but at low alpha so
+      // the agent name / status stay crisp on top.
+      function rowIoHeat(key) {
+        const r = ioByKey.get(key);
+        if (!r || !r.hist.length) return "";
+        const max = Math.max(1, ...r.hist.map((h) => Math.max(h.i, h.o)));
+        // A right-side "brightness ramp" is a hard-stop gradient; we approximate the
+        // per-second intensity by summing the last few buckets (rightmost = hottest).
+        const tail = Math.min(8, r.hist.length);
+        let o = 0, i = 0;
+        for (let k = r.hist.length - tail; k < r.hist.length; k++) { o += r.hist[k].o; i += r.hist[k].i; }
+        const aOut = Math.min(1, Math.log1p(o) / Math.log1p(max * tail));
+        const aIn = Math.min(1, Math.log1p(i) / Math.log1p(max * tail));
+        // Low-contrast: cap opacity well below what would muddle the label.
+        const oA = (aOut * 0.28).toFixed(2);
+        const iA = (aIn * 0.28).toFixed(2);
+        // oklch, two stacked linear-gradients, right-bright → left-fade.
+        return `<div class="ioheat" style="background:${JSON.stringify(
+          `linear-gradient(90deg, oklch(65% 0.14 152 / 0) 0%, oklch(65% 0.14 152 / ${oA}) 100%), linear-gradient(90deg, oklch(62% 0.16 255 / 0) 0%, oklch(62% 0.16 255 / ${iA}) 100%)`
+        )}"></div>`;
+      }
       function renderList() {
         // The graph view (/r/) only exists on the hosted origin — a local
         // `ay serve --http` console (served at /) has no /r/ route, so the
@@ -5951,7 +6031,7 @@ my.translate = async (text, lang) => {
                 const t = e.title || e.status_text || e.prompt || "";
                 const id = compactIdent(e, ctx, 3, r.parentEntry);
                 const cli = cliLabel(e);
-                return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">
+                return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">${rowIoHeat(e._key)}
         ${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}
         ${pinMarkHtml(e)}
         <span class="dot ${esc(e.status)}"></span>
@@ -5983,7 +6063,7 @@ my.translate = async (text, lang) => {
                     `<span class="rtag" data-k="${k}"><span style="opacity:.55">${k}:</span>${esc(v)}</span>`,
                 )
                 .join("");
-              return `<div class="row ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">
+              return `<div class="row ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">${rowIoHeat(e._key)}
         <div class="r1">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}${pinMarkHtml(e)}<span class="dot ${esc(e.status)}"></span>
           <span class="name">${esc(cliLabel(e) || ident(e) || "agent")}</span>
           <span class="badge">pid ${e.pid}</span>
