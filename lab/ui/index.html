@@ -1963,6 +1963,81 @@
           display: flex;
         }
       }
+      /* Menu entries that only do anything in the single-column phone layout —
+         shown there, hidden everywhere else so they're never a dead control. */
+      .rmenuphone {
+        display: none;
+      }
+      @media (max-width: 720px) {
+        .rmenuphone {
+          display: flex;
+        }
+      }
+      /* ---- "islands" mode: edge-to-edge terminal under floating glass bars ----
+         Opt-in (⋯ → Edge-to-edge, or ?islands=1). Mobile only.
+
+         The header stops eating layout height: .log is pulled up by --headH so
+         the xterm grid starts at the very top of the pane and its scrollback
+         renders BEHIND a blurred, translucent .rhead. The grid only GROWS here —
+         the buffer stays bottom-anchored, so every line that was visible before
+         is still visible, and the rows we gained are older scrollback that now
+         lives under the glass. Nothing the user could read gets taken away.
+
+         The bottom bars deliberately do NOT get the same treatment, and that is
+         geometry rather than an unfinished edge: xterm repaints a fixed grid, so
+         the last grid row is always the live CLI input line. Bleeding the grid
+         under the key bar would put that input line behind it at scroll-bottom —
+         exactly the "terminal becomes unreachable" failure this feature has to
+         avoid. So the key bar and composer keep reserving their height in normal
+         flow (which is also what makes fit.fit() and fit.proposeDimensions() —
+         both measure the CONTENT box — keep the negotiated PTY clear of them),
+         and only pick up the glass styling.
+
+         Everything here is a paint-level change plus one negative margin, so the
+         non-islands layout is byte-for-byte what it was. */
+      @media (max-width: 720px) {
+        /* z-index (not just source order) is what puts the bars over the grid:
+           .log is already position:relative, so without this it would paint on
+           top of the header it is supposed to slide under. */
+        .app.islands .rhead,
+        .app.islands .keybar,
+        .app.islands .composer {
+          position: relative;
+          z-index: 12;
+          backdrop-filter: blur(18px) saturate(150%);
+          -webkit-backdrop-filter: blur(18px) saturate(150%);
+        }
+        .app.islands .rhead {
+          /* --headH is measured from #rhead by JS (see islandsBoot) — it moves
+             with the safe-area inset, the cwd line and long-title wrapping, so a
+             hard-coded height would clip or gap on half the devices. */
+          background: color-mix(in srgb, var(--bg) 55%, transparent);
+          border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+        }
+        .app.islands .keybar,
+        .app.islands .composer {
+          background: color-mix(in srgb, var(--panel) 55%, transparent);
+        }
+        /* the two bars read as ONE island, so only the top one keeps a rule */
+        .app.islands .composer {
+          border-top: 0;
+        }
+        .app.islands .keybar {
+          border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+        }
+        /* the whole trick, in one line: bleed the terminal up under the header.
+           A negative margin on a flex item feeds back into flex sizing, so .log
+           ends up exactly --headH taller as well as --headH higher. */
+        .app.islands .log {
+          margin-top: calc(-1 * var(--headH, 0px));
+        }
+        /* The jump-to-latest pill is anchored to .log, which now starts above
+           the header — its own bottom offset is unaffected, but the peer-selection
+           overlay (.peer-overlay, inset:0 on .log) maps peer coords proportionally
+           across a box that is now taller than the peer's, so its "roughly here"
+           hint drifts by up to --headH in islands mode. It was already documented
+           as approximate; this makes it slightly more so. */
+      }
       /* Terminal right-click context menu: Copy the selection or fire a
          customizable quick command (e.g. /fork [selection]). Positioned at the
          cursor via inline top/left; clamped into the viewport by JS after mount. */
@@ -2204,6 +2279,9 @@
               <div class="rmenusep"></div>
               <label class="rmenuitem"
                 ><input type="checkbox" id="perfToggle" /> <span>Perf HUD</span></label
+              >
+              <label class="rmenuitem rmenuphone" title="let the terminal run under the title bar"
+                ><input type="checkbox" id="islandsToggle" /> <span>Edge-to-edge (beta)</span></label
               >
               <div class="rmenusep"></div>
               <button class="rmenuitem rmenuact" id="shareAgent" type="button">
@@ -5452,6 +5530,7 @@ my.translate = async (text, lang) => {
           });
         }
         if (cb) cb.addEventListener("change", () => setPerfHud(cb.checked));
+        $("islandsToggle")?.addEventListener("change", (ev) => applyIslands(ev.target.checked));
         $("shareAgent")?.addEventListener("click", () => (closePanel(), shareAgent("r")));
         $("shareAgentRW")?.addEventListener("click", () => (closePanel(), shareAgent("rw")));
         $("stopAgent")?.addEventListener("click", () => (closePanel(), stopAgent(false)));
@@ -5936,6 +6015,15 @@ my.translate = async (text, lang) => {
       // autoPidExplicit distinguishes the two: an explicit link opens the agent
       // even on mobile (it's a deliberate "take me here"), whereas a merely
       // restored selection only re-highlights the row on a phone — see loadList.
+      // ?islands=1 / =0 — read and persisted HERE, before the ?pid= handler just
+      // below replaceState()s the query string away. islandsBoot runs hundreds of
+      // lines later, by which point location.search would be empty on a ?pid= link.
+      const ISLANDS_KEY = "ay.islands";
+      try {
+        const q = new URLSearchParams(location.search).get("islands");
+        if (q === "1" || q === "0") localStorage.setItem(ISLANDS_KEY, q);
+      } catch {}
+
       let autoPid = new URLSearchParams(location.search).get("pid");
       let autoPidExplicit = !!autoPid;
       if (autoPid) {
@@ -6775,6 +6863,58 @@ my.translate = async (text, lang) => {
         vv.addEventListener("scroll", onVV);
         onVV();
       }
+      // ── "islands" mode: run the terminal edge-to-edge under a glass title bar ──
+      // The CSS (search "islands mode") does the painting; all this owns is the
+      // one number the CSS can't compute, --headH, and the flag that turns it on.
+      //
+      // It stays OFF by default on purpose: the negative margin makes the pane
+      // taller, which grows the grid, which the presence loop reports as capacity
+      // and the host turns into a taller PTY — a change every viewer of that agent
+      // feels. That's fine when it's asked for and rude when it isn't, so it takes
+      // an explicit opt-in (⋯ menu, or ?islands=1 / ?islands=0 to flip and persist).
+      let islandsOn = false;
+      function measureIslands() {
+        // Returns true when the reserved header height actually moved — callers
+        // use that to avoid a refit (and its presence post) on every observer tick.
+        const app = document.querySelector(".app");
+        if (!app) return false;
+        const rh = $("rhead");
+        // offsetParent is null while #rhead is display:none (no agent selected),
+        // which is also exactly when there is no header to hide under.
+        const h = islandsOn && rh && rh.offsetParent ? Math.round(rh.offsetHeight) : 0;
+        const next = h + "px";
+        if (app.style.getPropertyValue("--headH") === next) return false;
+        app.style.setProperty("--headH", next);
+        return true;
+      }
+      function applyIslands(on) {
+        islandsOn = !!on;
+        const app = document.querySelector(".app");
+        if (app) app.classList.toggle("islands", islandsOn);
+        const cb = $("islandsToggle");
+        if (cb) cb.checked = islandsOn;
+        try {
+          localStorage.setItem(ISLANDS_KEY, islandsOn ? "1" : "0");
+        } catch {}
+        measureIslands();
+        refitPane(); // the pane changed height either way — renegotiate the grid
+      }
+      (function islandsBoot() {
+        let want = null;
+        try {
+          want = localStorage.getItem(ISLANDS_KEY); // ?islands= already landed here
+        } catch {}
+        applyIslands(want === "1");
+        // The header grows and shrinks on its own (title wrap, cwd line, the
+        // read-only badge appearing, safe-area on rotate), so poll it with an
+        // observer rather than measuring once at boot.
+        const rh = $("rhead");
+        if (rh && window.ResizeObserver) {
+          new ResizeObserver(() => {
+            if (measureIslands()) refitPane();
+          }).observe(rh);
+        }
+      })();
       // ── mobile two-finger gestures on the terminal: pan = scroll, pinch = zoom ──
       // One finger now SELECTS (see touchSelBoot), so scrolling moves to two
       // fingers. The two are discriminated by what actually changes once the
