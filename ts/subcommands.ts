@@ -488,7 +488,7 @@ const SEND_TYPING_MAX_WAIT_MS = 10_000;
 // stdin — it's a document, and pasting it mid-session fuses with / truncates the
 // agent's terminal. Reject it outright and point at the stdin/file path so the
 // full text survives instead of being silently mangled by a bracketed paste.
-const SEND_BODY_MAX_CHARS = 2048;
+const SEND_BODY_MAX_CHARS = 4096;
 
 /**
  * Whether `name` is a subcommand. `managerCommands` (default true, for the

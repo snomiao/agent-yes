@@ -1669,7 +1669,7 @@ describe("subcommands.cmdSend safety guards", () => {
     }
   });
 
-  it("refuses a body longer than the 2048-char cap and points at the stdin path", async () => {
+  it("refuses a body longer than the 4096-char cap and points at the stdin path", async () => {
     const { runSubcommand } = await loadModule();
     const { appendGlobalPid } = await import("./globalPidIndex.ts");
     // Register a target agent so resolveOne succeeds and we reach the length gate.
@@ -1692,10 +1692,10 @@ describe("subcommands.cmdSend safety guards", () => {
       return true;
     };
     try {
-      const long = "x".repeat(2049);
+      const long = "x".repeat(4097);
       const code = await runSubcommand(["bun", "cli.js", "send", String(process.pid), long]);
       expect(code).toBe(1);
-      expect(stderr.join("")).toMatch(/over the 2048-char limit/);
+      expect(stderr.join("")).toMatch(/over the 4096-char limit/);
       expect(stderr.join("")).toMatch(/ay send <keyword> - < file\.txt/);
     } finally {
       process.stderr.write = orig;
