@@ -7206,6 +7206,11 @@ my.translate = async (text, lang) => {
         // in runOmni before this builder runs. Needs no anchor: workspaces exist
         // independently of any open agent.
         if ("ws".startsWith(cmdTerm)) rows.push({ kind: "wshint" });
+        // "/new" — the same spawn form the "+ New agent" button opens, reachable
+        // from the palette. Global like /ws and /filter: spawning needs no open
+        // agent (showNew prefills from the selection when there happens to be
+        // one), so it is offered unconditionally.
+        if ("new".startsWith(cmdTerm)) rows.push({ kind: "new" });
         // "/filter [tokens…]" — global: sets the left panel's filter box (#q) to the
         // arguments, same tokens the box itself takes (space = AND, repo:x tags).
         // With no args it clears the filter. Needs no anchor agent — it acts on the
@@ -7463,6 +7468,14 @@ my.translate = async (text, lang) => {
                   <div class="omni-sub">browse every workspace on the fleet — spawn into idle checkouts &nbsp;·&nbsp; ⏎ to open</div>
                 </div></div>`;
             }
+            if (r.kind === "new") {
+              return `<div class="omni-row omni-spawn${sc}" data-i="${i}">
+                <span class="dot active"></span>
+                <div class="omni-main">
+                  <div class="omni-title">＋ New agent <span style="opacity:.55">/new</span></div>
+                  <div class="omni-sub">open the spawn form — pick host, working dir and CLI &nbsp;·&nbsp; ⏎ to open</div>
+                </div></div>`;
+            }
             if (r.kind === "wsinfo") {
               return `<div class="omni-row${sc}" data-i="${i}">
                 <div class="omni-main"><div class="omni-sub">${esc(r.text)}</div></div></div>`;
@@ -7717,6 +7730,15 @@ my.translate = async (text, lang) => {
           $("omni-input").value = "/ws ";
           runOmni();
           return; // stays open — the browser replaces the command list
+        }
+        // "/new" — hand off to the very same opener the "+ New agent" button
+        // uses, so the form (host default, cwd prefill, CLI chain) behaves
+        // identically however it was reached. Closes the palette first: the
+        // spawn form is a modal of its own, not a narrowing of the command list.
+        if (row && row.kind === "new") {
+          closeOmni(false);
+          showNew();
+          return;
         }
         if (row && row.kind === "wsinfo") return; // informational, not activatable
         if (row && row.kind === "ws") {
