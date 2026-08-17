@@ -8,7 +8,10 @@ import { CLIS_CONFIG } from "./index.ts";
 import sflow from "sflow";
 import pkg from "../package.json";
 
-// Create copies for each CLI variant (-yes versions only; use --auto=no flag to disable auto-yes)
+// Create copies for each CLI variant.
+// -yes wrappers: only regenerate existing ones from package.json's bin map
+// (never auto-create new -yes entries — `ay` is the primary entry point).
+const existingBins = new Set(Object.keys(pkg.bin as Record<string, string>));
 const cliNames = [...Object.keys(CLIS_CONFIG), "agent"];
 const suffixes = ["-yes"];
 
@@ -34,16 +37,16 @@ if (typeof Bun !== "undefined" && existsSync(join(root, ".git"))) {
 await sflow(cliNames.flatMap((cli) => suffixes.map((suffix) => ({ cli, suffix }))))
   .map(async ({ cli, suffix }) => {
     const cliName = `${cli}${suffix}`;
-
     const wrapperPath = `./dist/${cliName}.js`;
+
+    // Only generate -yes wrapper files for CLI keys that already have
+    // a published bin entry in package.json. New CLI keys (e.g. `dsh`)
+    // never auto-create -yes bins — `ay <cli>` is the primary entry.
+    if (!existingBins.has(cliName)) return;
+
     await writeFile(wrapperPath, wrapperContent);
     await chmod(wrapperPath, 0o755);
-
-    // Only register -yes variants in package.json bin
-    if (suffix === "-yes" && !(pkg.bin as Record<string, string>)?.[cliName]) {
-      await Bun.$`npm pkg set ${"bin." + cliName}=${wrapperPath}`;
-      console.log(`${wrapperPath} created`);
-    }
+    console.log(`${wrapperPath} regenerated`);
   })
 
   .run();
