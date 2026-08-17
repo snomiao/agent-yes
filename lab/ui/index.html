@@ -6048,7 +6048,7 @@ my.translate = async (text, lang) => {
                 const t = e.title || e.status_text || e.prompt || "";
                 const id = compactIdent(e, ctx, 3, r.parentEntry);
                 const cli = cliLabel(e);
-                return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">
+                return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">${rowIoHeat(e._key)}
         ${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}
         ${pinMarkHtml(e)}
         <span class="dot ${esc(e.status)}"></span>
