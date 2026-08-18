@@ -660,6 +660,10 @@ fn with_meta(r: &PidRecord) -> Value {
         json!(last_active.unwrap_or(r.started_at)),
     );
     o.insert("last_stdin_at".into(), json!(last_stdin_at(r.pid)));
+    // Per-agent resource window (CPU-seconds/RSS/procs) from the background
+    // sampler. Null until the sampler's first pass lands; the console degrades
+    // to a transparent backdrop.
+    o.insert("res".into(), res_field(r.pid));
     v
 }
 
@@ -1148,6 +1152,18 @@ fn host_info() -> Value {
     // typical on macOS, where free excludes reclaimable inactive pages). See
     // serve::host_stats for the full rationale.
     let mem = host_stats::mem_stats();
+    // Managed vs unattributed resource split, from the background sampler, for
+    // the room header line ("2.3G/9.6G of 36G"). Degrades to zeros before the
+    // sampler's first pass.
+    let snap = crate::serve::sampler::res_snapshot();
+    let mut managed_rss: u64 = 0;
+    let mut managed_procs: usize = 0;
+    for (_pid, series) in &snap.agents {
+        if let Some((_, last)) = series.last() {
+            managed_rss = managed_rss.saturating_add(last.rss);
+            managed_procs = managed_procs.saturating_add(last.procs);
+        }
+    }
     json!({
         "host": hostname(),
         "platform": std::env::consts::OS,
@@ -1156,8 +1172,38 @@ fn host_info() -> Value {
         "loadavg": loadavg,
         "mem": { "total": mem.total, "free": mem.free, "available": mem.available },
         "uptime": host_stats::uptime_secs(),
+        "resources": {
+            "bucket_secs": snap.bucket_secs,
+            "managed_rss": managed_rss,
+            "managed_procs": managed_procs,
+            "unattributed_rss": snap.unattributed.rss,
+            "unattributed_procs": snap.unattributed.procs,
+        },
         "caps": { "send": true, "kill": false, "spawn": false, "spawnHook": false, "provision": false },
     })
+}
+
+/// The per-agent resource window for the console heatmap, keyed by wrapper pid.
+/// Null when the sampler has not yet recorded this agent.
+fn res_field(pid: u32) -> Value {
+    let snap = crate::serve::sampler::res_snapshot();
+    let bucket_secs = snap.bucket_secs;
+    match snap.agents.get(&pid) {
+        Some(series) => {
+            let t: Vec<i64> = series.iter().map(|(t, _)| *t).collect();
+            let cpu: Vec<f64> = series.iter().map(|(_, b)| b.cpu_seconds).collect();
+            let rss: Vec<u64> = series.iter().map(|(_, b)| b.rss).collect();
+            let procs: Vec<usize> = series.iter().map(|(_, b)| b.procs).collect();
+            json!({
+                "bucket_secs": bucket_secs,
+                "t": t,
+                "cpu_seconds": cpu,
+                "rss": rss,
+                "procs": procs,
+            })
+        }
+        None => Value::Null,
+    }
 }
 
 // ---- router -------------------------------------------------------------------

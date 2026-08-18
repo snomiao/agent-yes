@@ -15,6 +15,8 @@ pub mod http;
 pub mod log_gc;
 pub mod meta;
 pub mod nego;
+pub mod procstats;
+pub mod sampler;
 pub mod service;
 pub mod share;
 pub mod shell_env;
