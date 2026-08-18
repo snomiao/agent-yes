@@ -269,10 +269,7 @@ impl PidStore {
         let _lock = acquire_lock(&self.path);
         let result = (|| -> Result<()> {
             let records = self.read_all()?;
-            let live: Vec<PidRecord> = records
-                .into_iter()
-                .filter(|r| r.status != "exited" && is_process_alive(r.pid))
-                .collect();
+            let live: Vec<PidRecord> = records.into_iter().filter(keep_record).collect();
             self.write_all(&live)
         })();
         if let Err(e) = result {
@@ -461,6 +458,63 @@ fn log_siblings(log_file: Option<&str>) -> Vec<PathBuf> {
     ]
 }
 
+/// How recently a raw log must have been written for its agent to count as
+/// alive regardless of the pid probe. Comfortably longer than any single CLI's
+/// quiet period between renders, and far shorter than the days-long survival
+/// this guard is meant to prevent.
+const LOG_ACTIVITY_GRACE_MS: i64 = 5 * 60 * 1000;
+
+/// Is this record's raw log still being written?
+///
+/// A file that grew within the grace window proves SOMETHING holds the writing
+/// end, which is stronger evidence of life than `kill(pid, 0)` returning an
+/// error — see `keep_record`. Absent/unreadable log: no opinion (false), so the
+/// pid probe decides alone and behaviour is unchanged for records without logs.
+fn log_recently_written(r: &PidRecord, now_ms: i64) -> bool {
+    let Some(path) = r.log_file.as_deref() else {
+        return false;
+    };
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(mtime) = meta.modified() else {
+        return false;
+    };
+    let Ok(age) = mtime.duration_since(std::time::UNIX_EPOCH) else {
+        return false;
+    };
+    let mtime_ms = age.as_millis() as i64;
+    // A future mtime (clock skew) must read as "recent", never as "ancient".
+    now_ms.saturating_sub(mtime_ms) < LOG_ACTIVITY_GRACE_MS
+}
+
+/// Should `clean_stale` keep this record?
+///
+/// The eviction test used to be `status != "exited" && is_process_alive(pid)`,
+/// and it runs as a TRUNCATING rewrite of the shared registry on every agent
+/// startup — so one starting agent adjudicates every other agent's existence.
+///
+/// `is_process_alive` is `kill(pid, 0) == 0`, which reports "dead" for cases
+/// that are not death: EPERM on a process this user cannot signal (the same
+/// caveat `serve::share` documents for pid 1), or a transient failure on a
+/// heavily loaded box. One such reading permanently unregistered a LIVE agent,
+/// because nothing re-registers after spawn — observed as agents that kept
+/// running and logging for days while absent from `ay ls`, unreachable by
+/// `ay send`, and invisible to the reaper.
+///
+/// So a still-growing raw log now vetoes eviction. An exited record is still
+/// dropped unconditionally: that status is written by the wrapper itself on the
+/// way out, so it is a statement of fact rather than an inference.
+fn keep_record(r: &PidRecord) -> bool {
+    if r.status == "exited" {
+        return false;
+    }
+    if is_process_alive(r.pid) {
+        return true;
+    }
+    log_recently_written(r, chrono::Utc::now().timestamp_millis())
+}
+
 pub fn is_process_alive(pid: u32) -> bool {
     #[cfg(unix)]
     unsafe {
@@ -568,6 +622,101 @@ mod tests {
         assert_eq!(records[0].status, "exited");
         assert_eq!(records[0].exit_code, Some(0));
         assert_eq!(records[0].exit_reason, Some("done".into()));
+    }
+
+    /// The regression this guard exists for: a LIVE agent whose pid probe says
+    /// "dead" (EPERM, or a transient failure on a loaded box) used to be
+    /// evicted permanently, because nothing re-registers an agent after spawn.
+    /// A raw log that is still being written vetoes that.
+    #[test]
+    fn test_clean_stale_keeps_an_unprobeable_pid_whose_log_is_live() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("999999.raw.log");
+        std::fs::write(&log, b"still rendering").unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        store.register(
+            999999, // not a live pid — stands in for an unprobeable one
+            "claude",
+            None,
+            "/repo/alpha",
+            Some(log.to_str().unwrap()),
+        );
+        // Sweep repeatedly: every agent startup runs one, and a single bad
+        // reading used to be enough to unregister the agent forever.
+        for _ in 0..25 {
+            store.clean_stale();
+        }
+        let records = store.read_all().unwrap();
+        assert_eq!(records.len(), 1, "a live log must veto eviction");
+        assert_eq!(records[0].pid, 999999);
+    }
+
+    #[test]
+    fn test_clean_stale_still_evicts_when_the_log_went_quiet() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("999999.raw.log");
+        std::fs::write(&log, b"old output").unwrap();
+        // Backdate well past the grace window: a dead pid AND a cold log is the
+        // case the sweep is actually for.
+        let old = std::time::SystemTime::now()
+            - std::time::Duration::from_millis(LOG_ACTIVITY_GRACE_MS as u64 * 2);
+        std::fs::File::options()
+            .write(true)
+            .open(&log)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        store.register(
+            999999,
+            "claude",
+            None,
+            "/repo/alpha",
+            Some(log.to_str().unwrap()),
+        );
+        store.clean_stale();
+        assert!(store.read_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_clean_stale_evicts_exited_even_with_a_live_log() {
+        // "exited" is written by the wrapper on its way out — a statement of
+        // fact, not an inference — so it outranks any log activity.
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("1.raw.log");
+        std::fs::write(&log, b"fresh").unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        store.register(
+            std::process::id(),
+            "claude",
+            None,
+            "/repo/alpha",
+            Some(log.to_str().unwrap()),
+        );
+        store.update_status(std::process::id(), "exited", Some(0), Some("done"), None);
+        store.clean_stale();
+        assert!(store.read_all().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_clean_stale_missing_log_falls_back_to_the_pid_probe() {
+        // No log path, or a path that does not exist: no opinion, so the probe
+        // decides alone and prior behaviour is unchanged.
+        let dir = tempfile::tempdir().unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        store.register(999999, "claude", None, "/repo/alpha", None);
+        store.register(
+            999998,
+            "claude",
+            None,
+            "/repo/alpha",
+            Some(dir.path().join("nope.raw.log").to_str().unwrap()),
+        );
+        store.register(std::process::id(), "claude", None, "/repo/alpha", None);
+        store.clean_stale();
+        let records = store.read_all().unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].pid, std::process::id());
     }
 
     #[test]
