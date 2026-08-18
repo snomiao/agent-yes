@@ -5648,8 +5648,9 @@ my.translate = async (text, lang) => {
           document.addEventListener("click", (ev) => {
             if (!panel.hidden && !panel.contains(ev.target) && ev.target !== btn) closePanel();
           });
-          // Any item click closes the dropdown after the item's own handler runs.
-          panel.addEventListener("click", closePanel);
+          // Deliberately do NOT close on an in-panel item click: most items are
+          // toggles/cycles (fold, sort, stale) you may want to spin several times in
+          // a row. The panel now only closes on an outside click or the ⚙ toggle.
         }
       })();
 
