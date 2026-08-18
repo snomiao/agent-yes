@@ -424,6 +424,16 @@ describe("subtreeTotals", () => {
     expect(out[2]).toMatchObject({ rss: 300 });
   });
 
+  it("skips a row whose stats are missing rather than throwing", () => {
+    // Defensive: the sampler can miss an agent that exited mid-window, and a
+    // rollup must not take the whole table down with it.
+    const missing = { depth: 1, stats: undefined as unknown as ReturnType<typeof stats> };
+    const out = subtreeTotals([n(0, 1, 0, 1), missing, n(1, 4, 0, 1)]);
+    expect(out[0]).toMatchObject({ rss: 5 }); // descendants: skipped + counted
+    // And a row whose OWN stats are missing yields null instead of throwing.
+    expect(subtreeTotals([missing])).toEqual([null]);
+  });
+
   it("treats a missing depth as a root", () => {
     const out = subtreeTotals([{ stats: { pid: 1, rss: 1, cpuPercent: 0, procs: 1 } }, n(1, 2, 0, 1)]);
     expect(out[0]).toMatchObject({ rss: 3 });
@@ -462,6 +472,31 @@ describe("renderTable --tree", () => {
     expect(out).toContain("bash");
     // A zombie is called out — it is the one process state worth acting on.
     expect(out).toContain("zombie");
+  });
+
+  it("renders a tree row that has no prefix at all (a lone root)", () => {
+    // prefix/depth are optional on PsRow; a row built without them must still
+    // render, and must not gain a stray indent.
+    const bare = [{ ...treeRows[0]!, subtree: null }];
+    const out = renderTable(bare, null, { tree: true });
+    const line = out.split("\n").find((l) => l.startsWith("1 ")) as string;
+    expect(line).toBeTruthy();
+  });
+
+  it("indents process rows relative to their agent's rails", () => {
+    const kid = { pid: 9, ppid: 1, comm: "zsh", rss: 1, cpuPercent: 0, state: "S" };
+    const nested = renderTable(
+      [{ ...treeRows[0]!, depth: 1, prefix: "└─ ", subtree: null, procRows: [kid] }],
+      null,
+      { tree: true },
+    );
+    const root = renderTable([{ ...treeRows[0]!, subtree: null, procRows: [kid] }], null, {
+      tree: true,
+    });
+    const indentOf = (out: string) =>
+      (out.split("\n").find((l) => l.includes("zsh")) as string).match(/^ */)![0].length;
+    // A nested agent's processes sit deeper than a root agent's.
+    expect(indentOf(nested)).toBeGreaterThan(indentOf(root));
   });
 
   it("adds the Σ columns and renders forest rails on the PID cell", () => {

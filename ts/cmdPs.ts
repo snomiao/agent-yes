@@ -121,9 +121,14 @@ export interface PsRow {
 export function subtreeTotals(rows: Pick<PsRow, "depth" | "stats">[]): (TreeStats | null)[] {
   return rows.map((r, i) => {
     const depth = r.depth ?? 0;
-    let rss = r.stats.rss;
-    let cpuPercent = r.stats.cpuPercent;
-    let procs = r.stats.procs;
+    // Guard the row's OWN stats the same way its descendants' are guarded
+    // below: the sampler can miss an agent that exited mid-window, and one
+    // absent entry must not take down the whole table.
+    const own = r.stats;
+    if (!own) return null;
+    let rss = own.rss;
+    let cpuPercent = own.cpuPercent;
+    let procs = own.procs;
     let found = false;
     for (let j = i + 1; j < rows.length; j++) {
       const d = rows[j]?.depth ?? 0;
@@ -135,7 +140,7 @@ export function subtreeTotals(rows: Pick<PsRow, "depth" | "stats">[]): (TreeStat
       cpuPercent += st.cpuPercent;
       procs += st.procs;
     }
-    return found ? { pid: r.stats.pid, rss, cpuPercent, procs } : null;
+    return found ? { pid: own.pid, rss, cpuPercent, procs } : null;
   });
 }
 
