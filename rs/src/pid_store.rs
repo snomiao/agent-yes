@@ -263,6 +263,115 @@ impl PidStore {
         }
     }
 
+    /// Re-register agents that are RUNNING but have no registry record.
+    ///
+    /// `clean_stale` used to evict live agents on a bad `kill(pid, 0)` reading
+    /// (see `keep_record`), and nothing re-registers after spawn — so those
+    /// agents kept running and logging for days while absent from `ay ls`,
+    /// unreachable by `ay send`, and invisible to the reaper. Fixing the
+    /// eviction stops NEW losses; it cannot recover the ones already dropped.
+    ///
+    /// This recovers them. A `<pid>.raw.log` under a project's `.agent-yes/`
+    /// whose pid is still alive, with no record in the registry, can only be an
+    /// agent whose record was lost: the log is created by the wrapper at spawn,
+    /// so its existence means the agent WAS registered once.
+    ///
+    /// Deliberately conservative — it only adds, never removes, and reconstructs
+    /// just the fields the log path itself proves (pid, cwd, log_file). The
+    /// prompt and cli are unknown at this point; `cli` is recorded as "unknown"
+    /// rather than guessed, so a recovered row is visibly distinct from a
+    /// natively registered one instead of silently wrong.
+    pub fn recover_orphans(&self, dirs: &[PathBuf]) -> usize {
+        let _lock = acquire_lock(&self.path);
+        let known: std::collections::HashSet<u32> = match self.read_all() {
+            Ok(rs) => rs.iter().map(|r| r.pid).collect(),
+            Err(_) => return 0,
+        };
+        let mut found: Vec<PidRecord> = Vec::new();
+        for dir in dirs {
+            let Ok(entries) = fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                let Some(pid_str) = name.strip_suffix(".raw.log") else {
+                    continue;
+                };
+                let Ok(pid) = pid_str.parse::<u32>() else {
+                    continue;
+                };
+                if known.contains(&pid) || !is_process_alive(pid) {
+                    continue;
+                }
+                // The log lives at <cwd>/.agent-yes/<pid>.raw.log, so the cwd is
+                // its grandparent.
+                let cwd = path
+                    .parent()
+                    .and_then(|p| p.parent())
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if cwd.is_empty() {
+                    continue;
+                }
+                let started_at = fs::metadata(&path)
+                    .ok()
+                    .and_then(|m| m.created().or_else(|_| m.modified()).ok())
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or_else(|| chrono::Utc::now().timestamp_millis());
+                // Built inline rather than through register_full: that stamps
+                // OUR pid as wrapper_pid and OUR env as parent_pid, which would
+                // be a lie about someone else's agent. Only what the log path
+                // itself proves is filled in.
+                found.push(PidRecord {
+                    pid,
+                    // Not guessable from the log path. "unknown" keeps a
+                    // recovered row visibly distinct instead of silently wrong;
+                    // the console renders it as the CLI name, so a wrong guess
+                    // would be worse than an honest gap.
+                    cli: "unknown".to_string(),
+                    prompt: None,
+                    cwd,
+                    log_file: Some(path.to_string_lossy().to_string()),
+                    fifo_file: None,
+                    // Liveness was just proven by is_process_alive above; the
+                    // usual active/idle refresh takes over from here.
+                    status: "active".to_string(),
+                    unresponsive: false,
+                    exit_code: None,
+                    exit_reason: None,
+                    started_at,
+                    // The real wrapper is whatever ppid this pid has; we are not
+                    // it, and claiming otherwise would corrupt the agent tree.
+                    wrapper_pid: None,
+                    parent_pid: None,
+                    agent_id: Some(new_agent_id()),
+                    title: None,
+                    permissions: None,
+                });
+            }
+        }
+        if found.is_empty() {
+            return 0;
+        }
+        let n = found.len();
+        let result = (|| -> Result<()> {
+            let mut all = self.read_all()?;
+            all.extend(found);
+            self.write_all(&all)
+        })();
+        match result {
+            Ok(()) => n,
+            Err(e) => {
+                warn!("PidStore: failed to recover orphans: {}", e);
+                0
+            }
+        }
+    }
+
     pub fn clean_stale(&self) {
         // Lock spans read..write_all: a truncating rewrite must not race an
         // append, or a freshly registered (still-running) agent gets dropped.
@@ -717,6 +826,75 @@ mod tests {
         let records = store.read_all().unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].pid, std::process::id());
+    }
+
+    #[test]
+    fn test_recover_orphans_readopts_a_running_agent_with_no_record() {
+        // The exact field shape: a live pid, a <pid>.raw.log under a project's
+        // .agent-yes/, and nothing in the registry.
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("repo-alpha").join(".agent-yes");
+        std::fs::create_dir_all(&proj).unwrap();
+        let me = std::process::id();
+        std::fs::write(proj.join(format!("{me}.raw.log")), b"live output").unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        assert_eq!(store.recover_orphans(&[proj.clone()]), 1);
+        let recs = store.read_all().unwrap();
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].pid, me);
+        // cwd is the log's GRANDparent, not the .agent-yes dir itself.
+        assert!(recs[0].cwd.ends_with("repo-alpha"), "{}", recs[0].cwd);
+        assert_eq!(recs[0].cli, "unknown");
+        // Never claim to be the wrapper of someone else's agent.
+        assert_eq!(recs[0].wrapper_pid, None);
+        assert_eq!(recs[0].parent_pid, None);
+    }
+
+    #[test]
+    fn test_recover_orphans_ignores_dead_pids_and_known_records() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("repo-alpha").join(".agent-yes");
+        std::fs::create_dir_all(&proj).unwrap();
+        let me = std::process::id();
+        // Dead pid: its log is leftover, not an orphaned record.
+        std::fs::write(proj.join("999999.raw.log"), b"old").unwrap();
+        // Live pid that IS already registered: must not be duplicated.
+        std::fs::write(proj.join(format!("{me}.raw.log")), b"live").unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        store.register(me, "claude", None, "/repo/alpha", None);
+        assert_eq!(store.recover_orphans(&[proj]), 0);
+        assert_eq!(store.read_all().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_recover_orphans_is_idempotent_and_only_adds() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("repo-alpha").join(".agent-yes");
+        std::fs::create_dir_all(&proj).unwrap();
+        let me = std::process::id();
+        std::fs::write(proj.join(format!("{me}.raw.log")), b"live").unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        // A pre-existing UNRELATED record must survive the recovery write.
+        store.register(4242, "codex", None, "/repo/beta", None);
+        assert_eq!(store.recover_orphans(&[proj.clone()]), 1);
+        // Second sweep finds nothing new — the pid is now known.
+        assert_eq!(store.recover_orphans(&[proj]), 0);
+        let recs = store.read_all().unwrap();
+        assert_eq!(recs.len(), 2);
+        assert!(recs.iter().any(|r| r.pid == 4242), "existing record kept");
+    }
+
+    #[test]
+    fn test_recover_orphans_skips_junk_filenames_and_missing_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let proj = dir.path().join("repo-alpha").join(".agent-yes");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("notes.jsonl"), b"x").unwrap();
+        std::fs::write(proj.join("not-a-pid.raw.log"), b"x").unwrap();
+        let store = PidStore::with_path(dir.path().join("pids.jsonl"));
+        let missing = dir.path().join("gone");
+        assert_eq!(store.recover_orphans(&[proj, missing]), 0);
+        assert!(store.read_all().unwrap().is_empty());
     }
 
     #[test]
