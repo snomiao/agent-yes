@@ -1,0 +1,277 @@
+import { describe, expect, it } from "bun:test";
+import path from "path";
+import {
+  type NotifyEvent,
+  notifyDir,
+  filterSinceSeq,
+  filterSinceTs,
+  filterUnread,
+  inboxPath,
+  inboxesToGC,
+  liveWatcherPids,
+  maxSeq,
+  nextSeq,
+  parseCursor,
+  parseInboxText,
+  postmortemStartedAt,
+  rotateKeep,
+  emergencyKeep,
+  eventBytes,
+  serializeCursor,
+  serializeEvent,
+} from "./notifyInbox.ts";
+
+const ev = (over: Partial<NotifyEvent> = {}): NotifyEvent => ({
+  seq: 1,
+  ts: 1_000,
+  host: "h1",
+  parent_pid: 1,
+  child_pid: 100,
+  cli: "claude",
+  cwd: "/repo",
+  edge: "idle",
+  prev_state: "active",
+  state: "idle",
+  question: null,
+  ...over,
+});
+
+describe("notifyInbox — paths", () => {
+  it("namespaces the inbox by host and parent pid", () => {
+    const p = inboxPath("my-host", 42);
+    expect(p).toContain("notify");
+    expect(p.endsWith("42.ndjson")).toBe(true);
+    expect(p).toContain("my-host");
+  });
+
+  it("sanitizes an unsafe host so the path stays inside the notify dir", () => {
+    const p = path.resolve(inboxPath("../../etc", 1));
+    // Separators are stripped, so the resolved path can't climb out of notify/
+    // even though the dots survive as harmless literal filename chars.
+    expect(p.startsWith(path.resolve(notifyDir()) + path.sep)).toBe(true);
+  });
+});
+
+describe("notifyInbox — NDJSON round-trip + torn-line tolerance", () => {
+  it("serializes and re-parses an event", () => {
+    const line = serializeEvent(ev({ seq: 7 }));
+    const [got] = parseInboxText(line);
+    expect(got!.seq).toBe(7);
+    expect(got!.edge).toBe("idle");
+  });
+
+  it("skips a torn final line from a mid-append writer", () => {
+    const text =
+      serializeEvent(ev({ seq: 1 })) + "\n" + serializeEvent(ev({ seq: 2 })) + '\n{ "seq": 3, "ed';
+    const got = parseInboxText(text);
+    expect(got.map((e) => e.seq)).toEqual([1, 2]);
+  });
+
+  it("ignores blank lines and non-event JSON", () => {
+    const text = ["", serializeEvent(ev({ seq: 1 })), "  ", "42", '{"foo":"bar"}'].join("\n");
+    const got = parseInboxText(text);
+    expect(got.map((e) => e.seq)).toEqual([1]);
+  });
+
+  it("drops a partial event missing correlation fields (full validation)", () => {
+    const partial = JSON.stringify({ seq: 2, edge: "idle" }); // no parent_pid/child_pid/cwd
+    const badEdge = JSON.stringify({ ...ev({ seq: 3 }), edge: "bogus" });
+    const text = [serializeEvent(ev({ seq: 1 })), partial, badEdge].join("\n");
+    // Only the fully-formed event survives to a consumer's output.
+    expect(parseInboxText(text).map((e) => e.seq)).toEqual([1]);
+  });
+});
+
+describe("notifyInbox — seq allocation", () => {
+  it("nextSeq increments the last stored seq", () => {
+    expect(nextSeq(0)).toBe(1);
+    expect(nextSeq(41)).toBe(42);
+  });
+
+  it("nextSeq treats a missing/garbage counter as 0", () => {
+    expect(nextSeq(NaN)).toBe(1);
+    expect(nextSeq(-5)).toBe(1);
+  });
+
+  it("maxSeq finds the highest seq in an inbox (0 when empty)", () => {
+    expect(maxSeq([])).toBe(0);
+    expect(maxSeq([ev({ seq: 3 }), ev({ seq: 9 }), ev({ seq: 5 })])).toBe(9);
+  });
+});
+
+describe("notifyInbox — watermark filtering", () => {
+  const events = [ev({ seq: 1, ts: 100 }), ev({ seq: 2, ts: 200 }), ev({ seq: 3, ts: 300 })];
+
+  it("filterSinceSeq returns strictly-greater seqs", () => {
+    expect(filterSinceSeq(events, 1).map((e) => e.seq)).toEqual([2, 3]);
+    expect(filterSinceSeq(events, 0).map((e) => e.seq)).toEqual([1, 2, 3]);
+    expect(filterSinceSeq(events, undefined).map((e) => e.seq)).toEqual([1, 2, 3]);
+  });
+
+  it("filterSinceTs returns events at/after a wall-clock bound", () => {
+    expect(filterSinceTs(events, 200).map((e) => e.seq)).toEqual([2, 3]);
+  });
+
+  it("filterUnread returns seqs above the cursor", () => {
+    expect(filterUnread(events, 2).map((e) => e.seq)).toEqual([3]);
+    expect(filterUnread(events, 0).map((e) => e.seq)).toEqual([1, 2, 3]);
+  });
+});
+
+describe("notifyInbox — cursor", () => {
+  it("round-trips a cursor", () => {
+    expect(parseCursor(serializeCursor(5))).toEqual({ seq: 5 });
+  });
+
+  it("reads a missing/garbage cursor as seq 0", () => {
+    expect(parseCursor(null)).toEqual({ seq: 0 });
+    expect(parseCursor("not json")).toEqual({ seq: 0 });
+    expect(parseCursor('{"seq":-1}')).toEqual({ seq: 0 });
+  });
+});
+
+describe("notifyInbox — retention", () => {
+  it("GCs an inbox whose parent is dead and unreferenced by any live child", () => {
+    const gc = inboxesToGC([1, 2, 3], new Set([2]), new Set([3]));
+    // parent 1: dead + no live child → GC. parent 2: alive → keep. parent 3:
+    // referenced by a live child → keep.
+    expect(gc).toEqual([1]);
+  });
+
+  it("keeps everything when all parents are alive", () => {
+    expect(inboxesToGC([1, 2], new Set([1, 2]), new Set())).toEqual([]);
+  });
+});
+
+describe("notifyInbox — rotation", () => {
+  const many = () => Array.from({ length: 500 }, (_, i) => ev({ seq: i + 1 }));
+
+  it("keeps EVERYTHING when nothing is acked (min cursor 0) — at-least-once", () => {
+    // Every event is unacked, so none may be dropped even under a tiny cap. The
+    // inbox only shrinks once a consumer acks (advances its cursor).
+    const kept = rotateKeep(many(), 1, 0, 10);
+    expect(kept.length).toBe(500);
+  });
+
+  it("trims ACKED events (below the min cursor) under the byte cap", () => {
+    // seq 1..495 acked (min cursor 495), 496..500 unacked → only acked ones are
+    // eligible for eviction under the tiny cap.
+    const kept = rotateKeep(many(), 1, 495, 5);
+    expect(kept.length).toBeLessThan(500);
+    expect(kept[kept.length - 1]!.seq).toBe(500); // newest retained
+    expect(kept.some((e) => e.seq === 1)).toBe(false); // old acked evicted
+    for (let seq = 496; seq <= 500; seq++) expect(kept.some((e) => e.seq === seq)).toBe(true);
+  });
+
+  it("NEVER evicts an unacked event above the min cursor (at-least-once)", () => {
+    // protectAboveSeq=490 → every event with seq>490 must survive even under a
+    // tiny cap and a small minKeep. This is the guarantee codex flagged.
+    const kept = rotateKeep(many(), 1, 490, 5);
+    for (let seq = 491; seq <= 500; seq++) {
+      expect(kept.some((e) => e.seq === seq)).toBe(true);
+    }
+    expect(kept.length).toBeLessThan(500); // older, acked events still trimmed
+  });
+
+  it("returns everything when under minKeep", () => {
+    const events = [ev({ seq: 1 }), ev({ seq: 2 })];
+    expect(rotateKeep(events, 1, 0, 100).map((e) => e.seq)).toEqual([1, 2]);
+  });
+});
+
+describe("notifyInbox — watcher liveness", () => {
+  it("counts only heartbeats within the TTL", () => {
+    const now = 100_000;
+    const live = liveWatcherPids(
+      [
+        { pid: 1, ts: now - 1_000 }, // fresh
+        { pid: 2, ts: now - 999_999 }, // stale
+        { pid: 3, ts: now }, // fresh
+      ],
+      now,
+      15_000,
+    );
+    expect([...live].sort()).toEqual([1, 3]);
+  });
+});
+
+describe("notifyInbox — emergency rotation (#169.3)", () => {
+  const many = () => Array.from({ length: 500 }, (_, i) => ev({ seq: i + 1 }));
+
+  it("eventBytes sums the on-disk footprint (line + newline)", () => {
+    const evs = [ev({ seq: 1 }), ev({ seq: 2 })];
+    expect(eventBytes(evs)).toBe(
+      serializeEvent(evs[0]!).length + 1 + serializeEvent(evs[1]!).length + 1,
+    );
+    expect(eventBytes([])).toBe(0);
+  });
+
+  it("drops the OLDEST events even though they are unacked", () => {
+    // This is the whole point: rotateKeep protects every unacked event, which is
+    // right until the file threatens the disk. emergencyKeep ignores the
+    // watermark — the escape hatch a stuck consumer forces us to have.
+    const kept = emergencyKeep(many(), 1, 5);
+    expect(kept.length).toBeLessThan(500);
+    expect(kept[kept.length - 1]!.seq).toBe(500); // newest survive
+    expect(kept.some((e) => e.seq === 1)).toBe(false); // oldest sacrificed
+  });
+
+  it("still honours minKeep, so recent edges are never the ones sacrificed", () => {
+    const kept = emergencyKeep(many(), 1, 25);
+    expect(kept.length).toBe(25);
+    expect(kept.map((e) => e.seq)).toEqual(Array.from({ length: 25 }, (_, i) => 476 + i));
+  });
+
+  it("keeps everything that fits the cap", () => {
+    const evs = many();
+    expect(emergencyKeep(evs, eventBytes(evs), 5).length).toBe(500);
+  });
+
+  it("is a no-op below minKeep", () => {
+    const evs = [ev({ seq: 1 }), ev({ seq: 2 })];
+    expect(emergencyKeep(evs, 1, 100)).toEqual(evs);
+  });
+
+  it("returns events in ascending seq order (append order preserved)", () => {
+    const kept = emergencyKeep(many(), 1, 10);
+    expect(kept.map((e) => e.seq)).toEqual(kept.map((e) => e.seq).sort((a, b) => a - b));
+  });
+});
+
+describe("notifyInbox — postmortem identity (#169.6)", () => {
+  it("uses the single distinct incarnation stamped in the inbox", () => {
+    const evs = [ev({ seq: 1, parent_started_at: 500 }), ev({ seq: 2, parent_started_at: 500 })];
+    expect(postmortemStartedAt(evs)).toBe(500);
+  });
+
+  it("refuses to guess when the pid was reused across sessions", () => {
+    // Two agents' edges share the file. Picking one silently would attribute a
+    // stranger's children to whichever we chose — so make the operator decide.
+    const evs = [ev({ seq: 1, parent_started_at: 500 }), ev({ seq: 2, parent_started_at: 900 })];
+    expect(() => postmortemStartedAt(evs)).toThrow(/2 incarnations/);
+    expect(() => postmortemStartedAt(evs)).toThrow(/--started-at/);
+  });
+
+  it("lets an explicit choice win, even when ambiguous", () => {
+    const evs = [ev({ seq: 1, parent_started_at: 500 }), ev({ seq: 2, parent_started_at: 900 })];
+    expect(postmortemStartedAt(evs, 900)).toBe(900);
+  });
+
+  it("returns 0 (no filter) for a legacy inbox with no identity stamps", () => {
+    expect(postmortemStartedAt([ev({ seq: 1 })])).toBe(0);
+    expect(postmortemStartedAt([])).toBe(0);
+  });
+
+  it("ignores a non-positive or non-finite explicit choice", () => {
+    const evs = [ev({ seq: 1, parent_started_at: 500 })];
+    expect(postmortemStartedAt(evs, 0)).toBe(500);
+    expect(postmortemStartedAt(evs, -1)).toBe(500);
+    expect(postmortemStartedAt(evs, NaN)).toBe(500);
+  });
+
+  it("ignores zero stamps when finding distinct incarnations", () => {
+    // A 0 is "unknown", not an incarnation — it must not create false ambiguity.
+    const evs = [ev({ seq: 1, parent_started_at: 0 }), ev({ seq: 2, parent_started_at: 500 })];
+    expect(postmortemStartedAt(evs)).toBe(500);
+  });
+});
