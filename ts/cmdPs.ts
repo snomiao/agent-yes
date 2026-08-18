@@ -154,9 +154,13 @@ function padStart(s: string, n: number): string {
 export function renderTable(
   rows: PsRow[],
   unattributed: TreeStats | null,
-  opts: { tree?: boolean } = {},
+  opts: { tree?: boolean; procs?: boolean } = {},
 ): string {
   const tree = opts.tree === true;
+  // Independent of `tree`: the Σ columns describe the AGENT forest, while the
+  // process rows describe what is inside one agent. They answer different
+  // questions and are each expensive in vertical space, so they are each opt-in.
+  const showProcs = opts.procs === true;
   const cells = rows.map((r) => ({
     // In tree mode the rails live on the PID cell, so the hierarchy reads down
     // the left edge exactly like `ay ls`.
@@ -257,8 +261,10 @@ export function renderTable(
     // DIFFERENT kind of thing (an OS process, not an agent), and giving them
     // the agent columns would invite reading a shell as a fifth agent.
     const kids = rows[i]?.procRows;
-    if (!tree || !kids?.length) return;
-    const indent = " ".repeat((rows[i]?.prefix ?? "").length + 2);
+    if (!showProcs || !kids?.length) return;
+    // Indent under the agent's rails when they exist (--tree), else a plain
+    // two-space nest under a flat row.
+    const indent = " ".repeat((tree ? (rows[i]?.prefix ?? "").length : 0) + 2);
     const pw = Math.max(...kids.map((k) => String(k.pid).length));
     const cw = Math.max(...kids.map((k) => k.comm.length));
     for (const k of kids) {
@@ -298,6 +304,11 @@ export async function cmdPs(rest: string[]): Promise<number> {
       description:
         "Forest order with ├─ rails, plus Σ columns rolling each agent up with its subagents",
     })
+    .option("procs", {
+      type: "boolean",
+      default: false,
+      description: "Expand each agent into the OS processes it owns (wrapper, CLI, shells)",
+    })
     .option("interval", {
       type: "number",
       default: DEFAULT_WINDOW_MS / 1000,
@@ -308,6 +319,7 @@ export async function cmdPs(rest: string[]): Promise<number> {
     .example("ay ps", "biggest agents first, with box vitals")
     .example("ay ps --sort cpu", "who is actually burning CPU right now")
     .example("ay ps --tree", "parent>child forest; Σ columns include each agent's subagents")
+    .example("ay ps --procs", "expand each agent into its wrapper/CLI/shell processes")
     .example("ay ps --json", "machine-readable rollup")
     .help(false)
     .version(false)
@@ -369,10 +381,14 @@ export async function cmdPs(rest: string[]): Promise<number> {
     const totals = subtreeTotals(rows);
     rows.forEach((r, i) => {
       r.subtree = totals[i] ?? null;
+    });
+  }
+  if (argv.procs) {
+    for (const r of rows) {
       // Heaviest first: the reason to expand an agent is to find what inside it
       // is costing something, and that is almost never the wrapper.
       r.procRows = [...(members?.get(r.pid) ?? [])].sort((x, y) => y.rss - x.rss);
-    });
+    }
   }
 
   if (!argv.tree) {
@@ -417,7 +433,12 @@ export async function cmdPs(rest: string[]): Promise<number> {
 
   const header = formatSystemLine(sys);
   if (header) process.stdout.write(` ${header}\n\n`);
-  process.stdout.write(renderTable(rows, unattributed, { tree: argv.tree === true }) + "\n");
+  process.stdout.write(
+    renderTable(rows, unattributed, {
+      tree: argv.tree === true,
+      procs: argv.procs === true,
+    }) + "\n",
+  );
   return 0;
 }
 

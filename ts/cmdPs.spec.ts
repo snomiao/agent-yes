@@ -452,7 +452,7 @@ describe("renderTable --tree", () => {
     expect(out).not.toContain("ΣRSS");
   });
 
-  it("lists each agent's OS processes under it, but only in tree mode", () => {
+  it("lists each agent's OS processes only when --procs asks for them", () => {
     const withProcs = [
       {
         ...treeRows[0]!,
@@ -465,9 +465,12 @@ describe("renderTable --tree", () => {
         ],
       },
     ];
-    const flat = renderTable(withProcs, null);
-    expect(flat).not.toContain("bash"); // flat mode stays a one-row-per-agent table
-    const out = renderTable(withProcs, null, { tree: true });
+    // Default: a one-row-per-agent table, whatever procRows happens to hold.
+    expect(renderTable(withProcs, null)).not.toContain("bash");
+    // --tree alone is the AGENT forest; it must not drag the processes in.
+    expect(renderTable(withProcs, null, { tree: true })).not.toContain("bash");
+    // --procs is what expands them, and works without --tree.
+    const out = renderTable(withProcs, null, { procs: true });
     expect(out).toContain("claude");
     expect(out).toContain("bash");
     // A zombie is called out — it is the one process state worth acting on.
@@ -483,15 +486,23 @@ describe("renderTable --tree", () => {
     expect(line).toBeTruthy();
   });
 
+  it("expands processes without --tree, with no forest indent to inherit", () => {
+    const kid = { pid: 9, ppid: 1, comm: "zsh", rss: 1, cpuPercent: 0, state: "S" };
+    const out = renderTable([{ ...treeRows[0]!, procRows: [kid] }], null, { procs: true });
+    expect(out).toContain("zsh");
+    expect(out).not.toContain("ΣCPU%"); // --procs alone adds no forest columns
+  });
+
   it("indents process rows relative to their agent's rails", () => {
     const kid = { pid: 9, ppid: 1, comm: "zsh", rss: 1, cpuPercent: 0, state: "S" };
     const nested = renderTable(
       [{ ...treeRows[0]!, depth: 1, prefix: "└─ ", subtree: null, procRows: [kid] }],
       null,
-      { tree: true },
+      { tree: true, procs: true },
     );
     const root = renderTable([{ ...treeRows[0]!, subtree: null, procRows: [kid] }], null, {
       tree: true,
+      procs: true,
     });
     const indentOf = (out: string) =>
       (out.split("\n").find((l) => l.includes("zsh")) as string).match(/^ */)![0].length;
