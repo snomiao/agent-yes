@@ -303,6 +303,11 @@ fn url_query_value(query: &str, key: &str) -> Option<String> {
 /// address (port 0 resolves to a real port, which the caller prints).
 pub async fn run(port: u16) -> Result<()> {
     let token = Arc::new(api::load_or_create_token().context("serve token")?);
+    // Prime + start the per-agent resource sampler so the console's left-panel
+    // heatmap has data on the first poll (probe blocks for one /proc pass; the
+    // background thread then ticks at the adaptive bucket width).
+    let _ = crate::serve::sampler::probe_once();
+    crate::serve::sampler::start_sampler();
     // Loopback only — see the module header.
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = tokio::net::TcpListener::bind(addr)

@@ -53,6 +53,7 @@ describe("parseProcStat", () => {
     expect(s).toEqual({
       pid: 42,
       ppid: 7,
+      comm: "claude", // statLine's default
       rss: 10 * 4096,
       cpuSeconds: 2, // (150 + 50) ticks / 100 USER_HZ
       state: "S",
@@ -97,12 +98,37 @@ describe("parsePsTime", () => {
   });
 });
 
+describe("comm extraction", () => {
+  it("takes the comm from a stat line even when it holds spaces and parens", () => {
+    // The killer case: a comm containing ')' is why the field parse anchors on
+    // the LAST ')' — and the comm itself must span the FIRST '(' to that same
+    // anchor, or a name like "Web Content (1)" gets truncated.
+    const s = parseProcStat(9, statLine({ pid: 9, ppid: 1, comm: "Web Content (1)" }));
+    expect(s?.comm).toBe("Web Content (1)");
+    expect(s?.ppid).toBe(1); // fields after the comm still line up
+  });
+
+  it("keeps a plain comm intact", () => {
+    expect(parseProcStat(9, statLine({ pid: 9, ppid: 1, comm: "bash" }))?.comm).toBe("bash");
+  });
+});
+
 describe("parsePsTable", () => {
+  it("rejoins a comm that contains spaces, since it is the LAST column", () => {
+    const procs = parsePsTable("  10  1  2048  00:10 S /usr/bin/Google Chrome Helper\n");
+    expect(procs.get(10)?.comm).toBe("/usr/bin/Google Chrome Helper");
+    // The columns before it must be unaffected by those spaces.
+    expect(procs.get(10)?.rss).toBe(2048 * 1024);
+    expect(procs.get(10)?.state).toBe("S");
+  });
+
   it("normalizes ps KiB into bytes so both backends agree", () => {
     const procs = parsePsTable("  10  1  2048  00:10 S\n  11 10   512  00:00 Z\n");
     expect(procs.get(10)).toEqual({
       pid: 10,
       ppid: 1,
+      // This fixture predates the comm column; an absent one must read as "".
+      comm: "",
       rss: 2048 * 1024,
       cpuSeconds: 10,
       state: "S",
@@ -129,7 +155,7 @@ describe("descendantsOf", () => {
       ] as [number, number][]
     ).map(([pid, ppid]) => [
       pid,
-      { pid, ppid, rss: 0, cpuSeconds: 0, state: "S", startToken: `t${pid}` },
+      { pid, ppid, comm: "node", rss: 0, cpuSeconds: 0, state: "S", startToken: `t${pid}` },
     ]),
   );
   const kids = buildChildIndex(procs);
@@ -144,8 +170,8 @@ describe("descendantsOf", () => {
 
   it("terminates on a parent cycle instead of blowing the stack", () => {
     const cyclic = new Map<number, ProcSample>([
-      [1, { pid: 1, ppid: 2, rss: 0, cpuSeconds: 0, state: "S", startToken: "t1" }],
-      [2, { pid: 2, ppid: 1, rss: 0, cpuSeconds: 0, state: "S", startToken: "t2" }],
+      [1, { pid: 1, ppid: 2, comm: "node", rss: 0, cpuSeconds: 0, state: "S", startToken: "t1" }],
+      [2, { pid: 2, ppid: 1, comm: "node", rss: 0, cpuSeconds: 0, state: "S", startToken: "t2" }],
     ]);
     expect(descendantsOf(1, buildChildIndex(cyclic)).size).toBe(2);
   });
@@ -319,9 +345,9 @@ describe("parseMeminfo", () => {
 describe("systemStats", () => {
   it("reads load/mem and counts zombies from the snapshot", async () => {
     const procs = new Map<number, ProcSample>([
-      [1, { pid: 1, ppid: 0, rss: 0, cpuSeconds: 0, state: "S", startToken: "t1" }],
-      [2, { pid: 2, ppid: 1, rss: 0, cpuSeconds: 0, state: "Z", startToken: "t2" }],
-      [3, { pid: 3, ppid: 1, rss: 0, cpuSeconds: 0, state: "Z", startToken: "t3" }],
+      [1, { pid: 1, ppid: 0, comm: "node", rss: 0, cpuSeconds: 0, state: "S", startToken: "t1" }],
+      [2, { pid: 2, ppid: 1, comm: "node", rss: 0, cpuSeconds: 0, state: "Z", startToken: "t2" }],
+      [3, { pid: 3, ppid: 1, comm: "node", rss: 0, cpuSeconds: 0, state: "Z", startToken: "t3" }],
     ]);
     const sys = await systemStats(procs, {
       readSys: async (name) =>

@@ -3605,12 +3605,6 @@
         // Always-on header-badge traffic ring (independent of the opt-in HUD below).
         if (kind === "in") traf.cin += n || 0;
         else if (kind === "out") traf.cout += n || 0;
-        // Also accumulate into the selected agent's per-agent ring (left-panel heatmap).
-        if (sel) {
-          const r = ioRing(sel);
-          if (kind === "in") r.i += n || 0;
-          else if (kind === "out") r.o += n || 0;
-        }
         if (!perfOn) return;
         if (kind === "in") {
           perf.inEvents++;
@@ -3708,28 +3702,9 @@
         traf.cin = traf.cout = 0;
         traf.hist = [];
       }
-      // Per-agent I/O ring for the LEFT-PANEL heatmap. Only the SELECTED agent has
-      // live I/O (the fwd/term.write hooks fire for it alone), so this map holds a
-      // rolling window of the traffic each agent saw while it was selected. Other
-      // rows keep their last-known window (empty → transparent). Mirrors traf's
-      // shape but is keyed by composite _key, sampled on the same 1s tick below.
-      const IO_N = 60;
-      const ioByKey = new Map();
-      function ioRing(key) {
-        let r = ioByKey.get(key);
-        if (!r) {
-          r = { i: 0, o: 0, hist: [] };
-          ioByKey.set(key, r);
-        }
-        return r;
-      }
-      function ioReset(key) {
-        const r = ioByKey.get(key);
-        if (r) {
-          r.i = r.o = 0;
-          r.hist = [];
-        }
-      }
+      // Cached /api/host response (system load + managed/unattributed split) for
+      // the room header line. Refreshed every list tick.
+      let hostRes = null;
       // The last winsize the agent's PTY reported (from /api/size), so the tooltip
       // can show OUR viewport vs the agent's render size. Reset on agent switch.
       let agentSize = null;
@@ -3864,15 +3839,9 @@
         traf.hist.push({ i: traf.cin, o: traf.cout });
         if (traf.hist.length > TRAF_N) traf.hist.shift();
         traf.cin = traf.cout = 0;
-        // Per-agent ring: sample the selected agent's current second, then repaint
-        // the list so its row heatmap advances (and paint the header badge).
-        const r = sel ? ioRing(sel) : null;
-        if (r) {
-          r.hist.push({ i: r.i, o: r.o });
-          if (r.hist.length > IO_N) r.hist.shift();
-          r.i = r.o = 0;
-          renderList();
-        }
+        // The per-agent heatmap now comes from the server sampler (/api/ls res
+        // field), refreshed on the 3s list poll — no front-end per-second
+        // sampling needed. Repaint the header badge (traffic tooltip) only.
         if (sel) paintHeaderBadge();
       }, 1000);
 
@@ -5917,6 +5886,28 @@ my.translate = async (text, lang) => {
       // as agent rows so the hierarchy reads as one tree. The room/peer layers
       // only appear here when there are ≥2 of them (single ones fold away in
       // layeredRows), so a header always disambiguates something real.
+      // Resource summary for the LOCAL room header line, sourced from /api/host:
+      //   XX%/YY% XXG/YYG of ZZG
+      // where XX = agent-yes managed, YY = unattributed (rest of the box). Only
+      // renders when hostRes has been fetched and the sampler has data.
+      function resLineHtml() {
+        if (!hostRes || !hostRes.resources) return "";
+        const r = hostRes.resources;
+        const memTotal = hostRes.mem && hostRes.mem.total ? hostRes.mem.total : null;
+        const managed = hsize(r.managed_rss);
+        const unattributed = hsize(r.unattributed_rss);
+        const total = memTotal ? hsize(memTotal) : null;
+        if (!total) return "";
+        return `  —  <span title="agent-yes managed / unattributed">${managed}/${unattributed}</span> of ${total}`;
+      }
+      function hsize(bytes) {
+        if (bytes === null || !Number.isFinite(bytes)) return "-";
+        if (bytes >= 1073741824) return (bytes / 1073741824).toFixed(1) + "G";
+        if (bytes >= 1048576) return Math.round(bytes / 1048576) + "M";
+        if (bytes >= 1024) return Math.round(bytes / 1024) + "K";
+        return bytes + "B";
+      }
+
       function headerHtml(r) {
         const icon = r.kind === "room" ? "▤" : "▣";
         // Peer headers carry their host's connection type (lan/wan/relay), so a
@@ -5925,7 +5916,8 @@ my.translate = async (text, lang) => {
           r.kind === "peer"
             ? connTagHtml(hostKinds.get((r.room || "") + " " + (r.host || "")))
             : "";
-        return `<div class="ghead g-${r.kind}">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}<span class="gicon">${icon}</span><span class="glabel">${esc(r.label || "")}</span>${ctag}<span class="gkind">${r.kind}</span></div>`;
+        const resSuffix = r.kind === "room" ? resLineHtml() : "";
+        return `<div class="ghead g-${r.kind}">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}<span class="gicon">${icon}</span><span class="glabel">${esc(r.label || "")}${resSuffix}</span>${ctag}<span class="gkind">${r.kind}</span></div>`;
       }
 
       // Extra row classes for collaborative presence: a yellow bar when a human
@@ -5965,29 +5957,42 @@ my.translate = async (text, lang) => {
           : "";
       }
 
-      // Build the low-contrast oklch heatmap backdrop for one agent row. The overlay
-      // sits BEHIND the text (absolute, low opacity), a horizontal gradient from
-      // transparent (old, left) → colour (recent, right). OUT (green) and IN (accent)
-      // are layered as two gradients so both directions read, but at low alpha so
-      // the agent name / status stay crisp on top.
-      function rowIoHeat(key) {
-        const r = ioByKey.get(key);
-        if (!r || !r.hist.length) return "";
-        const max = Math.max(1, ...r.hist.map((h) => Math.max(h.i, h.o)));
-        // A right-side "brightness ramp" is a hard-stop gradient; we approximate the
-        // per-second intensity by summing the last few buckets (rightmost = hottest).
-        const tail = Math.min(8, r.hist.length);
-        let o = 0, i = 0;
-        for (let k = r.hist.length - tail; k < r.hist.length; k++) { o += r.hist[k].o; i += r.hist[k].i; }
-        const aOut = Math.min(1, Math.log1p(o) / Math.log1p(max * tail));
-        const aIn = Math.min(1, Math.log1p(i) / Math.log1p(max * tail));
-        // Low-contrast: cap opacity well below what would muddle the label.
-        const oA = (aOut * 0.28).toFixed(2);
-        const iA = (aIn * 0.28).toFixed(2);
-        // oklch, two stacked linear-gradients, right-bright → left-fade.
-        return `<div class="ioheat" style="background:${JSON.stringify(
-          `linear-gradient(90deg, oklch(65% 0.14 152 / 0) 0%, oklch(65% 0.14 152 / ${oA}) 100%), linear-gradient(90deg, oklch(62% 0.16 255 / 0) 0%, oklch(62% 0.16 255 / ${iA}) 100%)`
-        )}"></div>`;
+      // Build the low-contrast oklch heatmap backdrop for one agent row, from the
+      // SERVER-side per-agent resource window (`entry.res`, fed by ayrs' sampler —
+      // CPU-seconds, RSS and process count per bucket, one point per minute-ish).
+      // Every row gets its own window (no selection required), painted BEHIND the
+      // text (absolute, low opacity). Two stacked rows: CPU (top, warm) and RSS
+      // (bottom, cool), each a per-bucket grid so a busy/fat burst reads as a solid
+      // block and idle as near-transparent. Right edge is the newest bucket.
+      function rowIoHeat(e) {
+        const res = e && e.res;
+        if (!res || !Array.isArray(res.cpu_seconds) || !res.cpu_seconds.length) return "";
+        const n = res.cpu_seconds.length;
+        const bucketSecs = res.bucket_secs || 60;
+        // CPU: normalize cpu_seconds (summed across the tree) to "fraction of one
+        // core" by dividing by the bucket width. Log-scaled so a 1% vs 100% spread
+        // reads better than a linear 0..1.
+        const cpuMax = Math.max(1e-9, ...res.cpu_seconds.map((s) => Math.abs(s) / bucketSecs));
+        const rssMax = Math.max(1, ...(res.rss || []).map((b) => b || 0));
+        const log1p = (v) => (v <= 0 ? 0 : Math.min(1, Math.log1p(v) / Math.log1p(cpuMax)));
+        const logRss = (v) =>
+          v <= 0 ? 0 : Math.min(1, Math.log1p(v / 1e6) / Math.log1p(rssMax / 1e6));
+        const w = 96,
+          h = 22,
+          colW = w / n,
+          rowH = (h - 2) / 2;
+        const cells = [];
+        for (let k = 0; k < n; k++) {
+          const x = k * colW;
+          const aCpu = log1p((res.cpu_seconds[k] || 0) / bucketSecs);
+          const aRss = logRss(res.rss ? res.rss[k] || 0 : 0);
+          // Low-contrast caps so the agent name / status stay crisp on top.
+          cells.push(
+            `<rect x="${x.toFixed(2)}" y="0" width="${(colW - 0.5).toFixed(2)}" height="${rowH.toFixed(2)}" fill="oklch(62% 0.15 35)" opacity="${(aCpu * 0.3).toFixed(2)}"/>`,
+            `<rect x="${x.toFixed(2)}" y="${(rowH + 2).toFixed(2)}" width="${(colW - 0.5).toFixed(2)}" height="${rowH.toFixed(2)}" fill="oklch(65% 0.14 262)" opacity="${(aRss * 0.3).toFixed(2)}"/>`,
+          );
+        }
+        return `<div class="ioheat"><svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" shape-rendering="crispEdges" style="position:absolute;inset:0;width:100%;height:100%">${cells.join("")}</svg></div>`;
       }
       function renderList() {
         // The graph view (/r/) only exists on the hosted origin — a local
@@ -6032,7 +6037,7 @@ my.translate = async (text, lang) => {
                 const t = e.title || e.status_text || e.prompt || "";
                 const id = compactIdent(e, ctx, 3, r.parentEntry);
                 const cli = cliLabel(e);
-                return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">${rowIoHeat(e._key)}
+                return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">${rowIoHeat(e)}
         ${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}
         ${pinMarkHtml(e)}
         <span class="dot ${esc(e.status)}"></span>
@@ -6064,7 +6069,7 @@ my.translate = async (text, lang) => {
                     `<span class="rtag" data-k="${k}"><span style="opacity:.55">${k}:</span>${esc(v)}</span>`,
                 )
                 .join("");
-              return `<div class="row ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">${rowIoHeat(e._key)}
+              return `<div class="row ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">${rowIoHeat(e)}
         <div class="r1">${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}${pinMarkHtml(e)}<span class="dot ${esc(e.status)}"></span>
           <span class="name">${esc(cliLabel(e) || ident(e) || "agent")}</span>
           <span class="badge">pid ${e.pid}</span>
@@ -6140,6 +6145,14 @@ my.translate = async (text, lang) => {
       // so this stays a no-op on the wire for a modern fleet — it still re-renders
       // every tick, which keeps the relative "age" column fresh.
       async function loadList() {
+        // Refresh the local-host system snapshot for the room header line.
+        localTx
+          .fetchJSON("/api/host")
+          .then((h) => {
+            hostRes = h;
+          })
+          .catch(() => {});
+
         const srcs = [...sources.values()];
         await Promise.all(srcs.filter((s) => !s.streaming).map(listSource));
         mergeRender();
@@ -9322,9 +9335,18 @@ my.translate = async (text, lang) => {
           // The handle itself lives inside the tip; hit-test against it directly.
           if (!tip.contains(e.target)) return;
           if (e.clientY - tr.top > HANDLE) return;
-          drag = { id: e.pointerId, x: e.clientX, y: e.clientY, ox: tr.left, oy: tr.top, moved: false };
+          drag = {
+            id: e.pointerId,
+            x: e.clientX,
+            y: e.clientY,
+            ox: tr.left,
+            oy: tr.top,
+            moved: false,
+          };
           suppressClick = false;
-          try { tip.setPointerCapture(e.pointerId); } catch {}
+          try {
+            tip.setPointerCapture(e.pointerId);
+          } catch {}
           e.preventDefault();
         });
         pill.addEventListener("pointermove", (e) => {
@@ -9348,7 +9370,11 @@ my.translate = async (text, lang) => {
           const tip = tipEl();
           drag = null;
           if (tip) tip.classList.remove("dragging");
-          if (tip) { try { tip.releasePointerCapture(e.pointerId); } catch {} }
+          if (tip) {
+            try {
+              tip.releasePointerCapture(e.pointerId);
+            } catch {}
+          }
           if (!moved) return;
           if (tip) {
             pos = {
@@ -9356,7 +9382,9 @@ my.translate = async (text, lang) => {
               y: parseFloat(tip.style.top) || 8,
             };
           }
-          try { localStorage.setItem(KEY, JSON.stringify(pos)); } catch {}
+          try {
+            localStorage.setItem(KEY, JSON.stringify(pos));
+          } catch {}
           suppressClick = true;
           setTimeout(() => (suppressClick = false), 0);
         };

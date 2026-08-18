@@ -21,6 +21,7 @@ import yargs from "yargs";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import {
   humanBytes,
+  type ProcRow,
   sampleTrees,
   snapshotProcs,
   systemStats,
@@ -85,8 +86,62 @@ export interface PsRow {
   status: string;
   cwd: string;
   repo: string;
+  /** This agent's OWN cost, exclusive of any nested agent (see sampleTrees). */
   stats: TreeStats;
   self: boolean;
+  /** `├─ `/`└─ ` rails from the agent forest. Empty outside --tree. */
+  prefix?: string;
+  /** Depth in the agent forest; 0 for roots. */
+  depth?: number;
+  /**
+   * This agent's cost PLUS every descendant agent's. Set only in --tree mode,
+   * and only for rows that actually have descendants — a leaf's subtree IS its
+   * own row, so repeating the numbers would be noise.
+   */
+  subtree?: TreeStats | null;
+  /**
+   * The OS processes this agent owns (wrapper, the CLI itself, its shells and
+   * pty hosts). Populated in --tree so the agent's number can be read as a sum
+   * of things you can actually point at.
+   */
+  procRows?: ProcRow[];
+}
+
+/**
+ * Roll each row up with its descendants, using the forest `depth` column: a
+ * row's descendants are the following rows with a strictly greater depth, up to
+ * the next row at or above its own level.
+ *
+ * Needed because sampleTrees attributes DEEPEST-FIRST and exclusively — a
+ * parent's own numbers deliberately omit its subagents, so without this a
+ * fan-out parent looks cheap while its real cost sits in rows below it.
+ *
+ * Returns null for a row with no descendants.
+ */
+export function subtreeTotals(rows: Pick<PsRow, "depth" | "stats">[]): (TreeStats | null)[] {
+  return rows.map((r, i) => {
+    const depth = r.depth ?? 0;
+    // Guard the row's OWN stats the same way its descendants' are guarded
+    // below: the sampler can miss an agent that exited mid-window, and one
+    // absent entry must not take down the whole table.
+    const own = r.stats;
+    if (!own) return null;
+    let rss = own.rss;
+    let cpuPercent = own.cpuPercent;
+    let procs = own.procs;
+    let found = false;
+    for (let j = i + 1; j < rows.length; j++) {
+      const d = rows[j]?.depth ?? 0;
+      if (d <= depth) break; // left this row's subtree
+      const st = rows[j]?.stats;
+      if (!st) continue;
+      found = true;
+      rss += st.rss;
+      cpuPercent += st.cpuPercent;
+      procs += st.procs;
+    }
+    return found ? { pid: own.pid, rss, cpuPercent, procs } : null;
+  });
 }
 
 function pad(s: string, n: number): string {
@@ -96,15 +151,31 @@ function padStart(s: string, n: number): string {
   return s.length >= n ? s : " ".repeat(n - s.length) + s;
 }
 
-export function renderTable(rows: PsRow[], unattributed: TreeStats | null): string {
+export function renderTable(
+  rows: PsRow[],
+  unattributed: TreeStats | null,
+  opts: { tree?: boolean; procs?: boolean } = {},
+): string {
+  const tree = opts.tree === true;
+  // Independent of `tree`: the Σ columns describe the AGENT forest, while the
+  // process rows describe what is inside one agent. They answer different
+  // questions and are each expensive in vertical space, so they are each opt-in.
+  const showProcs = opts.procs === true;
   const cells = rows.map((r) => ({
-    pid: String(r.pid),
+    // In tree mode the rails live on the PID cell, so the hierarchy reads down
+    // the left edge exactly like `ay ls`.
+    pid: (tree ? (r.prefix ?? "") : "") + String(r.pid),
     cli: r.cli,
     status: r.status,
     cpu: r.stats.cpuPercent.toFixed(1),
     rss: humanBytes(r.stats.rss),
     procs: String(r.stats.procs),
     repo: r.repo,
+    cwd: shortenPath(r.cwd),
+    // Σ columns: this agent plus its descendants. Blank for leaves.
+    scpu: r.subtree ? r.subtree.cpuPercent.toFixed(1) : "",
+    srss: r.subtree ? humanBytes(r.subtree.rss) : "",
+    sprocs: r.subtree ? String(r.subtree.procs) : "",
     self: r.self,
   }));
   // The unmanaged row participates in the width pass — "unmanaged" is wider than
@@ -118,6 +189,10 @@ export function renderTable(rows: PsRow[], unattributed: TreeStats | null): stri
       rss: humanBytes(unattributed.rss),
       procs: String(unattributed.procs),
       repo: "-",
+      cwd: "-",
+      scpu: "",
+      srss: "",
+      sprocs: "",
       self: false,
     });
   }
@@ -129,6 +204,9 @@ export function renderTable(rows: PsRow[], unattributed: TreeStats | null): stri
     rss: Math.max(5, ...cells.map((c) => c.rss.length)),
     procs: Math.max(5, ...cells.map((c) => c.procs.length)),
     repo: Math.max(4, ...cells.map((c) => c.repo.length)),
+    scpu: Math.max(5, ...cells.map((c) => c.scpu.length)),
+    srss: Math.max(5, ...cells.map((c) => c.srss.length)),
+    sprocs: Math.max(6, ...cells.map((c) => c.sprocs.length)),
   };
   const line = (
     pid: string,
@@ -138,18 +216,65 @@ export function renderTable(rows: PsRow[], unattributed: TreeStats | null): stri
     rss: string,
     procs: string,
     repo: string,
+    cwd: string,
+    scpu = "",
+    srss = "",
+    sprocs = "",
     tail = "",
   ) =>
     `${pad(pid, w.pid)}  ${pad(cli, w.cli)}  ${pad(status, w.status)}  ` +
     `${padStart(cpu, w.cpu)}  ${padStart(rss, w.rss)}  ${padStart(procs, w.procs)}  ` +
-    `${pad(repo, w.repo)}${tail}`;
+    // The Σ block only exists in tree mode, where a parent's own numbers exclude
+    // its subagents and are therefore misleading on their own.
+    (tree
+      ? `${padStart(scpu, w.scpu)}  ${padStart(srss, w.srss)}  ${padStart(sprocs, w.sprocs)}  `
+      : "") +
+    // REPO stays as the at-a-glance identity; CWD follows with the full path
+    // (home collapsed to ~) because sibling worktrees of one repo share a REPO
+    // label and are otherwise indistinguishable here. NOT width-padded: it is
+    // the last column, and paths run long enough (120 chars on a real fleet)
+    // that padding to the widest would trail ~100 blanks on every other row.
+    `${pad(repo, w.repo)}  ${cwd}${tail}`;
 
-  const out: string[] = [line("PID", "CLI", "STATUS", "CPU%", "RSS", "PROCS", "REPO")];
-  for (const c of cells) {
+  const out: string[] = [
+    line("PID", "CLI", "STATUS", "CPU%", "RSS", "PROCS", "REPO", "CWD", "ΣCPU%", "ΣRSS", "ΣPROCS"),
+  ];
+  cells.forEach((c, i) => {
     out.push(
-      line(c.pid, c.cli, c.status, c.cpu, c.rss, c.procs, c.repo, c.self ? "  ← this session" : ""),
+      line(
+        c.pid,
+        c.cli,
+        c.status,
+        c.cpu,
+        c.rss,
+        c.procs,
+        c.repo,
+        c.cwd,
+        c.scpu,
+        c.srss,
+        c.sprocs,
+        c.self ? "  ← this session" : "",
+      ),
     );
-  }
+    // The agent's own processes, one indent deeper than its rails. Rendered as
+    // a continuation of the row above rather than as table rows: they are a
+    // DIFFERENT kind of thing (an OS process, not an agent), and giving them
+    // the agent columns would invite reading a shell as a fifth agent.
+    const kids = rows[i]?.procRows;
+    if (!showProcs || !kids?.length) return;
+    // Indent under the agent's rails when they exist (--tree), else a plain
+    // two-space nest under a flat row.
+    const indent = " ".repeat((tree ? (rows[i]?.prefix ?? "").length : 0) + 2);
+    const pw = Math.max(...kids.map((k) => String(k.pid).length));
+    const cw = Math.max(...kids.map((k) => k.comm.length));
+    for (const k of kids) {
+      out.push(
+        `${indent}· ${padStart(String(k.pid), pw)}  ${pad(k.comm, cw)}  ` +
+          `${padStart(k.cpuPercent.toFixed(1), 5)}  ${padStart(humanBytes(k.rss), 7)}` +
+          (k.state === "Z" ? "  zombie" : ""),
+      );
+    }
+  });
   return out.join("\n");
 }
 
@@ -176,7 +301,13 @@ export async function cmdPs(rest: string[]): Promise<number> {
     .option("tree", {
       type: "boolean",
       default: false,
-      description: "Keep ay ls's parent>child forest order instead of sorting",
+      description:
+        "Forest order with ├─ rails, plus Σ columns rolling each agent up with its subagents",
+    })
+    .option("procs", {
+      type: "boolean",
+      default: false,
+      description: "Expand each agent into the OS processes it owns (wrapper, CLI, shells)",
     })
     .option("interval", {
       type: "number",
@@ -187,6 +318,8 @@ export async function cmdPs(rest: string[]): Promise<number> {
     .option("help", { alias: "h", type: "boolean", default: false, description: "Show this help" })
     .example("ay ps", "biggest agents first, with box vitals")
     .example("ay ps --sort cpu", "who is actually burning CPU right now")
+    .example("ay ps --tree", "parent>child forest; Σ columns include each agent's subagents")
+    .example("ay ps --procs", "expand each agent into its wrapper/CLI/shell processes")
     .example("ay ps --json", "machine-readable rollup")
     .help(false)
     .version(false)
@@ -216,9 +349,10 @@ export async function cmdPs(rest: string[]): Promise<number> {
   // first-come, so sampling in that order would let a parent absorb a nested
   // agent's whole subtree and render the child as a bogus 0-proc row. Reverse to
   // claim deepest-first, then display in forest order.
-  const ordered = flattenForest(buildAgentForest(records)).map((r) => r.record);
+  const flat = flattenForest(buildAgentForest(records));
+  const ordered = flat.map((r) => r.record);
   const windowMs = Math.max(100, (Number.isFinite(argv.interval) ? argv.interval : 1) * 1000);
-  const { trees, unattributed } = await sampleTrees(
+  const { trees, unattributed, members } = await sampleTrees(
     [...ordered].reverse().map((r) => r.pid),
     { windowMs },
   );
@@ -227,7 +361,7 @@ export async function cmdPs(rest: string[]): Promise<number> {
     await Promise.all(ordered.map(async (r) => [r.pid, (await deriveLiveState(r)).state] as const)),
   );
   const selfPid = process.pid;
-  const rows: PsRow[] = ordered.map((r) => ({
+  const rows: PsRow[] = ordered.map((r, i) => ({
     pid: r.pid,
     cli: r.cli,
     status: states.get(r.pid) ?? r.status,
@@ -237,7 +371,25 @@ export async function cmdPs(rest: string[]): Promise<number> {
     // Mark the tree we are standing in — anything that later grows a kill
     // affordance must not let you shoot the session issuing the command.
     self: trees.get(r.pid) !== undefined && isSelfTree(r.pid, selfPid),
+    prefix: flat[i]?.prefix ?? "",
+    depth: flat[i]?.depth ?? 0,
   }));
+
+  // Only meaningful in forest order — sorting by rss would scatter descendants
+  // away from their parent and make a rollup describe the wrong span of rows.
+  if (argv.tree) {
+    const totals = subtreeTotals(rows);
+    rows.forEach((r, i) => {
+      r.subtree = totals[i] ?? null;
+    });
+  }
+  if (argv.procs) {
+    for (const r of rows) {
+      // Heaviest first: the reason to expand an agent is to find what inside it
+      // is costing something, and that is almost never the wrapper.
+      r.procRows = [...(members?.get(r.pid) ?? [])].sort((x, y) => y.rss - x.rss);
+    }
+  }
 
   if (!argv.tree) {
     const key = String(argv.sort);
@@ -281,7 +433,12 @@ export async function cmdPs(rest: string[]): Promise<number> {
 
   const header = formatSystemLine(sys);
   if (header) process.stdout.write(` ${header}\n\n`);
-  process.stdout.write(renderTable(rows, unattributed) + "\n");
+  process.stdout.write(
+    renderTable(rows, unattributed, {
+      tree: argv.tree === true,
+      procs: argv.procs === true,
+    }) + "\n",
+  );
   return 0;
 }
 

@@ -8,9 +8,10 @@ import {
   readPpidSync,
   renderTable,
   repoLabel,
+  subtreeTotals,
   type PsRow,
 } from "./cmdPs.ts";
-import type { SystemStats, TreeStats } from "./procStats.ts";
+import type { ProcRow, SystemStats, TreeStats } from "./procStats.ts";
 
 const stats = (over: Partial<TreeStats> = {}): TreeStats => ({
   pid: 1,
@@ -151,11 +152,13 @@ const fixture: {
   trees: Map<number, TreeStats>;
   unattributed: TreeStats;
   system: SystemStats;
+  members: Map<number, ProcRow[]>;
 } = {
   records: [],
   trees: new Map(),
   unattributed: { pid: 0, rss: 0, cpuPercent: 0, procs: 0 },
   system: sys(),
+  members: new Map(),
 };
 
 vi.mock("./subcommands.ts", () => ({
@@ -172,6 +175,7 @@ vi.mock("./procStats.ts", async () => {
     sampleTrees: vi.fn(async () => ({
       trees: fixture.trees,
       unattributed: fixture.unattributed,
+      members: fixture.members ?? new Map(),
     })),
   };
 });
@@ -385,5 +389,145 @@ describe("parsePpidFromStat", () => {
   it("returns null when the ppid field is missing or not a number", () => {
     expect(parsePpidFromStat("1234 (bash) S")).toBeNull();
     expect(parsePpidFromStat("1234 (bash) S notanumber 1234")).toBeNull();
+  });
+});
+
+describe("subtreeTotals", () => {
+  const n = (depth: number, rss: number, cpu: number, procs: number) => ({
+    depth,
+    stats: { pid: depth * 1000 + rss, rss, cpuPercent: cpu, procs },
+  });
+
+  it("returns null for a row with no descendants, so leaves render blank", () => {
+    expect(subtreeTotals([n(0, 10, 1, 1)])).toEqual([null]);
+  });
+
+  it("rolls a parent up with its children", () => {
+    const [parent, a, b] = subtreeTotals([n(0, 10, 1, 2), n(1, 5, 2, 3), n(1, 1, 4, 1)]);
+    expect(parent).toMatchObject({ rss: 16, cpuPercent: 7, procs: 6 });
+    expect(a).toBeNull();
+    expect(b).toBeNull();
+  });
+
+  it("includes grandchildren in the grandparent's total", () => {
+    // sampleTrees attributes exclusively, so without the deep walk a fan-out
+    // parent's real cost stays invisible.
+    const out = subtreeTotals([n(0, 1, 1, 1), n(1, 2, 2, 2), n(2, 4, 4, 4)]);
+    expect(out[0]).toMatchObject({ rss: 7, cpuPercent: 7, procs: 7 });
+    expect(out[1]).toMatchObject({ rss: 6, cpuPercent: 6, procs: 6 });
+    expect(out[2]).toBeNull();
+  });
+
+  it("stops at the next sibling — one subtree never absorbs another", () => {
+    const out = subtreeTotals([n(0, 1, 0, 1), n(1, 2, 0, 1), n(0, 100, 0, 1), n(1, 200, 0, 1)]);
+    expect(out[0]).toMatchObject({ rss: 3 });
+    expect(out[2]).toMatchObject({ rss: 300 });
+  });
+
+  it("skips a row whose stats are missing rather than throwing", () => {
+    // Defensive: the sampler can miss an agent that exited mid-window, and a
+    // rollup must not take the whole table down with it.
+    const missing = { depth: 1, stats: undefined as unknown as ReturnType<typeof stats> };
+    const out = subtreeTotals([n(0, 1, 0, 1), missing, n(1, 4, 0, 1)]);
+    expect(out[0]).toMatchObject({ rss: 5 }); // descendants: skipped + counted
+    // And a row whose OWN stats are missing yields null instead of throwing.
+    expect(subtreeTotals([missing])).toEqual([null]);
+  });
+
+  it("treats a missing depth as a root", () => {
+    const out = subtreeTotals([
+      { stats: { pid: 1, rss: 1, cpuPercent: 0, procs: 1 } },
+      n(1, 2, 0, 1),
+    ]);
+    expect(out[0]).toMatchObject({ rss: 3 });
+  });
+});
+
+describe("renderTable --tree", () => {
+  const treeRows = [
+    row({ pid: 1, repo: "alpha", stats: stats({ rss: 100, cpuPercent: 1, procs: 2 }) }),
+    row({ pid: 2, repo: "alpha", stats: stats({ rss: 50, cpuPercent: 2, procs: 1 }) }),
+  ];
+
+  it("omits the Σ columns entirely in flat mode", () => {
+    const out = renderTable(treeRows, null);
+    expect(out).not.toContain("ΣCPU%");
+    expect(out).not.toContain("ΣRSS");
+  });
+
+  it("lists each agent's OS processes only when --procs asks for them", () => {
+    const withProcs = [
+      {
+        ...treeRows[0]!,
+        depth: 0,
+        prefix: "",
+        procRows: [
+          { pid: 11, ppid: 1, comm: "claude", rss: 1024, cpuPercent: 2, state: "S" },
+          { pid: 12, ppid: 11, comm: "bash", rss: 512, cpuPercent: 0, state: "S" },
+          { pid: 13, ppid: 11, comm: "gone", rss: 0, cpuPercent: 0, state: "Z" },
+        ],
+      },
+    ];
+    // Default: a one-row-per-agent table, whatever procRows happens to hold.
+    expect(renderTable(withProcs, null)).not.toContain("bash");
+    // --tree alone is the AGENT forest; it must not drag the processes in.
+    expect(renderTable(withProcs, null, { tree: true })).not.toContain("bash");
+    // --procs is what expands them, and works without --tree.
+    const out = renderTable(withProcs, null, { procs: true });
+    expect(out).toContain("claude");
+    expect(out).toContain("bash");
+    // A zombie is called out — it is the one process state worth acting on.
+    expect(out).toContain("zombie");
+  });
+
+  it("renders a tree row that has no prefix at all (a lone root)", () => {
+    // prefix/depth are optional on PsRow; a row built without them must still
+    // render, and must not gain a stray indent.
+    const bare = [{ ...treeRows[0]!, subtree: null }];
+    const out = renderTable(bare, null, { tree: true });
+    const line = out.split("\n").find((l) => l.startsWith("1 ")) as string;
+    expect(line).toBeTruthy();
+  });
+
+  it("expands processes without --tree, with no forest indent to inherit", () => {
+    const kid = { pid: 9, ppid: 1, comm: "zsh", rss: 1, cpuPercent: 0, state: "S" };
+    const out = renderTable([{ ...treeRows[0]!, procRows: [kid] }], null, { procs: true });
+    expect(out).toContain("zsh");
+    expect(out).not.toContain("ΣCPU%"); // --procs alone adds no forest columns
+  });
+
+  it("indents process rows relative to their agent's rails", () => {
+    const kid = { pid: 9, ppid: 1, comm: "zsh", rss: 1, cpuPercent: 0, state: "S" };
+    const nested = renderTable(
+      [{ ...treeRows[0]!, depth: 1, prefix: "└─ ", subtree: null, procRows: [kid] }],
+      null,
+      { tree: true, procs: true },
+    );
+    const root = renderTable([{ ...treeRows[0]!, subtree: null, procRows: [kid] }], null, {
+      tree: true,
+      procs: true,
+    });
+    const indentOf = (out: string) =>
+      (out.split("\n").find((l) => l.includes("zsh")) as string).match(/^ */)![0].length;
+    // A nested agent's processes sit deeper than a root agent's.
+    expect(indentOf(nested)).toBeGreaterThan(indentOf(root));
+  });
+
+  it("adds the Σ columns and renders forest rails on the PID cell", () => {
+    const withTree = [
+      {
+        ...treeRows[0]!,
+        depth: 0,
+        prefix: "",
+        subtree: stats({ rss: 150, cpuPercent: 3, procs: 3 }),
+      },
+      { ...treeRows[1]!, depth: 1, prefix: "└─ ", subtree: null },
+    ];
+    const out = renderTable(withTree, null, { tree: true });
+    expect(out).toContain("ΣCPU%");
+    const child = out.split("\n").find((l) => l.includes("└─ 2")) as string;
+    expect(child).toBeTruthy();
+    // A leaf's Σ cells stay blank — repeating its own numbers would be noise.
+    expect(child).not.toMatch(/\s3\s/);
   });
 });

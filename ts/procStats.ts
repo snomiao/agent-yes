@@ -34,6 +34,8 @@ const execFileAsync = promisify(execFile);
 export interface ProcSample {
   pid: number;
   ppid: number;
+  /** Executable name (`bash`, `node`). May be a full path from the ps fallback. */
+  comm: string;
   /** Resident set size in bytes. */
   rss: number;
   /** Cumulative CPU (user+sys) in seconds since process start. */
@@ -113,6 +115,10 @@ export function parseProcStat(
 ): ProcSample | null {
   const close = stat.lastIndexOf(")");
   if (close < 0) return null;
+  // comm is field 2, wrapped in parens and free to contain spaces AND parens —
+  // hence first '(' to LAST ')', the same anchor the field parse below uses.
+  const open = stat.indexOf("(");
+  const comm = open >= 0 && open < close ? stat.slice(open + 1, close) : "";
   const f = stat
     .slice(close + 1)
     .trim()
@@ -128,6 +134,7 @@ export function parseProcStat(
   return {
     pid,
     ppid,
+    comm,
     rss: Number.isFinite(rssPages) ? rssPages * pageSizeBytes : 0,
     cpuSeconds: (utime + stime) / USER_HZ,
     state,
@@ -144,7 +151,7 @@ export interface ProcReaders {
   readStat?: (pid: number) => Promise<string | null>;
   /** Whole-file read of /proc/loadavg, /proc/meminfo, … or null. */
   readSys?: (name: string) => Promise<string | null>;
-  /** `ps -eo pid=,ppid=,rss=,time=,state=` output, for the non-Linux fallback. */
+  /** `ps -eo pid=,ppid=,rss=,time=,state=,comm=` output, for the non-Linux fallback. */
   readPsTable?: () => Promise<string | null>;
 }
 
@@ -183,7 +190,7 @@ export async function defaultReadSys(name: string): Promise<string | null> {
 
 export async function defaultReadPsTable(): Promise<string | null> {
   try {
-    const { stdout } = await execFileAsync("ps", ["-eo", "pid=,ppid=,rss=,time=,state="], {
+    const { stdout } = await execFileAsync("ps", ["-eo", "pid=,ppid=,rss=,time=,state=,comm="], {
       encoding: "utf8",
       timeout: 3000,
       maxBuffer: 16 * 1024 * 1024,
@@ -208,13 +215,20 @@ export function parsePsTime(raw: string): number {
   return seconds;
 }
 
-/** Parse the `ps -eo pid=,ppid=,rss=,time=,state=` fallback table. */
+/**
+ * Parse the `ps -eo pid=,ppid=,rss=,time=,state=,comm=` fallback table.
+ *
+ * comm is requested LAST on purpose: it can contain spaces (`Google Chrome
+ * Helper`), so anywhere else it would shift every column after it. Being last,
+ * everything from field 6 on is simply rejoined.
+ */
 export function parsePsTable(out: string): Map<number, ProcSample> {
   const procs = new Map<number, ProcSample>();
   for (const line of out.split("\n")) {
     const m = line.trim().split(/\s+/);
     if (m.length < 5) continue;
     const [pidS, ppidS, rssS, timeS, state] = m;
+    const comm = m.slice(5).join(" ");
     const pid = Number(pidS);
     const ppid = Number(ppidS);
     const rssKib = Number(rssS);
@@ -222,6 +236,7 @@ export function parsePsTable(out: string): Map<number, ProcSample> {
     procs.set(pid, {
       pid,
       ppid,
+      comm,
       // ps reports RSS in KiB; /proc gives bytes. Normalize to bytes so both
       // backends feed identical numbers into the rollup.
       rss: Number.isFinite(rssKib) ? rssKib * 1024 : 0,
@@ -303,6 +318,56 @@ export interface TreeStats {
   procs: number;
 }
 
+/** One OS process inside an agent's tree, as rendered by `ay ps --tree`. */
+export interface ProcRow {
+  pid: number;
+  ppid: number;
+  /** Executable basename — the full path from `ps -o comm=` is noise in a table. */
+  comm: string;
+  rss: number;
+  /** Percent of ONE core over the sample window. */
+  cpuPercent: number;
+  state: string;
+}
+
+/**
+ * Per-process detail for one claimed member set, same window and pid-reuse
+ * rules as `rollup` (see there for why a newcomer or a reused pid contributes
+ * no CPU delta).
+ */
+function memberRows(
+  members: Set<number>,
+  first: Map<number, ProcSample>,
+  second: Map<number, ProcSample>,
+  elapsedSeconds: number,
+): ProcRow[] {
+  const out: ProcRow[] = [];
+  for (const pid of members) {
+    const now = second.get(pid);
+    if (!now) continue;
+    const before = first.get(pid);
+    const reused =
+      before !== undefined &&
+      before.startToken !== "" &&
+      now.startToken !== "" &&
+      before.startToken !== now.startToken;
+    const delta = before && !reused ? Math.max(0, now.cpuSeconds - before.cpuSeconds) : 0;
+    out.push({
+      pid,
+      ppid: now.ppid,
+      comm:
+        (now.comm || "")
+          .split(/[\\/]+/)
+          .filter(Boolean)
+          .pop() ?? "",
+      rss: now.rss,
+      cpuPercent: elapsedSeconds > 0 ? (delta / elapsedSeconds) * 100 : 0,
+      state: now.state,
+    });
+  }
+  return out;
+}
+
 function rollup(
   root: number,
   members: Set<number>,
@@ -360,7 +425,12 @@ function rollup(
 export async function sampleTrees(
   roots: number[],
   opts: { windowMs?: number; deps?: ProcReaders } = {},
-): Promise<{ trees: Map<number, TreeStats>; unattributed: TreeStats }> {
+): Promise<{
+  trees: Map<number, TreeStats>;
+  unattributed: TreeStats;
+  /** root pid → the OS processes claimed by that root, for --tree. */
+  members: Map<number, ProcRow[]>;
+}> {
   const windowMs = Math.max(100, opts.windowMs ?? 1000);
   // Measure the ACTUAL elapsed time, not the requested window: a loaded box (the
   // exact case this command is for) can oversleep by hundreds of ms, and
@@ -385,10 +455,12 @@ export async function sampleTrees(
   const kids = buildChildIndex(second);
   const claimed = new Set<number>();
   const trees = new Map<number, TreeStats>();
+  const memberRowsByRoot = new Map<number, ProcRow[]>();
   for (const root of roots) {
     const members = descendantsOf(root, kids, claimed);
     for (const pid of members) claimed.add(pid);
     trees.set(root, rollup(root, members, first, second, elapsedSeconds));
+    memberRowsByRoot.set(root, memberRows(members, first, second, elapsedSeconds));
   }
 
   // Everything ay does NOT manage, as one row. This is the answer to "is there
@@ -396,7 +468,11 @@ export async function sampleTrees(
   // box from one quietly hoarding orphans.
   const rest = new Set<number>();
   for (const pid of second.keys()) if (!claimed.has(pid)) rest.add(pid);
-  return { trees, unattributed: rollup(0, rest, first, second, elapsedSeconds) };
+  return {
+    trees,
+    unattributed: rollup(0, rest, first, second, elapsedSeconds),
+    members: memberRowsByRoot,
+  };
 }
 
 /** Whole-box vitals for the header line. */

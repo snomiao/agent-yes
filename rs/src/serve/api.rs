@@ -607,6 +607,9 @@ fn with_meta(r: &PidRecord) -> Value {
         json!(last_active.unwrap_or(r.started_at)),
     );
     o.insert("last_stdin_at".into(), json!(last_stdin_at(r.pid)));
+    // Per-agent resource window (CPU/RSS/procs) for the console heatmap. Null
+    // until the sampler's first pass lands; the console degrades to transparent.
+    o.insert("res".into(), res_field(r.pid));
     v
 }
 
@@ -1081,24 +1084,68 @@ fn whoami_host() -> String {
 }
 
 fn host_info() -> Value {
-    let cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(0);
-    let mut loadavg = [0f64; 3];
-    #[cfg(unix)]
-    unsafe {
-        libc::getloadavg(loadavg.as_mut_ptr(), 3);
+    let snap = crate::serve::sampler::res_snapshot();
+    let sys = &snap.system;
+    let cpus = if sys.ncpu > 0 {
+        sys.ncpu
+    } else {
+        std::thread::available_parallelism()
+            .map(|n| n.get() as u32)
+            .unwrap_or(0)
+    };
+    let loadavg = if sys.load_valid { sys.load } else { [0f64; 3] };
+    // Aggregate managed = sum of all per-agent RSS; unattributed is separate.
+    let mut managed_rss: u64 = 0;
+    let mut managed_procs: usize = 0;
+    for (_pid, series) in &snap.agents {
+        if let Some((_, last)) = series.last() {
+            managed_rss = managed_rss.saturating_add(last.rss);
+            managed_procs = managed_procs.saturating_add(last.procs);
+        }
     }
+    let unattributed_rss = snap.unattributed.rss;
+    let unattributed_procs = snap.unattributed.procs;
     json!({
         "host": hostname(),
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "cpus": cpus,
         "loadavg": loadavg,
-        "mem": { "total": 0, "free": 0 },
+        "mem": { "total": sys.mem_total, "free": sys.mem_available },
         "uptime": 0,
+        "resources": {
+            "bucket_secs": snap.bucket_secs,
+            "managed_rss": managed_rss,
+            "managed_procs": managed_procs,
+            "unattributed_rss": unattributed_rss,
+            "unattributed_procs": unattributed_procs,
+        },
         "caps": { "send": true, "kill": false, "spawn": false, "spawnHook": false, "provision": false },
     })
+}
+
+/// The per-agent + unattributed resource window for the console heatmap, as the
+/// `res` field on each /api/ls entry (and the `unattributed` sibling for the
+/// room line). None when the sampler has not finished a first pass yet.
+fn res_field(pid: u32) -> Value {
+    let snap = crate::serve::sampler::res_snapshot();
+    let bucket_secs = snap.bucket_secs;
+    match snap.agents.get(&pid) {
+        Some(series) => {
+            let ts: Vec<i64> = series.iter().map(|(t, _)| *t).collect();
+            let cpu: Vec<f64> = series.iter().map(|(_, b)| b.cpu_seconds).collect();
+            let rss: Vec<u64> = series.iter().map(|(_, b)| b.rss).collect();
+            let procs: Vec<usize> = series.iter().map(|(_, b)| b.procs).collect();
+            json!({
+                "bucket_secs": bucket_secs,
+                "t": ts,
+                "cpu_seconds": cpu,
+                "rss": rss,
+                "procs": procs,
+            })
+        }
+        None => Value::Null,
+    }
 }
 
 // ---- router -------------------------------------------------------------------
