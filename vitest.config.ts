@@ -8,7 +8,11 @@ export default defineConfig({
     setupFiles: ["./vitest.setup.ts"],
     include: ["ts/**/*.spec.ts", "tests/ui-logic/**/*.spec.ts"],
     exclude: [
-      "ts/**/*.bun.spec.ts",
+      // `*.bun.spec.ts` are the bun:test ports of these same specs (run by
+      // `bun run test:bun`). They must never be picked up here: the originals
+      // stay the vitest source of truth, and the ports import "bun:test",
+      // which vitest cannot resolve.
+      "**/*.bun.spec.ts",
       "ts/parseCliArgs.spec.ts",
       "ts/tests/mock-claude-cli.spec.ts",
       "ts/tests/rust-cwd.spec.ts",
@@ -42,7 +46,7 @@ export default defineConfig({
       exclude: [
         "ts/**/*.spec.ts",
         "ts/**/*.test.ts",
-        "ts/**/*.bun.spec.ts",
+        "**/*.bun.spec.ts",
         "ts/index.ts",
         "ts/cli.ts",
         "ts/postbuild.ts",
