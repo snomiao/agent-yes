@@ -18,6 +18,7 @@ mod pty_spawner;
 mod ready_manager;
 mod reaper;
 mod running_lock;
+mod supported_clis;
 mod swarm;
 mod title_scanner;
 mod utils;
