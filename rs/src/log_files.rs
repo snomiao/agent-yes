@@ -20,8 +20,8 @@ use tracing::warn;
 /// `COMPACT_KEEP_BYTES`, which stays comfortably above the render window so no
 /// visible output is lost. Compaction runs in-process under the writer's own
 /// lock, so nothing else appends to the file while it happens.
-const COMPACT_KEEP_BYTES: u64 = 80 * 1024 * 1024;
-const COMPACT_TRIGGER_BYTES: u64 = 160 * 1024 * 1024;
+pub(crate) const COMPACT_KEEP_BYTES: u64 = 80 * 1024 * 1024;
+pub(crate) const COMPACT_TRIGGER_BYTES: u64 = 160 * 1024 * 1024;
 
 struct WriterState {
     file: Option<fs::File>,
@@ -100,7 +100,7 @@ impl LogWriter {
 /// is crash-atomicity: a kill mid-rewrite can leave a duplicated-then-stale tail,
 /// which is harmless for an ephemeral render log (deleted on clean exit; resume
 /// falls back to `--continue`) and self-heals on the next compaction.
-fn compact_tail(path: &Path, keep: u64) -> std::io::Result<u64> {
+pub(crate) fn compact_tail(path: &Path, keep: u64) -> std::io::Result<u64> {
     let len = fs::metadata(path)?.len();
     if len <= keep {
         return Ok(len);

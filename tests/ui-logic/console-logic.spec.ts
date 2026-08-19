@@ -9,6 +9,9 @@ import {
   ident,
   tagsFor,
   gitLabel,
+  cpuPct,
+  memPct,
+  resLabel,
   age,
   matches,
   nextIndex,
@@ -1166,5 +1169,63 @@ describe("createInputSender", () => {
     input.push("b");
     await waitFor(() => sent.length === 2, "the next keystroke to go out anyway");
     expect(sent).toEqual(["a", "b"]);
+  });
+});
+
+describe("cpuPct / memPct / resLabel — the room row's resource chip", () => {
+  const host = (o = {}) => ({ cpus: 10, loadavg: [5, 5, 5], mem: { total: 1000, free: 500 }, ...o });
+
+  it("reads loadavg as a share of cores, and does NOT clamp oversubscription", () => {
+    expect(cpuPct(host({ loadavg: [5, 0, 0], cpus: 10 }))).toBe(50);
+    expect(cpuPct(host({ loadavg: [10, 0, 0], cpus: 10 }))).toBe(100);
+    // Load above core count is real oversubscription and is the useful signal.
+    expect(cpuPct(host({ loadavg: [32, 0, 0], cpus: 10 }))).toBe(320);
+  });
+
+  it("returns null for cpu when the host reported too little to compute it", () => {
+    expect(cpuPct(host({ cpus: 0 }))).toBe(null);
+    expect(cpuPct(host({ loadavg: [] }))).toBe(null);
+    expect(cpuPct(undefined)).toBe(null);
+  });
+
+  it("prefers mem.available over mem.free, which otherwise reads as ~99% used", () => {
+    // The macOS case that motivated `available`: almost nothing is wholly FREE,
+    // but most of it is reclaimable, so `free` alone would cry wolf.
+    const macish = { cpus: 1, loadavg: [0, 0, 0], mem: { total: 1000, free: 5, available: 400 } };
+    expect(memPct(macish)).toBe(60);
+    // Older daemons send no `available` — fall back rather than render nothing.
+    expect(memPct({ cpus: 1, loadavg: [0, 0, 0], mem: { total: 1000, free: 400 } })).toBe(60);
+  });
+
+  it("returns null for mem when the daemon stubs total to 0", () => {
+    expect(memPct(host({ mem: { total: 0, free: 0 } }))).toBe(null);
+  });
+
+  it("renders whichever halves are available, and nothing at all when neither is", () => {
+    expect(resLabel([host()]).label).toBe("cpu 50% · mem 50%");
+    // A daemon with real loadavg but stubbed memory: cpu only, no stray dot.
+    expect(resLabel([host({ mem: { total: 0, free: 0 } })]).label).toBe("cpu 50%");
+    // Nothing computable at all must render NO chip, not an empty one.
+    expect(resLabel([{ cpus: 0, mem: { total: 0 } }]).label).toBe("");
+    expect(resLabel([]).label).toBe("");
+    expect(resLabel(undefined).label).toBe("");
+  });
+
+  it("reports the WORST machine when a room holds several", () => {
+    const calm = host({ loadavg: [1, 0, 0], mem: { total: 1000, available: 900 } });
+    const busy = host({ loadavg: [9, 0, 0], mem: { total: 1000, available: 200 } });
+    expect(resLabel([calm, busy]).label).toBe("cpu 90% · mem 80%");
+    expect(resLabel([busy, calm]).label).toBe("cpu 90% · mem 80%"); // order-independent
+  });
+
+  it("warns only at real pressure — core saturation or near-exhausted memory", () => {
+    expect(resLabel([host()]).warn).toBe(false);
+    expect(resLabel([host({ loadavg: [10, 0, 0] })]).warn).toBe(true); // load == cores
+    expect(resLabel([host({ mem: { total: 1000, available: 100 } })]).warn).toBe(true); // 90% used
+    expect(resLabel([host({ mem: { total: 1000, available: 150 } })]).warn).toBe(false); // 85%
+  });
+
+  it("ignores hosts that have not reported yet instead of throwing", () => {
+    expect(resLabel([null, undefined, host()]).label).toBe("cpu 50% · mem 50%");
   });
 });

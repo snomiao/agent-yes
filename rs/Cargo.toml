@@ -1,6 +1,6 @@
 [package]
 name = "agent-yes"
-version = "1.277.1"
+version = "1.287.0"
 edition = "2021"
 description = "Automated interaction wrapper for AI coding assistants"
 authors = ["snomiao"]
@@ -121,6 +121,9 @@ windows-sys = { version = "0.59", features = [
   "Win32_System_JobObjects",
   "Win32_System_Console",
   "Win32_Security",
+  # serve::host_stats: GlobalMemoryStatusEx/MEMORYSTATUSEX (host memory) and
+  # GetTickCount64 (host uptime) for GET /api/host.
+  "Win32_System_SystemInformation",
 ] }
 
 [features]

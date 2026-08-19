@@ -171,6 +171,49 @@ export function gitLabel(e) {
   return parts.join(" ");
 }
 
+// ---- host resources (the room row's CPU/mem chip) ---------------------------
+
+// CPU as a share of the machine's cores. loadavg is a run-queue length, so on an
+// N-core box a load of N is exactly saturated = 100%; values above that are real
+// oversubscription and are deliberately NOT clamped — "320%" is the useful
+// signal. Null when the host didn't report enough to compute it.
+export function cpuPct(h) {
+  const load = h?.loadavg?.[0];
+  return h?.cpus && Number.isFinite(load) ? Math.round((load / h.cpus) * 100) : null;
+}
+
+// Memory USED as a share of total. Prefers `available` over `free`: on macOS
+// `free` counts only wholly-free pages and ignores reclaimable inactive ones, so
+// it reads as ~99% used on a perfectly healthy machine (the two differ by ~20x
+// in practice). Falls back to `free` for daemons that don't send `available`.
+export function memPct(h) {
+  const total = h?.mem?.total;
+  if (!total) return null;
+  const avail = Number.isFinite(h.mem.available) ? h.mem.available : h.mem.free;
+  return Number.isFinite(avail) ? Math.round(((total - avail) / total) * 100) : null;
+}
+
+// Label + severity for a room's resource chip, given every host serving it. A
+// room can hold several machines (a codehost room) and one number cannot
+// honestly describe N of them, so the chip reports the WORST and the caller's
+// tooltip breaks it down per host.
+//
+// Returns { label, warn }. An EMPTY label means "render nothing" — a daemon that
+// stubs mem to 0 and reports no loadavg must not leave a stray empty chip.
+// `warn` marks genuine pressure: at or past core saturation, or memory nearly
+// exhausted — same "only shout when it means something" rule as the git chip.
+export function resLabel(stats) {
+  const list = (stats || []).filter(Boolean);
+  const cpus = list.map(cpuPct).filter((v) => v !== null);
+  const mems = list.map(memPct).filter((v) => v !== null);
+  const cpu = cpus.length ? Math.max(...cpus) : null;
+  const mem = mems.length ? Math.max(...mems) : null;
+  const label = [cpu === null ? "" : `cpu ${cpu}%`, mem === null ? "" : `mem ${mem}%`]
+    .filter(Boolean)
+    .join(" · ");
+  return { label, warn: (cpu !== null && cpu >= 100) || (mem !== null && mem >= 90) };
+}
+
 // Task-progress badge ("2/5") from the agent's parsed todo block (e.tasks =
 // { done, total }, computed live in /api/ls). Empty string when no todo block was
 // confidently detected — the badge is omitted entirely, never shown as "0/0".
