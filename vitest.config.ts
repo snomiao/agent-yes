@@ -125,13 +125,6 @@ export default defineConfig({
         // branches are unreachable and the file would sink the coverage gate.
         // Measured on POSIX runners, where the code path actually exists.
         ...(process.platform === "win32" ? ["ts/systemPathLink.ts"] : []),
-        // procStats reads /proc on Linux and shells out to `ps` everywhere else,
-        // so its two I/O halves are mutually exclusive by platform and NO single
-        // runner can cover both. Windows has neither, leaving the whole /proc
-        // half structurally dead there. The tests still RUN on Windows (they
-        // assert the degrade-to-empty contract); this only takes the file out of
-        // the coverage denominator, where it is measured on the POSIX runners.
-        ...(process.platform === "win32" ? ["ts/procStats.ts"] : []),
         // Guided onboarding — the workspace-setting path is unit-tested
         // (setup.spec.ts); the TTY prompt and the daemon install it delegates to
         // are integration-only.

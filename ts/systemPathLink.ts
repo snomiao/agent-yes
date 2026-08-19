@@ -107,11 +107,7 @@ export function linkBunBinsToSystemPath(opts?: {
       }
       if (ours) {
         result.skipped.push(name); // already correctly linked — nothing to do
-      } else if (
-        existing.isSymbolicLink() &&
-        !existsSync(dest) &&
-        danglingPointsInto(dest, bunDir)
-      ) {
+      } else if (existing.isSymbolicLink() && !existsSync(dest) && danglingPointsInto(dest, bunDir)) {
         // A dangling symlink that USED to point into our bun dir (a bin that
         // moved/rebuilt) — repoint it. We check the old target dir so we never
         // hijack an unrelated broken link that merely shares a name.

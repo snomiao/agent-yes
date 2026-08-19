@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { blockedOnAgent, describeBlock, monitorHint, type TodoBlock } from "./todoBlock";
+import { describeBlock, monitorHint, type TodoBlock } from "./todoBlock";
 
 describe("todoBlock", () => {
   it("blocked-by-human needs no monitor — a human's reply always self-delivers", () => {
@@ -39,35 +39,5 @@ describe("todoBlock", () => {
     });
     expect(rendered).toContain("alice");
     expect(rendered).toContain("https://example/oauth");
-  });
-});
-
-describe("blockedOnAgent", () => {
-  it("names the agent for both agent-shaped blocks", () => {
-    expect(blockedOnAgent({ type: "waiting-on-agent", agentId: "lane-b" })).toBe("lane-b");
-    expect(blockedOnAgent({ type: "waiting-on-answer", agentId: "lane-c" })).toBe("lane-c");
-  });
-
-  it("returns null for block shapes that name no agent, and for no block at all", () => {
-    expect(blockedOnAgent({ type: "blocked-by-task", taskId: "T1" })).toBeNull();
-    expect(blockedOnAgent({ type: "blocked-by-human", who: "alice" })).toBeNull();
-    expect(blockedOnAgent({ type: "blocked-by-external", signal: "ci" })).toBeNull();
-    expect(blockedOnAgent(null)).toBeNull();
-    expect(blockedOnAgent(undefined)).toBeNull();
-  });
-});
-
-describe("waiting-on-answer", () => {
-  it("describes who owes the answer, and the question when one was recorded", () => {
-    expect(describeBlock({ type: "waiting-on-answer", agentId: "lane-b" })).toBe(
-      "waiting for an answer from lane-b",
-    );
-    expect(
-      describeBlock({ type: "waiting-on-answer", agentId: "lane-b", question: "build red?" }),
-    ).toBe("waiting for an answer from lane-b: build red?");
-  });
-
-  it("is watched via the answering agent's lifecycle, since it can die owing the answer", () => {
-    expect(monitorHint({ type: "waiting-on-answer", agentId: "lane-b" })).toBe("notify-agent");
   });
 });

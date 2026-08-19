@@ -44,7 +44,6 @@ import { JsonlStore, type JsonlDoc } from "./JsonlStore.ts";
 import {
   DONE_STATE,
   LIFECYCLES,
-  transitionsOf,
   ORPHANED_STATE,
   canTransition,
   initialState,
@@ -408,7 +407,7 @@ export class TodoStore {
       // per-task array fields instead of the id sequence).
       await this.jsonl.load();
       const rec = this.mustGet(id);
-      const onGraph = transitionsOf(rec.kind).some(
+      const onGraph = LIFECYCLES[rec.kind].transitions.some(
         (t) => t.from === rec.state && t.gate === gateName,
       );
       if (!onGraph) {
@@ -475,7 +474,7 @@ export class TodoStore {
    */
   async verify(id: string, gateName?: string): Promise<TodoRecord> {
     const rec = this.mustGet(id);
-    const edges = transitionsOf(rec.kind).filter((t) => t.from === rec.state && t.gate);
+    const edges = LIFECYCLES[rec.kind].transitions.filter((t) => t.from === rec.state && t.gate);
     if (edges.length === 0)
       throw new Error(`task ${id}: no gated transition from state "${rec.state}"`);
     const targetEdge = gateName
@@ -624,39 +623,6 @@ export class TodoStore {
     const trimmed = text.trim();
     if (!trimmed) throw new Error(`task ${id}: acceptance criteria text must not be empty`);
     return this.rawUpdate(id, () => ({ acceptanceCriteria: trimmed }));
-  }
-
-  /**
-   * Reassign a task (`ay todo claim`). Ownership is the one field in this
-   * store that TWO agents actively compete for, so this takes the owner the
-   * caller believed was current and re-checks it against the FRESH record
-   * inside the write lock.
-   *
-   * Without that check, the CLI's shape — read the task, decide whether its
-   * owner is a live agent, then write — is a textbook lost update: two agents
-   * that both read "unowned" a millisecond apart would both pass their own
-   * liveness check and both write, and the loser would never learn it lost.
-   * The same revalidate-against-fresh discipline `clearWaitingOnAgentBlock`
-   * and `markOrphaned` already use, for the same reason.
-   *
-   * `expectedOwner` is `undefined` to skip the check, `null` to require the
-   * task still be unowned, or a string to require that exact current owner.
-   */
-  async setOwner(id: string, owner: string, expectedOwner?: string | null): Promise<TodoRecord> {
-    const trimmed = owner.trim();
-    if (!trimmed) throw new Error(`task ${id}: owner must not be empty`);
-    return this.rawUpdate(id, (fresh) => {
-      if (expectedOwner !== undefined) {
-        const current = fresh.owner ?? null;
-        if (current !== expectedOwner) {
-          throw new Error(
-            `task ${id}: owner changed to ${current ?? "(none)"} while claiming ` +
-              `(expected ${expectedOwner ?? "(none)"}) — re-read it and try again`,
-          );
-        }
-      }
-      return { owner: trimmed };
-    });
   }
 
   setBlock(id: string, block: TodoBlock | null): Promise<TodoRecord> {

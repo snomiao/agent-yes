@@ -37,19 +37,7 @@ export type TodoBlock =
       actionLink?: string;
     }
   | { type: "blocked-by-external"; signal: string; checkFn?: string }
-  | { type: "waiting-on-agent"; agentId: string }
-  // `ay ask`: this task's owner asked `agentId` a question and is waiting for
-  // the answer. Deliberately NOT modelled as either neighbouring shape —
-  //   - `waiting-on-agent` is auto-cleared by reconcile as soon as that agent
-  //     goes idle or exits 0. Right for "wait until it finishes", exactly
-  //     wrong here: an agent going idle WITHOUT answering would clear the
-  //     block and make an unanswered question look unblocked.
-  //   - `blocked-by-human` is precisely what the `/ask` decision panel selects
-  //     on (`listAsksForProject`), so reusing it would push agent-to-agent
-  //     asks into a human's inbox.
-  // Keeping the answerer on the record instead of clearing it is also what
-  // lets `ay todo ls` answer "is the agent that owes me an answer still alive?"
-  | { type: "waiting-on-answer"; agentId: string; question?: string };
+  | { type: "waiting-on-agent"; agentId: string };
 
 export type MonitorHint = "none" | "notify-agent" | "poll-external";
 
@@ -64,10 +52,6 @@ export function monitorHint(block: TodoBlock): MonitorHint {
     case "blocked-by-human":
       return "none";
     case "waiting-on-agent":
-    // An answer arrives as an `ay answer` call from the agent that owes it, so
-    // there is nothing to poll — but that agent's own lifecycle events are
-    // still worth watching, since it can die owing the answer.
-    case "waiting-on-answer":
       return "notify-agent";
     case "blocked-by-external":
       return "poll-external";
@@ -85,21 +69,5 @@ export function describeBlock(block: TodoBlock): string {
       return `waiting on external signal: ${block.signal}`;
     case "waiting-on-agent":
       return `waiting on agent ${block.agentId}`;
-    case "waiting-on-answer":
-      return `waiting for an answer from ${block.agentId}${block.question ? `: ${block.question}` : ""}`;
   }
-}
-
-/**
- * The agent this block is waiting on, if any — the one identifier a caller
- * needs to ask "is that party still alive?". Centralised so every surface
- * (list rendering, reconcile, JSON output) agrees on which block shapes name
- * an agent, instead of each one re-listing the cases and quietly missing the
- * next shape that gets added.
- */
-export function blockedOnAgent(block: TodoBlock | null | undefined): string | null {
-  if (!block) return null;
-  return block.type === "waiting-on-agent" || block.type === "waiting-on-answer"
-    ? block.agentId
-    : null;
 }

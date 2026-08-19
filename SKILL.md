@@ -50,6 +50,7 @@ agent-yes codex -- refactor this function
 agent-yes grok -- help me with this code
 agent-yes copilot -- generate unit tests
 agent-yes cursor -- optimize performance
+agent-yes gemini -- debug this code
 agent-yes qwen -- implement new feature
 
 # Auto-exit when idle (for automation)
@@ -74,7 +75,7 @@ await cliYes({
 // Use other tools
 await cliYes({
   prompt: "debug this function",
-  cli: "codex",
+  cli: "gemini",
   exitOnIdle: 60000,
 });
 ```
@@ -158,7 +159,7 @@ Only share an invite (or embed the widget) with an audience you mean to admit, a
 
 ## Configuration Options
 
-- `--cli=<tool>`: Specify AI CLI tool (claude, codex, copilot, cursor, grok, qwen)
+- `--cli=<tool>`: Specify AI CLI tool (claude, gemini, codex, copilot, cursor, grok, qwen)
 - `--exit-on-idle=<duration>`: Auto-exit after specified idle time (e.g., "60s", "5m")
 - Custom CLI args can be passed through for tool-specific options
 

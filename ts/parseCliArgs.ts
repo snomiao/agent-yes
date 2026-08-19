@@ -173,7 +173,7 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
       hidden: true,
     })
     .positional("cli", {
-      describe: "The AI CLI to run, e.g., claude, codex, copilot, cursor",
+      describe: "The AI CLI to run, e.g., claude, codex, copilot, cursor, gemini",
       type: "string",
       choices: supportedClis as string[] | undefined,
       demandOption: false,

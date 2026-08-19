@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import { execaCommandSync, parseCommandString } from "execa";
 import { fromWritable } from "from-node-stream";
 import { mkdir, open, readFile, stat, unlink, writeFile } from "fs/promises";
@@ -19,7 +18,6 @@ import { acquireLock, releaseLock, shouldUseLock } from "./runningLock.ts";
 import { logger } from "./logger.ts";
 import { createFifoStream } from "./beta/fifo.ts";
 import { PidStore } from "./pidStore.ts";
-import { TitlePublisher, TitleScanner } from "./titleScanner.ts";
 import { sendEnter, sendMessage } from "./core/messaging.ts";
 import {
   AUTO_RETRY_GIVE_UP_MS,
@@ -133,7 +131,7 @@ export type AgentCliConfig = {
   system?: string; // system prompt content to inject
 
   // status detect, and actions
-  ready?: RegExp[]; // regex matcher for stdin ready. Set to empty array [] to disable ready check entirely.
+  ready?: RegExp[]; // regex matcher for stdin ready, or line index for gemini. Set to empty array [] to disable ready check entirely.
   fatal?: RegExp[]; // array of regex to match for fatal errors
   working?: RegExp[]; // regex matcher for working status
   updateAvailable?: RegExp[]; // regex matcher for update available banners
@@ -311,46 +309,6 @@ export default async function agentYes({
     cliArgs = [...cliArgs, ...cliConf.yesArgs];
   }
 
-  // The AGENT_YES_PID we INHERITED is the wrapper pid of the agent that spawned
-  // us — see the ptyEnv block below, which reads the same value before re-stamping
-  // it with our own pid. Resolved here (before any prompt decoration) because the
-  // `<ay-init-msg>` wrapper has to go around the RAW task, with the SKILL.md
-  // header and the peer hint prepended outside it: those are ambient guidance, not
-  // part of what the parent asked for.
-  const inheritedParentPid = ((): number | undefined => {
-    const n = Number((env ?? (process.env as Record<string, string>)).AGENT_YES_PID);
-    return Number.isInteger(n) && n > 0 ? n : undefined;
-  })();
-
-  // The task as the caller wrote it, before any wrapping/prefixing and before
-  // promptArg clears it — used for the registry (so `ay ls` shows the agent's
-  // role, not wrapper boilerplate) and to remind the parent what it asked for
-  // when a report fires.
-  const originalPrompt = prompt;
-
-  // Wrap a sub-agent's initial prompt in `<ay-init-msg …>` — same attribution +
-  // reply route `ay send` puts on every later message, plus the reporting duty.
-  // No-ops for a top-level (human-launched) agent and for an interactive session
-  // with no prompt. See ts/initMsg.ts (mirrored in rs/src/init_msg.rs).
-  if (prompt && inheritedParentPid) {
-    try {
-      const { resolveSpawner } = await import("./parentLink.ts");
-      const spawner = await resolveSpawner(inheritedParentPid);
-      if (spawner) {
-        const { buildInitMsg } = await import("./initMsg.ts");
-        const { formatIdentity } = await import("./identity.ts");
-        // The spawner runs on THIS host (we resolved it from a local wrapper
-        // pid), so the local user/host and its cwd's branch are the right
-        // defaults — the same call rs/src/main.rs makes.
-        const identity = formatIdentity({ cwd: spawner.cwd, pid: spawner.pid });
-        prompt = buildInitMsg(prompt, spawner, randomBytes(4).toString("hex"), identity);
-      }
-    } catch (error) {
-      // Attribution is never worth failing a spawn over.
-      if (verbose) logger.warn("[init-msg] failed to wrap initial prompt:", { error });
-    }
-  }
-
   // If enabled, read SKILL.md header and prepend to the prompt for non-Claude agents
   try {
     const workingDir = cwd ?? process.cwd();
@@ -451,6 +409,11 @@ export default async function agentYes({
       // just add --continue flag for claude
       cliArgs = ["--continue", ...cliArgs];
       await logger.debug(`resume|adding --continue flag for claude`);
+    } else if (cli === "gemini") {
+      // Gemini supports session resume natively via --resume flag
+      // Sessions are project/directory-specific by default (stored in ~/.gemini/tmp/<project_hash>/chats/)
+      cliArgs = ["--resume", ...cliArgs];
+      await logger.debug(`resume|adding --resume flag for gemini`);
     } else {
       throw new Error(
         `Resume option is not supported for cli: ${cli}, make a feature request if you want it. https://github.com/snomiao/agent-yes/issues`,
@@ -484,10 +447,12 @@ export default async function agentYes({
 
   // Spawn the agent CLI process
   const ptyEnv = { ...(env ?? (process.env as Record<string, string>)) };
-  // The AGENT_YES_PID we INHERITED (the wrapper of the parent agent that launched
-  // this nested `ay`), read above from the same env before we overwrite it with
-  // our own pid here. undefined when started from a human shell → tree root.
-  const parentPid = inheritedParentPid;
+  // Capture the AGENT_YES_PID we INHERITED (the wrapper of the parent agent that
+  // launched this nested `ay`) before we overwrite it with our own pid below.
+  // null when started from a human shell → this agent is a tree root.
+  const inheritedAyPid = Number(ptyEnv.AGENT_YES_PID);
+  const parentPid =
+    Number.isInteger(inheritedAyPid) && inheritedAyPid > 0 ? inheritedAyPid : undefined;
   ptyEnv.AGENT_YES_PID = String(process.pid);
   // A caller-injected AGENT_YES_AGENT_ID (from `ay serve`'s /api/spawn) is meant
   // for THIS agent's record only — pidStore.registerProcess reads it from our own
@@ -495,6 +460,10 @@ export default async function agentYes({
   // `ay`) don't inherit it and register under the same id (which would make that
   // id ambiguous). The wrapper's own process.env still carries it for pidStore.
   delete ptyEnv.AGENT_YES_AGENT_ID;
+  // Same reasoning for AGENT_YES_ROLE: it names THIS agent's lane (pidStore
+  // reads it from our own env at registration). A subagent is its own lane, so
+  // don't let it inherit the parent's role.
+  delete ptyEnv.AGENT_YES_ROLE;
   // Strip the parent Claude Code session markers so the wrapped CLI is a CLEAN
   // top-level session. Without this, an `ay claude` launched from inside another
   // Claude Code session (or this claude's Bash tool) inherits
@@ -509,7 +478,7 @@ export default async function agentYes({
   // launching env; skip entries whose vars are unset so we never blank out an
   // inherited value (e.g. ANTHROPIC_AUTH_TOKEN when ZAI_API_KEY isn't exported).
   // `${VAR:-default}` falls back to `default` when VAR is unset/empty — used for
-  // overridable defaults like the model (glm → z-ai/glm-5.2).
+  // overridable defaults like the model (openrouter → z-ai/glm-5.2).
   if (cliConf?.env) {
     for (const [key, raw] of Object.entries(cliConf.env)) {
       let unresolved = false;
@@ -555,23 +524,12 @@ export default async function agentYes({
   // Wire up the xterm proxy to write back to the PTY
   shellWrite = (data: string) => shell.write(data);
 
-  // Capture the child CLI's terminal title (OSC 0/2) into the registry so
-  // `ay whoami` / `ay ls --json` can answer "what is this agent doing".
-  // TitlePublisher change-gates + rate-limits the registry writes.
-  const titleScanner = new TitleScanner();
-  const titlePublisher = new TitlePublisher((title) => {
-    pidStore.updateTitle(shell.pid, title).catch(() => null);
-  });
-
   // Attach data handler IMMEDIATELY after spawn to avoid losing early PTY output.
   // node-pty emits 'data' events eagerly — if no listener is attached, events are lost.
   function onData(data: string) {
     const currentPid = shell.pid;
     xtermProxy.write(data);
     globalAgentRegistry.appendStdout(currentPid, data);
-    const title = titleScanner.feed(data);
-    if (title) titlePublisher.observe(title);
-    else titlePublisher.poll();
   }
   shell.onData(onData);
 
@@ -581,11 +539,7 @@ export default async function agentYes({
       pid: shell.pid,
       cli,
       args: cliArgs,
-      // The task as the user/parent wrote it — NOT the delivered `prompt`, which
-      // by now carries the `<ay-init-msg>` wrapper (and any SKILL.md header /
-      // peer hint). `ay ls` shows this field as the agent's role; a wall of
-      // wrapper boilerplate there would bury the one line that identifies it.
-      prompt: originalPrompt,
+      prompt,
       cwd: workingDir,
       // We inject our own pid as AGENT_YES_PID into the agent's env above; record
       // it so a child `ay send` can map that env value back to this agent.
@@ -641,7 +595,7 @@ export default async function agentYes({
       context: ctx,
       cwd: workingDir,
       cli,
-      prompt: originalPrompt,
+      prompt,
       startTime: Date.now(),
       stdoutBuffer: [],
     });
@@ -736,13 +690,7 @@ export default async function agentYes({
       shellWrite = (data: string) => shell.write(data);
       // Register process in pidStore (non-blocking)
       try {
-        await pidStore.registerProcess({
-          pid: shell.pid,
-          cli,
-          args,
-          prompt: originalPrompt,
-          cwd: workingDir,
-        });
+        await pidStore.registerProcess({ pid: shell.pid, cli, args, prompt, cwd: workingDir });
       } catch (error) {
         logger.warn(`[pidStore] Failed to register restarted process ${shell.pid}:`, error);
       }
@@ -759,7 +707,7 @@ export default async function agentYes({
           context: ctx,
           cwd: workingDir,
           cli,
-          prompt: originalPrompt,
+          prompt,
           startTime: Date.now(),
           stdoutBuffer: [],
         });
@@ -853,7 +801,7 @@ export default async function agentYes({
           pid: shell.pid,
           cli,
           args: restoreArgs,
-          prompt: originalPrompt,
+          prompt,
           cwd: workingDir,
         });
       } catch (error) {
@@ -871,7 +819,7 @@ export default async function agentYes({
           context: ctx,
           cwd: workingDir,
           cli,
-          prompt: originalPrompt,
+          prompt,
           startTime: Date.now(),
           stdoutBuffer: [],
         });
@@ -1082,22 +1030,6 @@ export default async function agentYes({
   // Clear heartbeat on exit
   const cleanupHeartbeat = () => clearInterval(heartbeatInterval);
   shell.onExit(cleanupHeartbeat);
-
-  // Report to whoever spawned us when this agent settles idle (done), parks on a
-  // question (stuck), or exits. `<ay-init-msg>` asks the AGENT to do this; this
-  // loop is the guarantee, because an agent that has run out of context, crashed,
-  // or simply forgotten is exactly the case the parent is waiting on. No-ops
-  // entirely for a top-level agent. See ts/parentPingLoop.ts.
-  const { startParentPingLoop } = await import("./parentPingLoop.ts");
-  const parentPingLoop = startParentPingLoop({
-    parentPid,
-    selfWrapperPid: process.pid,
-    self: { cli, pid: shell.pid, cwd: workingDir, prompt: originalPrompt ?? null },
-    patterns: { ready: conf.ready, working: conf.working, needsInput: conf.needsInput },
-    // 48 lines: enough to carry a menu plus the question above it, matching what
-    // `ay notifyd` sends as evidence.
-    screen: () => removeControlCharacters(xtermProxy.tail(48)).split("\n"),
-  });
 
   if (exitOnIdle)
     (async () => {
@@ -1407,6 +1339,7 @@ export default async function agentYes({
             // ready matcher: if matched, mark stdin ready
             if (conf.ready?.some((rx: RegExp) => line.match(rx))) {
               logger.debug(`ready |${line}`);
+              if (cli === "gemini" && lineIndex <= 80) return; // gemini initial noise, only after many lines
               ctx.stdinReady.ready();
               ctx.stdinFirstReady.ready();
             }
@@ -1497,11 +1430,6 @@ export default async function agentYes({
   // and then get its exitcode
   const exitCode = await pendingExitCode.promise;
   logger.info(`[${cli}-yes] ${cli} exited with code ${exitCode}`);
-
-  // Final report to the parent — awaited (not fire-and-forget) so the message is
-  // actually handed to `ay send` before this process goes away. Bounded by
-  // deliverPing's own timeout and never throws.
-  await parentPingLoop.pingExit(exitCode ?? null);
 
   // Final pidStore cleanup
   await pidStore.close();

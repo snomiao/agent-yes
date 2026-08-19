@@ -9,7 +9,7 @@
 // This is the dev/prototype host; the production host is ts/share.ts. Both run
 // the SAME end-to-end-encryption protocol via the shared lab/ui/e2e.js module,
 // so neither can ever bridge a plaintext channel for a v2 room. See that file
-// and lab.agent-yes.com/2026-06-15-e2ee-share-links for the design.
+// and agent-yes.com/blog/e2ee-share-links for the design.
 //
 // Wire protocol: every DataChannel frame is an AES-256-GCM-sealed envelope
 // (lab/ui/e2e.js). Envelope shapes, once decrypted:

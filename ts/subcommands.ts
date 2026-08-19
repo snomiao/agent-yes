@@ -12,12 +12,18 @@
  */
 
 import { randomBytes } from "crypto";
+import { spawn } from "child_process";
 import { appendFile, mkdir, open, readFile, stat, writeFile } from "fs/promises";
+import { fileURLToPath } from "node:url";
 import ms from "ms";
 import { homedir } from "os";
 import path from "path";
-import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./globalPidIndex.ts";
-import { formatIdentity } from "./identity.ts";
+import {
+  type GlobalPidRecord,
+  readGlobalPids,
+  sanitizeRole,
+  updateGlobalPidStatus,
+} from "./globalPidIndex.ts";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
 import { agentYesHome } from "./agentYesHome.ts";
@@ -67,7 +73,6 @@ import type { AgentCliConfig } from "./index.ts";
 import yargs from "yargs";
 import { type ResolvedRemote, readRemotes, resolveRemoteSpec } from "./remotes.ts";
 import { isWebrtcSpec } from "./webrtcLink.ts";
-import { withIpcLock } from "./ipcLock.ts";
 
 // ---------------------------------------------------------------------------
 // notes store  (~/.agent-yes/notes.jsonl)
@@ -125,7 +130,7 @@ async function compactNotes(): Promise<void> {
 // wrong agent (e.g. you tail "babaiban" but a send resolves to "qq-cli").
 // ---------------------------------------------------------------------------
 
-export const READ_WINDOW_MS = 60_000; // "read recently" = within the last minute
+const READ_WINDOW_MS = 60_000; // "read recently" = within the last minute
 
 // Max time writeToIpc will keep retrying a backed-up FIFO before erroring. A live
 // agent drains its stdin in milliseconds; only a wedged reader hits this.
@@ -184,7 +189,7 @@ async function recordRead(by: string, target: number): Promise<void> {
   }
 }
 
-export async function lastReadAt(by: string, target: number): Promise<number | null> {
+async function lastReadAt(by: string, target: number): Promise<number | null> {
   const map = await readReads();
   return map.get(`${by}${READS_KEY_SEP}${target}`) ?? null;
 }
@@ -323,8 +328,7 @@ async function cmdWhoami(rest: string[]): Promise<number> {
   const ageMin = Math.max(0, Math.round((Date.now() - self.started_at) / 60_000));
   const lines = [
     `agent     ${self.cli} #${self.pid}${self.agent_id ? `  (agent_id ${self.agent_id})` : ""}`,
-    `identity  ${formatIdentity({ cwd: self.cwd, pid: self.pid })}`,
-    `title     ${self.title ?? "-"}`,
+    `role      ${self.role ?? "-  (set with: ay role <name>)"}`,
     `state     ${state}${question ? ` — ${question}` : ""}`,
     `cwd       ${self.cwd}`,
     `started   ${new Date(self.started_at).toISOString()}  (${ageMin}m ago)`,
@@ -332,7 +336,7 @@ async function cmdWhoami(rest: string[]): Promise<number> {
     `log       ${self.log_file ?? "-"}`,
     `fifo      ${self.fifo_file ?? "-"}`,
     `reply     ${reply} "..."`,
-    `envelope  <ay-msg from ${self.cli} ${formatIdentity({ cwd: self.cwd, pid: self.pid })} — reply: ${reply} "...">…</ay-msg>`,
+    `envelope  <ay-msg from ${self.cli} #${self.pid}${self.role ? ` (${self.role})` : ""} @ ${self.cwd} — reply: ${reply} "...">…</ay-msg>`,
   ];
   process.stdout.write(lines.join("\n") + "\n");
   return 0;
@@ -383,7 +387,7 @@ async function readLocalTsPids(cwd: string): Promise<GlobalPidRecord[]> {
     exit_code: d.exitCode ?? null,
     exit_reason: d.exitReason ?? null,
     started_at: d.startedAt ?? 0,
-    title: d.title ?? null,
+    role: d.role ?? null,
   }));
 }
 
@@ -416,10 +420,9 @@ const SUBCOMMANDS = new Set([
   "cat",
   "tail",
   "head",
-  "hist",
-  "history",
   "send",
   "msgs",
+  "role",
   "key",
   "select",
   "spawn",
@@ -429,8 +432,6 @@ const SUBCOMMANDS = new Set([
   "restart",
   "note",
   "todo",
-  "ask",
-  "answer",
   "ch",
   "channels",
   "term",
@@ -443,8 +444,8 @@ const SUBCOMMANDS = new Set([
   "expose",
   "callback",
   "reap",
-  "gc",
-  "dsh-legacy",
+  "deepseek",
+  "ds",
   "help",
 ]);
 
@@ -516,22 +517,6 @@ export function isUnknownManagerToken(
 }
 
 /**
- * True for a completely bare MANAGER invocation — `ay` / `agent-yes` with no
- * args at all. `ay` means agent-yes (the fleet manager), so it prints help
- * instead of silently launching an agent; naming a CLI is what launches one
- * (`ay claude`), and `cy` stays the zero-argument way to start claude.
- *
- * Never fires for a cli-bound alias (managerCommands=false): bare `cy` /
- * `claude-yes` / `codex-yes` must keep spawning their agent.
- *
- * `argv` is process.argv, so length 2 = [runtime, script] with no user args;
- * a flags-only run like `ay --continue` still launches (it asked for a run).
- */
-export function isBareManagerInvocation(argv: string[], managerCommands: boolean): boolean {
-  return managerCommands && argv.length <= 2;
-}
-
-/**
  * Write to stdout and wait until it has actually been handed off.
  *
  * The CLI ends with `process.exit()`, which DISCARDS bytes still sitting in the
@@ -585,11 +570,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
     switch (sub) {
       case "ls":
       case "list":
-        return await cmdLs(rest);
-      // `ps` was an alias for `ls`; it is now the RESOURCE view — same agents,
-      // rolled up per process tree with box vitals. See ts/cmdPs.ts.
       case "ps":
-        return await (await import("./cmdPs.ts")).cmdPs(rest);
+        return await cmdLs(rest);
       case "status":
         return await cmdStatus(rest);
       case "whoami":
@@ -607,13 +589,12 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdRead(rest, { mode: "tail" });
       case "head":
         return await cmdRead(rest, { mode: "head" });
-      case "hist":
-      case "history":
-        return await (await import("./hist.ts")).cmdHist(rest);
       case "send":
         return await cmdSend(rest);
       case "msgs":
         return await cmdMsgs(rest);
+      case "role":
+        return await cmdRole(rest);
       case "key":
         return await cmdKey(rest);
       case "select":
@@ -630,31 +611,6 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdRestart(rest);
       case "note":
         return await cmdNote(rest);
-      case "ask":
-      case "answer": {
-        // `ay ask` needs `ay send`'s delivery path and this file's agent
-        // resolver, both of which live here — so they are handed over rather
-        // than imported, which would make askCli.ts and this module circular.
-        const { runAskSubcommand, runAnswerSubcommand } = await import("./askCli.ts");
-        const deps = {
-          // `all: true` — a question may legitimately be addressed to an agent
-          // that has since gone idle or exited (that is precisely the case
-          // worth recording), so the answerer's liveness is REPORTED rather
-          // than made a precondition for asking.
-          resolveAgent: (keyword: string) =>
-            resolveOne(keyword, {
-              all: true,
-              active: false,
-              json: false,
-              latest: false,
-              cwdScope: null,
-            }),
-          send: cmdSend,
-        };
-        return sub === "ask"
-          ? await runAskSubcommand(rest, deps)
-          : await runAnswerSubcommand(rest, deps);
-      }
       case "todo": {
         const { runTodoSubcommand } = await import("./todoCli.ts");
         return runTodoSubcommand(rest);
@@ -713,24 +669,9 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         await reaper.sweep();
         return 0;
       }
-      case "dsh-legacy": {
-        const { cmdDsh } = await import("./cmdDsh.ts");
-        return await cmdDsh(rest);
-      }
-      case "gc": {
-        const { gcOldBinaryDirs } = await import("./rustBinary.ts");
-        const res = gcOldBinaryDirs();
-        if (res.removed.length === 0) {
-          process.stdout.write("no old agent-yes binary cache dirs to remove\n");
-        } else {
-          for (const v of res.removed) process.stdout.write(`removed ${v}\n`);
-          const mib = (res.freedBytes / 1024 / 1024).toFixed(1);
-          process.stdout.write(
-            `freed ${mib} MiB (${res.freedBytes} bytes) across ${res.removed.length} version dir(s)\n`,
-          );
-        }
-        return 0;
-      }
+      case "deepseek":
+      case "ds":
+        return cmdDeepseek(rest);
       case "help":
         return cmdHelp(managerCommands);
       default:
@@ -741,6 +682,47 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
     process.stderr.write(`ay ${sub}: ${msg}\n`);
     return 1;
   }
+}
+
+// ---------------------------------------------------------------------------
+// ay deepseek / ay ds
+// ---------------------------------------------------------------------------
+
+/**
+ * `ay deepseek [-- <args>…]` / `ay ds …`: run the local DeepSeek adapter that
+ * bridges Codex's Responses API to DeepSeek's chat completions, then spawn
+ * `codex` pointed at it. The adapter script lives in this package's
+ * `scripts/deepseek-codex.ts` and is Bun-only (Bun.serve / Bun.spawn), so it is
+ * re-exec'd via the same bun runtime that's running us — never imported into
+ * this process. Extra args are forwarded verbatim to `codex`.
+ */
+export function cmdDeepseek(rest: string[]): Promise<number> {
+  const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const script = path.join(root, "scripts", "deepseek-codex.ts");
+  const bunBin = process.execPath.split(/[/\\]/).at(-1)?.startsWith("bun")
+    ? process.execPath
+    : "bun";
+  const child = spawn(bunBin, [script, ...rest], {
+    cwd: process.cwd(),
+    env: { ...process.env, AGENT_YES_BIN: process.argv[1] },
+    stdio: "inherit",
+  });
+  return new Promise((resolve) => {
+    child.on("error", (err) => {
+      process.stderr.write(`ay deepseek: failed to start: ${err.message}\n`);
+      resolve(1);
+    });
+    child.on("exit", (code, signal) => {
+      if (signal) {
+        resolve(128 + (signal === "SIGINT" ? 2 : signal === "SIGTERM" ? 15 : 1));
+      } else {
+        resolve(code ?? 1);
+      }
+    });
+    for (const signal of ["SIGINT", "SIGTERM"] as const) {
+      process.on(signal, () => child.kill(signal));
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -778,20 +760,11 @@ async function buildAgentContextSection(self: GlobalPidRecord): Promise<string> 
     : parent
       ? `Spawned by agent pid ${parent.pid} (${parent.cli}) in ${shortenPath(parent.cwd)}.`
       : `Nested under a parent (wrapper pid ${self.parent_pid}) whose record isn't in the local registry.`;
-  // The reporting duty is stated in the `<ay-init-msg>` block wrapping this
-  // agent's initial prompt, but that block scrolls out of a long session (or is
-  // compacted away) long before the agent finishes. `ay help` is where an agent
-  // goes when it has lost the thread, so restate the obligation here.
-  const dutyLine = parent
-    ? `  You owe it a report: \`ay send ${parent.agent_id || parent.pid} "..."\` when you finish, and\n` +
-      `  when you are blocked. It is not watching your terminal.\n`
-    : ``;
 
   return (
     `You are running inside an agent:\n` +
     `  ${whoAmI}\n` +
     `  ${parentLine}\n` +
-    dutyLine +
     `\n` +
     `As an agent, you can:\n` +
     `  Spawn a sub-agent:\n` +
@@ -802,11 +775,6 @@ async function buildAgentContextSection(self: GlobalPidRecord): Promise<string> 
     `     --advisor is a claude-cli flag — only takes effect for claude/cy)\n` +
     `  List agents (your children nest under your own pid in the tree):\n` +
     `    ay ls --cwd ${shortenPath(self.cwd)}\n` +
-    `  Get notified when a sub-agent finishes / goes idle / crashes (preferred):\n` +
-    `    ay notify watch --unread\n` +
-    `    (one watch loop for your whole fan-out: needs_input / idle / exited edges land\n` +
-    `     in your inbox; a hard child crash is caught by the 2s liveness poll, which\n` +
-    `     nothing push-based can see)\n` +
     `  Watch agent state changes, scoped to your workspace:\n` +
     `    ay ls --watch --cwd ${shortenPath(self.cwd)}\n` +
     `    (NDJSON stream of state changes across every matched agent — one watcher\n` +
@@ -840,18 +808,14 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `\n` +
       `Management:\n` +
       `  ay ls [keyword]                     list running agents\n` +
-      `  ay ps [keyword]                     per-agent CPU/RSS, rolled up over each\n` +
-      `                                        agent's whole process tree, + box vitals\n` +
       `  ay tail [-f] [-n N] <keyword>       last N lines (96), -f to follow\n` +
       `  ay read <keyword> [page opts]       paginate: --last/--head N, --range A:B,\n` +
       `                                        --before-line L [--limit N]\n` +
       `  ay cat <keyword>                    full log\n` +
       `  ay head <keyword>                   first N lines\n` +
-      `  ay hist [-n 6] [--all] [--json]     past agent conversations (claude/codex\n` +
-      `                                        transcripts, incl. exited sessions);\n` +
-      `                                        this cwd unless --all\n` +
       `  ay send <keyword> <msg>             send a message (keyword '.' = agent in this cwd)\n` +
       `  ay msgs [keyword] [--in|--out]      inter-agent message log (sent + received)\n` +
+      `  ay role [name] | ay role <kw> <name>  lane/role name shown in the send envelope\n` +
       `  ay ch mk|join|send|read|tail <topic>  local-first E2E channels: AI ↔ humans on a topic (ay ch help)\n` +
       `  ay term embed <pid>                 <script> to embed a live read-only agent terminal in a page (ay term help)\n` +
       `  ay widget ls | read selection|dom   read an opted-in page widget's context (selection/DOM) (ay widget help)\n` +
@@ -863,13 +827,11 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay exit <keyword> [reason]          graceful shutdown, recording who/why (= 'ay send <kw> exit')\n` +
       `  ay restart <keyword> [--fresh]      stop (if live) + relaunch resuming the session; --fresh replays the prompt\n` +
       `  ay status <keyword>                 agent status snapshot\n` +
-      `  ay notify watch --unread            get notified when sub-agents finish/stuck/crash (writes to inbox)\n` +
       `  ay whoami [--json]                  (inside an agent) your own registry identity + reply address\n` +
       `  ay result <keyword> [--wait]        pull an agent's structured result envelope\n` +
       `  ay result set '<json>'              (inside an agent) deposit your result envelope\n` +
       `  ay reap                             kill process groups leaked by dead agents\n` +
-      `  ay gc                               remove old-version binary cache dirs and report freed space\n` +
-      `  ay dsh-legacy [args...]              launch the DeepSeek Harness terminal client (dsh-tui)\n` +
+      `  ay deepseek|ds [-- <codex args>]    run codex via the local DeepSeek adapter (DEEPSEEK_API_KEY)\n` +
       wsLines +
       `\n` +
       `Remote:\n` +
@@ -884,10 +846,9 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay ls   <token>@<host>:<port>       connect inline (no alias needed)\n` +
       `  ay send <token>@<host>:<port>:<kw> <msg>\n` +
       `\n` +
-      `Run an agent (naming a CLI is what launches one — bare 'ay' shows this help):\n` +
-      `  ay <claude|codex|...> [options] -- [prompt]\n` +
+      `Run an agent:\n` +
+      `  ay [claude|codex|gemini|...] [options] -- [prompt]\n` +
       `  ay claude -- "fix the bug in auth.ts"\n` +
-      `  cy [options] -- [prompt]            shortcut for 'ay claude' (bare 'cy' starts claude)\n` +
       `  ay claude --help                    full agent-runner options\n` +
       `\n` +
       `Labs (examples at https://github.com/snomiao/agent-yes/tree/main/lab):\n` +
@@ -1160,12 +1121,12 @@ async function runRemoteLs(
   if (records.length === 0) {
     process.stderr.write(
       remote.keyword
-        ? `no agents matched "${remote.keyword}" on ${remote.label}\n`
-        : `no running agents on ${remote.label}\n`,
+        ? `no agents matched "${remote.keyword}" on ${remote.url}\n`
+        : `no running agents on ${remote.url}\n`,
     );
     return 0;
   }
-  process.stderr.write(`[remote ${remote.label}]\n`);
+  process.stderr.write(`[remote ${remote.url}]\n`);
   const termWidth = (process.stdout as any).columns ?? 120;
   const widths = {
     pid: Math.max(3, ...records.map((r: any) => String(r.pid).length)),
@@ -1228,7 +1189,7 @@ async function runRemoteRead(
     let attempt = 0;
 
     process.stderr.write(
-      `[remote ${remote.label}  ${keyword}]\nfollowing... (Ctrl-C to stop, timeout: ${Math.round(reconnectTimeoutMs / 1000)}s)\n`,
+      `[remote ${remote.url}  ${keyword}]\nfollowing... (Ctrl-C to stop, timeout: ${Math.round(reconnectTimeoutMs / 1000)}s)\n`,
     );
 
     while (!ac.signal.aborted) {
@@ -1304,7 +1265,7 @@ async function runRemoteRead(
     return 1;
   }
   const text = await res.text();
-  process.stderr.write(`[remote ${remote.label}  ${keyword}]\n`);
+  process.stderr.write(`[remote ${remote.url}  ${keyword}]\n`);
   process.stdout.write(text);
   if (!text.endsWith("\n")) process.stdout.write("\n");
   return 0;
@@ -1338,7 +1299,7 @@ async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string):
     cwd?: string;
     agentId?: string;
   };
-  process.stdout.write(`sent to remote pid ${data.pid} (${remote.label}  ${keyword})\n`);
+  process.stdout.write(`sent to remote pid ${data.pid} (${remote.url}  ${keyword})\n`);
   // Record the sender's half of the exchange locally (the recipient's inbox is
   // recorded on the remote host by its /api/send handler). Only real bodies.
   if (msg && msg !== "-") {
@@ -1355,7 +1316,7 @@ async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string):
       code: code.toLowerCase() === "enter" ? undefined : code.toLowerCase(),
       confirmed: true,
       wrapped: false,
-      remote: remote.label,
+      remote: remote.url,
     });
   }
   return 0;
@@ -1398,7 +1359,7 @@ async function runRemoteSpawn(
     if (name === "TimeoutError" || name === "AbortError") {
       // The request may or may not have spawned — do NOT retry. Let the operator check.
       process.stderr.write(
-        `remote spawn: no response from ${remote.label} within ${Math.round(SPAWN_TIMEOUT_MS / 1000)}s — ` +
+        `remote spawn: no response from ${remote.url} within ${Math.round(SPAWN_TIMEOUT_MS / 1000)}s — ` +
           `result UNKNOWN (not retried).\n  ay ls ${hint}    # check whether it started\n`,
       );
       return 2;
@@ -1419,7 +1380,7 @@ async function runRemoteSpawn(
     provisioned?: { action: string };
   };
   process.stdout.write(
-    `spawned ${r.cli} on ${remote.label} in ${r.cwd}` +
+    `spawned ${r.cli} on ${remote.url} in ${r.cwd}` +
       `${r.hook ? " (via spawn hook)" : ""}` +
       `${r.provisioned ? ` (${r.provisioned.action})` : ""}\n`,
   );
@@ -1431,14 +1392,10 @@ async function runRemoteSpawn(
   if (r.agentId && !hint.includes("://")) {
     process.stderr.write(
       `\n  ay tail ${hint}:${r.agentId}            # watch its output\n` +
-        `  ay status ${hint}:${r.agentId} --wait   # block until it needs you\n` +
-        `  ay notify watch --unread       # get notified when it finishes/stuck/crashes\n`,
+        `  ay status ${hint}:${r.agentId} --wait   # block until it needs you\n`,
     );
   } else {
-    process.stderr.write(
-      `\n  ay ls ${hint}    # the new ${r.cli} agent appears here\n` +
-        `  ay notify watch --unread   # get notified when it finishes/stuck/crashes\n`,
-    );
+    process.stderr.write(`\n  ay ls ${hint}    # the new ${r.cli} agent appears here\n`);
   }
   return 0;
 }
@@ -1838,9 +1795,9 @@ async function cmdLs(rest: string[]): Promise<number> {
   const y = yargs(rest)
     .usage(
       "Usage: ay ls [keyword] [options]\n" +
-        "       ay list [keyword] [options]\n\n" +
-        "List running agents. Optionally filter by keyword (pid, cwd substring, or prompt substring).\n" +
-        "For per-agent CPU/memory usage, see `ay ps`.",
+        "       ay list [keyword] [options]\n" +
+        "       ay ps   [keyword] [options]\n\n" +
+        "List running agents. Optionally filter by keyword (pid, cwd substring, or prompt substring).",
     )
     .option("all", {
       type: "boolean",
@@ -3058,7 +3015,7 @@ async function cmdSpawn(rest: string[]): Promise<number> {
     .option("cli", {
       type: "string",
       default: "claude",
-      description: "CLI to wrap (claude|codex|…)",
+      description: "CLI to wrap (claude|codex|gemini|…)",
     })
     .option("cwd", {
       type: "string",
@@ -3472,13 +3429,13 @@ async function cmdSend(rest: string[]): Promise<number> {
   let nonce: string | undefined;
   if (sender.agent && !isSlashCommand(body) && !raw) {
     nonce = randomBytes(4).toString("hex");
-    // The standardized identity (<user>@<host>:<path>:<branch>#<pid>) names the
-    // sender in one token: the branch usually carries the lane name for free
-    // (worktree checkouts name their purpose), so recipients don't translate
-    // cwd/pid into a role by hand. Every segment is clamped to a header-safe
-    // charset in identity.ts — the open tag is not nonce-protected.
-    const identity = formatIdentity({ cwd: sender.agent.cwd, pid: sender.agent.pid });
-    prefix = `<ay-msg ${nonce} from ${sender.agent.cli} ${identity} — reply: ay send ${replyTarget} "...">\n`;
+    // The sender's self-declared role ("pm", "crm", …) rides along when set —
+    // recipients read dozens of these a day and a pid/cwd doesn't carry the
+    // lane name (cwd → role isn't always derivable). sanitizeRole guarantees
+    // the value can't forge header syntax.
+    const senderRole = sanitizeRole(sender.agent.role);
+    const roleTag = senderRole ? ` (${senderRole})` : "";
+    prefix = `<ay-msg ${nonce} from ${sender.agent.cli} #${sender.agent.pid}${roleTag} @ ${shortenPath(sender.agent.cwd)} — reply: ay send ${replyTarget} "...">\n`;
     suffix = `\n</ay-msg ${nonce}>`;
     // A body that itself starts with an <ay-msg …> header is usually an agent
     // hand-wrapping what this send is about to wrap again — the recipient then
@@ -3524,33 +3481,21 @@ async function cmdSend(rest: string[]): Promise<number> {
   const canConfirm = trailing === "\r" && Boolean(fullBody) && !noWait;
   let confirmed = true;
   let lastScreen: string[] = [];
-  // The body and its Enter are ONE transaction: every gap between them (the
-  // paste-settle wait, the submit-confirm retries) is a window where another
-  // writer's bytes would land mid-message. See ts/ipcLock.ts.
-  await withIpcLock(
-    record.pid,
-    async () => {
-      if (fullBody && trailing) {
-        await writeToIpc(fifoPath, fullBody);
-        if (canConfirm && record.log_file) {
-          // Wait for the paste to actually finish rendering — a long/multi-line body
-          // can take longer than any fixed guess, and sending Enter mid-paste gets
-          // swallowed by the CLI's bracketed-paste handling instead of submitting.
-          await waitForLogQuiet(record.log_file, SEND_SETTLE_QUIET_MS, SEND_SETTLE_MAX_MS);
-          ({ confirmed, screen: lastScreen } = await submitAndConfirm(record, fifoPath, trailing));
-        } else {
-          await new Promise((r) => setTimeout(r, 200));
-          await writeToIpc(fifoPath, trailing);
-        }
-      } else {
-        await writeToIpc(fifoPath, fullBody + trailing);
-      }
-    },
-    (why) =>
-      process.stderr.write(
-        `warning: ay send writing pid ${record.pid} without the input lock (${why})\n`,
-      ),
-  );
+  if (fullBody && trailing) {
+    await writeToIpc(fifoPath, fullBody);
+    if (canConfirm && record.log_file) {
+      // Wait for the paste to actually finish rendering — a long/multi-line body
+      // can take longer than any fixed guess, and sending Enter mid-paste gets
+      // swallowed by the CLI's bracketed-paste handling instead of submitting.
+      await waitForLogQuiet(record.log_file, SEND_SETTLE_QUIET_MS, SEND_SETTLE_MAX_MS);
+      ({ confirmed, screen: lastScreen } = await submitAndConfirm(record, fifoPath, trailing));
+    } else {
+      await new Promise((r) => setTimeout(r, 200));
+      await writeToIpc(fifoPath, trailing);
+    }
+  } else {
+    await writeToIpc(fifoPath, fullBody + trailing);
+  }
   const payload = body + trailing;
   const status = confirmed ? "sent" : "sent but NOT confirmed submitted";
   process.stdout.write(
@@ -3571,6 +3516,7 @@ async function cmdSend(rest: string[]): Promise<number> {
             cli: sender.agent.cli,
             cwd: sender.agent.cwd,
             agent_id: sender.agent.agent_id,
+            role: sender.agent.role ?? undefined,
           }
         : null,
       to: {
@@ -3578,6 +3524,7 @@ async function cmdSend(rest: string[]): Promise<number> {
         cli: record.cli,
         cwd: record.cwd,
         agent_id: record.agent_id,
+        role: record.role ?? undefined,
       },
       body,
       code: trailing === "\r" ? undefined : codeName,
@@ -3749,6 +3696,87 @@ async function cmdMsgs(rest: string[]): Promise<number> {
   return 0;
 }
 
+/**
+ * `ay role [name]` / `ay role <keyword> <name>` — read or set an agent's
+ * self-declared lane/role name ("pm", "crm", …). The role rides in the
+ * `ay send` envelope header (`from claude #123 (pm) @ …`) so recipients don't
+ * translate cwd/pid into a lane by hand — the emergent `[pm→qa]` body prefixes
+ * exist exactly because the envelope lacked this. With no args: print the
+ * calling agent's role. With one arg: set the calling agent's role (requires
+ * agent context). With two args: resolve the keyword and set that agent's role.
+ * `--clear` removes it. Roles are clamped by sanitizeRole (they render into the
+ * non-nonce-protected open tag).
+ */
+const ROLE_RESOLVE_OPTS: CommonOpts = {
+  all: false,
+  active: false,
+  cwdScope: null,
+  latest: false,
+  json: false,
+};
+
+async function cmdRole(rest: string[]): Promise<number> {
+  const y = yargs(rest)
+    .usage('Usage: ay role [name] | ay role <keyword> <name> | ay role [keyword] --clear')
+    .option("clear", { type: "boolean", default: false, description: "Remove the role" })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+  const argv = await y.parseAsync();
+  const args = argv._.slice(0).map(String);
+
+  // Figure out target + new value from arity: 0 args = self get (or self clear),
+  // 1 arg = self set (or keyword clear), 2 args = keyword set.
+  let target: GlobalPidRecord | null = null;
+  let newRole: string | undefined;
+  if (args.length === 2) {
+    target = await resolveOne(args[0]!, ROLE_RESOLVE_OPTS);
+    newRole = args[1]!;
+  } else if (args.length === 1 && argv.clear) {
+    target = await resolveOne(args[0]!, ROLE_RESOLVE_OPTS);
+  } else if (args.length === 1) {
+    target = await resolveSender();
+    if (!target) {
+      process.stderr.write(
+        "ay role: no agent context (AGENT_YES_PID unset or unregistered) — from a human shell, name the agent: ay role <keyword> <name>\n",
+      );
+      return 1;
+    }
+    newRole = args[0]!;
+  } else {
+    target = await resolveSender();
+    if (!target) {
+      process.stderr.write(
+        "ay role: no agent context — from a human shell, name the agent: ay role <keyword> [<name>|--clear]\n",
+      );
+      return 1;
+    }
+  }
+
+  if (newRole === undefined && !argv.clear) {
+    process.stdout.write(`${target.role ?? ""}\n`);
+    return 0;
+  }
+
+  let role: string | null = null;
+  if (!argv.clear) {
+    role = sanitizeRole(newRole);
+    if (!role) {
+      process.stderr.write(
+        `ay role: invalid role ${JSON.stringify(newRole)} — use 1-32 chars of [A-Za-z0-9._-]\n`,
+      );
+      return 1;
+    }
+  }
+  await updateGlobalPidStatus(target.pid, { role });
+  process.stdout.write(
+    role
+      ? `pid ${target.pid} (${target.cli}): role set to "${role}" — envelopes now read: from ${target.cli} #${target.pid} (${role}) @ ${shortenPath(target.cwd)}\n`
+      : `pid ${target.pid} (${target.cli}): role cleared\n`,
+  );
+  return 0;
+}
+
 // Resolve a keyword to one agent and return it with a writable FIFO, or throw
 // with the same guidance cmdSend gives. Shared by `ay key` / `ay select`.
 async function resolveWritableAgent(keyword: string, opts: CommonOpts): Promise<GlobalPidRecord> {
@@ -3840,14 +3868,7 @@ async function cmdKey(rest: string[]): Promise<number> {
   const force = Boolean(argv.force) || process.env.AGENT_YES_FORCE_SEND === "1";
   const sender = await enforceSendGuards(record, force);
 
-  await withIpcLock(
-    record.pid,
-    () => writeKeysPaced(record.fifo_file!, byteSeqs, Math.max(0, argv.pace)),
-    (why) =>
-      process.stderr.write(
-        `warning: ay key/select writing pid ${record.pid} without the input lock (${why})\n`,
-      ),
-  );
+  await writeKeysPaced(record.fifo_file!, byteSeqs, Math.max(0, argv.pace));
   process.stdout.write(`sent to pid ${record.pid} (${record.cli}): ${keyNames.join(" ")}\n`);
   await recordKeyEvent(sender, record, "key", keyNames.join(" "));
   return 0;
@@ -3922,14 +3943,7 @@ async function cmdSelect(rest: string[]): Promise<number> {
   // PARSED cursor position (not a blind "N-1 downs") so a non-first default works.
   const keyNames = menuSelectKeys(menu.cursor, n);
   const byteSeqs = keyNames.map((k) => controlCodeFromName(k));
-  await withIpcLock(
-    record.pid,
-    () => writeKeysPaced(record.fifo_file!, byteSeqs, Math.max(0, argv.pace)),
-    (why) =>
-      process.stderr.write(
-        `warning: ay key/select writing pid ${record.pid} without the input lock (${why})\n`,
-      ),
-  );
+  await writeKeysPaced(record.fifo_file!, byteSeqs, Math.max(0, argv.pace));
 
   const delta = n - menu.cursor;
   const moved =
@@ -3966,6 +3980,7 @@ export function stopTipForCli(cli: string, pid: number): string | null {
 /// Verified against current upstream CLIs:
 ///   claude   — `/exit`
 ///   codex    — `/exit`
+///   gemini   — `/quit`
 ///   bash/cmd/powershell — `exit` (the shell builtin; closes the session at a
 ///     bare prompt, far cleaner than Ctrl+C which would instead hit whatever
 ///     app is running in the foreground).
@@ -3974,6 +3989,7 @@ export function stopTipForCli(cli: string, pid: number): string | null {
 export const GRACEFUL_EXIT_COMMANDS: Record<string, string> = {
   claude: "/exit",
   codex: "/exit",
+  gemini: "/quit",
   bash: "exit",
   cmd: "exit",
   powershell: "exit",
@@ -4181,24 +4197,15 @@ async function cmdStop(rest: string[]): Promise<number> {
   }
 
   const fifoPath = record.fifo_file;
-  await withIpcLock(
-    record.pid,
-    async () => {
-      if (payload === "double-ctrl-c") {
-        await writeToIpc(fifoPath, "\x03");
-        await new Promise((r) => setTimeout(r, 200));
-        await writeToIpc(fifoPath, "\x03");
-      } else {
-        await writeToIpc(fifoPath, payload);
-        await new Promise((r) => setTimeout(r, 200));
-        await writeToIpc(fifoPath, "\r");
-      }
-    },
-    (why) =>
-      process.stderr.write(
-        `warning: ay stop writing pid ${record.pid} without the input lock (${why})\n`,
-      ),
-  );
+  if (payload === "double-ctrl-c") {
+    await writeToIpc(fifoPath, "\x03");
+    await new Promise((r) => setTimeout(r, 200));
+    await writeToIpc(fifoPath, "\x03");
+  } else {
+    await writeToIpc(fifoPath, payload);
+    await new Promise((r) => setTimeout(r, 200));
+    await writeToIpc(fifoPath, "\r");
+  }
 
   process.stdout.write(`stopping pid ${record.pid} (${record.cli}) via ${strategy}\n`);
   process.stderr.write(
@@ -4241,25 +4248,16 @@ async function gracefulExitAgent(
   await writeNote(record.pid, `↩ exit — ${reason}`).catch(() => {});
   const fifoPath = record.fifo_file;
   const graceful = GRACEFUL_EXIT_COMMANDS[record.cli];
-  return withIpcLock(
-    record.pid,
-    async () => {
-      if (graceful) {
-        await writeToIpc(fifoPath, graceful);
-        await new Promise((r) => setTimeout(r, 200));
-        await writeToIpc(fifoPath, "\r");
-        return { strategy: `'${graceful}' + Enter` };
-      }
-      await writeToIpc(fifoPath, "\x03");
-      await new Promise((r) => setTimeout(r, 200));
-      await writeToIpc(fifoPath, "\x03");
-      return { strategy: `double Ctrl+C (no known /exit for cli "${record.cli}")` };
-    },
-    (why) =>
-      process.stderr.write(
-        `warning: ay exit writing pid ${record.pid} without the input lock (${why})\n`,
-      ),
-  );
+  if (graceful) {
+    await writeToIpc(fifoPath, graceful);
+    await new Promise((r) => setTimeout(r, 200));
+    await writeToIpc(fifoPath, "\r");
+    return { strategy: `'${graceful}' + Enter` };
+  }
+  await writeToIpc(fifoPath, "\x03");
+  await new Promise((r) => setTimeout(r, 200));
+  await writeToIpc(fifoPath, "\x03");
+  return { strategy: `double Ctrl+C (no known /exit for cli "${record.cli}")` };
 }
 
 // ---------------------------------------------------------------------------
@@ -5336,60 +5334,9 @@ function printNotifyEvents(events: NotifyEvent[], json: boolean): void {
   }
 }
 
-/** Full usage for `ay notify --help` / `ay notify watch --help`. Every verb and
- *  option is listed so the caller never needs to enter the watch loop to find
- *  out what the subcommand does. */
-function notifyHelp(): number {
-  process.stdout.write(
-    `ay notify — read sub-agent status-transition notifications (see docs/subagent-notify.md)\n\n` +
-      `A parent runs ONE command in its Monitor loop to get every child's\n` +
-      `needs_input / idle / exited edge, each with a payload (question / tail /\n` +
-      `git head) so it can act without tailing the child:\n\n` +
-      `  ay notify watch --unread          # tail your inbox; ensures the daemon is up\n\n` +
-      `Usage:\n` +
-      `  ay notify watch [--parent <pid>] [--since <seq>] [--since-ts <ms>] [--unread]\n` +
-      `                   [--ack] [--json] [--consumer <name>] [--interval <s>]\n` +
-      `                   [--no-ensure-daemon]\n` +
-      `  ay notify read  [--parent <pid>] [--since <seq>] [--since-ts <ms>] [--unread]\n` +
-      `                   [--ack] [--json] [--consumer <name>] [--postmortem]\n` +
-      `                   [--started-at <ms>]\n` +
-      `  ay notify cursor get|set <seq> [--parent <pid>] [--consumer <name>]\n\n` +
-      `Verbs:\n` +
-      `  watch    tail -f the inbox (at-least-once by default; --ack advances the cursor)\n` +
-      `  read     one-shot drain of the inbox\n` +
-      `  cursor   get/set the persisted unread cursor (multiple readers via --consumer)\n\n` +
-      `Options:\n` +
-      `  --parent <pid>      parent pid whose inbox to drain (default: $AGENT_YES_PID)\n` +
-      `  --since <seq>       only edges with seq greater than this\n` +
-      `  --since-ts <ms>     only edges at/after this epoch-ms\n` +
-      `  --unread            only edges past the saved cursor\n` +
-      `  --ack               advance the cursor past what's shown (at-least-once: off by default)\n` +
-      `  --json              emit raw NDJSON events\n` +
-      `  --consumer <name>   cursor identity (for multiple readers, default: parent)\n` +
-      `  --interval <s>      poll interval in seconds (watch, default: 2)\n` +
-      `  --no-ensure-daemon  don't start the notifyd singleton if not running (watch)\n` +
-      `  --postmortem        read-only: inspect an inbox whose parent has exited (read)\n` +
-      `  --started-at <ms>   disambiguate which incarnation to show (--postmortem)\n\n` +
-      `Daemon (ay notifyd):\n` +
-      `  ay notifyd run|start|status|stop    the detection engine (auto-started by watch)\n`,
-  );
-  return 0;
-}
-
 async function cmdNotify(rest: string[]): Promise<number> {
   const verb = rest[0];
   const args = rest.slice(1);
-  // --help / -h (at either the verb or the sub-verb position) returns the full
-  // usage immediately — it must never fall through into the watch loop.
-  if (
-    verb === "help" ||
-    verb === "--help" ||
-    verb === "-h" ||
-    args.includes("--help") ||
-    args.includes("-h")
-  ) {
-    return notifyHelp();
-  }
 
   if (verb === "cursor") return cmdNotifyCursor(args);
   if (verb !== "read" && verb !== "watch") {

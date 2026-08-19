@@ -2621,15 +2621,12 @@ function cmdkCommandRows(q: string): typeof cmdkRows {
 function cmdkData() {
   const rows = [...recordsByKey.values()].map((r) => ({
     id: r._key,
-    pid: r.pid,
-    aid: r.agent_id ?? "",
     title: nodeTitle(r),
     status: r.status,
     sub:
       (r._src === LOCAL ? "" : `${r._src} · `) +
       shortCwd(r.cwd) +
-      (r.git?.branch ? ` ⎇${r.git.branch}` : "") +
-      (r.agent_id ? ` · ${r.agent_id}` : ""),
+      (r.git?.branch ? ` ⎇${r.git.branch}` : ""),
   }));
   rows.sort((a, b) => (a.status === "exited" ? 1 : 0) - (b.status === "exited" ? 1 : 0));
   return rows;
@@ -2639,11 +2636,9 @@ function cmdkRender() {
   const q = raw.toLowerCase();
   cmdkRows = raw.startsWith("/")
     ? cmdkCommandRows(raw)
-    : cmdkData().filter((r) => {
-        if (!q) return true;
-        if (/^\d+$/.test(q)) return String(r.pid) === q || r.aid === q;
-        return `${r.title} ${r.id} ${r.aid} ${r.sub} ${r.status}`.toLowerCase().includes(q);
-      });
+    : cmdkData().filter(
+        (r) => !q || `${r.title} ${r.id} ${r.sub} ${r.status}`.toLowerCase().includes(q),
+      );
   if (cmdkSel >= cmdkRows.length) cmdkSel = Math.max(0, cmdkRows.length - 1);
   cmdkList.innerHTML = cmdkRows
     .map(

@@ -1,31 +1,25 @@
 /**
- * `--cwd <dir>` on an agent run is NOT an agent-yes flag.
+ * `--cwd <dir>` on an agent run is deprecated.
  *
- * It once selected the directory the agent runs in. It no longer does: agent-yes
- * forwards it to the target CLI like any other unknown option, so the agent runs
- * wherever `ay` was invoked and the CLI decides what `--cwd` means (usually:
- * rejects it). Because agent-yes never handles a cwd but its own process cwd, the
- * wrapper cwd / agent cwd / recorded cwd cannot drift apart.
+ * It used to pick the directory the agent runs in. The shell already does this
+ * better: `cd <dir> && <same command>` puts the agent AND every relative path in
+ * the command in the same place, with no agent-yes-specific flag to remember.
+ * This module detects the flag on a raw argv and builds the copy-pasteable
+ * migration hint we print before continuing (the flag still works for now).
  *
- * The shell does this job better anyway: `cd <dir> && <same command>` puts the
- * agent AND every relative path in the command in the same place, with no
- * agent-yes-specific flag to remember. This module detects the flag on a raw argv
- * and builds the copy-pasteable hint we print before continuing.
- *
- * Scope: the agent-run path only (ts/cli.ts), and only tokens BEFORE `--` —
- * past the separator the token belongs to the CLI or the prompt. Management
- * subcommands that take a `--cwd` FILTER (`ay ls/status/spawn/schedule …`) are a
- * different flag and are unaffected — they never reach this code because
- * subcommands are dispatched earlier. The Rust runner mirrors this hint in
- * rs/src/main.rs for direct `agent-yes` invocations that bypass this launcher.
+ * Scope: the agent-run path only (ts/cli.ts). Management subcommands that take a
+ * `--cwd` FILTER (`ay ls/status/spawn/schedule …`) are a different flag and are
+ * not deprecated — they never reach this code because subcommands are dispatched
+ * earlier. The Rust runner mirrors this warning in rs/src/main.rs for direct
+ * `agent-yes` invocations that bypass this launcher.
  */
 
-/** Env var the JS launcher sets on the spawned Rust child so the hint, once
+/** Env var the JS launcher sets on the spawned Rust child so the warning, once
  * printed here, is not printed a second time by the Rust runner. Mirrored in
  * rs/src/main.rs. */
 export const SUPPRESS_CWD_WARN_ENV = "AGENT_YES_SUPPRESS_CWD_WARN";
 
-export interface CwdPassthroughHint {
+export interface CwdDeprecation {
   /** The directory value the user passed to --cwd (undefined if the flag had no value). */
   dir: string | undefined;
   /** The suggested replacement command line, e.g. `cd ~/foo && cy claude -- fix`. */
@@ -55,24 +49,20 @@ function programName(scriptPath: string | undefined): string {
 }
 
 /**
- * Detect a `--cwd <dir>` / `--cwd=<dir>` token on a full process.argv
- * (`[exec, script, ...userArgs]`). Returns the hint, or null when no `--cwd`
- * appears before the `--` separator.
+ * Detect a deprecated `--cwd <dir>` / `--cwd=<dir>` flag on a full process.argv
+ * (`[exec, script, ...userArgs]`). Returns the migration hint, or null when no
+ * `--cwd` flag is present.
  */
-export function detectCwdPassthrough(argv: string[]): CwdPassthroughHint | null {
+export function detectCwdDeprecation(argv: string[]): CwdDeprecation | null {
   const prog = programName(argv[1]);
   const userArgs = argv.slice(2);
-  // Past `--` the token is the CLI's or the prompt's — forwarded verbatim either
-  // way, so there is nothing to suggest and nothing to strip.
-  const sepIndex = userArgs.indexOf("--");
-  const optionEnd = sepIndex === -1 ? userArgs.length : sepIndex;
 
   let sawCwd = false;
   let dir: string | undefined;
   const rest: string[] = [];
   for (let i = 0; i < userArgs.length; i++) {
     const arg = userArgs[i]!;
-    if (i < optionEnd && arg === "--cwd") {
+    if (arg === "--cwd") {
       sawCwd = true;
       const next = userArgs[i + 1];
       // `--cwd DIR` — consume the value; a following flag means the value is missing.
@@ -82,7 +72,7 @@ export function detectCwdPassthrough(argv: string[]): CwdPassthroughHint | null 
       }
       continue;
     }
-    if (i < optionEnd && arg.startsWith("--cwd=")) {
+    if (arg.startsWith("--cwd=")) {
       sawCwd = true;
       dir = arg.slice("--cwd=".length);
       continue;
@@ -96,8 +86,7 @@ export function detectCwdPassthrough(argv: string[]): CwdPassthroughHint | null 
   const dirDisplay = dir === undefined ? "<dir>" : shellDisplayQuote(dir);
   const suggestion = `cd ${dirDisplay} && ${cmd}`;
   const message =
-    `\x1b[33m⚠ --cwd is not an agent-yes flag\x1b[0m — it is passed straight through to the CLI. ` +
-    `To run the agent somewhere else:\n\n` +
+    `\x1b[33m⚠ --cwd is deprecated.\x1b[0m Run the command in the target directory instead:\n\n` +
     `    ${suggestion}`;
   return { dir, suggestion, message };
 }

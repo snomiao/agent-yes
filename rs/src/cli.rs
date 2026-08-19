@@ -20,48 +20,10 @@ use std::env;
 /// Management subcommands handled by the TypeScript CLI, not this runner.
 /// MUST mirror `SUBCOMMANDS` in ts/subcommands.ts — keep the two in sync.
 pub const SUBCOMMANDS: &[&str] = &[
-    "ls",
-    "list",
-    "ps",
-    "status",
-    "whoami",
-    "result",
-    "notify",
-    "notifyd",
-    "read",
-    "cat",
-    "tail",
-    "head",
-    "hist",
-    "history",
-    "send",
-    "key",
-    "select",
-    "msgs",
-    "spawn",
-    "attach",
-    "stop",
-    "exit",
-    "restart",
-    "note",
-    "todo",
-    "ask",
-    "answer",
-    "ch",
+    "ls", "list", "ps", "status", "whoami", "result", "notify", "notifyd", "read", "cat", "tail",
+    "head", "send", "msgs", "role", "spawn", "attach", "stop", "exit", "restart", "note", "ch",
     "channels",
-    "term",
-    "widget",
-    "mint",
-    "serve",
-    "tray",
-    "schedule",
-    "remote",
-    "expose",
-    "callback",
-    "reap",
-    "gc",
-    "dsh-legacy",
-    "help",
+    "term", "widget", "mint", "serve", "schedule", "remote", "expose", "callback", "reap", "help",
 ];
 
 /// Subcommands reserved for the generic manager entry (`ay`/`agent-yes`), not a
@@ -97,6 +59,7 @@ fn invoked_cli_name(exe_base: &str) -> Option<String> {
     // Short aliases (must match CLI_ALIASES in ts/invokedCli.ts).
     match raw {
         "cy" => Some("claude".to_string()),
+        "orcy" => Some("openrouter".to_string()),
         other => Some(other.to_string()),
     }
 }
@@ -109,16 +72,6 @@ fn should_delegate(first_arg: &str, exe_base: &str) -> bool {
     is_subcommand(first_arg, manager_commands)
 }
 
-/// Pure decision: is this a completely bare MANAGER invocation (`agent-yes` /
-/// `ay` with no user args)? Those print help instead of launching claude — `ay`
-/// means agent-yes, the fleet manager, so a zero-argument run is "what can this
-/// do?", not "start an agent". Mirrors `isBareManagerInvocation` in
-/// ts/subcommands.ts. A cli-bound alias is excluded: bare `cy` / `claude-yes`
-/// still spawns claude.
-fn is_bare_manager_invocation(has_args: bool, exe_base: &str) -> bool {
-    !has_args && invoked_cli_name(exe_base).is_none()
-}
-
 /// If this binary was invoked with a leading management subcommand, re-exec the
 /// JS launcher and return `Some(exit_code)` for the caller to exit with;
 /// otherwise return `None` so the normal agent-run proceeds.
@@ -127,16 +80,11 @@ fn is_bare_manager_invocation(has_args: bool, exe_base: &str) -> bool {
 /// off `process.argv[2]` alone (a subcommand buried after flags is not one).
 pub fn maybe_delegate_subcommand() -> Option<i32> {
     let raw: Vec<String> = env::args().collect();
+    let first = raw.get(1)?; // raw[0] is the binary itself
     let exe_base = env::current_exe()
         .ok()
         .and_then(|p| p.file_stem().map(|s| s.to_string_lossy().to_string()))
         .unwrap_or_default();
-    // raw[0] is the binary itself, so raw[1] is the first user arg.
-    let Some(first) = raw.get(1) else {
-        // No args at all: the manager entry shows help; a cli-bound alias runs.
-        return is_bare_manager_invocation(false, &exe_base)
-            .then(|| delegate_to_js(&["help".to_string()]));
-    };
     if !should_delegate(first, &exe_base) {
         return None;
     }
@@ -203,7 +151,9 @@ fn delegate_to_js(forward_args: &[String]) -> i32 {
 pub const SUPPORTED_CLIS: &[&str] = &[
     "claude",
     "glm",
+    "openrouter",
     "pi",
+    "gemini",
     "codex",
     "copilot",
     "cursor",
@@ -212,9 +162,6 @@ pub const SUPPORTED_CLIS: &[&str] = &[
     "auggie",
     "amp",
     "opencode",
-    "dsh",
-    "dsh-tui",
-    "dsh-legacy",
     "bash",
     "cmd",
     "powershell",
@@ -241,6 +188,8 @@ pub struct CliArgs {
     pub queue: bool,
     pub use_skills: bool,
     pub skip_permissions: bool,
+    /// Working directory to run the agent in. None = use process current_dir.
+    pub cwd: Option<String>,
     /// Force raw TUI passthrough even when stdout is not a TTY.
     pub force_tty: bool,
     /// Force plain rendered text output even when stdout is a TTY.
@@ -263,7 +212,7 @@ pub struct CliArgs {
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Automated interaction wrapper for AI coding assistants")]
 struct Args {
-    /// CLI tool to use (claude, codex, copilot, cursor, grok, qwen, auggie)
+    /// CLI tool to use (claude, gemini, codex, copilot, cursor, grok, qwen, auggie)
     #[arg(long, default_value = "claude")]
     cli: String,
 
@@ -318,6 +267,10 @@ struct Args {
     /// Pass --dangerously-skip-permissions to the CLI
     #[arg(short = 'y', long = "yes", default_value = "false")]
     yes: bool,
+
+    /// Deprecated: working directory for the agent. Prefer `cd <dir> && <command>`.
+    #[arg(long)]
+    cwd: Option<String>,
 
     /// Force raw TUI passthrough even when stdout is not a TTY (piped/redirected)
     #[arg(long = "force-tty", default_value = "false")]
@@ -432,6 +385,7 @@ fn resolve_args(args: Args, exe_name: &str) -> Result<CliArgs> {
         queue: args.queue,
         use_skills: args.use_skills,
         skip_permissions: args.yes,
+        cwd: args.cwd,
         force_tty: args.force_tty,
         no_tty: args.no_tty,
         swarm,
@@ -569,6 +523,8 @@ mod tests {
         assert_eq!(invoked_cli_name("claude-yes"), Some("claude".into()));
         assert_eq!(invoked_cli_name("codex-yes"), Some("codex".into()));
         assert_eq!(invoked_cli_name("cy"), Some("claude".into()));
+        assert_eq!(invoked_cli_name("orcy"), Some("openrouter".into()));
+        assert_eq!(invoked_cli_name("gemini-yes.js"), Some("gemini".into()));
     }
 
     #[test]
@@ -589,22 +545,9 @@ mod tests {
     }
 
     #[test]
-    fn test_is_bare_manager_invocation() {
-        // Bare manager entry → help (delegated to the JS CLI).
-        assert!(is_bare_manager_invocation(false, "agent-yes"));
-        assert!(is_bare_manager_invocation(false, "ay"));
-        // Bare cli-bound alias → still spawns its agent.
-        assert!(!is_bare_manager_invocation(false, "cy"));
-        assert!(!is_bare_manager_invocation(false, "claude-yes"));
-        assert!(!is_bare_manager_invocation(false, "codex-yes"));
-        // With args, nothing is "bare" — normal dispatch decides.
-        assert!(!is_bare_manager_invocation(true, "agent-yes"));
-        assert!(!is_bare_manager_invocation(true, "cy"));
-    }
-
-    #[test]
     fn test_detect_cli_from_name_all() {
         assert_eq!(detect_cli_from_name("claude-yes"), Some("claude".into()));
+        assert_eq!(detect_cli_from_name("gemini-yes"), Some("gemini".into()));
         assert_eq!(detect_cli_from_name("codex-yes"), Some("codex".into()));
         assert_eq!(detect_cli_from_name("copilot-yes"), Some("copilot".into()));
         assert_eq!(detect_cli_from_name("cursor-yes"), Some("cursor".into()));
@@ -762,10 +705,10 @@ mod tests {
 
     #[test]
     fn test_supported_clis_count() {
-        assert_eq!(SUPPORTED_CLIS.len(), 14);
+        assert_eq!(SUPPORTED_CLIS.len(), 16);
         // The claude-compatible providers (run the `claude` binary via env) must
         // be present, else their `*-yes` bins fail validation in the Rust runtime.
-        for cli in ["glm", "pi"] {
+        for cli in ["glm", "openrouter", "pi"] {
             assert!(SUPPORTED_CLIS.contains(&cli), "missing {cli}");
         }
         // Each listed CLI must resolve to a real config (catches a name in this
@@ -794,6 +737,7 @@ mod tests {
             queue: false,
             use_skills: false,
             yes: false,
+            cwd: None,
             force_tty: false,
             no_tty: false,
             swarm: None,
@@ -823,9 +767,9 @@ mod tests {
     #[test]
     fn test_resolve_args_explicit_cli() {
         let mut args = default_args();
-        args.cli = "codex".into();
+        args.cli = "gemini".into();
         let result = resolve_args(args, "agent-yes").unwrap();
-        assert_eq!(result.cli, "codex");
+        assert_eq!(result.cli, "gemini");
     }
 
     #[test]
@@ -840,8 +784,8 @@ mod tests {
 
     #[test]
     fn test_resolve_args_binary_name_cli() {
-        let result = resolve_args(default_args(), "codex-yes").unwrap();
-        assert_eq!(result.cli, "codex");
+        let result = resolve_args(default_args(), "gemini-yes").unwrap();
+        assert_eq!(result.cli, "gemini");
     }
 
     #[test]
@@ -941,16 +885,17 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_args_cwd_is_forwarded_to_the_cli() {
-        // `--cwd` is not an agent-yes flag: it rides along to the target CLI like
-        // any other unknown option, so agent-yes never has a cwd but its own.
+    fn test_resolve_args_cwd_default_none() {
+        let result = resolve_args(default_args(), "agent-yes").unwrap();
+        assert!(result.cwd.is_none());
+    }
+
+    #[test]
+    fn test_resolve_args_cwd_explicit() {
         let mut args = default_args();
-        args.args = vec!["--cwd".into(), "/tmp".into()];
+        args.cwd = Some("/tmp".into());
         let result = resolve_args(args, "agent-yes").unwrap();
-        assert_eq!(
-            result.cli_args,
-            vec!["--cwd".to_string(), "/tmp".to_string()]
-        );
+        assert_eq!(result.cwd, Some("/tmp".into()));
     }
 
     #[test]

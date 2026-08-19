@@ -383,6 +383,6 @@ Core **does** own the verb taxonomy, the route→action map, the `Authorizer` se
 - `ts/serve.ts` — `apiFetch`, `checkAuth`, `loadOrCreateToken` (today's token).
 - `ts/share.ts`, `lab/ui/e2e.js`, `lab/ui/cf/worker.ts` — the E2E + signaling the
   fragment-borne capability must not regress.
-- `lab/ui/lab/posts/2026-06-15-e2ee-share-links.html` — how the current E2E secret works.
+- `lab/ui/blog/e2ee-share-links/index.html` — how the current E2E secret works.
 - [`docs/provisioning.md`](./provisioning.md) — spawn/cwd resolution that
   `agent:spawn` scoping must cooperate with.

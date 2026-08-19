@@ -1,15 +1,4 @@
-import {
-  appendFile,
-  mkdir,
-  open,
-  readdir,
-  readFile,
-  rename,
-  rm,
-  stat,
-  unlink,
-  writeFile,
-} from "fs/promises";
+import { appendFile, mkdir, open, readdir, readFile, stat, unlink, writeFile } from "fs/promises";
 import { existsSync, renameSync, watch, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -58,7 +47,6 @@ import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
 import { CLAUDE_SESSION_PIN_ENV } from "./sessionEnv.ts";
 import { MAX_CALLBACK_MSG_BYTES, frameVisitorMessage, verifyCapability } from "./callbackCore.ts";
 import { isTerminalReply } from "./terminalReply.ts";
-import { withIpcLock } from "./ipcLock.ts";
 import { removeControlCharacters } from "./removeControlCharacters.ts";
 import { parseStatusText } from "./statusText.ts";
 import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
@@ -465,21 +453,12 @@ function loginShellEnv(): Record<string, string> | null {
   loginShellEnvCache = null;
   if (process.platform === "win32") return loginShellEnvCache;
   try {
-    // $SHELL when the daemon has one; a launchd/systemd env usually doesn't,
-    // so fall back through the common defaults (zsh first — the macOS default).
-    const shell =
-      [process.env.SHELL, "/bin/zsh", "/bin/bash", "/bin/sh"].find((s): s is string =>
-        Boolean(s && existsSync(s)),
-      ) ?? "/bin/sh";
+    const shell = process.env.SHELL || "/bin/sh";
     // Delimiters fence off the env dump from any banner/prompt noise the rc files
     // print to stdout; `env -0` is NUL-separated so values with newlines survive.
-    // `-i` (interactive) on top of `-l`: PATH exports are commonly scattered
-    // across .zshenv/.zprofile/.zshrc, and a plain login shell never reads
-    // .zshrc — silently dropping those entries. The timeout guards against an
-    // rc file that blocks under -i.
     const delim = "_AY_SHELL_ENV_DELIM_";
     const res = Bun.spawnSync(
-      [shell, "-lic", `printf %s "${delim}"; env -0; printf %s "${delim}"`],
+      [shell, "-lc", `printf %s "${delim}"; env -0; printf %s "${delim}"`],
       {
         stdin: "ignore",
         stderr: "ignore",
@@ -500,15 +479,7 @@ function loginShellEnv(): Record<string, string> | null {
       env[pair.slice(0, eq)] = pair.slice(eq + 1);
     }
     // Require a usable result — a PATH carrying ~/.bun/bin is the whole point.
-    if (env.PATH) {
-      // Order-preserving dedup: rc files re-prepend the same dirs on every
-      // nesting level (.zshenv/.zprofile/.zshrc each adding ~/.bun/bin again).
-      const seen = new Set<string>();
-      env.PATH = env.PATH.split(":")
-        .filter((p) => p && !seen.has(p) && (seen.add(p), true))
-        .join(":");
-      loginShellEnvCache = env;
-    }
+    if (env.PATH) loginShellEnvCache = env;
   } catch {
     // best-effort; fall back to process.env
   }
@@ -593,38 +564,6 @@ async function runCapture(
   } catch (e) {
     return { ok: false, stdout: "", stderr: (e as Error).message };
   }
-}
-
-// A non-GitHub git source (gitlab, self-hosted, …) for /api/spawn's raw-clone
-// path. github.com inputs return null — those go through the provision module
-// (gh auth, setup-repo.sh). Accepts scp-style git@host:path, ssh://, git://,
-// http(s):// — bare owner/repo is github-first and never lands here.
-export function parseGitUrl(s: string): { url: string; owner: string; repo: string } | null {
-  let host = "";
-  let pathPart = "";
-  const scp = /^git@([^:/\s]+):([^\s]+?)(?:\.git)?\/?$/.exec(s);
-  if (scp) {
-    host = scp[1]!;
-    pathPart = scp[2]!;
-  } else {
-    let u: URL;
-    try {
-      u = new URL(s);
-    } catch {
-      return null;
-    }
-    if (!/^(https?|ssh|git)$/.test(u.protocol.replace(":", ""))) return null;
-    host = u.hostname;
-    pathPart = u.pathname.replace(/^\/+|\/+$/g, "").replace(/\.git$/, "");
-  }
-  if (/(^|\.)github\.com$/i.test(host)) return null;
-  const segs = pathPart.split("/").filter(Boolean);
-  if (segs.length < 2) return null;
-  const owner = segs[segs.length - 2]!;
-  const repo = segs[segs.length - 1]!.replace(/\.git$/, "");
-  if (!owner || !repo || owner === "." || owner === ".." || repo === "." || repo === "..")
-    return null;
-  return { url: s.replace(/\/+$/, ""), owner, repo };
 }
 
 // 60s memo for /api/ws/repos' gh side (see the endpoint for why).
@@ -3186,12 +3125,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       >();
       for (const w of workspaces) {
         const key = `${w.owner}/${w.repo}`;
-        const entry = byRepo.get(key) ?? {
-          owner: w.owner,
-          repo: w.repo,
-          local: true,
-          branches: [],
-        };
+        const entry = byRepo.get(key) ?? { owner: w.owner, repo: w.repo, local: true, branches: [] };
         entry.branches.push({ name: w.branch, path: w.path });
         byRepo.set(key, entry);
       }
@@ -3293,10 +3227,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
           ".[].name",
         ]);
         if (r.ok) {
-          remote = r.stdout
-            .split("\n")
-            .map((s) => s.trim())
-            .filter(Boolean);
+          remote = r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
           source = "gh";
           error = undefined;
         } else if (!error) {
@@ -3753,27 +3684,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
         if (!record.fifo_file)
           return new Response(`pid ${record.pid}: no fifo_file`, { status: 409 });
         const trailing = controlCodeFromName(code.toLowerCase());
-        const fifo = record.fifo_file;
-        // One transaction: the body and its Enter must reach the agent with
-        // nothing spliced between them. The ~200ms settle gap below is a wide
-        // window for another writer (a second viewer, an `ay send`) to land
-        // bytes mid-message — see ts/ipcLock.ts.
-        await withIpcLock(
-          record.pid,
-          async () => {
-            if (msg && trailing) {
-              await writeToIpc(fifo, msg);
-              await new Promise((r) => setTimeout(r, 200));
-              await writeToIpc(fifo, trailing);
-            } else {
-              await writeToIpc(fifo, msg + trailing);
-            }
-          },
-          (why) =>
-            process.stderr.write(
-              `warning: /api/send writing pid ${record.pid} without the input lock (${why})\n`,
-            ),
-        );
+        if (msg && trailing) {
+          await writeToIpc(record.fifo_file, msg);
+          await new Promise((r) => setTimeout(r, 200));
+          await writeToIpc(record.fifo_file, trailing);
+        } else {
+          await writeToIpc(record.fifo_file, msg + trailing);
+        }
         // Record this write for the stdin flash / sort. A payload that is purely a
         // terminal auto-reply (xterm answering the TUI's cursor/DA query, forwarded
         // over this same wire) is protocol noise, not input — stamp anyDaemonWriteAt
@@ -4107,7 +4024,6 @@ export async function cmdServe(rest: string[]): Promise<number> {
         prompt?: string;
         yes?: boolean;
         create?: boolean;
-        branch?: string; // raw-clone path only (github specs embed the branch in `from`)
         fork?: { fromCwd?: string; branch?: string };
       };
       try {
@@ -4245,105 +4161,6 @@ export async function cmdServe(rest: string[]): Promise<number> {
           );
         cwd = result.folder;
         provisioned = { action: result.action, folder: result.folder };
-      } else if (from && parseGitUrl(from)) {
-        // Non-GitHub git URL (gitlab, self-hosted, …): raw `git clone` into the
-        // standard layout <wsRoot>/<owner>/<repo>/tree/<branch> — no provision
-        // module, no setup-repo.sh. Same admission gates as the github path:
-        // provision hook first (it may select credentials), else the allowlist.
-        const gitSrc = parseGitUrl(from)!;
-        const branch = typeof body.branch === "string" ? body.branch.trim() : "";
-        // the branch lands in a filesystem path (tree/<branch>) — no empty/./..
-        // segments, no option-looking names
-        const badBranch = (b: string) =>
-          b.startsWith("-") || b.split("/").some((s) => !s || s === "." || s === "..");
-        if (branch && badBranch(branch))
-          return new Response(`invalid branch name: ${branch}`, { status: 400 });
-        const gitHook = await runProvisionHook(getProvisionRoot() ?? homedir(), {
-          KOHO_ACTION: "from",
-          KOHO_SOURCE: from,
-          KOHO_OWNER: gitSrc.owner,
-          KOHO_REPO: gitSrc.repo,
-          KOHO_BRANCH: branch,
-          KOHO_WS_ROOT: getProvisionRoot() ?? "",
-        });
-        if (gitHook.ran) {
-          if (!gitHook.ok)
-            return new Response(
-              `provision hook denied '${gitSrc.owner}/${gitSrc.repo}' (exit ${gitHook.code})` +
-                (gitHook.detail ? `:\n${gitHook.detail}` : ""),
-              { status: 403 },
-            );
-        } else if (!isProvisionAllowed(gitSrc.owner, gitSrc.repo)) {
-          return new Response(
-            `provisioning '${gitSrc.owner}/${gitSrc.repo}' is not allowed — add the owner to ` +
-              `provisionAllowlist in ~/.agent-yes/config.json (or "*" to allow all), ` +
-              `or set a provisionHook to gate it yourself`,
-            { status: 403 },
-          );
-        }
-        const wsRootDir = getProvisionRoot() ?? path.join(homedir(), "ws");
-        const base = path.join(wsRootDir, gitSrc.owner, gitSrc.repo, "tree");
-        const destFor = (b: string) => path.join(base, b);
-        if (branch && existsSync(path.join(destFor(branch), ".git"))) {
-          // already provisioned — reuse; a fetch/pull is the agent's business
-          cwd = destFor(branch);
-          provisioned = { action: "existing", folder: cwd };
-        } else {
-          const tmp = path.join(base, `.clone-${process.pid}-${Date.now().toString(36)}`);
-          try {
-            await mkdir(base, { recursive: true });
-          } catch (e) {
-            return new Response(`cannot create ${base}: ${(e as Error).message}`, { status: 500 });
-          }
-          const cloneMs = 300_000;
-          let created = false;
-          let r = await runCapture(
-            branch
-              ? ["git", "clone", "--branch", branch, "--", gitSrc.url, tmp]
-              : ["git", "clone", "--", gitSrc.url, tmp],
-            { timeoutMs: cloneMs },
-          );
-          if (!r.ok && branch && body.create === true) {
-            // branch may not exist yet — clone the default and branch off it
-            await rm(tmp, { recursive: true, force: true }).catch(() => {});
-            r = await runCapture(["git", "clone", "--", gitSrc.url, tmp], { timeoutMs: cloneMs });
-            if (r.ok) {
-              const co = await runCapture(["git", "-C", tmp, "checkout", "-b", branch]);
-              if (!co.ok) r = co;
-              else created = true;
-            }
-          }
-          if (!r.ok) {
-            await rm(tmp, { recursive: true, force: true }).catch(() => {});
-            return new Response(
-              `git clone failed: ${(r.stderr.trim() || "unknown").slice(0, 500)}` +
-                (branch && body.create !== true
-                  ? "\n(if the branch doesn't exist yet, retry with create:true)"
-                  : ""),
-              { status: 502 },
-            );
-          }
-          const head = await runCapture(["git", "-C", tmp, "rev-parse", "--abbrev-ref", "HEAD"]);
-          let actual = branch || (head.ok ? head.stdout.trim() : "") || "main";
-          if (badBranch(actual)) actual = "main";
-          const dest = destFor(actual);
-          if (existsSync(dest)) {
-            // raced/already there — keep the existing checkout, drop ours
-            await rm(tmp, { recursive: true, force: true }).catch(() => {});
-          } else {
-            try {
-              await mkdir(path.dirname(dest), { recursive: true });
-              await rename(tmp, dest);
-            } catch (e) {
-              await rm(tmp, { recursive: true, force: true }).catch(() => {});
-              return new Response(`cannot place checkout at ${dest}: ${(e as Error).message}`, {
-                status: 500,
-              });
-            }
-          }
-          cwd = dest;
-          provisioned = { action: created ? "cloned+new-branch" : "cloned", folder: dest };
-        }
       } else if (from) {
         type Spec = { owner: string; repo: string; branch: string };
         let prov: {
@@ -4352,23 +4169,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
           provision: (
             spec: Spec,
             opts?: { wsRoot?: string },
-          ) => Promise<{
-            ok: boolean;
-            folder: string;
-            action: string;
-            error?: string;
-            reason?: string;
-          }>;
+          ) => Promise<{ ok: boolean; folder: string; action: string; error?: string; reason?: string }>;
           createBranch?: (
             spec: Spec,
             opts?: { wsRoot?: string },
-          ) => Promise<{
-            ok: boolean;
-            folder: string;
-            action: string;
-            error?: string;
-            reason?: string;
-          }>;
+          ) => Promise<{ ok: boolean; folder: string; action: string; error?: string; reason?: string }>;
         };
         try {
           prov = (await importProvisionModule()) as typeof prov;
@@ -4419,13 +4224,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
             { status: 403 },
           );
         }
-        let result: {
-          ok: boolean;
-          folder: string;
-          action: string;
-          error?: string;
-          reason?: string;
-        };
+        let result: { ok: boolean; folder: string; action: string; error?: string; reason?: string };
         try {
           const wsRoot = getProvisionRoot();
           result = await prov.provision(spec, wsRoot ? { wsRoot } : undefined);
@@ -4802,19 +4601,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
       if (record.agent_id !== v.payload.agent || !record.fifo_file)
         return cbJson(409, { error: "agent unavailable" });
       const framed = frameVisitorMessage(v.payload.id, msg);
-      const cbFifo = record.fifo_file;
-      await withIpcLock(
-        record.pid,
-        async () => {
-          await writeToIpc(cbFifo, framed);
-          await new Promise((r) => setTimeout(r, 200));
-          await writeToIpc(cbFifo, controlCodeFromName("enter"));
-        },
-        (why) =>
-          process.stderr.write(
-            `warning: callback writing pid ${record.pid} without the input lock (${why})\n`,
-          ),
-      );
+      await writeToIpc(record.fifo_file, framed);
+      await new Promise((r) => setTimeout(r, 200));
+      await writeToIpc(record.fifo_file, controlCodeFromName("enter"));
       await noteStdinWrite(record.pid, record.fifo_file, true);
       await recordInbox({
         at: Date.now(),

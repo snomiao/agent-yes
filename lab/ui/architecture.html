@@ -562,7 +562,7 @@
         <nav>
           <a href="/">Home</a>
           <a href="/w/">Console</a>
-          <a href="https://lab.agent-yes.com/">Lab</a>
+          <a href="/blog/e2ee-share-links/">Blog</a>
           <a href="https://github.com/snomiao/agent-yes">GitHub</a>
         </nav>
       </header>
@@ -881,7 +881,7 @@
         <div>
           A living map of <a href="https://github.com/snomiao/agent-yes">agent-yes</a>. Open it
           locally (<code>open lab/ui/architecture.html</code>) or browse the
-          <a href="https://lab.agent-yes.com/2026-06-15-e2ee-share-links">E2E write-up</a> ·
+          <a href="/blog/e2ee-share-links/">E2E write-up</a> ·
           <a href="https://github.com/snomiao/agent-yes/blob/main/docs/auth-and-permissions.md"
             >auth design</a
           >
@@ -966,7 +966,7 @@
           status: "done",
           plane: "Trust & discovery",
           desc: "Confidentiality even against a fully compromised relay. The URL secret S splits via HKDF into an authToken (the only value the server sees, for room matching) and per-connection AES-256-GCM keys the server never sees. Mandatory bidirectional key-confirmation handshake; fail-closed on any mismatch/replay.",
-          files: ["lab/ui/e2e.js", "lab/ui/lab/posts/2026-06-15-e2ee-share-links.html"],
+          files: ["lab/ui/e2e.js", "lab/ui/blog/e2ee-share-links/index.html"],
         },
         {
           id: "signaling",
@@ -1106,12 +1106,12 @@
         {
           id: "clis",
           t: "AI CLIs",
-          s: "claude · codex · …",
+          s: "claude · codex · gemini · …",
           x: 68,
           y: 87,
           status: "done",
           plane: "Agent core",
-          desc: "The wrapped tools: Claude, Codex, Copilot, Cursor, Qwen, Grok, Auggie. Each has a config of ready/enter/fatal patterns and binary mapping; one wrapper, one console, many agents.",
+          desc: "The wrapped tools: Claude, Codex, Gemini, Copilot, Cursor, Qwen, Grok, Auggie. Each has a config of ready/enter/fatal patterns and binary mapping; one wrapper, one console, many agents.",
           files: ["ts/SUPPORTED_CLIS.ts", "agent-yes.config.ts"],
         },
         {

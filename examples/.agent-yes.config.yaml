@@ -34,6 +34,15 @@ clis:
       - "> 1\\. Yes,"
       - "> 1\\. Approve and run now"
 
+  # Gemini configuration
+  gemini:
+    ready:
+      - "Type your message"
+    enter:
+      - "│ ● 1\\. Yes, allow once"
+    restoreArgs:
+      - --resume
+
   # Custom CLI example
   # my-custom-cli:
   #   binary: my-cli-binary

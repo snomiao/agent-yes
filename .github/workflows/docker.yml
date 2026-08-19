@@ -56,7 +56,7 @@ jobs:
         with:
           images: |
             ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}
-            ${{ secrets.DOCKERHUB_USERNAME != '' && format('{0}/{1}/agent-yes', env.REGISTRY_DOCKER, secrets.DOCKERHUB_USERNAME) || '' }}
+            ${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/agent-yes
           tags: |
             type=ref,event=branch
             type=ref,event=pr
@@ -136,7 +136,7 @@ jobs:
         with:
           images: |
             ${{ env.REGISTRY_GHCR }}/${{ env.IMAGE_NAME }}
-            ${{ secrets.DOCKERHUB_USERNAME != '' && format('{0}/{1}/agent-yes', env.REGISTRY_DOCKER, secrets.DOCKERHUB_USERNAME) || '' }}
+            ${{ env.REGISTRY_DOCKER }}/${{ secrets.DOCKERHUB_USERNAME }}/agent-yes
           tags: |
             type=ref,event=branch,suffix=-mini
             type=ref,event=pr,suffix=-mini

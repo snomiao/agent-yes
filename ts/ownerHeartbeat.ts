@@ -138,12 +138,6 @@ export function startInlineHeartbeat(opts: OwnerHeartbeatOptions): OwnerHeartbea
   };
 }
 
-/** Upper bound on how long stop() waits for the worker thread to go away. Far
- *  longer than a terminate needs; short enough that shutdown never looks wedged.
- *  Overshooting only leaks an already-unref'd thread that cannot hold the
- *  process open. */
-const STOP_TIMEOUT_MS = 2_000;
-
 export function startOwnerHeartbeat(opts: OwnerHeartbeatOptions): OwnerHeartbeat {
   try {
     const worker = new Worker(WORKER_SRC, {
@@ -160,43 +154,10 @@ export function startOwnerHeartbeat(opts: OwnerHeartbeatOptions): OwnerHeartbeat
     // relying on the main loop's own token check.
     worker.on("error", () => {});
     if (typeof worker.unref === "function") worker.unref();
-
-    // The worker EXITS ON ITS OWN whenever fencing fails: losing the token
-    // clears its interval, which drains its event loop. That is the normal,
-    // expected end for a superseded beat — so by the time anyone calls stop(),
-    // the thread is very often already gone, and `terminate()` on an
-    // already-exited worker does not reliably settle (it hangs under bun).
-    // Track the exit and race it, with a bounded fallback, so stop() ALWAYS
-    // resolves: it is awaited on the daemon's shutdown path, where hanging would
-    // wedge the process instead of merely leaking a thread.
-    let exited = false;
-    const exitedPromise = new Promise<void>((resolve) => {
-      worker.once("exit", () => {
-        exited = true;
-        resolve();
-      });
-    });
     return {
       isolated: true,
       stop: async () => {
-        if (exited) return;
-        let timer: ReturnType<typeof setTimeout> | undefined;
-        const timeout = new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, STOP_TIMEOUT_MS);
-          if (typeof timer.unref === "function") timer.unref();
-        });
-        try {
-          await Promise.race([
-            worker.terminate().then(
-              () => {},
-              () => {},
-            ),
-            exitedPromise,
-            timeout,
-          ]);
-        } finally {
-          if (timer) clearTimeout(timer);
-        }
+        await worker.terminate().catch(() => {});
       },
     };
   } catch {

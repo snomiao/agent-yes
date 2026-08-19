@@ -335,8 +335,7 @@ fn path_with_dir_prepended(current: &std::ffi::OsStr, dir: &Path) -> Option<std:
 /// WM_SETTINGCHANGE so newly-launched processes pick it up. We deliberately
 /// avoid `setx` — it truncates PATH at 1024 chars and can clobber a long one.
 ///
-/// Unix: append a guarded `export PATH=…` line to the user's shell startup
-/// file — the one read by non-interactive shells too (see `path_rc_for_shell`).
+/// Unix: append a guarded `export PATH=…` line to the user's shell rc.
 fn persist_dir_on_path(dir: &Path) -> bool {
     #[cfg(windows)]
     {
@@ -364,35 +363,16 @@ fn persist_dir_on_path(dir: &Path) -> bool {
         let Some(home) = home_dir() else {
             return false;
         };
+        // Pick the rc for the user's shell; fall back to ~/.profile.
         let shell = std::env::var("SHELL").unwrap_or_default();
-        append_path_line_to_rc(&path_rc_for_shell(&home, &shell), dir)
-    }
-}
-
-/// Pick the startup file to write the PATH line to, for `shell`.
-///
-/// The choice is driven by NON-interactive shells, not interactive ones:
-/// agent-yes exists to be invoked by agents, schedulers, and `ssh <host>
-/// <cmd>`, none of which get an interactive shell. An rc that only interactive
-/// shells read leaves `ay` "command not found" in exactly the contexts that
-/// matter most.
-///
-///   - zsh:  `~/.zshrc` is interactive-only. `~/.zshenv` is read by EVERY zsh
-///           (interactive, non-interactive, scripts), so the line goes there —
-///           which also covers the interactive case, making `.zshrc` redundant.
-///   - bash: `~/.bashrc` is nominally interactive-only, but bash additionally
-///           sources it when its parent is sshd, which covers `ssh <host>
-///           <cmd>`. Bash has no `.zshenv` equivalent (`$BASH_ENV` is normally
-///           unset), so `.bashrc` stays the best available target.
-///   - else: `~/.profile`, the portable fallback.
-#[cfg(not(windows))]
-fn path_rc_for_shell(home: &Path, shell: &str) -> std::path::PathBuf {
-    if shell.ends_with("zsh") {
-        home.join(".zshenv")
-    } else if shell.ends_with("bash") {
-        home.join(".bashrc")
-    } else {
-        home.join(".profile")
+        let rc = if shell.ends_with("zsh") {
+            home.join(".zshrc")
+        } else if shell.ends_with("bash") {
+            home.join(".bashrc")
+        } else {
+            home.join(".profile")
+        };
+        append_path_line_to_rc(&rc, dir)
     }
 }
 
@@ -670,31 +650,5 @@ mod tests {
         assert_eq!(c2.matches("/opt/agent/bin").count(), 1);
 
         let _ = std::fs::remove_file(&rc);
-    }
-
-    #[cfg(not(windows))]
-    #[test]
-    fn test_path_rc_targets_non_interactive_startup_file() {
-        let home = Path::new("/home/u");
-
-        // zsh reads ~/.zshrc for interactive shells ONLY — a PATH line there is
-        // invisible to `ssh host cmd`, cron, and agent-spawned shells, which is
-        // precisely how ay gets invoked. It must land in ~/.zshenv.
-        assert_eq!(path_rc_for_shell(home, "/bin/zsh"), home.join(".zshenv"));
-        assert_eq!(
-            path_rc_for_shell(home, "/opt/homebrew/bin/zsh"),
-            home.join(".zshenv")
-        );
-
-        // bash sources ~/.bashrc when sshd is the parent, so it does cover
-        // `ssh host cmd`; there is no .zshenv equivalent to prefer.
-        assert_eq!(path_rc_for_shell(home, "/bin/bash"), home.join(".bashrc"));
-
-        // Unknown/empty shell falls back to the portable ~/.profile.
-        assert_eq!(
-            path_rc_for_shell(home, "/usr/bin/fish"),
-            home.join(".profile")
-        );
-        assert_eq!(path_rc_for_shell(home, ""), home.join(".profile"));
     }
 }

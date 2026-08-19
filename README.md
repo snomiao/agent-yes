@@ -1,4 +1,4 @@
-# Agent-Yes! for Claude/Codex/Cursor/Copilot/Qwen/Auggie
+# Agent-Yes! for Claude/Codex/Gemini/Cursor/Copilot/Qwen/Auggie
 
 A wrapper tool that automates interactions with various AI CLI tools by automatically handling common prompts and responses. Originally designed for Claude CLI, now supports multiple AI coding assistants. Rewritten in Rust for improved performance and reliability.
 
@@ -26,15 +26,11 @@ bun add -g agent-yes      # or: npm install -g agent-yes
 
 Then: `ay claude` (run an agent with auto-yes) · `ay serve --share` (web console + shareable link) · live console at https://agent-yes.com
 
-`ay` on its own prints the command list — `ay` **is** agent-yes, the fleet manager, so
-starting an agent names a CLI (`ay claude`, `ay codex`, …). `cy` remains the one-word
-shortcut that launches claude with no arguments.
-
 For the local web console, install [Portless](https://portless.sh/) once with `npm install -g portless`, then run `ay serve`. It assigns a free internal port and serves the console at `https://agent-yes.localhost/`. `ay serve --port N` remains available for a fixed-port API listener.
 
 ## Features
 
-- **Multi-CLI Support**: Works with Claude, Codex, Copilot, and Cursor CLI tools
+- **Multi-CLI Support**: Works with Claude, Gemini, Codex, Copilot, and Cursor CLI tools
 - **Auto-Response**: Automatically responds to common prompts like "Yes, proceed" and "Yes"
 - **Continuous Operation**: Keeps the AI assistant running until your task is done, waiting for your next prompt
 - **Interactive Control**: You can still queue more prompts or cancel executing tasks with `ESC` or `Ctrl+C`
@@ -54,6 +50,13 @@ npm install -g @anthropic-ai/claude-code
 ```
 
 Learn more: https://www.anthropic.com/claude-code
+
+### Gemini
+
+```bash
+# Install Gemini CLI (if available)
+# Check Google's documentation for installation instructions
+```
 
 ### Codex
 
@@ -130,6 +133,9 @@ copilot-yes -- generate unit tests
 # Use Cursor directly
 cursor-yes -- optimize performance
 
+# Use Gemini directly
+gemini-yes -- debug this code
+
 # Use Auggie directly
 auggie-yes -- analyze code patterns
 
@@ -137,6 +143,13 @@ auggie-yes -- analyze code patterns
 # Anthropic-compatible endpoint. Set ZAI_API_KEY first
 # (https://z.ai/manage-apikey/apikey-list).
 ZAI_API_KEY=... glm-yes -- help me with this code
+
+# Use OpenRouter directly — runs Claude Code against OpenRouter's
+# Anthropic-compatible endpoint. Set OPENROUTER_API_KEY first
+# (https://openrouter.ai/keys). `orcy` is the short alias
+# (openrouter-claude-yes) and defaults to the z-ai/glm-5.2 model
+# (override via ANTHROPIC_DEFAULT_*_MODEL or ~/.claude/settings.json).
+OPENROUTER_API_KEY=... orcy -- help me with this code
 
 # Use Pi directly — minimal multi-provider coding agent
 # (https://github.com/earendil-works/pi)
@@ -178,7 +191,7 @@ cy stop <keyword>                      # graceful shutdown (claude/codex: /exit)
 
 - A **single** `--code=ctrl-c` does not stop `claude` / `codex` — they treat it
   as "cancel current turn" rather than "quit". Prefer `cy stop <keyword>` (which
-  sends `/exit` for claude/codex), or send Ctrl+C twice
+  sends `/exit` for claude/codex and `/quit` for gemini), or send Ctrl+C twice
   in quick succession. The `cy send … --code=ctrl-c` output prints a one-line
   hint pointing at this when it detects one of those CLIs.
 
@@ -186,79 +199,6 @@ cy stop <keyword>                      # graceful shutdown (claude/codex: /exit)
 `~/.agent-yes/pids.jsonl` and a per-pid FIFO at `~/.agent-yes/fifo/<pid>.stdin`,
 so subcommands work whether the target agent is the TS or Rust runtime.
 Detailed reference (Japanese): [`docs/cy-subcommands.md`](./docs/cy-subcommands.md).
-
-### Shared task list across agents (`ay todo`)
-
-A lifecycle-tracked task list that every agent working on a repo reads and
-writes. The store is one append-only file at `<repo>/.agent-yes/todos.jsonl`,
-resolved from the repo's **common root** — so agents running in different git
-worktrees of the same repo share one list rather than each keeping a private
-one. Pass `--root <dir>` (or set `AGENT_YES_TODO_ROOT`) to point somewhere else.
-
-```bash
-ay todo                                 # help: every verb, with descriptions
-ay todo new fix the flaky test --kind code   # owner defaults to the calling agent
-ay todo ls                              # OWNER column marks dead agents: lane-3(exited)
-ay todo ls --owner me                   # just my tasks
-ay todo claim T4                        # take it over (refuses to steal from a live agent)
-ay todo claim T4 --force                # take it anyway
-ay todo block T4 --type waiting-on-agent --agent lane-2
-ay todo dep add T5 T4                   # T5 waits for T4 (cycles rejected)
-ay todo digest                          # per-tag board + "unblocked, resume these"
-ay todo reconcile                       # orphan tasks whose owner agent exited, clear stale blocks
-```
-
-Ownership is cross-referenced against the same agent registry `ay ls` reads, so
-"who owns this and are they still alive?" is answerable in one command:
-`--owner me` resolves to the calling agent's registry id, `ls` annotates each
-owner with that agent's live status, and `reconcile` orphans tasks whose owner
-exited (listing idle agents as reassignment candidates). Use `--owner none` to
-create a task nobody owns, and `--format json` for machine-readable output —
-JSON keeps `owner` verbatim and reports liveness in a separate `ownerLiveness`
-field, so filters that match on `owner` keep working.
-
-Tasks move through a lifecycle per `--kind`, and gated transitions require
-**independent verification**: whoever did the work cannot approve it. See
-`ts/todoStore.ts` for the gate model.
-
-### Ask another agent a question (`ay ask`)
-
-`ay send` delivers a question but leaves no trace of it: if the asker moves on
-and the other agent dies, wedges, or simply never replies, nothing records that
-an answer is owed. `ay ask` delivers the same way — returning immediately — and
-also writes a task carrying **both** parties, so an unanswered question is
-self-describing.
-
-```bash
-ay ask lane-b "does the cache need invalidating before deploy?"
-#   asked lane-b → T4
-#     monitor the answer:   ay todo get T4 --root "/path/to/repo"
-#     monitor the answerer: ay status lane-b
-
-ay answer T4 --root "/path/to/repo" "yes — bump CACHE_VERSION first"
-```
-
-The task stores the asker as its `owner` and the answering agent as a
-`waiting-on-answer` block, so `ay todo ls` shows both, each with that agent's
-live status:
-
-```
-ID  STATE     KIND      OWNER           WAITING-ON      SUMMARY
-T4  pending   question  lane-a(active)  lane-b(exited)  does the cache need inv…
-```
-
-That is the failure mode a bare send cannot report: **whoever died holding the
-question is visible in one command.** `ay todo reconcile` says the same thing in
-words (`T4: lane-b exited without answering`) and orphans the task if the
-_asker_ is the one that died — without ever closing the question itself, since
-the answer is still owed.
-
-Answering is gated on independent verification, which the store enforces: the
-validator must differ from the task's owner, so an asker can never quietly mark
-its own question answered. Targets are agents on this machine (same registry
-`ay ls` reads). `ay ask` respects `ay send`'s recency guard — pass `--force` to
-skip it; `ay answer` replies without it, since its recipient comes off the task
-record rather than from a typed keyword.
 
 ### Docker Usage
 
@@ -285,7 +225,7 @@ docker run --rm -v $(pwd):/workspace -w /workspace \
 # Run with other AI tools
 docker run --rm -v $(pwd):/workspace -w /workspace \
   ghcr.io/snomiao/agent-yes:latest \
-  --cli=codex -- debug this code
+  --cli=gemini -- debug this code
 ```
 
 **Persisting credentials:**
@@ -364,16 +304,16 @@ For deploying to cloud platforms like Google Cloud Run, AWS, Azure, see [Cloud D
 
 ### Supported CLI Tools
 
-| Tool             | CLI Name     | Description                        | Installation/Update                                 |
-| ---------------- | ------------ | ---------------------------------- | --------------------------------------------------- |
-| Claude           | `claude`     | Anthropic's Claude Code (default)  | `npm install -g @anthropic-ai/claude-code@latest`   |
-| Codex            | `codex`      | OpenAI's Codex CLI                 | `npm install -g @openai/codex-cli@latest`           |
-| Copilot          | `copilot`    | GitHub Copilot CLI                 | `npm install -g @github/copilot@latest`             |
-| Cursor           | `cursor`     | Cursor agent CLI                   | See https://cursor.com/ja/docs/cli/installation     |
-| Grok             | `grok`       | Vibe Kit's Grok CLI                | `npm install -g @vibe-kit/grok-cli@latest`          |
-| Qwen             | `qwen`       | Alibaba's Qwen Code CLI            | `npm install -g @qwen-code/qwen-code@latest`        |
-| Auggie           | `auggie`     | Augment Code's Auggie CLI          | `npm install -g @augmentcode-inc/auggie-cli@latest` |
-| DeepSeek Harness | `dsh-legacy` | DeepSeek Harness (interactive TUI) | `npm install -g @deepseek-ai/dsh@latest`            |
+| Tool    | CLI Name  | Description                       | Installation/Update                                 |
+| ------- | --------- | --------------------------------- | --------------------------------------------------- |
+| Claude  | `claude`  | Anthropic's Claude Code (default) | `npm install -g @anthropic-ai/claude-code@latest`   |
+| Gemini  | `gemini`  | Google's Gemini CLI               | `npm install -g @google/gemini-cli@latest`          |
+| Codex   | `codex`   | OpenAI's Codex CLI                | `npm install -g @openai/codex-cli@latest`           |
+| Copilot | `copilot` | GitHub Copilot CLI                | `npm install -g @github/copilot@latest`             |
+| Cursor  | `cursor`  | Cursor agent CLI                  | See https://cursor.com/ja/docs/cli/installation     |
+| Grok    | `grok`    | Vibe Kit's Grok CLI               | `npm install -g @vibe-kit/grok-cli@latest`          |
+| Qwen    | `qwen`    | Alibaba's Qwen Code CLI           | `npm install -g @qwen-code/qwen-code@latest`        |
+| Auggie  | `auggie`  | Augment Code's Auggie CLI         | `npm install -g @augmentcode-inc/auggie-cli@latest` |
 
 The tool will:
 
@@ -402,6 +342,23 @@ The tool will:
 - Terminal-based interface may not suit all developers
 - Closed ecosystem with limited community plugins
 - Requires API subscription for full features
+
+#### Gemini CLI (Google)
+
+**Pros:**
+
+- Free tier with generous limits (60 requests/min, 1,000/day)
+- Fully open source (Apache 2.0 license)
+- 1 million token context window
+- MCP integration for extensibility
+- GitHub Actions integration at no cost
+
+**Cons:**
+
+- Currently in preview with potential stability issues
+- Shared quotas between CLI and Code Assist
+- May produce factually incorrect outputs
+- Limited to English language support
 
 #### Codex CLI (OpenAI/Microsoft)
 
@@ -510,16 +467,16 @@ The tool will:
 - **For Solo Developers:** Claude Code (complex tasks) or Grok CLI (cost-conscious)
 - **For Teams:** Codex CLI (cloud collaboration) or Cursor CLI (parallel agents)
 - **For Enterprises:** Claude Code (performance) or Qwen Code (self-hosted)
-- **For Budget-Conscious:** Qwen Code (open source)
+- **For Budget-Conscious:** Gemini CLI (free tier) or Qwen Code (open source)
 - **For GitHub Users:** Copilot CLI (native integration)
 
 <!-- TODO: add usage As lib: call await claudeYes() and it returns render result -->
 
 ## Options
 
-- `--cli=<tool>`: Specify which AI CLI tool to use (claude, codex, copilot, cursor, grok, qwen, auggie). Defaults to `claude`.
+- `--cli=<tool>`: Specify which AI CLI tool to use (claude, gemini, codex, copilot, cursor, grok, qwen, auggie). Defaults to `claude`.
 - `--exit-on-idle=<seconds>`: Automatically exit when the AI tool becomes idle for the specified duration. Useful for automation scripts.
-- `--use-skills`: Automatically discover and prepend SKILL.md headers from the directory hierarchy (walks from current directory up to git root). Multiple SKILL.md files are merged with most specific first. Particularly useful to bring Claude Skills-like context to non-Claude agents such as Codex. Supports nested skills for monorepos.
+- `--use-skills`: Automatically discover and prepend SKILL.md headers from the directory hierarchy (walks from current directory up to git root). Multiple SKILL.md files are merged with most specific first. Particularly useful to bring Claude Skills-like context to non-Claude agents such as Codex or Gemini. Supports nested skills for monorepos.
 
 ## Advanced Features
 
@@ -571,7 +528,7 @@ await claudeYes({
 // Use other tools
 await claudeYes({
   prompt: "debug this function",
-  cli: "codex",
+  cli: "gemini",
   exitOnIdle: 60000,
 });
 

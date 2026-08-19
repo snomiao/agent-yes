@@ -55,10 +55,7 @@ pub fn sanitize_cap(cols: f64, rows: f64) -> Option<Cap> {
     {
         return None;
     }
-    Some(Cap {
-        cols: c as u32,
-        rows: r as u32,
-    })
+    Some(Cap { cols: c as u32, rows: r as u32 })
 }
 
 /// Elementwise min over caps, clamped up to the floor (mirrors negotiateSize).
@@ -85,9 +82,7 @@ fn global_dir() -> PathBuf {
     if let Ok(h) = std::env::var("AGENT_YES_HOME") {
         return PathBuf::from(h);
     }
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".agent-yes")
+    dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".agent-yes")
 }
 
 fn caps_dir(pid: u32) -> PathBuf {
@@ -281,19 +276,12 @@ async fn apply_nego(pid: u32) {
             st.caps_gone_at.remove(&pid);
             // dead band vs the ON-DISK winsize (not our prev write): absorbs
             // jitter and heals foreign writes only when they truly differ
-            let curr = std::fs::read_to_string(winsize_path(pid))
-                .ok()
-                .and_then(|s| {
-                    let mut it = s.split_whitespace();
-                    Some((
-                        it.next()?.parse::<i64>().ok()?,
-                        it.next()?.parse::<i64>().ok()?,
-                    ))
-                });
+            let curr = std::fs::read_to_string(winsize_path(pid)).ok().and_then(|s| {
+                let mut it = s.split_whitespace();
+                Some((it.next()?.parse::<i64>().ok()?, it.next()?.parse::<i64>().ok()?))
+            });
             if let Some((c, r)) = curr {
-                if (c - eff.cols as i64).abs() <= DEAD_BAND
-                    && (r - eff.rows as i64).abs() <= DEAD_BAND
-                {
+                if (c - eff.cols as i64).abs() <= DEAD_BAND && (r - eff.rows as i64).abs() <= DEAD_BAND {
                     // still record that nego owns this pid so the sweep keeps watching
                     st.applied.entry(pid).or_insert(AppliedWrite {
                         content: format!("{} {}", eff.cols, eff.rows),
@@ -307,12 +295,7 @@ async fn apply_nego(pid: u32) {
                 let _ = std::fs::create_dir_all(dir);
             }
             if std::fs::write(&path, &content).is_ok() {
-                st.applied.insert(
-                    pid,
-                    AppliedWrite {
-                        content: content.clone(),
-                    },
-                );
+                st.applied.insert(pid, AppliedWrite { content: content.clone() });
                 sigwinch(pid);
                 eprintln!(
                     "[api/resize] pid={pid} {}x{} src=presence-nego daemon=d{} caps={}",
@@ -344,10 +327,7 @@ async fn apply_nego(pid: u32) {
             // only unlink if the file still holds OUR last write; a different
             // content means `ay attach` / a forced resize owns it now
             let path = winsize_path(pid);
-            if std::fs::read_to_string(&path)
-                .map(|c| c == prev)
-                .unwrap_or(false)
-            {
+            if std::fs::read_to_string(&path).map(|c| c == prev).unwrap_or(false) {
                 let _ = std::fs::remove_file(&path);
                 sigwinch(pid);
                 eprintln!(
@@ -401,9 +381,7 @@ pub async fn presence_post(body: &Value) -> Result<(), (u16, String)> {
             drop(st);
             if let Some(prev) = prev_agent {
                 let v = viewer.clone();
-                tokio::task::spawn_blocking(move || withdraw_cap(prev, &v))
-                    .await
-                    .ok();
+                tokio::task::spawn_blocking(move || withdraw_cap(prev, &v)).await.ok();
                 schedule_nego(prev).await;
             }
         }
@@ -418,16 +396,8 @@ pub async fn presence_post(body: &Value) -> Result<(), (u16, String)> {
                 PresenceEntry {
                     viewer: viewer.clone(),
                     agent: pid.to_string(),
-                    cols: body
-                        .get("cols")
-                        .and_then(|v| v.as_f64())
-                        .map(|v| v.max(0.0) as u32)
-                        .unwrap_or(0),
-                    rows: body
-                        .get("rows")
-                        .and_then(|v| v.as_f64())
-                        .map(|v| v.max(0.0) as u32)
-                        .unwrap_or(0),
+                    cols: body.get("cols").and_then(|v| v.as_f64()).map(|v| v.max(0.0) as u32).unwrap_or(0),
+                    rows: body.get("rows").and_then(|v| v.as_f64()).map(|v| v.max(0.0) as u32).unwrap_or(0),
                     sel: body
                         .get("sel")
                         .and_then(|v| v.as_str())
@@ -439,9 +409,7 @@ pub async fn presence_post(body: &Value) -> Result<(), (u16, String)> {
             drop(st);
             if let Some(prev) = withdraw_prev {
                 let v = viewer.clone();
-                tokio::task::spawn_blocking(move || withdraw_cap(prev, &v))
-                    .await
-                    .ok();
+                tokio::task::spawn_blocking(move || withdraw_cap(prev, &v)).await.ok();
                 schedule_nego(prev).await;
             }
             let v = viewer.clone();
@@ -452,9 +420,7 @@ pub async fn presence_post(body: &Value) -> Result<(), (u16, String)> {
                         .ok();
                 }
                 None => {
-                    tokio::task::spawn_blocking(move || withdraw_cap(pid, &v))
-                        .await
-                        .ok();
+                    tokio::task::spawn_blocking(move || withdraw_cap(pid, &v)).await.ok();
                 }
             }
             schedule_nego(pid).await;
@@ -489,16 +455,8 @@ pub async fn presence_get() -> Value {
 /// POST /api/resize/:pid — cap mode by default, force mode with force:true
 /// (the WebRTC bridge always carries the master token, so force is honored).
 pub async fn resize_post(pid: u32, body: &Value) -> Result<Value, (u16, String)> {
-    let cols = body
-        .get("cols")
-        .and_then(|v| v.as_f64())
-        .map(|v| v.floor().max(1.0))
-        .unwrap_or(0.0);
-    let rows = body
-        .get("rows")
-        .and_then(|v| v.as_f64())
-        .map(|v| v.floor().max(1.0))
-        .unwrap_or(0.0);
+    let cols = body.get("cols").and_then(|v| v.as_f64()).map(|v| v.floor().max(1.0)).unwrap_or(0.0);
+    let rows = body.get("rows").and_then(|v| v.as_f64()).map(|v| v.floor().max(1.0)).unwrap_or(0.0);
     if cols < 1.0 || rows < 1.0 {
         return Err((400, "missing cols/rows".into()));
     }
@@ -517,9 +475,7 @@ pub async fn resize_post(pid: u32, body: &Value) -> Result<Value, (u16, String)>
             rows as u32,
             std::process::id()
         );
-        return Ok(
-            json!({"ok": true, "pid": pid, "cols": cols as u32, "rows": rows as u32, "forced": true}),
-        );
+        return Ok(json!({"ok": true, "pid": pid, "cols": cols as u32, "rows": rows as u32, "forced": true}));
     }
     let Some(cap) = sanitize_cap(cols, rows) else {
         return Err((400, "cols/rows out of range".into()));
@@ -533,9 +489,7 @@ pub async fn resize_post(pid: u32, body: &Value) -> Result<Value, (u16, String)>
         .take(64)
         .collect();
     let v = viewer.clone();
-    tokio::task::spawn_blocking(move || publish_cap(pid, &v, cap, "viewer"))
-        .await
-        .ok();
+    tokio::task::spawn_blocking(move || publish_cap(pid, &v, cap, "viewer")).await.ok();
     schedule_nego(pid).await;
     eprintln!(
         "[api/resize] pid={pid} {}x{} src=api-resize-cap daemon=d{}",
@@ -552,13 +506,7 @@ mod tests {
 
     #[test]
     fn sanitize_bounds() {
-        assert_eq!(
-            sanitize_cap(100.7, 30.9),
-            Some(Cap {
-                cols: 100,
-                rows: 30
-            })
-        );
+        assert_eq!(sanitize_cap(100.7, 30.9), Some(Cap { cols: 100, rows: 30 }));
         assert_eq!(sanitize_cap(19.0, 30.0), None);
         assert_eq!(sanitize_cap(501.0, 30.0), None);
         assert_eq!(sanitize_cap(100.0, 4.0), None);
@@ -568,13 +516,7 @@ mod tests {
 
     #[test]
     fn negotiate_min_and_floor() {
-        let caps = [
-            Cap {
-                cols: 120,
-                rows: 40,
-            },
-            Cap { cols: 90, rows: 50 },
-        ];
+        let caps = [Cap { cols: 120, rows: 40 }, Cap { cols: 90, rows: 50 }];
         assert_eq!(negotiate_size(&caps), Some(Cap { cols: 90, rows: 40 }));
         // floor clamps tiny mins up to 40x10
         let caps = [Cap { cols: 20, rows: 5 }];

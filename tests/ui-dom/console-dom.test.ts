@@ -466,37 +466,19 @@ describe("console DOM behaviour", () => {
         } catch {}
       }
     });
-    // the combobox fires its logic on `change` — fill() then commit like a user
-    const setRepo = async (v: string) => {
-      await page.fill("#nf-repo", v);
-      await page.dispatchEvent("#nf-repo", "change");
-    };
     try {
       await page.click("#newbtn");
-      // repo combobox datalist fills async from /api/ws/repos — 3 repos
-      await expect.poll(() => page.locator("#nf-repo-list option").count()).toBe(3);
-      const values = await page
-        .locator("#nf-repo-list option")
-        .evaluateAll((os) => os.map((o) => (o as HTMLOptionElement).value));
-      expect(values).toContain("acme/newrepo");
+      // repo picker fills async from /api/ws/repos — placeholder + 3 repos
+      await expect.poll(() => page.locator("#nf-repo option").count()).toBe(4);
+      expect(await page.locator("#nf-repo").innerText()).toContain("acme/newrepo (gh)");
 
       // pick a repo → branch row appears, datalist fills from /api/ws/branches
-      await setRepo("acme/widgets");
+      await page.selectOption("#nf-repo", "acme/widgets");
       await expect.poll(() => page.locator("#nf-branch-row").isVisible()).toBe(true);
       await expect.poll(() => page.locator("#nf-branch-list option").count()).toBe(2);
 
-      // picking a repo derives the Working dir from the ws standard layout
-      // (locked so it can't read as "clone into whatever dir was there")
-      await expect.poll(() => page.locator("#nf-cwd").isDisabled()).toBe(true);
-      await expect
-        .poll(() => page.locator("#nf-cwd").inputValue())
-        .toContain("/home/u/ws/acme/widgets/tree/");
-
       // a NEW branch name → hint flags the create, spawn carries create:true
       await page.fill("#nf-branch", "feat-x");
-      await expect
-        .poll(() => page.locator("#nf-cwd").inputValue())
-        .toBe("/home/u/ws/acme/widgets/tree/feat-x");
       await expect
         .poll(() => page.locator("#nf-branch-hint").innerText())
         .toContain("new branch will be created");
@@ -507,32 +489,17 @@ describe("console DOM behaviour", () => {
       expect(spawns[0].create).toBe(true);
       expect(spawns[0].cwd).toBeUndefined();
 
-      // a github /tree/<branch> URL → normalized spec, branch prefilled
+      // an EXISTING remote branch → plain {from}, no create
       await page.click("#newbtn");
-      await setRepo("https://github.com/acme/widgets/tree/main");
-      await expect.poll(() => page.locator("#nf-branch").inputValue()).toBe("main");
+      await expect.poll(() => page.locator("#nf-repo option").count()).toBe(4);
+      await page.selectOption("#nf-repo", "acme/widgets");
       await expect.poll(() => page.locator("#nf-branch-list option").count()).toBe(2);
+      await page.fill("#nf-branch", "main");
       await page.selectOption("#nf-cli", "claude");
       await page.click("#nf-go");
       await expect.poll(() => spawns.length).toBe(2);
       expect(spawns[1].from).toBe("acme/widgets@main");
       expect(spawns[1].create).toBeUndefined();
-      expect(spawns[1].branch).toBeUndefined();
-
-      // a non-GitHub git URL → cwd preview still derives from the layout
-      await page.click("#newbtn");
-      await setRepo("https://gitlab.com/acme/tools.git");
-      await expect
-        .poll(() => page.locator("#nf-cwd").inputValue())
-        .toContain("/home/u/ws/acme/tools/tree/");
-      await expect.poll(() => page.locator("#nf-branch-hint").innerText()).toContain("git clone");
-      await page.fill("#nf-branch", "dev");
-      await page.selectOption("#nf-cli", "claude");
-      await page.click("#nf-go");
-      await expect.poll(() => spawns.length).toBe(3);
-      expect(spawns[2].from).toBe("https://gitlab.com/acme/tools.git");
-      expect(spawns[2].branch).toBe("dev");
-      expect(spawns[2].create).toBe(true);
     } finally {
       await ctx.close();
     }
@@ -675,51 +642,6 @@ describe("console DOM behaviour", () => {
     }
   });
 
-  it("the New-agent FAB floats in the left panel, drags, and persists its spot", async () => {
-    const { ctx, page } = await openConsole(browser, url);
-    try {
-      // It lives in the left panel (not the header meta row) and floats over the
-      // list, parked near the panel's bottom-right corner.
-      expect(await page.evaluate(() => !!document.querySelector(".left > #newbtn"))).toBe(true);
-      expect(
-        await page.evaluate(() => getComputedStyle(document.querySelector("#newbtn")!).position),
-      ).toBe("absolute");
-      const panel = (await page.locator(".left").boundingBox())!;
-      const before = (await page.locator("#newbtn").boundingBox())!;
-      expect(panel.x + panel.width - (before.x + before.width)).toBeLessThan(40); // right edge
-      expect(panel.y + panel.height - (before.y + before.height)).toBeLessThan(40); // bottom edge
-
-      // Dragging moves it and must NOT open the spawn form (pointerup on a
-      // <button> still synthesizes a click).
-      const cx = before.x + before.width / 2;
-      const cy = before.y + before.height / 2;
-      await page.mouse.move(cx, cy);
-      await page.mouse.down();
-      await page.mouse.move(cx - 160, cy - 200, { steps: 8 });
-      await page.mouse.up();
-      const after = (await page.locator("#newbtn").boundingBox())!;
-      expect(Math.round(before.x - after.x)).toBeGreaterThan(100);
-      expect(Math.round(before.y - after.y)).toBeGreaterThan(140);
-      expect(await page.locator("#newform").isVisible()).toBe(false);
-
-      // …and the new spot survives a reload (stored right/bottom offsets).
-      const saved = JSON.parse((await page.evaluate(() => localStorage.getItem("ay.newbtnPos")))!);
-      expect(saved.r).toBeGreaterThan(100);
-      expect(saved.b).toBeGreaterThan(140);
-      await page.reload();
-      await page.waitForSelector(".list .row", { timeout: 10_000 });
-      const reloaded = (await page.locator("#newbtn").boundingBox())!;
-      expect(Math.abs(reloaded.x - after.x)).toBeLessThan(2);
-      expect(Math.abs(reloaded.y - after.y)).toBeLessThan(2);
-
-      // A plain click still opens the spawn form.
-      await page.click("#newbtn");
-      await expect.poll(() => page.locator("#newform").isVisible()).toBe(true);
-    } finally {
-      await ctx.close();
-    }
-  });
-
   it("shows the install one-liner on the home page", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
@@ -767,63 +689,6 @@ describe("console DOM behaviour", () => {
       expect(await page.locator('.keybar [data-mod="ctrl"]').count()).toBe(1);
       expect(await page.locator('.keybar [data-mod="shift"]').count()).toBe(1);
       expect(await page.locator('.keybar [data-arrow="up"]').count()).toBe(1);
-    } finally {
-      await ctx.close();
-    }
-  });
-
-  it("edge-to-edge mode runs the terminal under the title bar but never under the key bar", async () => {
-    // The whole hazard of this feature: xterm repaints a fixed grid whose LAST
-    // row is the live CLI input line, so if .log is allowed to run under the
-    // bottom bars the input becomes untappable. Bleeding upward is safe (the
-    // buffer is bottom-anchored, so it only exposes older scrollback), bleeding
-    // downward is not. This pins both halves of that contract.
-    const { ctx, page } = await openConsole(
-      browser,
-      url,
-      { width: 390, height: 844 },
-      { hasTouch: true, isMobile: true },
-    );
-    try {
-      await page.locator(".list .row").first().click();
-      await expect.poll(() => page.locator(".keybar").isVisible()).toBe(true);
-
-      const box = () =>
-        page.evaluate(() => {
-          const g = (sel: string) => {
-            const el = document.querySelector(sel) as HTMLElement;
-            const r = el.getBoundingClientRect();
-            return { top: r.top, bottom: r.bottom };
-          };
-          const log = document.getElementById("log")!;
-          const cs = getComputedStyle(log);
-          const r = log.getBoundingClientRect();
-          return {
-            head: g(".rhead"),
-            log: r.top,
-            // where the xterm grid is actually allowed to paint
-            logContentBottom: r.bottom - (parseFloat(cs.paddingBottom) || 0),
-            keybar: g(".keybar").top,
-          };
-        });
-
-      const before = await box();
-      expect(before.log).toBeGreaterThanOrEqual(before.head.bottom - 1); // header reserves space
-
-      await page.locator("#rmenubtn").click();
-      await page.locator("#islandsToggle").check();
-      await expect.poll(async () => (await box()).log).toBeLessThan(before.log);
-
-      const after = await box();
-      // top: the pane now starts at the very top of the header, i.e. the grid
-      // paints behind it instead of below it
-      expect(after.log).toBeLessThanOrEqual(after.head.top + 1);
-      // bottom: unchanged — the key bar still sits below everything the grid
-      // can paint into
-      expect(after.logContentBottom).toBeLessThanOrEqual(after.keybar + 1);
-      // (1px of slack: the header height is fractional, so pulling .log up by it
-      // reshuffles sub-pixel rounding on the bottom edge too)
-      expect(Math.abs(after.logContentBottom - before.logContentBottom)).toBeLessThanOrEqual(1);
     } finally {
       await ctx.close();
     }
@@ -945,13 +810,10 @@ describe("fold subagent trees", () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
       await expect.poll(() => page.locator(".list .row").count()).toBe(1);
-      // The fold toggle now lives inside the Settings dropdown.
-      await page.click("#viewmenubtn");
       await page.click("#foldbtn");
       // All four agents (root + 3 descendants) now render; the chip is gone.
       await expect.poll(() => page.locator(".list .row").count()).toBe(4);
       expect(await page.locator(".subs").count()).toBe(0);
-      await page.click("#viewmenubtn");
       await page.click("#foldbtn");
       await expect.poll(() => page.locator(".list .row").count()).toBe(1);
     } finally {

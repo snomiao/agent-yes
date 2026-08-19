@@ -18,7 +18,7 @@
  * `todoStore.ts` — this module only knows gates by name.
  */
 
-export type LifecycleKind = "code" | "decision" | "doc" | "investigation" | "human" | "question";
+export type LifecycleKind = "code" | "decision" | "doc" | "investigation" | "human";
 
 export interface LifecycleTransition {
   from: string;
@@ -96,22 +96,6 @@ export const LIFECYCLES: Record<LifecycleKind, LifecycleGraph> = {
       { from: "decided", to: "done" },
     ],
   },
-  // One agent asked another a question (`ay ask`). Same shape as `human`, but
-  // the party being waited on is a tracked agent rather than a person, which
-  // changes what is knowable: an agent can DIE mid-question, and the store can
-  // see that happen (see `waiting-on-answer` in todoBlock.ts).
-  //
-  // The `answer-received` gate is deliberately left unregistered so it can only
-  // be satisfied through `approve()`, whose independence rule then does the
-  // work for free: the validator must differ from the task's owner, and the
-  // owner is the ASKER — so an asker can never mark its own question answered.
-  question: {
-    states: ["pending", "answered", "done"],
-    transitions: [
-      { from: "pending", to: "answered", gate: "answer-received" },
-      { from: "answered", to: "done" },
-    ],
-  },
 };
 
 /** The state a newly-created task of `kind` starts in (its graph's first state). */
@@ -119,24 +103,6 @@ export function initialState(kind: LifecycleKind): string {
   const first = LIFECYCLES[kind].states[0];
   if (!first) throw new Error(`lifecycle kind "${kind}" has no states`);
   return first;
-}
-
-/**
- * Every transition of `kind`, or `[]` when this binary has never heard of that
- * kind.
- *
- * Use this — never a bare `LIFECYCLES[rec.kind]` — whenever the kind comes off
- * a STORED RECORD rather than from validated CLI input. The store is shared by
- * every agent on a machine, and those agents routinely run different builds
- * (one lane on a fresh `bun link`, another on the published npm package), so an
- * older binary WILL read records whose kind was added later. Indexing directly
- * throws `Cannot read properties of undefined`, taking down `ls`/`reconcile`
- * for every task rather than just the one it cannot interpret. Degrading to "no
- * transitions" instead means the unknown task is simply not actionable by the
- * old binary — it still lists, and its data is untouched.
- */
-export function transitionsOf(kind: string): LifecycleTransition[] {
-  return LIFECYCLES[kind as LifecycleKind]?.transitions ?? [];
 }
 
 /** States reachable in one transition from `currentState`, regardless of gates. */

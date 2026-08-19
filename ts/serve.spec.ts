@@ -4,7 +4,6 @@ import {
   installerArgv,
   isNoNodeExecError,
   oxmgrVersionHasWindowsFix,
-  parseGitUrl,
   portlessConsoleUrl,
 } from "./serve.ts";
 
@@ -127,40 +126,5 @@ describe("installerArgv", () => {
 
   it("returns null with neither installer", () => {
     expect(installerArgv("pm2", null, null)).toBeNull();
-  });
-});
-
-// The raw-clone spawn path only handles NON-github git sources; github (and
-// bare owner/repo, which never reaches this parser) goes through the provision
-// module. Owner/repo come from the URL's last two path segments so the checkout
-// lands in the standard <wsRoot>/<owner>/<repo>/tree/<branch> layout.
-describe("parseGitUrl", () => {
-  it("parses scp-style, ssh and https non-github URLs", () => {
-    expect(parseGitUrl("git@gitlab.com:acme/tools.git")).toEqual({
-      url: "git@gitlab.com:acme/tools.git",
-      owner: "acme",
-      repo: "tools",
-    });
-    expect(parseGitUrl("ssh://git@git.corp.io/team/app.git")).toEqual({
-      url: "ssh://git@git.corp.io/team/app.git",
-      owner: "team",
-      repo: "app",
-    });
-    expect(parseGitUrl("https://gitlab.com/acme/tools")).toEqual({
-      url: "https://gitlab.com/acme/tools",
-      owner: "acme",
-      repo: "tools",
-    });
-    // subgrouped gitlab paths use the LAST two segments
-    expect(parseGitUrl("https://gitlab.com/org/group/proj.git")?.owner).toBe("group");
-  });
-
-  it("rejects github, bare specs, and traversal-looking segments", () => {
-    expect(parseGitUrl("https://github.com/acme/tools")).toBeNull();
-    expect(parseGitUrl("git@github.com:acme/tools.git")).toBeNull();
-    expect(parseGitUrl("acme/tools")).toBeNull();
-    expect(parseGitUrl("https://gitlab.com/tools")).toBeNull();
-    expect(parseGitUrl("https://gitlab.com/../evil")).toBeNull();
-    expect(parseGitUrl("file:///etc/passwd")).toBeNull();
   });
 });

@@ -3,10 +3,10 @@
  */
 
 import { execFileSync } from "child_process";
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, unlinkSync } from "fs";
+import { existsSync, mkdirSync, unlinkSync } from "fs";
 import { chmod, copyFile } from "fs/promises";
 import path from "path";
-import { compareVersions, getInstalledPackage } from "./versionChecker.ts";
+import { getInstalledPackage } from "./versionChecker.ts";
 
 // Platform/arch to binary name mapping
 const PLATFORM_MAP: Record<string, string> = {
@@ -37,22 +37,6 @@ export function getBinaryName(): string {
 }
 
 /**
- * The version-scoped download cache root (`~/.cache/agent-yes/bin/`) WITHOUT
- * the version segment. Independent of `getBinDir()`'s npm-package shortcut:
- * GC only ever touches the user cache, never a packaged bin dir.
- */
-function getCacheBinRoot(): string {
-  const cacheDir =
-    process.env.AGENT_YES_CACHE_DIR ||
-    path.join(
-      process.env.XDG_CACHE_HOME || path.join(process.env.HOME || "/tmp", ".cache"),
-      "agent-yes",
-    );
-
-  return path.join(cacheDir, "bin");
-}
-
-/**
  * Get the directory where binaries are stored
  */
 export function getBinDir(): string {
@@ -71,79 +55,14 @@ export function getBinDir(): string {
   // previous (older) release downloaded, and a published binary fix would never
   // reach a machine that already has one cached. A version segment makes a new
   // release miss the path and re-download; old binaries sit harmlessly beside it.
-  return path.join(getCacheBinRoot(), getInstalledPackage().version);
-}
+  const cacheDir =
+    process.env.AGENT_YES_CACHE_DIR ||
+    path.join(
+      process.env.XDG_CACHE_HOME || path.join(process.env.HOME || "/tmp", ".cache"),
+      "agent-yes",
+    );
 
-// Only a strict `x.y.z` release version is ever eligible for GC. A pre-release
-// or dev suffix (e.g. `1.270.0-beta.0`) is never deleted, even if semver would
-// order it below the current version — a user may still be running it.
-const STRICT_SEMVER = /^\d+\.\d+\.\d+$/;
-
-export interface BinaryGcResult {
-  /** Version dir names that were removed. */
-  removed: string[];
-  /** Total bytes of removed files. */
-  freedBytes: number;
-}
-
-function dirSizeBytes(dir: string): number {
-  let total = 0;
-  try {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const p = path.join(dir, entry.name);
-      if (entry.isDirectory()) total += dirSizeBytes(p);
-      else if (entry.isFile()) {
-        try {
-          total += statSync(p).size;
-        } catch {
-          /* raced with deletion — count what we can */
-        }
-      }
-    }
-  } catch {
-    /* unreadable dir — best effort */
-  }
-  return total;
-}
-
-/**
- * Delete versioned binary cache dirs strictly older than the CURRENT package
- * version.
- *
- * `~/.cache/agent-yes/bin/<version>/` accumulates one dir per release a user
- * has ever run (PERFORMANCE-EVENT 2026-08-13), each holding a ~20-30 MiB
- * binary that nothing ever cleaned up. Keep the current version; delete only
- * dirs named `x.y.z` that compare strictly less than it (never pre-release /
- * dev, never anything newer or malformed). Idempotent and best-effort: a dir
- * that cannot be removed simply survives until the next run.
- */
-export function gcOldBinaryDirs(): BinaryGcResult {
-  const result: BinaryGcResult = { removed: [], freedBytes: 0 };
-  const current = getInstalledPackage().version;
-  if (!STRICT_SEMVER.test(current)) return result; // dev/pre-release current — do nothing
-
-  const root = getCacheBinRoot();
-  let entries: string[];
-  try {
-    entries = readdirSync(root);
-  } catch {
-    return result; // no cache dir at all — nothing to collect
-  }
-
-  for (const name of entries) {
-    if (!STRICT_SEMVER.test(name)) continue;
-    if (compareVersions(name, current) >= 0) continue;
-    const dir = path.join(root, name);
-    const size = dirSizeBytes(dir);
-    try {
-      rmSync(dir, { recursive: true, force: true });
-      result.removed.push(name);
-      result.freedBytes += size;
-    } catch {
-      // locked/in-use dir — leave it for the next run
-    }
-  }
-  return result;
+  return path.join(cacheDir, "bin", getInstalledPackage().version);
 }
 
 /**
@@ -419,22 +338,6 @@ export async function getRustBinary(
   } = {},
 ): Promise<string> {
   const { verbose = false, forceDownload = false } = options;
-
-  // Startup GC: collect cache dirs left behind by OLDER package versions (each
-  // release pins its own <version>/ subdir; nothing ever deleted them — see
-  // PERFORMANCE-EVENT 2026-08-13). Safe and idempotent: only strict x.y.z dirs
-  // that are strictly below the current version are removed, never this
-  // version's dir, and all failures are swallowed.
-  try {
-    const freed = gcOldBinaryDirs();
-    if (verbose && freed.removed.length > 0) {
-      console.log(
-        `[rust] GC removed ${freed.removed.length} old binary cache dir(s): ${freed.removed.join(", ")}`,
-      );
-    }
-  } catch {
-    /* never block the agent run on cache GC */
-  }
 
   // First try to find existing binary
   if (!forceDownload) {

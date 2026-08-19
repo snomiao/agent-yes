@@ -13,7 +13,7 @@
 # outlives this waiter.
 #
 # Usage:   spawn-notify <cwd> -- <task...>
-# Env:     CLI=claude          wrapped CLI (claude|codex|…)
+# Env:     CLI=claude          wrapped CLI (claude|codex|gemini|…)
 #          AY_FLAGS="-y"       extra flags for `ay <cli>` (e.g. -y for yolo)
 #          WAIT_MODE=--wait    --wait      → wake on idle|needs_input|stuck|stopped (recommended:
 #                                            also catches a blocked AskUserQuestion menu)
@@ -31,12 +31,9 @@ task="$*"
 
 # 1) Fire-and-forget. nohup+disown so the agent outlives this waiter; agent-yes
 #    keeps its own PTY log under ~/.agent-yes, so /dev/null here loses nothing.
-#    `cd` in a subshell rather than `--cwd`: on an agent run that flag is not an
-#    agent-yes flag at all — it is forwarded to the CLI, which dies on the unknown
-#    option. The subshell keeps this script's own cwd untouched for step 2.
 mkdir -p "$cwd"
 # shellcheck disable=SC2086
-( cd "$cwd" && exec nohup ay "$cli" ${AY_FLAGS:-} -- "$task" >/dev/null 2>&1 ) &
+nohup ay "$cli" ${AY_FLAGS:-} --cwd "$cwd" -- "$task" >/dev/null 2>&1 &
 disown || true
 
 # 2) Resolve the agent we just spawned to an EXACT pid (newest match in this cwd),

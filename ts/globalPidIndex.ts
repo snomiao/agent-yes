@@ -65,12 +65,24 @@ export interface GlobalPidRecord {
   // permission checks off?" is unanswerable after the fact. See
   // ts/agentPermissions.ts (mirrored in rs/src/agent_permissions.rs).
   permissions?: AgentPermissions | null;
-  // The child CLI's most recent terminal title (OSC 0/2 from its PTY stream —
-  // claude/opencode continuously set it to a task summary). The wrapper's
-  // title scanner keeps this fresh so `ay whoami` / `ay ls --json` can answer
-  // "what is this agent doing" without reading its screen. Mirrors Rust's
-  // `title`.
-  title?: string | null;
+  // Self-declared lane/role name (e.g. "pm", "crm", "release-console"), shown in
+  // the `ay send` envelope so recipients don't have to translate cwd/pid into a
+  // role by hand. Set via $AGENT_YES_ROLE at spawn or `ay role <name>` later.
+  // Mirrors Rust's `role`; must pass sanitizeRole (it is rendered into the
+  // envelope header line, so an unconstrained value could forge header syntax).
+  role?: string | null;
+}
+
+// Roles render verbatim into the `<ay-msg …>` header line, whose OPEN tag is not
+// nonce-protected (only the close tag is) — whitespace, ">", or control chars in
+// a role could forge header structure. Clamp at every entry point (env pickup,
+// `ay role`), not at render time, so stored records stay clean.
+const ROLE_RE = /^[A-Za-z0-9._-]{1,32}$/;
+
+/** Validate a role name; returns the trimmed role or null when unusable. */
+export function sanitizeRole(raw: string | undefined | null): string | null {
+  const trimmed = raw?.trim();
+  return trimmed && ROLE_RE.test(trimmed) ? trimmed : null;
 }
 
 /**
@@ -124,9 +136,7 @@ export async function appendGlobalPid(record: GlobalPidRecord): Promise<void> {
 /** Append a partial update by pid (status, exit_code, exit_reason, log_file). */
 export async function updateGlobalPidStatus(
   pid: number,
-  patch: Partial<
-    Pick<GlobalPidRecord, "status" | "exit_code" | "exit_reason" | "log_file" | "title">
-  >,
+  patch: Partial<Pick<GlobalPidRecord, "status" | "exit_code" | "exit_reason" | "log_file" | "role">>,
 ): Promise<void> {
   const file = resolveGlobalFile(); // capture at call time (see withLock)
   try {

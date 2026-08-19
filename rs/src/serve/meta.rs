@@ -60,9 +60,7 @@ pub fn parse_task_counts(lines: &[String]) -> Option<TaskCounts> {
         let (mut done, mut total) = (0u32, 0u32);
         let mut j = i;
         while j < n {
-            let Some(mk) = marker_of(&lines[j]) else {
-                break;
-            };
+            let Some(mk) = marker_of(&lines[j]) else { break };
             if lines[j].contains(ANCHOR) {
                 has_anchor = true;
             }
@@ -91,19 +89,13 @@ struct BadgeDef {
 /// a capture group makes the badge dynamic: the wire id becomes `id:capture`
 /// ("shells:4 shells") and the console re-derives the label from it.
 static BADGE_DEFS: Lazy<Vec<BadgeDef>> = Lazy::new(|| {
-    let d = |id, pat: &str| BadgeDef {
-        id,
-        pattern: Regex::new(pat).unwrap(),
-    };
+    let d = |id, pat: &str| BadgeDef { id, pattern: Regex::new(pat).unwrap() };
     vec![
         d("goal-active", r"(?i)/goal active"),
         d("session-limit", r"(?i)you['’]?ve hit your session limit"),
         // Anchored on the FULL banner so an agent merely discussing retries
         // can't light it; `[\s\S]{0,40}` spans the "· " separator / a wrap.
-        d(
-            "retrying",
-            r"(?is)Waiting for API response.{0,40}will retry in \d",
-        ),
+        d("retrying", r"(?is)Waiting for API response.{0,40}will retry in \d"),
         // Footer counters: anchored on the "· " separator / "←" arrow chrome,
         // never the bare phrase. The capture keeps the CLI's own pluralisation.
         d("shells", r"(?m)· (\d+ shells?)(?: ·|\s*$)"),
@@ -239,21 +231,11 @@ pub fn parse_porcelain_v2(out: &str) -> GitInfo {
         if let Some(rest) = line.strip_prefix("# branch.head ") {
             // A detached HEAD reports "(detached)" — surfaced as a null branch,
             // exactly like the TS parser.
-            g.branch = if rest == "(detached)" {
-                None
-            } else {
-                Some(rest.to_string())
-            };
+            g.branch = if rest == "(detached)" { None } else { Some(rest.to_string()) };
         } else if let Some(rest) = line.strip_prefix("# branch.ab ") {
             let mut it = rest.split_whitespace();
-            g.ahead = it
-                .next()
-                .and_then(|v| v.trim_start_matches('+').parse().ok())
-                .unwrap_or(0);
-            g.behind = it
-                .next()
-                .and_then(|v| v.trim_start_matches('-').parse().ok())
-                .unwrap_or(0);
+            g.ahead = it.next().and_then(|v| v.trim_start_matches('+').parse().ok()).unwrap_or(0);
+            g.behind = it.next().and_then(|v| v.trim_start_matches('-').parse().ok()).unwrap_or(0);
         } else if line.starts_with('#') {
             continue;
         } else if line.starts_with('?') || line.starts_with('u') {
@@ -285,11 +267,7 @@ mod tests {
     #[test]
     fn task_counts_needs_anchor_and_two_markers() {
         assert_eq!(parse_task_counts(&v(&["☒ one"])), None);
-        assert_eq!(
-            parse_task_counts(&v(&["☒ one", "◻ two"])),
-            None,
-            "no ⎿ anchor"
-        );
+        assert_eq!(parse_task_counts(&v(&["☒ one", "◻ two"])), None, "no ⎿ anchor");
         assert_eq!(
             parse_task_counts(&v(&["⎿  ☒ one", "   ◼ two", "   ◻ three"])),
             Some(TaskCounts { done: 1, total: 3 })
@@ -298,11 +276,10 @@ mod tests {
 
     #[test]
     fn task_counts_takes_the_most_recent_block() {
-        let lines = v(&["⎿  ☒ a", "   ☒ b", "prose", "⎿  ☒ c", "   ◻ d", "   ◻ e"]);
-        assert_eq!(
-            parse_task_counts(&lines),
-            Some(TaskCounts { done: 1, total: 3 })
-        );
+        let lines = v(&[
+            "⎿  ☒ a", "   ☒ b", "prose", "⎿  ☒ c", "   ◻ d", "   ◻ e",
+        ]);
+        assert_eq!(parse_task_counts(&lines), Some(TaskCounts { done: 1, total: 3 }));
     }
 
     #[test]
@@ -321,10 +298,7 @@ mod tests {
             vec!["shells:4 shells"]
         );
         assert_eq!(match_badges(&v(&["⏸ x · PR #310"])), vec!["pr:PR #310"]);
-        assert_eq!(
-            match_badges(&v(&["⏸ x · ← 3 agents"])),
-            vec!["bg-agents:3 agents"]
-        );
+        assert_eq!(match_badges(&v(&["⏸ x · ← 3 agents"])), vec!["bg-agents:3 agents"]);
     }
 
     #[test]
@@ -344,12 +318,7 @@ mod tests {
     #[test]
     fn needs_input_yields_the_menu_text() {
         let ni = vec![Regex::new(r"(?m)❯ ?\d+\.").unwrap()];
-        let lines = v(&[
-            "Do you want to apply this fix?",
-            "❯ 1. Yes",
-            "  2. No",
-            "─────",
-        ]);
+        let lines = v(&["Do you want to apply this fix?", "❯ 1. Yes", "  2. No", "─────"]);
         let q = classify_needs_input(&lines, &ni, &[]).unwrap();
         assert!(q.contains("Do you want to apply this fix?"), "{q}");
         assert!(q.contains("❯ 1. Yes"), "{q}");
@@ -394,17 +363,13 @@ mod tests {
 
     #[test]
     fn git_v2_detached_head_reports_a_null_branch() {
-        assert!(parse_porcelain_v2("# branch.head (detached)\n")
-            .branch
-            .is_none());
+        assert!(parse_porcelain_v2("# branch.head (detached)\n").branch.is_none());
     }
 
     #[test]
     fn git_v2_serializes_with_the_ts_field_names() {
         let v = serde_json::to_value(parse_porcelain_v2("# branch.head main\n")).unwrap();
-        for k in [
-            "branch", "dirty", "changed", "pins", "subDirty", "ahead", "behind",
-        ] {
+        for k in ["branch", "dirty", "changed", "pins", "subDirty", "ahead", "behind"] {
             assert!(v.get(k).is_some(), "missing {k} in {v}");
         }
     }

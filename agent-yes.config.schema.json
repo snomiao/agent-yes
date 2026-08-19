@@ -25,6 +25,7 @@
       },
       "properties": {
         "claude": { "$ref": "#/definitions/AgentCliConfig" },
+        "gemini": { "$ref": "#/definitions/AgentCliConfig" },
         "codex": { "$ref": "#/definitions/AgentCliConfig" },
         "copilot": { "$ref": "#/definitions/AgentCliConfig" },
         "cursor": { "$ref": "#/definitions/AgentCliConfig" },
@@ -32,10 +33,7 @@
         "qwen": { "$ref": "#/definitions/AgentCliConfig" },
         "auggie": { "$ref": "#/definitions/AgentCliConfig" },
         "amp": { "$ref": "#/definitions/AgentCliConfig" },
-        "opencode": { "$ref": "#/definitions/AgentCliConfig" },
-        "dsh": { "$ref": "#/definitions/AgentCliConfig" },
-        "dsh-tui": { "$ref": "#/definitions/AgentCliConfig" },
-        "dsh-legacy": { "$ref": "#/definitions/AgentCliConfig" }
+        "opencode": { "$ref": "#/definitions/AgentCliConfig" }
       }
     }
   },

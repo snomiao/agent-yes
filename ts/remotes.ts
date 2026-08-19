@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
 import yaml from "yaml";
-import { isWebrtcSpec, parseWebrtcLink } from "./webrtcLink.ts";
+import { isWebrtcSpec } from "./webrtcLink.ts";
 
 function remotesPath(): string {
   const dir = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
@@ -18,14 +18,6 @@ export interface ResolvedRemote {
   url: string;
   token: string;
   keyword?: string;
-  /** Stable, human-readable name for display — never the loopback bridge URL. */
-  label: string;
-}
-
-/** A display label for a WebRTC share link: the room id, never the local bridge. */
-function webrtcLabel(link: string): string {
-  const parsed = parseWebrtcLink(link);
-  return parsed ? `webrtc:${parsed.room}` : "webrtc";
 }
 
 export async function readRemotes(): Promise<Map<string, RemoteConfig>> {
@@ -90,16 +82,11 @@ export function parseDirectRemoteSpec(
 export async function resolveRemoteSpec(spec: string): Promise<ResolvedRemote | null> {
   // Inline WebRTC share link: `ay ls webrtc://…` or `ay ls https://…/w/#room:token`.
   // These carry their own secret and have no keyword (use an alias to add one).
-  if (isWebrtcSpec(spec)) return resolveWebrtc(spec, undefined, webrtcLabel(spec));
+  if (isWebrtcSpec(spec)) return resolveWebrtc(spec, undefined);
 
   const direct = parseDirectRemoteSpec(spec);
   if (direct) {
-    return {
-      url: direct.baseUrl,
-      token: direct.token,
-      keyword: direct.keyword,
-      label: `${direct.host}:${direct.port}`,
-    };
+    return { url: direct.baseUrl, token: direct.token, keyword: direct.keyword };
   }
 
   // alias[:keyword]
@@ -111,8 +98,8 @@ export async function resolveRemoteSpec(spec: string): Promise<ResolvedRemote | 
   const cfg = remotes.get(alias);
   if (!cfg) return null;
   // A saved alias may point at a WebRTC link; bridge it just like an inline one.
-  if (isWebrtcSpec(cfg.url)) return resolveWebrtc(cfg.url, keyword, alias);
-  return { url: cfg.url, token: cfg.token, keyword, label: alias };
+  if (isWebrtcSpec(cfg.url)) return resolveWebrtc(cfg.url, keyword);
+  return { url: cfg.url, token: cfg.token, keyword };
 }
 
 /**
@@ -120,14 +107,10 @@ export async function resolveRemoteSpec(spec: string): Promise<ResolvedRemote | 
  * ordinary http remote, so every fetch-based remote command works unchanged.
  * The bridge lives for the rest of the process (torn down on `process.exit`).
  */
-async function resolveWebrtc(
-  link: string,
-  keyword: string | undefined,
-  label: string,
-): Promise<ResolvedRemote> {
+async function resolveWebrtc(link: string, keyword?: string): Promise<ResolvedRemote> {
   const { startWebrtcBridge } = await import("./webrtcRemote.ts");
   const bridge = await startWebrtcBridge(link);
-  return { url: bridge.baseUrl, token: bridge.token, keyword, label };
+  return { url: bridge.baseUrl, token: bridge.token, keyword };
 }
 
 // ---------------------------------------------------------------------------

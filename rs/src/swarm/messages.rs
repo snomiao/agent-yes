@@ -35,7 +35,7 @@ pub enum TaskStatus {
 pub struct AgentCapabilities {
     /// Agent's unique identifier
     pub agent_id: AgentId,
-    /// Name of the underlying CLI (claude, codex, etc.)
+    /// Name of the underlying CLI (claude, codex, gemini, etc.)
     pub cli: String,
     /// Current working directory
     pub cwd: String,

@@ -1,6 +1,6 @@
 {
   "name": "agent-yes",
-  "version": "1.276.0",
+  "version": "1.262.0",
   "description": "A wrapper tool that automates interactions with various AI CLI tools by automatically handling common prompts and responses.",
   "keywords": [
     "ai",
@@ -13,6 +13,7 @@
     "codex",
     "copilot",
     "cursor",
+    "gemini",
     "grok",
     "qwen",
     "wrapper"
@@ -39,12 +40,12 @@
     "copilot-yes": "./dist/copilot-yes.js",
     "cursor-yes": "./dist/cursor-yes.js",
     "cy": "./dist/cy.js",
-    "dsh-legacy-yes": "./dist/dsh-legacy-yes.js",
-    "dsh-tui-yes": "./dist/dsh-tui-yes.js",
-    "dsh-yes": "./dist/dsh-yes.js",
+    "gemini-yes": "./dist/gemini-yes.js",
     "glm-yes": "./dist/glm-yes.js",
     "grok-yes": "./dist/grok-yes.js",
     "opencode-yes": "./dist/opencode-yes.js",
+    "openrouter-yes": "./dist/openrouter-yes.js",
+    "orcy": "./dist/orcy.js",
     "pi-yes": "./dist/pi-yes.js",
     "powershell-yes": "./dist/powershell-yes.js",
     "qwen-yes": "./dist/qwen-yes.js"
@@ -75,7 +76,7 @@
     "lab/ui/sw.js",
     "ts/channels/*.ts",
     "ts/terminal/*.ts",
-    "lab/ui/lab/**"
+    "lab/ui/blog/**"
   ],
   "type": "module",
   "module": "ts/index.ts",
@@ -107,6 +108,7 @@
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
+    "deepseek": "bun scripts/deepseek-codex.ts",
     "build": "tsdown",
     "check:e2e": "bun scripts/check-e2e.ts",
     "cf": "bun scripts/cf.ts",

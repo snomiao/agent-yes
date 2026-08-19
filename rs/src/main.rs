@@ -5,9 +5,7 @@ mod config;
 mod config_loader;
 mod context;
 mod fifo;
-mod identity;
 mod idle_waiter;
-mod init_msg;
 mod installer;
 mod log_files;
 mod logger;
@@ -19,7 +17,6 @@ mod ready_manager;
 mod reaper;
 mod running_lock;
 mod swarm;
-mod title_scanner;
 mod utils;
 mod vterm;
 mod webhook;
@@ -52,14 +49,14 @@ fn detect_install_method() -> &'static str {
 /// Quote one argv token for display in a copy-pasteable shell command. Leaves
 /// shell-safe tokens (including a leading `~`/`~/path`, so `cd ~/foo` still
 /// expands) bare; single-quotes anything else. Mirrors `shellDisplayQuote` in
-/// ts/cwdPassthroughHint.ts.
+/// ts/cwdDeprecation.ts.
 fn shell_display_quote(s: &str) -> String {
     if s.is_empty() {
         return "''".to_string();
     }
-    let safe = s
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || "_@%+=:,./~-".contains(c));
+    let safe = s.chars().all(|c| {
+        c.is_ascii_alphanumeric() || "_@%+=:,./~-".contains(c)
+    });
     if safe {
         s.to_string()
     } else {
@@ -67,25 +64,17 @@ fn shell_display_quote(s: &str) -> String {
     }
 }
 
-/// Build the `--cwd` hint from a program name and its user args (everything after
-/// argv[0]). Strips `--cwd <dir>` / `--cwd=<dir>` and rebuilds the copy-pasteable
-/// `cd <dir> && <same command>` line. Returns None when no `--cwd` appears before
-/// the `--` separator — past it the token belongs to the CLI or the prompt, and
-/// agent-yes has no business reading it. Pure so it can be unit tested. Mirrors
-/// detectCwdPassthrough in ts/cwdPassthroughHint.ts.
-fn build_cwd_migration(prog: &str, user_args: &[String]) -> Option<String> {
-    let end = user_args
-        .iter()
-        .position(|a| a == "--")
-        .unwrap_or(user_args.len());
+/// Build the `--cwd` deprecation warning from a program name and its user args
+/// (everything after argv[0]). Strips `--cwd <dir>` / `--cwd=<dir>` and rebuilds
+/// the copy-pasteable `cd <dir> && <same command>` hint. Pure so it can be unit
+/// tested. Mirrors detectCwdDeprecation in ts/cwdDeprecation.ts.
+fn build_cwd_migration(prog: &str, user_args: &[String]) -> String {
     let mut dir: Option<String> = None;
     let mut rest: Vec<String> = Vec::new();
-    let mut saw = false;
     let mut i = 0;
     while i < user_args.len() {
         let arg = &user_args[i];
-        if i < end && arg == "--cwd" {
-            saw = true;
+        if arg == "--cwd" {
             // `--cwd DIR` — consume the value unless the next token is a flag.
             if let Some(next) = user_args.get(i + 1) {
                 if !next.starts_with('-') {
@@ -97,19 +86,13 @@ fn build_cwd_migration(prog: &str, user_args: &[String]) -> Option<String> {
             i += 1;
             continue;
         }
-        if i < end {
-            if let Some(v) = arg.strip_prefix("--cwd=") {
-                saw = true;
-                dir = Some(v.to_string());
-                i += 1;
-                continue;
-            }
+        if let Some(v) = arg.strip_prefix("--cwd=") {
+            dir = Some(v.to_string());
+            i += 1;
+            continue;
         }
         rest.push(arg.clone());
         i += 1;
-    }
-    if !saw {
-        return None;
     }
 
     let mut cmd = shell_display_quote(prog);
@@ -122,34 +105,27 @@ fn build_cwd_migration(prog: &str, user_args: &[String]) -> Option<String> {
         Some(ref d) => shell_display_quote(d),
         None => "<dir>".to_string(),
     };
-    Some(format!(
-        "\x1b[33m⚠ --cwd is not an agent-yes flag\x1b[0m — it is passed straight through to the CLI. To run the agent somewhere else:\n\n    cd {dir_disp} && {cmd}"
-    ))
+    format!(
+        "\x1b[33m⚠ --cwd is deprecated.\x1b[0m Run the command in the target directory instead:\n\n    cd {dir_disp} && {cmd}"
+    )
 }
 
-/// `--cwd <dir>` is not an agent-yes flag: it rides along to the target CLI like
-/// any other unknown option, so the agent runs wherever `ay` was invoked. Print
-/// the `cd <dir> && <same command>` hint so that's not a surprise, then continue.
-/// The JS launcher prints its own (more faithful — it knows the `cy`/`ay` name the
-/// user typed) copy and sets AGENT_YES_SUPPRESS_CWD_WARN, so this mirror only
-/// fires on a direct `agent-yes … --cwd` invocation that bypassed the launcher.
-fn warn_cwd_passthrough() {
+/// `--cwd <dir>` on an agent run is deprecated: `cd <dir> && <same command>`
+/// does the same thing without an agent-yes-specific flag. Print the migration
+/// hint before continuing (the flag still works). The JS launcher prints its own
+/// (more faithful, it knows the `cy`/`ay` name the user typed) copy and sets
+/// AGENT_YES_SUPPRESS_CWD_WARN so this mirror only fires on a direct
+/// `agent-yes … --cwd` invocation that bypassed the launcher.
+fn warn_cwd_deprecated() {
     if std::env::var_os("AGENT_YES_SUPPRESS_CWD_WARN").is_some() {
         return;
     }
     let raw: Vec<String> = std::env::args().collect();
     let prog = raw
         .first()
-        .map(|p| {
-            p.rsplit(['/', '\\'])
-                .next()
-                .unwrap_or(p.as_str())
-                .to_string()
-        })
+        .map(|p| p.rsplit(['/', '\\']).next().unwrap_or(p.as_str()).to_string())
         .unwrap_or_else(|| "agent-yes".to_string());
-    if let Some(msg) = build_cwd_migration(&prog, &raw[1..]) {
-        eprintln!("{msg}");
-    }
+    eprintln!("{}", build_cwd_migration(&prog, &raw[1..]));
 }
 
 #[tokio::main]
@@ -161,12 +137,6 @@ async fn main() -> Result<()> {
     if let Some(code) = cli::maybe_delegate_subcommand() {
         std::process::exit(code);
     }
-
-    // `--cwd` reads like an agent-yes flag but isn't one — it is forwarded to the
-    // target CLI, so the agent runs wherever `ay` was invoked. Point at `cd` before
-    // that surprises anyone. Runs AFTER the subcommand delegation above, so the
-    // `--cwd` FILTER on `ay ls/status/spawn/schedule` never reaches this.
-    warn_cwd_passthrough();
 
     // Parse CLI arguments
     let args = cli::parse_args()?;
@@ -181,15 +151,45 @@ async fn main() -> Result<()> {
         install_method
     );
 
-    // The agent always runs where the wrapper runs. There is no flag that moves it
-    // (`--cwd` is forwarded to the CLI, see warn_cwd_passthrough), so the wrapper's
-    // own cwd, the agent's cwd and the recorded cwd cannot drift apart — the
-    // divergence that used to break display and search on agent-yes.com is
-    // unreachable rather than merely fixed. To run elsewhere: `cd <dir> && ay …`.
-    let cwd = std::env::current_dir()
-        .map_err(|e| anyhow::anyhow!("Failed to get current working directory: {}", e))?
-        .to_string_lossy()
-        .to_string();
+    // Resolve working directory: --cwd flag overrides, else use process current_dir.
+    // Canonicalise to an absolute path so downstream consumers (pid_store, lock keys,
+    // webhooks) see a stable identifier regardless of how the user typed it.
+    let cwd = if let Some(ref requested) = args.cwd {
+        warn_cwd_deprecated();
+        // Expand leading `~` / `~/` because shells (zsh, bash) do NOT expand a tilde
+        // that appears after `=` (e.g. `--cwd=~/foo` arrives literally). Only the
+        // user's own `~` is supported; `~user` is not.
+        let expanded = if requested == "~" {
+            dirs::home_dir()
+                .map(|h| h.to_string_lossy().to_string())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Invalid --cwd \"~\": cannot resolve home directory")
+                })?
+        } else if let Some(rest) = requested.strip_prefix("~/") {
+            let home = dirs::home_dir().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Invalid --cwd {:?}: cannot resolve home directory",
+                    requested
+                )
+            })?;
+            home.join(rest).to_string_lossy().to_string()
+        } else {
+            requested.clone()
+        };
+        let path = std::path::PathBuf::from(&expanded);
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| anyhow::anyhow!("Invalid --cwd {:?}: {}", requested, e))?;
+        if !canonical.is_dir() {
+            return Err(anyhow::anyhow!("--cwd {:?} is not a directory", requested));
+        }
+        canonical.to_string_lossy().to_string()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| anyhow::anyhow!("Failed to get current working directory: {}", e))?
+            .to_string_lossy()
+            .to_string()
+    };
 
     // Check for swarm mode (new --swarm flag or deprecated --experimental-swarm)
     if args.swarm.is_some() {
@@ -232,48 +232,8 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
         }
     }
 
-    // Build command arguments in the SAME order the TypeScript runtime builds
-    // them (ts/index.ts): default_args first, then user cli_args, then the
-    // prompt (front for `first-arg`, back for `last-arg`), then `-y` yolo args.
-    // Order matters for CLIs whose default_args are launcher flags that must
-    // precede the first positional — dsh-legacy needs `--profile headless` before the
-    // task it boots.
-    let mut cmd_args: Vec<String> = Vec::new();
-    cmd_args.extend(cli_config.default_args.iter().cloned());
-    cmd_args.extend(args.cli_args.iter().cloned());
-
-    // Wrap a SUB-agent's initial prompt in `<ay-init-msg …>` — the same
-    // attribution + reply route `ay send` puts on every later message, plus an
-    // explicit duty to report back when finished or stuck. Only the DELIVERED
-    // prompt is wrapped: `args.prompt` stays the raw task, so the registry (and
-    // therefore `ay ls`) still shows what this agent was actually asked to do.
-    // No-op for a top-level agent (no inherited AGENT_YES_PID). See init_msg.rs
-    // — the format is byte-identical to ts/initMsg.ts.
-    let delivered_prompt: Option<String> = args.prompt.as_ref().map(|raw| {
-        let spawner = std::env::var("AGENT_YES_PID")
-            .ok()
-            .and_then(|v| v.trim().parse::<u32>().ok())
-            .filter(|p| *p > 0)
-            .and_then(|parent| {
-                let records = PidStore::new().read_all().ok()?;
-                init_msg::spawner_from_records(&records, parent)
-            });
-
-        match spawner {
-            Some(s) => {
-                // The spawner runs on THIS host (we resolved it from a local
-                // wrapper pid), so the local user/host and its cwd's branch are
-                // the right defaults — same call ts/index.ts makes.
-                let ident = identity::format_identity(&identity::IdentityParts {
-                    cwd: &s.cwd,
-                    pid: s.pid,
-                    ..Default::default()
-                });
-                init_msg::build_init_msg(raw, &s, &init_msg::mint_nonce(), &ident)
-            }
-            None => raw.clone(),
-        }
-    });
+    // Build command arguments
+    let mut cmd_args = args.cli_args.clone();
 
     // Add prompt based on promptArg configuration.
     //
@@ -281,7 +241,7 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     // as an argv (that would run-and-exit, e.g. `bash -c`), it is typed into the
     // interactive session after the shell prompt is ready — see `initial_input`
     // below and its consumer in AgentContext::run_with_fifo.
-    if let Some(ref prompt) = delivered_prompt {
+    if let Some(ref prompt) = args.prompt {
         match cli_config.prompt_arg.as_str() {
             "first-arg" => {
                 cmd_args.insert(0, prompt.clone());
@@ -291,10 +251,8 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
             }
             "typed" => {}
             flag if flag.starts_with("--") || flag.starts_with("-") => {
-                // `--flag <prompt>` goes at the FRONT (matching ts/index.ts):
-                // `[flag, prompt, …default_args, …cli_args]`.
-                cmd_args.insert(0, prompt.clone());
-                cmd_args.insert(0, flag.to_string());
+                cmd_args.push(flag.to_string());
+                cmd_args.push(prompt.clone());
             }
             _ => {}
         }
@@ -303,10 +261,13 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     // For "typed" (shell) CLIs, carry the prompt into the run loop so it is typed
     // into the live session once ready; every other mode delivered it via argv.
     let initial_input = if cli_config.prompt_arg == "typed" {
-        delivered_prompt.clone()
+        args.prompt.clone()
     } else {
         None
     };
+
+    // Add default args
+    cmd_args.extend(cli_config.default_args.iter().cloned());
 
     // Add the per-CLI "yolo" args if -y was passed. Each CLI declares its own
     // (claude: --dangerously-skip-permissions; codex:
@@ -742,7 +703,7 @@ async fn run_swarm_mode(args: CliArgs, cwd: &str) -> Result<i32> {
 }
 
 #[cfg(test)]
-mod cwd_passthrough_tests {
+mod cwd_deprecation_tests {
     use super::{build_cwd_migration, shell_display_quote};
 
     fn args(parts: &[&str]) -> Vec<String> {
@@ -763,45 +724,26 @@ mod cwd_passthrough_tests {
         let msg = build_cwd_migration(
             "agent-yes",
             &args(&["--cli", "claude", "--cwd", "/ws/app", "-p", "fix"]),
-        )
-        .expect("--cwd before `--` should produce a hint");
-        assert!(
-            msg.contains("cd /ws/app && agent-yes --cli claude -p fix"),
-            "{msg}"
         );
-        assert!(msg.contains("--cwd is not an agent-yes flag"));
+        assert!(msg.contains("cd /ws/app && agent-yes --cli claude -p fix"), "{msg}");
+        assert!(msg.contains("--cwd is deprecated"));
     }
 
     #[test]
     fn strips_cwd_equals_form() {
-        let msg = build_cwd_migration("agent-yes", &args(&["--cwd=/tmp/x", "codex"])).unwrap();
+        let msg = build_cwd_migration("agent-yes", &args(&["--cwd=/tmp/x", "codex"]));
         assert!(msg.contains("cd /tmp/x && agent-yes codex"), "{msg}");
     }
 
     #[test]
     fn keeps_home_relative_dir_bare() {
-        let msg = build_cwd_migration("agent-yes", &args(&["--cwd", "~/ws/product"])).unwrap();
+        let msg = build_cwd_migration("agent-yes", &args(&["--cwd", "~/ws/product"]));
         assert!(msg.contains("cd ~/ws/product && agent-yes"), "{msg}");
     }
 
     #[test]
     fn placeholder_when_value_missing() {
-        let msg = build_cwd_migration("agent-yes", &args(&["--cli", "claude", "--cwd"])).unwrap();
+        let msg = build_cwd_migration("agent-yes", &args(&["--cli", "claude", "--cwd"]));
         assert!(msg.contains("cd <dir> && agent-yes --cli claude"), "{msg}");
-    }
-
-    #[test]
-    fn no_hint_when_cwd_is_absent() {
-        assert!(build_cwd_migration("agent-yes", &args(&["claude", "-p", "fix"])).is_none());
-    }
-
-    #[test]
-    fn no_hint_for_cwd_after_the_separator() {
-        // Past `--` the token is the CLI's or the prompt's, not a misplaced flag —
-        // and it is forwarded verbatim either way, so there is nothing to suggest.
-        assert!(
-            build_cwd_migration("agent-yes", &args(&["claude", "--", "--cwd", "/ws/app"]))
-                .is_none()
-        );
     }
 }

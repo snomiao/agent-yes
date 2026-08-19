@@ -72,18 +72,10 @@ jobs:
           # path filters). Dispatch it explicitly when the promoted batch
           # touches the site; deploy-agent-yes.yml is idempotent so a spurious
           # dispatch is merely a ~40s no-op redeploy.
-          #
-          # Pass the SHA we just promoted. Dispatching `--ref release` alone
-          # races our own push: measured 2026-08-09, this step promoted
-          # 8b4f24f→5f55ed9 and the deploy it launched 1.3s later ran at
-          # 8b4f24f — the pre-push tip. Prod redeployed the OLD site and went
-          # green, so the console served a stale service worker for hours with
-          # nothing red anywhere. --ref still selects the workflow file; the
-          # `sha` input decides what actually gets checked out and deployed.
           if [ -z "$CURRENT" ] || ! git diff --quiet "$CURRENT" "$TARGET" -- \
               lab/ui scripts/build-rgui.ts .github/workflows/deploy-agent-yes.yml; then
-            echo "Batch touches site paths — dispatching prod deploy for $TARGET."
-            gh workflow run deploy-agent-yes.yml --ref release -f sha="$TARGET"
+            echo "Batch touches site paths — dispatching prod deploy."
+            gh workflow run deploy-agent-yes.yml --ref release
           else
             echo "No site-path changes in this batch — deploy not needed."
           fi

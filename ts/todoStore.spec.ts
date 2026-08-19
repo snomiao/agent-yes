@@ -148,31 +148,6 @@ describe("TodoStore", () => {
     await expect(s.setAcceptanceCriteria("T99", "text")).rejects.toThrow(/no such task/);
   });
 
-  it("setOwner() reassigns a task, trimming the value and refusing an empty one", async () => {
-    const s = await openStore(TEST_ROOT);
-    const t = await s.create({ summary: "x", kind: "code" });
-    expect((await s.setOwner(t._id, "  lane-b  ")).owner).toBe("lane-b");
-    await expect(s.setOwner(t._id, "   ")).rejects.toThrow(/must not be empty/);
-    await expect(s.setOwner("T99", "lane-b")).rejects.toThrow(/no such task/);
-  });
-
-  it("setOwner() with expectedOwner refuses when the owner changed underneath — the lost-update guard `ay todo claim` relies on", async () => {
-    const s = await openStore(TEST_ROOT);
-    const t = await s.create({ summary: "contested", kind: "code" });
-
-    // Two claimers both read "unowned"; the first one writes.
-    await s.setOwner(t._id, "lane-a", null);
-    // The second one is still acting on its stale read, and must lose loudly
-    // rather than silently overwrite a claim it never saw.
-    await expect(s.setOwner(t._id, "lane-b", null)).rejects.toThrow(/owner changed to lane-a/);
-    expect(s.get(t._id)?.owner).toBe("lane-a");
-
-    // A claimer that DID see the current owner is allowed through.
-    expect((await s.setOwner(t._id, "lane-b", "lane-a")).owner).toBe("lane-b");
-    // And omitting expectedOwner skips the check entirely.
-    expect((await s.setOwner(t._id, "lane-c")).owner).toBe("lane-c");
-  });
-
   it("setAcceptanceCriteria() refuses WHITESPACE-only text too, and trims what it stores (codex-review round-8 Important: a blank-looking value must not silently pass as real criteria)", async () => {
     const s = await openStore(TEST_ROOT);
     const t = await s.create({ summary: "x", kind: "doc" });

@@ -121,9 +121,7 @@ mod tests {
     #[test]
     fn test_register_and_sweep_keeps_live_drops_dead() {
         // Isolate the registry under a temp HOME so we don't touch the real file.
-        let _guard = crate::log_files::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::log_files::ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let dir = tempfile::tempdir().unwrap();
         let prev = std::env::var_os("AGENT_YES_HOME");
         std::env::set_var("AGENT_YES_HOME", dir.path());

@@ -144,10 +144,7 @@
       }
 
       /* ---- left: list ---- */
-      /* position:relative anchors the floating "+ New agent" FAB (see .newbtn)
-         to this panel, so it rides the splitter instead of the viewport. */
       .left {
-        position: relative;
         display: flex;
         flex-direction: column;
         min-width: 0;
@@ -1056,81 +1053,25 @@
         margin-top: 16px;
       }
 
-      /* new-agent button (floating FAB) + spawn form (reuses the launch overlay shell) */
+      /* new-agent button (header) + spawn form (reuses the launch overlay shell) */
       .metaright {
         display: flex;
         align-items: center;
         gap: 10px;
       }
-      /* Floats over the bottom-right of the left panel and can be dragged
-         anywhere inside it (position persisted as right/bottom offsets — see the
-         drag IIFE near the splitter's). z-index sits above the list + its wire
-         overlay but below every modal/overlay, so it never covers a dialog.
-         The solid-accent look here is also the no-backdrop-filter fallback:
-         translucent without a blur behind it would be unreadable over rows. */
       .newbtn {
-        position: absolute;
-        right: 14px;
-        bottom: max(14px, var(--sab));
-        z-index: 10;
         background: var(--accent);
         color: var(--bg);
-        border: 1px solid transparent;
-        border-radius: 999px;
+        border: 0;
+        border-radius: 7px;
         font-weight: 600;
         font-size: 11.5px;
-        padding: 7px 14px;
+        padding: 4px 11px;
         cursor: pointer;
         line-height: 1.6;
-        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.28);
-        touch-action: none; /* pointermove must not be stolen by scroll-to-pan */
-        user-select: none;
-        -webkit-user-select: none;
-        -webkit-tap-highlight-color: transparent;
-        transition:
-          background 0.18s ease,
-          color 0.18s ease,
-          box-shadow 0.18s ease;
       }
       .newbtn:hover {
         filter: brightness(1.12);
-      }
-      .newbtn.dragging {
-        cursor: grabbing;
-        transition: none; /* follow the pointer 1:1, don't lag behind it */
-      }
-      /* Liquid-glass idle state, only where the platform can actually blur what's
-         behind the button (Safari/Chrome/Edge, and Firefox with the pref on).
-         Unfocused = translucent tinted glass with a specular rim; hover / keyboard
-         focus / drag snap it back to the opaque accent pill above. */
-      @supports (
-        ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) and
-          (background: color-mix(in srgb, red, blue))
-      ) {
-        .newbtn {
-          background: color-mix(in srgb, var(--accent) 16%, transparent);
-          color: var(--accent);
-          border-color: color-mix(in srgb, var(--fg) 18%, transparent);
-          -webkit-backdrop-filter: blur(14px) saturate(180%);
-          backdrop-filter: blur(14px) saturate(180%);
-          box-shadow:
-            0 4px 14px rgba(0, 0, 0, 0.22),
-            inset 0 1px 0 color-mix(in srgb, #fff 34%, transparent),
-            inset 0 -1px 0 color-mix(in srgb, #000 14%, transparent);
-        }
-        .newbtn:hover,
-        .newbtn:focus-visible,
-        .newbtn.dragging {
-          background: var(--accent);
-          color: var(--bg);
-          border-color: transparent;
-          box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
-        }
-      }
-      @media (prefers-reduced-motion: reduce) {
-        .newbtn {
-          transition: none;
-        }
       }
       .viewbtn {
         background: transparent;
@@ -1149,49 +1090,6 @@
       .viewbtn.on {
         color: var(--accent);
         border-color: var(--accent);
-      }
-      /* Settings (⚙) dropdown in the console toolbar — folds the view toggles
-         (subs/state/stale/ports/graph) behind one trigger to declutter the bar. */
-      .viewmenu {
-        position: relative;
-      }
-      .viewmenupanel {
-        position: absolute;
-        top: 30px;
-        right: 0;
-        z-index: 15;
-        background: var(--panel);
-        border: 1px solid var(--line);
-        border-radius: 8px;
-        padding: 4px;
-        min-width: 150px;
-        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
-      }
-      .viewmenupanel[hidden] {
-        display: none;
-      }
-      .viewmenuitem {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        width: 100%;
-        background: none;
-        border: none;
-        text-align: left;
-        font: inherit;
-        font-size: 12.5px;
-        color: var(--muted);
-        padding: 5px 8px;
-        border-radius: 6px;
-        cursor: pointer;
-        white-space: nowrap;
-      }
-      .viewmenuitem:hover {
-        background: var(--bg);
-        color: var(--fg);
-      }
-      .viewmenuitem.on {
-        color: var(--accent);
       }
       .lcard .nfield {
         margin-top: 12px;
@@ -1240,10 +1138,8 @@
         overflow-y: auto;
         flex: 1;
         min-height: 0;
-        /* clear the home-indicator / gesture bar so the last row stays tappable,
-           plus room for the floating New-agent FAB parked at the bottom-right —
-           without it the last row can never be scrolled out from under the button. */
-        padding-bottom: calc(var(--sab) + 60px);
+        /* clear the home-indicator / gesture bar so the last row stays tappable */
+        padding-bottom: var(--sab);
       }
       .row {
         padding: 11px 18px;
@@ -1963,81 +1859,6 @@
           display: flex;
         }
       }
-      /* Menu entries that only do anything in the single-column phone layout —
-         shown there, hidden everywhere else so they're never a dead control. */
-      .rmenuphone {
-        display: none;
-      }
-      @media (max-width: 720px) {
-        .rmenuphone {
-          display: flex;
-        }
-      }
-      /* ---- "islands" mode: edge-to-edge terminal under floating glass bars ----
-         Opt-in (⋯ → Edge-to-edge, or ?islands=1). Mobile only.
-
-         The header stops eating layout height: .log is pulled up by --headH so
-         the xterm grid starts at the very top of the pane and its scrollback
-         renders BEHIND a blurred, translucent .rhead. The grid only GROWS here —
-         the buffer stays bottom-anchored, so every line that was visible before
-         is still visible, and the rows we gained are older scrollback that now
-         lives under the glass. Nothing the user could read gets taken away.
-
-         The bottom bars deliberately do NOT get the same treatment, and that is
-         geometry rather than an unfinished edge: xterm repaints a fixed grid, so
-         the last grid row is always the live CLI input line. Bleeding the grid
-         under the key bar would put that input line behind it at scroll-bottom —
-         exactly the "terminal becomes unreachable" failure this feature has to
-         avoid. So the key bar and composer keep reserving their height in normal
-         flow (which is also what makes fit.fit() and fit.proposeDimensions() —
-         both measure the CONTENT box — keep the negotiated PTY clear of them),
-         and only pick up the glass styling.
-
-         Everything here is a paint-level change plus one negative margin, so the
-         non-islands layout is byte-for-byte what it was. */
-      @media (max-width: 720px) {
-        /* z-index (not just source order) is what puts the bars over the grid:
-           .log is already position:relative, so without this it would paint on
-           top of the header it is supposed to slide under. */
-        .app.islands .rhead,
-        .app.islands .keybar,
-        .app.islands .composer {
-          position: relative;
-          z-index: 12;
-          backdrop-filter: blur(18px) saturate(150%);
-          -webkit-backdrop-filter: blur(18px) saturate(150%);
-        }
-        .app.islands .rhead {
-          /* --headH is measured from #rhead by JS (see islandsBoot) — it moves
-             with the safe-area inset, the cwd line and long-title wrapping, so a
-             hard-coded height would clip or gap on half the devices. */
-          background: color-mix(in srgb, var(--bg) 55%, transparent);
-          border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
-        }
-        .app.islands .keybar,
-        .app.islands .composer {
-          background: color-mix(in srgb, var(--panel) 55%, transparent);
-        }
-        /* the two bars read as ONE island, so only the top one keeps a rule */
-        .app.islands .composer {
-          border-top: 0;
-        }
-        .app.islands .keybar {
-          border-top: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
-        }
-        /* the whole trick, in one line: bleed the terminal up under the header.
-           A negative margin on a flex item feeds back into flex sizing, so .log
-           ends up exactly --headH taller as well as --headH higher. */
-        .app.islands .log {
-          margin-top: calc(-1 * var(--headH, 0px));
-        }
-        /* The jump-to-latest pill is anchored to .log, which now starts above
-           the header — its own bottom offset is unaffected, but the peer-selection
-           overlay (.peer-overlay, inset:0 on .log) maps peer coords proportionally
-           across a box that is now taller than the peer's, so its "roughly here"
-           hint drifts by up to --headH in islands mode. It was already documented
-           as approximate; this makes it slightly more so. */
-      }
       /* Terminal right-click context menu: Copy the selection or fire a
          customizable quick command (e.g. /fork [selection]). Positioned at the
          cursor via inline top/left; clamped into the viewport by JS after mount. */
@@ -2165,71 +1986,36 @@
               <span id="count" class="count"></span>
             </span>
             <span class="metaright">
-              <span class="viewmenu">
-                <button
-                  id="viewmenubtn"
-                  class="viewbtn"
-                  title="view settings"
-                  aria-haspopup="true"
-                  aria-expanded="false"
-                >
-                  ⚙ Settings ▾
-                </button>
-                <div class="viewmenupanel" id="viewmenupanel" hidden>
-                  <button
-                    id="foldbtn"
-                    class="viewmenuitem"
-                    type="button"
-                    title="fold subagent trees"
-                  >
-                    ⊞ subs
-                  </button>
-                  <button id="sortbtn" class="viewmenuitem" type="button" title="cycle sort order">
-                    ⇅ state
-                  </button>
-                  <button
-                    id="stalebtn"
-                    class="viewmenuitem"
-                    type="button"
-                    role="checkbox"
-                    aria-checked="false"
-                    title="show stale stopped agents (exited over 5 minutes ago)"
-                  >
-                    ◌ stale
-                  </button>
-                  <button
-                    id="portsbtn"
-                    class="viewmenuitem"
-                    type="button"
-                    title="manage exposed localhost ports"
-                  >
-                    ⇄ ports
-                  </button>
-                  <button
-                    id="rguibtn"
-                    class="viewmenuitem"
-                    type="button"
-                    title="open the agent graph view (/r/) for this fleet"
-                  >
-                    ⌗ graph
-                  </button>
-                </div>
-              </span>
+              <button id="foldbtn" class="viewbtn" title="fold subagent trees">⊞ subs</button>
+              <button id="sortbtn" class="viewbtn" title="cycle sort order">⇅ state</button>
+              <button
+                id="stalebtn"
+                class="viewbtn"
+                role="checkbox"
+                aria-checked="false"
+                title="show stale stopped agents (exited over 5 minutes ago)"
+              >
+                ◌ stale
+              </button>
+              <button id="portsbtn" class="viewbtn" title="manage exposed localhost ports">
+                ⇄ ports
+              </button>
+              <button
+                id="rguibtn"
+                class="viewbtn"
+                title="open the agent graph view (/r/) for this fleet"
+              >
+                ⌗ graph
+              </button>
+              <button id="newbtn" class="newbtn" title="spawn a new agent on this fleet">
+                + New agent
+              </button>
               <span id="conn" class="connbadge" title="rooms — click to manage">● local</span>
             </span>
           </div>
           <div class="rooms" id="rooms" style="display: none"></div>
         </div>
         <div class="list" id="list"></div>
-        <!-- Floating spawn FAB: last child of .left so it paints over the list;
-             absolutely positioned + draggable inside the panel (see .newbtn). -->
-        <button
-          id="newbtn"
-          class="newbtn"
-          title="spawn a new agent on this fleet — drag to move the button"
-        >
-          + New agent
-        </button>
       </div>
 
       <div class="splitter" id="splitter" title="drag to resize"></div>
@@ -2279,10 +2065,6 @@
               <div class="rmenusep"></div>
               <label class="rmenuitem"
                 ><input type="checkbox" id="perfToggle" /> <span>Perf HUD</span></label
-              >
-              <label class="rmenuitem rmenuphone" title="let the terminal run under the title bar"
-                ><input type="checkbox" id="islandsToggle" />
-                <span>Edge-to-edge (beta)</span></label
               >
               <div class="rmenusep"></div>
               <button class="rmenuitem rmenuact" id="shareAgent" type="button">
@@ -2535,7 +2317,6 @@
         centerOffset,
         docTitle,
         omniScore,
-        createInputSender,
       } from "./console-logic.js";
       // The ay-share (rtc) remote-room transport lives in a shared module so the
       // /r/ rgui viewer reuses the exact same WebRTC + e2e wire (rtc.js imports
@@ -4322,13 +4103,13 @@
 
       // Wire the ⋯ overflow menu and restore the saved HUD preference.
       // Recovery actions for the SELECTED agent, both confirmed first (destructive):
-      //   Stop  — graceful: send the CLI's exit command (claude/codex /exit) + Enter
-      //           over the existing /api/send stdin wire. (Ctrl+C / Ctrl+C×2
+      //   Stop  — graceful: send the CLI's exit command (claude/codex /exit, gemini
+      //           /quit) + Enter over the existing /api/send stdin wire. (Ctrl+C / Ctrl+C×2
       //           you can already just type — and some agents rely on that pattern — so
       //           we don't reinvent it here.)
       //   Force — escalation a stuck agent can't ignore: a real SIGKILL of its process
       //           GROUP, server-side via POST /api/kill. Use when /exit does nothing.
-      const GRACEFUL_EXIT = { claude: "/exit", codex: "/exit" };
+      const GRACEFUL_EXIT = { claude: "/exit", codex: "/exit", gemini: "/quit" };
       // `ent` targets a specific agent (the Cmd+K /kill · /restart commands pass the
       // omnibox anchor); the ⋯-menu buttons omit it and act on the selected agent.
       async function stopAgent(force, ent) {
@@ -5531,7 +5312,6 @@ my.translate = async (text, lang) => {
           });
         }
         if (cb) cb.addEventListener("change", () => setPerfHud(cb.checked));
-        $("islandsToggle")?.addEventListener("change", (ev) => applyIslands(ev.target.checked));
         $("shareAgent")?.addEventListener("click", () => (closePanel(), shareAgent("r")));
         $("shareAgentRW")?.addEventListener("click", () => (closePanel(), shareAgent("rw")));
         $("stopAgent")?.addEventListener("click", () => (closePanel(), stopAgent(false)));
@@ -5546,27 +5326,6 @@ my.translate = async (text, lang) => {
           saved = localStorage.getItem("ay.perfHud") === "1";
         } catch {}
         setPerfHud(saved);
-      })();
-      (function viewMenuBoot() {
-        const btn = $("viewmenubtn"),
-          panel = $("viewmenupanel");
-        const closePanel = () => {
-          if (!panel) return;
-          panel.hidden = true;
-          btn?.setAttribute("aria-expanded", "false");
-        };
-        if (btn && panel) {
-          btn.addEventListener("click", (ev) => {
-            ev.stopPropagation();
-            panel.hidden = !panel.hidden;
-            btn.setAttribute("aria-expanded", String(!panel.hidden));
-          });
-          document.addEventListener("click", (ev) => {
-            if (!panel.hidden && !panel.contains(ev.target) && ev.target !== btn) closePanel();
-          });
-          // Any item click closes the dropdown after the item's own handler runs.
-          panel.addEventListener("click", closePanel);
-        }
       })();
 
       // The local source is only worth polling when this page is actually backed
@@ -6016,15 +5775,6 @@ my.translate = async (text, lang) => {
       // autoPidExplicit distinguishes the two: an explicit link opens the agent
       // even on mobile (it's a deliberate "take me here"), whereas a merely
       // restored selection only re-highlights the row on a phone — see loadList.
-      // ?islands=1 / =0 — read and persisted HERE, before the ?pid= handler just
-      // below replaceState()s the query string away. islandsBoot runs hundreds of
-      // lines later, by which point location.search would be empty on a ?pid= link.
-      const ISLANDS_KEY = "ay.islands";
-      try {
-        const q = new URLSearchParams(location.search).get("islands");
-        if (q === "1" || q === "0") localStorage.setItem(ISLANDS_KEY, q);
-      } catch {}
-
       let autoPid = new URLSearchParams(location.search).get("pid");
       let autoPidExplicit = !!autoPid;
       if (autoPid) {
@@ -6577,20 +6327,12 @@ my.translate = async (text, lang) => {
         // keyword MUST be a string — ay serve's POST /api/send rejects a numeric
         // keyword with 400 (pid arrives as a number from /api/ls JSON).
         const kw = String(pid);
-        // One /api/send in flight at a time for this agent. A request per
-        // keystroke let a fast typist have several racing at once, and nothing
-        // in any transport (fetch / mux / RTC) — nor in the host's
-        // resolve-then-write handler — kept them in order, so characters
-        // arrived transposed. See createInputSender in console-logic.js.
-        const input = createInputSender((msg) =>
-          tx.post("/api/send", { keyword: kw, msg, code: "none" }),
-        );
         const fwd = (d) => {
           if (sel !== e._key) return; // ignore a stale terminal mid-switch
           // a soft-keyboard character may be decorated by an armed sticky Ctrl/Alt
           if (typeof d === "string") d = applyStickyMods(d);
           perfNote("in", typeof d === "string" ? d.length : (d?.byteLength ?? 0));
-          input.push(d);
+          tx.post("/api/send", { keyword: kw, msg: d, code: "none" }).catch(() => {});
         };
         term.onData(fwd);
         term.onBinary(fwd);
@@ -6864,58 +6606,6 @@ my.translate = async (text, lang) => {
         vv.addEventListener("scroll", onVV);
         onVV();
       }
-      // ── "islands" mode: run the terminal edge-to-edge under a glass title bar ──
-      // The CSS (search "islands mode") does the painting; all this owns is the
-      // one number the CSS can't compute, --headH, and the flag that turns it on.
-      //
-      // It stays OFF by default on purpose: the negative margin makes the pane
-      // taller, which grows the grid, which the presence loop reports as capacity
-      // and the host turns into a taller PTY — a change every viewer of that agent
-      // feels. That's fine when it's asked for and rude when it isn't, so it takes
-      // an explicit opt-in (⋯ menu, or ?islands=1 / ?islands=0 to flip and persist).
-      let islandsOn = false;
-      function measureIslands() {
-        // Returns true when the reserved header height actually moved — callers
-        // use that to avoid a refit (and its presence post) on every observer tick.
-        const app = document.querySelector(".app");
-        if (!app) return false;
-        const rh = $("rhead");
-        // offsetParent is null while #rhead is display:none (no agent selected),
-        // which is also exactly when there is no header to hide under.
-        const h = islandsOn && rh && rh.offsetParent ? Math.round(rh.offsetHeight) : 0;
-        const next = h + "px";
-        if (app.style.getPropertyValue("--headH") === next) return false;
-        app.style.setProperty("--headH", next);
-        return true;
-      }
-      function applyIslands(on) {
-        islandsOn = !!on;
-        const app = document.querySelector(".app");
-        if (app) app.classList.toggle("islands", islandsOn);
-        const cb = $("islandsToggle");
-        if (cb) cb.checked = islandsOn;
-        try {
-          localStorage.setItem(ISLANDS_KEY, islandsOn ? "1" : "0");
-        } catch {}
-        measureIslands();
-        refitPane(); // the pane changed height either way — renegotiate the grid
-      }
-      (function islandsBoot() {
-        let want = null;
-        try {
-          want = localStorage.getItem(ISLANDS_KEY); // ?islands= already landed here
-        } catch {}
-        applyIslands(want === "1");
-        // The header grows and shrinks on its own (title wrap, cwd line, the
-        // read-only badge appearing, safe-area on rotate), so poll it with an
-        // observer rather than measuring once at boot.
-        const rh = $("rhead");
-        if (rh && window.ResizeObserver) {
-          new ResizeObserver(() => {
-            if (measureIslands()) refitPane();
-          }).observe(rh);
-        }
-      })();
       // ── mobile two-finger gestures on the terminal: pan = scroll, pinch = zoom ──
       // One finger now SELECTS (see touchSelBoot), so scrolling moves to two
       // fingers. The two are discriminated by what actually changes once the
@@ -8292,7 +7982,6 @@ my.translate = async (text, lang) => {
         const res = await target.tx.post("/api/spawn", {
           cli: spec.cli || "claude",
           from: spec.from || undefined,
-          branch: spec.branch || undefined,
           create: spec.create || undefined,
           fork: spec.fork || undefined,
           cwd: spec.cwd || undefined,
@@ -8351,7 +8040,15 @@ my.translate = async (text, lang) => {
       // picker (options from /api/spawn-config `clis`), preselected from the
       // chain: selected agent's cli → last used cli → explicit user pick.
       const LAST_CLI_KEY = "ay.lastSpawnCli";
-      const CLI_FALLBACK = ["claude", "codex", "copilot", "cursor-agent", "goose", "aider"];
+      const CLI_FALLBACK = [
+        "claude",
+        "codex",
+        "gemini",
+        "copilot",
+        "cursor-agent",
+        "goose",
+        "aider",
+      ];
       function cliOptions(clis, preferred) {
         const list = clis && clis.length ? clis : CLI_FALLBACK;
         const has = preferred && list.includes(preferred);
@@ -8407,10 +8104,11 @@ my.translate = async (text, lang) => {
         $("newform").innerHTML = `<div class="lcard">
       <div class="ltitle">New agent · ${esc(sourceLabel(target) || "local")}</div>
       ${hostRow}
-      <div class="nfield"><label>Working dir</label><input id="nf-cwd" list="nf-cwd-list" value="${esc(cwd)}" placeholder="(host default — ignored when a Provision repo is set)" spellcheck="false" autocapitalize="off" /><datalist id="nf-cwd-list">${cwdOptions(target ? target.id : "")}</datalist></div>
+      <div class="nfield"><label>Working dir</label><input id="nf-cwd" list="nf-cwd-list" value="${esc(cwd)}" placeholder="(host default — ignored when Spawn from is set)" spellcheck="false" autocapitalize="off" /><datalist id="nf-cwd-list">${cwdOptions(target ? target.id : "")}</datalist></div>
       <div class="nfield"><label>CLI</label><select id="nf-cli">${cliOptions(null, preferredCli)}</select></div>
-      <div class="nfield"><label>Provision repo — optional</label><input id="nf-repo" list="nf-repo-list" placeholder="owner/repo · github URL · git URL (gitlab etc.) — provisions a worktree" spellcheck="false" autocapitalize="off" /><datalist id="nf-repo-list"></datalist><div class="lhint" id="nf-repo-hint" style="display:none"></div></div>
+      <div class="nfield"><label>Provision repo — optional</label><select id="nf-repo"><option value="" selected>(none — use working dir or spawn-from)</option></select></div>
       <div class="nfield" id="nf-branch-row" style="display:none"><label>Branch</label><input id="nf-branch" list="nf-branch-list" placeholder="(repo default) — pick one, or type a new name to create it" spellcheck="false" autocapitalize="off" /><datalist id="nf-branch-list"></datalist><div class="lhint" id="nf-branch-hint" style="display:none"></div></div>
+      <div class="nfield"><label>Spawn from — optional</label><input id="nf-from" placeholder="github URL / owner/repo@branch — provisions a worktree" spellcheck="false" autocapitalize="off" /></div>
       <div class="nfield"><label>Prompt — optional</label><textarea id="nf-prompt" rows="3" placeholder="initial message to send the agent…"></textarea></div>
       <div class="lrow">
         <button class="lfleet" id="nf-go">▷ Launch</button>
@@ -8429,92 +8127,29 @@ my.translate = async (text, lang) => {
           showHook(sources.get(ev.target.value));
           loadRepoPicker(sources.get(ev.target.value));
         });
-        $("nf-repo")?.addEventListener("change", onRepoChange);
+        $("nf-repo")?.addEventListener("change", () => {
+          const repo = $("nf-repo").value;
+          const row = $("nf-branch-row");
+          if (row) row.style.display = repo ? "" : "none";
+          if (repo) loadBranchPicker(spawnTarget($("newform").dataset.room), repo);
+          else nfRemoteBranches = null;
+        });
         $("nf-branch-row")?.addEventListener("input", (ev) => {
-          if (ev.target.id === "nf-branch") {
-            updateBranchHint();
-            updateProvisionCwd();
-          }
+          if (ev.target.id === "nf-branch") updateBranchHint();
         });
         showHook(target);
         loadRepoPicker(target);
       }
 
-      // ---- provisioning picker (repo combobox → branch) for the New-agent form
-      // The repo field is a COMBOBOX: a datalist filled from the target host's
-      // /api/ws/repos (local checkouts + gh-visible repos), but free text always
-      // works — owner/repo, a full github URL (repo or /tree/<branch> URL), or
-      // any other git URL (gitlab etc. — the host raw-`git clone`s those).
-      // The listing endpoints are best-effort; a fetch failure just leaves the
-      // datalist empty and shows a short hint, manual input still provisions.
+      // ---- provisioning picker (repo → branch) for the New-agent form -------
+      // Data comes from the target host's /api/ws/repos and /api/ws/branches.
+      // Both are best-effort on the server (gh may be unauthenticated); here a
+      // fetch failure just leaves the pickers empty — the free-text "Spawn
+      // from" field still works.
       let nfRemoteBranches = null; // Set of remote branch names for the picked repo
-      let nfWsRoot = ""; // target host's workspace root (from /api/ws/repos)
-
-      // What the repo field's text means. github-first: bare owner/repo IS a
-      // github repo; only scheme/git@ inputs on other hosts become raw git URLs.
-      function parseRepoInput(v) {
-        v = (v || "").trim();
-        if (!v) return null;
-        let m =
-          /^https?:\/\/github\.com\/([^/\s]+)\/([^/\s]+?)(?:\.git)?(?:\/tree\/([^\s?#]+))?\/?$/i.exec(
-            v,
-          );
-        if (m) return { kind: "github", owner: m[1], repo: m[2], branch: m[3] || "" };
-        m = /^git@github\.com:([^/\s]+)\/([^/\s]+?)(?:\.git)?$/i.exec(v);
-        if (m) return { kind: "github", owner: m[1], repo: m[2], branch: "" };
-        m = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(v);
-        if (m && m[1] !== "." && m[1] !== "..")
-          return { kind: "github", owner: m[1], repo: m[2], branch: "" };
-        if (/^(git@[^:\s]+:|ssh:\/\/|git:\/\/|https?:\/\/)\S+$/.test(v)) {
-          // owner/repo from the last two path segments — where the server's
-          // raw-clone path will place the checkout in the standard layout
-          const segs = v
-            .replace(/\/+$/, "")
-            .replace(/\.git$/, "")
-            .split(/[/:]/)
-            .filter(Boolean);
-          return {
-            kind: "git",
-            url: v.replace(/\/+$/, ""),
-            owner: segs.length >= 2 ? segs[segs.length - 2] : "",
-            repo: segs.length >= 2 ? segs[segs.length - 1] : "",
-          };
-        }
-        return null;
-      }
-
-      // While a provision source is picked, the Working dir is DERIVED — show
-      // the ws-standard target <wsRoot>/<owner>/<repo>/tree/<branch> and lock
-      // the field so it can't read as "clone into whatever dir was there".
-      // Cleared → unlock and restore what the user had typed.
-      function updateProvisionCwd() {
-        const cwdEl = $("nf-cwd");
-        if (!cwdEl) return;
-        const parsed = parseRepoInput($("nf-repo")?.value || "");
-        if (!parsed || !parsed.owner || !parsed.repo) {
-          if (cwdEl.disabled) {
-            cwdEl.disabled = false;
-            cwdEl.value = cwdEl.dataset.userCwd || "";
-          }
-          return;
-        }
-        if (!cwdEl.disabled) cwdEl.dataset.userCwd = cwdEl.value;
-        let br = ($("nf-branch")?.value || "").trim() || parsed.branch || "";
-        if (!br && nfRemoteBranches) {
-          br = nfRemoteBranches.has("main")
-            ? "main"
-            : nfRemoteBranches.has("master")
-              ? "master"
-              : "";
-        }
-        cwdEl.disabled = true;
-        cwdEl.value = `${nfWsRoot || "~/ws"}/${parsed.owner}/${parsed.repo}/tree/${br || "…"}`;
-      }
       function loadRepoPicker(target) {
-        const dl = $("nf-repo-list");
-        const hint = $("nf-repo-hint");
-        if (!dl) return;
-        if (!target?.tx?.fetchJSON) return;
+        const selEl = $("nf-repo");
+        if (!selEl || !target?.tx?.fetchJSON) return;
         const forId = target.id;
         target.tx
           .fetchJSON("/api/ws/repos")
@@ -8522,52 +8157,18 @@ my.translate = async (text, lang) => {
             // a slow answer for a host the user switched away from must not
             // paint the new host's repo list (same guard as showHook)
             if ($("newform").dataset.room !== forId) return;
-            nfWsRoot = (d && d.wsRoot) || "";
-            updateProvisionCwd();
+            const cur = selEl.value;
             const repos = (d && d.repos) || [];
-            dl.innerHTML = repos
-              .map(
-                (r) =>
-                  `<option value="${esc(`${r.owner}/${r.repo}`)}">${r.local ? "provisioned" : "gh"}</option>`,
-              )
-              .join("");
-            if (hint && d && d.gh && !d.gh.ok && d.gh.error) {
-              hint.textContent = `gh listing unavailable (${d.gh.error}) — type a repo or URL`;
-              hint.style.display = "";
-            } else if (hint) hint.style.display = "none";
+            selEl.innerHTML =
+              `<option value="">(none — use working dir or spawn-from)</option>` +
+              repos
+                .map((r) => {
+                  const full = `${r.owner}/${r.repo}`;
+                  return `<option value="${esc(full)}"${full === cur ? " selected" : ""}>${esc(full)}${r.local ? "" : " (gh)"}</option>`;
+                })
+                .join("");
           })
-          .catch(() => {
-            if ($("newform").dataset.room !== forId) return;
-            if (hint) {
-              hint.textContent =
-                "repo list unavailable on this host — type owner/repo or a git URL";
-              hint.style.display = "";
-            }
-          });
-      }
-      function onRepoChange() {
-        const parsed = parseRepoInput($("nf-repo")?.value || "");
-        const row = $("nf-branch-row");
-        const hint = $("nf-branch-hint");
-        nfRemoteBranches = null;
-        if (row) row.style.display = parsed ? "" : "none";
-        updateProvisionCwd();
-        if (!parsed) return;
-        if (parsed.kind === "github") {
-          if (parsed.branch && $("nf-branch")) $("nf-branch").value = parsed.branch;
-          loadBranchPicker(
-            spawnTarget($("newform").dataset.room),
-            `${parsed.owner}/${parsed.repo}`,
-          );
-        } else {
-          const dl = $("nf-branch-list");
-          if (dl) dl.innerHTML = "";
-          if (hint) {
-            hint.textContent =
-              "non-GitHub git URL — the host runs a raw `git clone`; branch optional (a new name creates it)";
-            hint.style.display = "";
-          }
-        }
+          .catch(() => {});
       }
       function loadBranchPicker(target, repo) {
         const dl = $("nf-branch-list");
@@ -8583,9 +8184,7 @@ my.translate = async (text, lang) => {
         target.tx
           .fetchJSON("/api/ws/branches?repo=" + encodeURIComponent(repo))
           .then((d) => {
-            // user picked another repo meanwhile (value may be a URL — normalize)
-            const cur = parseRepoInput($("nf-repo")?.value || "");
-            if (!cur || cur.kind !== "github" || `${cur.owner}/${cur.repo}` !== want) return;
+            if ($("nf-repo")?.value !== want) return; // user picked another repo meanwhile
             const branches = (d && d.branches) || [];
             nfRemoteBranches = new Set(branches.filter((b) => b.remote).map((b) => b.name));
             if (dl)
@@ -8596,7 +8195,6 @@ my.translate = async (text, lang) => {
                 )
                 .join("");
             updateBranchHint(d && d.error);
-            updateProvisionCwd();
           })
           .catch(() => {
             if (hint) hint.textContent = "branch list unavailable — type a branch name";
@@ -8660,37 +8258,23 @@ my.translate = async (text, lang) => {
         try {
           localStorage.setItem(LAST_CLI_KEY, cli);
         } catch {}
-        // The repo combobox decides provisioning: a github repo [+ branch]
-        // becomes a `from` spec (a branch name that isn't on the remote asks
-        // the server to create it — create:true, ws new --create); any other
-        // git URL is sent as-is with the branch alongside (raw clone path).
-        let from = "";
-        let branch = "";
+        // The repo/branch pickers win over the free-text "Spawn from" field:
+        // picked repo [+ branch] → a `from` spec; a branch name that isn't on
+        // the remote asks the server to create it (create:true, ws new --create).
+        let from = $("nf-from")?.value.trim() || "";
         let create = false;
-        const parsed = parseRepoInput($("nf-repo")?.value || "");
-        const br = ($("nf-branch")?.value || "").trim();
-        if (parsed && parsed.kind === "github") {
-          from = br ? `${parsed.owner}/${parsed.repo}@${br}` : `${parsed.owner}/${parsed.repo}`;
+        const pickedRepo = $("nf-repo")?.value || "";
+        if (pickedRepo) {
+          const br = ($("nf-branch")?.value || "").trim();
+          from = br ? `${pickedRepo}@${br}` : pickedRepo;
           // Unknown remote list (fetch failed) → still send create: the server
           // only uses it after the branch turns out missing, so it's harmless
           // for existing branches and saves an un-actionable 502 for new ones.
           create = !!(br && (!nfRemoteBranches || !nfRemoteBranches.has(br)));
-        } else if (parsed && parsed.kind === "git") {
-          from = parsed.url;
-          branch = br;
-          create = !!br;
-        } else if ($("nf-repo")?.value.trim()) {
-          // unparseable text must not silently fall through to a plain-cwd spawn
-          $("nf-repo").focus();
-          alert(
-            "Provision repo not recognized — use owner/repo, a github URL, or a git URL (git@… / https://…)",
-          );
-          return;
         }
         const spec = {
           cli,
           from,
-          branch,
           create,
           // a provision spec decides the cwd server-side — don't send a stale one
           cwd: from ? "" : $("nf-cwd").value.trim(),
@@ -9037,115 +8621,6 @@ my.translate = async (text, lang) => {
         };
         sp.addEventListener("pointerup", end);
         sp.addEventListener("pointercancel", end);
-      })();
-
-      // ---- draggable floating "+ New agent" FAB ------------------------------
-      // The button floats over the bottom-right of the left panel and can be
-      // parked anywhere inside it. The position is stored as offsets from the
-      // panel's RIGHT/BOTTOM edges (not left/top) so it stays put when the
-      // splitter resizes the panel or the layout flips to the mobile column.
-      (function () {
-        const btn = $("newbtn");
-        const left = document.querySelector(".left");
-        if (!btn || !left) return;
-        const KEY = "ay.newbtnPos";
-        const EDGE = 8; // never let the button hang off the panel
-        const THRESH = 5; // px of travel before a press counts as a drag
-        let pos = null; // {r,b} the user's intent, pre-clamp
-        let drag = null;
-        let suppressClick = false;
-
-        // Clamp against the CURRENT panel box on every apply: a saved position
-        // from a wide panel must not push the button out of a narrow one, but
-        // `pos` keeps the original intent so widening restores it.
-        function apply() {
-          if (!pos) return;
-          const lr = left.getBoundingClientRect();
-          if (!lr.width || !lr.height) return; // panel hidden (mobile detail view)
-          const maxR = Math.max(EDGE, lr.width - btn.offsetWidth - EDGE);
-          const maxB = Math.max(EDGE, lr.height - btn.offsetHeight - EDGE);
-          btn.style.right = Math.min(Math.max(pos.r, EDGE), maxR) + "px";
-          btn.style.bottom = Math.min(Math.max(pos.b, EDGE), maxB) + "px";
-        }
-
-        try {
-          const s = JSON.parse(localStorage.getItem(KEY) || "null");
-          if (s && isFinite(s.r) && isFinite(s.b)) pos = { r: +s.r, b: +s.b };
-        } catch {}
-        apply();
-        // Re-clamp whenever the panel box changes — window resize, splitter drag
-        // (which never fires a window resize), or the mobile column flip.
-        if (typeof ResizeObserver === "function") new ResizeObserver(apply).observe(left);
-        else addEventListener("resize", apply);
-
-        btn.addEventListener("pointerdown", (e) => {
-          if (e.pointerType === "mouse" && e.button !== 0) return;
-          const lr = left.getBoundingClientRect();
-          const br = btn.getBoundingClientRect();
-          drag = {
-            id: e.pointerId,
-            x: e.clientX,
-            y: e.clientY,
-            r: lr.right - br.right,
-            b: lr.bottom - br.bottom,
-            moved: false,
-          };
-          suppressClick = false;
-          try {
-            btn.setPointerCapture(e.pointerId);
-          } catch {}
-        });
-
-        btn.addEventListener("pointermove", (e) => {
-          if (!drag || e.pointerId !== drag.id) return;
-          const dx = e.clientX - drag.x;
-          const dy = e.clientY - drag.y;
-          if (!drag.moved) {
-            if (Math.abs(dx) + Math.abs(dy) < THRESH) return;
-            drag.moved = true;
-            btn.classList.add("dragging");
-          }
-          e.preventDefault(); // no text selection / scroll chaining mid-drag
-          pos = { r: drag.r - dx, b: drag.b - dy };
-          apply();
-        });
-
-        const end = (e) => {
-          if (!drag || e.pointerId !== drag.id) return;
-          const moved = drag.moved;
-          drag = null;
-          btn.classList.remove("dragging");
-          try {
-            btn.releasePointerCapture(e.pointerId);
-          } catch {}
-          if (!moved) return;
-          // Persist what's actually on screen (the clamped value), so a later
-          // resize can't spring the button back to somewhere off-panel.
-          pos = { r: parseFloat(btn.style.right) || EDGE, b: parseFloat(btn.style.bottom) || EDGE };
-          try {
-            localStorage.setItem(KEY, JSON.stringify(pos));
-          } catch {}
-          suppressClick = true; // pointerup on a <button> still emits a click
-        };
-        btn.addEventListener("pointerup", end);
-        btn.addEventListener("pointercancel", end);
-
-        // Swallow the click a finished drag synthesizes. It has to be a CAPTURE
-        // listener on an ancestor: capture on document runs before the target's
-        // own bubble listener (showNew), which was registered first and would
-        // otherwise win.
-        document.addEventListener(
-          "click",
-          (e) => {
-            if (!suppressClick) return;
-            suppressClick = false;
-            if (e.target === btn || btn.contains(e.target)) {
-              e.stopPropagation();
-              e.preventDefault();
-            }
-          },
-          true,
-        );
       })();
       boot();
     </script>

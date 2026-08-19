@@ -170,9 +170,9 @@ describe("projectRecord", () => {
   });
 
   it("reads Codex event messages and ignores duplicate response_items", () => {
-    expect(
-      projectRecord(codexEvent("agent_message", "hi", "2026-08-03T01:00:00Z"), "codex"),
-    ).toEqual({ ts: "2026-08-03T01:00:00Z", role: "assistant", text: "hi" });
+    expect(projectRecord(codexEvent("agent_message", "hi", "2026-08-03T01:00:00Z"), "codex")).toEqual(
+      { ts: "2026-08-03T01:00:00Z", role: "assistant", text: "hi" },
+    );
     const dup = JSON.stringify({
       timestamp: "2026-08-03T01:00:00Z",
       type: "response_item",
@@ -191,11 +191,7 @@ describe("projectRecord", () => {
 describe("discoverTranscripts", () => {
   it("finds both sources and filters Claude by cwd slug", async () => {
     await writeClaudeSession("s1", [claudeTurn("user", "a", "2026-08-01T00:00:00Z")]);
-    await writeClaudeSession(
-      "s2",
-      [claudeTurn("user", "b", "2026-08-01T00:00:00Z")],
-      "/other/repo",
-    );
+    await writeClaudeSession("s2", [claudeTurn("user", "b", "2026-08-01T00:00:00Z")], "/other/repo");
     await writeCodexSession("c1", [codexEvent("user_message", "c", "2026-08-03T00:00:01Z")]);
 
     const all = await discoverTranscripts({ home });

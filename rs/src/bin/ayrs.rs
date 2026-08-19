@@ -13,25 +13,19 @@ mod pid_store;
 // `ay ls` exactly instead of re-deriving its own heuristics.
 #[path = "../config_loader.rs"]
 mod config_loader;
-#[path = "../fifo.rs"]
-mod fifo;
 #[path = "../log_files.rs"]
 mod log_files;
-#[path = "../reaper.rs"]
-mod reaper;
-#[path = "../serve/mod.rs"]
-mod serve;
+#[path = "../fifo.rs"]
+mod fifo;
 #[path = "../vterm.rs"]
 mod vterm;
+#[path = "../serve/mod.rs"]
+mod serve;
 
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(
-    name = "ayrs",
-    version,
-    about = "agent-yes Rust serve daemon (experimental)"
-)]
+#[command(name = "ayrs", version, about = "agent-yes Rust serve daemon (experimental)")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -68,9 +62,6 @@ enum ServeAction {
     Install,
     /// Stop and deregister the service
     Uninstall,
-    /// Bounce the installed service (picks up a rebuilt binary; keeps the unit,
-    /// the room and boot-autostart exactly as they are)
-    Restart,
     /// Show whether the service is installed and running
     Status,
 }
@@ -79,32 +70,15 @@ enum ServeAction {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Serve {
-            webrtc,
-            sighost,
-            action,
-            port,
-        } => {
+        Command::Serve { webrtc, sighost, action, port } => {
             match action {
                 // Service management never needs a room up front: the unit
                 // re-runs `ayrs serve --webrtc` which loads/mints as usual.
                 Some(ServeAction::Install) => return serve::service::install(&webrtc, &sighost),
                 Some(ServeAction::Uninstall) => return serve::service::uninstall(),
-                Some(ServeAction::Restart) => return serve::service::restart(),
                 Some(ServeAction::Status) => return serve::service::status(),
                 None => {}
             }
-            // Recover the login-shell env in the background now, so the first
-            // /api/spawn doesn't pay the shell's rc-file startup cost (see
-            // serve/shell_env.rs — launchd hands us a bare PATH).
-            serve::shell_env::warm();
-
-            // Sweep the orphan-reaper registry on startup: kill the recorded
-            // process group of any PRIOR agent whose wrapper died without its
-            // own cleanup. Mirrors rs/src/main.rs. Also the defense layer that
-            // eventually clears any zombie an old (pre-fix) daemon left behind.
-            reaper::sweep();
-
             // --port and --webrtc are independent transports over the SAME API
             // surface; running both is the normal local+remote setup.
             let http = port.map(|p| tokio::spawn(serve::http::run(p)));
@@ -119,11 +93,7 @@ async fn main() -> anyhow::Result<()> {
                         &Some(webrtc.clone()),
                         &sighost,
                     ));
-                    let url = if webrtc.is_empty() {
-                        None
-                    } else {
-                        Some(webrtc)
-                    };
+                    let url = if webrtc.is_empty() { None } else { Some(webrtc) };
                     serve::share::run_share(serve::share::ShareConfig { url, sighost }).await
                 }
                 None => match http {

@@ -28,22 +28,13 @@ function shortTime(ts: string | null): string {
   return sameDay ? hhmm : `${d.toISOString().slice(5, 10)} ${hhmm}`;
 }
 
-/**
- * Collapse a turn to `max` chars, noting how much was withheld.
- *
- * `color` gates the dim tint on that note. Everything else in the renderer
- * already honours it, but this note hardcoded the escapes — so `ay hist | cat`
- * stayed clean only until a turn was long enough to truncate, i.e. the common
- * case. Defaults true so a direct `snippet()` call keeps its old look.
- */
-export function snippet(text: string, max: number, color = true): string {
+/** Collapse a turn to `max` chars, noting how much was withheld. */
+export function snippet(text: string, max: number): string {
   const trimmed = text.trim();
   if (max <= 0 || trimmed.length <= max) return trimmed;
   const head = trimmed.slice(0, max);
   const hiddenLines = trimmed.slice(max).split("\n").length;
-  const dim = color ? DIM : "";
-  const off = color ? RESET : "";
-  return `${head}… ${dim}(+${trimmed.length - max} chars, ${hiddenLines} more lines)${off}`;
+  return `${head}… ${DIM}(+${trimmed.length - max} chars, ${hiddenLines} more lines)${RESET}`;
 }
 
 export function renderRecord(r: HistRecord, opts: { color: boolean; max: number }): string {
@@ -51,7 +42,7 @@ export function renderRecord(r: HistRecord, opts: { color: boolean; max: number 
   const tint = opts.color ? (r.role === "user" ? CYAN : GREEN) : "";
   const dim = opts.color ? DIM : "";
   const off = opts.color ? RESET : "";
-  const body = snippet(r.text, opts.max, opts.color)
+  const body = snippet(r.text, opts.max)
     .split("\n")
     .map((l) => `  ${l}`)
     .join("\n");

@@ -190,6 +190,7 @@ mod tests {
 
     #[test]
     fn test_compact_tail_keeps_trailing_bytes_in_place() {
+        use std::os::unix::fs::MetadataExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("big.raw.log");
         // 300 KiB of distinct lines; compact to the last 64 KiB.
@@ -197,15 +198,7 @@ mod tests {
             .flat_map(|i| format!("{:015}\n", i).into_bytes())
             .collect();
         fs::write(&path, &body).unwrap();
-        // Unix-only: `MetadataExt::ino` does not exist on Windows, and importing it
-        // unconditionally made the whole test binary fail to COMPILE there — so no
-        // cargo test could run on Windows at all. Gate just the inode check; every
-        // byte-level assertion below stays live on all platforms.
-        #[cfg(unix)]
-        let ino_before = {
-            use std::os::unix::fs::MetadataExt;
-            fs::metadata(&path).unwrap().ino()
-        };
+        let ino_before = fs::metadata(&path).unwrap().ino();
         let keep = 64 * 1024;
         let len = compact_tail(&path, keep).unwrap();
         assert_eq!(len, keep);
@@ -214,11 +207,7 @@ mod tests {
         // The kept bytes are the file's true tail.
         assert_eq!(&on_disk[..], &body[body.len() - keep as usize..]);
         // Same inode — in-place, so live-tail followers keep their fd valid.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::MetadataExt;
-            assert_eq!(fs::metadata(&path).unwrap().ino(), ino_before);
-        }
+        assert_eq!(fs::metadata(&path).unwrap().ino(), ino_before);
     }
 
     #[test]
@@ -237,11 +226,7 @@ mod tests {
         let size = fs::metadata(&path).unwrap().len();
         // File was compacted, not left to grow past the trigger.
         assert!(size <= COMPACT_TRIGGER_BYTES, "size {} not capped", size);
-        assert!(
-            size >= COMPACT_KEEP_BYTES,
-            "size {} unexpectedly tiny",
-            size
-        );
+        assert!(size >= COMPACT_KEEP_BYTES, "size {} unexpectedly tiny", size);
         // Most recent output is retained.
         let mut tail = vec![0u8; 32];
         let mut f = fs::File::open(&path).unwrap();

@@ -32,13 +32,6 @@ const SUB: &str = "ay-signal-1";
 pub const DEFAULT_SIGHOST: &str = "s.agent-yes.com";
 const HOST_HEARTBEAT_MS: u64 = 20_000;
 const SIG_REFRESH_MS: u64 = 4 * 60_000;
-/// Ceiling on one peer's WebRTC setup / answer handling. webrtc-rs can block
-/// indefinitely on its internal locks; without a ceiling a single stuck peer
-/// leaks its task and its UDP sockets forever. Generous — this is a crash
-/// barrier, not a latency budget.
-const PEER_OP_TIMEOUT_MS: u64 = 30_000;
-/// Ceiling on tearing one peer down, for the same reason.
-const PEER_CLOSE_TIMEOUT_MS: u64 = 10_000;
 const STUN_URL: &str = "stun:stun.l.google.com:19302";
 const MAX_ROTATES: u32 = 5;
 
@@ -167,25 +160,6 @@ struct PeerCrypto {
 
 type Peers = Arc<Mutex<HashMap<String, Peer>>>;
 
-/// One peer's serialized work queue. The signaling loop only ever *sends* these
-/// — it never awaits WebRTC work itself (see `dispatch_signal`).
-enum PeerCmd {
-    /// Build the RTCPeerConnection and send the offer (`peer-join`).
-    Start,
-    /// Apply the browser's answer SDP and derive the direction keys.
-    Answer(String),
-    /// Trickle-ICE candidate from the browser.
-    Candidate(Box<RTCIceCandidateInit>),
-}
-
-/// Per-peer command channels, keyed by peer id. Lives in `run_share` (NOT in
-/// `connect_once`) so peer tasks survive the 4-minute signaling refresh.
-///
-/// LOCK RULE: this mutex is held for map operations only — insert, get+clone,
-/// remove — and NEVER across a WebRTC await. That invariant is what keeps the
-/// signaling loop unwedgeable: every path that touches it completes promptly.
-type Mailboxes = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<PeerCmd>>>>;
-
 /// Messages from callbacks/tasks back to the signaling writer.
 enum SigOut {
     Send(String),
@@ -299,9 +273,6 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     let api_token = api::load_or_create_token().context("serve token")?;
 
     let peers: Peers = Arc::new(Mutex::new(HashMap::new()));
-    // Outlives connect_once so a peer keeps its serialized task across the
-    // 4-minute signaling refresh.
-    let mailboxes: Mailboxes = Arc::new(Mutex::new(HashMap::new()));
     let mut rotates = 0u32;
 
     let link = format_share_link(&room.room, &secret, &room.host);
@@ -317,7 +288,6 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
             &secret,
             &api_token,
             peers.clone(),
-            mailboxes.clone(),
             scope.clone(),
             cancel_rx.clone(),
         )
@@ -369,7 +339,6 @@ pub async fn run_scoped_session(
         host: sighost,
     };
     let peers: Peers = Arc::new(Mutex::new(HashMap::new()));
-    let mailboxes: Mailboxes = Arc::new(Mutex::new(HashMap::new()));
     loop {
         if *cancel.borrow() {
             break;
@@ -379,7 +348,6 @@ pub async fn run_scoped_session(
             &secret,
             "",
             peers.clone(),
-            mailboxes.clone(),
             scope.clone(),
             cancel.clone(),
         )
@@ -406,10 +374,6 @@ pub async fn run_scoped_session(
             }
         }
     }
-    // Dropping every mailbox ends each peer task, which closes its own peer
-    // connection; the sweep below is the backstop for a peer whose task had
-    // already exited. Both halves are idempotent.
-    mailboxes.lock().await.clear();
     let ids: Vec<String> = peers.lock().await.keys().cloned().collect();
     for id in ids {
         close_peer(&peers, &id).await;
@@ -428,7 +392,6 @@ async fn connect_once(
     secret: &str,
     api_token: &str,
     peers: Peers,
-    mailboxes: Mailboxes,
     scope: Arc<Scope>,
     mut cancel: watch::Receiver<bool>,
 ) -> Result<SessionEnd> {
@@ -505,16 +468,7 @@ async fn connect_once(
                     }
                     Message::Text(t) => {
                         let Ok(m) = serde_json::from_str::<Value>(&t) else { continue };
-                        dispatch_signal(
-                            m,
-                            &peers,
-                            &mailboxes,
-                            secret,
-                            api_token,
-                            &sig_tx,
-                            &scope,
-                        )
-                        .await;
+                        handle_signal(m, secret, api_token, &peers, &sig_tx, &scope).await;
                     }
                     _ => {}
                 }
@@ -523,26 +477,11 @@ async fn connect_once(
     }
 }
 
-/// Route one signaling message to the peer it belongs to — and nothing else.
-///
-/// This runs INSIDE `connect_once`'s `tokio::select!`, alongside the heartbeat,
-/// the dead-socket detector, the periodic refresh and (via the loop above it)
-/// reconnection. Every one of those recovery mechanisms is starved for as long
-/// as this function is awaiting, so it must never await anything of unbounded
-/// duration. It previously awaited `start_peer` / `on_answer` / `close_peer`
-/// directly — all of which await into webrtc-rs, which can block indefinitely on
-/// its internal locks. One such block deafened the host permanently: peer-joins
-/// piled up unread in the socket's receive queue (measured: 6875 bytes) while
-/// the heartbeat that was supposed to notice the dead session never ran again.
-///
-/// So: per-peer work goes to that peer's own task via `PeerCmd`, and the sends
-/// are non-blocking. A peer that wedges now wedges only itself.
-async fn dispatch_signal(
+async fn handle_signal(
     m: Value,
-    peers: &Peers,
-    mailboxes: &Mailboxes,
     secret: &str,
     api_token: &str,
+    peers: &Peers,
     sig_tx: &mpsc::UnboundedSender<SigOut>,
     scope: &Arc<Scope>,
 ) {
@@ -552,27 +491,16 @@ async fn dispatch_signal(
             let Some(peer_id) = m.get("peer").map(value_to_id) else {
                 return;
             };
-            let tx = {
-                let mut map = mailboxes.lock().await;
-                if map.contains_key(&peer_id) {
-                    return; // duplicate join for a peer we're already serving
-                }
-                let (tx, rx) = mpsc::unbounded_channel();
-                map.insert(peer_id.clone(), tx.clone());
-                spawn_peer_task(
-                    peer_id.clone(),
-                    rx,
-                    peers.clone(),
-                    mailboxes.clone(),
-                    secret.to_string(),
-                    api_token.to_string(),
-                    sig_tx.clone(),
-                    scope.clone(),
-                );
-                tx
-            };
+            if peers.lock().await.contains_key(&peer_id) {
+                return;
+            }
             eprintln!("[ayrs share] peer-join {peer_id}");
-            let _ = tx.send(PeerCmd::Start);
+            if let Err(e) =
+                start_peer(peer_id.clone(), api_token, peers, sig_tx, scope.clone()).await
+            {
+                eprintln!("[ayrs share] peer setup failed: {e:#}");
+                close_peer(peers, &peer_id).await;
+            }
         }
         Some("answer") => {
             let Some(from) = m.get("from").map(value_to_id) else {
@@ -583,7 +511,10 @@ async fn dispatch_signal(
                 .and_then(|s| s.as_str())
                 .unwrap_or("")
                 .to_string();
-            send_cmd(mailboxes, &from, PeerCmd::Answer(sdp)).await;
+            if let Err(e) = on_answer(&from, sdp, secret, peers).await {
+                eprintln!("[ayrs share] answer failed for {from}: {e:#}");
+                close_peer(peers, &from).await;
+            }
         }
         Some("candidate") => {
             let Some(from) = m.get("from").map(value_to_id) else {
@@ -596,240 +527,21 @@ async fn dispatch_signal(
                 Ok(c) => c,
                 Err(_) => return,
             };
-            send_cmd(mailboxes, &from, PeerCmd::Candidate(Box::new(init))).await;
+            let pc = {
+                let map = peers.lock().await;
+                map.get(&from).map(|p| p.pc.clone())
+            };
+            if let Some(pc) = pc {
+                let _ = pc.add_ice_candidate(init).await;
+            }
         }
         Some("peer-leave") => {
             if let Some(peer) = m.get("peer").map(value_to_id) {
-                request_close(mailboxes, &peer).await;
+                close_peer(peers, &peer).await;
             }
         }
         _ => {}
     }
-}
-
-/// Hand one command to a peer's task. Unbounded send → never blocks.
-async fn send_cmd(mailboxes: &Mailboxes, peer_id: &str, cmd: PeerCmd) {
-    let tx = mailboxes.lock().await.get(peer_id).cloned();
-    if let Some(tx) = tx {
-        let _ = tx.send(cmd);
-    }
-}
-
-/// Ask a peer to tear down. Dropping the mailbox closes the command channel,
-/// which ends that peer's task, and the task itself performs the actual
-/// `close()`. Nothing outside the peer task ever closes an RTCPeerConnection —
-/// that is what keeps `close()` off webrtc-rs callback stacks (see `close_peer`).
-async fn request_close(mailboxes: &Mailboxes, peer_id: &str) {
-    mailboxes.lock().await.remove(peer_id);
-}
-
-#[cfg(test)]
-mod dispatch_tests {
-    use super::*;
-
-    /// A mailbox whose receiver is never drained — stands in for a peer stuck
-    /// inside webrtc-rs. The receiver is returned so the channel stays open.
-    fn wedged_peer(id: &str) -> (Mailboxes, mpsc::UnboundedReceiver<PeerCmd>) {
-        let (tx, rx) = mpsc::unbounded_channel();
-        let mut map = HashMap::new();
-        map.insert(id.to_string(), tx);
-        (Arc::new(Mutex::new(map)), rx)
-    }
-
-    fn empty_peers() -> Peers {
-        Arc::new(Mutex::new(HashMap::new()))
-    }
-
-    /// The property the wedge cost us: routing a signaling message must never
-    /// wait on the peer it is routed to. Before the mailbox split, `answer`
-    /// awaited `set_remote_description` right here in the signaling `select!`,
-    /// so one peer blocking inside webrtc-rs stopped the heartbeat, the
-    /// dead-socket detector and reconnection for every other peer too.
-    #[tokio::test]
-    async fn routing_never_waits_on_the_peer_it_routes_to() {
-        let (mailboxes, _rx) = wedged_peer("stuck");
-        let peers = empty_peers();
-        let (sig_tx, _sig_rx) = mpsc::unbounded_channel();
-        let scope = Arc::new(Scope::Full);
-
-        for msg in [
-            json!({"type":"answer","from":"stuck","sdp":"v=0\r\n"}),
-            json!({"type":"candidate","from":"stuck","candidate":{"candidate":"","sdpMid":"0"}}),
-            json!({"type":"peer-leave","peer":"stuck"}),
-        ] {
-            tokio::time::timeout(
-                Duration::from_secs(5),
-                dispatch_signal(
-                    msg.clone(),
-                    &peers,
-                    &mailboxes,
-                    "secret",
-                    "token",
-                    &sig_tx,
-                    &scope,
-                ),
-            )
-            .await
-            .unwrap_or_else(|_| panic!("dispatch blocked on a wedged peer: {msg}"));
-        }
-    }
-
-    /// Commands reach a peer in signaling order. This is what a bare
-    /// `tokio::spawn` per message would lose — an answer could then be applied
-    /// before the offer that produced it, or a candidate before the answer.
-    #[tokio::test]
-    async fn commands_keep_their_signaling_order() {
-        let (mailboxes, mut rx) = wedged_peer("p");
-        let peers = empty_peers();
-        let (sig_tx, _sig_rx) = mpsc::unbounded_channel();
-        let scope = Arc::new(Scope::Full);
-
-        dispatch_signal(
-            json!({"type":"answer","from":"p","sdp":"SDP-1"}),
-            &peers,
-            &mailboxes,
-            "secret",
-            "token",
-            &sig_tx,
-            &scope,
-        )
-        .await;
-        dispatch_signal(
-            json!({"type":"candidate","from":"p","candidate":{"candidate":"c","sdpMid":"0"}}),
-            &peers,
-            &mailboxes,
-            "secret",
-            "token",
-            &sig_tx,
-            &scope,
-        )
-        .await;
-
-        match rx.recv().await {
-            Some(PeerCmd::Answer(sdp)) => assert_eq!(sdp, "SDP-1"),
-            _ => panic!("expected the answer first"),
-        }
-        assert!(matches!(rx.recv().await, Some(PeerCmd::Candidate(_))));
-    }
-
-    /// `peer-leave` drops the mailbox, which is what ends the peer's task — and
-    /// it must not run the close itself (that is the callback-stack trap).
-    #[tokio::test]
-    async fn leaving_drops_the_mailbox() {
-        let (mailboxes, _rx) = wedged_peer("gone");
-        let peers = empty_peers();
-        let (sig_tx, _sig_rx) = mpsc::unbounded_channel();
-        let scope = Arc::new(Scope::Full);
-
-        dispatch_signal(
-            json!({"type":"peer-leave","peer":"gone"}),
-            &peers,
-            &mailboxes,
-            "secret",
-            "token",
-            &sig_tx,
-            &scope,
-        )
-        .await;
-        assert!(mailboxes.lock().await.is_empty());
-    }
-
-    /// A duplicate `peer-join` must not spawn a second task for the same peer —
-    /// two tasks racing one RTCPeerConnection is how the signaling state machine
-    /// gets into "invalid proposed signaling state transition from stable".
-    #[tokio::test]
-    async fn a_duplicate_join_is_ignored() {
-        let (mailboxes, _rx) = wedged_peer("dup");
-        let peers = empty_peers();
-        let (sig_tx, _sig_rx) = mpsc::unbounded_channel();
-        let scope = Arc::new(Scope::Full);
-
-        dispatch_signal(
-            json!({"type":"peer-join","peer":"dup"}),
-            &peers,
-            &mailboxes,
-            "secret",
-            "token",
-            &sig_tx,
-            &scope,
-        )
-        .await;
-        assert_eq!(mailboxes.lock().await.len(), 1);
-    }
-}
-
-/// One peer's serialized worker. Commands are processed strictly in arrival
-/// order, so the offer is always sent before the answer is applied and
-/// candidates never overtake the remote description — the ordering guarantee a
-/// bare `tokio::spawn` per signaling message would have thrown away.
-#[allow(clippy::too_many_arguments)]
-fn spawn_peer_task(
-    peer_id: String,
-    mut rx: mpsc::UnboundedReceiver<PeerCmd>,
-    peers: Peers,
-    mailboxes: Mailboxes,
-    secret: String,
-    api_token: String,
-    sig_tx: mpsc::UnboundedSender<SigOut>,
-    scope: Arc<Scope>,
-) {
-    tokio::spawn(async move {
-        while let Some(cmd) = rx.recv().await {
-            // Every webrtc-rs call gets a ceiling: a stuck one must kill its own
-            // peer, not linger holding sockets and a task forever.
-            let timeout = Duration::from_millis(PEER_OP_TIMEOUT_MS);
-            let outcome: Result<()> = match cmd {
-                PeerCmd::Start => {
-                    match tokio::time::timeout(
-                        timeout,
-                        start_peer(
-                            peer_id.clone(),
-                            &api_token,
-                            &peers,
-                            &mailboxes,
-                            &sig_tx,
-                            scope.clone(),
-                        ),
-                    )
-                    .await
-                    {
-                        Ok(r) => r,
-                        Err(_) => Err(anyhow!("setup timed out after {PEER_OP_TIMEOUT_MS}ms")),
-                    }
-                }
-                PeerCmd::Answer(sdp) => {
-                    match tokio::time::timeout(timeout, on_answer(&peer_id, sdp, &secret, &peers))
-                        .await
-                    {
-                        Ok(r) => r,
-                        Err(_) => Err(anyhow!("answer timed out after {PEER_OP_TIMEOUT_MS}ms")),
-                    }
-                }
-                PeerCmd::Candidate(init) => {
-                    let pc = {
-                        let map = peers.lock().await;
-                        map.get(&peer_id).map(|p| p.pc.clone())
-                    };
-                    match pc {
-                        Some(pc) => {
-                            match tokio::time::timeout(timeout, pc.add_ice_candidate(*init)).await {
-                                Ok(r) => r.map_err(|e| anyhow!(e)),
-                                Err(_) => Err(anyhow!("add_ice_candidate timed out")),
-                            }
-                        }
-                        None => Ok(()), // candidate for a peer that already went away
-                    }
-                }
-            };
-            if let Err(e) = outcome {
-                eprintln!("[ayrs share] peer {peer_id} failed: {e:#}");
-                break;
-            }
-        }
-        // Channel closed (peer-leave / connection died) or a command failed.
-        close_peer(&peers, &peer_id).await;
-        mailboxes.lock().await.remove(&peer_id);
-    });
 }
 
 pub(super) fn value_to_id(v: &Value) -> String {
@@ -839,29 +551,13 @@ pub(super) fn value_to_id(v: &Value) -> String {
     }
 }
 
-/// Tear one peer down. ONLY the peer's own task may call this.
-///
-/// `RTCPeerConnection::close()` must never run on a webrtc-rs callback stack.
-/// webrtc-rs invokes our handlers while holding the handler's `Mutex`
-/// (`do_peer_connection_state_change`: `let mut f = handler.lock().await;
-/// f(cs).await;`), and `close()` re-locks that same non-reentrant mutex on its
-/// way out (step #11 → `update_connection_state`). Closing from inside a state
-/// change handler is therefore a guaranteed self-deadlock: the task hangs
-/// forever holding the handler lock, and the peer's ICE sockets are never
-/// released. Callbacks call `request_close` instead, which only drops a channel.
 async fn close_peer(peers: &Peers, peer_id: &str) {
     let removed = peers.lock().await.remove(peer_id);
     if let Some(p) = removed {
         for (_, h) in p.reqs {
             h.abort();
         }
-        // Bounded: a wedged close must not strand this task either.
-        if tokio::time::timeout(Duration::from_millis(PEER_CLOSE_TIMEOUT_MS), p.pc.close())
-            .await
-            .is_err()
-        {
-            eprintln!("[ayrs share] peer {peer_id} close timed out — abandoning it");
-        }
+        let _ = p.pc.close().await;
     }
 }
 
@@ -869,7 +565,6 @@ async fn start_peer(
     peer_id: String,
     api_token: &str,
     peers: &Peers,
-    mailboxes: &Mailboxes,
     sig_tx: &mpsc::UnboundedSender<SigOut>,
     scope: Arc<Scope>,
 ) -> Result<()> {
@@ -905,16 +600,12 @@ async fn start_peer(
         }));
     }
 
-    // dead-peer cleanup. This handler runs with webrtc-rs holding the
-    // state-change handler mutex, so it must NOT close the peer connection here
-    // — close() re-locks that mutex and deadlocks (see close_peer). Drop the
-    // mailbox instead; the peer's own task does the closing once it is off this
-    // stack.
+    // dead-peer cleanup
     {
-        let mailboxes2 = mailboxes.clone();
+        let peers2 = peers.clone();
         let peer_id = peer_id.clone();
         pc.on_peer_connection_state_change(Box::new(move |st| {
-            let mailboxes2 = mailboxes2.clone();
+            let peers2 = peers2.clone();
             let peer_id = peer_id.clone();
             Box::pin(async move {
                 if matches!(
@@ -923,7 +614,7 @@ async fn start_peer(
                         | RTCPeerConnectionState::Closed
                         | RTCPeerConnectionState::Disconnected
                 ) {
-                    request_close(&mailboxes2, &peer_id).await;
+                    close_peer(&peers2, &peer_id).await;
                 }
             })
         }));
@@ -933,13 +624,7 @@ async fn start_peer(
 
     // sealed-frame sender task: (flags, envelope) → seal in order → dc.send
     let (out_tx, out_rx) = mpsc::unbounded_channel::<(u8, Value)>();
-    spawn_sender(
-        dc.clone(),
-        out_rx,
-        peers.clone(),
-        mailboxes.clone(),
-        peer_id.clone(),
-    );
+    spawn_sender(dc.clone(), out_rx, peers.clone(), peer_id.clone());
 
     // inbound frames → per-peer handler (serialized by the channel)
     let (in_tx, in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
@@ -956,50 +641,39 @@ async fn start_peer(
     }
     spawn_receiver(
         peers.clone(),
-        mailboxes.clone(),
         peer_id.clone(),
         in_rx,
         api_token.to_string(),
         scope,
     );
 
-    // on open: start the mandatory key-confirmation handshake.
-    //
-    // The handler itself only sends the nonce and returns. The confirm deadline
-    // used to be a `sleep` in this very callback, which pinned the data
-    // channel's on_open handler mutex for the whole timeout and then closed the
-    // peer from a callback stack — the same re-entrancy trap as the state-change
-    // handler. It runs as its own task now.
+    // on open: start the mandatory key-confirmation handshake
     {
         let peers2 = peers.clone();
-        let mailboxes2 = mailboxes.clone();
         let peer_id2 = peer_id.clone();
         dc.on_open(Box::new(move || {
             let peers2 = peers2.clone();
-            let mailboxes2 = mailboxes2.clone();
             let peer_id2 = peer_id2.clone();
             Box::pin(async move {
-                {
-                    let mut map = peers2.lock().await;
-                    if let Some(p) = map.get_mut(&peer_id2) {
-                        let nonce = p.my_nonce.clone();
-                        let _ = p
-                            .out_tx
-                            .send((e2e::FLAG_CONFIRM, json!({"t":"confirm","nonce":nonce})));
-                    }
+                let mut map = peers2.lock().await;
+                if let Some(p) = map.get_mut(&peer_id2) {
+                    let nonce = p.my_nonce.clone();
+                    let _ = p
+                        .out_tx
+                        .send((e2e::FLAG_CONFIRM, json!({"t":"confirm","nonce":nonce})));
                 }
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_millis(e2e::CONFIRM_TIMEOUT_MS)).await;
-                    let confirmed = peers2
-                        .lock()
-                        .await
-                        .get(&peer_id2)
-                        .map(|p| p.confirmed)
-                        .unwrap_or(true);
-                    if !confirmed {
-                        request_close(&mailboxes2, &peer_id2).await;
-                    }
-                });
+                drop(map);
+                // confirm deadline: close the peer if the handshake stalls
+                tokio::time::sleep(Duration::from_millis(e2e::CONFIRM_TIMEOUT_MS)).await;
+                let confirmed = peers2
+                    .lock()
+                    .await
+                    .get(&peer_id2)
+                    .map(|p| p.confirmed)
+                    .unwrap_or(true);
+                if !confirmed {
+                    close_peer(&peers2, &peer_id2).await;
+                }
             })
         }));
     }
@@ -1054,7 +728,6 @@ fn spawn_sender(
     dc: Arc<RTCDataChannel>,
     mut out_rx: mpsc::UnboundedReceiver<(u8, Value)>,
     peers: Peers,
-    mailboxes: Mailboxes,
     peer_id: String,
 ) {
     tokio::spawn(async move {
@@ -1072,7 +745,7 @@ fn spawn_sender(
             {
                 Ok(f) => f,
                 Err(_) => {
-                    request_close(&mailboxes, &peer_id).await; // counter overflow — fail closed
+                    close_peer(&peers, &peer_id).await; // counter overflow — fail closed
                     return;
                 }
             };
@@ -1087,7 +760,6 @@ fn spawn_sender(
 /// runs the confirm handshake, then dispatches req/abort envelopes.
 fn spawn_receiver(
     peers: Peers,
-    mailboxes: Mailboxes,
     peer_id: String,
     mut in_rx: mpsc::UnboundedReceiver<Vec<u8>>,
     api_token: String,
@@ -1100,7 +772,7 @@ fn spawn_receiver(
                 match map.get(&peer_id).and_then(|p| p.crypto.clone()) {
                     Some(c) => c,
                     None => {
-                        request_close(&mailboxes, &peer_id).await;
+                        close_peer(&peers, &peer_id).await;
                         return;
                     }
                 }
@@ -1114,13 +786,13 @@ fn spawn_receiver(
                     Ok(o) => o,
                     Err(_) => {
                         drop(map);
-                        request_close(&mailboxes, &peer_id).await; // fail closed
+                        close_peer(&peers, &peer_id).await; // fail closed
                         return;
                     }
                 }
             };
             let Ok(env) = serde_json::from_slice::<Value>(&opened.plaintext) else {
-                request_close(&mailboxes, &peer_id).await;
+                close_peer(&peers, &peer_id).await;
                 return;
             };
             let t = env.get("t").and_then(|t| t.as_str()).unwrap_or("");
@@ -1130,7 +802,7 @@ fn spawn_receiver(
             };
             if !confirmed {
                 if t != "confirm" {
-                    request_close(&mailboxes, &peer_id).await;
+                    close_peer(&peers, &peer_id).await;
                     return;
                 }
                 let mut map = peers.lock().await;

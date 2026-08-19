@@ -28,17 +28,9 @@ import { buildRustArgs } from "./buildRustArgs.ts";
   const managerCommands = !invokedCliName(process.argv);
   // Intercept bare -h/--help so we show TS subcommands, not just Rust agent-runner options.
   const isHelpFlag = rawArg === "-h" || rawArg === "--help";
-  const { isSubcommand, runSubcommand, cmdHelp, isUnknownManagerToken, isBareManagerInvocation } =
+  const { isSubcommand, runSubcommand, cmdHelp, isUnknownManagerToken } =
     await import("./subcommands.ts");
   if (isHelpFlag && process.argv.length === 3) {
-    await cmdHelp(managerCommands);
-    process.exit(0);
-  }
-  // Bare `ay` / `agent-yes`: show help. `ay` is the fleet manager, so a
-  // zero-argument run is someone asking "what can this do?", not "launch an
-  // agent" — launching names a CLI (`ay claude …`), and `cy` remains the
-  // no-argument shortcut for claude. Mirrored in rs/src/cli.rs.
-  if (isBareManagerInvocation(process.argv, managerCommands)) {
     await cmdHelp(managerCommands);
     process.exit(0);
   }
@@ -63,15 +55,14 @@ import { buildRustArgs } from "./buildRustArgs.ts";
   }
 }
 
-// `--cwd <dir>` on an agent run reads like an agent-yes flag but isn't one — it
-// is forwarded to the target CLI, so the agent runs wherever `ay` was invoked.
-// Point at `cd <dir> && …` once, then continue. Runs AFTER the subcommand fast
+// Deprecation: `--cwd <dir>` on an agent run. Runs AFTER the subcommand fast
 // path above, so subcommand `--cwd` FILTERS (ay ls/status/spawn/schedule) are
-// untouched — only a real agent launch reaches here. Suppress the Rust runner's
-// mirror of this hint so it isn't printed twice when we spawn the binary below.
+// untouched — only a real agent launch reaches here. Warn once, then continue
+// (the flag still works); suppress the Rust runner's mirror of this warning so
+// it isn't printed twice when we spawn the Rust binary below.
 {
-  const { detectCwdPassthrough, SUPPRESS_CWD_WARN_ENV } = await import("./cwdPassthroughHint.ts");
-  const dep = detectCwdPassthrough(process.argv);
+  const { detectCwdDeprecation, SUPPRESS_CWD_WARN_ENV } = await import("./cwdDeprecation.ts");
+  const dep = detectCwdDeprecation(process.argv);
   if (dep) {
     console.warn(dep.message);
     process.env[SUPPRESS_CWD_WARN_ENV] = "1";
@@ -158,13 +149,8 @@ if (config.useRust) {
     // agent so we don't block the parent's tool call for the whole session, then
     // print how to drive it and exit. `--attach`/AGENT_YES_ATTACH=1 opts out.
     const attach = config.attach || process.env.AGENT_YES_ATTACH === "1";
-    const {
-      shouldForkNested,
-      buildSpawnTutorial,
-      waitForRegistration,
-      confirmAgentStarted,
-      predictedLogPath,
-    } = await import("./forkNested.ts");
+    const { shouldForkNested, buildSpawnTutorial, waitForRegistration, predictedLogPath } =
+      await import("./forkNested.ts");
     if (
       shouldForkNested({
         isTTY: Boolean(process.stdout.isTTY),
@@ -202,23 +188,13 @@ if (config.useRust) {
         console.error(deathMsg);
         process.exit(1);
       }
+      forked.unref();
       if (!registered) {
-        forked.unref();
         console.error(
           `Agent pid ${forkedPid} spawned but never became addressable (ay tail/ay send) within 5s.\n` +
             `Log (if written yet): ${predictedLogPath(process.cwd(), forkedPid)}\n` +
             `It may still be starting up — retry: ay tail ${forkedPid}`,
         );
-        process.exit(1);
-      }
-      // Registration only proves the wrapper got far enough to write its record —
-      // the CLI can still die immediately after. Confirm it actually started before
-      // claiming success, or a caller fanning out reads "Spawned pid N" + exit 0 for
-      // a dead agent (#387). Keep the exit/error listeners live until this resolves.
-      const started = await confirmAgentStarted(forkedPid, 1500, () => deathMsg !== null);
-      forked.unref();
-      if (!started.ok) {
-        console.error(deathMsg ?? started.reason);
         process.exit(1);
       }
       console.log(buildSpawnTutorial(config.cli || "agent", forkedPid));

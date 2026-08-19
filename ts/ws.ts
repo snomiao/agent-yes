@@ -139,27 +139,22 @@ function isCheckoutRoot(dir: string): boolean {
 }
 
 // List real subdirectories (no symlinks, no dotdirs), tolerating vanished dirs.
-//
-// The ITERATION is inside the try, not just the open. `opendir` is lazy on some
-// runtimes (notably Bun): the ENOENT for a missing directory surfaces from the
-// first `for await` step, not from the `await opendir(...)`, so a try that wraps
-// only the open lets it escape — walkWorkspaces would throw on a missing root
-// instead of returning [].
 async function subdirs(dir: string): Promise<string[]> {
   const out: string[] = [];
+  let d: Awaited<ReturnType<typeof opendir>>;
   try {
-    for await (const ent of await opendir(dir)) {
-      if (ent.name.startsWith(".")) continue;
-      if (ent.isDirectory()) {
-        out.push(ent.name);
-      } else if (ent.isSymbolicLink()) {
-        // never follow symlinks — a link cycle under tree/ must not loop the walk
-        continue;
-      }
-    }
+    d = await opendir(dir);
   } catch {
-    // Vanished/unreadable dir — a partial listing is still the right answer.
-    return out.sort();
+    return out;
+  }
+  for await (const ent of d) {
+    if (ent.name.startsWith(".")) continue;
+    if (ent.isDirectory()) {
+      out.push(ent.name);
+    } else if (ent.isSymbolicLink()) {
+      // never follow symlinks — a link cycle under tree/ must not loop the walk
+      continue;
+    }
   }
   return out.sort();
 }
@@ -534,11 +529,7 @@ async function cmdWsFork(args: string[]): Promise<number> {
     return 1;
   }
   process.stdout.write(`${res.action}  ${res.folder}\n`);
-  // `cd <dir> && ay …`, never `ay … --cwd <dir>`: on an agent run `--cwd` is not
-  // an agent-yes flag at all — it is forwarded to the target CLI, which dies on
-  // the unknown option. cd has no such problem and puts every relative path in
-  // the command in the same place as the agent.
-  process.stderr.write(`\n  cd ${res.folder} && ay claude -- "<prompt>"   # work there\n`);
+  process.stderr.write(`\n  ay claude --cwd ${res.folder} -- "<prompt>"   # work there\n`);
   return 0;
 }
 

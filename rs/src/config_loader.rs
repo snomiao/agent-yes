@@ -1023,3 +1023,4 @@ fn compile_inline_flags(flags: &str) -> Result<String> {
         Ok(format!("(?{})", normalized))
     }
 }
+

@@ -49,15 +49,3 @@ not found`), install rustup first, then re-source the env:
 curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
 . "$HOME/.cargo/env"
 ```
-
-## Reading a child process's stdout with a timeout: never join the reader
-
-When you kill a timed-out child whose stdout you are draining on another
-thread, do NOT `join` that reader thread (Rust) / `await` that read promise
-(TS) on the timeout path. Killing the child does not close the pipe: any
-**grandchild** it spawned (an rc file's `sleep`, a spinner, a forked helper)
-inherits the pipe's write end and keeps it open, so `read_to_end` only returns
-when the grandchild eventually exits — a test hung 60 s on exactly this in
-`rs/src/serve/shell_env.rs`. Abandon the reader instead; it exits by itself
-once the last writer closes. This applies to every "spawn a child, read its
-output, enforce a deadline" site, not just shell_env.

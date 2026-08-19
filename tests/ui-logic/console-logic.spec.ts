@@ -38,7 +38,6 @@ import {
   docTitle,
   statusGlyph,
   omniScore,
-  createInputSender,
 } from "../../lab/ui/console-logic.js";
 
 const agent = (over = {}) => ({
@@ -57,7 +56,7 @@ describe("cliLabel", () => {
   });
   it("shows non-default CLIs", () => {
     expect(cliLabel(agent({ cli: "codex" }))).toBe("codex");
-    expect(cliLabel(agent({ cli: "grok" }))).toBe("grok");
+    expect(cliLabel(agent({ cli: "gemini" }))).toBe("gemini");
   });
   it("treats a missing cli as empty", () => {
     expect(cliLabel(agent({ cli: undefined }))).toBe("");
@@ -1045,126 +1044,5 @@ describe("sortEntries", () => {
       a({ _k: "amy", cwd: "/x/amy/repo/tree/main" }),
     ];
     expect(keys(sortEntries(list, "identity"))).toEqual(["amy", "zed"]);
-  });
-});
-
-// Regression cover for the reported "typing fast transposes characters" bug on
-// agent-yes.com: `which is also the r` arriving as ` which il sao sthe r`.
-// Nothing was lost, only reordered — the signature of concurrent writes, not
-// dropped input. The model below is the whole bug in miniature: a transport
-// whose per-request latency varies, which is true of all three the console
-// uses.
-describe("createInputSender", () => {
-  /**
-   * A send() whose completion order does NOT match its call order. `delays`
-   * supplies the latency of each successive call, so a later call can finish
-   * first — exactly what a varying-latency request path does.
-   */
-  function jitterySend(delays: number[]) {
-    const landed: string[] = [];
-    let i = 0;
-    const send = (msg: string) => {
-      const wait = delays[i++] ?? 0;
-      return new Promise<void>((resolve) =>
-        setTimeout(() => {
-          landed.push(msg); // "landed" = reached the agent's FIFO
-          resolve();
-        }, wait),
-      );
-    };
-    return { send, landed };
-  }
-
-  /**
-   * Wait for an outcome, not for a duration. These tests deliberately give
-   * send() real latency, and serialized latency ADDS UP — a fixed sleep long
-   * enough on an idle laptop is a coin flip on a loaded CI runner, which is
-   * how ordering tests turn into flaky tests.
-   */
-  async function waitFor(cond: () => boolean, label: string): Promise<void> {
-    for (let i = 0; i < 400; i++) {
-      if (cond()) return;
-      await new Promise((r) => setTimeout(r, 5));
-    }
-    throw new Error(`timed out waiting for: ${label}`);
-  }
-
-  it("delivers in order even when the first request is slower than the second", async () => {
-    // Without serialization these two overlap and the fast one wins the race —
-    // the transposition users actually saw.
-    const { send, landed } = jitterySend([20, 0]);
-    const input = createInputSender(send);
-    input.push("a");
-    input.push("b");
-    await waitFor(() => landed.length === 2, "both keystrokes to land");
-    expect(landed.join("")).toBe("ab");
-  });
-
-  it("preserves the exact character order of a fast burst", async () => {
-    const typed = "which is also the r".split("");
-    // Descending latencies: every request would overtake the one before it.
-    const { send, landed } = jitterySend(typed.map((_, i) => typed.length - i));
-    const input = createInputSender(send);
-    for (const ch of typed) input.push(ch);
-    // Coalescing means fewer sends than keystrokes, so wait on the CONTENT
-    // having fully arrived rather than on a send count.
-    await waitFor(() => landed.join("").length === typed.length, "the whole burst to land");
-    expect(landed.join("")).toBe(typed.join(""));
-  });
-
-  it("coalesces the keystrokes that pile up behind an in-flight request into one payload", async () => {
-    const sent: string[] = [];
-    let release: (() => void) | null = null;
-    const input = createInputSender((msg: string) => {
-      sent.push(msg);
-      // Hold the FIRST request open so the rest of the burst queues behind it.
-      return sent.length === 1 ? new Promise<void>((r) => (release = r)) : Promise.resolve();
-    });
-
-    input.push("h");
-    for (const ch of "ello") input.push(ch);
-    expect(sent).toEqual(["h"]); // still only one request in flight
-    expect(input.pending()).toBe(4);
-
-    release!();
-    await waitFor(() => input.pending() === 0, "the queued burst to flush");
-    // Four keystrokes, one follow-up request — fewer round trips than the
-    // per-keystroke version it replaces, not more.
-    expect(sent).toEqual(["h", "ello"]);
-    expect(input.pending()).toBe(0);
-  });
-
-  it("keeps a binary chunk as its own payload without losing its place in the order", async () => {
-    const sent: unknown[] = [];
-    const mouse = new Uint8Array([0x1b, 0x5b, 0x4d]);
-    let release: (() => void) | null = null;
-    const input = createInputSender((msg: unknown) => {
-      sent.push(msg);
-      return sent.length === 1 ? new Promise<void>((r) => (release = r)) : Promise.resolve();
-    });
-
-    input.push("open"); // holds the wire so everything below queues up
-    input.push("a");
-    input.push("b");
-    input.push(mouse);
-    input.push("c");
-    release!();
-    await waitFor(() => sent.length === 4, "every queued chunk to be sent");
-    // "ab" coalesced into one payload; the binary chunk passed through
-    // untouched rather than being concatenated into text; "c" still after it.
-    expect(sent).toEqual(["open", "ab", mouse, "c"]);
-  });
-
-  it("a failed send does not wedge the queue — later keystrokes still go out", async () => {
-    const sent: string[] = [];
-    const input = createInputSender((msg: string) => {
-      sent.push(msg);
-      return sent.length === 1 ? Promise.reject(new Error("network")) : Promise.resolve();
-    });
-    input.push("a");
-    await waitFor(() => sent.length === 1, "the failing send to be attempted");
-    input.push("b");
-    await waitFor(() => sent.length === 2, "the next keystroke to go out anyway");
-    expect(sent).toEqual(["a", "b"]);
   });
 });

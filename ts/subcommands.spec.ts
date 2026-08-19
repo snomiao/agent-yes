@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "fs/promises";
+import { mkdir, mkdtemp, rm, utimes, writeFile } from "fs/promises";
 import { appendFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -139,37 +139,8 @@ describe("subcommands.isSubcommand", () => {
   });
 });
 
-describe("subcommands ↔ rs/src/cli.rs subcommand mirror", () => {
-  // The Rust runner keeps its OWN hardcoded copy of both lists (it must decide
-  // whether to re-exec the JS launcher before clap swallows the word as prompt
-  // text). Nothing enforced that copy, so it silently drifted: `key`, `select`,
-  // `todo`, `tray` existed only on the TS side, and running them on the Rust
-  // binary directly launched an agent with the subcommand as its prompt. Parse
-  // both sources and require them to stay identical.
-  const names = (src: string, re: RegExp): string[] =>
-    [...(src.match(re)?.[1] ?? "").matchAll(/"([^"]+)"/g)].map((m) => m[1]).sort();
-
-  it("keeps SUBCOMMANDS and MANAGER_SUBCOMMANDS identical in both runtimes", async () => {
-    const ts = await readFile(new URL("./subcommands.ts", import.meta.url), "utf8");
-    const rs = await readFile(new URL("../rs/src/cli.rs", import.meta.url), "utf8");
-    expect(names(rs, /pub const SUBCOMMANDS: &\[&str\] = &\[([\s\S]*?)\];/)).toEqual(
-      names(ts, /const SUBCOMMANDS = new Set\(\[([\s\S]*?)\]\)/),
-    );
-    expect(names(rs, /pub const MANAGER_SUBCOMMANDS: &\[&str\] = &\[([\s\S]*?)\];/)).toEqual(
-      names(ts, /const MANAGER_SUBCOMMANDS = new Set\(\[([\s\S]*?)\]\)/),
-    );
-  });
-
-  it("actually parsed something (guards against a regex that silently matches nothing)", async () => {
-    const rs = await readFile(new URL("../rs/src/cli.rs", import.meta.url), "utf8");
-    expect(names(rs, /pub const SUBCOMMANDS: &\[&str\] = &\[([\s\S]*?)\];/).length).toBeGreaterThan(
-      20,
-    );
-  });
-});
-
 describe("subcommands.isUnknownManagerToken (footgun guard)", () => {
-  const CLIS = ["claude", "codex"];
+  const CLIS = ["claude", "codex", "gemini"];
   it("flags a bare non-cli non-subcommand word on the manager entry", async () => {
     const { isUnknownManagerToken } = await loadModule();
     // `ay frobnicate` / a newer subcommand on an older build — neither a
@@ -188,24 +159,6 @@ describe("subcommands.isUnknownManagerToken (footgun guard)", () => {
     const { isUnknownManagerToken } = await loadModule();
     // `cy widget ls` → managerCommands=false → "widget ls" is a prompt to claude.
     expect(isUnknownManagerToken("widget", false, CLIS)).toBe(false);
-  });
-});
-
-describe("subcommands.isBareManagerInvocation", () => {
-  it("fires for a bare manager entry (`ay` with no args) → help, not a spawn", async () => {
-    const { isBareManagerInvocation } = await loadModule();
-    expect(isBareManagerInvocation(["bun", "/x/dist/agent-yes.js"], true)).toBe(true);
-  });
-  it("never fires for a cli-bound alias (bare `cy` still spawns claude)", async () => {
-    const { isBareManagerInvocation } = await loadModule();
-    expect(isBareManagerInvocation(["bun", "/x/dist/cy.js"], false)).toBe(false);
-  });
-  it("does not fire once any arg is present, including a flags-only run", async () => {
-    const { isBareManagerInvocation } = await loadModule();
-    // `ay claude`, `ay ls`, `ay --continue` each asked for something specific.
-    expect(isBareManagerInvocation(["bun", "/x/agent-yes.js", "claude"], true)).toBe(false);
-    expect(isBareManagerInvocation(["bun", "/x/agent-yes.js", "ls"], true)).toBe(false);
-    expect(isBareManagerInvocation(["bun", "/x/agent-yes.js", "--continue"], true)).toBe(false);
   });
 });
 
@@ -230,7 +183,6 @@ describe("subcommands.cmdHelp", () => {
     expect(await capture()).toContain("ay setup"); // default = manager
     expect(await capture(false)).not.toContain("ay setup"); // cli-bound alias (cy)
     expect(await capture(false)).toContain("ay ls"); // universal commands still shown
-    expect(await capture()).toContain("ay notify watch --unread"); // Management entry
   });
 
   it("stays plain for a human shell (no AGENT_YES_PID)", async () => {
@@ -279,7 +231,6 @@ describe("subcommands.cmdHelp", () => {
       expect(out).toContain("Spawn a sub-agent");
       expect(out).toContain(`ay ls --cwd /work/parent/child`);
       expect(out).toContain(`ay ls --watch --cwd /work/parent/child`);
-      expect(out).toContain("ay notify watch --unread");
     } finally {
       if (saved === undefined) delete process.env.AGENT_YES_PID;
       else process.env.AGENT_YES_PID = saved;
@@ -349,6 +300,7 @@ describe("subcommands.stopTipForCli", () => {
     expect(stopTipForCli("claude", 1234)).toMatch(/ay stop 1234/);
     expect(stopTipForCli("claude", 1234)).toMatch(/\/exit/);
     expect(stopTipForCli("codex", 99)).toMatch(/ay stop 99/);
+    expect(stopTipForCli("gemini", 7)).toMatch(/\/quit/);
   });
 
   it("returns null for CLIs without a known graceful command", async () => {
@@ -359,10 +311,11 @@ describe("subcommands.stopTipForCli", () => {
 });
 
 describe("subcommands.GRACEFUL_EXIT_COMMANDS", () => {
-  it("maps the known CLIs to their /exit-style commands", async () => {
+  it("maps the three known CLIs to their /exit-style commands", async () => {
     const { GRACEFUL_EXIT_COMMANDS } = await loadModule();
     expect(GRACEFUL_EXIT_COMMANDS["claude"]).toBe("/exit");
     expect(GRACEFUL_EXIT_COMMANDS["codex"]).toBe("/exit");
+    expect(GRACEFUL_EXIT_COMMANDS["gemini"]).toBe("/quit");
   });
 });
 
@@ -1198,22 +1151,7 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
     ...over,
   });
 
-  /**
-   * `fn` gets the fifo path plus `onKeystroke()`, which resolves once
-   * submitAndConfirm's trailing code actually lands on the fifo.
-   *
-   * Tests that need the agent to "react" MUST hang that reaction off
-   * `onKeystroke()` rather than a `setTimeout`. submitAndConfirm snapshots the
-   * log size and the current working-marker state BEFORE it writes to the fifo,
-   * and it only does that after `cliDefaults()` has parsed the config — so a
-   * wall-clock timer races that setup. Under load the setup wins, the "reaction"
-   * lands in the pre-write snapshot, and the assertion flips: growth gets folded
-   * into `sizeBefore`, and a busy marker reads as `wasAlreadyWorking` (which the
-   * false-positive guard below deliberately treats as NOT confirmed).
-   */
-  async function withFifo(
-    fn: (fifo: string, onKeystroke: () => Promise<boolean>) => Promise<void>,
-  ) {
+  async function withFifo(fn: (fifo: string) => Promise<void>) {
     const { spawnSync } = await import("child_process");
     const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-"));
     const fifo = path.join(dir, "test.fifo");
@@ -1222,27 +1160,9 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
       if (r.status !== 0) return; // mkfifo unavailable — skip
       const fs = await import("fs");
       const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR); // keeps writes from blocking
-      // A SEPARATE non-blocking reader: rdwrFd is never read from, so the
-      // keystroke is still here to be observed. O_NONBLOCK is load-bearing —
-      // a blocking readSync on an empty fifo wedges the whole vitest worker.
-      const readFd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
-      const onKeystroke = async (timeoutMs = 5_000): Promise<boolean> => {
-        const buf = Buffer.alloc(64);
-        const deadline = Date.now() + timeoutMs;
-        while (Date.now() < deadline) {
-          try {
-            if (fs.readSync(readFd, buf, 0, buf.length, null) > 0) return true;
-          } catch (err: any) {
-            if (err?.code !== "EAGAIN") throw err; // EAGAIN = nothing yet
-          }
-          await new Promise((r) => setTimeout(r, 5));
-        }
-        return false;
-      };
       try {
-        await fn(fifo, onKeystroke);
+        await fn(fifo);
       } finally {
-        fs.closeSync(readFd);
         fs.closeSync(rdwrFd);
       }
     } finally {
@@ -1258,16 +1178,11 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
         const log = path.join(dir, "a.log");
         await writeFile(log, "❯ \r\n"); // idle — no busy marker yet
         const { submitAndConfirm } = await loadModule();
-        await withFifo(async (fifo, onKeystroke) => {
-          // The Enter kicks off work: the busy marker appears once the keystroke
-          // has actually landed — a genuine idle→busy transition, and one that
-          // provably happens AFTER submitAndConfirm's pre-write snapshot.
-          const reacted = onKeystroke().then((got) => {
-            if (got) appendFileSync(log, BUSY);
-            return got;
-          });
+        await withFifo(async (fifo) => {
+          // The Enter kicks off work: the busy marker appears shortly after,
+          // well within the confirm window — a genuine idle→busy transition.
+          setTimeout(() => appendFileSync(log, BUSY), 100);
           const { confirmed, screen } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
-          expect(await reacted).toBe(true); // the fifo really carried the Enter
           expect(confirmed).toBe(true);
           expect(screen.join("\n")).toContain("esc to interrupt");
         });
@@ -1306,15 +1221,11 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
       const log = path.join(dir, "a.log");
       await writeFile(log, "❯ \r\n");
       const { submitAndConfirm } = await loadModule();
-      await withFifo(async (fifo, onKeystroke) => {
-        // The CLI starts responding once the Enter lands. Keyed off the actual
-        // keystroke so the growth cannot be folded into `sizeBefore`.
-        const reacted = onKeystroke().then((got) => {
-          if (got) appendFileSync(log, "some real response text appears here\r\n");
-          return got;
-        });
+      await withFifo(async (fifo) => {
+        // Simulate the CLI starting to respond shortly after Enter lands — well
+        // within the first attempt's confirm window.
+        setTimeout(() => appendFileSync(log, "some real response text appears here\r\n"), 100);
         const { confirmed } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
-        expect(await reacted).toBe(true);
         expect(confirmed).toBe(true);
       });
     } finally {
@@ -1564,69 +1475,6 @@ describe("subcommands.writeToIpc reliable delivery", () => {
       }
     },
   );
-});
-
-describe("withIpcLock prevents two writers splicing into one FIFO", () => {
-  const itUnix = process.platform === "linux" || process.platform === "darwin";
-
-  // The failure this guards against is NOT "messages arrive in a surprising
-  // order" — it is one message cut in half by another. writeToIpc loops on
-  // EAGAIN/partial writes, and POSIX only promises atomicity up to PIPE_BUF
-  // (512 bytes on macOS), so two concurrent writers of a large payload
-  // interleave bytes mid-message. This test reproduces that against a real
-  // FIFO with a real slow reader, exactly like the delivery test above.
-  it.skipIf(!itUnix)("keeps each writer's payload contiguous", async () => {
-    const { writeToIpc } = await loadModule();
-    const { withIpcLock } = await import("./ipcLock.ts");
-    const { spawnSync } = await import("child_process");
-    const fs = await import("fs");
-    const tmp = await mkdtemp(path.join(tmpdir(), "ay-splice-"));
-    try {
-      const fifo = path.join(tmp, "splice.fifo");
-      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
-      const rfd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
-      const chunks: Buffer[] = [];
-      const drain = setInterval(() => {
-        const b = Buffer.alloc(1000);
-        try {
-          const n = fs.readSync(rfd, b, 0, b.length, null);
-          if (n > 0) chunks.push(Buffer.from(b.subarray(0, n)));
-        } catch {
-          /* EAGAIN when momentarily empty */
-        }
-      }, 5);
-      try {
-        // Two 20KB payloads of distinct repeated characters, each written as a
-        // two-part transaction with a gap — the `ay send` shape (body, settle,
-        // Enter). Locked, each must appear as one unbroken run.
-        const a = "a".repeat(20_000);
-        const b = "b".repeat(20_000);
-        const txn = (ch: string, body: string) =>
-          withIpcLock(987654, async () => {
-            await writeToIpc(fifo, body);
-            await new Promise((r) => setTimeout(r, 30));
-            await writeToIpc(fifo, ch.toUpperCase());
-          });
-        await Promise.all([txn("a", a), txn("b", b)]);
-
-        const deadline = Date.now() + 5000;
-        const total = a.length + b.length + 2;
-        while (Buffer.concat(chunks).length < total && Date.now() < deadline) {
-          await new Promise((r) => setTimeout(r, 10));
-        }
-        const got = Buffer.concat(chunks).toString("utf8");
-        expect(got).toHaveLength(total);
-        // Whichever transaction went first, the stream is exactly one complete
-        // transaction followed by the other — never a's bytes inside b's run.
-        expect(got === a + "A" + b + "B" || got === b + "B" + a + "A").toBe(true);
-      } finally {
-        clearInterval(drain);
-        fs.closeSync(rfd);
-      }
-    } finally {
-      await rm(tmp, { recursive: true, force: true }).catch(() => null);
-    }
-  });
 });
 
 describe("subcommands.cmdSend safety guards", () => {
@@ -2822,8 +2670,121 @@ describe("subcommands.cmdWhoami", () => {
     expect(text).toMatch(/agent {5}claude #\d+ {2}\(agent_id aaaa0000bbbb\)/);
     expect(text).toMatch(/reply {5}ay send aaaa0000bbbb/);
     expect(text).toMatch(
-      /<ay-msg from claude [A-Za-z0-9._-]+@[A-Za-z0-9._-]+:\/repo\/alpha#\d+ — reply: ay send aaaa0000bbbb "\.\.\.">/,
+      /<ay-msg from claude #\d+ @ \/repo\/alpha — reply: ay send aaaa0000bbbb "\.\.\.">/,
     );
+  });
+});
+
+describe("subcommands.cmdRole", () => {
+  async function registerAgent(over: Record<string, unknown> = {}) {
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: 910001,
+      cli: "claude",
+      prompt: null,
+      cwd: "/repo/lane",
+      log_file: null,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      wrapper_pid: 515151,
+      agent_id: "eeee0000ffff",
+      ...over,
+    } as any);
+  }
+
+  function capture() {
+    const out: string[] = [];
+    const err: string[] = [];
+    const origOut = process.stdout.write.bind(process.stdout);
+    const origErr = process.stderr.write.bind(process.stderr);
+    (process.stdout as any).write = (s: any) => (out.push(String(s)), true);
+    (process.stderr as any).write = (s: any) => (err.push(String(s)), true);
+    return {
+      out,
+      err,
+      restore() {
+        process.stdout.write = origOut;
+        process.stderr.write = origErr;
+      },
+    };
+  }
+
+  async function withAgentEnv<T>(fn: () => Promise<T>): Promise<T> {
+    const saved = process.env.AGENT_YES_PID;
+    process.env.AGENT_YES_PID = "515151";
+    try {
+      return await fn();
+    } finally {
+      if (saved === undefined) delete process.env.AGENT_YES_PID;
+      else process.env.AGENT_YES_PID = saved;
+    }
+  }
+
+  it("self get/set/clear round-trips via agent context", async () => {
+    const { runSubcommand } = await loadModule();
+    await registerAgent();
+    await withAgentEnv(async () => {
+      let cap = capture();
+      try {
+        expect(await runSubcommand(["bun", "cli.js", "role", "pm"])).toBe(0);
+        expect(cap.out.join("")).toContain('role set to "pm"');
+      } finally {
+        cap.restore();
+      }
+      cap = capture();
+      try {
+        expect(await runSubcommand(["bun", "cli.js", "role"])).toBe(0);
+        expect(cap.out.join("")).toBe("pm\n");
+        expect(await runSubcommand(["bun", "cli.js", "role", "--clear"])).toBe(0);
+        expect(await runSubcommand(["bun", "cli.js", "role"])).toBe(0);
+        expect(cap.out.join("")).toContain("role cleared");
+      } finally {
+        cap.restore();
+      }
+    });
+  });
+
+  it("keyword set and keyword clear work from a human shell", async () => {
+    const { runSubcommand } = await loadModule();
+    await registerAgent();
+    let cap = capture();
+    try {
+      expect(await runSubcommand(["bun", "cli.js", "role", "910001", "crm"])).toBe(0);
+      expect(cap.out.join("")).toContain('role set to "crm"');
+      expect(await runSubcommand(["bun", "cli.js", "role", "910001", "--clear"])).toBe(0);
+      expect(cap.out.join("")).toContain("role cleared");
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it("rejects header-forging role values", async () => {
+    const { runSubcommand } = await loadModule();
+    await registerAgent();
+    const cap = capture();
+    try {
+      expect(await runSubcommand(["bun", "cli.js", "role", "910001", "a b>"])).toBe(1);
+      expect(cap.err.join("")).toContain("invalid role");
+    } finally {
+      cap.restore();
+    }
+  });
+
+  it("errors without agent context when no keyword is given", async () => {
+    const { runSubcommand } = await loadModule();
+    const saved = process.env.AGENT_YES_PID;
+    delete process.env.AGENT_YES_PID;
+    const cap = capture();
+    try {
+      expect(await runSubcommand(["bun", "cli.js", "role"])).toBe(1);
+      expect(await runSubcommand(["bun", "cli.js", "role", "somename"])).toBe(1);
+      expect(cap.err.join("")).toContain("no agent context");
+    } finally {
+      cap.restore();
+      if (saved !== undefined) process.env.AGENT_YES_PID = saved;
+    }
   });
 });
 
@@ -2898,9 +2859,7 @@ describe("subcommands.cmdSend double-envelope warning", () => {
         const buf = Buffer.alloc(8192);
         const n = fs.readSync(rdwrFd, buf, 0, buf.length, null);
         const received = buf.subarray(0, n).toString();
-        expect(received).toMatch(
-          /^<ay-msg [0-9a-f]{8} from claude [A-Za-z0-9._-]+@[A-Za-z0-9._-]+:\/repo\/beta#900001 — /,
-        );
+        expect(received).toMatch(/^<ay-msg [0-9a-f]{8} from claude #900001 @ /);
         expect(received).toContain("<ay-msg deadbeef");
         fs.closeSync(rdwrFd);
       } finally {
@@ -2974,20 +2933,16 @@ describe("subcommands.cmdSend double-envelope warning", () => {
     }
   });
 
-  it.skipIf(!itUnix)("the envelope header carries the standardized identity", async () => {
+  it.skipIf(!itUnix)("a sender with a role gets it rendered into the envelope header", async () => {
     const { runSubcommand } = await loadModule();
     const { appendGlobalPid } = await import("./globalPidIndex.ts");
     const { spawnSync } = await import("child_process");
     const tmp = await mkdtemp(path.join(tmpdir(), "ay-fifo-"));
     try {
-      const fifo = path.join(tmp, "ident.fifo");
+      const fifo = path.join(tmp, "role.fifo");
       if (spawnSync("mkfifo", [fifo]).status !== 0) return;
       const fs = await import("fs");
       const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR);
-      // Sender cwd IS a git checkout, so the identity carries its branch.
-      const senderCwd = path.join(tmp, "sender-repo");
-      await mkdir(path.join(senderCwd, ".git"), { recursive: true });
-      await writeFile(path.join(senderCwd, ".git", "HEAD"), "ref: refs/heads/crm-lane\n");
       await appendGlobalPid({
         pid: process.pid,
         cli: "claude",
@@ -3004,7 +2959,7 @@ describe("subcommands.cmdSend double-envelope warning", () => {
         pid: 900001,
         cli: "claude",
         prompt: null,
-        cwd: senderCwd,
+        cwd: "/repo/beta",
         log_file: null,
         status: "active",
         exit_code: null,
@@ -3012,6 +2967,7 @@ describe("subcommands.cmdSend double-envelope warning", () => {
         started_at: Date.now(),
         wrapper_pid: 424242,
         agent_id: "cccc0000dddd",
+        role: "crm",
       });
       const savedAyPid = process.env.AGENT_YES_PID;
       process.env.AGENT_YES_PID = "424242";
@@ -3035,9 +2991,8 @@ describe("subcommands.cmdSend double-envelope warning", () => {
       const buf = Buffer.alloc(4096);
       const n = fs.readSync(rdwrFd, buf, 0, buf.length, null);
       const received = buf.subarray(0, n).toString();
-      // <user>@<host>:<path>:<branch>#<pid> — reply targets the agent_id.
       expect(received).toMatch(
-        /^<ay-msg [0-9a-f]{8} from claude [A-Za-z0-9._-]+@[A-Za-z0-9._-]+:.+:crm-lane#900001 — reply: ay send cccc0000dddd "\.\.\.">/,
+        /^<ay-msg [0-9a-f]{8} from claude #900001 \(crm\) @ \/repo\/beta — reply: ay send cccc0000dddd "\.\.\.">/,
       );
       fs.closeSync(rdwrFd);
     } finally {

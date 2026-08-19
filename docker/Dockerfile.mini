@@ -2,11 +2,7 @@
 # Size: ~200-400MB vs 2.2GB for full image
 
 # Build stage - includes all build tools and dependencies
-# Pin the node MAJOR: a bare `node:alpine` floats to whatever is newest, so the
-# node/npm/node-gyp that builds node-pty below can change under us and break the
-# image with zero repo changes. Same major that was floating in (26) — this only
-# stops the silent jump to the next one.
-FROM node:26-alpine AS builder
+FROM node:alpine AS builder
 
 # Install build tools and bun
 RUN apk add --no-cache \
@@ -29,7 +25,7 @@ COPY . .
 RUN bun run build
 
 # Runtime stage - minimal runtime environment
-FROM node:26-alpine
+FROM node:alpine
 
 # Install runtime dependencies and temporary build tools
 RUN apk add --no-cache \
@@ -47,31 +43,8 @@ COPY --from=builder /src/agent-yes/dist ./dist
 COPY --from=builder /src/agent-yes/package.json ./
 COPY --from=builder /src/agent-yes/bun.lock ./
 
-# Install only production dependencies and build native modules.
-#
-# node-pty must be COMPILED here: the ENTRYPOINT below runs under node (not bun),
-# so ts/pty.ts loads node-pty rather than bun-pty — and node-pty ships prebuilds
-# for darwin/win32 only, never linux. So every build runs node-gyp, which first
-# downloads the node headers over the network. That download is the flakiest step
-# in the whole image, and when it fails the error looks like a compile error:
-#
-#   gyp http 200 https://nodejs.org/download/release/vX/node-vX-headers.tar.gz
-#   gyp ERR! UNCAUGHT EXCEPTION
-#   gyp ERR! stack AssertionError: assert(!this.paused)
-#   gyp ERR! stack   at Parser.finish (.../npm/node_modules/undici/...client-h1.js)
-#
-# i.e. npm's bundled undici crashing mid-body on a response it already got a 200
-# for — transient, and only on the slower emulated arm64 leg. Retry instead of
-# failing the build: the same commit passed on a re-run with no changes.
-RUN bun install --production --ignore-scripts \
-    && for i in 1 2 3; do \
-         npm rebuild node-pty && break; \
-         echo "node-pty rebuild failed (attempt $i/3), retrying in $((i * 10))s"; \
-         rm -rf /root/.cache/node-gyp; \
-         sleep $((i * 10)); \
-       done \
-    && node -e "require('node-pty')" \
-    && bun pm cache clean
+# Install only production dependencies and build native modules
+RUN bun install --production --ignore-scripts && npm rebuild node-pty && bun pm cache clean
 
 # Remove build tools to save space
 RUN apk del build-base python3
