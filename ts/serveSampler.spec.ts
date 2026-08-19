@@ -98,8 +98,8 @@ describe("sweep", () => {
     const snap = getSnapshot();
     expect([...snap.agents.keys()].sort()).toEqual([100, 200]);
     expect(snap.agents.get(100)).toHaveLength(1);
-    expect(snap.agents.get(100)![0][1].rss).toBe(2048);
-    expect(snap.agents.get(100)![0][1].procs).toBe(3);
+    expect(snap.agents.get(100)![0]![1].rss).toBe(2048);
+    expect(snap.agents.get(100)![0]![1].procs).toBe(3);
     expect(snap.unattributed.rss).toBe(8192);
     expect(snap.unattributed.procs).toBe(9);
   });
@@ -112,7 +112,7 @@ describe("sweep", () => {
     // `ay ps` semantics: sampleTrees attributes first-come, so the caller must
     // hand it the reversed list. Getting this backwards silently credits a
     // child's memory to its parent.
-    expect(sampleTrees.mock.calls[0][0]).toEqual([300, 200, 100]);
+    expect(sampleTrees.mock.calls[0]![0]).toEqual([300, 200, 100]);
   });
 
   it("converts cpuPercent into cpu-seconds of one core over the pass", async () => {
@@ -122,7 +122,7 @@ describe("sweep", () => {
 
     // 100% of one core is at most the pass duration in seconds, and the floor on
     // elapsed (1ms) keeps a sub-millisecond pass from producing a huge number.
-    const cpu = getSnapshot().agents.get(100)![0][1].cpu_seconds;
+    const cpu = getSnapshot().agents.get(100)![0]![1].cpu_seconds;
     expect(cpu).toBeGreaterThan(0);
     expect(cpu).toBeLessThan(1);
     // The unattributed rollup goes through the same conversion, at half the rate.
@@ -141,7 +141,7 @@ describe("sweep", () => {
     // cleared window (which the console would render as the agent dying).
     expect(after).toBe(width);
     expect(getSnapshot().agents.get(100)).toHaveLength(1);
-    expect(getSnapshot().agents.get(100)![0][1].rss).toBe(4096);
+    expect(getSnapshot().agents.get(100)![0]![1].rss).toBe(4096);
   });
 
   it("falls back to the fast width when the very first sweep throws", async () => {
@@ -189,8 +189,8 @@ describe("sweep", () => {
     expect(series).toHaveLength(windowLen(60));
     // Oldest-first ordering, with the three oldest dropped — the console draws
     // left-to-right, so a reversed window would render the heatmap backwards.
-    expect(series[0][1].rss).toBe(3);
-    expect(series[series.length - 1][1].rss).toBe(62);
+    expect(series[0]![1].rss).toBe(3);
+    expect(series[series.length - 1]![1].rss).toBe(62);
   });
 });
 
