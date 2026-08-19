@@ -72,6 +72,22 @@ describe("notifyd singleton lock", () => {
     expect(await acquireDaemonLock((pid) => pid === 424242)).toBe(true);
   });
 
+  it("GIVES UP (bounded, not a 15ms busy-wait) when the owner is OUR OWN pid, live and fresh", async () => {
+    // The pathological spin: pid reuse hands us the SAME pid a prior daemon held.
+    // With no os_start to prove the disagreement, the decline check skips
+    // (owner.pid === process.pid) AND the shared steal decision refuses (pid is
+    // "self" → not dead; ts fresh → not stale). Before the wait bound this looped
+    // at 15ms forever; now it must decline within the budget instead of spinning.
+    await mkdir(daemonLockDir(), { recursive: true });
+    await writeFile(
+      daemonLockOwnerPath(),
+      JSON.stringify({ pid: process.pid, started_at: 1, ts: Date.now() }),
+    );
+    const t0 = Date.now();
+    expect(await acquireDaemonLock(() => true, 80)).toBe(false); // bounded decline
+    expect(Date.now() - t0).toBeLessThan(2000);
+  });
+
   it("eventually steals a torn owner, but only AFTER the grace (no double daemon)", async () => {
     // A torn owner is also the mkdir→writeOwner window of a concurrent daemon
     // start, so it is respected within the grace (~1s) and stolen only past it —

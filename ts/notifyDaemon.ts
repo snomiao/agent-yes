@@ -258,6 +258,18 @@ export interface DaemonOptions {
 // the pid+started_at re-check before SIGTERM).
 const OWNER_TTL_MS = 30_000;
 
+// Hard upper bound on how long a contender may wait for the singleton lock. The
+// decline and steal predicates are SUPPOSED to be exhaustive, but they are not
+// complements: a valid owner whose pid equals OUR OWN pid (pid reuse — a prior
+// daemon died and the OS handed us the same pid, with no os_start recorded to
+// prove the disagreement) is skipped by the decline check (`owner.pid !==
+// process.pid`) yet also refused by the shared steal decision (its pid is "self",
+// so not dead; its ts is fresh, so not stale). Without a bound that residue spins
+// at 15ms forever, burning a whole core. Bounded well above the torn-owner grace
+// (~1s) and well below the heartbeat TTL (30s), so a live holder is never waited
+// out to staleness — we decline promptly instead and the next watch poll retries.
+const LOCK_WAIT_BUDGET_MS = 5000;
+
 export interface DaemonIdentity {
   pid: number;
   started_at: number;
@@ -333,11 +345,21 @@ async function writeOwner(): Promise<boolean> {
  */
 export async function acquireDaemonLock(
   isAlive: (pid: number) => boolean = isPidAlive,
+  waitBudgetMs: number = LOCK_WAIT_BUDGET_MS,
 ): Promise<boolean> {
   // The lock dir lives under notify/ — ensure that exists first, else mkdir of
   // the lock throws ENOENT which must NOT be mistaken for "someone holds it".
   await mkdir(notifyDir(), { recursive: true }).catch(() => {});
+  const deadline = Date.now() + waitBudgetMs;
   for (;;) {
+    // Never busy-wait without bound. Every iteration must end in acquire,
+    // decline, or steal; if the identity is so split that NEITHER decline nor
+    // steal applies (see LOCK_WAIT_BUDGET_MS), give up and decline rather than
+    // spin at 15ms indefinitely — the next watch poll re-ensures the daemon.
+    if (Date.now() >= deadline) {
+      logger.warn("[notifyd] gave up acquiring the daemon lock — unverifiable live holder");
+      return false;
+    }
     try {
       await mkdir(daemonLockDir(), { recursive: false });
       daemonStartedAt = Date.now(); // fixed for this daemon's lifetime
