@@ -1,11 +1,30 @@
 # Codex with DeepSeek
 
-A local-only adapter that lets Codex CLI use DeepSeek's Chat Completions API.
-It does not modify `~/.codex/config.toml`, global Codex authentication, or the
-globally linked `agent-yes` package. Codex is launched through the agent-yes
-wrapper, so the session is a first-class agent (`ay ls`, `ay tail`, resume, …).
+Codex を DeepSeek で動かす経路は 2 つある。**まず `ay codex-ds` を試すこと。**
+そちらで足りない場合にだけ、このアダプタを使う。
+
+| | `ay codex-ds` | このアダプタ (`ay ds`) |
+|---|---|---|
+| 経路 | OpenRouter (`deepseek/deepseek-v4-pro-0813`) | DeepSeek API に直結 |
+| 仕組み | codex に `-c` オーバーライドを渡すだけ。追加プロセスなし | ローカル HTTP プロキシを立てて Responses ⇄ Chat Completions を変換 |
+| 必要なもの | `OPENROUTER_API_KEY` のみ | `DEEPSEEK_API_KEY` |
+| 設定ファイル | 不要 (素の codex install で動く) | 隔離した `CODEX_HOME` を自動生成 |
+
+**`ay codex-ds` を既定にする理由**: 変換レイヤを挟まないぶん壊れる箇所が少ない。
+codex が `wire_api = "responses"` しか話さなくなった (0.147) 一方で OpenRouter は
+`POST /api/v1/responses` を提供しているため、間に何も要らない。
+
+**このアダプタが必要になる場合**: DeepSeek に直接課金したい、OpenRouter を経由
+させたくない、あるいは OpenRouter に無いモデル (`DEEPSEEK_MODEL`) を指名したいとき。
+DeepSeek の API は Chat Completions しか提供していないので、codex の Responses
+リクエストを変換するプロキシがどうしても要る。推論モデルが直前のターンで出した
+`reasoning_content` を次のリクエストに逐語で返す必要がある点も、ここで吸収している。
+
+どちらも codex セッションは agent-yes ラッパー経由で起動するので、一級の agent
+(`ay ls` / `ay tail` / resume) として扱える。
 
 ## Setup
+
 
 Create `.env.local` in the repository root:
 
