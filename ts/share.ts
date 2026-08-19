@@ -5,6 +5,7 @@
 // lab/ui/cf/worker.ts for the signaling protocol and lab/ui/index.html for the
 // browser side.
 import { randomBytes } from "crypto";
+import { isTerminalReply } from "./terminalReply.ts";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
@@ -75,7 +76,29 @@ const STUN: IceServer[] = [{ urls: "stun:stun.l.google.com:19302" }];
 
 function perfLog(event: string, data: Record<string, unknown>, force = false) {
   if (!force && !PERF_VERBOSE) return;
-  process.stderr.write(`[share:perf] ${JSON.stringify({ t: Date.now(), event, ...data })}\n`);
+  process.stderr.write(
+    `[share:perf] ${JSON.stringify({ t: Date.now(), pid: process.pid, event, ...data })}\n`,
+  );
+}
+
+// Event-loop lag sampler. A `send` with a multi-second queuedMs but
+// bufferedAmount ≈ 0 means the DataChannel was fine and the *runtime* stalled —
+// this separates "network/peer slow" from "the event loop was blocked" (GC on a
+// leaked heap, a sync native call). Samples a 500ms timer's drift and reports
+// rss alongside, so a stall can be attributed on the spot.
+const PERF_LAG_TICK_MS = 500;
+const PERF_LAG_WARN_MS = Number(process.env.AGENT_YES_WEBRTC_PERF_LAG_MS) || 250;
+function startLagSampler() {
+  let last = performance.now();
+  const t = setInterval(() => {
+    const now = performance.now();
+    const lag = Math.round(now - last - PERF_LAG_TICK_MS);
+    last = now;
+    const rss = process.memoryUsage?.().rss ?? 0;
+    perfLog("loop.lag", { lag, rssMb: Math.round(rss / 1e6) }, lag >= PERF_LAG_WARN_MS);
+  }, PERF_LAG_TICK_MS);
+  t.unref?.();
+  return t;
 }
 
 function maybeSlow(event: string, startedAt: number, data: Record<string, unknown> = {}) {
@@ -756,7 +779,22 @@ export async function startShare(
     if (req.t !== "req") return;
     const { id, method, path: p, body } = req;
     const startedAt = performance.now();
-    perfLog("req.start", { room, peer: peerId, id, method, path: p });
+    // For /api/send, classify the payload WITHOUT logging its content (it is
+    // keystrokes): `termReply` distinguishes a real keypress from the xterm
+    // auto-replies a TUI's ESC[?6n polling induces — the difference between
+    // "the user is typing" and a viewer↔agent query/reply feedback loop.
+    let extra: Record<string, unknown> = {};
+    if (p === "/api/send") {
+      const msg = (() => {
+        try {
+          return typeof body === "string" ? JSON.parse(body)?.msg : body?.msg;
+        } catch {
+          return undefined;
+        }
+      })();
+      if (typeof msg === "string") extra = { len: msg.length, termReply: isTerminalReply(msg) };
+    }
+    perfLog("req.start", { room, peer: peerId, id, method, path: p, ...extra });
     const ac = new AbortController();
     peer.aborts.set(id, ac);
     try {
@@ -847,6 +885,7 @@ export async function startShare(
   // freeze). Daemon-only (non-TTY): a foreground `ay serve` has no restart
   // manager, so exiting would just stop sharing — and the user is there to act.
   const startedAt = Date.now();
+  const lagSampler = startLagSampler();
   const proactiveRestart = process.stdout.isTTY
     ? undefined
     : setInterval(() => {
@@ -878,6 +917,7 @@ export async function startShare(
   const close = () => {
     closed = true;
     if (proactiveRestart) clearInterval(proactiveRestart);
+    clearInterval(lagSampler);
     try {
       currentWs?.close();
     } catch {

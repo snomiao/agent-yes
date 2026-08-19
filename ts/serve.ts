@@ -43,7 +43,7 @@ import { isTermToken, mintTermToken, verifyTermToken, type TermScope } from "./t
 import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
 import { CLAUDE_SESSION_PIN_ENV } from "./sessionEnv.ts";
 import { MAX_CALLBACK_MSG_BYTES, frameVisitorMessage, verifyCapability } from "./callbackCore.ts";
-import { isTerminalReply } from "./terminalReply.ts";
+import { isTerminalReply, makeTerminalReplyGuard } from "./terminalReply.ts";
 import { removeControlCharacters } from "./removeControlCharacters.ts";
 import { parseStatusText } from "./statusText.ts";
 import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
@@ -2007,6 +2007,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
     anyDaemonWriteAt.set(pid, mt);
     if (meaningful) meaningfulStdinAt.set(pid, mt);
   };
+  // Break the auto-reply feedback loop (see makeTerminalReplyGuard).
+  const allowTerminalReply = makeTerminalReplyGuard();
   // last_stdin_at for a record: newest of (a) the last meaningful write we made and
   // (b) a FIFO write we did NOT make (a local `ay send`, always meaningful). A mtime
   // at/below our last write means the newest write was ours → use the meaningful stamp
@@ -3405,6 +3407,14 @@ export async function cmdServe(rest: string[]): Promise<number> {
         const record = await resolveOne(keyword, defaultOpts());
         if (!record.fifo_file)
           return new Response(`pid ${record.pid}: no fifo_file`, { status: 409 });
+        // Pure terminal auto-reply: answer the TUI's query, but don't sustain the
+        // query→answer→repaint→query loop (see allowTerminalReply). Report ok so
+        // the viewer treats it as delivered and doesn't retry — a dropped protocol
+        // answer is nothing the caller can or should act on.
+        const autoReply = msg !== "" && isTerminalReply(msg);
+        if (autoReply && !allowTerminalReply(record.pid, msg)) {
+          return Response.json({ ok: true, pid: record.pid, cli: record.cli, dropped: "autoreply" });
+        }
         const trailing = controlCodeFromName(code.toLowerCase());
         if (msg && trailing) {
           await writeToIpc(record.fifo_file, msg);
@@ -3417,12 +3427,14 @@ export async function cmdServe(rest: string[]): Promise<number> {
         // terminal auto-reply (xterm answering the TUI's cursor/DA query, forwarded
         // over this same wire) is protocol noise, not input — stamp anyDaemonWriteAt
         // but not the "meaningful" time, so a resize/redraw can't trip the flash.
-        await noteStdinWrite(record.pid, record.fifo_file, !isTerminalReply(msg));
+        await noteStdinWrite(record.pid, record.fifo_file, !autoReply);
         // Record the recipient's inbox on THIS host (the sender records its own
         // outbox on its host). The sender crossed the wire, so `from.cwd` names a
         // path on another machine — mark it remote so the peer's cwd isn't misread
         // as local. Only real message bodies are logged. Best-effort.
-        if (msg) {
+        // Only real message bodies are logged — a terminal auto-reply is protocol
+        // chatter, not mail, and at loop rate it would flood the inbox store.
+        if (msg && !autoReply) {
           const senderParty: MailParty | null =
             from && typeof from === "object" && typeof from.pid === "number"
               ? {
