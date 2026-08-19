@@ -334,6 +334,112 @@ clis:
       - --search
     noEOL: true
 
+  # codex-ds — the `codex` binary pointed at DeepSeek V4 Pro over OpenRouter
+  # instead of the built-in OpenAI models. Everything the provider needs rides
+  # in `defaultArgs` as `-c` overrides, so this works against a stock codex
+  # install with no `~/.codex/*.config.toml` of your own; the only external
+  # requirement is `OPENROUTER_API_KEY` in the environment (same shape as glm's
+  # ZAI_API_KEY). Get one at https://openrouter.ai/keys.
+  #
+  # Two codex-version constraints are baked into the override:
+  #   - `wire_api` must be "responses"; codex >= 0.147 removed the "chat"
+  #     wire protocol, and OpenRouter serves POST /api/v1/responses.
+  #   - the provider table is passed inline rather than as a named profile,
+  #     because codex >= 0.147 rejects a `[profiles.X]` table in config.toml
+  #     and wants it in a separate `<X>.config.toml`.
+  #
+  # All drive markers below are copied from the `codex` block — same binary,
+  # same TUI — because per-CLI config does not inherit.
+  codex-ds:
+    binary: codex
+    promptArg: first-arg
+    defaultArgs:
+      - -c
+      - model_providers.openrouter={name="OpenRouter",base_url="https://openrouter.ai/api/v1",env_key="OPENROUTER_API_KEY",wire_api="responses"}
+      - -c
+      - model_provider="openrouter"
+      - -c
+      - model="deepseek/deepseek-v4-pro-0813"
+      - --search
+    yesArgs:
+      - --dangerously-bypass-approvals-and-sandbox
+    install:
+      npm: "npm install -g @openai/codex@latest"
+    help: https://openrouter.ai/deepseek/deepseek-v4-pro
+    updateAvailable:
+      - "^✨⬆️ Update available!"
+    ready:
+      - ⏎ send
+      - "› "
+      - '\? for shortcuts'
+    working:
+      - esc to interrupt
+    needsInput:
+      - pattern: '[›>] ?\d+\.'
+        flags: m
+    enter:
+      - pattern: '[›>] ?1\. ?Yes'
+        flags: m
+      - pattern: '[›>] ?1\. ?Approve'
+        flags: m
+      - pattern: '[›>] ?1\. ?Allow'
+        flags: m
+    fatal:
+      - "Error: The cursor position could not be read within"
+    noEOL: true
+
+
+  # codex-ds-direct — same idea as codex-ds, but pointed straight at DeepSeek's
+  # own endpoint instead of going through OpenRouter. DeepSeek gained native
+  # Responses API support in the 2026-08-13 V4 Pro update
+  # (https://api-docs.deepseek.com/guides/responses_api/), so no translating
+  # proxy is needed on this path either — one less hop and no reseller margin.
+  # Requires `DEEPSEEK_API_KEY`; get one at https://platform.deepseek.com.
+  #
+  # Model id differs from the OpenRouter route: DeepSeek's own /models lists
+  # exactly `deepseek-v4-flash` and `deepseek-v4-pro` — there are no dated
+  # snapshot ids here, so this uses the plain `deepseek-v4-pro`.
+  #
+  # Drive markers are copied from the `codex` block, as with codex-ds.
+  codex-ds-direct:
+    binary: codex
+    promptArg: first-arg
+    defaultArgs:
+      - -c
+      - model_providers.deepseek={name="DeepSeek",base_url="https://api.deepseek.com",env_key="DEEPSEEK_API_KEY",wire_api="responses"}
+      - -c
+      - model_provider="deepseek"
+      - -c
+      - model="deepseek-v4-pro"
+      - --search
+    yesArgs:
+      - --dangerously-bypass-approvals-and-sandbox
+    install:
+      npm: "npm install -g @openai/codex@latest"
+    help: https://api-docs.deepseek.com/guides/responses_api/
+    updateAvailable:
+      - "^✨⬆️ Update available!"
+    ready:
+      - ⏎ send
+      - "› "
+      - '\? for shortcuts'
+    working:
+      - esc to interrupt
+    needsInput:
+      - pattern: '[›>] ?\d+\.'
+        flags: m
+    enter:
+      - pattern: '[›>] ?1\. ?Yes'
+        flags: m
+      - pattern: '[›>] ?1\. ?Approve'
+        flags: m
+      - pattern: '[›>] ?1\. ?Allow'
+        flags: m
+    fatal:
+      - "Error: The cursor position could not be read within"
+    noEOL: true
+
+
   qwen:
     install:
       npm: "npm install -g @qwen-code/qwen-code@latest"

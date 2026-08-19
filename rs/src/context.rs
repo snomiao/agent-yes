@@ -1101,7 +1101,7 @@ impl AgentContext {
         }
 
         // Extract and store codex session ID (once per session)
-        if self.cli == "codex" && !self.codex_session_found {
+        if crate::cli::is_codex_family(&self.cli) && !self.codex_session_found {
             if let Some(session_id) = codex_sessions::extract_session_id(output) {
                 codex_sessions::store_session(&self.cwd, &session_id);
                 self.codex_session_found = true;

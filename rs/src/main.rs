@@ -320,7 +320,7 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     }
 
     // Codex session resume: look up stored session ID for this cwd
-    if args.continue_session && args.cli == "codex" {
+    if args.continue_session && crate::cli::is_codex_family(&args.cli) {
         if let Some(session_id) = codex_sessions::get_session(cwd) {
             info!("Resuming codex session: {}", session_id);
             cmd_args.push("--session".to_string());

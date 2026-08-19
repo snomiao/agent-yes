@@ -16,6 +16,8 @@ pub const SUPPORTED_CLIS: &[&str] = &[
     "glm",
     "pi",
     "codex",
+    "codex-ds",
+    "codex-ds-direct",
     "copilot",
     "cursor",
     "grok",
