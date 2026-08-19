@@ -35,7 +35,7 @@ For the `ay send` guards, the check is:
 ay send 99999 --body-file /tmp/x   # pid 99999 does not exist — nothing is sent
 ```
 
-- guards present → `ay send: no message. These are not ay send options...`
+- guards present → `ay send: Unknown arguments: body-file, bodyFile`
 - guards absent → `ay send: no agent matched "99999"` (the unknown flag was
   swallowed and the send proceeded — which is the bug)
 
