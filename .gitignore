@@ -21,6 +21,9 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .env.test.local
 .env.production.local
 .env.local
+# isolated CODEX_HOME for the DeepSeek adapter (scripts/deepseek-codex.ts):
+# session state + auth for a non-default provider, never committed
+.codex-deepseek/
 # caches
 .eslintcache
 .cache
