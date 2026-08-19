@@ -54,6 +54,12 @@ enum Command {
         #[arg(long)]
         port: Option<u16>,
 
+        /// Absolute path to the console `lab/ui/` directory (default: auto-detect
+        /// from CWD or the installed binary's sibling). When the auto-detection
+        /// fails the UI 404s but the /api endpoints still work.
+        #[arg(long)]
+        ui: Option<String>,
+
         /// Install/uninstall/inspect the daemon as a native OS service
         /// (launchd on macOS, systemd --user on Linux) instead of running it
         /// in the foreground.
@@ -84,7 +90,12 @@ async fn main() -> anyhow::Result<()> {
             sighost,
             action,
             port,
+            ui,
         } => {
+            // Override the auto-detected UI path if the user passed --ui.
+            if let Some(p) = ui {
+                serve::http::set_ui_dir(std::path::PathBuf::from(p));
+            }
             match action {
                 // Service management never needs a room up front: the unit
                 // re-runs `ayrs serve --webrtc` which loads/mints as usual.
@@ -104,6 +115,11 @@ async fn main() -> anyhow::Result<()> {
             // own cleanup. Mirrors rs/src/main.rs. Also the defense layer that
             // eventually clears any zombie an old (pre-fix) daemon left behind.
             reaper::sweep();
+
+            // Reclaim raw logs whose own writer cannot: an agent exec'd before
+            // log compaction shipped keeps that image for its whole life, so
+            // nothing inside it will ever cap its log (see serve/log_gc.rs).
+            serve::log_gc::spawn();
 
             // --port and --webrtc are independent transports over the SAME API
             // surface; running both is the normal local+remote setup.

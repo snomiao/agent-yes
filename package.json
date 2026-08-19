@@ -1,6 +1,6 @@
 {
   "name": "agent-yes",
-  "version": "1.277.1",
+  "version": "1.287.0",
   "description": "A wrapper tool that automates interactions with various AI CLI tools by automatically handling common prompts and responses.",
   "keywords": [
     "ai",
@@ -127,6 +127,7 @@
     "release": "standard-version && npm publish",
     "release:beta": "standard-version && npm publish --tag beta",
     "test": "vitest run",
+    "test:bun": "bun test --timeout 30000 .bun.",
     "test:coverage": "vitest run --coverage",
     "test:ui": "vitest run --config tests/ui-test/vitest.config.ts",
     "test:ui-dom": "vitest run --config tests/ui-dom/vitest.config.ts",

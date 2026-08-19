@@ -293,115 +293,6 @@ fn rollup(
     }
 }
 
-/// Whole-box vitals: loadavg (1/5/15) and memory from /proc/loadavg + meminfo.
-#[derive(Debug, Clone, Default)]
-pub struct SystemStats {
-    pub load: [f64; 3],
-    pub load_valid: bool,
-    pub ncpu: u32,
-    pub mem_total: u64,
-    pub mem_available: u64,
-}
-
-/// Parse /proc/meminfo (`MemTotal:  16316360 kB`) into a byte-valued map.
-pub fn parse_meminfo(raw: &str) -> HashMap<String, u64> {
-    let mut out = HashMap::new();
-    for line in raw.lines() {
-        let mut it = line.split_whitespace();
-        let Some(key) = it.next() else { continue };
-        let key = key.trim_end_matches(':').to_string();
-        let Some(val) = it.next().and_then(|v| v.parse::<u64>().ok()) else {
-            continue;
-        };
-        out.insert(key, val * 1024);
-    }
-    out
-}
-
-pub fn system_stats() -> SystemStats {
-    let mut s = SystemStats {
-        ncpu: std::thread::available_parallelism()
-            .map(|n| n.get() as u32)
-            .unwrap_or(0),
-        ..Default::default()
-    };
-    if let Ok(load_raw) = std::fs::read_to_string("/proc/loadavg") {
-        let fields: Vec<f64> = load_raw
-            .split_whitespace()
-            .take(3)
-            .map(|x| x.parse().unwrap_or(f64::NAN))
-            .collect();
-        if fields.len() == 3 && fields.iter().all(|f| f.is_finite()) {
-            s.load = [fields[0], fields[1], fields[2]];
-            s.load_valid = true;
-        }
-    } else {
-        // Non-Linux: getloadavg(3) works on macOS/BSD too (matches node:os in the
-        // TS fallback). No /proc/loadavg there.
-        #[cfg(unix)]
-        unsafe {
-            let mut la = [0f64; 3];
-            let n = libc::getloadavg(la.as_mut_ptr(), 3);
-            if n >= 1 {
-                s.load = la;
-                s.load_valid = la.iter().any(|&x| x > 0.0);
-            }
-        }
-    }
-    if let Ok(mem_raw) = std::fs::read_to_string("/proc/meminfo") {
-        let mem = parse_meminfo(&mem_raw);
-        s.mem_total = mem.get("MemTotal").copied().unwrap_or(0);
-        // MemAvailable is the kernel's own estimate of what a new allocation can
-        // get; "free" is misleading on a warm page cache.
-        s.mem_available = mem.get("MemAvailable").copied().unwrap_or(0);
-    } else {
-        // macOS/BSD: `sysctl hw.memsize` (bytes) is total RAM. "Available" has no
-        // direct sysctl twin (`vm.page_free_count` is far too low to be useful),
-        // so we approximate used-vs-total from `vm_stat` by reusing the VM's
-        // free+inactive pages — a reasonable "reclaimable" proxy.
-        s.mem_total = sysctl_u64("hw.memsize").unwrap_or(0);
-        s.mem_available = macos_available_bytes().unwrap_or(0);
-    }
-    s
-}
-
-/// Read a u64 sysctl on macOS/BSD. None on error (unsupported key, non-macOS…).
-fn sysctl_u64(key: &str) -> Option<u64> {
-    let out = std::process::Command::new("sysctl")
-        .args(["-n", key])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.trim().parse::<u64>().ok()
-}
-
-/// MacOS "reclaimable" memory ≈ free + inactive pages from `vm_stat` (page size
-/// 4096 on arm64). Best-effort; None when vm_stat is missing/parse fails.
-fn macos_available_bytes() -> Option<u64> {
-    let out = std::process::Command::new("vm_stat").output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut free = 0u64;
-    let mut inactive = 0u64;
-    for line in text.lines() {
-        let mut it = line.split(':');
-        let Some(key) = it.next() else { continue };
-        let key = key.trim();
-        let Some(val) = it.next().and_then(|v| v.trim().strip_suffix('.')) else {
-            continue;
-        };
-        let val = val.trim().parse::<u64>().unwrap_or(0);
-        match key {
-            "Pages free" => free = val,
-            "Pages inactive" => inactive = val,
-            _ => {}
-        }
-    }
-    if free == 0 && inactive == 0 {
-        return None;
-    }
-    Some((free + inactive).saturating_mul(4096))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -502,13 +393,5 @@ mod tests {
         assert_eq!(t.rss, 2000 + 50 + 40);
         // Only pid 1 contributes a delta: 12 - 10 = 2.
         assert!((t.cpu_delta - 2.0).abs() < 1e-9);
-    }
-
-    #[test]
-    fn meminfo_parses_bytes() {
-        let raw = "MemTotal:       16316360 kB\nMemAvailable:   1000000 kB\n";
-        let m = parse_meminfo(raw);
-        assert_eq!(m.get("MemTotal"), Some(&(16316360u64 * 1024)));
-        assert_eq!(m.get("MemAvailable"), Some(&(1000000u64 * 1024)));
     }
 }

@@ -355,11 +355,7 @@ function memberRows(
     out.push({
       pid,
       ppid: now.ppid,
-      comm:
-        (now.comm || "")
-          .split(/[\\/]+/)
-          .filter(Boolean)
-          .pop() ?? "",
+      comm: (now.comm || "").split(/[\\/]+/).filter(Boolean).pop() ?? "",
       rss: now.rss,
       cpuPercent: elapsedSeconds > 0 ? (delta / elapsedSeconds) * 100 : 0,
       state: now.state,

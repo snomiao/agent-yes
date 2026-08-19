@@ -20,7 +20,7 @@
 // rather than erroring the serve path.
 
 use super::procstats::{
-    build_child_index, descendants_of, snapshot_procs, system_stats, ProcSample, TreeStats,
+    build_child_index, descendants_of, snapshot_procs, ProcSample, TreeStats,
 };
 use crate::pid_store::is_process_alive;
 use std::collections::{HashMap, HashSet};
@@ -48,8 +48,6 @@ pub struct Bucket {
 pub struct ResSnapshot {
     /// wrapper pid → resource window (oldest first), each (unix_ms_ts, bucket).
     pub agents: HashMap<u32, Vec<(i64, Bucket)>>,
-    /// Whole-box vitals at the last sweep.
-    pub system: super::procstats::SystemStats,
     /// The unattributed (non-agent-yes) rollup at the last sweep.
     pub unattributed: Bucket,
     /// Bucket width actually in use (60 or 300), for the console's axis label.
@@ -225,7 +223,6 @@ fn sweep_once(st: &mut SampleState) -> std::time::Duration {
     }
     st.prev = next_prev;
 
-    st.snap.system = system_stats();
     st.snap.unattributed = bucket_from(&unattributed);
     st.snap.bucket_secs = st.bucket_secs;
 

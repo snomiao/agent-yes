@@ -58,6 +58,7 @@ import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
 import { CLAUDE_SESSION_PIN_ENV } from "./sessionEnv.ts";
 import { MAX_CALLBACK_MSG_BYTES, frameVisitorMessage, verifyCapability } from "./callbackCore.ts";
 import { isTerminalReply } from "./terminalReply.ts";
+import * as serveSampler from "./serveSampler.ts";
 import { withIpcLock } from "./ipcLock.ts";
 import { removeControlCharacters } from "./removeControlCharacters.ts";
 import { parseStatusText } from "./statusText.ts";
@@ -2251,6 +2252,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
           : await logBadges(r.log_file).then(async (b) =>
               (await isUserTyping(r.pid)) ? [...b, TYPING_BADGE.id] : b,
             ),
+      // Per-agent resource window (CPU-seconds/RSS/procs) from the background
+      // sampler. Null until the sampler's first pass lands; the console degrades
+      // to a transparent backdrop.
+      res: serveSampler.resField(r.pid),
     };
   };
 
@@ -3095,6 +3100,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         loadavg: loadavg(),
         mem: { total: totalmem(), free: freemem() },
         uptime: uptime(),
+        resources: serveSampler.resourcesField(),
         caps: {
           send: true, // the console can always drive agent stdin
           kill: true,
@@ -4981,6 +4987,14 @@ export async function cmdServe(rest: string[]): Promise<number> {
         throw e;
       }
     }
+
+    // Start the per-agent resource sampler (left-panel heatmap data). Prime the
+    // first bucket immediately so the first /api/ls already carries `res`. The
+    // sampler reads the live wrapper pids through listRecords (same registry the
+    // /api/ls handler consults), so both agree on the fleet.
+    serveSampler.startSampler(async () =>
+      (await listRecords(undefined, defaultOpts({ all: true }))).map((r) => r.pid),
+    );
 
     // server is null only when we degraded to WebRTC-only above (port wedged);
     // skip the HTTP connection banner since nothing is listening on the port.

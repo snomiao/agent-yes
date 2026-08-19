@@ -357,6 +357,28 @@ async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
     let pid_store = PidStore::new();
     pid_store.prune_old_logs();
     pid_store.clean_stale();
+    // ...then recover any agent that a PRIOR clean_stale dropped while it was
+    // still running (see PidStore::recover_orphans). Ordered after the sweep so
+    // it observes the post-sweep registry, and scoped to this agent's own
+    // project dir plus the global one — a startup must not stat the whole disk.
+    {
+        let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+        if let Some(g) = crate::log_files::global_dir() {
+            dirs.push(g);
+        }
+        if let Ok(cwd) = std::env::current_dir() {
+            if let Some(d) = crate::log_files::project_log_dir(&cwd.to_string_lossy()) {
+                dirs.push(d);
+            }
+        }
+        let recovered = pid_store.recover_orphans(&dirs);
+        if recovered > 0 {
+            info!(
+                "recovered {} unregistered but still-running agent(s)",
+                recovered
+            );
+        }
+    }
 
     // Defense-in-depth: sweep the orphan-reaper registry, killing the recorded
     // process group of any PRIOR agent whose wrapper died without running its own

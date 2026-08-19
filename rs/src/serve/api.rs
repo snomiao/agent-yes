@@ -7,6 +7,7 @@
 // truth); data comes from the same files the TS daemon uses: pids.jsonl,
 // <cwd>/.agent-yes/<pid>.raw.log, and the per-pid stdin FIFOs.
 use crate::pid_store::{is_process_alive, PidRecord};
+use crate::serve::host_stats;
 use serde_json::{json, Value};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
@@ -88,7 +89,7 @@ pub fn load_or_create_token() -> std::io::Result<String> {
 
 // ---- pids.jsonl -------------------------------------------------------------
 
-fn read_records() -> Vec<PidRecord> {
+pub(crate) fn read_records() -> Vec<PidRecord> {
     let path = global_dir().join("pids.jsonl");
     let Ok(content) = std::fs::read_to_string(&path) else {
         return Vec::new();
@@ -356,6 +357,51 @@ fn json_cache_get(cache: &JsonCache, key: &str, size: u64, mtime: i64) -> Option
     }
 }
 
+/// When `log_tasks` last recomputed, per log file. Separate from `TASKS_CACHE`
+/// so the cache's `(size, mtime)` contract — and the shared `json_cached`
+/// helper — stay exactly as they are.
+type StampMap = std::sync::Mutex<std::collections::HashMap<String, i64>>;
+static TASKS_STAMP: once_cell::sync::Lazy<StampMap> = once_cell::sync::Lazy::new(Default::default);
+
+/// The previously computed task count, if it was computed recently enough to
+/// keep serving. `None` means "recompute now", which is also what an entry with
+/// no recorded stamp gets — a first call always computes.
+fn tasks_recent_enough(log_file: &str) -> Option<Value> {
+    let fresh = TASKS_STAMP
+        .lock()
+        .ok()?
+        .get(log_file)
+        .is_some_and(|at| now_ms() - *at < TASKS_MAX_STALE_MS);
+    if !fresh {
+        return None;
+    }
+    // Any stored value under this key, whatever (size, mtime) produced it.
+    let map = TASKS_CACHE.lock().ok()?;
+    map.get(log_file).map(|(_, _, v)| v.clone())
+}
+
+fn stamp_tasks(log_file: &str) {
+    if let Ok(mut m) = TASKS_STAMP.lock() {
+        m.insert(log_file.to_string(), now_ms());
+    }
+}
+
+/// Longest a task count may be served after the log has already moved on.
+///
+/// The `(size, mtime)` key alone is the right invalidation rule for the cheap
+/// derived fields, but it has a pathology on the expensive one: an ACTIVE agent
+/// appends every tick, so its key changes every tick and `log_tasks` — the
+/// heaviest item in `with_meta`, a 256KB terminal replay plus a scrollback dump
+/// bounded only by the emulator's 10k-row history — recomputes on every poll,
+/// for every viewer.
+///
+/// Task counts do not move at that rate. They change when a task transitions,
+/// not when a character is printed, so serving a slightly stale count between
+/// recomputes costs the console nothing observable while cutting the work by
+/// the ratio of this value to the poll tick. Bounded by wall clock rather than
+/// by a tick count so it does not scale with the number of connected viewers.
+const TASKS_MAX_STALE_MS: i64 = 15_000;
+
 /// Task progress from the rendered todo block. Reads a 256KB window (vs 32KB
 /// elsewhere) and keeps the WHOLE render — the latest block is often scrolled
 /// well back from the final rows.
@@ -369,9 +415,16 @@ fn log_tasks(log_file: Option<&str>) -> Value {
     if let Some(v) = json_cache_get(&TASKS_CACHE, log_file, size, mtime) {
         return v;
     }
+    // Key miss, i.e. the log grew. Recompute at most every TASKS_MAX_STALE_MS.
+    if let Some(v) = tasks_recent_enough(log_file) {
+        return v;
+    }
     let Some((size, mtime, lines)) = render_tail_lines(log_file, 256 * 1024, 0) else {
         return Value::Null;
     };
+    // Stamped on the compute path only, so the staleness clock measures time
+    // between real renders rather than time between calls.
+    stamp_tasks(log_file);
     json_cached(&TASKS_CACHE, log_file, size, mtime, || {
         crate::serve::meta::parse_task_counts(&lines)
             .map(|t| json!({ "done": t.done, "total": t.total }))
@@ -607,9 +660,6 @@ fn with_meta(r: &PidRecord) -> Value {
         json!(last_active.unwrap_or(r.started_at)),
     );
     o.insert("last_stdin_at".into(), json!(last_stdin_at(r.pid)));
-    // Per-agent resource window (CPU/RSS/procs) for the console heatmap. Null
-    // until the sampler's first pass lands; the console degrades to transparent.
-    o.insert("res".into(), res_field(r.pid));
     v
 }
 
@@ -1084,68 +1134,30 @@ fn whoami_host() -> String {
 }
 
 fn host_info() -> Value {
-    let snap = crate::serve::sampler::res_snapshot();
-    let sys = &snap.system;
-    let cpus = if sys.ncpu > 0 {
-        sys.ncpu
-    } else {
-        std::thread::available_parallelism()
-            .map(|n| n.get() as u32)
-            .unwrap_or(0)
-    };
-    let loadavg = if sys.load_valid { sys.load } else { [0f64; 3] };
-    // Aggregate managed = sum of all per-agent RSS; unattributed is separate.
-    let mut managed_rss: u64 = 0;
-    let mut managed_procs: usize = 0;
-    for (_pid, series) in &snap.agents {
-        if let Some((_, last)) = series.last() {
-            managed_rss = managed_rss.saturating_add(last.rss);
-            managed_procs = managed_procs.saturating_add(last.procs);
-        }
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(0);
+    let mut loadavg = [0f64; 3];
+    #[cfg(unix)]
+    unsafe {
+        libc::getloadavg(loadavg.as_mut_ptr(), 3);
     }
-    let unattributed_rss = snap.unattributed.rss;
-    let unattributed_procs = snap.unattributed.procs;
+    // `free` keeps Node os.freemem() semantics so this matches the TS daemon;
+    // `available` is the additive field a UI should prefer, because "free" alone
+    // under-reports usable memory by a wide margin (an order of magnitude is
+    // typical on macOS, where free excludes reclaimable inactive pages). See
+    // serve::host_stats for the full rationale.
+    let mem = host_stats::mem_stats();
     json!({
         "host": hostname(),
         "platform": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
         "cpus": cpus,
         "loadavg": loadavg,
-        "mem": { "total": sys.mem_total, "free": sys.mem_available },
-        "uptime": 0,
-        "resources": {
-            "bucket_secs": snap.bucket_secs,
-            "managed_rss": managed_rss,
-            "managed_procs": managed_procs,
-            "unattributed_rss": unattributed_rss,
-            "unattributed_procs": unattributed_procs,
-        },
+        "mem": { "total": mem.total, "free": mem.free, "available": mem.available },
+        "uptime": host_stats::uptime_secs(),
         "caps": { "send": true, "kill": false, "spawn": false, "spawnHook": false, "provision": false },
     })
-}
-
-/// The per-agent + unattributed resource window for the console heatmap, as the
-/// `res` field on each /api/ls entry (and the `unattributed` sibling for the
-/// room line). None when the sampler has not finished a first pass yet.
-fn res_field(pid: u32) -> Value {
-    let snap = crate::serve::sampler::res_snapshot();
-    let bucket_secs = snap.bucket_secs;
-    match snap.agents.get(&pid) {
-        Some(series) => {
-            let ts: Vec<i64> = series.iter().map(|(t, _)| *t).collect();
-            let cpu: Vec<f64> = series.iter().map(|(_, b)| b.cpu_seconds).collect();
-            let rss: Vec<u64> = series.iter().map(|(_, b)| b.rss).collect();
-            let procs: Vec<usize> = series.iter().map(|(_, b)| b.procs).collect();
-            json!({
-                "bucket_secs": bucket_secs,
-                "t": ts,
-                "cpu_seconds": cpu,
-                "rss": rss,
-                "procs": procs,
-            })
-        }
-        None => Value::Null,
-    }
 }
 
 // ---- router -------------------------------------------------------------------
