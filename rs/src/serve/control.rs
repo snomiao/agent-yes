@@ -61,6 +61,9 @@ fn spawn_detached(bin: &std::path::Path, args: &[String], cwd: &str) -> std::io:
     let mut cmd = std::process::Command::new(bin);
     cmd.args(args)
         .current_dir(cwd)
+        // Do not propagate launchd's minimal PATH into interactive agents.
+        // This also protects an already-installed old service definition.
+        .env("PATH", super::service::runtime_path())
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());

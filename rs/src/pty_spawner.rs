@@ -123,6 +123,75 @@ fn expand_env_vars(raw: &str, unresolved: &mut bool) -> String {
     out
 }
 
+/// Mirror Bun's automatic env-file loading for the wrapped CLI.
+///
+/// Bun loads `.env` → `.env.{NODE_ENV}` → `.env.{NODE_ENV}.local` → `.env.local`
+/// from the script's cwd and NEVER overrides a variable that is already set in
+/// the environment. A console-spawned agent inherits the serve daemon's minimal
+/// env (launchd/systemd set only PATH), so without this the repo's `.env.local`
+/// (`DEEPSEEK_API_KEY`, `CLOUDFLARE_API_TOKEN`, …) never reaches the CLI. Apply
+/// the same semantics here so a spawned agent behaves exactly like a `bun` script
+/// run from that directory. The agent-yes global `~/.agent-yes/.env.local` is
+/// loaded at the LOWEST precedence (before any repo file); ambient env always
+/// wins over every file. Mirrors ts/loadEnv/… precedence in scripts/deepseek-codex.ts.
+fn inject_bun_env_files(cmd: &mut CommandBuilder, cwd: &std::path::Path) {
+    let mut files: Vec<std::path::PathBuf> = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        files.push(
+            std::path::Path::new(&home)
+                .join(".agent-yes")
+                .join(".env.local"),
+        );
+    }
+    files.push(cwd.join(".env"));
+    let node_env = std::env::var("NODE_ENV").ok().filter(|s| !s.is_empty());
+    if let Some(ne) = &node_env {
+        files.push(cwd.join(format!(".env.{ne}")));
+        files.push(cwd.join(format!(".env.{ne}.local")));
+    }
+    files.push(cwd.join(".env.local"));
+    for path in files {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in raw.lines() {
+            let Some((key, value)) = parse_env_line(line) else {
+                continue;
+            };
+            // Bun never overrides an already-set variable: ambient env wins, and
+            // later (higher-precedence) files overwrite earlier ones via cmd.env.
+            if std::env::var_os(&key).is_some() {
+                continue;
+            }
+            cmd.env(&key, &value);
+        }
+    }
+}
+
+/// Parse one dotenv line the way Bun does: trim, skip blanks and `#` comments,
+/// allow an optional `export` prefix, split at the FIRST `=`, and strip one layer
+/// of matching surrounding quotes.
+fn parse_env_line(line: &str) -> Option<(String, String)> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+    let line = line.strip_prefix("export ").unwrap_or(line).trim();
+    let eq = line.find('=')?;
+    let key = line[..eq].trim();
+    if key.is_empty() || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+        return None;
+    }
+    let mut value = line[eq + 1..].trim();
+    if value.len() >= 2 {
+        let (first, last) = (value.as_bytes()[0], value.as_bytes()[value.len() - 1]);
+        if (first == b'"' && last == b'"') || (first == b'\'' && last == b'\'') {
+            value = &value[1..value.len() - 1];
+        }
+    }
+    Some((key.to_string(), value.to_string()))
+}
+
 /// Read terminal size via ioctl(TIOCGWINSZ). Returns None if stdout is not a TTY.
 #[cfg(unix)]
 fn ioctl_terminal_size() -> Option<(u16, u16)> {
@@ -499,6 +568,13 @@ pub async fn spawn_agent(
         cmd.env_remove(key);
     }
 
+    // Load `.env`/`.env.local` (Bun-style) from the agent's cwd plus the global
+    // `~/.agent-yes/.env.local`, filling only keys the ambient env doesn't have.
+    // Console-spawned agents inherit the daemon's minimal env, so this is what
+    // makes DEEPSEEK_API_KEY / CLOUDFLARE_API_TOKEN reach the CLI. TERM/COLORTERM
+    // and config.env below still win (they are injected afterwards).
+    inject_bun_env_files(&mut cmd, std::path::Path::new(cwd));
+
     // The agent runs in a PTY (a real terminal), so advertise terminal
     // capabilities. A console/daemon-spawned agent inherits an env with no TERM/
     // COLORTERM: neither the daemon (no controlling terminal) nor the recovered
@@ -766,6 +842,133 @@ mod tests {
         assert!(!unresolved);
 
         std::env::remove_var("AY_TEST_KEY");
+    }
+
+    #[test]
+    fn test_parse_env_line() {
+        // Plain assignment.
+        assert_eq!(
+            parse_env_line("KEY=value"),
+            Some(("KEY".to_string(), "value".to_string()))
+        );
+        // Optional `export` prefix.
+        assert_eq!(
+            parse_env_line("export EXPORTED=x"),
+            Some(("EXPORTED".to_string(), "x".to_string()))
+        );
+        // Whitespace around key/value is trimmed.
+        assert_eq!(
+            parse_env_line("  SPACED =  padded  "),
+            Some(("SPACED".to_string(), "padded".to_string()))
+        );
+        // One layer of matching quotes is stripped.
+        assert_eq!(
+            parse_env_line("QUOTED=\"with space\""),
+            Some(("QUOTED".to_string(), "with space".to_string()))
+        );
+        assert_eq!(
+            parse_env_line("SINGLE='a=b'"),
+            Some(("SINGLE".to_string(), "a=b".to_string()))
+        );
+        // Value containing an `=` is preserved (split at the FIRST `=`).
+        assert_eq!(
+            parse_env_line("URL=https://api.deepseek.com"),
+            Some(("URL".to_string(), "https://api.deepseek.com".to_string()))
+        );
+        // Blank and comment lines are skipped.
+        assert_eq!(parse_env_line(""), None);
+        assert_eq!(parse_env_line("   "), None);
+        assert_eq!(parse_env_line("# comment"), None);
+        assert_eq!(parse_env_line("   # indented comment"), None);
+        // Lines with no `=` or an empty key are skipped.
+        assert_eq!(parse_env_line("no_equals"), None);
+        assert_eq!(parse_env_line("=value"), None);
+        assert_eq!(parse_env_line("BAD-KEY=value"), None);
+    }
+
+    #[test]
+    fn test_inject_bun_env_files() {
+        use std::ffi::OsStr;
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var("AY_DOTENV_ONLY_LOCAL");
+        std::env::remove_var("AY_DOTENV_ONLY_PLAIN");
+        std::env::remove_var("AY_DOTENV_OVERRIDE");
+        std::env::remove_var("AY_DOTENV_AMBIENT");
+        std::env::remove_var("NODE_ENV");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // `.env` provides a base value, `.env.local` overrides it — Bun precedence.
+        std::fs::write(
+            dir.join(".env"),
+            "AY_DOTENV_ONLY_PLAIN=from-env\nAY_DOTENV_OVERRIDE=from-env\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join(".env.local"),
+            "AY_DOTENV_ONLY_LOCAL=from-local\nAY_DOTENV_OVERRIDE=from-local\nexport AY_DOTENV_QUOTED=\"quoted value\"\nAY_DOTENV_AMBIENT=from-file\n# ignored\n\n",
+        )
+        .unwrap();
+        // An ambient var must NEVER be overridden by a file.
+        std::env::set_var("AY_DOTENV_AMBIENT", "ambient");
+
+        let mut cmd = CommandBuilder::new("true");
+        inject_bun_env_files(&mut cmd, dir);
+
+        assert_eq!(
+            cmd.get_env("AY_DOTENV_ONLY_PLAIN"),
+            Some(OsStr::new("from-env")),
+            ".env must be loaded"
+        );
+        assert_eq!(
+            cmd.get_env("AY_DOTENV_ONLY_LOCAL"),
+            Some(OsStr::new("from-local")),
+            ".env.local must be loaded"
+        );
+        assert_eq!(
+            cmd.get_env("AY_DOTENV_OVERRIDE"),
+            Some(OsStr::new("from-local")),
+            ".env.local must win over .env"
+        );
+        assert_eq!(
+            cmd.get_env("AY_DOTENV_QUOTED"),
+            Some(OsStr::new("quoted value")),
+            "export prefix and quotes must be handled"
+        );
+        assert_eq!(
+            cmd.get_env("AY_DOTENV_AMBIENT"),
+            Some(OsStr::new("ambient")),
+            "ambient env must win over the file value"
+        );
+
+        std::env::remove_var("AY_DOTENV_ONLY_LOCAL");
+        std::env::remove_var("AY_DOTENV_ONLY_PLAIN");
+        std::env::remove_var("AY_DOTENV_OVERRIDE");
+        std::env::remove_var("AY_DOTENV_AMBIENT");
+    }
+
+    #[test]
+    fn test_inject_bun_env_files_node_env_variants() {
+        use std::ffi::OsStr;
+        let _guard = ENV_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("NODE_ENV", "development");
+        std::env::remove_var("AY_DOTENV_DEV");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join(".env.development"), "AY_DOTENV_DEV=from-dev\n").unwrap();
+
+        let mut cmd = CommandBuilder::new("true");
+        inject_bun_env_files(&mut cmd, dir);
+
+        assert_eq!(
+            cmd.get_env("AY_DOTENV_DEV"),
+            Some(OsStr::new("from-dev")),
+            ".env.{{NODE_ENV}} must be loaded"
+        );
+
+        std::env::remove_var("NODE_ENV");
+        std::env::remove_var("AY_DOTENV_DEV");
     }
 
     #[test]

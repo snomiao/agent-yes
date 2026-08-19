@@ -8,10 +8,12 @@
 // <cwd>/.agent-yes/<pid>.raw.log, and the per-pid stdin FIFOs.
 use crate::pid_store::{is_process_alive, PidRecord};
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex, OnceCell};
 
 const TAIL_SNAPSHOT_BYTES: u64 = 65_536;
 const SSE_PING_MS: u64 = 15_000;
@@ -20,6 +22,9 @@ const SSE_PING_MS: u64 = 15_000;
 // channel that carries the snapshot itself. Three seconds matches the console's
 // former polling cadence while SSE still avoids sending unchanged records.
 const LS_TICK_MS: u64 = 3_000;
+// Browser tabs and WebRTC subscribers often ask for the same snapshot at the
+// same instant. Reuse it briefly so metadata/log enrichment runs once.
+const LS_CACHE_TTL_MS: u64 = 500;
 // 50ms keeps keystroke echo snappy (the TS daemon uses fs.watch + a 60ms
 // unwatched poll; a plain 50ms stat poll costs ~nothing and needs no watcher
 // lifecycle — see agent-yes-fswatch-dies-in-daemon for why watchers are risky
@@ -663,6 +668,74 @@ fn ls_json(all: bool, active: bool, keyword: &str) -> Vec<Value> {
         .collect()
 }
 
+#[derive(Clone, Eq, Hash, PartialEq)]
+struct LsKey {
+    all: bool,
+    active: bool,
+    keyword: String,
+}
+
+struct LsCacheEntry {
+    generated_at: std::time::Instant,
+    value: Arc<Vec<Value>>,
+}
+
+#[derive(Default)]
+struct LsSharedState {
+    cache: HashMap<LsKey, LsCacheEntry>,
+    inflight: HashMap<LsKey, Arc<OnceCell<Arc<Vec<Value>>>>>,
+}
+
+static LS_SHARED: once_cell::sync::Lazy<Mutex<LsSharedState>> =
+    once_cell::sync::Lazy::new(|| Mutex::new(LsSharedState::default()));
+
+async fn ls_json_shared(all: bool, active: bool, keyword: &str) -> Arc<Vec<Value>> {
+    let key = LsKey { all, active, keyword: keyword.to_string() };
+    let cell = {
+        let mut shared = LS_SHARED.lock().await;
+        if let Some(hit) = shared.cache.get(&key) {
+            if hit.generated_at.elapsed() < Duration::from_millis(LS_CACHE_TTL_MS) {
+                return hit.value.clone();
+            }
+        }
+        shared
+            .inflight
+            .entry(key.clone())
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone()
+    };
+
+    let value = cell
+        .get_or_init(|| {
+            let key = key.clone();
+            async move {
+                Arc::new(
+                    tokio::task::spawn_blocking(move || ls_json(key.all, key.active, &key.keyword))
+                        .await
+                        .unwrap_or_default(),
+                )
+            }
+        })
+        .await
+        .clone();
+
+    let mut shared = LS_SHARED.lock().await;
+    shared.cache.insert(
+        key.clone(),
+        LsCacheEntry { generated_at: std::time::Instant::now(), value: value.clone() },
+    );
+    if shared.inflight.get(&key).is_some_and(|current| Arc::ptr_eq(current, &cell)) {
+        shared.inflight.remove(&key);
+    }
+    // Bound keyword-shaped cache growth without affecting hot snapshots.
+    if shared.cache.len() > 128 {
+        shared
+            .cache
+            .retain(|_, entry| entry.generated_at.elapsed() < Duration::from_millis(LS_CACHE_TTL_MS));
+    }
+    value
+}
+
 // ---- SSE helpers ------------------------------------------------------------
 
 fn sse_frame(payload: &Value) -> Vec<u8> {
@@ -676,13 +749,10 @@ fn spawn_ls_subscribe(all: bool, active: bool, keyword: String) -> mpsc::Receive
         let mut first = true;
         let mut last_ping = std::time::Instant::now();
         loop {
-            let kw = keyword.clone();
-            let entries = tokio::task::spawn_blocking(move || ls_json(all, active, &kw))
-                .await
-                .unwrap_or_default();
+            let entries = ls_json_shared(all, active, &keyword).await;
             let mut upsert: Vec<Value> = Vec::new();
             let mut seen: std::collections::HashSet<i64> = std::collections::HashSet::new();
-            for e in &entries {
+            for e in entries.iter() {
                 let pid = e.get("pid").and_then(|p| p.as_i64()).unwrap_or(0);
                 seen.insert(pid);
                 let ser = e.to_string();
@@ -697,7 +767,7 @@ fn spawn_ls_subscribe(all: bool, active: bool, keyword: String) -> mpsc::Receive
             }
             let frame = if first {
                 first = false;
-                Some(sse_frame(&json!({"full": true, "upsert": entries, "remove": []})))
+                Some(sse_frame(&json!({"full": true, "upsert": &*entries, "remove": []})))
             } else if !upsert.is_empty() || !removed.is_empty() {
                 Some(sse_frame(&json!({"upsert": upsert, "remove": removed})))
             } else if last_ping.elapsed() >= Duration::from_millis(SSE_PING_MS) {
@@ -1036,10 +1106,8 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
 
     match (method, path) {
         ("GET", "/api/ls") => {
-            let entries = tokio::task::spawn_blocking(move || ls_json(all, active, &keyword))
-                .await
-                .unwrap_or_default();
-            json_res(200, &Value::Array(entries))
+            let entries = ls_json_shared(all, active, &keyword).await;
+            json_res(200, &Value::Array((*entries).clone()))
         }
         ("GET", "/api/ls/subscribe") => ApiResponse {
             status: 200,
@@ -1254,5 +1322,24 @@ mod tests {
         .unwrap();
         let t = log_title(Some(p.to_str().unwrap()));
         assert_eq!(t.as_deref(), Some("✳ 深夜定義の統一 — テスト"));
+    }
+
+    #[tokio::test]
+    async fn identical_ls_requests_share_one_snapshot() {
+        let keyword = format!("singleflight-{}", std::process::id());
+        let mut requests = Vec::new();
+        for _ in 0..16 {
+            let keyword = keyword.clone();
+            requests.push(tokio::spawn(async move {
+                ls_json_shared(false, false, &keyword).await
+            }));
+        }
+        let first = requests.remove(0).await.unwrap();
+        for request in requests {
+            let snapshot = request.await.unwrap();
+            assert!(Arc::ptr_eq(&first, &snapshot));
+        }
+        let cached = ls_json_shared(false, false, &keyword).await;
+        assert!(Arc::ptr_eq(&first, &cached));
     }
 }

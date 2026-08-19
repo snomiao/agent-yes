@@ -16,7 +16,7 @@
 //     and only if the winsize file still holds our own last write
 use once_cell::sync::Lazy;
 use serde_json::{json, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -225,13 +225,15 @@ struct NegoState {
     presence: HashMap<String, PresenceEntry>,
     applied: HashMap<u32, AppliedWrite>,
     caps_gone_at: HashMap<u32, i64>,
-    pending: HashSet<u32>,
+    pending: HashMap<u32, u64>,
     sweep_running: bool,
 }
 
 static STATE: Lazy<Mutex<NegoState>> = Lazy::new(|| Mutex::new(NegoState::default()));
 
-/// Debounced negotiation trigger (mirrors scheduleNego, 350ms). Also lazily
+/// Trailing-edge negotiation trigger. Every fresh cap supersedes the prior
+/// timer, so a continuously resizing viewport applies once after it settles.
+/// Also lazily
 /// starts the 5s grow-back sweep that re-negotiates every applied pid so cap
 /// TTL expiry / foreign winsize drift heals without any POST.
 pub async fn schedule_nego(pid: u32) {
@@ -248,14 +250,17 @@ pub async fn schedule_nego(pid: u32) {
             }
         });
     }
-    if st.pending.contains(&pid) {
-        return;
-    }
-    st.pending.insert(pid);
+    let generation = st.pending.get(&pid).copied().unwrap_or(0).wrapping_add(1);
+    st.pending.insert(pid, generation);
     drop(st);
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(NEGO_DEBOUNCE_MS)).await;
-        STATE.lock().await.pending.remove(&pid);
+        let mut st = STATE.lock().await;
+        if st.pending.get(&pid).copied() != Some(generation) {
+            return;
+        }
+        st.pending.remove(&pid);
+        drop(st);
         apply_nego(pid).await;
     });
 }
@@ -374,6 +379,7 @@ pub async fn presence_post(body: &Value) -> Result<(), (u16, String)> {
     let mut withdraw_prev: Option<u32> = None;
     let mut st = STATE.lock().await;
     let prev_agent: Option<u32> = st.presence.get(&viewer).and_then(|e| e.agent.parse().ok());
+    let prev_cap = st.presence.get(&viewer).and_then(|e| e.cap);
     match agent {
         None => {
             // clear this viewer's entry (and its cap on the previous agent)
@@ -386,6 +392,7 @@ pub async fn presence_post(body: &Value) -> Result<(), (u16, String)> {
             }
         }
         Some(pid) => {
+            let needs_nego = prev_agent != Some(pid) || prev_cap != sane;
             if let Some(prev) = prev_agent {
                 if prev != pid {
                     withdraw_prev = Some(prev);
@@ -423,7 +430,9 @@ pub async fn presence_post(body: &Value) -> Result<(), (u16, String)> {
                     tokio::task::spawn_blocking(move || withdraw_cap(pid, &v)).await.ok();
                 }
             }
-            schedule_nego(pid).await;
+            if needs_nego {
+                schedule_nego(pid).await;
+            }
         }
     }
     Ok(())
@@ -522,6 +531,18 @@ mod tests {
         let caps = [Cap { cols: 20, rows: 5 }];
         assert_eq!(negotiate_size(&caps), Some(Cap { cols: 40, rows: 10 }));
         assert_eq!(negotiate_size(&[]), None);
+    }
+
+    #[test]
+    fn newer_debounce_generation_supersedes_older_one() {
+        let mut st = NegoState::default();
+        let pid = 42;
+        let first = st.pending.get(&pid).copied().unwrap_or(0).wrapping_add(1);
+        st.pending.insert(pid, first);
+        let second = st.pending.get(&pid).copied().unwrap_or(0).wrapping_add(1);
+        st.pending.insert(pid, second);
+        assert_ne!(st.pending.get(&pid).copied(), Some(first));
+        assert_eq!(st.pending.get(&pid).copied(), Some(second));
     }
 
     // Regression: a viewer switching agents (prev != pid) used to call

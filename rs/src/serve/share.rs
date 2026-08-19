@@ -8,16 +8,18 @@
 use super::api;
 use super::e2e;
 use anyhow::{anyhow, bail, Context, Result};
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::OnceLock;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
-use webrtc::api::APIBuilder;
+use webrtc::api::setting_engine::SettingEngine;
+use webrtc::api::{APIBuilder, API};
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
@@ -33,6 +35,36 @@ const HOST_HEARTBEAT_MS: u64 = 20_000;
 const SIG_REFRESH_MS: u64 = 4 * 60_000;
 const STUN_URL: &str = "stun:stun.l.google.com:19302";
 const MAX_ROTATES: u32 = 5;
+const DEFAULT_PERF_SLOW_MS: u128 = 750;
+
+fn perf_slow_ms() -> u128 {
+    static VALUE: OnceLock<u128> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("AGENT_YES_WEBRTC_PERF_SLOW_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_PERF_SLOW_MS)
+    })
+}
+
+fn perf_verbose() -> bool {
+    std::env::var("AGENT_YES_WEBRTC_PERF").as_deref() == Ok("1")
+}
+
+fn perf_log(event: &str, data: Value, force: bool) {
+    if force || perf_verbose() {
+        eprintln!("[share:perf] {event} {data}");
+    }
+}
+
+fn maybe_slow(event: &str, started_at: Instant, mut data: Value) {
+    let ms = started_at.elapsed().as_millis();
+    if let Some(obj) = data.as_object_mut() {
+        obj.insert("ms".into(), json!(ms));
+    }
+    perf_log(event, data, ms >= perf_slow_ms());
+}
 
 fn global_dir() -> PathBuf {
     if let Ok(h) = std::env::var("AGENT_YES_HOME") {
@@ -203,7 +235,7 @@ fn claim_room_at(path: &std::path::Path, room: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-mod claim_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -253,6 +285,14 @@ mod claim_tests {
         claim_room_at(&p, "r1").unwrap();
         claim_room_at(&p, "r1").unwrap();
     }
+
+    #[test]
+    fn signaling_retry_uses_capped_exponential_backoff() {
+        let seconds: Vec<u64> = (1..=8)
+            .map(|failure| signaling_retry_delay(failure).as_secs())
+            .collect();
+        assert_eq!(seconds, vec![2, 4, 8, 16, 32, 60, 60, 60]);
+    }
 }
 
 pub async fn run_share(cfg: ShareConfig) -> Result<()> {
@@ -273,18 +313,45 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
 
     let peers: Peers = Arc::new(Mutex::new(HashMap::new()));
     let mut rotates = 0u32;
+    let mut signaling_failures = 0u32;
+    // The API's immutable engines are shared by every peer; each peer
+    // connection still owns its ICE transport and UDP socket. Data-channel
+    // traffic plus signaling peer-leave handles prompt liveness, so the
+    // WebRTC default two-second ICE keepalive is unnecessarily expensive for
+    // an idle console fleet. Keep NAT state warm at a lower cadence.
+    let mut setting_engine = SettingEngine::default();
+    setting_engine.set_ice_timeouts(
+        Some(Duration::from_secs(30)),
+        Some(Duration::from_secs(30)),
+        Some(Duration::from_secs(15)),
+    );
+    let webrtc_api = Arc::new(
+        APIBuilder::new()
+            .with_setting_engine(setting_engine)
+            .build(),
+    );
 
     let link = format_share_link(&room.room, &secret, &room.host);
     eprintln!("[ayrs share] room {} via {}", room.room, room.host);
     println!("{link}");
 
     loop {
-        match connect_once(&room, &secret, &api_token, peers.clone()).await {
+        match connect_once(
+            &room,
+            &secret,
+            &api_token,
+            peers.clone(),
+            webrtc_api.clone(),
+        )
+        .await
+        {
             Ok(SessionEnd::Refresh) => {
                 // periodic re-hello (see ts/share.ts SIG_REFRESH_MS rationale)
+                signaling_failures = 0;
                 continue;
             }
             Ok(SessionEnd::Rejected) => {
+                signaling_failures = 0;
                 if explicit || rotates >= MAX_ROTATES {
                     bail!("room rejected by signaling server (1008) — delete ~/.agent-yes/.share-room-ayrs to rotate");
                 }
@@ -297,14 +364,27 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
                 eprintln!("[ayrs share] room rotated: {link}");
             }
             Ok(SessionEnd::Dropped) => {
+                signaling_failures = 0;
                 tokio::time::sleep(Duration::from_millis(1000)).await;
             }
             Err(e) => {
-                eprintln!("[ayrs share] signaling error: {e:#}");
-                tokio::time::sleep(Duration::from_millis(2000)).await;
+                signaling_failures = signaling_failures.saturating_add(1);
+                let delay = signaling_retry_delay(signaling_failures);
+                eprintln!(
+                    "[ayrs share] signaling error: {e:#}; retrying in {}s",
+                    delay.as_secs()
+                );
+                tokio::time::sleep(delay).await;
             }
         }
     }
+}
+
+fn signaling_retry_delay(failures: u32) -> Duration {
+    const BASE_SECS: u64 = 2;
+    const MAX_SECS: u64 = 60;
+    let shift = failures.saturating_sub(1).min(31);
+    Duration::from_secs(BASE_SECS.saturating_mul(1u64 << shift).min(MAX_SECS))
 }
 
 enum SessionEnd {
@@ -318,6 +398,7 @@ async fn connect_once(
     secret: &str,
     api_token: &str,
     peers: Peers,
+    webrtc_api: Arc<API>,
 ) -> Result<SessionEnd> {
     let scheme = if room.host.starts_with("localhost") || room.host.starts_with("127.") {
         "ws"
@@ -386,7 +467,15 @@ async fn connect_once(
                     }
                     Message::Text(t) => {
                         let Ok(m) = serde_json::from_str::<Value>(&t) else { continue };
-                        handle_signal(m, secret, api_token, &peers, &sig_tx).await;
+                        handle_signal(
+                            m,
+                            secret,
+                            api_token,
+                            &peers,
+                            &sig_tx,
+                            &webrtc_api,
+                        )
+                        .await;
                     }
                     _ => {}
                 }
@@ -401,6 +490,7 @@ async fn handle_signal(
     api_token: &str,
     peers: &Peers,
     sig_tx: &mpsc::UnboundedSender<SigOut>,
+    webrtc_api: &API,
 ) {
     match m.get("type").and_then(|t| t.as_str()) {
         Some("pong") | Some("welcome") => {}
@@ -412,7 +502,8 @@ async fn handle_signal(
                 return;
             }
             eprintln!("[ayrs share] peer-join {peer_id}");
-            if let Err(e) = start_peer(peer_id.clone(), api_token, peers, sig_tx).await {
+            if let Err(e) = start_peer(peer_id.clone(), api_token, peers, sig_tx, webrtc_api).await
+            {
                 eprintln!("[ayrs share] peer setup failed: {e:#}");
                 close_peer(peers, &peer_id).await;
             }
@@ -481,8 +572,8 @@ async fn start_peer(
     api_token: &str,
     peers: &Peers,
     sig_tx: &mpsc::UnboundedSender<SigOut>,
+    webrtc_api: &API,
 ) -> Result<()> {
-    let api = APIBuilder::new().build();
     let config = RTCConfiguration {
         ice_servers: vec![RTCIceServer {
             urls: vec![STUN_URL.to_string()],
@@ -490,7 +581,7 @@ async fn start_peer(
         }],
         ..Default::default()
     };
-    let pc = Arc::new(api.new_peer_connection(config).await?);
+    let pc = Arc::new(webrtc_api.new_peer_connection(config).await?);
 
     // trickle ICE → signaling writer
     {
@@ -783,7 +874,31 @@ fn spawn_receiver(
                     let peer_id2 = peer_id.clone();
                     let id2 = id.clone();
                     let handle = tokio::spawn(async move {
-                        serve_request(out_tx, id2.clone(), method, path, body).await;
+                        let panic_tx = out_tx.clone();
+                        let panic_id = id2.clone();
+                        let request = serve_request(
+                            out_tx,
+                            peer_id2.clone(),
+                            id2.clone(),
+                            method,
+                            path,
+                            body,
+                        );
+                        if std::panic::AssertUnwindSafe(request).catch_unwind().await.is_err() {
+                            eprintln!(
+                                "[ayrs share] request panicked peer={} id={}",
+                                peer_id2, panic_id
+                            );
+                            let _ = panic_tx.send((
+                                0,
+                                json!({"t":"res","id":panic_id,"status":500,"ct":"text/plain; charset=utf-8"}),
+                            ));
+                            let _ = panic_tx.send((
+                                0,
+                                json!({"t":"data","id":panic_id,"seq":0,"chunk":"internal request panic; see ayrs-serve.err.log"}),
+                            ));
+                            let _ = panic_tx.send((0, json!({"t":"end","id":panic_id})));
+                        }
                         // done — drop our own abort registration
                         let mut map = peers2.lock().await;
                         if let Some(p) = map.get_mut(&peer_id2) {
@@ -807,17 +922,37 @@ fn spawn_receiver(
 /// as {t:"res"} / {t:"data"} / {t:"end"} envelopes.
 async fn serve_request(
     out_tx: mpsc::UnboundedSender<(u8, Value)>,
+    peer_id: String,
     id: String,
     method: String,
     path: String,
     body: String,
 ) {
+    let started_at = Instant::now();
+    perf_log(
+        "req.start",
+        json!({"peer":peer_id,"id":id,"method":method,"path":path}),
+        false,
+    );
     let res = api::handle(&method, &path, &body).await;
+    maybe_slow(
+        "req.head",
+        started_at,
+        json!({
+            "peer":peer_id,
+            "id":id,
+            "method":method,
+            "path":path,
+            "status":res.status
+        }),
+    );
+    let status = res.status;
     let _ = out_tx.send((
         0,
         json!({"t":"res","id":id,"status":res.status,"ct":res.content_type}),
     ));
     let mut seq: u64 = 0;
+    let mut bytes: usize = 0;
     let send_text = |text: &str, seq: &mut u64| -> bool {
         // Slice to MAX_CHUNK units; receiver reassembles by seq-order concat.
         let mut rest = text;
@@ -839,8 +974,9 @@ async fn serve_request(
         true
     };
     match res.body {
-        api::Body::Full(bytes) => {
-            let text = String::from_utf8_lossy(&bytes);
+        api::Body::Full(full) => {
+            let text = String::from_utf8_lossy(&full);
+            bytes = text.len();
             if !text.is_empty() {
                 send_text(&text, &mut seq);
             }
@@ -848,6 +984,7 @@ async fn serve_request(
         api::Body::Stream(mut rx) => {
             while let Some(chunk) = rx.recv().await {
                 let text = String::from_utf8_lossy(&chunk);
+                bytes += text.len();
                 if !send_text(&text, &mut seq) {
                     return;
                 }
@@ -855,4 +992,17 @@ async fn serve_request(
         }
     }
     let _ = out_tx.send((0, json!({"t":"end","id":id,"seq":seq})));
+    maybe_slow(
+        "req.end",
+        started_at,
+        json!({
+            "peer":peer_id,
+            "id":id,
+            "method":method,
+            "path":path,
+            "status":status,
+            "chunks":seq,
+            "bytes":bytes
+        }),
+    );
 }

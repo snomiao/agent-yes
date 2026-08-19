@@ -69,7 +69,17 @@ function moveLockedBinariesAside(): Array<{ original: string; aside: string }> {
 
 const moved = process.platform === "win32" ? moveLockedBinariesAside() : [];
 
-const args = ["install", "--path", "rs", "--features", "swarm", ...process.argv.slice(2)];
+// Honour the checked-in lockfile. Besides reproducibility this avoids Cargo
+// re-resolving and re-locking the full dependency graph on every local install.
+const args = [
+  "install",
+  "--locked",
+  "--path",
+  "rs",
+  "--features",
+  "swarm",
+  ...process.argv.slice(2),
+];
 console.log(`[build-rs] cargo ${args.join(" ")}`);
 const result = spawnSync("cargo", args, { cwd: repoRoot, stdio: "inherit" });
 

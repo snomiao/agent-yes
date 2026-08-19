@@ -2273,6 +2273,7 @@
       const SEND_FLASH_MS = 2000;
       const SEND_FADE_MS = 20000; // wire fully faded this long after delivery
       let es = null; // live-tail subscription closer
+      let resumeTail = null; // re-open the selected tail after a hidden-tab pause
       let term = null; // xterm.js Terminal rendering the raw PTY stream
       let fit = null;
       // One-shot on OPEN (select): fit the terminal to our pane, then adopt — push
@@ -3665,7 +3666,7 @@
       // viewers stay on one shared canvas and selections line up.
       let presencePollRunning = false;
       setInterval(async () => {
-        if (presencePollRunning) return;
+        if (document.visibilityState === "hidden" || presencePollRunning) return;
         presencePollRunning = true;
         try {
           await pollFleetPresence(); // fleet-wide peer focus (independent of what's selected)
@@ -3747,7 +3748,7 @@
       }
       let edgesPollRunning = false;
       setInterval(async () => {
-        if (edgesPollRunning) return;
+        if (document.visibilityState === "hidden" || edgesPollRunning) return;
         edgesPollRunning = true;
         try {
           await pollEdges();
@@ -5337,7 +5338,7 @@ my.translate = async (text, lang) => {
       // skips this source — no duplicate full-list bytes on the wire. Older hosts
       // without the endpoint never send an event, so the poll keeps covering them.
       function subscribeSource(s) {
-        if (!s.tx || s.unsub) return;
+        if (document.visibilityState === "hidden" || !s.tx || s.unsub) return;
         s.unsub = s.tx.subscribe(
           "/api/ls/subscribe?all=1",
           (ev) => {
@@ -5704,6 +5705,7 @@ my.translate = async (text, lang) => {
       // so this stays a no-op on the wire for a modern fleet — it still re-renders
       // every tick, which keeps the relative "age" column fresh.
       async function loadList() {
+        if (document.visibilityState === "hidden") return;
         const srcs = [...sources.values()];
         await Promise.all(srcs.filter((s) => !s.streaming).map(listSource));
         mergeRender();
@@ -5848,6 +5850,7 @@ my.translate = async (text, lang) => {
         // Render the agent's native TUI with xterm.js by feeding it the raw PTY
         // stream (ANSI/cursor control intact) — see /api/tail?raw=1.
         if (es) es.close();
+        es = null;
         if (term) {
           term.dispose();
           term = null;
@@ -6163,7 +6166,13 @@ my.translate = async (text, lang) => {
         // repair (garbled, overlapping, dim-bleed output). First event is an
         // xterm-rendered tail snapshot; later events are incremental deltas.
         const startTail = () => {
-          if (sel !== selKey || !term) return; // switched away during size sync
+          if (
+            document.visibilityState === "hidden" ||
+            sel !== selKey ||
+            !term ||
+            es
+          )
+            return; // switched/paused during size sync, or already resumed
           $("livedot").className = "dot idle";
           $("livetxt").textContent = "connecting…";
           const close = tx.subscribe(
@@ -6190,6 +6199,7 @@ my.translate = async (text, lang) => {
           );
           es = { close };
         };
+        resumeTail = startTail;
         Promise.resolve(resyncTerm()).finally(startTail);
       }
 
@@ -6635,6 +6645,12 @@ my.translate = async (text, lang) => {
         if ("filter".startsWith(cmdTerm)) {
           rows.push({ kind: "filter", value: parts.slice(1).join(" ") });
         }
+        // "/new" — opens the same spawn form as the "+ New agent" button, so the
+        // fleet's primary action is reachable from the ⌘K palette too. Needs no
+        // anchor (it spawns on spawnTarget()'s host), like /ws and /filter.
+        if ("new".startsWith(cmdTerm)) {
+          rows.push({ kind: "new" });
+        }
         return rows;
       }
 
@@ -6874,6 +6890,18 @@ my.translate = async (text, lang) => {
                 <div class="omni-main">
                   <div class="omni-title">${title}</div>
                   <div class="omni-sub">sets the left panel filter &nbsp;·&nbsp; space = AND, tags like repo:/wt:/cli:/host:/user: — bare text also matches host & user</div>
+                </div></div>`;
+            }
+            if (r.kind === "new") {
+              const cur = $("q").value.trim();
+              const title = cur
+                ? `✦ New agent <span style="opacity:.55">(prompt: ${esc(cur)})</span>`
+                : `✦ New agent <span style="opacity:.55">/new</span>`;
+              return `<div class="omni-row omni-spawn${sc}" data-i="${i}">
+                <span class="dot active"></span>
+                <div class="omni-main">
+                  <div class="omni-title">${title}</div>
+                  <div class="omni-sub">opens the "+ New agent" spawn form &nbsp;·&nbsp; ⏎ to create</div>
                 </div></div>`;
             }
             if (r.kind === "wshint") {
@@ -7129,6 +7157,14 @@ my.translate = async (text, lang) => {
           closeOmni(false);
           $("q").value = row.value;
           $("q").dispatchEvent(new Event("input"));
+          return;
+        }
+        // "/new" — the "+ New agent" button: opens the spawn form prefilled for
+        // the anchor agent's host/cwd/cli. Same global command class as /filter
+        // (works with no agent open — the form picks the default fleet).
+        if (row && row.kind === "new") {
+          closeOmni(false);
+          showNew();
           return;
         }
         // /ws rows — handled BEFORE the ⌘⏎ spawn-here fallthrough: in the
@@ -8163,7 +8199,9 @@ my.translate = async (text, lang) => {
         document.addEventListener("visibilitychange", () => {
           if (document.visibilityState === "visible") {
             lastActivity = Date.now();
+            for (const s of sources.values()) subscribeSource(s);
             loadList();
+            resumeTail?.();
             // Re-FIT our pane locally in case the window resized while this tab was
             // hidden (a backgrounded tab can miss window 'resize'). A genuine size
             // change then propagates to the agent via term.onResize → pushSize.
@@ -8173,6 +8211,29 @@ my.translate = async (text, lang) => {
             // and reflows the stream on every tab switch — the glitch the eager
             // per-focus resync introduced. The one-shot adopt still runs on select.
             refitPane();
+          } else {
+            // Keep signaling/WebRTC connected, but stop all server-fed streams
+            // while the tab cannot render them. Each stream starts with a fresh
+            // snapshot when visibility returns, so no state is lost.
+            for (const s of sources.values()) unsubscribeSource(s);
+            if (es) {
+              try {
+                es.close();
+              } catch {}
+              es = null;
+            }
+            // Withdraw immediately instead of waiting for the host TTL, so a
+            // background viewer no longer affects negotiated terminal geometry.
+            const cur = presenceTarget();
+            if (cur) {
+              cur.tx
+                .post("/api/presence", {
+                  viewer: myViewerId,
+                  agent: "",
+                })
+                .catch(() => {});
+            }
+            presencePeers = [];
           }
         });
         watchVersion();

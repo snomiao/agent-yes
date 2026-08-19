@@ -16,8 +16,69 @@ use hyper::{Request, Response, StatusCode};
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, Infallible>;
+const DISCOVERY_FILE: &str = "ayrs-http.json";
+
+fn spawn_spool_dir() -> std::path::PathBuf {
+    #[cfg(unix)]
+    let owner = unsafe { libc::getuid() }.to_string();
+    #[cfg(not(unix))]
+    let owner = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
+    std::env::temp_dir()
+        .join(format!("agent-yes-{owner}"))
+        .join("spawn")
+}
+
+async fn run_spawn_spool(dir: std::path::PathBuf, token: Arc<String>) {
+    loop {
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                if !name.ends_with(".request.json") {
+                    continue;
+                }
+                let response_path =
+                    path.with_file_name(name.replace(".request.json", ".response.json"));
+                let response = match std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                {
+                    Some(value)
+                        if value.get("token").and_then(|v| v.as_str()) == Some(token.as_str()) =>
+                    {
+                        let body = value
+                            .get("request")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null)
+                            .to_string();
+                        crate::serve::control::spawn(&body)
+                    }
+                    _ => ApiResponse {
+                        status: 401,
+                        content_type: "text/plain".into(),
+                        body: ApiBody::Full(b"Unauthorized".to_vec()),
+                    },
+                };
+                let _ = std::fs::remove_file(&path);
+                let body = match response.body {
+                    ApiBody::Full(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                    ApiBody::Stream(_) => "stream response unsupported".into(),
+                };
+                let payload = serde_json::json!({ "status": response.status, "body": body });
+                let _ = std::fs::write(
+                    response_path,
+                    serde_json::to_vec(&payload).unwrap_or_default(),
+                );
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
 
 /// Defense-in-depth CSP for the console document (mirrors CONSOLE_CSP in
 /// ts/serve.ts and lab/ui/cf/worker.ts — keep them in sync). The console renders
@@ -40,7 +101,10 @@ fn token_eq(a: &str, b: &str) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    a.bytes()
+        .zip(b.bytes())
+        .fold(0u8, |acc, (x, y)| acc | (x ^ y))
+        == 0
 }
 
 /// Directory holding the console assets, next to the installed binary or in the
@@ -105,11 +169,15 @@ fn status(code: StatusCode, msg: &str) -> Response<BoxBody> {
 /// Turn an ApiResponse into a hyper response, streaming SSE bodies as they
 /// arrive rather than buffering (a tail stream never ends).
 fn to_http(r: ApiResponse) -> Response<BoxBody> {
-    let mut b = Response::builder().status(r.status).header("content-type", r.content_type.clone());
+    let mut b = Response::builder()
+        .status(r.status)
+        .header("content-type", r.content_type.clone());
     match r.body {
         ApiBody::Full(v) => b.body(full(v)).unwrap(),
         ApiBody::Stream(rx) => {
-            b = b.header("cache-control", "no-cache").header("connection", "keep-alive");
+            b = b
+                .header("cache-control", "no-cache")
+                .header("connection", "keep-alive");
             // Poll the channel straight into body frames — no intermediate
             // task, and the concrete stream type stays Sync (BoxBody requires
             // it, and a `dyn Stream + Send` box does not satisfy that).
@@ -123,7 +191,10 @@ fn to_http(r: ApiResponse) -> Response<BoxBody> {
     }
 }
 
-async fn handle(req: Request<Incoming>, token: Arc<String>) -> Result<Response<BoxBody>, Infallible> {
+async fn handle(
+    req: Request<Incoming>,
+    token: Arc<String>,
+) -> Result<Response<BoxBody>, Infallible> {
     let method = req.method().as_str().to_string();
     let path = req.uri().path().to_string();
     let query = req.uri().query().unwrap_or("").to_string();
@@ -151,7 +222,11 @@ async fn handle(req: Request<Incoming>, token: Arc<String>) -> Result<Response<B
         if !token_eq(&tok, &token) {
             return Ok(status(StatusCode::UNAUTHORIZED, "Unauthorized"));
         }
-        let Some(key) = req.headers().get("sec-websocket-key").and_then(|v| v.to_str().ok()) else {
+        let Some(key) = req
+            .headers()
+            .get("sec-websocket-key")
+            .and_then(|v| v.to_str().ok())
+        else {
             return Ok(status(StatusCode::BAD_REQUEST, "missing Sec-WebSocket-Key"));
         };
         let accept = ws_accept(key);
@@ -183,9 +258,7 @@ async fn handle(req: Request<Incoming>, token: Arc<String>) -> Result<Response<B
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(str::to_string)
-        .or_else(|| {
-            url_query_value(&query, "token")
-        })
+        .or_else(|| url_query_value(&query, "token"))
         .unwrap_or_default();
     if !token_eq(&provided, &token) {
         return Ok(status(StatusCode::UNAUTHORIZED, "Unauthorized"));
@@ -197,12 +270,18 @@ async fn handle(req: Request<Incoming>, token: Arc<String>) -> Result<Response<B
         .await
         .map(|c| String::from_utf8_lossy(&c.to_bytes()).into_owned())
         .unwrap_or_default();
-    let with_query = if query.is_empty() { path.clone() } else { format!("{path}?{query}") };
+    let with_query = if query.is_empty() {
+        path.clone()
+    } else {
+        format!("{path}?{query}")
+    };
     Ok(to_http(api::handle(&method, &with_query, &body).await))
 }
 
 fn is_websocket_upgrade(h: &hyper::HeaderMap) -> bool {
-    h.get("upgrade").and_then(|v| v.to_str().ok()).map(|v| v.eq_ignore_ascii_case("websocket"))
+    h.get("upgrade")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("websocket"))
         == Some(true)
 }
 
@@ -233,7 +312,9 @@ where
     });
     while let Some(Ok(msg)) = rx.next().await {
         let Message::Text(raw) = msg else { continue };
-        let Ok(m) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+        let Ok(m) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
         let (Some(id), Some(path)) = (m.get("id").cloned(), m.get("path").and_then(|p| p.as_str()))
         else {
             continue;
@@ -242,7 +323,11 @@ where
             continue;
         }
         let path = path.to_string();
-        let method = m.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_string();
+        let method = m
+            .get("method")
+            .and_then(|v| v.as_str())
+            .unwrap_or("GET")
+            .to_string();
         let body = match m.get("body") {
             Some(b) if !b.is_null() => b.to_string(),
             _ => String::new(),
@@ -281,8 +366,43 @@ pub async fn run(port: u16) -> Result<()> {
     let token = Arc::new(api::load_or_create_token().context("serve token")?);
     // Loopback only — see the module header.
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = tokio::net::TcpListener::bind(addr).await.with_context(|| format!("bind {addr}"))?;
+    let listener = tokio::net::TcpListener::bind(addr)
+        .await
+        .with_context(|| format!("bind {addr}"))?;
     let local = listener.local_addr()?;
+    let spool = spawn_spool_dir();
+    std::fs::create_dir_all(&spool)
+        .with_context(|| format!("create spawn spool {}", spool.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&spool, std::fs::Permissions::from_mode(0o700));
+    }
+    tokio::spawn(run_spawn_spool(spool.clone(), token.clone()));
+    // Publish only the loopback endpoint, never the bearer token. Sandboxed
+    // nested `ay <cli>` launchers can usually read ~/.agent-yes but cannot write
+    // its PID/FIFO registry; they use this endpoint to ask the unsandboxed
+    // service to spawn on their behalf. The client reads the existing 0600
+    // .serve-token separately and verifies /api/host before using the endpoint.
+    let discovery = dirs::home_dir()
+        .map(|h| h.join(".agent-yes"))
+        .unwrap_or_else(|| std::path::PathBuf::from(".agent-yes"))
+        .join(DISCOVERY_FILE);
+    if let Some(parent) = discovery.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let discovery_body = serde_json::json!({
+        "pid": std::process::id(),
+        "port": local.port(),
+        "spool": spool,
+    });
+    std::fs::write(&discovery, serde_json::to_vec(&discovery_body)?)
+        .with_context(|| format!("write {}", discovery.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&discovery, std::fs::Permissions::from_mode(0o600));
+    }
     println!("http://127.0.0.1:{}/#k={}", local.port(), token);
     loop {
         let (stream, _) = listener.accept().await?;
@@ -332,7 +452,10 @@ mod tests {
 
     #[test]
     fn query_values_parse() {
-        assert_eq!(url_query_value("a=1&token=xy", "token").as_deref(), Some("xy"));
+        assert_eq!(
+            url_query_value("a=1&token=xy", "token").as_deref(),
+            Some("xy")
+        );
         assert_eq!(url_query_value("a=1", "token"), None);
     }
 
@@ -340,7 +463,10 @@ mod tests {
     fn content_types_cover_the_console_assets() {
         assert_eq!(content_type("index.html"), "text/html; charset=utf-8");
         assert_eq!(content_type("main.js"), "text/javascript; charset=utf-8");
-        assert_eq!(content_type("manifest.webmanifest"), "application/json; charset=utf-8");
+        assert_eq!(
+            content_type("manifest.webmanifest"),
+            "application/json; charset=utf-8"
+        );
         assert_eq!(content_type("icon.svg"), "image/svg+xml");
     }
 }

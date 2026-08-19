@@ -113,6 +113,8 @@
     "cf": "bun scripts/cf.ts",
     "build:rgui": "bun scripts/build-rgui.ts",
     "dev:rgui": "bun lab/ui/rgui/dev.ts",
+    "dev:ayrs": "bun scripts/dev-ayrs.ts",
+    "build:rs:dev": "cargo build --manifest-path rs/Cargo.toml --bin ayrs",
     "build:rs": "bun ./scripts/build-rs.ts",
     "postbuild": "bun ./ts/postbuild.ts",
     "demo": "bun run build && bun link && claude-yes -- demo",

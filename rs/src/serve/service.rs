@@ -12,6 +12,7 @@
 // migration.
 
 use anyhow::{bail, Context, Result};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -40,6 +41,35 @@ fn log_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// A service-safe PATH that retains the user's common package-manager bins.
+/// launchd otherwise supplies only /usr/bin:/bin:/usr/sbin:/sbin, and every
+/// agent spawned by the daemon inherits that crippled PATH.
+pub(crate) fn runtime_path() -> String {
+    let mut paths = Vec::<PathBuf>::new();
+    if let Some(home) = dirs::home_dir() {
+        paths.extend([
+            home.join(".bun/bin"),
+            home.join(".cargo/bin"),
+            home.join(".local/bin"),
+        ]);
+    }
+    if let Some(current) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&current));
+    }
+    #[cfg(unix)]
+    paths.extend(
+        ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin", "/usr/sbin", "/sbin"]
+            .into_iter()
+            .map(PathBuf::from),
+    );
+    let mut seen = HashSet::new();
+    paths.retain(|path| seen.insert(path.clone()));
+    std::env::join_paths(paths)
+        .unwrap_or_else(|_| std::ffi::OsString::from("/usr/bin:/bin:/usr/sbin:/sbin"))
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// Args the service should run, after the executable path.
 fn service_args(webrtc: &Option<String>, sighost: &str) -> Vec<String> {
     let mut args = vec!["serve".to_string(), "--webrtc".to_string()];
@@ -50,6 +80,10 @@ fn service_args(webrtc: &Option<String>, sighost: &str) -> Vec<String> {
     }
     args.push("--sighost".to_string());
     args.push(sighost.to_string());
+    // A free loopback port gives sandboxed nested launchers a control path to
+    // the unsandboxed service. The chosen port is published in ayrs-http.json.
+    args.push("--port".to_string());
+    args.push("0".to_string());
     args
 }
 
@@ -95,13 +129,19 @@ fn render_unit(exe: &str, args: &[String], out_log: &str, err_log: &str) -> Stri
 {prog}  </array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>ProcessType</key><string>Background</string>
+  <key>ProcessType</key><string>Interactive</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>{path}</string>
+    <key>RUST_BACKTRACE</key><string>1</string>
+  </dict>
   <key>StandardOutPath</key><string>{out}</string>
   <key>StandardErrorPath</key><string>{err}</string>
 </dict>
 </plist>
 "#,
         prog = prog,
+        path = xml_escape(&runtime_path()),
         out = xml_escape(out_log),
         err = xml_escape(err_log),
     )
@@ -120,12 +160,15 @@ fn render_unit(exe: &str, args: &[String], _out: &str, _err: &str) -> String {
          [Service]\n\
          Type=simple\n\
          ExecStart='{exe}' {args}\n\
+         Environment=\"PATH={path}\"\n\
+         Environment=\"RUST_BACKTRACE=1\"\n\
          Restart=always\n\
          RestartSec=5\n\n\
          [Install]\n\
          WantedBy=default.target\n",
         exe = exe,
         args = quoted.join(" "),
+        path = runtime_path().replace('\\', "\\\\").replace('"', "\\\""),
     )
 }
 
@@ -270,7 +313,14 @@ mod tests {
     fn service_args_defaults_to_persisted_room() {
         assert_eq!(
             service_args(&Some(String::new()), "s.agent-yes.com"),
-            vec!["serve", "--webrtc", "--sighost", "s.agent-yes.com"]
+            vec![
+                "serve",
+                "--webrtc",
+                "--sighost",
+                "s.agent-yes.com",
+                "--port",
+                "0",
+            ]
         );
     }
 
@@ -305,6 +355,23 @@ mod tests {
         assert!(u.contains("<string>/bin/ayrs</string>"));
         assert!(u.contains("<string>--webrtc</string>"));
         assert!(u.contains("<string>a&amp;b</string>"));
+        assert!(u.contains("<string>--port</string>"));
+        assert!(u.contains("<string>0</string>"));
+        assert!(u.contains("<key>ProcessType</key><string>Interactive</string>"));
+        assert!(u.contains("<key>EnvironmentVariables</key>"));
+        assert!(u.contains("<key>RUST_BACKTRACE</key><string>1</string>"));
+        assert!(u.contains(".bun/bin"));
+        assert!(u.contains(".cargo/bin"));
         assert!(u.contains(&format!("<string>{LABEL}</string>")));
+    }
+
+    #[test]
+    fn runtime_path_keeps_agent_tool_bins_and_is_deduplicated() {
+        let path = runtime_path();
+        assert!(path.contains(".bun/bin"));
+        assert!(path.contains(".cargo/bin"));
+        let entries: Vec<_> = std::env::split_paths(&std::ffi::OsString::from(path)).collect();
+        let unique: HashSet<_> = entries.iter().cloned().collect();
+        assert_eq!(entries.len(), unique.len());
     }
 }
