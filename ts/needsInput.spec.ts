@@ -147,7 +147,11 @@ test("parseMenu: collects boxed bullet rows (gemini '│ ● 1. Yes, allow once'
 });
 
 test("parseMenu: a boxed 'N.M' version still isn't mistaken for an option", () => {
-  const screen = ["│ Cleanup?              │", "│ ❯ 1. Delete 3.5GB     │", "│   2. Keep             │"];
+  const screen = [
+    "│ Cleanup?              │",
+    "│ ❯ 1. Delete 3.5GB     │",
+    "│   2. Keep             │",
+  ];
   const menu = parseMenu(screen, claude);
   expect(menu!.options).toEqual([1, 2]);
 });

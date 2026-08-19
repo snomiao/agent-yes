@@ -190,8 +190,18 @@ export async function startServer(
           schema: "ay-ws/v1",
           wsRoot: "/home/u/ws",
           repos: [
-            { owner: "snomiao", repo: "agent-yes", local: true, branches: [{ name: "main", path: WORKSPACES[0]!.path }] },
-            { owner: "acme", repo: "widgets", local: true, branches: [{ name: "dev", path: WORKSPACES[1]!.path }] },
+            {
+              owner: "snomiao",
+              repo: "agent-yes",
+              local: true,
+              branches: [{ name: "main", path: WORKSPACES[0]!.path }],
+            },
+            {
+              owner: "acme",
+              repo: "widgets",
+              local: true,
+              branches: [{ name: "dev", path: WORKSPACES[1]!.path }],
+            },
             { owner: "acme", repo: "newrepo", local: false, branches: [] },
           ],
           gh: { ok: true },

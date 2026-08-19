@@ -405,10 +405,7 @@ export interface TailOpts extends ProjectOpts, BackwardOpts {
  * Stops reading as soon as `limit` records are collected — the whole reason the
  * backward reader is a generator.
  */
-export async function tailTranscript(
-  file: TranscriptFile,
-  opts: TailOpts,
-): Promise<HistRecord[]> {
+export async function tailTranscript(file: TranscriptFile, opts: TailOpts): Promise<HistRecord[]> {
   const out: HistRecord[] = [];
   for await (const { offset, text } of readLinesBackward(file.path, opts)) {
     const projected = projectRecord(text, file.source, opts);
@@ -472,9 +469,7 @@ export async function histPage(q: HistQuery): Promise<HistPage> {
   // hand; only the former can page without losing timestamp ties.
   const cursor = q.cursor ?? (q.before ? decodeCursor(q.before) : null);
   const tails = await Promise.all(
-    considered.map((f) =>
-      tailTranscript(f, { ...q, limit: perFile, cursor: cursor ?? undefined }),
-    ),
+    considered.map((f) => tailTranscript(f, { ...q, limit: perFile, cursor: cursor ?? undefined })),
   );
   const merged = tails.flat();
 

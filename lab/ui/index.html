@@ -8199,7 +8199,11 @@ my.translate = async (text, lang) => {
         if (!cwdEl.disabled) cwdEl.dataset.userCwd = cwdEl.value;
         let br = ($("nf-branch")?.value || "").trim() || parsed.branch || "";
         if (!br && nfRemoteBranches) {
-          br = nfRemoteBranches.has("main") ? "main" : nfRemoteBranches.has("master") ? "master" : "";
+          br = nfRemoteBranches.has("main")
+            ? "main"
+            : nfRemoteBranches.has("master")
+              ? "master"
+              : "";
         }
         cwdEl.disabled = true;
         cwdEl.value = `${nfWsRoot || "~/ws"}/${parsed.owner}/${parsed.repo}/tree/${br || "…"}`;
