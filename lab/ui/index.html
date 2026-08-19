@@ -9210,9 +9210,18 @@ my.translate = async (text, lang) => {
           if (!pill.classList.contains("pinned")) return;
           const tr = tip.getBoundingClientRect();
           if (e.clientY - tr.top > HANDLE) return; // not on the handle
-          drag = { id: e.pointerId, x: e.clientX, y: e.clientY, ox: tr.left, oy: tr.top, moved: false };
+          drag = {
+            id: e.pointerId,
+            x: e.clientX,
+            y: e.clientY,
+            ox: tr.left,
+            oy: tr.top,
+            moved: false,
+          };
           suppressClick = false;
-          try { tip.setPointerCapture(e.pointerId); } catch {}
+          try {
+            tip.setPointerCapture(e.pointerId);
+          } catch {}
           e.preventDefault();
         });
         tip.addEventListener("pointermove", (e) => {
@@ -9233,13 +9242,17 @@ my.translate = async (text, lang) => {
           const moved = drag.moved;
           drag = null;
           tip.classList.remove("dragging");
-          try { tip.releasePointerCapture(e.pointerId); } catch {}
+          try {
+            tip.releasePointerCapture(e.pointerId);
+          } catch {}
           if (!moved) return;
           pos = {
             x: parseFloat(tip.style.left) || 8,
             y: parseFloat(tip.style.top) || 8,
           };
-          try { localStorage.setItem(KEY, JSON.stringify(pos)); } catch {}
+          try {
+            localStorage.setItem(KEY, JSON.stringify(pos));
+          } catch {}
           suppressClick = true;
           // Swallow the synthetic click a drag emits (would toggle pin off).
           setTimeout(() => (suppressClick = false), 0);
