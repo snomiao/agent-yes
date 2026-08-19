@@ -76,8 +76,8 @@ const CSP = [
   "img-src 'self' data:",
   "font-src 'self' data:",
   "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
-  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net",
-  "connect-src 'self' https://s.agent-yes.com https://agent-yes.com wss:",
+  "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://static.cloudflareinsights.com",
+  "connect-src 'self' https://s.agent-yes.com https://agent-yes.com https://cloudflareinsights.com wss:",
   "worker-src 'self'",
   "manifest-src 'self'",
 ].join("; ");
