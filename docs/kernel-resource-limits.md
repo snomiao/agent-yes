@@ -7,11 +7,11 @@
 
 ## 1. Overview: the two failure modes
 
-| Symptom | Actual cause | Errno | Fix |
-|---|---|---|---|
-| `openpty failed: out of pty devices` (Python) | **Sandbox blocks `/dev/ptmx`** (EPERM), NOT pty exhaustion | `errno=1 Operation not permitted` | Escalate sandbox: `danger-full-access` or remove Seatbelt profile |
-| `openpty failed: …` (real exhaustion) | Actual pty count exceeds `kern.tty.ptmx_max` | `errno=34 Result too large` / `ENOSPC` | Raise `ptmx_max` or kill idle agents |
-| `forkpty failed` (C/rs) | Same — sandbox (EPERM) or pool exhaustion (ENOSPC) | EPERM vs ENOSPC | Diagnose with `posix_openpt()` test, then appropriate fix |
+| Symptom                                       | Actual cause                                               | Errno                                  | Fix                                                               |
+| --------------------------------------------- | ---------------------------------------------------------- | -------------------------------------- | ----------------------------------------------------------------- |
+| `openpty failed: out of pty devices` (Python) | **Sandbox blocks `/dev/ptmx`** (EPERM), NOT pty exhaustion | `errno=1 Operation not permitted`      | Escalate sandbox: `danger-full-access` or remove Seatbelt profile |
+| `openpty failed: …` (real exhaustion)         | Actual pty count exceeds `kern.tty.ptmx_max`               | `errno=34 Result too large` / `ENOSPC` | Raise `ptmx_max` or kill idle agents                              |
+| `forkpty failed` (C/rs)                       | Same — sandbox (EPERM) or pool exhaustion (ENOSPC)         | EPERM vs ENOSPC                        | Diagnose with `posix_openpt()` test, then appropriate fix         |
 
 **Key diagnostic**: run `open("/dev/ptmx", O_RDWR)` from a C test binary; if it returns
 **EPERM**, it's the sandbox. If it returns **ENOSPC**, it's actual pty depletion.
@@ -23,9 +23,10 @@
 ### 2.1 What they are and why agent-yes needs them
 
 Every `ay <cli>` spawns the target CLI under a **pseudoterminal pair** (master
-+ slave). The master end is opened via `open("/dev/ptmx")` (or the
-`posix_openpt(3)` wrapper). The slave end appears as `/dev/ttysXXX` on macOS
-or `/dev/pts/N` on Linux.
+
+- slave). The master end is opened via `open("/dev/ptmx")` (or the
+  `posix_openpt(3)` wrapper). The slave end appears as `/dev/ttysXXX` on macOS
+  or `/dev/pts/N` on Linux.
 
 Each agent's stdin/stdout/stderr attach to the slave end via the master fd;
 this is why `ay status` can read the agent's screen and why the agent thinks
@@ -37,6 +38,7 @@ it's talking to a real terminal even in headless/CI contexts.
 default 511).
 
 **Is it adjustable?** **Yes** — but with constraints:
+
 ```bash
 # Check current
 sysctl kern.tty.ptmx_max    # default: 511
@@ -53,11 +55,13 @@ echo 'kern.tty.ptmx_max=999' | sudo tee -a /etc/sysctl.conf
 
 **Sandbox caveat**: on macOS, agent-yes may run under a **Seatbelt sandbox**
 that blocks `open("/dev/ptmx")` with `EPERM` (Operation not permitted),
-*regardless* of whether the pty pool has free slots. The sandbox policy must
+_regardless_ of whether the pty pool has free slots. The sandbox policy must
 explicitly allow `/dev/ptmx` access (`(allow sysctl-read kern.tty.ptmx_max)`
-+ `(allow file-read* file-write* (char-device "/dev/ptmx"))`). See §4 below.
+
+- `(allow file-read* file-write* (char-device "/dev/ptmx"))`). See §4 below.
 
 **Diagnosis**:
+
 ```bash
 # Count active pty opens
 lsof /dev/ptmx | tail -n +2 | wc -l
@@ -110,6 +114,7 @@ sudo sysctl kern.tty.ptmx_max=512 # raise
 ### 3.1 File descriptors
 
 **macOS**:
+
 ```bash
 kern.maxfiles: 276480         # system-wide
 kern.maxfilesperproc: 138240  # per-process
@@ -117,6 +122,7 @@ ulimit -n: unlimited          # soft limit (may be lower)
 ```
 
 **Linux**:
+
 ```bash
 ulimit -n                    # soft limit (often 1024)
 ulimit -n 65536              # raise (session only)
@@ -130,6 +136,7 @@ per-process soft limit.
 ### 3.2 Process count
 
 **macOS**:
+
 ```bash
 kern.maxproc: 9000            # system-wide ceiling
 kern.maxprocperuid: 6000      # per-user ceiling
@@ -137,6 +144,7 @@ ulimit -u: 6000               # soft limit
 ```
 
 **Linux**:
+
 ```bash
 ulimit -u                    # per-user (often 4096 or "unlimited")
 # /etc/security/limits.conf  # nproc
