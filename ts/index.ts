@@ -10,6 +10,7 @@ import { agentYesHome } from "./agentYesHome.ts";
 import {
   extractSessionId,
   getSessionForCwd,
+  isCodexFamily,
   storeSessionForCwd,
 } from "./resume/codexSessionManager.ts";
 import pty, { ptyPackage } from "./pty.ts";
@@ -435,7 +436,7 @@ export default async function agentYes({
 
   // Handle --continue flag for codex session restoration
   if (resume) {
-    if (cli === "codex" && resume) {
+    if (isCodexFamily(cli) && resume) {
       // Try to get stored session for this directory
       const storedSessionId = await getSessionForCwd(workingDir);
       if (storedSessionId) {
@@ -827,7 +828,7 @@ export default async function agentYes({
 
       // For codex, try to use stored session ID for this directory
       let restoreArgs = conf.restoreArgs;
-      if (cli === "codex") {
+      if (isCodexFamily(cli)) {
         const storedSessionId = await getSessionForCwd(workingDir);
         if (storedSessionId) {
           // Use specific session ID instead of --last
@@ -1060,7 +1061,7 @@ export default async function agentYes({
         }
 
         // session ID capture for codex
-        if (cli === "codex") {
+        if (isCodexFamily(cli)) {
           const sessionId = extractSessionId(line);
           if (sessionId) {
             logger.debug(`heartbeat|session|captured session ID: ${sessionId}`);
@@ -1447,7 +1448,7 @@ export default async function agentYes({
             }
 
             // session ID capture for codex
-            if (cli === "codex") {
+            if (isCodexFamily(cli)) {
               const sessionId = extractSessionId(line);
               if (sessionId) {
                 logger.debug(`session|captured session ID: ${sessionId}`);

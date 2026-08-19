@@ -200,12 +200,26 @@ fn delegate_to_js(forward_args: &[String]) -> i32 {
 // MUST mirror the `clis:` keys in default.config.yaml — this list gates CLI
 // validation and binary-name detection (`glm-yes` → "glm"). A new CLI added to
 // the YAML won't be runnable via the Rust runtime until it's listed here too.
+/// True for the codex CLI and every codex-derived variant (`codex-ds`,
+/// `codex-ds-direct`, …) — they all run the same `codex` binary and print the
+/// same session-id banner, so the session capture/resume path must treat them
+/// alike. Keying those sites on an exact `== "codex"` made `--continue` on a
+/// variant silently start a fresh session instead of resuming.
+///
+/// The per-cwd session store is therefore shared across codex variants. That is
+/// fine: resuming re-applies the launching CLI's own `defaultArgs`, so a session
+/// resumed via `codex-ds` still talks to DeepSeek.
+pub fn is_codex_family(cli: &str) -> bool {
+    cli == "codex" || cli.starts_with("codex-")
+}
+
 pub const SUPPORTED_CLIS: &[&str] = &[
     "claude",
     "glm",
     "pi",
     "codex",
     "codex-ds",
+    "codex-ds-direct",
     "copilot",
     "cursor",
     "grok",
@@ -763,7 +777,7 @@ mod tests {
 
     #[test]
     fn test_supported_clis_count() {
-        assert_eq!(SUPPORTED_CLIS.len(), 18);
+        assert_eq!(SUPPORTED_CLIS.len(), 19);
         // The claude-compatible providers (run the `claude` binary via env) must
         // be present, else their `*-yes` bins fail validation in the Rust runtime.
         for cli in ["glm", "pi"] {

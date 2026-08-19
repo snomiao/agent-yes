@@ -187,6 +187,21 @@ export async function getSessionForCwd(cwd: string): Promise<string | null> {
  * Extract session ID from codex output
  * Session IDs are UUIDs in the format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
  */
+/**
+ * True for the codex CLI and every codex-derived variant (`codex-ds`,
+ * `codex-ds-direct`, …) — they all run the same `codex` binary and print the
+ * same session-id banner, so the session capture/resume path must treat them
+ * alike. Keying those sites on an exact `=== "codex"` made `--continue` on a
+ * variant silently start a fresh session instead of resuming.
+ *
+ * The per-cwd session store is therefore shared across codex variants. That is
+ * fine: resuming re-applies the launching CLI's own `defaultArgs`, so a session
+ * resumed via `codex-ds` still talks to DeepSeek.
+ */
+export function isCodexFamily(cli: string): boolean {
+  return cli === "codex" || cli.startsWith("codex-");
+}
+
 export function extractSessionId(output: string): string | null {
   // Look for session ID in various contexts where it might appear
   const sessionIdRegex = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
