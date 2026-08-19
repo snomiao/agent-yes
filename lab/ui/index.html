@@ -8564,9 +8564,28 @@ my.translate = async (text, lang) => {
       // picker (options from /api/spawn-config `clis`), preselected from the
       // chain: selected agent's cli → last used cli → explicit user pick.
       const LAST_CLI_KEY = "ay.lastSpawnCli";
-      const CLI_FALLBACK = ["claude", "codex", "copilot", "cursor-agent", "goose", "aider"];
-      function cliOptions(clis, preferred) {
-        const list = clis && clis.length ? clis : CLI_FALLBACK;
+      // Last-resort names for a room with no agents to learn from. Every entry
+      // MUST be a real CLI key from default.config.yaml — the daemon rejects an
+      // unknown `cli` with 400, and the picker is the only place the user sees
+      // what is on offer, so a name invented here reads as "supported" and fails
+      // at Launch. The previous list carried three that never existed on either
+      // runtime (`goose`, `aider`, and `cursor-agent` — which is the BINARY for
+      // the CLI named `cursor`, not a CLI name).
+      const CLI_FALLBACK = ["claude", "codex", "copilot"];
+      // Fallback CLIs for a host we have not heard back from yet: the CLIs its
+      // own agents are already running. Those are host-scoped and proven to be
+      // accepted here, unlike a static guess. /api/spawn-config still replaces
+      // this with the daemon's authoritative list as soon as it answers.
+      function cliFallback(room) {
+        const seen = new Set();
+        for (const e of entries) {
+          if (room && e._src !== room) continue;
+          if (e.cli) seen.add(e.cli);
+        }
+        return seen.size ? [...seen].sort() : CLI_FALLBACK;
+      }
+      function cliOptions(clis, preferred, room) {
+        const list = clis && clis.length ? clis : cliFallback(room);
         const has = preferred && list.includes(preferred);
         return (
           `<option value=""${has ? "" : " selected"} disabled>choose a CLI…</option>` +
@@ -8621,7 +8640,7 @@ my.translate = async (text, lang) => {
       <div class="ltitle">New agent · ${esc(sourceLabel(target) || "local")}</div>
       ${hostRow}
       <div class="nfield"><label>Working dir</label><input id="nf-cwd" list="nf-cwd-list" value="${esc(cwd)}" placeholder="(host default — ignored when a Provision repo is set)" spellcheck="false" autocapitalize="off" /><datalist id="nf-cwd-list">${cwdOptions(target ? target.id : "")}</datalist></div>
-      <div class="nfield"><label>CLI</label><select id="nf-cli">${cliOptions(null, preferredCli)}</select></div>
+      <div class="nfield"><label>CLI</label><select id="nf-cli">${cliOptions(null, preferredCli, target ? target.id : "")}</select></div>
       <div class="nfield"><label>Provision repo — optional</label><input id="nf-repo" list="nf-repo-list" placeholder="owner/repo · github URL · git URL (gitlab etc.) — provisions a worktree" spellcheck="false" autocapitalize="off" /><datalist id="nf-repo-list"></datalist><div class="lhint" id="nf-repo-hint" style="display:none"></div></div>
       <div class="nfield" id="nf-branch-row" style="display:none"><label>Branch</label><input id="nf-branch" list="nf-branch-list" placeholder="(repo default) — pick one, or type a new name to create it" spellcheck="false" autocapitalize="off" /><datalist id="nf-branch-list"></datalist><div class="lhint" id="nf-branch-hint" style="display:none"></div></div>
       <div class="nfield"><label>Prompt — optional</label><textarea id="nf-prompt" rows="3" placeholder="initial message to send the agent…"></textarea></div>
@@ -8854,7 +8873,7 @@ my.translate = async (text, lang) => {
             const cliSel = $("nf-cli");
             if (cliSel && c && Array.isArray(c.clis) && c.clis.length) {
               const cur = cliSel.value;
-              cliSel.innerHTML = cliOptions(c.clis, cur || null);
+              cliSel.innerHTML = cliOptions(c.clis, cur || null, forId);
             }
           })
           .catch(() => {});
