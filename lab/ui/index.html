@@ -6163,12 +6163,17 @@ my.translate = async (text, lang) => {
       // every tick, which keeps the relative "age" column fresh.
       async function loadList() {
         // Refresh the local-host system snapshot for the room header line.
-        localTx
-          .fetchJSON("/api/host")
-          .then((h) => {
-            hostRes = h;
-          })
-          .catch(() => {});
+        // Only when a local ay serve is actually present: the public
+        // agent-yes.com/beta origins serve static assets only, so probing
+        // /api/host there 404s (and churns the /api/mux socket) every tick.
+        if (sources.has(LOCAL)) {
+          localTx
+            .fetchJSON("/api/host")
+            .then((h) => {
+              hostRes = h;
+            })
+            .catch(() => {});
+        }
 
         const srcs = [...sources.values()];
         await Promise.all(srcs.filter((s) => !s.streaming).map(listSource));
