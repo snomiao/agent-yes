@@ -1692,10 +1692,10 @@ describe("subcommands.cmdSend safety guards", () => {
       return true;
     };
     try {
-      const long = "x".repeat(4097);
+      const long = "x".repeat(1025);
       const code = await runSubcommand(["bun", "cli.js", "send", String(process.pid), long]);
       expect(code).toBe(1);
-      expect(stderr.join("")).toMatch(/over the 4096-char limit/);
+      expect(stderr.join("")).toMatch(/over the 1024-char limit/);
       expect(stderr.join("")).toMatch(/ay send <keyword> - < file\.txt/);
     } finally {
       process.stderr.write = orig;
