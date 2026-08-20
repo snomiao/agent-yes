@@ -26,8 +26,8 @@ type BoxBody = http_body_util::combinators::BoxBody<Bytes, Infallible>;
 const CONSOLE_CSP: &str = "default-src 'self'; base-uri 'none'; object-src 'none'; \
      frame-ancestors 'none'; form-action 'self'; img-src 'self' data:; \
      font-src 'self' data:; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; \
-     script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net; \
-     connect-src 'self' https://s.agent-yes.com https://agent-yes.com wss:; \
+     script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://static.cloudflareinsights.com; \
+     connect-src 'self' https://s.agent-yes.com https://agent-yes.com https://cloudflareinsights.com wss:; \
      worker-src 'self'; manifest-src 'self'";
 
 fn full(b: Vec<u8>) -> BoxBody {
