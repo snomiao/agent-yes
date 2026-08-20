@@ -213,27 +213,7 @@ pub fn is_codex_family(cli: &str) -> bool {
     cli == "codex" || cli.starts_with("codex-")
 }
 
-pub const SUPPORTED_CLIS: &[&str] = &[
-    "claude",
-    "glm",
-    "pi",
-    "codex",
-    "codex-ds",
-    "codex-ds-direct",
-    "copilot",
-    "cursor",
-    "grok",
-    "qwen",
-    "auggie",
-    "amp",
-    "opencode",
-    "dsh",
-    "dsh-tui",
-    "dsh-legacy",
-    "bash",
-    "cmd",
-    "powershell",
-];
+pub use crate::supported_clis::SUPPORTED_CLIS;
 
 // Most fields here are read elsewhere in the binary; the ones that aren't
 // are kept either for forward use (auto-install, use-skills) or as deprecated

@@ -11,27 +11,7 @@ use serde_json::{json, Value};
 
 /// CLIs `/api/spawn` accepts — the same list the runtime validates against, so
 /// the console's picker can't offer something the spawn will reject.
-pub const SUPPORTED_CLIS: &[&str] = &[
-    "claude",
-    "glm",
-    "pi",
-    "codex",
-    "codex-ds",
-    "codex-ds-direct",
-    "copilot",
-    "cursor",
-    "grok",
-    "qwen",
-    "auggie",
-    "amp",
-    "opencode",
-    "dsh",
-    "dsh-tui",
-    "dsh-legacy",
-    "bash",
-    "cmd",
-    "powershell",
-];
+pub use crate::supported_clis::SUPPORTED_CLIS;
 
 /// Absolute path to an `ay`-equivalent executable.
 ///
