@@ -955,13 +955,16 @@ describe("fold subagent trees", () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
       await expect.poll(() => page.locator(".list .row").count()).toBe(1);
-      // The fold toggle now lives inside the Settings dropdown.
+      // The fold toggle now lives inside the Settings dropdown, which stays OPEN
+      // after an item click (416bedb — most items are toggles you may want to
+      // spin several times). So open it once and click the toggle twice; a
+      // second #viewmenubtn click here would CLOSE the panel and the following
+      // #foldbtn click would hang waiting for a hidden element.
       await page.click("#viewmenubtn");
       await page.click("#foldbtn");
       // All four agents (root + 3 descendants) now render; the chip is gone.
       await expect.poll(() => page.locator(".list .row").count()).toBe(4);
       expect(await page.locator(".subs").count()).toBe(0);
-      await page.click("#viewmenubtn");
       await page.click("#foldbtn");
       await expect.poll(() => page.locator(".list .row").count()).toBe(1);
     } finally {
