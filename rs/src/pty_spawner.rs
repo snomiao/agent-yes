@@ -404,6 +404,11 @@ impl PtyContext {
         self.output_rx.try_recv().ok()
     }
 
+    /// Wait for the next PTY output chunk without a polling floor.
+    pub async fn recv_output(&mut self) -> Option<String> {
+        self.output_rx.recv().await
+    }
+
     /// Get a cloned writer for async writing
     pub fn get_writer(&self) -> Arc<Mutex<Box<dyn Write + Send>>> {
         self.writer.clone()

@@ -907,13 +907,9 @@ impl AgentContext {
                     }
                 }
 
-                // Check for process exit and PTY output (poll frequently)
+                // Process-exit/liveness housekeeping. PTY output itself has an
+                // event-driven arm below, so it no longer waits for this tick.
                 _ = sleep_ms(10) => {
-                    // Try to read output from channel (non-blocking)
-                    while let Some(output) = pty.try_recv() {
-                        self.handle_output(&output, &mut msg_ctx, &stdout_tx).await?;
-                    }
-
                     // Check if process has exited
                     if let Ok(Some(status)) = pty.try_wait() {
                         let code = status.exit_code() as i32;
@@ -968,6 +964,10 @@ impl AgentContext {
                             }
                         }
                     }
+                }
+
+                Some(output) = pty.recv_output() => {
+                    self.handle_output(&output, &mut msg_ctx, &stdout_tx).await?;
                 }
             }
         }
@@ -1068,7 +1068,9 @@ impl AgentContext {
         }
 
         // Write to raw log file
-        self.log_writer.write(output);
+        if let Some(end_offset) = self.log_writer.write(output) {
+            crate::live_output::publish(std::process::id(), end_offset, output.as_bytes());
+        }
 
         // Update buffers
         self.output_buffer.push_str(output);

@@ -25,7 +25,6 @@ const LS_TICK_MS: u64 = 3_000;
 // unwatched poll; a plain 50ms stat poll costs ~nothing and needs no watcher
 // lifecycle — see agent-yes-fswatch-dies-in-daemon for why watchers are risky
 // in long-lived daemons).
-const TAIL_POLL_MS: u64 = 50;
 /// Consider an agent "active" if its log grew within this window, else "idle".
 const ACTIVE_WINDOW_MS: i64 = 60_000;
 
@@ -911,9 +910,11 @@ fn spawn_ls_subscribe(all: bool, active: bool, keyword: String) -> mpsc::Receive
     rx
 }
 
-fn spawn_tail(log_file: String, raw: bool) -> mpsc::Receiver<Vec<u8>> {
+fn spawn_tail(pid: u32, log_file: String, raw: bool) -> mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
     tokio::spawn(async move {
+        #[cfg(unix)]
+        let mut live = crate::live_output::subscribe(pid);
         let mut offset: u64 = 0;
         // snapshot: last 64KB of the file
         let snapshot = tokio::task::spawn_blocking({
@@ -942,30 +943,102 @@ fn spawn_tail(log_file: String, raw: bool) -> mpsc::Receiver<Vec<u8>> {
                 // no log yet — start at 0 and stream once it appears
             }
         }
+        #[cfg(not(unix))]
         let mut last_ping = std::time::Instant::now();
         loop {
-            tokio::time::sleep(Duration::from_millis(TAIL_POLL_MS)).await;
-            let read = tokio::task::spawn_blocking({
-                let log_file = log_file.clone();
-                move || -> std::io::Result<(u64, Vec<u8>)> {
-                    let mut f = std::fs::File::open(&log_file)?;
-                    let size = f.metadata()?.len();
-                    if size < offset {
-                        return Ok((size, Vec::new())); // truncated/compacted
+            #[cfg(unix)]
+            tokio::select! {
+                item = live.recv() => {
+                    let chunk = match item {
+                        Ok(chunk) => chunk,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            // The bounded in-memory queue overflowed. Recover every
+                            // missed byte from the durable log before accepting more
+                            // datagrams, rather than silently jumping the offset.
+                            let path = log_file.clone();
+                            let read = tokio::task::spawn_blocking(move || read_log_range(&path, offset, None)).await;
+                            if let Ok(Ok((size, buf))) = read {
+                                offset = size;
+                                if !buf.is_empty() {
+                                    let text = decode_log(&buf, raw);
+                                    let skip = !raw && text.trim().is_empty();
+                                    if !skip && tx.send(sse_frame(&json!(text))).await.is_err() { return; }
+                                }
+                            }
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    };
+                    let start = chunk.end_offset.saturating_sub(chunk.data.len() as u64);
+                    if chunk.end_offset < offset {
+                        // Usually this is a queued pre-snapshot datagram. Only a
+                        // smaller current log proves compaction reset the offset.
+                        let path = log_file.clone();
+                        let compacted = tokio::task::spawn_blocking(move || {
+                            std::fs::metadata(path).map(|m| m.len() < offset)
+                        }).await.ok().and_then(Result::ok).unwrap_or(false);
+                        if compacted {
+                            offset = chunk.end_offset;
+                            let text = decode_log(&chunk.data, raw);
+                            let skip = !raw && text.trim().is_empty();
+                            if !skip && tx.send(sse_frame(&json!(text))).await.is_err() { return; }
+                        }
+                        continue;
                     }
-                    if size == offset {
-                        return Ok((size, Vec::new()));
+                    if chunk.end_offset <= offset {
+                        continue; // snapshot already included this queued chunk
                     }
-                    f.seek(SeekFrom::Start(offset))?;
-                    let mut buf = Vec::new();
-                    f.read_to_end(&mut buf)?;
-                    Ok((size, buf))
+                    let data = if start > offset {
+                        // Datagram loss or broadcast lag between otherwise valid
+                        // chunks. Fill the exact hole (including this chunk) from
+                        // the log, whose offset is the transport's sequence number.
+                        let path = log_file.clone();
+                        let end = chunk.end_offset;
+                        match tokio::task::spawn_blocking(move || read_log_range(&path, offset, Some(end))).await {
+                            Ok(Ok((size, buf))) => {
+                                offset = size;
+                                buf
+                            }
+                            _ => continue, // keep offset; a later chunk retries a wider recovery
+                        }
+                    } else if start < offset {
+                        chunk.data[(offset - start) as usize..].to_vec()
+                    } else {
+                        chunk.data
+                    };
+                    offset = chunk.end_offset.max(offset);
+                    let text = decode_log(&data, raw);
+                    let skip = !raw && text.trim().is_empty();
+                    if !skip && tx.send(sse_frame(&json!(text))).await.is_err() {
+                        return;
+                    }
                 }
-            })
-            .await
-            .unwrap_or_else(|e| Err(std::io::Error::other(e)));
-            match read {
-                Ok((size, buf)) => {
+                _ = tokio::time::sleep(Duration::from_millis(SSE_PING_MS)) => {
+                    if tx.send(b": ping\n\n".to_vec()).await.is_err() { return; }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                // Non-Unix platforms retain the durable-log fallback until they
+                // gain an equivalent local datagram transport.
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                let read = tokio::task::spawn_blocking({
+                    let log_file = log_file.clone();
+                    move || -> std::io::Result<(u64, Vec<u8>)> {
+                        let mut f = std::fs::File::open(&log_file)?;
+                        let size = f.metadata()?.len();
+                        if size <= offset {
+                            return Ok((size, Vec::new()));
+                        }
+                        f.seek(SeekFrom::Start(offset))?;
+                        let mut buf = Vec::new();
+                        f.read_to_end(&mut buf)?;
+                        Ok((size, buf))
+                    }
+                })
+                .await
+                .unwrap_or_else(|e| Err(std::io::Error::other(e)));
+                if let Ok((size, buf)) = read {
                     offset = size;
                     if !buf.is_empty() {
                         let text = decode_log(&buf, raw);
@@ -975,17 +1048,39 @@ fn spawn_tail(log_file: String, raw: bool) -> mpsc::Receiver<Vec<u8>> {
                         }
                     }
                 }
-                Err(_) => { /* file missing — keep polling */ }
-            }
-            if last_ping.elapsed() >= Duration::from_millis(SSE_PING_MS) {
-                last_ping = std::time::Instant::now();
-                if tx.send(b": ping\n\n".to_vec()).await.is_err() {
-                    return;
+                if last_ping.elapsed() >= Duration::from_millis(SSE_PING_MS) {
+                    last_ping = std::time::Instant::now();
+                    if tx.send(b": ping\n\n".to_vec()).await.is_err() {
+                        return;
+                    }
                 }
             }
         }
     });
     rx
+}
+
+/// Read bytes after `offset`, optionally stopping at `through`. A file smaller
+/// than the remembered offset was compacted; reset to its new EOF without
+/// replaying tens of megabytes of retained history.
+fn read_log_range(
+    path: &str,
+    offset: u64,
+    through: Option<u64>,
+) -> std::io::Result<(u64, Vec<u8>)> {
+    let mut f = std::fs::File::open(path)?;
+    let size = f.metadata()?.len();
+    if size < offset {
+        return Ok((size, Vec::new()));
+    }
+    let end = through.unwrap_or(size).min(size);
+    if end <= offset {
+        return Ok((end, Vec::new()));
+    }
+    f.seek(SeekFrom::Start(offset))?;
+    let mut buf = vec![0; (end - offset) as usize];
+    f.read_exact(&mut buf)?;
+    Ok((end, buf))
 }
 
 fn decode_log(buf: &[u8], raw: bool) -> String {
@@ -1370,7 +1465,7 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
                     Some(log) => ApiResponse {
                         status: 200,
                         content_type: "text/event-stream".into(),
-                        body: Body::Stream(spawn_tail(log, raw)),
+                        body: Body::Stream(spawn_tail(r.pid, log, raw)),
                     },
                     None => text(404, format!("pid {}: no log_file", r.pid)),
                 },
@@ -1656,5 +1751,29 @@ mod tests {
         .unwrap();
         let t = log_title(Some(p.to_str().unwrap()));
         assert_eq!(t.as_deref(), Some("✳ 深夜定義の統一 — テスト"));
+    }
+
+    #[test]
+    fn live_tail_gap_recovery_and_compaction_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("tail.raw.log");
+        std::fs::write(&p, b"abcdefghij").unwrap();
+
+        // A missing datagram between offsets 3 and 10 is recovered exactly.
+        let (end, bytes) = read_log_range(p.to_str().unwrap(), 3, Some(10)).unwrap();
+        assert_eq!(end, 10);
+        assert_eq!(bytes, b"defghij");
+
+        // Snapshot de-duplication asks for an empty [EOF, EOF] range.
+        let (end, bytes) = read_log_range(p.to_str().unwrap(), 10, Some(10)).unwrap();
+        assert_eq!(end, 10);
+        assert!(bytes.is_empty());
+
+        // Compaction makes the remembered offset invalid: reset, don't replay
+        // retained history as if it were new output.
+        std::fs::write(&p, b"new").unwrap();
+        let (end, bytes) = read_log_range(p.to_str().unwrap(), 10, None).unwrap();
+        assert_eq!(end, 3);
+        assert!(bytes.is_empty());
     }
 }

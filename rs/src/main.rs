@@ -9,6 +9,7 @@ mod identity;
 mod idle_waiter;
 mod init_msg;
 mod installer;
+mod live_output;
 mod log_files;
 mod logger;
 mod messaging;

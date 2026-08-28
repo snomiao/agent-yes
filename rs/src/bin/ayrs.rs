@@ -15,6 +15,8 @@ mod pid_store;
 mod config_loader;
 #[path = "../fifo.rs"]
 mod fifo;
+#[path = "../live_output.rs"]
+mod live_output;
 #[path = "../log_files.rs"]
 mod log_files;
 #[path = "../reaper.rs"]

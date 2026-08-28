@@ -64,15 +64,17 @@ impl LogWriter {
         }
     }
 
-    pub fn write(&self, data: &str) {
-        let Ok(mut g) = self.state.lock() else { return };
+    pub fn write(&self, data: &str) -> Option<u64> {
+        let Ok(mut g) = self.state.lock() else {
+            return None;
+        };
         if g.file.is_none() {
-            return;
+            return None;
         }
         {
             let f = g.file.as_mut().expect("checked is_some above");
             if f.write_all(data.as_bytes()).is_err() {
-                return;
+                return None;
             }
         }
         g.written = g.written.saturating_add(data.len() as u64);
@@ -87,6 +89,7 @@ impl LogWriter {
                 }
             }
         }
+        Some(g.written)
     }
 }
 
