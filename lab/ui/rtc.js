@@ -93,6 +93,16 @@ function maybeSlow(scope, event, startedAt, data = {}) {
   else perfLog(scope, event, { ms, ...data });
 }
 
+export function updateStreamTrace(stream, seq, receivedAt) {
+  const expected = stream.nextSeq;
+  const gap = typeof seq === "number" && seq !== expected ? { expected, actual: seq } : null;
+  if (typeof seq === "number") stream.nextSeq = seq + 1;
+  if (stream.lastAt)
+    stream.maxGapMs = Math.max(stream.maxGapMs || 0, Math.max(0, receivedAt - stream.lastAt));
+  stream.lastAt = receivedAt;
+  return gap;
+}
+
 // Tunnels request/response + streaming over one DataChannel. Mirrors the
 // envelope in lab/ui/share-host.ts: {t:"req"|"abort"} out, {t:"res"|"data"|"end"} in.
 export class RTCClient {
@@ -124,6 +134,7 @@ export class RTCClient {
       _confirmTimer: null,
       _recvChain: Promise.resolve(), // serialize decrypts (ordered replay check)
       _sendChain: Promise.resolve(), // serialize seals (wire order == counter order)
+      _traceSeq: 0,
     });
   }
   async connect() {
@@ -348,8 +359,24 @@ export class RTCClient {
         call.bytes = (call.bytes || 0) + r.chunk.length;
       }
       if (stream) {
+        const receivedAt = performance.now();
+        const seqGap = updateStreamTrace(stream, r.seq, receivedAt);
+        if (seqGap) {
+          perfLog("rtc", "stream.seq_gap", { room: this.room, path: stream.path, ...seqGap }, true);
+        }
+        if (r.trace && typeof r.trace.hostQueuedMs === "number") {
+          const wallMs = Date.now() - r.trace.hostQueuedMs;
+          perfLog("rtc", "stream.wire", {
+            room: this.room,
+            path: stream.path,
+            seq: r.seq,
+            span: r.trace.span,
+            wallMs,
+            hostApiMs: r.trace.hostApiMs,
+          });
+        }
         if (!stream.firstAt) {
-          stream.firstAt = performance.now();
+          stream.firstAt = receivedAt;
           maybeSlow("rtc", "stream.first", stream.startedAt, {
             room: this.room,
             path: stream.path,
@@ -357,7 +384,6 @@ export class RTCClient {
         }
         stream.chunks++;
         stream.bytes += r.chunk.length;
-        stream.lastAt = performance.now();
         stream(r.chunk);
       }
     } else if (r.t === "end") {
@@ -408,7 +434,10 @@ export class RTCClient {
         timer,
       });
       perfLog("rtc", "req.start", { room: this.room, method, path });
-      this._dcSend(0, { t: "req", id, method, path, body }).catch((e) => {
+      const trace = perfEnabled()
+        ? { span: `${this.room}:${++this._traceSeq}`, clientSentMs: Date.now() }
+        : undefined;
+      this._dcSend(0, { t: "req", id, method, path, body, trace }).catch((e) => {
         clearTimeout(timer);
         this.calls.delete(id);
         maybeSlow("rtc", "req.send_fail", startedAt, {
@@ -425,10 +454,22 @@ export class RTCClient {
     const id = randomHex(16);
     const startedAt = performance.now();
     const wrapped = (chunk) => onRaw(chunk);
-    Object.assign(wrapped, { path, startedAt, firstAt: 0, lastAt: 0, chunks: 0, bytes: 0 });
+    Object.assign(wrapped, {
+      path,
+      startedAt,
+      firstAt: 0,
+      lastAt: 0,
+      chunks: 0,
+      bytes: 0,
+      nextSeq: 0,
+      maxGapMs: 0,
+    });
     this.streams.set(id, wrapped);
     perfLog("rtc", "stream.start", { room: this.room, path });
-    this._dcSend(0, { t: "req", id, method: "GET", path });
+    const trace = perfEnabled()
+      ? { span: `${this.room}:${++this._traceSeq}`, clientSentMs: Date.now() }
+      : undefined;
+    this._dcSend(0, { t: "req", id, method: "GET", path, trace });
     return () => {
       const stream = this.streams.get(id);
       if (stream)
@@ -438,6 +479,7 @@ export class RTCClient {
           ms: Math.round(performance.now() - startedAt),
           chunks: stream.chunks,
           bytes: stream.bytes,
+          maxGapMs: Math.round(stream.maxGapMs),
         });
       this.streams.delete(id);
       this._dcSend(0, { t: "abort", id });

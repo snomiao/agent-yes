@@ -1374,6 +1374,7 @@ fn spawn_receiver(
                         .and_then(|b| b.as_str())
                         .unwrap_or("")
                         .to_string();
+                    let trace_span = request_trace_span(&env);
                     let out_tx = {
                         let map = peers.lock().await;
                         match map.get(&peer_id) {
@@ -1387,7 +1388,8 @@ fn spawn_receiver(
                     let id2 = id.clone();
                     let scope2 = scope.clone();
                     let handle = tokio::spawn(async move {
-                        serve_request(out_tx, id2.clone(), method, path, body, scope2).await;
+                        serve_request(out_tx, id2.clone(), method, path, body, trace_span, scope2)
+                            .await;
                         // done — drop our own abort registration
                         let mut map = peers2.lock().await;
                         if let Some(p) = map.get_mut(&peer_id2) {
@@ -1415,9 +1417,22 @@ async fn serve_request(
     method: String,
     path: String,
     body: String,
+    trace: Option<String>,
     scope: Arc<Scope>,
 ) {
+    let request_started = std::time::Instant::now();
     let res = super::agent_share::scoped_handle(&scope, &method, &path, &body).await;
+    let host_api_ms = request_started.elapsed().as_secs_f64() * 1000.0;
+    let trace_for = |seq: u64| {
+        trace.as_ref().map(|span| {
+            json!({
+                "span": span,
+                "seq": seq,
+                "hostQueuedMs": unix_time_ms(),
+                "hostApiMs": host_api_ms,
+            })
+        })
+    };
     let _ = out_tx.send((
         0,
         json!({"t":"res","id":id,"status":res.status,"ct":res.content_type}),
@@ -1432,10 +1447,12 @@ async fn serve_request(
                 end -= 1;
             }
             let (chunk, tail) = rest.split_at(end);
-            if out_tx
-                .send((0, json!({"t":"data","id":id,"seq":*seq,"chunk":chunk})))
-                .is_err()
-            {
+            let trace = trace_for(*seq);
+            let mut envelope = json!({"t":"data","id":id,"seq":*seq,"chunk":chunk});
+            if let Some(trace) = trace {
+                envelope["trace"] = trace;
+            }
+            if out_tx.send((0, envelope)).is_err() {
                 return false;
             }
             *seq += 1;
@@ -1460,4 +1477,37 @@ async fn serve_request(
         }
     }
     let _ = out_tx.send((0, json!({"t":"end","id":id,"seq":seq})));
+}
+
+fn unix_time_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+}
+
+fn request_trace_span(env: &Value) -> Option<String> {
+    env.get("trace")
+        .and_then(|t| t.get("span"))
+        .and_then(|s| s.as_str())
+        .filter(|s| s.len() <= 96)
+        .map(str::to_owned)
+}
+
+#[cfg(test)]
+mod latency_trace_tests {
+    use super::*;
+
+    #[test]
+    fn trace_span_is_bounded_and_optional() {
+        assert_eq!(
+            request_trace_span(&json!({"trace":{"span":"room:42"}})).as_deref(),
+            Some("room:42")
+        );
+        assert_eq!(request_trace_span(&json!({})), None);
+        assert_eq!(
+            request_trace_span(&json!({"trace":{"span":"x".repeat(97)}})),
+            None
+        );
+    }
 }
