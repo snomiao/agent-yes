@@ -27,6 +27,7 @@ import createRgui, {
   type Port,
   type Rgui,
 } from "@snomiao/rgui";
+import { OrderedInputQueue, PredictiveEcho } from "./terminal-input";
 // Shared ay-share (rtc) remote-room transport — the SAME WebRTC + e2e wire the
 // console uses (lab/ui/rtc.js, which imports lab/ui/e2e.js). Bundled in by
 // scripts/build-rgui.ts. A .js module with no types → treated as any here.
@@ -913,6 +914,7 @@ type Xterm = {
   focus(): void;
   onData(cb: (d: string) => void): void;
   options: Record<string, unknown>;
+  buffer?: { active?: { type?: string } };
 };
 const XTermCtor = (window as unknown as { Terminal?: new (o: unknown) => Xterm }).Terminal;
 
@@ -973,25 +975,32 @@ let deferredWhileMoving = 0; // QA metric (see #qa): stream bytes deferred mid-g
 
 // Direct typing: pump xterm keystrokes (onData raw bytes — printable keys,
 // \r, arrows, ctrl-*) into the agent's PTY via POST /api/send {code:"none"}
-// (a bare writeToIpc — no trailing Enter). A promise chain keeps byte order;
-// per-keystroke POSTs are fine on both wires (HTTP and the room DataChannel).
+// (a bare writeToIpc — no trailing Enter). Input arriving while a request is
+// in flight is coalesced into the next ordered batch instead of creating an
+// RTT gate for every key.
 // Read-only shares deny host-side (403) — surface it once, don't spam.
-function attachStdin(term: Xterm, key: string, onDenied: () => void) {
-  let chain = Promise.resolve();
+let terminalImeActive = false;
+addEventListener("compositionstart", () => (terminalImeActive = true), true);
+addEventListener("compositionend", () => (terminalImeActive = false), true);
+
+function attachStdin(term: Xterm, key: string, predictor: PredictiveEcho, onDenied: () => void) {
   let denied = false;
-  term.onData((data) => {
-    if (term.options.disableStdin) return;
-    chain = chain.then(async () => {
-      const r = await apiPost(
-        "/api/send",
-        { keyword: pidOf(key), msg: data, code: "none" },
-        srcOf(key),
-      );
-      if (!r.ok && !denied) {
+  const queue = new OrderedInputQueue(
+    (msg) => apiPost("/api/send", { keyword: pidOf(key), msg, code: "none" }, srcOf(key)),
+    () => {
+      if (!denied) {
         denied = true;
         onDenied();
       }
+    },
+  );
+  term.onData((data) => {
+    if (term.options.disableStdin) return;
+    predictor.tryInput(data, (s) => term.write(s), {
+      composing: terminalImeActive,
+      alternate: term.buffer?.active?.type === "alternate",
     });
+    queue.push(data);
   });
 }
 
@@ -1087,12 +1096,14 @@ function makeTerm(pid: string): TermEntry | null {
   // #nostream (debug): skip the live SSE so the page reaches network-idle and rech
   // can drive it; render a static pattern so the overlay still has content/size.
   const noStream = location.hash.includes("nostream");
+  const predictor = new PredictiveEcho();
   // Stream handler shared by both wires (HTTP EventSource or the room channel):
   // while the view is moving, DEFER writes — repainting the xterm canvas while
   // rgui is CSS-scaling it every frame re-rasters = the zoom flash. Buffer now,
   // flush once the view settles (see the settle interval).
   const onStream = (data: unknown) => {
-    const s = data as string;
+    const s = predictor.observeOutput(data as string);
+    if (!s) return;
     if (Date.now() - lastViewChangeAt < SETTLE_MS) {
       entry.buf += s;
       deferredWhileMoving++; // QA metric: stream bytes that arrived mid-gesture
@@ -1102,7 +1113,7 @@ function makeTerm(pid: string): TermEntry | null {
     ? { close() {} }
     : subscribeRaw(`/api/tail/${encodeURIComponent(rawPid)}?raw=1`, onStream, src);
   const entry: TermEntry = { el, term, es, miss: 0, buf: "" };
-  attachStdin(term, pid, () => {
+  attachStdin(term, pid, predictor, () => {
     const prev = statusLabel.textContent;
     statusLabel.textContent = "⌨ input denied — read-only share";
     setTimeout(() => {
@@ -2291,14 +2302,18 @@ function initEmbed(pid: string) {
     })
     .catch(() => {})
     .finally(() => requestAnimationFrame(fit));
-  subscribeRaw(`/api/tail/${encodeURIComponent(pid)}?raw=1`, (d) => term.write(d as string));
+  const predictor = new PredictiveEcho();
+  subscribeRaw(`/api/tail/${encodeURIComponent(pid)}?raw=1`, (d) => {
+    const s = predictor.observeOutput(d as string);
+    if (s) term.write(s);
+  });
   // direct typing: the embed IS the terminal, so stdin is armed from the start
   // (&ro keeps it read-only); click the page and type
   if (!hashParts.includes("ro")) {
     term.options.disableStdin = false;
     term.options.cursorBlink = true;
     // the embed is served by the agent's own daemon (#k= auth) — local wire
-    attachStdin(term, `${LOCAL}#${pid}`, () => {
+    attachStdin(term, `${LOCAL}#${pid}`, predictor, () => {
       document.title = `agent-yes · #${pid} (read-only)`;
     });
   }
