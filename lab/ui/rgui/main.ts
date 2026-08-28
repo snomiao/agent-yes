@@ -983,6 +983,48 @@ let terminalImeActive = false;
 addEventListener("compositionstart", () => (terminalImeActive = true), true);
 addEventListener("compositionend", () => (terminalImeActive = false), true);
 
+function writePredictiveVisual(term: Xterm, data: string): void {
+  const root = term.element;
+  const rows = root?.querySelector<HTMLElement>(".xterm-rows");
+  const input = root?.querySelector<HTMLElement>(".xterm-helper-textarea");
+  if (!rows || !input) {
+    term.write(data);
+    return;
+  }
+  let overlay = rows.querySelector<HTMLElement>(".ay-predictive-cell");
+  if (!overlay) {
+    overlay = document.createElement("span");
+    overlay.className = "ay-predictive-cell";
+    Object.assign(overlay.style, {
+      position: "absolute",
+      zIndex: "20",
+      pointerEvents: "none",
+      whiteSpace: "pre",
+      font: "inherit",
+    });
+    rows.append(overlay);
+  }
+  const width = Number.parseFloat(input.style.width) || 8;
+  const isBackspace = data === "\x7f" || data === "\b";
+  overlay.style.left = `${Math.max(0, (Number.parseFloat(input.style.left) || 0) - (isBackspace ? width : 0))}px`;
+  overlay.style.top = input.style.top || "0px";
+  overlay.style.width = `${width}px`;
+  overlay.style.height = input.style.height || input.style.lineHeight || "1em";
+  overlay.style.lineHeight = input.style.lineHeight || input.style.height || "1em";
+  overlay.style.color = isBackspace ? "transparent" : "inherit";
+  overlay.style.background = isBackspace
+    ? getComputedStyle(root).getPropertyValue("--xterm-bg") ||
+      term.options.theme?.background ||
+      "#0d1117"
+    : "transparent";
+  overlay.textContent = isBackspace ? " " : data;
+  const revision = String(Number(overlay.dataset.revision || 0) + 1);
+  overlay.dataset.revision = revision;
+  term.write(data, () => {
+    if (overlay?.dataset.revision === revision) overlay.remove();
+  });
+}
+
 function attachStdin(term: Xterm, key: string, predictor: PredictiveEcho, onDenied: () => void) {
   let denied = false;
   const queue = new OrderedInputQueue(
@@ -996,7 +1038,7 @@ function attachStdin(term: Xterm, key: string, predictor: PredictiveEcho, onDeni
   );
   term.onData((data) => {
     if (term.options.disableStdin) return;
-    predictor.tryInput(data, (s) => term.write(s), {
+    predictor.tryInput(data, (s) => writePredictiveVisual(term, s), {
       composing: terminalImeActive,
       alternate: term.buffer?.active?.type === "alternate",
     });

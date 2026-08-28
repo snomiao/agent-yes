@@ -47,7 +47,9 @@ Bun.serve({
 
     if (watch) await build();
     const p = url.pathname === "/" ? "/index.html" : url.pathname;
-    return new Response(Bun.file(path.join(dist, p)));
+    return new Response(Bun.file(path.join(dist, p)), {
+      headers: { "Cache-Control": "no-store" },
+    });
   },
 });
 

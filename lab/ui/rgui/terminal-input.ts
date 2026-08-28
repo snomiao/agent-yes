@@ -42,8 +42,9 @@ type PredictedOp = { kind: "print"; value: string } | { kind: "backspace" };
 const ALT_ON = /\x1b\[\?(?:47|1047|1049)h/;
 const ALT_OFF = /\x1b\[\?(?:47|1047|1049)l/;
 const DYNAMIC_CONTROL = /\x1b(?:\[[0-9;?]*[ABCDEFGHJKSTfhl]|[78])/;
-const QUIET_MS = 250;
+const QUIET_MS = 30;
 const DYNAMIC_COOLDOWN_MS = 1500;
+const MAX_PREDICTED_OPS = 512;
 
 /** Conservative local echo for a quiet primary-screen prompt. */
 export class PredictiveEcho {
@@ -55,11 +56,14 @@ export class PredictiveEcho {
 
   observeOutput(data: string, now = performance.now()): string {
     this.seenOutput = true;
-    this.lastOutputAt = now;
     if (ALT_ON.test(data)) this.alternate = true;
     if (ALT_OFF.test(data)) this.alternate = false;
     if (DYNAMIC_CONTROL.test(data)) this.dynamicUntil = now + DYNAMIC_COOLDOWN_MS;
-    return this.reconcile(data);
+    const rest = this.reconcile(data);
+    // A fully reconciled remote echo is not new terminal activity. Keeping the
+    // previous quiet timestamp allows prediction to continue during typing.
+    if (rest) this.lastOutputAt = now;
+    return rest;
   }
 
   tryInput(
@@ -75,7 +79,7 @@ export class PredictiveEcho {
       !this.seenOutput ||
       now - this.lastOutputAt < QUIET_MS ||
       now < this.dynamicUntil ||
-      this.predicted.length >= 32
+      this.predicted.length >= MAX_PREDICTED_OPS
     )
       return false;
     if (/^[\x20-\x7e]$/.test(data)) {
@@ -83,7 +87,7 @@ export class PredictiveEcho {
       write(data);
       return true;
     }
-    if ((data === "\x7f" || data === "\b") && this.predicted.at(-1)?.kind === "print") {
+    if (data === "\x7f" || data === "\b") {
       this.predicted.push({ kind: "backspace" });
       write("\b \b");
       return true;

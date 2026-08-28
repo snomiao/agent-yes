@@ -46,7 +46,10 @@ describe("PredictiveEcho", () => {
     const echo = new PredictiveEcho();
     const write = vi.fn();
     echo.observeOutput("prompt> ", 100);
-    expect(echo.tryInput("a", write, { now: 200 })).toBe(false);
+    expect(echo.tryInput("a", write, { now: 120 })).toBe(false);
+    expect(echo.tryInput("a", write, { now: 140 })).toBe(true);
+    echo.observeOutput("unrelated", 200);
+    expect(echo.tryInput("a", write, { now: 220 })).toBe(false);
     expect(echo.tryInput("a", write, { now: 400 })).toBe(true);
     expect(echo.observeOutput("a", 420)).toBe("");
   });
@@ -71,5 +74,33 @@ describe("PredictiveEcho", () => {
     expect(echo.tryInput("\x7f", write, { now: 301 })).toBe(true);
     expect(write).toHaveBeenLastCalledWith("\b \b");
     expect(echo.observeOutput("x\b \b", 310)).toBe("");
+  });
+
+  it("predicts backspace after the prior printable echo was reconciled", () => {
+    const echo = new PredictiveEcho();
+    const write = vi.fn();
+    echo.observeOutput("$ ", 0);
+    expect(echo.tryInput("x", write, { now: 40 })).toBe(true);
+    expect(echo.observeOutput("x", 50)).toBe("");
+    expect(echo.tryInput("\x7f", write, { now: 60 })).toBe(true);
+    expect(write).toHaveBeenLastCalledWith("\b \b");
+  });
+
+  it("keeps predicting after a fully reconciled remote echo", () => {
+    const echo = new PredictiveEcho();
+    const write = vi.fn();
+    echo.observeOutput("$ ", 0);
+    expect(echo.tryInput("a", write, { now: 300 })).toBe(true);
+    expect(echo.observeOutput("a", 310)).toBe("");
+    expect(echo.tryInput("b", write, { now: 320 })).toBe(true);
+  });
+
+  it("does not fall back to remote echo on an ordinary long command line", () => {
+    const echo = new PredictiveEcho();
+    const write = vi.fn();
+    echo.observeOutput("$ ", 0);
+    for (let i = 0; i < 128; i++) {
+      expect(echo.tryInput("x", write, { now: 300 + i })).toBe(true);
+    }
   });
 });
