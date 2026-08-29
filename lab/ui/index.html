@@ -6704,6 +6704,13 @@ my.translate = async (text, lang) => {
         // keyword MUST be a string — ay serve's POST /api/send rejects a numeric
         // keyword with 400 (pid arrives as a number from /api/ls JSON).
         const kw = String(pid);
+        // A remote key normally costs two display frames: one for the PTY
+        // round-trip and another because xterm debounces DOM rendering onto the
+        // next rAF. Remember that input is awaiting its authoritative output so
+        // the first parsed reply can flush xterm's already-pending render now.
+        // This predicts nothing and never edits the buffer: the bytes still come
+        // from the real PTY, unlike speculative local echo.
+        let inputAwaitingPaint = false;
         // One /api/send in flight at a time for this agent. A request per
         // keystroke let a fast typist have several racing at once, and nothing
         // in any transport (fetch / mux / RTC) — nor in the host's
@@ -6717,6 +6724,7 @@ my.translate = async (text, lang) => {
           // a soft-keyboard character may be decorated by an armed sticky Ctrl/Alt
           if (typeof d === "string") d = applyStickyMods(d);
           perfNote("in", typeof d === "string" ? d.length : (d?.byteLength ?? 0));
+          inputAwaitingPaint = true;
           input.push(d);
         };
         term.onData(fwd);
@@ -6818,7 +6826,25 @@ my.translate = async (text, lang) => {
               // raw bleeds into the one we just switched to. Preview makes switches
               // frequent, so this race is no longer theoretical.
               if (term && sel === selKey) {
-                term.write(raw);
+                const flushAfterParse = inputAwaitingPaint;
+                if (flushAfterParse) inputAwaitingPaint = false;
+                term.write(raw, () => {
+                  if (!flushAfterParse || !term || sel !== selKey) return;
+                  // xterm has parsed the authoritative bytes and queued the exact
+                  // dirty rows, but its public refresh() only schedules another
+                  // animation frame. Flush that existing debouncer once so input
+                  // feedback can paint in the current frame. All private access is
+                  // guarded: an xterm upgrade simply falls back to normal rAF.
+                  const debouncer = term?._core?._renderService?._renderDebouncer;
+                  const frame = debouncer?._animationFrame;
+                  if (!frame || typeof debouncer._innerRefresh !== "function") return;
+                  try {
+                    debouncer._coreBrowserService?.window?.cancelAnimationFrame(frame);
+                    debouncer._innerRefresh();
+                  } catch {
+                    // Rendering correctness wins over the latency optimization.
+                  }
+                });
                 perfNote("out", raw?.length ?? 0);
               }
             },
