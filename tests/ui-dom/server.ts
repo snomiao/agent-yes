@@ -118,6 +118,12 @@ export async function startServer(
       return file(res, join(UI, "rtc.js"), "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/qrcode.js")
       return file(res, join(UI, "qrcode.js"), "text/javascript; charset=utf-8");
+    if (req.method === "GET" && /^\/vendor\/[\w.-]+\.min\.(js|css)$/.test(p))
+      return file(
+        res,
+        join(UI, p.slice(1)),
+        p.endsWith(".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8",
+      );
 
     if (req.method === "GET" && p === "/api/ls") {
       res.writeHead(200, { "Content-Type": "application/json" });

@@ -42,7 +42,48 @@ import {
   statusGlyph,
   omniScore,
   createInputSender,
+  createFrameScheduler,
 } from "../../lab/ui/console-logic.js";
+
+describe("createFrameScheduler", () => {
+  it("coalesces a resize storm into at most one callback per frame", () => {
+    const frames = new Map<number, () => void>();
+    let next = 1;
+    let runs = 0;
+    const scheduler = createFrameScheduler(
+      () => runs++,
+      (cb: () => void) => {
+        const id = next++;
+        frames.set(id, cb);
+        return id;
+      },
+      (id: number) => frames.delete(id),
+    );
+    for (let i = 0; i < 100; i++) scheduler.schedule();
+    expect(frames.size).toBe(1);
+    frames.values().next().value!();
+    expect(runs).toBe(1);
+    scheduler.schedule();
+    expect(frames.size).toBe(2); // fired frame remains in this deliberately tiny fake
+    [...frames.values()].at(-1)!();
+    expect(runs).toBe(2);
+  });
+
+  it("cancels pending work on dispose", () => {
+    const frames = new Map<number, () => void>();
+    let runs = 0;
+    const scheduler = createFrameScheduler(
+      () => runs++,
+      (cb: () => void) => (frames.set(7, cb), 7),
+      (id: number) => frames.delete(id),
+    );
+    scheduler.schedule();
+    scheduler.dispose();
+    expect(frames.size).toBe(0);
+    scheduler.schedule();
+    expect(runs).toBe(0);
+  });
+});
 
 const agent = (over = {}) => ({
   cli: "claude",
@@ -1173,7 +1214,12 @@ describe("createInputSender", () => {
 });
 
 describe("cpuPct / memPct / resLabel — the room row's resource chip", () => {
-  const host = (o = {}) => ({ cpus: 10, loadavg: [5, 5, 5], mem: { total: 1000, free: 500 }, ...o });
+  const host = (o = {}) => ({
+    cpus: 10,
+    loadavg: [5, 5, 5],
+    mem: { total: 1000, free: 500 },
+    ...o,
+  });
 
   it("reads loadavg as a share of cores, and does NOT clamp oversubscription", () => {
     expect(cpuPct(host({ loadavg: [5, 0, 0], cpus: 10 }))).toBe(50);

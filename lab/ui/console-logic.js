@@ -13,6 +13,41 @@
 // common case stays uncluttered and the identity (repo/branch) leads instead.
 export const cliLabel = (e) => (e.cli && e.cli !== "claude" ? e.cli : "");
 
+// Collapse an arbitrary burst of notifications into one callback on the next
+// animation frame. ResizeObserver/window.resize/pointermove can all fire many
+// times before the browser can paint; doing xterm measurements in each handler
+// creates forced-layout work that competes with terminal input and output.
+// The injected frame functions keep this DOM-free and deterministic in tests.
+export function createFrameScheduler(
+  run,
+  requestFrame = (cb) => requestAnimationFrame(cb),
+  cancelFrame = (id) => cancelAnimationFrame(id),
+) {
+  let frame = null;
+  let disposed = false;
+  const flush = () => {
+    frame = null;
+    if (!disposed) run();
+  };
+  return {
+    schedule() {
+      if (disposed || frame !== null) return;
+      frame = requestFrame(flush);
+    },
+    flush() {
+      if (disposed) return;
+      if (frame !== null) cancelFrame(frame);
+      frame = null;
+      run();
+    },
+    dispose() {
+      disposed = true;
+      if (frame !== null) cancelFrame(frame);
+      frame = null;
+    },
+  };
+}
+
 // Windows daemons report cwds with backslashes (C:\Users\…\tree\main); every
 // cwd parser/comparator below assumes forward slashes, so normalize once here.
 // Without this a Windows host's agents parse no owner/repo/branch and render as

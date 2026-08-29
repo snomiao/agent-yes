@@ -2554,6 +2554,7 @@
         docTitle,
         omniScore,
         createInputSender,
+        createFrameScheduler,
       } from "./console-logic.js";
       // The ay-share (rtc) remote-room transport lives in a shared module so the
       // /r/ rgui viewer reuses the exact same WebRTC + e2e wire (rtc.js imports
@@ -3614,6 +3615,9 @@
         outBytes: 0,
         jankMs: 0,
         echoMs: null,
+        resizeEvents: 0,
+        resizeFrames: 0,
+        resizeMs: [],
       };
       let perfOn = false;
       let perfRaf = 0;
@@ -3646,7 +3650,10 @@
           perf.outWrites =
           perf.outBytes =
           perf.jankMs =
+          perf.resizeEvents =
+          perf.resizeFrames =
             0;
+        perf.resizeMs = [];
       }
       function perfFrameLoop() {
         if (!perfOn) {
@@ -3681,12 +3688,16 @@
           return;
         }
         const fps = perf.frames; // window is ~1s
+        const resizeMs = perf.resizeMs.slice().sort((a, b) => a - b);
+        const resizePick = (q) =>
+          resizeMs.length ? resizeMs[Math.floor((resizeMs.length - 1) * q)].toFixed(1) : "—";
         const next =
           '<div class="ctip-sec ctip-perf">' +
           `<div>fps&nbsp;&nbsp;${fps}</div>` +
           `<div>echo&nbsp;${perf.echoMs == null ? "—" : perf.echoMs + " ms"}</div>` +
           `<div>keys&nbsp;${perf.inEvents}/s&nbsp;${fmtBytes(perf.inBytes)}/s</div>` +
           `<div>out&nbsp;&nbsp;${perf.outWrites}/s&nbsp;${fmtBytes(perf.outBytes)}/s</div>` +
+          `<div>resize ${perf.resizeEvents}→${perf.resizeFrames}/s&nbsp;p50 ${resizePick(0.5)}&nbsp;p95 ${resizePick(0.95)} ms</div>` +
           `<div>jank&nbsp;${Math.round(perf.jankMs)} ms/s</div></div>`;
         perfRowsHtml = next;
         perfReset(); // note: echoMs is preserved (last keystroke round-trip stays shown)
@@ -3884,12 +3895,13 @@
         }
       })();
       let presencePeers = []; // others watching the SELECTED agent: [{cols,rows,sel}]
+      let lastResizePresenceKey = "";
       function presenceTarget() {
         const e = sel ? entries.find((x) => x._key === sel) : null;
         const src = e ? srcFor(e) : null;
         return e && src && src.tx ? { e, tx: src.tx } : null;
       }
-      function sendPresence() {
+      function sendPresence(geometryOnly = false) {
         const cur = presenceTarget();
         if (!cur || !term) return;
         let selR = null;
@@ -3924,6 +3936,11 @@
             }
           }
         } catch {}
+        if (geometryOnly) {
+          const geometryKey = `${cur.e._key}:${term.cols}x${term.rows}:${cap?.cols || 0}x${cap?.rows || 0}`;
+          if (geometryKey === lastResizePresenceKey) return;
+          lastResizePresenceKey = geometryKey;
+        }
         cur.tx
           .post("/api/presence", {
             viewer: myViewerId,
@@ -4315,6 +4332,7 @@
       // first keyboard-open after picking an agent would be spent priming the
       // memo instead of snapping.
       let lastPaneDims = null;
+      let appliedPaneKey = "";
       function seedPaneDims() {
         requestAnimationFrame(() => {
           const el = $("log");
@@ -4333,11 +4351,11 @@
           } catch {}
         }
       }
-      function refitPane() {
+      function refitPane(geometryOnly = false) {
         if (!term) return;
         if (negoActive) {
           applyCanvasScale();
-          sendPresence();
+          sendPresence(geometryOnly);
           snapIfHeightOnly();
           return;
         }
@@ -4346,6 +4364,32 @@
             fit.fit();
           } catch {}
         snapIfHeightOnly();
+      }
+      // Resize events are notifications, not a license to synchronously measure
+      // layout. Chrome can deliver several window/visualViewport/pointer events
+      // inside one display frame; fit.fit(), proposeDimensions(), and xterm font
+      // changes all force layout. Coalesce every source and skip a frame whose
+      // terminal pane geometry did not actually change.
+      const paneResize = createFrameScheduler(() => {
+        if (document.visibilityState === "hidden" || !term) return;
+        const el = $("log");
+        if (!el) return;
+        const key = `${el.clientWidth}x${el.clientHeight}@${window.devicePixelRatio || 1}`;
+        if (key === appliedPaneKey) return;
+        appliedPaneKey = key;
+        const started = perfOn ? performance.now() : 0;
+        refitPane(true);
+        // refitPane already applies the canvas scale in negotiating mode. Legacy
+        // fit emits term.onResize and pushSize; its render path needs one scale.
+        if (!negoActive) applyCanvasScale();
+        renderPeerSelections();
+        if (perfOn) {
+          perf.resizeFrames++;
+          perf.resizeMs.push(performance.now() - started);
+        }
+      });
+      function schedulePaneRefit() {
+        paneResize.schedule();
       }
       // Follow the canonical grid: resize our xterm to the agent's size (set by the
       // active driver / local owner) WITHOUT reflowing to our pane, then scale to
@@ -6979,9 +7023,8 @@ my.translate = async (text, lang) => {
       window.addEventListener("resize", () => {
         // Resizing our window is strong intent → re-fit / re-report capacity
         // (refitPane picks the legacy-push vs negotiate path).
-        refitPane();
-        applyCanvasScale();
-        renderPeerSelections(); // cell size changed → reposition peer-selection overlays
+        if (perfOn) perf.resizeEvents++;
+        schedulePaneRefit();
       });
       // iOS overlays the soft keyboard ON TOP of the layout viewport rather than
       // shrinking it, so a bottom-anchored composer would hide behind it. Track
@@ -6994,7 +7037,8 @@ my.translate = async (text, lang) => {
         const onVV = () => {
           const kb = Math.max(0, Math.round(window.innerHeight - vv.height - vv.offsetTop));
           document.documentElement.style.setProperty("--kb", kb + "px");
-          refitPane();
+          if (perfOn) perf.resizeEvents++;
+          schedulePaneRefit();
         };
         vv.addEventListener("resize", onVV);
         vv.addEventListener("scroll", onVV);
@@ -7034,7 +7078,8 @@ my.translate = async (text, lang) => {
           localStorage.setItem(ISLANDS_KEY, islandsOn ? "1" : "0");
         } catch {}
         measureIslands();
-        refitPane(); // the pane changed height either way — renegotiate the grid
+        appliedPaneKey = "";
+        schedulePaneRefit(); // the pane changed height either way — renegotiate the grid
       }
       (function islandsBoot() {
         let want = null;
@@ -7048,7 +7093,10 @@ my.translate = async (text, lang) => {
         const rh = $("rhead");
         if (rh && window.ResizeObserver) {
           new ResizeObserver(() => {
-            if (measureIslands()) refitPane();
+            if (measureIslands()) {
+              appliedPaneKey = "";
+              schedulePaneRefit();
+            }
           }).observe(rh);
         }
       })();
@@ -9211,7 +9259,8 @@ my.translate = async (text, lang) => {
             // terminal of a different size) that re-push fights the local terminal
             // and reflows the stream on every tab switch — the glitch the eager
             // per-focus resync introduced. The one-shot adopt still runs on select.
-            refitPane();
+            appliedPaneKey = "";
+            schedulePaneRefit();
           }
         });
         watchVersion();
@@ -9280,7 +9329,8 @@ my.translate = async (text, lang) => {
           if (!dragging) return;
           const w = Math.min(Math.max(e.clientX, 280), window.innerWidth - 360);
           app.style.setProperty("--leftw", w + "px");
-          refitPane();
+          if (perfOn) perf.resizeEvents++;
+          schedulePaneRefit();
         });
         const end = (e) => {
           if (!dragging) return;

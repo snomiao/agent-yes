@@ -33,7 +33,9 @@ const TERMINAL_STUB =
   "resize(c,r){this.cols=c;this.rows=r;}" +
   "hasSelection(){return false;}getSelection(){return '';}getSelectionPosition(){return null;}" +
   "clearSelection(){}dispose(){}};";
-const FITADDON_STUB = "window.FitAddon={FitAddon:class{activate(){}dispose(){}fit(){}}};";
+const FITADDON_STUB =
+  "window.FitAddon={FitAddon:class{activate(){}dispose(){}fit(){window.__fitCalls=(window.__fitCalls||0)+1;}" +
+  "proposeDimensions(){return {cols:80,rows:24}}}};";
 
 async function openConsole(
   browser: Browser,
@@ -682,6 +684,50 @@ describe("console DOM behaviour", () => {
       // persisted for next visit
       const saved = await page.evaluate(() => localStorage.getItem("ay.leftw"));
       expect(saved).toBe(leftw);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("coalesces resize storms and skips unchanged terminal geometry", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    const sends: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && request.url().includes("/api/send"))
+        sends.push(request.url());
+    });
+    try {
+      await page.click('.list .row[data-key="local#102"]');
+      await expect
+        .poll(() => page.evaluate(() => typeof (window as any).__onData))
+        .toBe("function");
+      // Let the selection's asynchronous /api/size fit finish before measuring
+      // resize-only work.
+      await page.waitForTimeout(100);
+      const before = await page.evaluate(() => (window as any).__fitCalls || 0);
+
+      // One hundred notifications in the same task must produce at most one
+      // xterm fit in the next display frame.
+      await page.evaluate(() => {
+        for (let i = 0; i < 100; i++) window.dispatchEvent(new Event("resize"));
+      });
+      await page.waitForTimeout(50);
+      const afterFirst = await page.evaluate(() => (window as any).__fitCalls || 0);
+      expect(afterFirst - before).toBeLessThanOrEqual(1);
+
+      // The viewport did not change, so a later storm is zero terminal work.
+      await page.evaluate(() => {
+        for (let i = 0; i < 100; i++) window.dispatchEvent(new Event("resize"));
+      });
+      await page.waitForTimeout(50);
+      expect(await page.evaluate(() => (window as any).__fitCalls || 0)).toBe(afterFirst);
+
+      // Input remains connected while resize work is being coalesced.
+      await page.evaluate(() => {
+        for (let i = 0; i < 100; i++) window.dispatchEvent(new Event("resize"));
+        (window as any).__onData("z");
+      });
+      await expect.poll(() => sends.length).toBe(1);
     } finally {
       await ctx.close();
     }
