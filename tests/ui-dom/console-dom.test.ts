@@ -28,7 +28,9 @@ import { startServer } from "./server.ts";
 const TERMINAL_STUB =
   "window.Terminal=class{constructor(){this.cols=80;this.rows=24;this.element=null;}" +
   "loadAddon(){}open(el){this.element=el;}focus(){}onTitleChange(){}onResize(){}onScroll(){}" +
-  "onData(f){window.__onData=f;}onBinary(){}write(){}resize(c,r){this.cols=c;this.rows=r;}" +
+  "onData(f){window.__onData=f;}onBinary(){}" +
+  "write(d,cb){(window.__termWrites??=[]).push({data:d,hasCallback:typeof cb==='function'});if(cb)cb();}" +
+  "resize(c,r){this.cols=c;this.rows=r;}" +
   "hasSelection(){return false;}getSelection(){return '';}getSelectionPosition(){return null;}" +
   "clearSelection(){}dispose(){}};";
 const FITADDON_STUB = "window.FitAddon={FitAddon:class{activate(){}dispose(){}fit(){}}};";
@@ -754,6 +756,22 @@ describe("console DOM behaviour", () => {
       expect(await page.locator(".composer").isVisible()).toBe(false);
       expect(await page.locator(".keybar").count()).toBe(1);
       expect(await page.locator(".keybar").isVisible()).toBe(false);
+    } finally {
+      await ctx.close();
+    }
+  });
+
+  it("keeps live output on xterm's public render scheduler", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      await page.locator(".list .row").first().click();
+      await expect
+        .poll(() => page.evaluate(() => (window as any).__termWrites?.length ?? 0))
+        .toBe(1);
+      expect(await page.evaluate(() => (window as any).__termWrites[0])).toEqual({
+        data: "agent output\r\n",
+        hasCallback: false,
+      });
     } finally {
       await ctx.close();
     }
