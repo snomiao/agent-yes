@@ -215,13 +215,4 @@ function stopSampler(): void {
   timer = null;
 }
 
-export {
-  getSnapshot,
-  getBucketSecs,
-  resField,
-  resourcesField,
-  startSampler,
-  stopSampler,
-  sweep,
-  windowLen,
-};
+export { getSnapshot, getBucketSecs, resField, resourcesField, startSampler, stopSampler, sweep, windowLen };

@@ -25,7 +25,10 @@ function tree(pid: number, rss: number, cpuPercent: number, procs: number) {
 }
 
 /** A whole sampleTrees result: the given trees plus an unattributed rollup. */
-function result(trees: Array<ReturnType<typeof tree>>, unattributed = tree(0, 0, 0, 0)) {
+function result(
+  trees: Array<ReturnType<typeof tree>>,
+  unattributed = tree(0, 0, 0, 0),
+) {
   return {
     trees: new Map(trees.map((t) => [t.pid, t])),
     unattributed,
@@ -328,13 +331,12 @@ describe("startSampler", () => {
     // Node hands back a Timeout carrying .unref(); a bare numeric handle (jsdom,
     // some bundlers) has none, and the optional call must simply skip it.
     const raw = globalThis.setTimeout;
-    const stub = vi.spyOn(globalThis, "setTimeout").mockImplementation(((
-      fn: () => void,
-      ms?: number,
-    ) => {
-      const h = raw(fn, ms);
-      return { ...(h as object), unref: undefined } as unknown as ReturnType<typeof raw>;
-    }) as typeof raw);
+    const stub = vi
+      .spyOn(globalThis, "setTimeout")
+      .mockImplementation(((fn: () => void, ms?: number) => {
+        const h = raw(fn, ms);
+        return { ...(h as object), unref: undefined } as unknown as ReturnType<typeof raw>;
+      }) as typeof raw);
 
     try {
       startSampler(async () => [100]);

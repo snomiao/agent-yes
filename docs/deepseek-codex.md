@@ -6,12 +6,12 @@ configuration — `binary: codex` plus a few `-c` overrides in
 `CODEX_HOME`, a helper script, or a config file of your own: a stock `codex`
 install is enough.
 
-|          | `ay codex-ds`                   | `ay codex-ds-direct`    |
-| -------- | ------------------------------- | ----------------------- |
-| Route    | OpenRouter                      | DeepSeek's own endpoint |
-| Model    | `deepseek/deepseek-v4-pro-0813` | `deepseek-v4-pro`       |
-| Requires | `OPENROUTER_API_KEY`            | `DEEPSEEK_API_KEY`      |
-| Billing  | OpenRouter credits              | DeepSeek account        |
+| | `ay codex-ds` | `ay codex-ds-direct` |
+|---|---|---|
+| Route | OpenRouter | DeepSeek's own endpoint |
+| Model | `deepseek/deepseek-v4-pro-0813` | `deepseek-v4-pro` |
+| Requires | `OPENROUTER_API_KEY` | `DEEPSEEK_API_KEY` |
+| Billing | OpenRouter credits | DeepSeek account |
 
 Pick `codex-ds` to keep one key across many providers, or `codex-ds-direct` to
 bill DeepSeek straight and drop a network hop plus the reseller margin.

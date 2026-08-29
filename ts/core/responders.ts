@@ -4,11 +4,7 @@ import { sendEnter, sendMessage } from "./messaging.ts";
 import type { AgentContext } from "./context.ts";
 import type { AgentCliConfig } from "../index.ts";
 import type { SUPPORTED_CLIS } from "../SUPPORTED_CLIS.ts";
-import {
-  extractSessionId,
-  isCodexFamily,
-  storeSessionForCwd,
-} from "../resume/codexSessionManager.ts";
+import { extractSessionId, isCodexFamily, storeSessionForCwd } from "../resume/codexSessionManager.ts";
 
 /**
  * Auto-response handlers for CLI-specific patterns
