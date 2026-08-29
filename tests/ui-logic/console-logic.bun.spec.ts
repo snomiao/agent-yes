@@ -1173,7 +1173,12 @@ describe("createInputSender", () => {
 });
 
 describe("cpuPct / memPct / resLabel — the room row's resource chip", () => {
-  const host = (o = {}) => ({ cpus: 10, loadavg: [5, 5, 5], mem: { total: 1000, free: 500 }, ...o });
+  const host = (o = {}) => ({
+    cpus: 10,
+    loadavg: [5, 5, 5],
+    mem: { total: 1000, free: 500 },
+    ...o,
+  });
 
   it("reads loadavg as a share of cores, and does NOT clamp oversubscription", () => {
     expect(cpuPct(host({ loadavg: [5, 0, 0], cpus: 10 }))).toBe(50);

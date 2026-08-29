@@ -1156,28 +1156,23 @@ async fn handle_send(body: &str) -> ApiResponse {
         return text(409, format!("pid {}: no fifo_file", rec.pid));
     };
     let trailing = control_code(&code);
-    let write = |data: Vec<u8>| {
-        let fifo = fifo.clone();
-        tokio::task::spawn_blocking(move || write_fifo(&fifo, &data))
-    };
+    // The FIFO is opened O_NONBLOCK and a keystroke is only a few bytes. Moving
+    // every write through Tokio's blocking pool added scheduler jitter larger
+    // than the actual local I/O (several milliseconds under agent load). Keep
+    // this tiny nonblocking syscall on the request task; errors still propagate
+    // synchronously and no unbounded wait is possible.
+    let write = |data: &[u8]| write_fifo(&fifo, data);
     let result = if !msg.is_empty() && !trailing.is_empty() {
         // typed text first, control code 200 ms later (mirrors the TS daemon)
-        match write(msg.clone().into_bytes())
-            .await
-            .unwrap_or_else(|e| Err(std::io::Error::other(e)))
-        {
+        match write(msg.as_bytes()) {
             Ok(()) => {
                 tokio::time::sleep(Duration::from_millis(200)).await;
-                write(trailing.as_bytes().to_vec())
-                    .await
-                    .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+                write(trailing.as_bytes())
             }
             Err(e) => Err(e),
         }
     } else {
-        write(format!("{msg}{trailing}").into_bytes())
-            .await
-            .unwrap_or_else(|e| Err(std::io::Error::other(e)))
+        write(format!("{msg}{trailing}").as_bytes())
     };
     match result {
         Ok(()) => {

@@ -435,7 +435,10 @@ describe("subtreeTotals", () => {
   });
 
   it("treats a missing depth as a root", () => {
-    const out = subtreeTotals([{ stats: { pid: 1, rss: 1, cpuPercent: 0, procs: 1 } }, n(1, 2, 0, 1)]);
+    const out = subtreeTotals([
+      { stats: { pid: 1, rss: 1, cpuPercent: 0, procs: 1 } },
+      n(1, 2, 0, 1),
+    ]);
     expect(out[0]).toMatchObject({ rss: 3 });
   });
 });
@@ -512,7 +515,12 @@ describe("renderTable --tree", () => {
 
   it("adds the Σ columns and renders forest rails on the PID cell", () => {
     const withTree = [
-      { ...treeRows[0]!, depth: 0, prefix: "", subtree: stats({ rss: 150, cpuPercent: 3, procs: 3 }) },
+      {
+        ...treeRows[0]!,
+        depth: 0,
+        prefix: "",
+        subtree: stats({ rss: 150, cpuPercent: 3, procs: 3 }),
+      },
       { ...treeRows[1]!, depth: 1, prefix: "└─ ", subtree: null },
     ];
     const out = renderTable(withTree, null, { tree: true });
