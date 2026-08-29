@@ -2558,7 +2558,7 @@
       // The ay-share (rtc) remote-room transport lives in a shared module so the
       // /r/ rgui viewer reuses the exact same WebRTC + e2e wire (rtc.js imports
       // e2e.js internally). The console only needs the client class.
-      import { RTCClient } from "./rtc.js";
+      import { RTCClient, sendRtcInput } from "./rtc.js";
 
       let entries = [];
       let sel = null; // selected agent's composite key (room#pid)
@@ -3099,7 +3099,7 @@
       function rtcTx(rtc) {
         return {
           input(pid, msg) {
-            return rtc.sendInput(pid, msg);
+            return sendRtcInput(rtc, pid, msg);
           },
           async fetchJSON(path) {
             return JSON.parse((await rtc.req("GET", path)).text);
@@ -8136,6 +8136,19 @@ my.translate = async (text, lang) => {
           }
           s.client = c;
           s.tx = rtcTx(c);
+          // Negotiate the stdin fast path explicitly. A new page can connect to
+          // an older host during a rolling upgrade; sending an unknown envelope
+          // there would look successful while silently dropping every key. Keep
+          // the legacy request/response path until the host advertises support.
+          c.fastInput = false;
+          try {
+            const version = await s.tx.fetchJSON("/api/version");
+            c.fastInput = Array.isArray(version?.features)
+              ? version.features.includes("rtc-stdin-v1")
+              : false;
+          } catch {
+            c.fastInput = false;
+          }
           s.reconnectDelay = RTC_BACKOFF_MIN; // a healthy connect resets the backoff
           s.failCount = 0; // …and the dead-room escalation (see RTC_BACKOFF_DEAD_MAX)
           clearTimeout(s.reconnectTimer); // cancel any reconnect queued during replace

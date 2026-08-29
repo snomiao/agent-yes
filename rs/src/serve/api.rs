@@ -1409,7 +1409,13 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
             body: Body::Stream(spawn_ls_subscribe(all, active, keyword.clone())),
         },
         ("GET", "/api/whoami") => json_res(200, &json!({ "host": whoami_host() })),
-        ("GET", "/api/version") => json_res(200, &json!({ "version": env!("CARGO_PKG_VERSION") })),
+        ("GET", "/api/version") => json_res(
+            200,
+            &json!({
+                "version": env!("CARGO_PKG_VERSION"),
+                "features": ["rtc-stdin-v1"],
+            }),
+        ),
         ("GET", "/api/host") => json_res(200, &host_info()),
         ("GET", p) if p.starts_with("/api/size/") => {
             let kw = url_decode(&p["/api/size/".len()..]);

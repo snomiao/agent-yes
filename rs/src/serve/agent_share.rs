@@ -514,6 +514,15 @@ mod tests {
     async fn version_passes_through() {
         let res = scoped_handle(&agent_scope(), "GET", "/api/version", "").await;
         assert_eq!(res.status, 200);
+        let Body::Full(bytes) = res.body else {
+            panic!("expected full body")
+        };
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(v["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|feature| feature == "rtc-stdin-v1"));
     }
 
     #[tokio::test]

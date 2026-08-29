@@ -103,6 +103,16 @@ export function updateStreamTrace(stream, seq, receivedAt) {
   return gap;
 }
 
+export async function sendRtcInput(rtc, pid, msg) {
+  if (rtc.fastInput) return rtc.sendInput(pid, msg);
+  const r = await rtc.req(
+    "POST",
+    "/api/send",
+    JSON.stringify({ keyword: String(pid), msg, code: "none" }),
+  );
+  if (r.status < 200 || r.status >= 300) throw new Error(r.text || `send failed (${r.status})`);
+}
+
 // Tunnels request/response + streaming over one DataChannel. Mirrors the
 // envelope in lab/ui/share-host.ts: {t:"req"|"abort"} out, {t:"res"|"data"|"end"} in.
 export class RTCClient {

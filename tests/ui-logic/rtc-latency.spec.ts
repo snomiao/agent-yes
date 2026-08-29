@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { RTCClient, updateStreamTrace } from "../../lab/ui/rtc.js";
+import { RTCClient, sendRtcInput, updateStreamTrace } from "../../lab/ui/rtc.js";
 
 describe("RTC stream latency telemetry", () => {
   test("tracks sequence gaps and maximum inter-chunk delay", () => {
@@ -19,6 +19,40 @@ describe("RTC stream latency telemetry", () => {
 });
 
 describe("RTC low-latency stdin", () => {
+  test("falls back to POST /api/send until the host advertises the capability", async () => {
+    const calls: unknown[] = [];
+    const rtc = {
+      fastInput: false,
+      req: async (...args: unknown[]) => {
+        calls.push(args);
+        return { status: 200, text: "ok" };
+      },
+      sendInput: () => {
+        throw new Error("must not use an unnegotiated envelope");
+      },
+    };
+
+    await sendRtcInput(rtc, 42, "a");
+
+    expect(calls).toEqual([
+      ["POST", "/api/send", JSON.stringify({ keyword: "42", msg: "a", code: "none" })],
+    ]);
+  });
+
+  test("uses the fast envelope after capability negotiation", async () => {
+    const sent: unknown[] = [];
+    const rtc = {
+      fastInput: true,
+      req: () => {
+        throw new Error("must not use the legacy request");
+      },
+      sendInput: async (...args: unknown[]) => sent.push(args),
+    };
+
+    await sendRtcInput(rtc, "42", "b");
+    expect(sent).toEqual([["42", "b"]]);
+  });
+
   test("assigns monotonic sequence numbers and only waits for wire admission", async () => {
     const rtc = new RTCClient("signal.test", "room", "token");
     const sent: unknown[] = [];
