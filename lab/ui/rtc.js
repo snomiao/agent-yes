@@ -135,6 +135,8 @@ export class RTCClient {
       _recvChain: Promise.resolve(), // serialize decrypts (ordered replay check)
       _sendChain: Promise.resolve(), // serialize seals (wire order == counter order)
       _traceSeq: 0,
+      _inputSeq: 0,
+      _inputAck: 0,
     });
   }
   async connect() {
@@ -339,6 +341,17 @@ export class RTCClient {
     // Frames are authenticated + replay-checked before they reach here, so an
     // id we don't know is a late/cancelled response from the legitimate host,
     // not an attack — drop it rather than tear down the channel.
+    if (r.t === "stdin_ack") {
+      if (typeof r.seq === "number" && r.seq > this._inputAck) this._inputAck = r.seq;
+      if (r.status && (r.status < 200 || r.status >= 300))
+        perfLog(
+          "rtc",
+          "stdin.reject",
+          { room: this.room, seq: r.seq, status: r.status, error: r.error || "" },
+          true,
+        );
+      return;
+    }
     const call = this.calls.get(r.id),
       stream = this.streams.get(r.id);
     if (r.t === "res") {
@@ -449,6 +462,16 @@ export class RTCClient {
         reject(e); // channel already torn down
       });
     });
+  }
+  // Low-latency terminal input. The encrypted DataChannel is ordered and
+  // _dcSend serializes seals, so these frames reach the host in sequence
+  // without waiting for a full request/response round trip per keystroke.
+  // The host still returns cumulative acknowledgements for observability and
+  // rejection reporting; callers only await admission to the wire.
+  sendInput(pid, msg) {
+    if (typeof msg !== "string") return Promise.reject(new TypeError("terminal input must be text"));
+    const seq = ++this._inputSeq;
+    return this._dcSend(0, { t: "stdin", pid: String(pid), seq, msg });
   }
   subscribe(path, onRaw) {
     const id = randomHex(16);

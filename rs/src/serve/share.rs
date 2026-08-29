@@ -1340,6 +1340,35 @@ fn spawn_receiver(
             }
             match t {
                 "confirm" => {} // stray confirm after handshake — ignore
+                "stdin" => {
+                    // Fast path for interactive terminal input. The receiver
+                    // loop is serialized, so writes preserve DataChannel order
+                    // without spawning one Tokio task per key. Keep the scoped
+                    // API boundary: read-only/agent-scoped shares must enforce
+                    // exactly the same permissions as POST /api/send.
+                    let seq = env.get("seq").and_then(Value::as_u64).unwrap_or(0);
+                    let pid = env.get("pid").and_then(Value::as_str).unwrap_or("");
+                    let msg = env.get("msg").and_then(Value::as_str).unwrap_or("");
+                    let body = json!({"keyword": pid, "msg": msg, "code": "none"}).to_string();
+                    let res =
+                        super::agent_share::scoped_handle(&scope, "POST", "/api/send", &body).await;
+                    let mut ack = json!({"t":"stdin_ack","seq":seq,"status":res.status});
+                    if !(200..300).contains(&res.status) {
+                        if let api::Body::Full(bytes) = res.body {
+                            ack["error"] = Value::String(
+                                String::from_utf8_lossy(&bytes).chars().take(256).collect(),
+                            );
+                        }
+                    }
+                    let out_tx = {
+                        let map = peers.lock().await;
+                        match map.get(&peer_id) {
+                            Some(p) => p.out_tx.clone(),
+                            None => return,
+                        }
+                    };
+                    let _ = out_tx.send((0, ack));
+                }
                 "abort" => {
                     if let Some(id) = env.get("id").and_then(|i| i.as_str()) {
                         let mut map = peers.lock().await;

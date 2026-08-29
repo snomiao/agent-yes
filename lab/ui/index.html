@@ -3098,6 +3098,9 @@
       };
       function rtcTx(rtc) {
         return {
+          input(pid, msg) {
+            return rtc.sendInput(pid, msg);
+          },
           async fetchJSON(path) {
             return JSON.parse((await rtc.req("GET", path)).text);
           },
@@ -6717,7 +6720,9 @@ my.translate = async (text, lang) => {
         // resolve-then-write handler — kept them in order, so characters
         // arrived transposed. See createInputSender in console-logic.js.
         const input = createInputSender((msg) =>
-          tx.post("/api/send", { keyword: kw, msg, code: "none" }),
+          typeof tx.input === "function"
+            ? tx.input(kw, msg)
+            : tx.post("/api/send", { keyword: kw, msg, code: "none" }),
         );
         const fwd = (d) => {
           if (sel !== e._key) return; // ignore a stale terminal mid-switch
