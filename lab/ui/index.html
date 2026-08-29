@@ -6704,6 +6704,65 @@ my.translate = async (text, lang) => {
         // keyword MUST be a string — ay serve's POST /api/send rejects a numeric
         // keyword with 400 (pid arrives as a number from /api/ls JSON).
         const kw = String(pid);
+        // TUI-safe local visual echo. This never mutates xterm's buffer: it only
+        // paints over the current cursor cell until the host's real redraw has
+        // landed, so alternate-screen applications keep full ownership of state.
+        const visualEcho = (() => {
+          let overlay = null;
+          let revision = 0;
+          let text = "";
+          const clear = (through) => {
+            if (through !== revision) return;
+            overlay?.remove();
+            overlay = null;
+            text = "";
+          };
+          const push = (data) => {
+            if (typeof data !== "string") return;
+            const printable = /^[\x20-\x7e]$/.test(data);
+            const backspace = data === "\x7f" || data === "\b";
+            if (!printable && !backspace) return;
+            const root = term?.element;
+            const rows = root?.querySelector(".xterm-rows");
+            const input = root?.querySelector(".xterm-helper-textarea");
+            if (!rows || !input) return;
+            if (!overlay) {
+              overlay = document.createElement("span");
+              overlay.className = "ay-local-echo";
+              Object.assign(overlay.style, {
+                position: "absolute",
+                zIndex: "30",
+                pointerEvents: "none",
+                whiteSpace: "pre",
+                font: "inherit",
+              });
+              rows.append(overlay);
+            }
+            const width = Number.parseFloat(input.style.width) || 8;
+            const maskPrevious = backspace && !text;
+            if (printable) text += data;
+            else if (text) text = text.slice(0, -1);
+            overlay.style.left = `${Math.max(
+              0,
+              (Number.parseFloat(input.style.left) || 0) - (maskPrevious ? width : 0),
+            )}px`;
+            overlay.style.top = input.style.top || "0px";
+            overlay.style.minWidth = `${width}px`;
+            overlay.style.height = input.style.height || input.style.lineHeight || "1em";
+            overlay.style.lineHeight = input.style.lineHeight || input.style.height || "1em";
+            overlay.style.color = maskPrevious ? "transparent" : getComputedStyle(root).color;
+            overlay.style.background = maskPrevious
+              ? term.options.theme?.background || getComputedStyle(root).backgroundColor || "#0d1117"
+              : "transparent";
+            overlay.textContent = maskPrevious ? " " : text || " ";
+            overlay.dataset.revision = String(++revision);
+          };
+          return {
+            push,
+            revision: () => revision,
+            clear,
+          };
+        })();
         // One /api/send in flight at a time for this agent. A request per
         // keystroke let a fast typist have several racing at once, and nothing
         // in any transport (fetch / mux / RTC) — nor in the host's
@@ -6717,6 +6776,7 @@ my.translate = async (text, lang) => {
           // a soft-keyboard character may be decorated by an armed sticky Ctrl/Alt
           if (typeof d === "string") d = applyStickyMods(d);
           perfNote("in", typeof d === "string" ? d.length : (d?.byteLength ?? 0));
+          visualEcho.push(d);
           input.push(d);
         };
         term.onData(fwd);
@@ -6818,7 +6878,8 @@ my.translate = async (text, lang) => {
               // raw bleeds into the one we just switched to. Preview makes switches
               // frequent, so this race is no longer theoretical.
               if (term && sel === selKey) {
-                term.write(raw);
+                const echoRevision = visualEcho.revision();
+                term.write(raw, () => visualEcho.clear(echoRevision));
                 perfNote("out", raw?.length ?? 0);
               }
             },

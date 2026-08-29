@@ -26,8 +26,8 @@ import { startServer } from "./server.ts";
 // contextmenu listener (term.element?.addEventListener) has something to bind to;
 // the selection getters report "no selection" so that handler is a harmless no-op.
 const TERMINAL_STUB =
-  "window.Terminal=class{constructor(){this.cols=80;this.rows=24;this.element=null;}" +
-  "loadAddon(){}open(el){this.element=el;}focus(){}onTitleChange(){}onResize(){}onScroll(){}" +
+  "window.Terminal=class{constructor(){this.cols=80;this.rows=24;this.element=null;this.options={theme:{background:'#0d1117'}};}" +
+  "loadAddon(){}open(el){el.innerHTML='<div class=\"xterm\"><div class=\"xterm-rows\"></div><textarea class=\"xterm-helper-textarea\" style=\"left:8px;top:16px;width:8px;height:16px;line-height:16px\"></textarea></div>';this.element=el.querySelector('.xterm');}focus(){}onTitleChange(){}onResize(){}onScroll(){}" +
   "onData(f){window.__onData=f;}onBinary(){}write(){}resize(c,r){this.cols=c;this.rows=r;}" +
   "hasSelection(){return false;}getSelection(){return '';}getSelectionPosition(){return null;}" +
   "clearSelection(){}dispose(){}};";
@@ -255,8 +255,12 @@ describe("console DOM behaviour", () => {
       await expect.poll(() => page.locator(".row.sel").getAttribute("data-key")).toBe("local#102");
       // Drive the captured xterm onData handler as a real keystroke would.
       await page.waitForFunction(() => typeof (window as any).__onData === "function");
-      await page.evaluate(() => (window as any).__onData("h"));
+      const immediateEcho = await page.evaluate(() => {
+        (window as any).__onData("h");
+        return document.querySelector(".ay-local-echo")?.textContent;
+      });
 
+      expect(immediateEcho).toBe("h");
       await expect.poll(() => sends.length).toBeGreaterThan(0);
       expect(typeof sends[0].keyword).toBe("string");
       expect(sends[0].keyword).toBe("102");
