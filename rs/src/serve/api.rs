@@ -15,6 +15,11 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 
 const TAIL_SNAPSHOT_BYTES: u64 = 65_536;
+// Compatibility/recovery path for agents that predate the live-output datagram
+// publisher (and for a publisher/socket that disappears mid-session). Datagrams
+// remain the low-latency path; this durable-log catch-up prevents a stream from
+// freezing forever until the viewer reconnects and receives a fresh snapshot.
+const TAIL_FALLBACK_MS: u64 = 50;
 const SSE_PING_MS: u64 = 15_000;
 // A full tick enriches every agent from its live PTY log. One second saturates
 // a core on larger fleets whose logs are all moving, starving the WebRTC data
@@ -945,6 +950,12 @@ fn spawn_tail(pid: u32, log_file: String, raw: bool) -> mpsc::Receiver<Vec<u8>> 
         }
         #[cfg(not(unix))]
         let mut last_ping = std::time::Instant::now();
+        #[cfg(unix)]
+        let mut durable_tick = tokio::time::interval(Duration::from_millis(TAIL_FALLBACK_MS));
+        #[cfg(unix)]
+        durable_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        #[cfg(unix)]
+        durable_tick.tick().await; // the snapshot already caught up to EOF
         loop {
             #[cfg(unix)]
             tokio::select! {
@@ -1015,6 +1026,28 @@ fn spawn_tail(pid: u32, log_file: String, raw: bool) -> mpsc::Receiver<Vec<u8>> 
                 }
                 _ = tokio::time::sleep(Duration::from_millis(SSE_PING_MS)) => {
                     if tx.send(b": ping\n\n".to_vec()).await.is_err() { return; }
+                }
+                _ = durable_tick.tick() => {
+                    // A running agent launched before the datagram fast path was
+                    // installed still appends the authoritative raw log, but it
+                    // never wakes `live.recv()`. Periodically catch up from that
+                    // log. `offset` is also the datagram sequence number, so a
+                    // later queued datagram is de-duplicated by the normal branch.
+                    let path = log_file.clone();
+                    let read = tokio::task::spawn_blocking(move || {
+                        read_log_range(&path, offset, None)
+                    })
+                    .await;
+                    if let Ok(Ok((size, buf))) = read {
+                        offset = size;
+                        if !buf.is_empty() {
+                            let text = decode_log(&buf, raw);
+                            let skip = !raw && text.trim().is_empty();
+                            if !skip && tx.send(sse_frame(&json!(text))).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
                 }
             }
             #[cfg(not(unix))]
@@ -1776,5 +1809,28 @@ mod tests {
         let (end, bytes) = read_log_range(p.to_str().unwrap(), 10, None).unwrap();
         assert_eq!(end, 3);
         assert!(bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn live_tail_catches_up_without_a_datagram() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("legacy.raw.log");
+        std::fs::write(&p, b"snapshot").unwrap();
+
+        // No live_output::publish call: this models an already-running wrapper
+        // from before the datagram fast path was installed.
+        let mut tail = spawn_tail(4_000_000_001, p.to_string_lossy().into_owned(), true);
+        let snapshot = tokio::time::timeout(Duration::from_secs(1), tail.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&snapshot).contains("snapshot"));
+
+        std::fs::write(&p, b"snapshot incremental").unwrap();
+        let incremental = tokio::time::timeout(Duration::from_secs(1), tail.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&incremental).contains("incremental"));
     }
 }
