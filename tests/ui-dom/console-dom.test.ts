@@ -733,6 +733,33 @@ describe("console DOM behaviour", () => {
     }
   });
 
+  it("keeps negotiated PTY capacity stable through a browser resize drag", async () => {
+    const negotiated = await startServer(undefined, { negotiateSize: true });
+    const { ctx, page } = await openConsole(browser, negotiated.url);
+    const presence: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "POST" && request.url().includes("/api/presence"))
+        presence.push(request.url());
+    });
+    try {
+      await page.click('.list .row[data-key="local#102"]');
+      await page.waitForTimeout(200);
+      presence.length = 0;
+      const box = (await page.locator("#splitter").boundingBox())!;
+      await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+      await page.mouse.down();
+      await page.mouse.move(box.x + 240, box.y + box.height / 2, { steps: 20 });
+      await page.mouse.up();
+      // Browser geometry is a local rendering concern: no remote SIGWINCH during
+      // or after the drag. The regular heartbeat renews the pre-drag cap.
+      await page.waitForTimeout(300);
+      expect(presence.length).toBe(0);
+    } finally {
+      await ctx.close();
+      negotiated.close();
+    }
+  });
+
   it("the New-agent FAB floats in the left panel, drags, and persists its spot", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {

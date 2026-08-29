@@ -96,6 +96,7 @@ function file(res: http.ServerResponse, path: string, type: string) {
 // disturbing the shared fixture the other tests assert exact counts against.
 export async function startServer(
   agents: unknown[] = AGENTS,
+  options: { negotiateSize?: boolean } = {},
 ): Promise<{ url: string; close: () => void }> {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || "/", "http://localhost");
@@ -131,7 +132,9 @@ export async function startServer(
     }
     if (req.method === "GET" && p.startsWith("/api/size/")) {
       res.writeHead(200, { "Content-Type": "application/json" });
-      return res.end(JSON.stringify({ cols: 80, rows: 24 }));
+      return res.end(
+        JSON.stringify({ cols: 80, rows: 24, ...(options.negotiateSize ? { nego: true } : {}) }),
+      );
     }
     if (req.method === "GET" && p.startsWith("/api/tail/")) {
       res.writeHead(200, {
@@ -147,6 +150,10 @@ export async function startServer(
     if (req.method === "POST" && (p.startsWith("/api/resize/") || p === "/api/send")) {
       res.writeHead(200, { "Content-Type": "text/plain" });
       return res.end("ok");
+    }
+    if (p === "/api/presence") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(req.method === "GET" ? "[]" : '{"ok":true}');
     }
     // Recovery endpoints (Cmd+K /kill · /restart, and the ⋯-menu buttons). Ack ok
     // so restartAgent()'s success path runs; the test asserts the target from the

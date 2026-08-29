@@ -2621,7 +2621,7 @@
           // fewer readable cells → the PTY itself shrinks → bigger crisp text.
           if (negoActive) {
             applyCanvasScale();
-            sendPresence();
+            sendPresence(true);
           } else if (fit)
             try {
               fit.fit();
@@ -3895,13 +3895,15 @@
         }
       })();
       let presencePeers = []; // others watching the SELECTED agent: [{cols,rows,sel}]
-      let lastResizePresenceKey = "";
+      let lastPresenceGeometryKey = "";
+      let stablePresenceCap = null;
+      let stablePresenceAgentKey = "";
       function presenceTarget() {
         const e = sel ? entries.find((x) => x._key === sel) : null;
         const src = e ? srcFor(e) : null;
         return e && src && src.tx ? { e, tx: src.tx } : null;
       }
-      function sendPresence(geometryOnly = false) {
+      function sendPresence(refreshCap = false) {
         const cur = presenceTarget();
         if (!cur || !term) return;
         let selR = null;
@@ -3912,14 +3914,15 @@
           const s = term.getSelectionPosition && term.getSelectionPosition();
           selR = selFromBottom(s, term.buffer.active.length);
         } catch {}
-        // Our readable capacity: the grid our pane fits at the current font —
-        // measured from the container (transform-independent), NOT term.cols
-        // (which may be a foreign canonical grid we're letterboxing). The host
-        // negotiates the PTY to the min cap across viewers; read-only viewers
-        // report none (they can't influence the PTY). Older hosts ignore it.
-        let cap = null;
+        // Our readable capacity is sampled when selecting an agent or explicitly
+        // changing font size, then renewed unchanged by the heartbeat. A browser
+        // window resize is handled locally by letterboxing; deriving a fresh cap
+        // from every pane size would repeatedly SIGWINCH the shared PTY and expose
+        // half-redrawn TUI frames. Read-only viewers report no cap.
+        let cap = stablePresenceAgentKey === cur.e._key ? stablePresenceCap : null;
+        if (stablePresenceAgentKey !== cur.e._key) refreshCap = true;
         try {
-          if (!isReadonlyEnt(cur.e) && fit) {
+          if (refreshCap && !isReadonlyEnt(cur.e) && fit) {
             const d = fit.proposeDimensions();
             if (d && d.cols > 0 && d.rows > 0) {
               // proposeDimensions measures at the RENDER font, which may be the
@@ -3936,10 +3939,12 @@
             }
           }
         } catch {}
-        if (geometryOnly) {
+        if (refreshCap) {
+          stablePresenceAgentKey = cur.e._key;
+          stablePresenceCap = cap;
           const geometryKey = `${cur.e._key}:${term.cols}x${term.rows}:${cap?.cols || 0}x${cap?.rows || 0}`;
-          if (geometryKey === lastResizePresenceKey) return;
-          lastResizePresenceKey = geometryKey;
+          if (geometryKey === lastPresenceGeometryKey) return;
+          lastPresenceGeometryKey = geometryKey;
         }
         cur.tx
           .post("/api/presence", {
@@ -4351,11 +4356,10 @@
           } catch {}
         }
       }
-      function refitPane(geometryOnly = false) {
+      function refitPane() {
         if (!term) return;
         if (negoActive) {
           applyCanvasScale();
-          sendPresence(geometryOnly);
           snapIfHeightOnly();
           return;
         }
@@ -4378,7 +4382,7 @@
         if (key === appliedPaneKey) return;
         appliedPaneKey = key;
         const started = perfOn ? performance.now() : 0;
-        refitPane(true);
+        refitPane();
         // refitPane already applies the canvas scale in negotiating mode. Legacy
         // fit emits term.onResize and pushSize; its render path needs one scale.
         if (!negoActive) applyCanvasScale();
@@ -6729,7 +6733,7 @@ my.translate = async (text, lang) => {
             // (the pane may have changed) — the host resizes if the min moved.
             if (negoActive) {
               applyCanvasScale();
-              sendPresence();
+              sendPresence(true);
               return;
             }
             lastDroveAt = Date.now(); // we're driving the size now (lease the grid)
@@ -6807,7 +6811,7 @@ my.translate = async (text, lang) => {
               } catch {}
             }
             suppressPush = false;
-            sendPresence(); // cap → host negotiates → size event brings the grid
+            sendPresence(true); // initial cap → host negotiates → size event brings the grid
             return;
           }
           try {
