@@ -8,6 +8,9 @@ on:
 
 jobs:
   release:
+    # Production can be frozen independently while main continues feeding the
+    # beta channel. Repository variable HOLD_PROD=1 is the operator kill switch.
+    if: vars.HOLD_PROD != '1'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
