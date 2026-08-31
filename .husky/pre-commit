@@ -1,7 +1,5 @@
 #!/usr/bin/env sh
 set -e
-bun run fmt
-git add -u
 bunx lint-staged
 bun run build
 # NOTE: the full `bun run test:coverage` gate runs in pre-push, NOT here. It's

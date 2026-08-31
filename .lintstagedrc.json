@@ -1,3 +1,3 @@
 {
-  "*.{ts,js,json}": ["oxlint --fix"]
+  "*.{ts,js,json}": ["oxlint --fix --fix-suggestions", "oxfmt"]
 }

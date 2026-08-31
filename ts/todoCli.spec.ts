@@ -342,7 +342,10 @@ describe("ay todo CLI", () => {
 
   it("tree --format json emits the actual nested structure, not the human text (codex-review Important)", async () => {
     await run("new", "a", "--kind", "code", "--owner", "cto");
-    await run("new", "b", "--kind", "code");
+    // The production default deliberately assigns new work to the calling
+    // agent. This structure assertion is about tree shape, not caller
+    // identity, so opt out explicitly to keep it hermetic under an ay agent.
+    await run("new", "b", "--kind", "code", "--owner", "none");
     await run("dep", "add", "T2", "T1");
     const cap = captureStdout();
     await runTodoSubcommand(["tree", "--root", TEST_ROOT, "--format", "json"]);
