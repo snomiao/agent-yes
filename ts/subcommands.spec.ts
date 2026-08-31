@@ -1669,7 +1669,10 @@ describe("subcommands.cmdSend safety guards", () => {
     }
   });
 
-  it("refuses a body longer than the 4096-char cap and points at the stdin path", async () => {
+  // Name was "the 4096-char cap and points at the stdin path" while the body
+  // asserted 1024 and the message no longer points at stdin — a test whose name
+  // describes neither the cap it checks nor the advice it pins.
+  it("refuses an over-long body and points at a remedy that works", async () => {
     const { runSubcommand } = await loadModule();
     const { appendGlobalPid } = await import("./globalPidIndex.ts");
     // Register a target agent so resolveOne succeeds and we reach the length gate.
@@ -1696,8 +1699,59 @@ describe("subcommands.cmdSend safety guards", () => {
       const code = await runSubcommand(["bun", "cli.js", "send", String(process.pid), long]);
       expect(code).toBe(1);
       expect(stderr.join("")).toMatch(/over the 1024-char limit/);
-      expect(stderr.join("")).toMatch(/ay send <keyword> - < file\.txt/);
+      // The remedy must be one that WORKS. The previous message said to pipe from
+      // a file; piping produces the same over-long body and hits the same cap, so
+      // the advice cost the reader an attempt and then their confidence in the
+      // message. Sending the PATH is what actually gets a long body across.
+      expect(stderr.join("")).toMatch(/send the PATH/);
+      expect(stderr.join("")).not.toMatch(/- < file\.txt/);
+      // And it must pre-empt the attempt it used to recommend.
+      expect(stderr.join("")).toMatch(/Piping with '-' does NOT help/);
     } finally {
+      process.stderr.write = orig;
+    }
+  });
+
+  // THE GAP that let the wrong advice ship: nothing asserted that the `-` (stdin)
+  // path is subject to the cap. It is — the stdin read happens before the check —
+  // so the old hint sent readers to a remedy the code refuses just as hard. The
+  // advice was wrong for a year of commits because no test asked this question.
+  it("applies the SAME cap to a body read from stdin ('-')", async () => {
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: null,
+      cwd: process.cwd(),
+      log_file: null,
+      fifo_file: "/tmp/ay-length-stdin-test.fifo",
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+    });
+    const stderr: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (s: any) => {
+      stderr.push(String(s));
+      return true;
+    };
+    // The command consumes `process.stdin` as an async iterable, so the stub has
+    // to be a real stream — an earlier attempt patched fs.readFileSync, which this
+    // path never calls, and the test failed for a reason unrelated to the cap.
+    const { Readable } = await import("node:stream");
+    const origStdin = Object.getOwnPropertyDescriptor(process, "stdin")!;
+    try {
+      Object.defineProperty(process, "stdin", {
+        value: Readable.from([Buffer.from("y".repeat(1025))]),
+        configurable: true,
+      });
+      const code = await runSubcommand(["bun", "cli.js", "send", String(process.pid), "-"]);
+      expect(code).toBe(1);
+      expect(stderr.join("")).toMatch(/over the 1024-char limit/);
+    } finally {
+      Object.defineProperty(process, "stdin", origStdin);
       process.stderr.write = orig;
     }
   });
