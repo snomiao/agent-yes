@@ -1,7 +1,7 @@
 import { chromium } from "playwright";
 import { startServer, AGENTS } from "../tests/ui-dom/server.ts";
 
-const counts = [1, 10, 20, 30];
+const counts = [1, 10, 20, 30, 70];
 const percentile = (xs: number[], q: number) => {
   if (!xs.length) return 0;
   const sorted = xs.slice().sort((a, b) => a - b);

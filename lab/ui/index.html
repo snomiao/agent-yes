@@ -1345,6 +1345,14 @@
         overflow: visible;
         z-index: 3;
       }
+      /* Continuous window/splitter resize gets a compositor-cheap path. These
+         overlays depend on row/grid geometry and are rebuilt once when resize
+         settles; hiding them avoids forcing the entire tree + terminal into
+         every intermediate layout. */
+      .app.resize-active .wire-overlay,
+      .app.resize-active .peer-overlay {
+        visibility: hidden;
+      }
       /* Per-row chip: how many peers are watching THIS agent (yellow, mono). */
       .peerchip {
         font-family: var(--mono);
@@ -2554,7 +2562,7 @@
         docTitle,
         omniScore,
         createInputSender,
-        createFrameScheduler,
+        createSettledFrameScheduler,
       } from "./console-logic.js";
       // The ay-share (rtc) remote-room transport lives in a shared module so the
       // /r/ rgui viewer reuses the exact same WebRTC + e2e wire (rtc.js imports
@@ -4369,29 +4377,37 @@
           } catch {}
         snapIfHeightOnly();
       }
-      // Resize events are notifications, not a license to synchronously measure
-      // layout. Chrome can deliver several window/visualViewport/pointer events
-      // inside one display frame; fit.fit(), proposeDimensions(), and xterm font
-      // changes all force layout. Coalesce every source and skip a frame whose
-      // terminal pane geometry did not actually change.
-      const paneResize = createFrameScheduler(() => {
-        if (document.visibilityState === "hidden" || !term) return;
-        const el = $("log");
-        if (!el) return;
-        const key = `${el.clientWidth}x${el.clientHeight}@${window.devicePixelRatio || 1}`;
-        if (key === appliedPaneKey) return;
-        appliedPaneKey = key;
-        const started = perfOn ? performance.now() : 0;
-        refitPane();
-        // refitPane already applies the canvas scale in negotiating mode. Legacy
-        // fit emits term.onResize and pushSize; its render path needs one scale.
-        if (!negoActive) applyCanvasScale();
-        renderPeerSelections();
-        if (perfOn) {
-          perf.resizeFrames++;
-          perf.resizeMs.push(performance.now() - started);
-        }
-      });
+      // Resize has a cheap moving phase and one precise settled phase. Changing
+      // xterm's font size remeasures every cell and applyCanvasScale may need up
+      // to three frames to converge; doing that at pointer frequency produced
+      // 50-140ms frames on large fleet trees. While moving, only mark the app so
+      // geometry-dependent overlays are hidden. After 120ms of quiet, measure
+      // once, refit/letterbox once, and rebuild the overlay once.
+      const paneResize = createSettledFrameScheduler(
+        () => {
+          if (document.visibilityState === "hidden" || !term) return;
+          document.querySelector(".app")?.classList.add("resize-active");
+          if (perfOn) perf.resizeFrames++;
+        },
+        () => {
+          document.querySelector(".app")?.classList.remove("resize-active");
+          if (document.visibilityState === "hidden" || !term) return;
+          const el = $("log");
+          if (!el) return;
+          const key = `${el.clientWidth}x${el.clientHeight}@${window.devicePixelRatio || 1}`;
+          if (key === appliedPaneKey) return;
+          appliedPaneKey = key;
+          const started = perfOn ? performance.now() : 0;
+          refitPane();
+          // refitPane already applies the canvas scale in negotiating mode.
+          // Legacy fit emits term.onResize and needs one final local scale.
+          if (!negoActive) applyCanvasScale();
+          renderPeerSelections();
+          renderSendWires();
+          if (perfOn) perf.resizeMs.push(performance.now() - started);
+        },
+        120,
+      );
       function schedulePaneRefit() {
         paneResize.schedule();
       }

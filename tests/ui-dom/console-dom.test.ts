@@ -733,6 +733,28 @@ describe("console DOM behaviour", () => {
     }
   });
 
+  it("defers expensive terminal fitting until continuous resize settles", async () => {
+    const { ctx, page } = await openConsole(browser, url);
+    try {
+      await page.click('.list .row[data-key="local#102"]');
+      await page.waitForTimeout(200);
+      const before = await page.evaluate(() => (window as any).__fitCalls || 0);
+      await page.setViewportSize({ width: 1100, height: 720 });
+      await page.waitForTimeout(50);
+      expect(
+        await page.locator(".app").evaluate((el) => el.classList.contains("resize-active")),
+      ).toBe(true);
+      expect(await page.evaluate(() => (window as any).__fitCalls || 0)).toBe(before);
+      await page.waitForTimeout(150);
+      expect(
+        await page.locator(".app").evaluate((el) => el.classList.contains("resize-active")),
+      ).toBe(false);
+      expect(await page.evaluate(() => (window as any).__fitCalls || 0)).toBe(before + 1);
+    } finally {
+      await ctx.close();
+    }
+  });
+
   it("keeps negotiated PTY capacity stable through a browser resize drag", async () => {
     const negotiated = await startServer(undefined, { negotiateSize: true });
     const { ctx, page } = await openConsole(browser, negotiated.url);

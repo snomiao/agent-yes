@@ -43,6 +43,7 @@ import {
   omniScore,
   createInputSender,
   createFrameScheduler,
+  createSettledFrameScheduler,
 } from "../../lab/ui/console-logic.js";
 
 describe("createFrameScheduler", () => {
@@ -78,6 +79,52 @@ describe("createFrameScheduler", () => {
     expect(frames.size).toBe(0);
     scheduler.schedule();
     expect(runs).toBe(0);
+  });
+});
+
+describe("createSettledFrameScheduler", () => {
+  it("runs cheap work once per frame and expensive work once after quiet", () => {
+    const frames = new Map<number, () => void>();
+    const timers = new Map<number, () => void>();
+    let nextFrame = 1;
+    let nextTimer = 100;
+    let cheap = 0;
+    let expensive = 0;
+    const scheduler = createSettledFrameScheduler(
+      () => cheap++,
+      () => expensive++,
+      120,
+      (cb: () => void) => (frames.set(nextFrame, cb), nextFrame++),
+      (id: number) => frames.delete(id),
+      (cb: () => void) => (timers.set(nextTimer, cb), nextTimer++),
+      (id: number) => timers.delete(id),
+    );
+    for (let i = 0; i < 100; i++) scheduler.schedule();
+    expect(frames.size).toBe(1);
+    expect(timers.size).toBe(1);
+    frames.values().next().value!();
+    expect(cheap).toBe(1);
+    expect(expensive).toBe(0);
+    timers.values().next().value!();
+    expect(expensive).toBe(1);
+  });
+
+  it("cancels both phases on dispose", () => {
+    const frames = new Map<number, () => void>();
+    const timers = new Map<number, () => void>();
+    const scheduler = createSettledFrameScheduler(
+      () => {},
+      () => {},
+      120,
+      (cb: () => void) => (frames.set(1, cb), 1),
+      (id: number) => frames.delete(id),
+      (cb: () => void) => (timers.set(2, cb), 2),
+      (id: number) => timers.delete(id),
+    );
+    scheduler.schedule();
+    scheduler.dispose();
+    expect(frames.size).toBe(0);
+    expect(timers.size).toBe(0);
   });
 });
 

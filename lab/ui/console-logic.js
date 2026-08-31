@@ -48,6 +48,54 @@ export function createFrameScheduler(
   };
 }
 
+// Resize has two very different kinds of work. While the pointer/window is
+// moving, keep the display responsive with at most one cheap callback per
+// frame. Expensive layout (xterm font metrics, overlays, tree wires) runs once
+// only after notifications have been quiet for `settleMs`.
+export function createSettledFrameScheduler(
+  onFrame,
+  onSettle,
+  settleMs = 120,
+  requestFrame = (cb) => requestAnimationFrame(cb),
+  cancelFrame = (id) => cancelAnimationFrame(id),
+  setTimer = (cb, ms) => setTimeout(cb, ms),
+  clearTimer = (id) => clearTimeout(id),
+) {
+  let frame = null;
+  let timer = null;
+  let disposed = false;
+  const frameRun = () => {
+    frame = null;
+    if (!disposed) onFrame();
+  };
+  const settleRun = () => {
+    timer = null;
+    if (!disposed) onSettle();
+  };
+  return {
+    schedule() {
+      if (disposed) return;
+      if (frame === null) frame = requestFrame(frameRun);
+      if (timer !== null) clearTimer(timer);
+      timer = setTimer(settleRun, settleMs);
+    },
+    flush() {
+      if (disposed) return;
+      if (frame !== null) cancelFrame(frame);
+      if (timer !== null) clearTimer(timer);
+      frame = timer = null;
+      onFrame();
+      onSettle();
+    },
+    dispose() {
+      disposed = true;
+      if (frame !== null) cancelFrame(frame);
+      if (timer !== null) clearTimer(timer);
+      frame = timer = null;
+    },
+  };
+}
+
 // Windows daemons report cwds with backslashes (C:\Users\…\tree\main); every
 // cwd parser/comparator below assumes forward slashes, so normalize once here.
 // Without this a Windows host's agents parse no owner/repo/branch and render as
