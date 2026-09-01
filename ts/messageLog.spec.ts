@@ -145,12 +145,12 @@ describe("messageLog", () => {
   });
 });
 
-describe("messageLog terminal-chatter filter", () => {
+describe("messageLog unprompted-reply filter", () => {
   let dir: string;
   let prevCwd: string;
 
   beforeEach(async () => {
-    dir = await mkdtemp(path.join(tmpdir(), "msglog-chatter-"));
+    dir = await mkdtemp(path.join(tmpdir(), "msglog-reply-"));
     prevCwd = process.cwd();
   });
 
@@ -160,36 +160,43 @@ describe("messageLog terminal-chatter filter", () => {
   });
 
   // Byte shapes are terminal protocol; every surrounding record is synthetic.
-  const CHATTER = [
+  const UNPROMPTED = [
     ["cursor position report", "\x1b[?59;3R"],
     ["device attributes reply", "\x1b[?1;2c"],
+    ["device status report", "\x1b[0n"],
     ["background colour reply", "\x1b]11;rgb:0d0d/1111/1717\x1b\\"],
-    ["pointer motion", "\x1b[<65;24;18M"],
     ["a burst of seven cursor reports", "\x1b[?59;29R" + "\x1b[?59;3R".repeat(6)],
-    ["a mixed attach handshake", "\x1b[1;1R\x1b]11;rgb:ffff/ffff/ffff\x1b\\\x1b[?1;2c"],
+    [
+      "the attach handshake, mixing CSI and OSC",
+      "\x1b[?1;1R\x1b]11;rgb:ffff/ffff/ffff\x1b\\\x1b[?1;2c",
+    ],
   ] as const;
 
   const REAL = [
     ["down arrow — how a dialog gets answered", "\x1b[B"],
     ["left arrow", "\x1b[D"],
     ["Delete", "\x1b[3~"],
+    ["modified F3 — same final byte as a cursor report", "\x1b[1;2R"],
+    ["plain CPR, excluded because modified F3 shares its shape", "\x1b[1;1R"],
+    ["a mouse click inside a TUI", "\x1b[<0;12;27m"],
+    ["pointer motion, indistinguishable from a click", "\x1b[<65;24;18M"],
     ["focus in (uncovered, deliberately kept)", "\x1b[I"],
     ["a lone DEL is a backspace keypress", "\x7f"],
     ["ordinary prose", "the deploy is green"],
-    ["prose that CONTAINS a report", "cursor came back as \x1b[?59;3R — ignore it"],
+    ["prose that CONTAINS a reply", "cursor came back as \x1b[?59;3R — ignore it"],
   ] as const;
 
-  it("drops senderless chatter and keeps everything else", () => {
-    for (const [name, body] of CHATTER)
+  it("drops senderless unprompted replies and keeps everything else", () => {
+    for (const [name, body] of UNPROMPTED)
       expect(shouldRecord(makeRecord({ from: null, body })), `drop ${name}`).toBe(false);
     for (const [name, body] of REAL)
       expect(shouldRecord(makeRecord({ from: null, body })), `keep ${name}`).toBe(true);
   });
 
-  it("never drops chatter an agent deliberately sent", () => {
-    // Shape decides; the sender is the safety margin. An agent that means to
-    // push these bytes still gets a durable record of having done it.
-    for (const [name, body] of CHATTER) {
+  it("never drops a reply an agent deliberately sent", () => {
+    // Shape decides; the sender is a margin. An agent that means to push these
+    // bytes still gets a durable record of having done it.
+    for (const [name, body] of UNPROMPTED) {
       const rec = makeRecord({
         from: {
           pid: 1111,
@@ -203,10 +210,10 @@ describe("messageLog terminal-chatter filter", () => {
     }
   });
 
-  it("writes NO mailbox line for senderless chatter, end to end", async () => {
+  it("writes NO mailbox line for a senderless unprompted reply, end to end", async () => {
     const to = path.join(dir, "recipient");
     process.chdir(dir);
-    for (const [, body] of CHATTER)
+    for (const [, body] of UNPROMPTED)
       await recordMessage(
         makeRecord({
           from: null,
@@ -234,9 +241,9 @@ describe("messageLog terminal-chatter filter", () => {
     expect(await readMailbox(dir, "outbox")).toHaveLength(1);
   });
 
-  it("a chatter burst past the cap leaves an earlier real message recoverable", async () => {
+  it("a reply burst past the cap leaves an earlier real message recoverable", async () => {
     // The regression this exists to prevent: the mailbox is the recovery path
-    // for a truncated message, and chatter was evicting it within minutes.
+    // for a truncated message, and replies were evicting it within minutes.
     const to = path.join(dir, "recipient");
     const toParty = { pid: 2222, cli: "codex", cwd: to, agent_id: "agent-B" };
     await recordInbox(

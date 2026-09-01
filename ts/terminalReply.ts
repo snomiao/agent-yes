@@ -1,21 +1,3 @@
-/** One query reply a terminal sends back: CPR / DECXCPR (`R`), DA1 / DA2 (`c`),
- * DSR (`n`). */
-const REPLY = String.raw`\x1b\[(?:\??\d+(?:;\d+)*R|\?[\d;]*c|>[\d;]*c|\d*n)`;
-
-/**
- * One terminal-generated event that is NOT an answer to a protocol query and is
- * NOT typing: an OSC colour reply (10 fg / 11 bg / 12 cursor / 4;n palette,
- * terminated by ST or BEL), or an SGR mouse tracking report, emitted whenever
- * the pointer moves over the terminal.
- */
-const DEVICE_EVENT = String.raw`\x1b\](?:10|11|12|4;\d+);rgb:[0-9a-fA-F]{1,4}(?:/[0-9a-fA-F]{1,4})*(?:\x1b\\|\x07)|\x1b\[<\d+;\d+;\d+[Mm]`;
-
-// Each is anchored over ONE-OR-MORE: a burst (a tail replay on viewer attach, a
-// pointer drag) arrives concatenated in a single chunk.
-const REPLY_ONLY = new RegExp(`^(?:${REPLY})+$`);
-const DEVICE_ONLY = new RegExp(`^(?:${DEVICE_EVENT})+$`);
-const CHATTER = new RegExp(`^(?:${REPLY}|${DEVICE_EVENT})+$`);
-
 /**
  * Is this /api/send payload PURELY terminal auto-reply chatter — the responses
  * a viewer's xterm generates to the agent TUI's protocol queries (Cursor
@@ -26,34 +8,40 @@ const CHATTER = new RegExp(`^(?:${REPLY}|${DEVICE_EVENT})+$`);
  * redraw/resize (or a TUI polling `ESC[?6n` every render) can't pin the
  * console's stdin-flash + stdin age at "just typed".
  *
- * Real typing — including arrow keys like `ESC[A` — never matches: an input and
- * a reply are both CSI, and only the final byte separates them.
+ * Anchored over ONE-OR-MORE replies: a burst of queries (e.g. tail replay on
+ * viewer attach) is answered in a single onData chunk, so several replies
+ * arrive concatenated in one payload. Real typing — including arrow keys like
+ * `ESC[A` — never matches any alternative.
  */
-export const isTerminalReply = (s: string): boolean => REPLY_ONLY.test(s);
+export const isTerminalReply = (s: string): boolean =>
+  /^(?:\x1b\[(?:\??\d+(?:;\d+)*R|\?[\d;]*c|>[\d;]*c|\d*n))+$/.test(s);
 
 /**
- * Is this payload purely terminal device events (see `DEVICE_EVENT`)?
+ * Is this payload nothing but replies a terminal sends UNPROMPTED BY ANY PERSON —
+ * answers to queries the application itself made?
  *
- * Kept separate from `isTerminalReply` deliberately. That predicate gates
- * `last_stdin_at` in the serve daemon, and widening it would change when the
- * console reports "just typed" — a different question from whether something is
- * a message. Callers that want both compose them with `isTerminalChatter`.
+ * Deliberately NARROWER than `isTerminalReply`, even though it also covers OSC
+ * colour replies, because the two answer different questions. `isTerminalReply`
+ * decides whether to refresh `last_stdin_at`; being wrong there mislabels a
+ * console as "just typed". This one decides whether a byte is stored in the
+ * message log at all; being wrong here DELETES SOMETHING A PERSON DID. Where a
+ * shape is ambiguous, this predicate declines.
+ *
+ * Two families that `isTerminalReply` accepts are excluded for exactly that
+ * reason, and the exclusions are measurements, not caution:
+ *
+ *  - PLAIN CPR `ESC[<n>;<n>R`. xterm's modified F3 is `ESC[1;<mod>R` — the same
+ *    shape. "Only the final byte separates an input from a reply" is false: `R`
+ *    ends both. Measured over 128,827 stored rows, plain CPR appears ONCE while
+ *    the `?`-prefixed DECXCPR form — which no key can produce — appears 46,693
+ *    times. Keeping plain CPR buys one row and costs a real keypress.
+ *  - SGR MOUSE `ESC[<b;x;yM|m`. `M` is press/wheel/motion and `m` is release, so
+ *    a person clicking a button inside a TUI emits the same bytes as the pointer
+ *    drifting across it. 36,616 rows, the second largest family — and no shape
+ *    separates the deliberate click from the drift. A discriminator has to come
+ *    from the producer, which is the only place the intent is known.
  */
-export const isTerminalDeviceEvent = (s: string): boolean => DEVICE_ONLY.test(s);
-
-/**
- * Everything a terminal puts on an agent's stdin that neither a human nor an
- * agent meant to send — query replies AND device events.
- *
- * One anchored alternation over BOTH alphabets, NOT `isTerminalReply(s) ||
- * isTerminalDeviceEvent(s)`. The `||` form cannot see a burst that mixes the two
- * families, because each half anchors over its own alphabet and a mixed chunk
- * satisfies neither. That burst is exactly what a terminal sends on attach —
- * measured once in a 63,129-row corpus:
- *
- *     ESC[1;1R   ESC]10;rgb:…ST   ESC]11;rgb:…ST   ESC[?1;2c
- *
- * one write carrying a cursor report, both colour replies, and a device
- * attributes answer. Rare — and it is the one that would have been kept forever.
- */
-export const isTerminalChatter = (s: string): boolean => CHATTER.test(s);
+export const isUnpromptedTerminalReply = (s: string): boolean =>
+  /^(?:\x1b\[(?:\?\d+(?:;\d+)*R|\?[\d;]*c|>[\d;]*c|\d*n)|\x1b\](?:10|11|12|4;\d+);rgb:[0-9a-fA-F]{1,4}(?:\/[0-9a-fA-F]{1,4})*(?:\x1b\\|\x07))+$/.test(
+    s,
+  );

@@ -18,7 +18,7 @@
 import { appendFile, mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import { logger } from "./logger.ts";
-import { isTerminalChatter } from "./terminalReply.ts";
+import { isUnpromptedTerminalReply } from "./terminalReply.ts";
 
 /** One end of a message: enough to attribute and to route a reply. */
 export interface MailParty {
@@ -61,39 +61,41 @@ export interface MessageRecord {
 /**
  * Whether a record belongs in a mailbox at all.
  *
- * A terminal's own chatter — cursor reports, device attributes, colour replies,
- * mouse motion — reaches a lane's stdin the same way a message does, so without
- * this it is stored as one and evicts the log.
+ * A terminal answers protocol queries the TUI makes — where is the cursor, what
+ * terminal are you, what is your background colour — and those answers reach the
+ * agent's stdin the same way a message does. Without this they are stored as
+ * messages, and the mailbox is capped, so they evict it.
  *
- * Why that is worse than untidy: this mailbox is the documented recovery path
- * for a message that arrived truncated, and an evicted message is
- * indistinguishable from one that was never sent. Measured on one lane, 1,989 of
- * its 2,000 slots were cursor reports arriving at ~292/min, so the window held
- * SEVEN MINUTES. Across one box: 28,537 of 63,129 stored rows, 45%. Raising
- * MAILBOX_MAX_LINES cannot fix that rate; the rows have to stop being recorded.
+ * Why that is worse than untidy: this log is the documented recovery path for a
+ * message that arrived truncated, and an evicted message is indistinguishable
+ * from one that was never sent. Measured on one agent, 1,989 of its 2,000 slots
+ * were `ESC[?59;3R` arriving at ~292/min, so the window held SEVEN MINUTES.
+ * Raising MAILBOX_MAX_LINES cannot fix a rate; the rows have to stop being
+ * recorded.
  *
  * TWO conditions, and only the first discriminates:
  *
- *  1. The body is nothing BUT chatter (`isTerminalChatter`). Not "contains an
- *     escape" and not "is a control byte" — `ESC[B` is how an operator answers a
- *     CLI's dialog through `ay send` (measured 434 `ESC[D` + 49 `ESC[B` rows),
- *     and a lone DEL (measured 1,314) is someone pressing backspace. An input
- *     and a reply are both CSI; only the final byte tells them apart.
- *  2. No agent sent it. Across every mailbox on one box, all 28,537 chatter-
- *     shaped bodies had `from === null` and none had a sender, so this never
- *     fires today. It is here so that an agent which deliberately pushes such
- *     bytes still gets a durable record of having done it. Shape decides; the
- *     sender is the safety margin.
+ *  1. The body is nothing but replies nobody asked for
+ *     (`isUnpromptedTerminalReply`). That predicate is deliberately narrower
+ *     than serve's `isTerminalReply` — see its doc for the two families it
+ *     refuses to claim, and why "only the final byte separates an input from a
+ *     reply" turned out to be false.
+ *  2. No agent sent it. Across 128,827 stored rows every reply-shaped body had
+ *     `from === null` and none had a sender, so this never fires today. It is
+ *     here so an agent that deliberately pushes such bytes still gets a durable
+ *     record. Shape decides; the sender is a margin, and NOT a safety net for
+ *     humans — an interactive human sender is also `from === null`, which is why
+ *     every ambiguous shape has to be excluded by shape.
  *
- * NOT covered, named rather than silently missed: focus in/out (`ESC[I` /
- * `ESC[O`, measured 145 rows) is terminal-generated and is not a message either,
- * but it is shape-identical to a two-byte CSI key, so it stays. Any reply family
- * a terminal emits beyond those in `terminalReply.ts` is also still recorded —
- * that list is what was observed, not what is possible.
+ * NOT COVERED, named rather than silently missed: SGR mouse reports (36,616
+ * rows) and plain CPR, both excluded because they collide with real input;
+ * focus in/out (`ESC[I` / `ESC[O`, 215 rows), shape-identical to a two-byte CSI
+ * key. What is left still drops 47,331 of 128,827 stored rows (36.7%) — and
+ * 99.5% of the mailbox that was measured broken, whose noise was pure DECXCPR.
  */
 export function shouldRecord(record: MessageRecord): boolean {
   if (record.from) return true;
-  return !isTerminalChatter(record.body ?? "");
+  return !isUnpromptedTerminalReply(record.body ?? "");
 }
 
 /** Keep at most this many lines per mailbox; older entries are compacted away. */
