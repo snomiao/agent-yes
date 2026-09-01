@@ -3436,13 +3436,25 @@ async function cmdSend(rest: string[]): Promise<number> {
 
   // Length cap: a body longer than this is a document, not a prompt — rejecting it
   // is kinder than pasting it into a live CLI where bracketed-paste will fuse or
-  // truncate it. The `-` (stdin) path carries multi-line bodies verbatim too, so
-  // the hint points at a real alternative that doesn't silently lose text.
+  // truncate it.
+  //
+  // The hint used to say `ay send <keyword> - < file.txt`, and that does not work.
+  // The `-` form only changes where the body is READ from: it is resolved into
+  // this same `body` a few lines above, so it meets this identical cap. An error
+  // naming a non-working remedy is worse than one naming none — it costs the
+  // reader a second attempt and teaches the wrong habit. Reported by an operator
+  // who followed the hint and was rejected again at 1,780 chars.
+  //
+  // What works is not sending the text at all: send the PATH and let the reader
+  // open it. That also survives a truncated delivery, since the tail is what
+  // arrives and a path is short enough to sit in it.
   if (body.length > SEND_BODY_MAX_CHARS) {
     throw new Error(
       `message is ${body.length} chars, over the ${SEND_BODY_MAX_CHARS}-char limit. ` +
-        `Longer text isn't a terminal prompt — write it to a file and pipe it, ` +
-        `e.g. 'ay send <keyword> - < file.txt', or shorten to ≤${SEND_BODY_MAX_CHARS} chars.`,
+        `Longer text isn't a terminal prompt. Piping it in with '-' hits this same ` +
+        `cap — the body is capped however it arrives. Write it to a file and send ` +
+        `the PATH instead, e.g. 'ay send <keyword> "details: /path/to/notes.md"', ` +
+        `or shorten to ≤${SEND_BODY_MAX_CHARS} chars.`,
     );
   }
 
