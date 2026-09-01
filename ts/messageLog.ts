@@ -18,6 +18,7 @@
 import { appendFile, mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import { logger } from "./logger.ts";
+import { isUnpromptedTerminalReply } from "./terminalReply.ts";
 
 /** One end of a message: enough to attribute and to route a reply. */
 export interface MailParty {
@@ -55,6 +56,46 @@ export interface MessageRecord {
    * absent for a same-host send. The two ends record their own mailbox on their
    * own machine, so this marks that the peer's cwd is on another host. */
   remote?: string;
+}
+
+/**
+ * Whether a record belongs in a mailbox at all.
+ *
+ * A terminal answers protocol queries the TUI makes — where is the cursor, what
+ * terminal are you, what is your background colour — and those answers reach the
+ * agent's stdin the same way a message does. Without this they are stored as
+ * messages, and the mailbox is capped, so they evict it.
+ *
+ * Why that is worse than untidy: this log is the documented recovery path for a
+ * message that arrived truncated, and an evicted message is indistinguishable
+ * from one that was never sent. Measured on one agent, 1,989 of its 2,000 slots
+ * were `ESC[?59;3R` arriving at ~292/min, so the window held SEVEN MINUTES.
+ * Raising MAILBOX_MAX_LINES cannot fix a rate; the rows have to stop being
+ * recorded.
+ *
+ * TWO conditions, and only the first discriminates:
+ *
+ *  1. The body is nothing but replies nobody asked for
+ *     (`isUnpromptedTerminalReply`). That predicate is deliberately narrower
+ *     than serve's `isTerminalReply` — see its doc for the two families it
+ *     refuses to claim, and why "only the final byte separates an input from a
+ *     reply" turned out to be false.
+ *  2. No agent sent it. Across 128,827 stored rows every reply-shaped body had
+ *     `from === null` and none had a sender, so this never fires today. It is
+ *     here so an agent that deliberately pushes such bytes still gets a durable
+ *     record. Shape decides; the sender is a margin, and NOT a safety net for
+ *     humans — an interactive human sender is also `from === null`, which is why
+ *     every ambiguous shape has to be excluded by shape.
+ *
+ * NOT COVERED, named rather than silently missed: SGR mouse reports (36,616
+ * rows) and plain CPR, both excluded because they collide with real input;
+ * focus in/out (`ESC[I` / `ESC[O`, 215 rows), shape-identical to a two-byte CSI
+ * key. What is left still drops 47,331 of 128,827 stored rows (36.7%) — and
+ * 99.5% of the mailbox that was measured broken, whose noise was pure DECXCPR.
+ */
+export function shouldRecord(record: MessageRecord): boolean {
+  if (record.from) return true;
+  return !isUnpromptedTerminalReply(record.body ?? "");
 }
 
 /** Keep at most this many lines per mailbox; older entries are compacted away. */
@@ -98,6 +139,7 @@ async function appendCapped(filePath: string, record: MessageRecord): Promise<vo
  * under `from.cwd`; a human sender (from === null) writes under `process.cwd()`.
  */
 export async function recordOutbox(record: MessageRecord): Promise<void> {
+  if (!shouldRecord(record)) return;
   const outCwd = record.from?.cwd ?? process.cwd();
   try {
     await appendCapped(mailboxPath(outCwd, "outbox"), record);
@@ -108,6 +150,7 @@ export async function recordOutbox(record: MessageRecord): Promise<void> {
 
 /** Record the RECIPIENT's view in its inbox (under `to.cwd`). Best-effort. */
 export async function recordInbox(record: MessageRecord): Promise<void> {
+  if (!shouldRecord(record)) return;
   try {
     await appendCapped(mailboxPath(record.to.cwd, "inbox"), record);
   } catch (err) {

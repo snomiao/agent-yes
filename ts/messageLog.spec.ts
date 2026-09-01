@@ -9,6 +9,7 @@ import {
   recordInbox,
   recordMessage,
   recordOutbox,
+  shouldRecord,
   type MessageRecord,
 } from "./messageLog.ts";
 
@@ -141,5 +142,126 @@ describe("messageLog", () => {
     expect(partyMatches(party, "other", 5)).toBe(true); // pid fallback
     expect(partyMatches(party, "other", 6)).toBe(false);
     expect(partyMatches(null, "stable", 5)).toBe(false);
+  });
+});
+
+describe("messageLog unprompted-reply filter", () => {
+  let dir: string;
+  let prevCwd: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "msglog-reply-"));
+    prevCwd = process.cwd();
+  });
+
+  afterEach(async () => {
+    process.chdir(prevCwd);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // Byte shapes are terminal protocol; every surrounding record is synthetic.
+  const UNPROMPTED = [
+    ["cursor position report", "\x1b[?59;3R"],
+    ["device attributes reply", "\x1b[?1;2c"],
+    ["device status report", "\x1b[0n"],
+    ["background colour reply", "\x1b]11;rgb:0d0d/1111/1717\x1b\\"],
+    ["a burst of seven cursor reports", "\x1b[?59;29R" + "\x1b[?59;3R".repeat(6)],
+    [
+      "the attach handshake, mixing CSI and OSC",
+      "\x1b[?1;1R\x1b]11;rgb:ffff/ffff/ffff\x1b\\\x1b[?1;2c",
+    ],
+  ] as const;
+
+  const REAL = [
+    ["down arrow — how a dialog gets answered", "\x1b[B"],
+    ["left arrow", "\x1b[D"],
+    ["Delete", "\x1b[3~"],
+    ["modified F3 — same final byte as a cursor report", "\x1b[1;2R"],
+    ["plain CPR, excluded because modified F3 shares its shape", "\x1b[1;1R"],
+    ["a mouse click inside a TUI", "\x1b[<0;12;27m"],
+    ["pointer motion, indistinguishable from a click", "\x1b[<65;24;18M"],
+    ["focus in (uncovered, deliberately kept)", "\x1b[I"],
+    ["a lone DEL is a backspace keypress", "\x7f"],
+    ["ordinary prose", "the deploy is green"],
+    ["prose that CONTAINS a reply", "cursor came back as \x1b[?59;3R — ignore it"],
+  ] as const;
+
+  it("drops senderless unprompted replies and keeps everything else", () => {
+    for (const [name, body] of UNPROMPTED)
+      expect(shouldRecord(makeRecord({ from: null, body })), `drop ${name}`).toBe(false);
+    for (const [name, body] of REAL)
+      expect(shouldRecord(makeRecord({ from: null, body })), `keep ${name}`).toBe(true);
+  });
+
+  it("never drops a reply an agent deliberately sent", () => {
+    // Shape decides; the sender is a margin. An agent that means to push these
+    // bytes still gets a durable record of having done it.
+    for (const [name, body] of UNPROMPTED) {
+      const rec = makeRecord({
+        from: {
+          pid: 1111,
+          cli: "claude",
+          cwd: "/repo/alpha",
+          agent_id: "agent-A",
+        },
+        body,
+      });
+      expect(shouldRecord(rec), `agent-sent ${name}`).toBe(true);
+    }
+  });
+
+  it("writes NO mailbox line for a senderless unprompted reply, end to end", async () => {
+    const to = path.join(dir, "recipient");
+    process.chdir(dir);
+    for (const [, body] of UNPROMPTED)
+      await recordMessage(
+        makeRecord({
+          from: null,
+          body,
+          to: { pid: 2222, cli: "codex", cwd: to, agent_id: "agent-B" },
+        }),
+      );
+    expect(await readMailbox(to, "inbox")).toHaveLength(0);
+    expect(await readMailbox(dir, "outbox")).toHaveLength(0);
+  });
+
+  it("still writes the line for a senderless ARROW KEY, end to end", async () => {
+    const to = path.join(dir, "recipient");
+    process.chdir(dir);
+    await recordMessage(
+      makeRecord({
+        from: null,
+        body: "\x1b[B",
+        to: { pid: 2222, cli: "codex", cwd: to, agent_id: "agent-B" },
+      }),
+    );
+    const inbox = await readMailbox(to, "inbox");
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]!.body).toBe("\x1b[B");
+    expect(await readMailbox(dir, "outbox")).toHaveLength(1);
+  });
+
+  it("a reply burst past the cap leaves an earlier real message recoverable", async () => {
+    // The regression this exists to prevent: the mailbox is the recovery path
+    // for a truncated message, and replies were evicting it within minutes.
+    const to = path.join(dir, "recipient");
+    const toParty = { pid: 2222, cli: "codex", cwd: to, agent_id: "agent-B" };
+    await recordInbox(
+      makeRecord({
+        from: {
+          pid: 1111,
+          cli: "claude",
+          cwd: "/repo/alpha",
+          agent_id: "agent-A",
+        },
+        body: "the message that arrived truncated",
+        to: toParty,
+      }),
+    );
+    for (let i = 0; i < 2500; i++)
+      await recordInbox(makeRecord({ from: null, body: "\x1b[?59;3R", to: toParty }));
+    const inbox = await readMailbox(to, "inbox");
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]!.body).toBe("the message that arrived truncated");
   });
 });
