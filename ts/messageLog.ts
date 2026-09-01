@@ -99,7 +99,7 @@ export function shouldRecord(record: MessageRecord): boolean {
 }
 
 /** Keep at most this many lines per mailbox; older entries are compacted away. */
-const MAILBOX_MAX_LINES = 2000;
+export const MAILBOX_MAX_LINES = 2000;
 
 export type Mailbox = "inbox" | "outbox";
 
