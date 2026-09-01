@@ -1669,7 +1669,7 @@ describe("subcommands.cmdSend safety guards", () => {
     }
   });
 
-  it("refuses a body longer than the 4096-char cap and points at the stdin path", async () => {
+  it("refuses an over-cap body and points at a remedy that WORKS (the path, not `-`)", async () => {
     const { runSubcommand } = await loadModule();
     const { appendGlobalPid } = await import("./globalPidIndex.ts");
     // Register a target agent so resolveOne succeeds and we reach the length gate.
@@ -1696,9 +1696,55 @@ describe("subcommands.cmdSend safety guards", () => {
       const code = await runSubcommand(["bun", "cli.js", "send", String(process.pid), long]);
       expect(code).toBe(1);
       expect(stderr.join("")).toMatch(/over the 1024-char limit/);
-      expect(stderr.join("")).toMatch(/ay send <keyword> - < file\.txt/);
+      // It must point at sending the PATH...
+      expect(stderr.join("")).toMatch(/send the PATH/);
+      expect(stderr.join("")).toMatch(/\/path\/to\/notes\.md/);
+      // ...and must not resurrect `- < file.txt`, which hits this same cap. The
+      // previous version of this test asserted that exact string, so the defect
+      // was pinned GREEN: an operator followed the hint and was rejected again.
+      expect(stderr.join("")).not.toMatch(/- < file\.txt/);
     } finally {
       process.stderr.write = orig;
+    }
+  });
+
+  it("applies the same cap to the `-` (stdin) body — the form the old hint recommended", async () => {
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: null,
+      cwd: process.cwd(),
+      log_file: null,
+      fifo_file: "/tmp/ay-length-stdin-test.fifo",
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+    });
+    const stderr: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (s: any) => {
+      stderr.push(String(s));
+      return true;
+    };
+    const origStdin = Object.getOwnPropertyDescriptor(process, "stdin")!;
+    const long = "y".repeat(1780);
+    Object.defineProperty(process, "stdin", {
+      configurable: true,
+      value: (async function* () {
+        yield Buffer.from(long, "utf-8");
+      })(),
+    });
+    try {
+      const code = await runSubcommand(["bun", "cli.js", "send", String(process.pid), "-"]);
+      expect(code).toBe(1);
+      // The cap is on the body however it arrives, so `-` buys nothing.
+      expect(stderr.join("")).toMatch(/1780 chars, over the 1024-char limit/);
+    } finally {
+      process.stderr.write = orig;
+      Object.defineProperty(process, "stdin", origStdin);
     }
   });
 });
