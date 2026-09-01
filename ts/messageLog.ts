@@ -18,6 +18,7 @@
 import { appendFile, mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import { logger } from "./logger.ts";
+import { isTerminalChatter } from "./terminalReply.ts";
 
 /** One end of a message: enough to attribute and to route a reply. */
 export interface MailParty {
@@ -55,6 +56,44 @@ export interface MessageRecord {
    * absent for a same-host send. The two ends record their own mailbox on their
    * own machine, so this marks that the peer's cwd is on another host. */
   remote?: string;
+}
+
+/**
+ * Whether a record belongs in a mailbox at all.
+ *
+ * A terminal's own chatter — cursor reports, device attributes, colour replies,
+ * mouse motion — reaches a lane's stdin the same way a message does, so without
+ * this it is stored as one and evicts the log.
+ *
+ * Why that is worse than untidy: this mailbox is the documented recovery path
+ * for a message that arrived truncated, and an evicted message is
+ * indistinguishable from one that was never sent. Measured on one lane, 1,989 of
+ * its 2,000 slots were cursor reports arriving at ~292/min, so the window held
+ * SEVEN MINUTES. Across one box: 28,537 of 63,129 stored rows, 45%. Raising
+ * MAILBOX_MAX_LINES cannot fix that rate; the rows have to stop being recorded.
+ *
+ * TWO conditions, and only the first discriminates:
+ *
+ *  1. The body is nothing BUT chatter (`isTerminalChatter`). Not "contains an
+ *     escape" and not "is a control byte" — `ESC[B` is how an operator answers a
+ *     CLI's dialog through `ay send` (measured 434 `ESC[D` + 49 `ESC[B` rows),
+ *     and a lone DEL (measured 1,314) is someone pressing backspace. An input
+ *     and a reply are both CSI; only the final byte tells them apart.
+ *  2. No agent sent it. Across every mailbox on one box, all 28,537 chatter-
+ *     shaped bodies had `from === null` and none had a sender, so this never
+ *     fires today. It is here so that an agent which deliberately pushes such
+ *     bytes still gets a durable record of having done it. Shape decides; the
+ *     sender is the safety margin.
+ *
+ * NOT covered, named rather than silently missed: focus in/out (`ESC[I` /
+ * `ESC[O`, measured 145 rows) is terminal-generated and is not a message either,
+ * but it is shape-identical to a two-byte CSI key, so it stays. Any reply family
+ * a terminal emits beyond those in `terminalReply.ts` is also still recorded —
+ * that list is what was observed, not what is possible.
+ */
+export function shouldRecord(record: MessageRecord): boolean {
+  if (record.from) return true;
+  return !isTerminalChatter(record.body ?? "");
 }
 
 /** Keep at most this many lines per mailbox; older entries are compacted away. */
@@ -98,6 +137,7 @@ async function appendCapped(filePath: string, record: MessageRecord): Promise<vo
  * under `from.cwd`; a human sender (from === null) writes under `process.cwd()`.
  */
 export async function recordOutbox(record: MessageRecord): Promise<void> {
+  if (!shouldRecord(record)) return;
   const outCwd = record.from?.cwd ?? process.cwd();
   try {
     await appendCapped(mailboxPath(outCwd, "outbox"), record);
@@ -108,6 +148,7 @@ export async function recordOutbox(record: MessageRecord): Promise<void> {
 
 /** Record the RECIPIENT's view in its inbox (under `to.cwd`). Best-effort. */
 export async function recordInbox(record: MessageRecord): Promise<void> {
+  if (!shouldRecord(record)) return;
   try {
     await appendCapped(mailboxPath(record.to.cwd, "inbox"), record);
   } catch (err) {
