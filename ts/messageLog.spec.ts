@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
 import {
+  MAILBOX_MAX_LINES,
   mailboxPath,
   partyMatches,
   readMailbox,
@@ -277,6 +278,16 @@ describe("messageLog unprompted-reply filter", () => {
     expect(raw.split("\n").filter((l) => l.trim())).toHaveLength(1);
   });
 
+  it("pins the cap's VALUE, because deriving from it costs the ability to notice a change", () => {
+    // The behaviour test below derives its sizes from MAILBOX_MAX_LINES so a
+    // deliberate cap change does not silently stop it crossing the boundary.
+    // That robustness has a price: it can no longer notice the constant moving.
+    // One cheap assertion buys that back — an UNintended change fails here and
+    // an intended one is a single line to update, with the behaviour test still
+    // valid at the new size.
+    expect(MAILBOX_MAX_LINES).toBe(2000);
+  });
+
   it("compacts to MAILBOX_MAX_LINES, dropping the OLDEST and keeping the newest", async () => {
     // The cap whose exhaustion caused the incident had no coverage at all before
     // this. It is the other half of the contract: the filter keeps replies out,
@@ -290,17 +301,20 @@ describe("messageLog unprompted-reply filter", () => {
     const from = { pid: 1111, cli: "claude", cwd: "/repo/alpha", agent_id: "agent-A" };
     const file = mailboxPath(to, "inbox");
     await mkdir(path.dirname(file), { recursive: true });
-    const seeded = Array.from({ length: 1999 }, (_, i) =>
+    // Derived from the constant, not hard-coded: if the cap moves, a literal
+    // seed count would quietly stop crossing the boundary and this test would
+    // pass without ever compacting — the exact failure the rename above is about.
+    const seeded = Array.from({ length: MAILBOX_MAX_LINES - 1 }, (_, i) =>
       JSON.stringify(makeRecord({ from, to: toParty, body: `seed ${i}` })),
     );
     await writeFile(file, seeded.join("\n") + "\n");
 
-    // 1999 + 3 = 2002, so exactly two must be evicted, oldest first.
+    // (MAX - 1) + 3 = MAX + 2, so exactly two must be evicted, oldest first.
     for (const body of ["real A", "real B", "real C"])
       await recordInbox(makeRecord({ from, to: toParty, body }));
 
     const inbox = await readMailbox(to, "inbox");
-    expect(inbox).toHaveLength(2000);
+    expect(inbox).toHaveLength(MAILBOX_MAX_LINES);
     expect(inbox.at(-1)!.body).toBe("real C");
     expect(inbox.at(-2)!.body).toBe("real B");
     expect(inbox.at(-3)!.body).toBe("real A");
