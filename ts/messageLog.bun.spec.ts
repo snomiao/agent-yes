@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtemp, readFile, rm } from "fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
 import {
@@ -241,9 +241,17 @@ describe("messageLog unprompted-reply filter", () => {
     expect(await readMailbox(dir, "outbox")).toHaveLength(1);
   });
 
-  it("a reply burst past the cap leaves an earlier real message recoverable", async () => {
+  it("filtered replies never reach the file, so they cannot count toward the cap", async () => {
     // The regression this exists to prevent: the mailbox is the recovery path
     // for a truncated message, and replies were evicting it within minutes.
+    //
+    // NAMED FOR WHAT IT PROVES. An earlier draft called this "a reply burst past
+    // the cap leaves an earlier real message recoverable", which promises more
+    // than the body delivers: every one of the 2,500 rows below is filtered, so
+    // the file never approaches MAILBOX_MAX_LINES and compaction never runs. The
+    // mechanism under test is that the rows never land at all — asserted
+    // directly below on the file, not just on the parsed mailbox. Compaction
+    // itself is covered by the next test.
     const to = path.join(dir, "recipient");
     const toParty = { pid: 2222, cli: "codex", cwd: to, agent_id: "agent-B" };
     await recordInbox(
@@ -263,5 +271,42 @@ describe("messageLog unprompted-reply filter", () => {
     const inbox = await readMailbox(to, "inbox");
     expect(inbox).toHaveLength(1);
     expect(inbox[0]!.body).toBe("the message that arrived truncated");
+    // The mechanism, not just the outcome: one line on disk, so the 2,500
+    // replies were never written rather than written and then compacted away.
+    const raw = await readFile(mailboxPath(to, "inbox"), "utf-8");
+    expect(raw.split("\n").filter((l) => l.trim())).toHaveLength(1);
+  });
+
+  it("compacts to MAILBOX_MAX_LINES, dropping the OLDEST and keeping the newest", async () => {
+    // The cap whose exhaustion caused the incident had no coverage at all before
+    // this. It is the other half of the contract: the filter keeps replies out,
+    // and this decides who survives when real traffic fills the log.
+    //
+    // The first 1,999 lines are written directly as a FIXTURE — driving them
+    // through recordInbox would re-read the whole file 2,000 times. The rows
+    // that actually cross the boundary go through the real writer.
+    const to = path.join(dir, "recipient");
+    const toParty = { pid: 2222, cli: "codex", cwd: to, agent_id: "agent-B" };
+    const from = { pid: 1111, cli: "claude", cwd: "/repo/alpha", agent_id: "agent-A" };
+    const file = mailboxPath(to, "inbox");
+    await mkdir(path.dirname(file), { recursive: true });
+    const seeded = Array.from({ length: 1999 }, (_, i) =>
+      JSON.stringify(makeRecord({ from, to: toParty, body: `seed ${i}` })),
+    );
+    await writeFile(file, seeded.join("\n") + "\n");
+
+    // 1999 + 3 = 2002, so exactly two must be evicted, oldest first.
+    for (const body of ["real A", "real B", "real C"])
+      await recordInbox(makeRecord({ from, to: toParty, body }));
+
+    const inbox = await readMailbox(to, "inbox");
+    expect(inbox).toHaveLength(2000);
+    expect(inbox.at(-1)!.body).toBe("real C");
+    expect(inbox.at(-2)!.body).toBe("real B");
+    expect(inbox.at(-3)!.body).toBe("real A");
+    // Oldest-first eviction: "seed 0" and "seed 1" are gone, "seed 2" is now the head.
+    expect(inbox[0]!.body).toBe("seed 2");
+    expect(inbox.some((r) => r.body === "seed 0")).toBe(false);
+    expect(inbox.some((r) => r.body === "seed 1")).toBe(false);
   });
 });
