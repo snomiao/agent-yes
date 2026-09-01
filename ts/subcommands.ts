@@ -3436,13 +3436,25 @@ async function cmdSend(rest: string[]): Promise<number> {
 
   // Length cap: a body longer than this is a document, not a prompt — rejecting it
   // is kinder than pasting it into a live CLI where bracketed-paste will fuse or
-  // truncate it. The `-` (stdin) path carries multi-line bodies verbatim too, so
-  // the hint points at a real alternative that doesn't silently lose text.
+  // truncate it.
+  //
+  // The cap applies to the FINAL body, so it covers the `-` (stdin) path too: the
+  // stdin read happens above, and `body` is whatever came out of it. An earlier
+  // version of this message told the reader to pipe from a file instead — advice
+  // that cannot work, because piping produces the same over-long body and hits the
+  // same cap. An error prescribing a remedy that fails costs the reader a full
+  // attempt and then makes them doubt their own reading of the message, which is
+  // worse than saying nothing. What actually works is sending the PATH rather than
+  // the content, so that is what it now says — and it says so about stdin
+  // explicitly, to pre-empt the attempt.
   if (body.length > SEND_BODY_MAX_CHARS) {
     throw new Error(
       `message is ${body.length} chars, over the ${SEND_BODY_MAX_CHARS}-char limit. ` +
-        `Longer text isn't a terminal prompt — write it to a file and pipe it, ` +
-        `e.g. 'ay send <keyword> - < file.txt', or shorten to ≤${SEND_BODY_MAX_CHARS} chars.`,
+        `Longer text is a document, not a terminal prompt: write it to a file ` +
+        `(your session scratchpad) and send the PATH, e.g. ` +
+        `'ay send <keyword> "see /path/to/notes.md"'. ` +
+        `Piping with '-' does NOT help — stdin is subject to the same ` +
+        `${SEND_BODY_MAX_CHARS}-char limit.`,
     );
   }
 
