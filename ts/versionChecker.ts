@@ -218,9 +218,25 @@ export async function fetchLatestVersion(): Promise<string | null> {
 
 /** A version split into its numeric core and its prerelease identifiers. */
 interface ParsedVersion {
-  core: number[];
+  /** Kept as STRINGS — see `compareNumericStrings` for why, not `Number`. */
+  core: string[];
   /** Empty for a release; `["beta", "719", "1"]` for `-beta.719.1`. */
   pre: string[];
+}
+
+/**
+ * Compare two runs of digits as numbers, without going through `Number`.
+ *
+ * `Number` is exact only below 2^53, so a build counter past that compares EQUAL
+ * to its neighbour and the ordering silently collapses — the same class of
+ * mistake as the NaN this file is fixing, just further out. Digit strings have no
+ * such ceiling: strip leading zeros, then longer wins, then lexicographic.
+ */
+function compareNumericStrings(a: string, b: string): number {
+  const x = a.replace(/^0+(?=\d)/, "");
+  const y = b.replace(/^0+(?=\d)/, "");
+  if (x.length !== y.length) return x.length > y.length ? 1 : -1;
+  return x === y ? 0 : x > y ? 1 : -1;
 }
 
 /**
@@ -230,11 +246,17 @@ interface ParsedVersion {
  *
  * Build metadata is parsed and discarded: semver says it takes no part in
  * precedence.
+ *
+ * Deliberately more PERMISSIVE than strict semver about what it accepts — a
+ * leading zero in an identifier, a core shorter or longer than three fields.
+ * This is an ordering function, not a validator: the cost of rejecting a version
+ * npm actually published would be paid as a refused upgrade, and the cost of
+ * ordering an odd-but-real one is nothing.
  */
 export function parseVersion(v: string): ParsedVersion | null {
   const m = /^v?(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(v.trim());
   if (!m) return null;
-  return { core: m[1]!.split(".").map(Number), pre: m[2] ? m[2].split(".") : [] };
+  return { core: m[1]!.split("."), pre: m[2] ? m[2].split(".") : [] };
 }
 
 /**
@@ -266,9 +288,8 @@ export function compareVersions(v1: string, v2: string): number {
   if (!a || !b) return 0;
 
   for (let i = 0; i < Math.max(a.core.length, b.core.length); i++) {
-    const x = a.core[i] ?? 0;
-    const y = b.core[i] ?? 0;
-    if (x !== y) return x > y ? 1 : -1;
+    const cmp = compareNumericStrings(a.core[i] ?? "0", b.core[i] ?? "0");
+    if (cmp !== 0) return cmp;
   }
 
   if (a.pre.length === 0 && b.pre.length === 0) return 0;
@@ -284,7 +305,8 @@ export function compareVersions(v1: string, v2: string): number {
     const xNum = /^\d+$/.test(x);
     const yNum = /^\d+$/.test(y);
     if (xNum && yNum) {
-      if (Number(x) !== Number(y)) return Number(x) > Number(y) ? 1 : -1;
+      const cmp = compareNumericStrings(x, y);
+      if (cmp !== 0) return cmp;
     } else if (xNum !== yNum) {
       return xNum ? -1 : 1; // numeric identifiers rank below alphanumeric ones
     } else if (x !== y) {

@@ -96,6 +96,20 @@ describe("versionChecker", () => {
       }
     });
 
+    it("orders numbers past 2^53, where Number() would call them equal", () => {
+      // The same failure as the NaN this fixes, one order of magnitude out:
+      // Number() is exact only below 2^53, so a build counter past it would
+      // compare EQUAL to its neighbour and the ordering would silently collapse.
+      expect(compareVersions("1.2.3-9007199254740992", "1.2.3-9007199254740993")).toBe(-1);
+      expect(compareVersions("1.2.9007199254740993", "1.2.9007199254740992")).toBe(1);
+    });
+
+    it("treats leading zeros as the same number, not as text", () => {
+      expect(compareVersions("1.02.3", "1.2.3")).toBe(0);
+      expect(compareVersions("1.0.0-01", "1.0.0-1")).toBe(0);
+      expect(compareVersions("1.0.0-002", "1.0.0-10")).toBe(-1);
+    });
+
     it("ignores build metadata, which takes no part in precedence", () => {
       expect(compareVersions("1.2.3+build.5", "1.2.3")).toBe(0);
       expect(compareVersions("1.2.3+a", "1.2.3+b")).toBe(0);
@@ -175,6 +189,36 @@ describe("versionChecker", () => {
       process.env.AGENT_YES_UPDATED = pkg.default.version;
       await checkAndAutoUpdate();
       expect(fetch).not.toHaveBeenCalled();
+    });
+
+    it("does NOT install `latest` over a newer prerelease — the downgrade, end to end", async () => {
+      // The comparator tests pin the answer; this pins the ACTION taken on it.
+      // With the previous comparator this call ran
+      // `bun add -g agent-yes@1.290.5` over 1.290.6-beta and re-execed.
+      const { readFile } = await import("fs/promises");
+      const { execaCommand } = await import("execa");
+      _setInstalledPackageForTesting({ name: "agent-yes", version: "1.290.6-beta.719.1" });
+      vi.mocked(readFile).mockResolvedValueOnce(
+        JSON.stringify({ checkedAt: Date.now(), latestVersion: "1.290.5" }) as any,
+      );
+      await checkAndAutoUpdate();
+      expect(execaCommand).not.toHaveBeenCalled();
+      expect(process.stderr.write).not.toHaveBeenCalled();
+    });
+
+    it("still installs a real newer release over a prerelease", async () => {
+      // The other direction, so the fix cannot be "never update" in disguise.
+      const { readFile } = await import("fs/promises");
+      const { execaCommand } = await import("execa");
+      _setInstalledPackageForTesting({ name: "agent-yes", version: "1.290.6-beta.719.1" });
+      vi.mocked(readFile).mockResolvedValueOnce(
+        JSON.stringify({ checkedAt: Date.now(), latestVersion: "1.290.6" }) as any,
+      );
+      await checkAndAutoUpdate();
+      expect(execaCommand).toHaveBeenCalledWith(
+        expect.stringContaining("agent-yes@1.290.6"),
+        expect.anything(),
+      );
     });
 
     it("should use cached result within TTL and not install when up-to-date", async () => {
