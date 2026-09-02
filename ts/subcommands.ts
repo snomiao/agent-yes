@@ -1801,6 +1801,35 @@ export function probeStdinReachable(
 }
 
 /**
+ * Whether a row is old enough and quiet enough for `probeStdinReachable`'s answer
+ * to mean anything.
+ *
+ * What the grace period IS: one idle threshold measured twice over — the agent
+ * must have EXISTED longer than IDLE_THRESHOLD_MS, and it must have PRODUCED
+ * nothing for that long. Both clocks are the same constant, so there is no
+ * second number to keep in sync, and each covers the other's blind spot:
+ *
+ *  - The age covers a stale log. Both runtimes register the pid record before
+ *    the reader opens the FIFO, and Rust's log writer OPENS ITS RAW LOG IN
+ *    APPEND MODE — so a recycled pid inheriting a previous agent's log file
+ *    starts life looking quiet. Age does not care what the log says.
+ *  - The quiet covers a long-lived agent. An agent that has been up for hours
+ *    and is mid-answer is `active`; nothing about it is misreported, so it is
+ *    not probed.
+ *
+ * `log_file: null` is quiet by definition rather than `active`: there is no log
+ * to judge by, so the age is the whole test. Without that, a record with no log
+ * could never be reported unreachable at all.
+ */
+function reachabilityProbeApplies(
+  r: Pick<GlobalPidRecord, "started_at" | "log_file">,
+  base: "active" | "idle",
+): boolean {
+  const olderThanThreshold = Date.now() - r.started_at > IDLE_THRESHOLD_MS;
+  return olderThanThreshold && (base === "idle" || !r.log_file);
+}
+
+/**
  * The live display state of one agent: stopped (exited) / unreachable (alive but
  * its stdin FIFO takes no writer) / idle (alive+quiet) / active (alive+recent
  * output) / needs_input (alive but parked on an unanswered
@@ -1819,16 +1848,12 @@ export async function deriveLiveState(
   // should be invited to act on, and reporting it as `idle` is what let a
   // coordinator count this row against a concurrency cap and hand it work.
   //
-  // Gated on `base === "idle"` — the quiet threshold IS the grace period, and it
-  // is load-bearing, not an optimisation. Both runtimes register the record
-  // BEFORE the reader opens the FIFO (rs/src/main.rs registers, then
-  // `run_with_fifo` spawns the reader; ts/index.ts registers at spawn and builds
-  // the FIFO stream later in the pipeline), so a just-spawned, perfectly healthy
-  // agent has a reader-less FIFO for a moment. Its log is fresh in that moment,
-  // so it reads `active` and is never probed. And a wrapper that has actually
-  // died stops writing the log, so its row falls to `idle` within the threshold
-  // and IS probed — the window closes on its own, from both sides.
-  if (base === "idle" && probeStdinReachable(r) === "unreachable")
+  // Gated: the probe only speaks for a row that is past the grace period (see
+  // reachabilityProbeApplies). Both runtimes register the record BEFORE the
+  // reader opens the FIFO, so a healthy agent is briefly readerless at spawn and
+  // must not be called dead there; a wrapper that HAS died stops writing the log,
+  // so its row ages into the probe on its own.
+  if (reachabilityProbeApplies(r, base) && probeStdinReachable(r) === "unreachable")
     return { state: "unreachable", question: null };
   // The Rust supervisor flagged this agent unresponsive (no PTY output after a
   // poke / a frozen "working" spinner) — an authoritative wedge signal, so it
@@ -5148,9 +5173,9 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
   } else {
     state = "active";
   }
-  // Whether the log has been quiet past the idle threshold, captured BEFORE the
-  // needs_input / stuck overrides rewrite `state`. Gates the reachability probe.
-  const quiet = state === "idle";
+  // The log-derived state, captured BEFORE the needs_input / stuck overrides
+  // rewrite `state`. Gates the reachability probe.
+  const baseState: "active" | "idle" = state === "idle" ? "idle" : "active";
   const activity =
     state !== "stopped" && record.log_file ? await extractActivity(record.log_file) : null;
   // A blocked interactive menu overrides active/idle — the agent is alive and
@@ -5172,9 +5197,12 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
   if (alive && record.unresponsive) state = "stuck";
   // Alive but undeliverable outranks all of the above, exactly as in
   // deriveLiveState — `ay status` and `ay ls` must not disagree about whether a
-  // row can be given work. Same quiet-threshold gate, for the same reason: a
-  // freshly spawned agent is registered before its reader opens the FIFO.
-  if (alive && quiet && probeStdinReachable(record) === "unreachable") {
+  // row can be given work. Same grace period, from the same helper.
+  if (
+    alive &&
+    reachabilityProbeApplies(record, baseState) &&
+    probeStdinReachable(record) === "unreachable"
+  ) {
     state = "unreachable";
     question = null;
   }

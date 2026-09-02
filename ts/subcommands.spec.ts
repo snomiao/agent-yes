@@ -3521,6 +3521,38 @@ describe("subcommands.deriveLiveState reachability", () => {
     }
   });
 
+  it("does NOT probe a young agent that INHERITED a stale log — the recycled-log race", async () => {
+    // The quiet half of the grace period is not enough on its own. Rust's log
+    // writer opens `<pid>.raw.log` in APPEND mode, so a recycled pid can inherit
+    // a previous agent's log file and look quiet from its first millisecond —
+    // while its reader has not opened the FIFO yet. The AGE half is what covers
+    // this: the record was created seconds ago, so nothing is concluded from it.
+    const { spawnSync } = await import("child_process");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+    try {
+      const fifo = path.join(dir, "stdin.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const log = await quietLog(dir); // inherited: mtime 5 minutes old
+      const mod = await loadModule();
+      const state = await mod.deriveLiveState(
+        rec({ log_file: log, fifo_file: fifo, started_at: Date.now() - 1_000 }),
+      );
+      expect(state.state).not.toBe("unreachable");
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("still probes an OLD record that has no log at all", async () => {
+    // `log_file: null` reads `active` from the log heuristics because there is
+    // nothing to judge by — it must not therefore become unprobeable, or a row
+    // with no log could never be reported unreachable at all.
+    const mod = await loadModule();
+    expect(
+      await mod.deriveLiveState(rec({ log_file: null, fifo_file: null, started_at: 0 })),
+    ).toEqual({ state: "unreachable", question: null });
+  });
+
   // Also a guard rather than a proof: `stopped` must keep winning, so a dead pid
   // is never reported by the more specific-sounding `unreachable`.
   it("keeps reporting 'stopped' for a dead pid without probing anything", async () => {
@@ -3617,6 +3649,93 @@ describe("subcommands.cmdSend unreachable exit status", () => {
     } finally {
       Object.defineProperty(process, "stdin", orig);
       cap.restore();
+    }
+  });
+
+  it("exits the same way when the reader dies MID-SEND, end to end", async () => {
+    // The window the preflight probe cannot cover, driven through cmdSend rather
+    // than asserted on a predicate: reachable when the send starts, gone before
+    // it finishes. `writeToIpc` opens per call, so the failure the SECOND write
+    // meets here is ENXIO at open — EPIPE needs the reader to vanish inside one
+    // write, which the sibling test below produces directly. Both errnos go
+    // through the same catch, and this is the half that proves the catch is
+    // wired to cmdSend's exit status at all.
+    //
+    // Hold the FIFO with a read-only fd: an O_RDWR fd would BE a reader forever
+    // and the write could never fail.
+    const { spawnSync } = await import("child_process");
+    const fs = await import("fs");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-epipe-"));
+    const savedForce = process.env.AGENT_YES_FORCE_SEND;
+    try {
+      const fifo = path.join(dir, "stdin.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const readFd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+      let closed = false;
+      const closeOnFirstByte = (async () => {
+        const buf = Buffer.alloc(4096);
+        const deadline = Date.now() + 5_000;
+        while (Date.now() < deadline) {
+          try {
+            if (fs.readSync(readFd, buf, 0, buf.length, null) > 0) break;
+          } catch (err: any) {
+            if (err?.code !== "EAGAIN") break;
+          }
+          await new Promise((r) => setTimeout(r, 2));
+        }
+        fs.closeSync(readFd); // every reader gone → the next write is EPIPE
+        closed = true;
+      })();
+
+      const mod = await loadModule();
+      // No log_file: cmdSend then takes the plain "body, pause, trailing" path,
+      // so there is a real gap between the two writes for the reader to vanish in.
+      await registerTarget(fifo);
+      process.env.AGENT_YES_FORCE_SEND = "1"; // this test is about delivery, not guards
+      const cap = captureStderr();
+      let code: number | null;
+      try {
+        code = await mod.runSubcommand(["bun", "cli.js", "send", String(process.pid), "hello"]);
+      } finally {
+        cap.restore();
+      }
+      await closeOnFirstByte;
+      expect(closed).toBe(true);
+      expect(code).toBe(mod.SEND_EXIT_UNREACHABLE);
+      expect(cap.out.join("")).toMatch(/UNREACHABLE mid-send/);
+    } finally {
+      if (savedForce === undefined) delete process.env.AGENT_YES_FORCE_SEND;
+      else process.env.AGENT_YES_FORCE_SEND = savedForce;
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("a reader lost INSIDE one write really does raise EPIPE, and it classifies", async () => {
+    // Produces the errno rather than asserting a string: fill the pipe so
+    // `writeToIpc` is looping on EAGAIN, then take the reader away mid-loop.
+    // POSIX gives EPIPE for a write to a FIFO with no reader, and that is the
+    // one shape a preflight open() can never predict.
+    const { spawnSync } = await import("child_process");
+    const fs = await import("fs");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-epipe-"));
+    try {
+      const fifo = path.join(dir, "stdin.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const readFd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+      const mod = await loadModule();
+      // Far past any pipe buffer, and never drained, so the write backs up.
+      const huge = "z".repeat(1024 * 1024);
+      const write = mod.writeToIpc(fifo, huge);
+      setTimeout(() => fs.closeSync(readFd), 50); // every reader gone, mid-write
+      const err = await write.then(
+        () => null,
+        (e: NodeJS.ErrnoException) => e,
+      );
+      expect(err).not.toBeNull();
+      expect(err!.code).toBe("EPIPE");
+      expect(mod.isUnreachableWriteErrno(err!.code)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
     }
   });
 
