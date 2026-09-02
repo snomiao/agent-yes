@@ -3648,13 +3648,13 @@ async function cmdSend(rest: string[]): Promise<number> {
   // send that cannot land should not first consume the caller's piped body.
   if (!fifoPath) {
     process.stderr.write(
-      `ay send: pid ${record.pid}: no fifo_file recorded — this agent didn't register a stdin FIFO (an older agent, or one not started with --stdpush). Restarting it (ay restart ${record.pid}) re-registers one.\n`,
+      `ay send: pid ${record.pid}: no fifo_file recorded — this agent didn't register a stdin FIFO (an older agent, or one not started with --stdpush), so there is no channel to deliver on. If it is still running, restarting it (ay restart ${record.pid}) registers one; if the row is stale, ay stop ${record.pid} retires it.\n`,
     );
     return SEND_EXIT_UNREACHABLE;
   }
   if (await confirmStdinUnreachable(record, UNREACHABLE_CONFIRM_SEND_MS)) {
     process.stderr.write(
-      `ay send: pid ${record.pid} (${record.cli}) is UNREACHABLE — its stdin FIFO ${fifoPath} takes no writer, so nothing was sent. The process is alive but nothing is reading its input (its wrapper died, or the pid was recycled). \`ay ls\` shows it as \`unreachable\`; \`ay restart ${record.pid}\` gives it a live channel again.\n`,
+      `ay send: pid ${record.pid} (${record.cli}) is UNREACHABLE — its stdin FIFO ${fifoPath} takes no writer, so nothing was sent. The process is alive but nothing is reading its input (its wrapper died, or the pid was recycled). See why: ps -p ${record.pid} -o comm= — if that is not ${record.cli}, the pid was recycled and this row is stale. Retire it with: ay stop ${record.pid} (registry only, sends no signal). Do NOT use ay restart: it writes the shutdown command to this same FIFO and fails the same way.\n`,
     );
     return SEND_EXIT_UNREACHABLE;
   }
@@ -3855,7 +3855,7 @@ async function cmdSend(rest: string[]): Promise<number> {
     const code = (e as NodeJS.ErrnoException)?.code;
     if (!isUnreachableWriteErrno(code)) throw e;
     process.stderr.write(
-      `ay send: pid ${record.pid} (${record.cli}) became UNREACHABLE mid-send — its stdin FIFO ${fifoPath} stopped taking a writer (${code}). The message may be partly delivered; \`ay restart ${record.pid}\` gives it a live channel again.\n`,
+      `ay send: pid ${record.pid} (${record.cli}) became UNREACHABLE mid-send — its stdin FIFO ${fifoPath} stopped taking a writer (${code}). The message may be partly delivered. Retire the row with: ay stop ${record.pid} (registry only, sends no signal); ay restart writes to this same FIFO and would fail the same way.\n`,
     );
     return SEND_EXIT_UNREACHABLE;
   }
@@ -4461,6 +4461,31 @@ async function cmdStop(rest: string[]): Promise<number> {
       exit_reason: "already-stopped",
     }).catch(() => {});
     process.stdout.write(`pid ${record.pid} (${record.cli}) already stopped — marked exited\n`);
+    return 0;
+  }
+
+  // Alive by pid, but nothing is reading its stdin: the shutdown command below
+  // would go to the same FIFO that refuses a writer, and throw. Retire the record
+  // instead — REGISTRY ONLY, no signal of any kind. That is safe precisely
+  // because we cannot talk to it: the pid we hold may not even be this agent any
+  // more (a recycled pid), and signalling it would reach a stranger. This is the
+  // one remedy that works on such a row, and `ay send`'s error points here.
+  //
+  // Gated on `confirmStdinUnreachable`, not a single probe, so an agent that is
+  // merely quiet — or still opening its FIFO — is never retired by `ay stop`.
+  if (await confirmStdinUnreachable(record, UNREACHABLE_CONFIRM_SEND_MS)) {
+    await updateGlobalPidStatus(record.pid, {
+      status: "exited",
+      exit_reason: "unreachable",
+    }).catch(() => {});
+    process.stdout.write(
+      `pid ${record.pid} (${record.cli}) is unreachable — nothing reads its stdin, so no shutdown ` +
+        `command was sent. Marked exited; it will stop appearing in \`ay ls\`.\n`,
+    );
+    process.stderr.write(
+      `  the process at pid ${record.pid} may not be this agent any more — check with: ` +
+        `ps -p ${record.pid} -o comm=\n`,
+    );
     return 0;
   }
 
@@ -5566,7 +5591,11 @@ async function cmdResult(rest: string[]): Promise<number> {
       return 0;
     }
     const snap = await snapshotStatus(record);
-    if (snap.state === "stopped") {
+    // `unreachable` is terminal here for the same reason it is in
+    // `ay status --wait`: no envelope can arrive from an agent nothing can reach,
+    // so waiting on it only burns the caller's --timeout. Teaching one sibling
+    // and not the other is how a wait loop quietly stops being a wait.
+    if (snap.state === "stopped" || snap.state === "unreachable") {
       // Done, but never deposited an envelope. Re-check once: the agent may have
       // written the file in the same tick it exited (race), so prefer the file.
       const last = await loadStoredResult(record.pid);
@@ -5574,7 +5603,7 @@ async function cmdResult(rest: string[]): Promise<number> {
         emitFound(last);
         return 0;
       }
-      emitMissing("stopped");
+      emitMissing(snap.state);
       return 1;
     }
     if (!argv.wait) {

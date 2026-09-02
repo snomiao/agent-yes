@@ -3630,6 +3630,96 @@ describe("subcommands.deriveLiveState reachability", () => {
   });
 });
 
+describe("subcommands.cmdStop retiring an unreachable row", () => {
+  async function registerStopTarget(fifoFile: string | null) {
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "codex",
+      prompt: "stop-reach-test",
+      cwd: process.cwd(),
+      log_file: null,
+      fifo_file: fifoFile,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now() - 10 * 60 * 1000,
+    });
+  }
+
+  async function statusOf(pid: number): Promise<string | undefined> {
+    const { readGlobalPids } = await import("./globalPidIndex.ts");
+    return (await readGlobalPids()).find((r) => r.pid === pid)?.status;
+  }
+
+  it("retires it WITHOUT sending any signal, and says why", async () => {
+    // The only remedy that works on such a row: registry only. `ay send` points
+    // here, so it has to actually work — that was the defect this replaces.
+    const { spawnSync } = await import("child_process");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-stop-"));
+    try {
+      const fifo = path.join(dir, "stdin.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const mod = await loadModule();
+      await registerStopTarget(fifo);
+      const out: string[] = [];
+      const origOut = process.stdout.write.bind(process.stdout);
+      const origErr = process.stderr.write.bind(process.stderr);
+      (process.stdout as any).write = (x: any) => (out.push(String(x)), true);
+      (process.stderr as any).write = (x: any) => (out.push(String(x)), true);
+      let code: number | null;
+      try {
+        code = await mod.runSubcommand(["bun", "cli.js", "stop", String(process.pid)]);
+      } finally {
+        process.stdout.write = origOut;
+        process.stderr.write = origErr;
+      }
+      expect(code).toBe(0);
+      expect(out.join("")).toMatch(/unreachable/);
+      expect(out.join("")).toMatch(/no shutdown command was sent/);
+      expect(out.join("")).toMatch(/ps -p \d+ -o comm=/);
+      expect(await statusOf(process.pid)).toBe("exited");
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("does NOT retire a row that is merely quiet — the control that matters", async () => {
+    // A reachable agent with nothing to say must survive `ay stop` reaching the
+    // new branch: it has to fall through to the real shutdown path, leaving the
+    // record active. A stop that retires quiet lanes is worse than the bug.
+    const { spawnSync } = await import("child_process");
+    const fs = await import("fs");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-stop-"));
+    try {
+      const fifo = path.join(dir, "stdin.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const held = fs.openSync(fifo, fs.constants.O_RDWR); // a live reader
+      try {
+        const mod = await loadModule();
+        await registerStopTarget(fifo);
+        const out: string[] = [];
+        const origOut = process.stdout.write.bind(process.stdout);
+        const origErr = process.stderr.write.bind(process.stderr);
+        (process.stdout as any).write = (x: any) => (out.push(String(x)), true);
+        (process.stderr as any).write = (x: any) => (out.push(String(x)), true);
+        try {
+          await mod.runSubcommand(["bun", "cli.js", "stop", String(process.pid)]);
+        } finally {
+          process.stdout.write = origOut;
+          process.stderr.write = origErr;
+        }
+        expect(out.join("")).not.toMatch(/unreachable/);
+        expect(await statusOf(process.pid)).not.toBe("exited");
+      } finally {
+        fs.closeSync(held);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+});
+
 describe("subcommands.cmdSend unreachable exit status", () => {
   async function registerTarget(fifoFile: string | null) {
     const { appendGlobalPid } = await import("./globalPidIndex.ts");
@@ -3671,7 +3761,12 @@ describe("subcommands.cmdSend unreachable exit status", () => {
         expect(code).toBe(mod.SEND_EXIT_UNREACHABLE);
         expect(code).not.toBe(1);
         expect(cap.out.join("")).toMatch(/UNREACHABLE/);
-        expect(cap.out.join("")).toMatch(/ay restart/);
+        // The remedy it names must be one that WORKS on this row. `ay restart`
+        // writes the shutdown command to this same FIFO and fails identically —
+        // naming it was brief defect #1 reproduced inside its own fix.
+        expect(cap.out.join("")).toMatch(/ay stop \d+/);
+        expect(cap.out.join("")).toMatch(/Do NOT use ay restart/);
+        expect(cap.out.join("")).toMatch(/ps -p \d+ -o comm=/);
       } finally {
         cap.restore();
       }
