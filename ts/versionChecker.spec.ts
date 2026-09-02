@@ -64,6 +64,43 @@ describe("versionChecker", () => {
       expect(compareVersions("1.0.1", "1.0")).toBe(1);
       expect(compareVersions("1.0", "1.0.1")).toBe(-1);
     });
+
+    it("does not read a PRERELEASE as older than the release it is ahead of", () => {
+      // The downgrade. `checkAndAutoUpdate` installs `latest` whenever this
+      // returns < 0, so answering -1 here means installing 1.290.5 OVER
+      // 1.290.6-beta and re-execing. Measured on a live fleet: every machine on
+      // a prerelease reverted itself on its next invocation.
+      expect(compareVersions("1.290.6-beta.719.1", "1.290.5")).toBe(1);
+      expect(compareVersions("1.290.5", "1.290.6-beta.719.1")).toBe(-1);
+    });
+
+    it("ranks a prerelease below its own release, and prereleases among themselves", () => {
+      expect(compareVersions("1.2.3-beta.1", "1.2.3")).toBe(-1);
+      expect(compareVersions("1.2.3", "1.2.3-beta.1")).toBe(1);
+      // Numeric identifiers compare as numbers, not as text: 2 < 10.
+      expect(compareVersions("1.2.3-beta.2", "1.2.3-beta.10")).toBe(-1);
+      expect(compareVersions("1.0.0-alpha", "1.0.0-beta")).toBe(-1);
+      // A numeric identifier ranks below an alphanumeric one, and a shorter run
+      // of identifiers below a longer one sharing its prefix.
+      expect(compareVersions("1.0.0-1", "1.0.0-alpha")).toBe(-1);
+      expect(compareVersions("1.0.0-alpha", "1.0.0-alpha.1")).toBe(-1);
+      expect(compareVersions("1.0.0-beta.1", "1.0.0-beta.1")).toBe(0);
+    });
+
+    it("answers 0 — never -1 — for a version it cannot read", () => {
+      // "I cannot tell" must not arrive at the caller as "older": the caller's
+      // action on -1 is a global install, and its action on 0 is nothing.
+      for (const junk of ["latest", "", "next", "^1.2.3", "1.x", "not-a-version"]) {
+        expect(compareVersions(junk, "1.0.0")).toBe(0);
+        expect(compareVersions("1.0.0", junk)).toBe(0);
+      }
+    });
+
+    it("ignores build metadata, which takes no part in precedence", () => {
+      expect(compareVersions("1.2.3+build.5", "1.2.3")).toBe(0);
+      expect(compareVersions("1.2.3+a", "1.2.3+b")).toBe(0);
+      expect(compareVersions("v1.2.4", "1.2.3")).toBe(1);
+    });
   });
 
   describe("fetchLatestVersion", () => {
