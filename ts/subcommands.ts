@@ -1801,6 +1801,37 @@ export function probeStdinReachable(
 }
 
 /**
+ * How long a row must go on being unwritable before we say so. Paid only by rows
+ * that already look dead, so a healthy fleet never waits.
+ */
+const UNREACHABLE_CONFIRM_MS = 400;
+
+/**
+ * `probeStdinReachable`, but sustained rather than instantaneous — the same
+ * principle this file already applies to `idle`, for the same reason.
+ *
+ * One reading is not enough even behind the age/quiet gate, because a record's
+ * `started_at` is not always the moment the agent started: Rust's orphan
+ * recovery adopts a live pid whose `<pid>.raw.log` it finds and stamps
+ * `started_at` from that FILE's timestamp. A recycled pid inheriting an old log
+ * therefore arrives already old AND already quiet, while the wrapper it belongs
+ * to has not opened its FIFO reader yet — every gate satisfied, and still a
+ * healthy agent.
+ *
+ * A second reading a moment later costs nothing on a live fleet (a reachable row
+ * returns after the first probe) and turns "no reader at this instant" into "no
+ * reader for as long as we looked", which is the claim `unreachable` actually
+ * makes.
+ */
+export async function confirmStdinUnreachable(
+  r: Pick<GlobalPidRecord, "pid" | "fifo_file">,
+): Promise<boolean> {
+  if (probeStdinReachable(r) !== "unreachable") return false;
+  await new Promise((resolve) => setTimeout(resolve, UNREACHABLE_CONFIRM_MS));
+  return probeStdinReachable(r) === "unreachable";
+}
+
+/**
  * Whether a row is old enough and quiet enough for `probeStdinReachable`'s answer
  * to mean anything.
  *
@@ -1853,7 +1884,7 @@ export async function deriveLiveState(
   // reader opens the FIFO, so a healthy agent is briefly readerless at spawn and
   // must not be called dead there; a wrapper that HAS died stops writing the log,
   // so its row ages into the probe on its own.
-  if (reachabilityProbeApplies(r, base) && probeStdinReachable(r) === "unreachable")
+  if (reachabilityProbeApplies(r, base) && (await confirmStdinUnreachable(r)))
     return { state: "unreachable", question: null };
   // The Rust supervisor flagged this agent unresponsive (no PTY output after a
   // poke / a frozen "working" spinner) — an authoritative wedge signal, so it
@@ -3606,7 +3637,7 @@ async function cmdSend(rest: string[]): Promise<number> {
     );
     return SEND_EXIT_UNREACHABLE;
   }
-  if (probeStdinReachable(record) === "unreachable") {
+  if (await confirmStdinUnreachable(record)) {
     process.stderr.write(
       `ay send: pid ${record.pid} (${record.cli}) is UNREACHABLE — its stdin FIFO ${fifoPath} takes no writer, so nothing was sent. The process is alive but nothing is reading its input (its wrapper died, or the pid was recycled). \`ay ls\` shows it as \`unreachable\`; \`ay restart ${record.pid}\` gives it a live channel again.\n`,
     );
@@ -5160,7 +5191,12 @@ export interface StatusSnapshot {
 }
 
 export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSnapshot> {
-  const alive = isPidAlive(record.pid);
+  // A stored exit is terminal here exactly as it is in `deriveLiveStatus`. Without
+  // this, an exited record whose pid the OS has since handed to an unrelated
+  // process reads as alive from `isPidAlive` alone, and `ay status` would call it
+  // active or unreachable while `ay ls` correctly calls it stopped. The two must
+  // not disagree about whether a row can be given work.
+  const alive = record.status !== "exited" && isPidAlive(record.pid);
   let state: LiveState;
   let logMtimeMs: number | null = null;
   if (!alive) {
@@ -5201,7 +5237,7 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
   if (
     alive &&
     reachabilityProbeApplies(record, baseState) &&
-    probeStdinReachable(record) === "unreachable"
+    (await confirmStdinUnreachable(record))
   ) {
     state = "unreachable";
     question = null;

@@ -3555,6 +3555,17 @@ describe("subcommands.deriveLiveState reachability", () => {
 
   // Also a guard rather than a proof: `stopped` must keep winning, so a dead pid
   // is never reported by the more specific-sounding `unreachable`.
+  it("agrees with ay status on an exited record whose pid has been recycled", async () => {
+    // `ay ls` has always honoured a stored exit; `ay status` asked the OS alone,
+    // so a recycled pid made it call an exited row alive — and, once this change
+    // existed, `unreachable` — while `ay ls` said `stopped`. The two must not
+    // disagree about whether a row can be given work.
+    const mod = await loadModule();
+    const exited = rec({ status: "exited", pid: process.pid, fifo_file: null });
+    expect((await mod.deriveLiveState(exited)).state).toBe("stopped");
+    expect((await mod.snapshotStatus(exited)).state).toBe("stopped");
+  });
+
   it("keeps reporting 'stopped' for a dead pid without probing anything", async () => {
     const mod = await loadModule();
     expect(await mod.deriveLiveState(rec({ pid: 2147483646 }))).toEqual({
@@ -3672,9 +3683,20 @@ describe("subcommands.cmdSend unreachable exit status", () => {
       if (spawnSync("mkfifo", [fifo]).status !== 0) return;
       const readFd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
       let closed = false;
+
+      const mod = await loadModule();
+      // No log_file: cmdSend then takes the plain "body, pause, trailing" path,
+      // so there is a real gap between the two writes for the reader to vanish in.
+      await registerTarget(fifo);
+      process.env.AGENT_YES_FORCE_SEND = "1"; // this test is about delivery, not guards
+
+      // Armed only NOW, after module load and registration: a watchdog started
+      // before them can burn its deadline on a slow import under load, close the
+      // reader before the send begins, and quietly turn this into a test of the
+      // preflight probe instead of the mid-send path it is named for.
       const closeOnFirstByte = (async () => {
         const buf = Buffer.alloc(4096);
-        const deadline = Date.now() + 5_000;
+        const deadline = Date.now() + 20_000;
         while (Date.now() < deadline) {
           try {
             if (fs.readSync(readFd, buf, 0, buf.length, null) > 0) break;
@@ -3683,15 +3705,9 @@ describe("subcommands.cmdSend unreachable exit status", () => {
           }
           await new Promise((r) => setTimeout(r, 2));
         }
-        fs.closeSync(readFd); // every reader gone → the next write is EPIPE
+        fs.closeSync(readFd); // every reader gone → the next write fails
         closed = true;
       })();
-
-      const mod = await loadModule();
-      // No log_file: cmdSend then takes the plain "body, pause, trailing" path,
-      // so there is a real gap between the two writes for the reader to vanish in.
-      await registerTarget(fifo);
-      process.env.AGENT_YES_FORCE_SEND = "1"; // this test is about delivery, not guards
       const cap = captureStderr();
       let code: number | null;
       try {
@@ -3734,6 +3750,34 @@ describe("subcommands.cmdSend unreachable exit status", () => {
       expect(err).not.toBeNull();
       expect(err!.code).toBe("EPIPE");
       expect(mod.isUnreachableWriteErrno(err!.code)).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  // Guard, not proof: pins that exit 1 keeps meaning "your call was wrong",
+  // so introducing 3 did not quietly widen into the caller-error cases.
+  it("does not refuse a target whose reader opens a moment later", async () => {
+    // The send-side half of the sustained reading: a wrapper that is still
+    // starting has no reader for a moment, and refusing delivery to it would be
+    // the same false positive as listing it dead.
+    const { spawnSync } = await import("child_process");
+    const fs = await import("fs");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+    try {
+      const fifo = path.join(dir, "stdin.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const mod = await loadModule();
+      // Unreachable right now; a reader appears inside the confirm window.
+      const late = setTimeout(() => fs.openSync(fifo, fs.constants.O_RDWR), 100);
+      try {
+        expect(mod.probeStdinReachable({ pid: process.pid, fifo_file: fifo })).toBe("unreachable");
+        expect(await mod.confirmStdinUnreachable({ pid: process.pid, fifo_file: fifo })).toBe(
+          false,
+        );
+      } finally {
+        clearTimeout(late);
+      }
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => null);
     }
