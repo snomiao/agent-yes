@@ -12,6 +12,7 @@
  */
 
 import { randomBytes } from "crypto";
+import { closeSync, constants as fsConstants, openSync } from "fs";
 import { appendFile, mkdir, open, readFile, stat, writeFile } from "fs/promises";
 import ms from "ms";
 import { homedir } from "os";
@@ -549,6 +550,17 @@ export function sendPayloadCapError(bodyLen: number, envelopeLen: number): strin
     `or shorten the body to ≤${budget} chars.`
   );
 }
+
+/**
+ * `ay send` exit status when the target cannot be written to at all — its stdin
+ * FIFO takes no writer (ENXIO / gone), or it never registered one. Distinct from
+ * 1 (a transport hiccup: a backed-up reader, a lock we could not take, a body
+ * over the cap) because the remedies are different: 1 says try again, this says
+ * the row is dead and needs `ay restart`. `ay ls` shows the same rows as
+ * `unreachable`, so a caller can see it BEFORE it hands out work.
+ * 2 is already "timed out" everywhere else in this CLI, so this is 3.
+ */
+export const SEND_EXIT_UNREACHABLE = 3;
 
 /**
  * Whether `name` is a subcommand. `managerCommands` (default true, for the
@@ -1724,8 +1736,54 @@ export async function deriveLiveStatus(r: GlobalPidRecord): Promise<"active" | "
 }
 
 /**
- * The live display state of one agent: stopped (exited) / idle (alive+quiet) /
- * active (alive+recent output) / needs_input (alive but parked on an unanswered
+ * Whether an agent's stdin FIFO can still take a write — the cheap discriminator
+ * between a lane that is staffed and one that only looks it.
+ *
+ * `isPidAlive` is not that discriminator. A pid can be alive and unreachable: the
+ * wrapper that reads the FIFO died while the CLI kept running, the record aged
+ * past a reboot, or the pid was recycled by an unrelated process. All three leave
+ * a row that reads `idle` — exactly what a healthy waiting lane reads as — until
+ * a send fails with ENXIO. Measured on this host: a row listed `idle 1d` whose
+ * `ay send` returned `ENXIO … open '<statedir>/fifo/<pid>.stdin'`.
+ *
+ * Both runtimes hold the FIFO open for the agent's whole lifetime (Rust opens it
+ * O_RDWR, TS keeps a paired dummy writer), so a live agent never momentarily
+ * loses its reader: the probe does not flap, and O_NONBLOCK means it cannot block.
+ *
+ * Fails OPEN by design. Only the two errnos that mean "nobody is on the other
+ * end" (ENXIO: FIFO with no reader; ENOENT: FIFO gone) return "unreachable";
+ * every other error — and Windows, whose named pipes need a connect, not an
+ * open — returns "unknown" and leaves the state alone. Marking a quiet-but-
+ * healthy lane dead is a worse failure than the bug this fixes.
+ */
+export function probeStdinReachable(
+  r: Pick<GlobalPidRecord, "pid" | "fifo_file">,
+): "ok" | "unreachable" | "unknown" {
+  // Windows' named pipes need a connect, not an open — no cheap synchronous
+  // probe, so say nothing rather than guess.
+  if (process.platform === "win32") return "unknown";
+  // `fifo_file` is an optional field: a Rust rewrite of pids.jsonl can drop it
+  // from a perfectly live agent's record, re-added on the next TS status update
+  // (see globalPidIndex.ts). Inferring death from the MISSING FIELD would flash
+  // healthy lanes as dead for the width of that window. So fall back to the
+  // conventional path the FIFO actually lives at, and let the open() decide —
+  // a dropped field finds the live reader, a FIFO that was never created is
+  // ENOENT.
+  const fifo = r.fifo_file ?? path.resolve(agentYesHome(), "fifo", `${r.pid}.stdin`);
+  try {
+    const fd = openSync(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
+    closeSync(fd);
+    return "ok";
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code;
+    return code === "ENXIO" || code === "ENOENT" ? "unreachable" : "unknown";
+  }
+}
+
+/**
+ * The live display state of one agent: stopped (exited) / unreachable (alive but
+ * its stdin FIFO takes no writer) / idle (alive+quiet) / active (alive+recent
+ * output) / needs_input (alive but parked on an unanswered
  * menu). Shared by the `ay ls` human table AND its `--json` output so both report
  * needs_input identically — an orchestrator parsing `ay ls --json` is the primary
  * consumer. Builds on the cheap deriveLiveStatus, then adds the menu (needs_input)
@@ -1736,6 +1794,11 @@ export async function deriveLiveState(
 ): Promise<{ state: LiveState; question: string | null }> {
   const base = await deriveLiveStatus(r);
   if (base === "exited") return { state: "stopped", question: null };
+  // Alive but nothing can be delivered to it. This wins over every state below,
+  // including needs_input: a question we cannot answer is not a state a caller
+  // should be invited to act on, and reporting it as `idle` is what let a
+  // coordinator count this row against a concurrency cap and hand it work.
+  if (probeStdinReachable(r) === "unreachable") return { state: "unreachable", question: null };
   // The Rust supervisor flagged this agent unresponsive (no PTY output after a
   // poke / a frozen "working" spinner) — an authoritative wedge signal, so it
   // wins over the log-tail heuristics (needs_input / stuck) below.
@@ -3385,7 +3448,11 @@ async function cmdSend(rest: string[]): Promise<number> {
     // nothing and still ran the (blocking) submit-confirm. The `--async` alias
     // masked this. No option here has a meaningful `--no-` form to lose.
     .parserConfiguration({ "boolean-negation": false })
-    .usage("Usage: ay send <keyword> <msg|-> [options]")
+    .usage(
+      "Usage: ay send <keyword> <msg|-> [options]\n\n" +
+        "Exit: 0 sent, 3 target unreachable (nothing sent; ay ls shows it as\n" +
+        "'unreachable' — ay restart <pid> revives it), 1 everything else.",
+    )
     .option("code", {
       type: "string",
       default: "enter",
@@ -3474,10 +3541,20 @@ async function cmdSend(rest: string[]): Promise<number> {
   }
 
   const fifoPath = record.fifo_file;
+  // Both shapes of "there is nobody to deliver to" exit with the same
+  // distinguishable status, before we read stdin or take the input lock — a
+  // send that cannot land should not first consume the caller's piped body.
   if (!fifoPath) {
-    throw new Error(
-      `pid ${record.pid}: no fifo_file recorded — this agent didn't register a stdin FIFO (an older agent, or one not started with --stdpush). Restarting it (ay restart ${record.pid}) re-registers one.`,
+    process.stderr.write(
+      `ay send: pid ${record.pid}: no fifo_file recorded — this agent didn't register a stdin FIFO (an older agent, or one not started with --stdpush). Restarting it (ay restart ${record.pid}) re-registers one.\n`,
     );
+    return SEND_EXIT_UNREACHABLE;
+  }
+  if (probeStdinReachable(record) === "unreachable") {
+    process.stderr.write(
+      `ay send: pid ${record.pid} (${record.cli}) is UNREACHABLE — its stdin FIFO ${fifoPath} takes no writer, so nothing was sent. The process is alive but nothing is reading its input (its wrapper died, or the pid was recycled). \`ay ls\` shows it as \`unreachable\`; \`ay restart ${record.pid}\` gives it a live channel again.\n`,
+    );
+    return SEND_EXIT_UNREACHABLE;
   }
 
   let body: string;
@@ -3636,30 +3713,48 @@ async function cmdSend(rest: string[]): Promise<number> {
   // The body and its Enter are ONE transaction: every gap between them (the
   // paste-settle wait, the submit-confirm retries) is a window where another
   // writer's bytes would land mid-message. See ts/ipcLock.ts.
-  await withIpcLock(
-    record.pid,
-    async () => {
-      if (fullBody && trailing) {
-        await writeToIpc(fifoPath, fullBody);
-        if (canConfirm && record.log_file) {
-          // Wait for the paste to actually finish rendering — a long/multi-line body
-          // can take longer than any fixed guess, and sending Enter mid-paste gets
-          // swallowed by the CLI's bracketed-paste handling instead of submitting.
-          await waitForLogQuiet(record.log_file, SEND_SETTLE_QUIET_MS, SEND_SETTLE_MAX_MS);
-          ({ confirmed, screen: lastScreen } = await submitAndConfirm(record, fifoPath, trailing));
+  try {
+    await withIpcLock(
+      record.pid,
+      async () => {
+        if (fullBody && trailing) {
+          await writeToIpc(fifoPath, fullBody);
+          if (canConfirm && record.log_file) {
+            // Wait for the paste to actually finish rendering — a long/multi-line body
+            // can take longer than any fixed guess, and sending Enter mid-paste gets
+            // swallowed by the CLI's bracketed-paste handling instead of submitting.
+            await waitForLogQuiet(record.log_file, SEND_SETTLE_QUIET_MS, SEND_SETTLE_MAX_MS);
+            ({ confirmed, screen: lastScreen } = await submitAndConfirm(
+              record,
+              fifoPath,
+              trailing,
+            ));
+          } else {
+            await new Promise((r) => setTimeout(r, 200));
+            await writeToIpc(fifoPath, trailing);
+          }
         } else {
-          await new Promise((r) => setTimeout(r, 200));
-          await writeToIpc(fifoPath, trailing);
+          await writeToIpc(fifoPath, fullBody + trailing);
         }
-      } else {
-        await writeToIpc(fifoPath, fullBody + trailing);
-      }
-    },
-    (why) =>
-      process.stderr.write(
-        `warning: ay send writing pid ${record.pid} without the input lock (${why})\n`,
-      ),
-  );
+      },
+      (why) =>
+        process.stderr.write(
+          `warning: ay send writing pid ${record.pid} without the input lock (${why})\n`,
+        ),
+    );
+  } catch (e) {
+    // The reader can die between the probe above and this write — a lock wait
+    // is a real window. Classify by the errno, not by when we noticed: the same
+    // mechanism gets the same exit status, so a caller's retry logic doesn't
+    // depend on a race. Every other failure (a backed-up reader that never
+    // drained, a filesystem error) stays 1.
+    const code = (e as NodeJS.ErrnoException)?.code;
+    if (code !== "ENXIO" && code !== "ENOENT") throw e;
+    process.stderr.write(
+      `ay send: pid ${record.pid} (${record.cli}) became UNREACHABLE mid-send — its stdin FIFO ${fifoPath} stopped taking a writer (${code}). The message may be partly delivered; \`ay restart ${record.pid}\` gives it a live channel again.\n`,
+    );
+    return SEND_EXIT_UNREACHABLE;
+  }
   const payload = body + trailing;
   const status = confirmed ? "sent" : "sent but NOT confirmed submitted";
   process.stdout.write(
@@ -4991,7 +5086,8 @@ export interface StatusSnapshot {
   cwd: string;
   // needs_input: alive but blocked on an interactive menu (distinct from idle =
   // alive+quiet/done, and stopped = exited). stuck: alive + busy marker on screen
-  // but long-silent (wedged mid-stream). See `question`.
+  // but long-silent (wedged mid-stream). unreachable: alive but its stdin FIFO
+  // takes no writer, so nothing can be delivered. See `question`.
   state: LiveState;
   activity: string | null;
   /** The pending question/menu when state === "needs_input", else null. */
@@ -5038,6 +5134,13 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
   // it overrides the log-tail heuristics above (but never a dead agent, which
   // Rust clears the flag on anyway).
   if (alive && record.unresponsive) state = "stuck";
+  // Alive but undeliverable outranks all of the above, exactly as in
+  // deriveLiveState — `ay status` and `ay ls` must not disagree about whether a
+  // row can be given work.
+  if (alive && probeStdinReachable(record) === "unreachable") {
+    state = "unreachable";
+    question = null;
+  }
   const notes = await readNotes();
   const note = notes.get(record.pid) ?? null;
   return {
@@ -5146,6 +5249,9 @@ async function cmdStatus(rest: string[]): Promise<number> {
         snap.state === "needs_input" ||
         snap.state === "idle" ||
         snap.state === "stuck" ||
+        // Undeliverable is terminal: no later event can arrive on a channel
+        // nothing can write to, so waiting on it would hang until --timeout.
+        snap.state === "unreachable" ||
         snap.state === "stopped"
       ) {
         emit(snap);
@@ -5165,7 +5271,8 @@ async function cmdStatus(rest: string[]): Promise<number> {
       const snap = await snapshotStatus(record);
       // A wedged agent reads as `stuck` rather than `idle`; still treat it as
       // "quiet, your turn" so `--wait-idle` doesn't hang on a stalled stream.
-      if (snap.state === "idle" || snap.state === "stuck") {
+      // Same for `unreachable`, which is terminal — see the --wait loop above.
+      if (snap.state === "idle" || snap.state === "stuck" || snap.state === "unreachable") {
         emit(snap);
         return 0;
       }

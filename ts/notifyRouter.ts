@@ -38,7 +38,10 @@ export interface ChildObservation {
   parent_started_at?: number;
   cli: string;
   cwd: string;
-  /** `deriveLiveState` state: active | idle | stopped | needs_input | stuck. */
+  /**
+   * `deriveLiveState` state: active | idle | stopped | needs_input | stuck |
+   * unreachable.
+   */
   state: string;
   /** Compact question when state === "needs_input", else null. */
   question: string | null;
@@ -212,6 +215,13 @@ export function stepRouter(
         }
         break;
       }
+      // An undeliverable child is over as far as its parent is concerned: no
+      // later edge can arrive on a channel nothing can write to, and before
+      // `unreachable` existed this child read as `idle` and the parent DID get
+      // woken. Falling through to `stopped` keeps that wake-up — the alternative
+      // is the default branch below, which emits nothing and would leave a
+      // parent waiting forever on a child whose wrapper died.
+      case "unreachable":
       case "stopped": {
         cs.idleSince = null;
         cs.idleEmitted = false;
