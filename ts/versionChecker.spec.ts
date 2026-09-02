@@ -221,6 +221,26 @@ describe("versionChecker", () => {
       );
     });
 
+    it("takes the right action on versions past 2^53, end to end", async () => {
+      // The comparator test pins the ordering; this pins the DECISION made on it.
+      // Through `Number` these two are the same float, the comparison answers
+      // "equal", and a real available upgrade is silently never installed.
+      const { readFile } = await import("fs/promises");
+      const { execaCommand } = await import("execa");
+      _setInstalledPackageForTesting({ name: "agent-yes", version: "1.2.9007199254740992" });
+      vi.mocked(readFile).mockResolvedValueOnce(
+        JSON.stringify({
+          checkedAt: Date.now(),
+          latestVersion: "1.2.9007199254740993",
+        }) as any,
+      );
+      await checkAndAutoUpdate();
+      expect(execaCommand).toHaveBeenCalledWith(
+        expect.stringContaining("agent-yes@1.2.9007199254740993"),
+        expect.anything(),
+      );
+    });
+
     it("should use cached result within TTL and not install when up-to-date", async () => {
       const { readFile } = await import("fs/promises");
       vi.mocked(readFile).mockResolvedValueOnce(
