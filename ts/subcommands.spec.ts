@@ -3376,6 +3376,61 @@ describe("subcommands.probeStdinReachable", () => {
     });
   });
 
+  it("waits longer for a SEND than for a listing, because the costs differ", async () => {
+    // A listing that is briefly wrong is cheap; refusing to deliver to an agent
+    // that was merely still starting is not. The send window must therefore
+    // outlast the display one, and a reader that appears between them must be
+    // seen by the send.
+    const { spawnSync } = await import("child_process");
+    const fs = await import("fs");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+    try {
+      const fifo = path.join(dir, "stdin.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const mod = await loadModule();
+      const rec = { pid: process.pid, fifo_file: fifo };
+      // Nothing is reading yet, and nothing will within the display window.
+      expect(await mod.confirmStdinUnreachable(rec)).toBe(true);
+      const late = setTimeout(() => fs.openSync(fifo, fs.constants.O_RDWR), 400);
+      try {
+        // …but the send keeps looking, and sees the reader arrive.
+        expect(await mod.confirmStdinUnreachable(rec, 3_000)).toBe(false);
+      } finally {
+        clearTimeout(late);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it("costs ONE window for many dead rows probed together, not one each", async () => {
+    // The property `ay notifyd` depends on: it derives every child's state in
+    // parallel, so a fleet with several broken children costs one confirmation
+    // window per tick rather than one per child. Serially this would be 5×.
+    const { spawnSync } = await import("child_process");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+    try {
+      const fifos: string[] = [];
+      for (let i = 0; i < 5; i++) {
+        const f = path.join(dir, `stdin-${i}.fifo`);
+        if (spawnSync("mkfifo", [f]).status !== 0) return;
+        fifos.push(f);
+      }
+      const mod = await loadModule();
+      const started = Date.now();
+      const answers = await Promise.all(
+        fifos.map((f) => mod.confirmStdinUnreachable({ pid: process.pid, fifo_file: f })),
+      );
+      const elapsed = Date.now() - started;
+      expect(answers).toEqual([true, true, true, true, true]);
+      // One window is 150ms; five serial ones would be 750ms. A generous bound,
+      // so this fails on the shape (serial) and not on a slow machine.
+      expect(elapsed).toBeLessThan(500);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
   it("is 'unreachable' for a FIFO nobody is reading (the ENXIO row)", async () => {
     const mod = await loadModule();
     await withReaderlessFifo((fifo) => {

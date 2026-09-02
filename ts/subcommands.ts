@@ -1803,8 +1803,19 @@ export function probeStdinReachable(
 /**
  * How long a row must go on being unwritable before we say so. Paid only by rows
  * that already look dead, so a healthy fleet never waits.
+ *
+ * Two windows, because the two callers are not paying for the same thing.
+ * DISPLAY is already gated on age AND quiet, so this is a belt against the one
+ * hole that survives the gate; a rare transient `unreachable` in a listing is
+ * cheap, and every row in a tick could pay this, so it stays short. A SEND has
+ * no gate — it asks about right now — and getting it wrong means refusing to
+ * deliver to an agent that was merely still starting, so it waits longer. The
+ * cost is only ever paid by a send that is about to fail anyway.
  */
-const UNREACHABLE_CONFIRM_MS = 400;
+const UNREACHABLE_CONFIRM_DISPLAY_MS = 150;
+const UNREACHABLE_CONFIRM_SEND_MS = 2_000;
+/** Gap between re-probes while waiting out either window. */
+const UNREACHABLE_POLL_MS = 100;
 
 /**
  * `probeStdinReachable`, but sustained rather than instantaneous — the same
@@ -1818,17 +1829,21 @@ const UNREACHABLE_CONFIRM_MS = 400;
  * to has not opened its FIFO reader yet — every gate satisfied, and still a
  * healthy agent.
  *
- * A second reading a moment later costs nothing on a live fleet (a reachable row
- * returns after the first probe) and turns "no reader at this instant" into "no
- * reader for as long as we looked", which is the claim `unreachable` actually
- * makes.
+ * Re-reading costs nothing on a live fleet (a reachable row returns on the first
+ * probe) and turns "no reader at this instant" into "no reader for as long as we
+ * looked", which is the claim `unreachable` actually makes.
  */
 export async function confirmStdinUnreachable(
   r: Pick<GlobalPidRecord, "pid" | "fifo_file">,
+  windowMs: number = UNREACHABLE_CONFIRM_DISPLAY_MS,
 ): Promise<boolean> {
   if (probeStdinReachable(r) !== "unreachable") return false;
-  await new Promise((resolve) => setTimeout(resolve, UNREACHABLE_CONFIRM_MS));
-  return probeStdinReachable(r) === "unreachable";
+  const deadline = Date.now() + windowMs;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, UNREACHABLE_POLL_MS));
+    if (probeStdinReachable(r) !== "unreachable") return false;
+  }
+  return true;
 }
 
 /**
@@ -3637,7 +3652,7 @@ async function cmdSend(rest: string[]): Promise<number> {
     );
     return SEND_EXIT_UNREACHABLE;
   }
-  if (await confirmStdinUnreachable(record)) {
+  if (await confirmStdinUnreachable(record, UNREACHABLE_CONFIRM_SEND_MS)) {
     process.stderr.write(
       `ay send: pid ${record.pid} (${record.cli}) is UNREACHABLE — its stdin FIFO ${fifoPath} takes no writer, so nothing was sent. The process is alive but nothing is reading its input (its wrapper died, or the pid was recycled). \`ay ls\` shows it as \`unreachable\`; \`ay restart ${record.pid}\` gives it a live channel again.\n`,
     );
