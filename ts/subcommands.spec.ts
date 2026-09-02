@@ -3372,34 +3372,62 @@ describe("subcommands.probeStdinReachable", () => {
   it("is 'ok' while something holds the FIFO open — the positive control", async () => {
     const mod = await loadModule();
     await withReadFifo((fifo) => {
-      expect(mod.probeStdinReachable({ fifo_file: fifo })).toBe("ok");
+      expect(mod.probeStdinReachable({ pid: process.pid, fifo_file: fifo })).toBe("ok");
     });
   });
 
   it("is 'unreachable' for a FIFO nobody is reading (the ENXIO row)", async () => {
     const mod = await loadModule();
     await withReaderlessFifo((fifo) => {
-      expect(mod.probeStdinReachable({ fifo_file: fifo })).toBe("unreachable");
+      expect(mod.probeStdinReachable({ pid: process.pid, fifo_file: fifo })).toBe("unreachable");
     });
   });
 
   it("is 'unreachable' when the FIFO is gone entirely", async () => {
     const mod = await loadModule();
-    expect(mod.probeStdinReachable({ fifo_file: path.join(testHome, "nope.fifo") })).toBe(
-      "unreachable",
-    );
+    expect(
+      mod.probeStdinReachable({ pid: process.pid, fifo_file: path.join(testHome, "nope.fifo") }),
+    ).toBe("unreachable");
   });
 
-  it("is 'unreachable' when no FIFO was ever registered", async () => {
+  it("falls back to the conventional path when `fifo_file` was dropped", async () => {
+    // The decisive test for the fallback, not just "a missing path is
+    // unreachable": a LIVE agent whose record lost the optional field (a Rust
+    // rewrite of pids.jsonl can drop it) must still read `ok`, because the FIFO
+    // is right where both runtimes put it.
     const mod = await loadModule();
-    expect(mod.probeStdinReachable({ fifo_file: null })).toBe("unreachable");
+    const pid = 4242;
+    const fifo = await liveFifo(pid); // creates <agentYesHome()>/fifo/4242.stdin
+    if (!fifo) return;
+    expect(mod.probeStdinReachable({ pid, fifo_file: null })).toBe("ok");
+  });
+
+  it("is 'unreachable' when no FIFO exists at the conventional path either", async () => {
+    const mod = await loadModule();
+    expect(mod.probeStdinReachable({ pid: 4243, fifo_file: null })).toBe("unreachable");
+  });
+
+  it("classifies EPIPE as unreachable for a WRITE, though a probe can never see it", async () => {
+    // A reader present at open() that vanishes mid-write gives EPIPE. Only the
+    // write path produces it, so it belongs in the send's classification and not
+    // in the probe — but it must land on the same exit status, because it is the
+    // same mechanism noticed a moment later.
+    const mod = await loadModule();
+    expect(mod.isUnreachableWriteErrno("EPIPE")).toBe(true);
+    expect(mod.isUnreachableWriteErrno("ENXIO")).toBe(true);
+    expect(mod.isUnreachableWriteErrno("ENOENT")).toBe(true);
+    // A full pipe means a reader EXISTS and is slow — that is the retry loop,
+    // not a dead row.
+    expect(mod.isUnreachableWriteErrno("EAGAIN")).toBe(false);
+    expect(mod.isUnreachableWriteErrno("EACCES")).toBe(false);
+    expect(mod.isUnreachableWriteErrno(undefined)).toBe(false);
   });
 
   it("fails OPEN on any other errno rather than calling a live agent dead", async () => {
     const mod = await loadModule();
     // A directory: open(O_WRONLY) gives EISDIR, which says nothing about whether
     // an agent is reading. Anything but ENXIO/ENOENT must leave the state alone.
-    expect(mod.probeStdinReachable({ fifo_file: testHome })).toBe("unknown");
+    expect(mod.probeStdinReachable({ pid: process.pid, fifo_file: testHome })).toBe("unknown");
   });
 });
 
@@ -3444,6 +3472,10 @@ describe("subcommands.deriveLiveState reachability", () => {
     }
   });
 
+  // Deliberately passes both before and after this change — that IS its job.
+  // The brief's condition is that a genuinely idle, reachable lane keeps reading
+  // `idle`; a fix that marked every quiet lane dead would look identical from
+  // the outside without it. It guards the fix, it does not prove it.
   it("still reports 'idle' for a quiet lane that IS reachable — the positive control", async () => {
     const { spawnSync } = await import("child_process");
     const fs = await import("fs");
@@ -3467,6 +3499,30 @@ describe("subcommands.deriveLiveState reachability", () => {
     }
   });
 
+  it("does NOT call a freshly spawned agent unreachable — the spawn-race guard", async () => {
+    // Both runtimes register the record BEFORE the reader opens the FIFO, so a
+    // healthy agent has a reader-less FIFO for a moment at spawn. Its log is
+    // fresh then, so the row reads `active` and is never probed. If this ever
+    // reports `unreachable`, every new agent flashes dead on the way up.
+    const { spawnSync } = await import("child_process");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+    try {
+      const fifo = path.join(dir, "stdin.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const log = path.join(dir, "a.log");
+      await writeFile(log, "starting up\n"); // fresh mtime → `active`
+      const mod = await loadModule();
+      expect(await mod.deriveLiveState(rec({ log_file: log, fifo_file: fifo }))).toEqual({
+        state: "active",
+        question: null,
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  // Also a guard rather than a proof: `stopped` must keep winning, so a dead pid
+  // is never reported by the more specific-sounding `unreachable`.
   it("keeps reporting 'stopped' for a dead pid without probing anything", async () => {
     const mod = await loadModule();
     expect(await mod.deriveLiveState(rec({ pid: 2147483646 }))).toEqual({
@@ -3564,6 +3620,8 @@ describe("subcommands.cmdSend unreachable exit status", () => {
     }
   });
 
+  // Guard, not proof: pins that exit 1 keeps meaning "your call was wrong",
+  // so introducing 3 did not quietly widen into the caller-error cases.
   it("keeps 1 for an over-cap body — that is a caller error, not a dead row", async () => {
     const { spawnSync } = await import("child_process");
     const fs = await import("fs");

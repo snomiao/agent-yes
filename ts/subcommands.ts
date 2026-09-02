@@ -563,6 +563,23 @@ export function sendPayloadCapError(bodyLen: number, envelopeLen: number): strin
 export const SEND_EXIT_UNREACHABLE = 3;
 
 /**
+ * Whether an errno from a FIFO write means "nobody is on the other end", as
+ * opposed to "the other end is slow" or "the filesystem said no".
+ *
+ * Three, and the third is the one a preflight probe cannot see:
+ *   ENXIO  — open() found a FIFO with no reader (the probe's case)
+ *   ENOENT — the FIFO is gone
+ *   EPIPE  — the reader was there at open() and vanished DURING the write. Only
+ *            this path can produce it, which is why it is not in the probe.
+ *
+ * EAGAIN/EWOULDBLOCK are deliberately absent: a full pipe means a reader exists
+ * and is slow, which is `ay send`'s retry loop, not a dead row.
+ */
+export function isUnreachableWriteErrno(code: string | undefined): boolean {
+  return code === "ENXIO" || code === "ENOENT" || code === "EPIPE";
+}
+
+/**
  * Whether `name` is a subcommand. `managerCommands` (default true, for the
  * generic `ay`/`agent-yes` entry) additionally admits manager-only commands
  * like `setup`; pass false for a cli-bound alias (cy/claude-yes/…) so those
@@ -1748,7 +1765,10 @@ export async function deriveLiveStatus(r: GlobalPidRecord): Promise<"active" | "
  *
  * Both runtimes hold the FIFO open for the agent's whole lifetime (Rust opens it
  * O_RDWR, TS keeps a paired dummy writer), so a live agent never momentarily
- * loses its reader: the probe does not flap, and O_NONBLOCK means it cannot block.
+ * loses its reader mid-session: the probe does not flap, and O_NONBLOCK means it
+ * cannot block. The one window where a HEALTHY agent has no reader is between
+ * registration and the reader's first open at spawn; callers must not conclude
+ * death inside it — see the quiet-threshold gate in `deriveLiveState`.
  *
  * Fails OPEN by design. Only the two errnos that mean "nobody is on the other
  * end" (ENXIO: FIFO with no reader; ENOENT: FIFO gone) return "unreachable";
@@ -1794,11 +1814,22 @@ export async function deriveLiveState(
 ): Promise<{ state: LiveState; question: string | null }> {
   const base = await deriveLiveStatus(r);
   if (base === "exited") return { state: "stopped", question: null };
-  // Alive but nothing can be delivered to it. This wins over every state below,
+  // Alive but nothing can be delivered to it. Wins over every state below,
   // including needs_input: a question we cannot answer is not a state a caller
   // should be invited to act on, and reporting it as `idle` is what let a
   // coordinator count this row against a concurrency cap and hand it work.
-  if (probeStdinReachable(r) === "unreachable") return { state: "unreachable", question: null };
+  //
+  // Gated on `base === "idle"` — the quiet threshold IS the grace period, and it
+  // is load-bearing, not an optimisation. Both runtimes register the record
+  // BEFORE the reader opens the FIFO (rs/src/main.rs registers, then
+  // `run_with_fifo` spawns the reader; ts/index.ts registers at spawn and builds
+  // the FIFO stream later in the pipeline), so a just-spawned, perfectly healthy
+  // agent has a reader-less FIFO for a moment. Its log is fresh in that moment,
+  // so it reads `active` and is never probed. And a wrapper that has actually
+  // died stops writing the log, so its row falls to `idle` within the threshold
+  // and IS probed — the window closes on its own, from both sides.
+  if (base === "idle" && probeStdinReachable(r) === "unreachable")
+    return { state: "unreachable", question: null };
   // The Rust supervisor flagged this agent unresponsive (no PTY output after a
   // poke / a frozen "working" spinner) — an authoritative wedge signal, so it
   // wins over the log-tail heuristics (needs_input / stuck) below.
@@ -3744,12 +3775,14 @@ async function cmdSend(rest: string[]): Promise<number> {
     );
   } catch (e) {
     // The reader can die between the probe above and this write — a lock wait
-    // is a real window. Classify by the errno, not by when we noticed: the same
-    // mechanism gets the same exit status, so a caller's retry logic doesn't
-    // depend on a race. Every other failure (a backed-up reader that never
-    // drained, a filesystem error) stays 1.
+    // is a real window, and so is the write itself: a reader present at open()
+    // that vanishes mid-write gives EPIPE, which no preflight can predict.
+    // Classify by the errno, not by when we noticed: the same mechanism gets the
+    // same exit status, so a caller's retry logic doesn't depend on a race.
+    // Every other failure (a backed-up reader that never drained, a filesystem
+    // error) stays 1.
     const code = (e as NodeJS.ErrnoException)?.code;
-    if (code !== "ENXIO" && code !== "ENOENT") throw e;
+    if (!isUnreachableWriteErrno(code)) throw e;
     process.stderr.write(
       `ay send: pid ${record.pid} (${record.cli}) became UNREACHABLE mid-send — its stdin FIFO ${fifoPath} stopped taking a writer (${code}). The message may be partly delivered; \`ay restart ${record.pid}\` gives it a live channel again.\n`,
     );
@@ -5115,6 +5148,9 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
   } else {
     state = "active";
   }
+  // Whether the log has been quiet past the idle threshold, captured BEFORE the
+  // needs_input / stuck overrides rewrite `state`. Gates the reachability probe.
+  const quiet = state === "idle";
   const activity =
     state !== "stopped" && record.log_file ? await extractActivity(record.log_file) : null;
   // A blocked interactive menu overrides active/idle — the agent is alive and
@@ -5136,8 +5172,9 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
   if (alive && record.unresponsive) state = "stuck";
   // Alive but undeliverable outranks all of the above, exactly as in
   // deriveLiveState — `ay status` and `ay ls` must not disagree about whether a
-  // row can be given work.
-  if (alive && probeStdinReachable(record) === "unreachable") {
+  // row can be given work. Same quiet-threshold gate, for the same reason: a
+  // freshly spawned agent is registered before its reader opens the FIFO.
+  if (alive && quiet && probeStdinReachable(record) === "unreachable") {
     state = "unreachable";
     question = null;
   }
