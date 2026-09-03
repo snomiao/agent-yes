@@ -28,6 +28,7 @@ import {
   readMailbox,
   recordMessage,
   recordOutbox,
+  senderLabel,
 } from "./messageLog.ts";
 import { badgeLabel, matchBadges, TYPING_BADGE } from "./badges.ts";
 import {
@@ -220,7 +221,9 @@ export interface MessageEdge {
   by: number;
   target: number;
   at: number;
-  kind?: "key" | "select" | "auto-retry";
+  /** Derived, not re-listed: a hand-copied union here silently broke when
+   * `MessageRecord["kind"]` grew a member (#453 added "terminal"). */
+  kind?: MessageRecord["kind"];
 }
 
 /**
@@ -1352,6 +1355,7 @@ async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string):
   if (msg && msg !== "-") {
     await recordOutbox({
       at: Date.now(),
+      origin: from ? undefined : "shell",
       from,
       to: {
         pid: data.pid,
@@ -3597,6 +3601,9 @@ async function cmdSend(rest: string[]): Promise<number> {
     await recordMessage({
       at: Date.now(),
       nonce,
+      // A local CLI invocation. When there is no agent behind it, a terminal
+      // is — the one unattributed origin a person is plausibly at.
+      origin: sender.agent ? undefined : "shell",
       from: sender.agent
         ? {
             pid: sender.agent.pid,
@@ -3764,13 +3771,10 @@ async function cmdMsgs(rest: string[]): Promise<number> {
 
   for (const { dir, rec } of shown) {
     const when = new Date(rec.at).toLocaleTimeString();
-    // auto-retry nudges are written by the agent's own wrapper (from is null
-    // there too) — label them as agent-yes, not a human send.
-    const fromLabel = rec.from
-      ? `${rec.from.cli} #${rec.from.pid}`
-      : rec.kind === "auto-retry"
-        ? "agent-yes"
-        : "human";
+    // Names the sender from the RECORDED origin, never from `from` being null —
+    // a console's wire write and a public visitor are unattributed too, and
+    // calling either of them "human" is the claim a reader must not be handed.
+    const fromLabel = senderLabel(rec);
     const peer = dir === "out" ? `→ ${rec.to.cli} #${rec.to.pid}` : `← ${fromLabel}`;
     const via = rec.remote ? ` (via ${rec.remote})` : "";
     const flag = rec.confirmed === false ? " (unconfirmed)" : "";
@@ -3807,6 +3811,7 @@ async function recordKeyEvent(
 ): Promise<void> {
   await recordMessage({
     at: Date.now(),
+    origin: sender.agent ? undefined : "shell",
     from: sender.agent
       ? {
           pid: sender.agent.pid,

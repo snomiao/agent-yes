@@ -20,6 +20,27 @@ import path from "path";
 import { logger } from "./logger.ts";
 import { isUnpromptedTerminalReply } from "./terminalReply.ts";
 
+/**
+ * Where a write entered this host — its provenance, as known at the door.
+ *
+ * `from === null` used to be read as "a human typed this", because the one
+ * producer that left it null was an interactive `ay send`. It is now four
+ * producers, and only one of them is a person's shell. A console forwarding a
+ * terminal's own bytes and a public callback visitor also arrive unattributed,
+ * so inferring a human from an absent sender hands the operator's label to a
+ * wire artefact — and an agent that weighs a human's instruction above another
+ * agent's is exactly the reader that must not be told that.
+ *
+ *  - `shell`   — a local `ay send` / `key` / `select` with no agent context.
+ *                The only origin a person is behind, and even then only
+ *                probably: a script invoking the CLI looks the same.
+ *  - `wire`    — an unattributed `POST /api/send`: the web console, a remote
+ *                `ay send` from a host that sent no `from`, any HTTP client.
+ *  - `visitor` — the public callback widget. A stranger on the internet.
+ *  - `wrapper` — the agent's own supervisor (the auto-retry nudge).
+ */
+export type MessageOrigin = "shell" | "wire" | "visitor" | "wrapper";
+
 /** One end of a message: enough to attribute and to route a reply. */
 export interface MailParty {
   pid: number;
@@ -34,8 +55,14 @@ export interface MessageRecord {
   at: number;
   /** The per-send nonce from the `[ay-msg …]` wrapper, when the body was wrapped. */
   nonce?: string;
-  /** Sender; `null` when an interactive human shell sent it (no agent context). */
+  /** Sender; `null` when no agent context was attributed to the write. `null`
+   * is NOT evidence of a human — see {@link MessageOrigin}. */
   from: MailParty | null;
+  /** WHERE the write entered this host, recorded by the entry point rather than
+   * inferred later from `from`. Absent on rows written before this field
+   * existed, which is why a missing value renders as unattributed and never as
+   * a human. See {@link MessageOrigin}. */
+  origin?: MessageOrigin;
   /** Recipient agent. */
   to: MailParty;
   /** What kind of stdin write this was. Omitted for a normal `ay send` text
@@ -110,6 +137,34 @@ export interface MessageRecord {
  * that does not send the flag is unaffected — it falls through to conditions 1
  * and 2 exactly as before.
  */
+/**
+ * How to name the sender of a record in a listing.
+ *
+ * Never claims a human on the strength of an absent sender: an unattributed
+ * write whose origin was not recorded is `unattributed`, because that is all
+ * that is known about it. Only `origin: "shell"` — a local CLI invocation with
+ * a terminal behind it — is called human, and a caller that must not be fooled
+ * should read `origin` itself rather than this label.
+ */
+export function senderLabel(record: MessageRecord): string {
+  if (record.from) return `${record.from.cli} #${record.from.pid}`;
+  switch (record.origin) {
+    case "shell":
+      return "human";
+    case "wire":
+      return "wire";
+    case "visitor":
+      return "visitor";
+    case "wrapper":
+      return "agent-yes";
+  }
+  // No origin recorded. Written before the field existed, or by a producer that
+  // did not declare one — either way the sender is unknown, and "human" is a
+  // claim nothing here supports. The auto-retry nudge predates `origin` and is
+  // still identifiable by its kind.
+  return record.kind === "auto-retry" ? "agent-yes" : "unattributed";
+}
+
 export function shouldRecord(record: MessageRecord): boolean {
   if (record.kind === "terminal") return false;
   if (record.from) return true;
