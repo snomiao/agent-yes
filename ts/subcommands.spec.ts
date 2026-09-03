@@ -16,12 +16,24 @@ vi.mock("os", async () => {
   };
 });
 
+// The homedir mock covers the DEFAULT case completely: agentYesHome() falls back
+// to homedir() when $AGENT_YES_HOME is unset, so the fallback resolves into the
+// mock. It does NOT cover the case where the variable is set, because
+// agentYesHome() reads it first — and then the tests below write pids.jsonl rows
+// and IPC locks to whatever path it names, the operator's live store included.
+// Pin it at the same temp dir so both paths land there.
+let savedAyHome: string | undefined;
+
 beforeEach(async () => {
   testHome = await mkdtemp(path.join(tmpdir(), "ay-sub-test-"));
+  savedAyHome = process.env.AGENT_YES_HOME;
+  process.env.AGENT_YES_HOME = path.join(testHome, ".agent-yes");
   vi.resetModules();
 });
 
 afterEach(async () => {
+  if (savedAyHome === undefined) delete process.env.AGENT_YES_HOME;
+  else process.env.AGENT_YES_HOME = savedAyHome;
   await rm(testHome, { recursive: true, force: true }).catch(() => null);
 });
 
