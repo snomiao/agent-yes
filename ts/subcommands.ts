@@ -2906,9 +2906,19 @@ export async function extractTaskCounts(logPath: string): Promise<TaskCounts | n
 // heavy ts/index.ts module out of the `ay ls`/`ay status` startup path.
 let _cliDefaults: Promise<Record<string, AgentCliConfig>> | null = null;
 export function cliDefaults(): Promise<Record<string, AgentCliConfig>> {
-  return (_cliDefaults ??= loadSharedCliDefaults().catch(
-    () => ({}) as Record<string, AgentCliConfig>,
-  ));
+  return (_cliDefaults ??= loadSharedCliDefaults().catch((err) => {
+    // Fail-open is deliberate: `ay ls` / `ay status` must still work with a
+    // broken YAML. But an empty map is not neutral for every consumer — paste
+    // framing reads `bracketedPaste` from here, so a load failure turns framing
+    // OFF for every CLI at once and long messages start losing their heads
+    // again with nothing going red. Say so on stderr rather than degrading in
+    // silence; the caller still gets a usable (empty) map.
+    process.stderr.write(
+      `warning: could not load shared CLI defaults (${(err as Error)?.message ?? err}) — ` +
+        `falling back to none. Paste framing is off for every CLI until this is fixed.\n`,
+    );
+    return {} as Record<string, AgentCliConfig>;
+  }));
 }
 
 /**
