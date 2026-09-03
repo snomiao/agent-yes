@@ -188,10 +188,24 @@ async function observeChildren(): Promise<ObserveResult> {
     )
       aliveChildStartedAt.set(r.pid, r.started_at);
   }
-  for (const r of records) {
+  // Per-child state derivation runs CONCURRENTLY. It used to be a serial await,
+  // which was free while every step was a stat() — but `deriveLiveState` can now
+  // spend a confirmation window on a row whose stdin FIFO takes no writer, and
+  // serially that window is paid once per suspected child. A fleet with several
+  // broken children would have stretched this daemon's poll cadence linearly and
+  // delayed every parent wake-up behind them. Concurrency makes the whole tick
+  // cost one window instead of N.
+  const eligible = records.filter((r) => {
     const parent = r.parent_pid;
-    if (typeof parent !== "number" || parent <= 0) continue;
-    if (!watching.has(parent)) continue; // scope: only watched parents' children
+    if (typeof parent !== "number" || parent <= 0) return false;
+    if (!watching.has(parent)) return false; // scope: only watched parents' children
+    return true;
+  });
+  const derived = new Map(
+    await Promise.all(eligible.map(async (r) => [r.pid, await deriveLiveState(r)] as const)),
+  );
+  for (const r of eligible) {
+    const parent = r.parent_pid as number;
     // Cross-session guard: a child cannot predate its parent, so a child of THIS
     // watcher incarnation must have started at/after it. Exclude a stale orphan
     // spawned under a PRIOR agent that held this pid (now recycled by the current
@@ -202,7 +216,7 @@ async function observeChildren(): Promise<ObserveResult> {
     // exact incarnation.)
     const watcherStart = watching.get(parent) ?? 0;
     if (watcherStart > 0 && r.started_at < watcherStart) continue;
-    const { state, question } = await deriveLiveState(r);
+    const { state, question } = derived.get(r.pid)!;
     // Parent start time: prefer the WATCHER's self-reported value (authoritative,
     // never 0) over a registry-wrapper lookup that can miss and stamp a 0 — a 0
     // would slip past the reader's parent pid-reuse guard.

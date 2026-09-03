@@ -112,7 +112,8 @@ Implementation: `ts/parentPing.ts` (pure state machine), `ts/parentPingSend.ts`
 
 A parent harness with a **monitor loop** (Claude Code's Monitor tool, an
 `ay ls --watch --json` stream, `ay notify watch`, or a polling `ay status <pid>`)
-already sees the child's state — `working | idle | needs_input | stopped` — at
+already sees the child's state — `active | idle | needs_input | stuck |
+unreachable | stopped` — at
 its own cadence, with better fidelity than any injected message and without
 anything landing in its composer. When the parent can do that, it should: the
 spawn tutorial now lists the monitor route **first**.

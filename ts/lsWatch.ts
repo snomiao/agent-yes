@@ -10,7 +10,14 @@
  * `needsInput.ts`.
  */
 
-export type LiveState = "active" | "idle" | "stopped" | "needs_input" | "stuck";
+/**
+ * `unreachable`: the process is alive but its stdin FIFO cannot be opened for
+ * write, so nothing can be delivered to it. It is deliberately NOT folded into
+ * `idle`, because idle is what a healthy lane waiting for work looks like — a
+ * caller cannot otherwise tell staffed from dead, and finds out only when the
+ * send fails. See `probeStdinReachable` in subcommands.ts.
+ */
+export type LiveState = "active" | "idle" | "stopped" | "needs_input" | "stuck" | "unreachable";
 
 /** The observable state of one agent at a single tick. */
 export interface LsAgentState {

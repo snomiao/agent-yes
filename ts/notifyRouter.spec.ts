@@ -349,3 +349,32 @@ describe("notifyRouter — startup reconcile (baseline)", () => {
     expect(r.events).toEqual([]);
   });
 });
+
+describe("notifyRouter — unreachable child", () => {
+  it("wakes the parent once, instead of going silent", () => {
+    // Before `unreachable` existed, a child whose wrapper had died read as
+    // `idle` and the parent was woken after the hysteresis window. It must not
+    // become quieter for being reported more accurately: an undeliverable child
+    // is over, so it takes the `exited` edge, once.
+    let s: RouterState = new Map();
+    let r = step(s, [child({ state: "unreachable" })], 0);
+    expect(r.events.map((e) => e.edge)).toEqual(["exited"]);
+    s = r.next;
+    r = step(s, [child({ state: "unreachable" })], 1_000);
+    expect(r.events).toEqual([]);
+  });
+
+  it("does not emit a second edge when the row is later reaped", () => {
+    let s: RouterState = new Map();
+    s = step(s, [child({ state: "unreachable" })], 0).next;
+    const r = step(s, [], 1_000);
+    expect(r.events).toEqual([]);
+  });
+
+  it("clears a pending idle episode so the wake is the exit, not a stale idle", () => {
+    let s: RouterState = new Map();
+    s = step(s, [child({ state: "idle" })], 0).next; // idle timer started
+    const r = step(s, [child({ state: "unreachable" })], 10_000);
+    expect(r.events.map((e) => e.edge)).toEqual(["exited"]);
+  });
+});

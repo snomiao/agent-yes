@@ -17,7 +17,9 @@ the parent only noticed by manually `ay tail`-ing it. Real incident
    (done/quiet) and `stopped` (exited). `ay status --json` adds a `question`
    field with the pending menu text.
 3. **`ay status <pid> --wait`** — blocks until the agent needs attention
-   (`needs_input | idle | stopped`), then emits the snapshot. The orchestrator
+   (`needs_input | idle | stuck | unreachable | stopped`), then emits the
+   snapshot. `unreachable` is terminal for the same reason `stopped` is: nothing
+   can be delivered to that agent, so no later event can arrive. The orchestrator
    primitive: it returns on a blocking question, not just on "done".
    `--watch` already streams state changes, so `needs_input` flows there for free.
 
@@ -116,7 +118,8 @@ Each left out with a one-line reason; none is required to fix the reported pain.
   `feat/state-events`) — see "What shipped next" above.
 - **Join-wait — `ay ls --wait` (block until the whole batch is settled).** The
   blocking counterpart to `ay ls --watch`: exit once _every_ matched agent is in
-  a terminal-for-the-operator state (`needs_input | idle | stopped`), so a
+  a terminal-for-the-operator state (`needs_input | idle | stuck | unreachable |
+  stopped`), so a
   fan-out parent can `ay ls <scope> --wait` and get control back the moment the
   batch collectively needs it. _Why not now:_ `--watch` already delivers the
   events; the parent can implement the join itself by consuming the stream. This

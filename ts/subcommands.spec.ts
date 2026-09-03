@@ -32,13 +32,62 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  // Restore the operator's own value rather than deleting it (from #456): a
+  // bare delete would leave a machine that HAD it set running the rest of the
+  // suite against the default path.
   if (savedAyHome === undefined) delete process.env.AGENT_YES_HOME;
   else process.env.AGENT_YES_HOME = savedAyHome;
+  for (const fd of heldFifoFds.splice(0)) {
+    try {
+      (await import("fs")).closeSync(fd);
+    } catch {
+      /* already closed */
+    }
+  }
   await rm(testHome, { recursive: true, force: true }).catch(() => null);
 });
 
 async function loadModule() {
   return await import("./subcommands.ts");
+}
+
+/** Reader fds held open by `liveFifo`, closed after every test. */
+const heldFifoFds: number[] = [];
+
+/**
+ * Give a record a stdin FIFO with a reader held open — what a healthy lane
+ * looks like to `probeStdinReachable` (both runtimes hold theirs open for the
+ * agent's whole lifetime). Fixtures whose subject is some OTHER state (stuck,
+ * needs_input, a send guard) need this: without a readable FIFO the row is
+ * genuinely undeliverable and now reports `unreachable`, which is correct but
+ * is not what those tests measure.
+ *
+ * With no argument it creates the CONVENTIONAL path for `pid` — the same one
+ * `probeStdinReachable` falls back to when `fifo_file` is absent — so a fixture
+ * carrying `fifo_file: null` becomes reachable without editing it.
+ *
+ * Returns the path, or null when `mkfifo` is unavailable (caller should skip).
+ */
+async function liveFifo(pid: number, at?: string): Promise<string | null> {
+  // FIFOs are a unix construct. On Windows production uses a named pipe
+  // (`\\.\pipe\agent-yes-<pid>`, see pidStore.getFifoPath), so there is no
+  // path this helper could create — and handing production a unix-shaped path
+  // there makes it ENOENT on a file that can never exist. Return null, which
+  // every caller already treats as "skip".
+  if (process.platform === "win32") return null;
+  const { spawnSync } = await import("child_process");
+  const fs = await import("fs");
+  const { PidStore } = await import("./pidStore.ts");
+  // Ask the OWNER for the path instead of rebuilding it: pidStore.getFifoPath
+  // is the single place that knows the shape, and a second copy here is exactly
+  // what drifted from it. `getFifoPath` reads no instance state, so the
+  // constructor's working dir is irrelevant to the answer.
+  const fifo = at ?? new PidStore(testHome).getFifoPath(pid);
+  await mkdir(path.dirname(fifo), { recursive: true });
+  await rm(fifo, { force: true }).catch(() => null);
+  if (spawnSync("mkfifo", [fifo]).status !== 0) return null;
+  heldFifoFds.push(fs.openSync(fifo, fs.constants.O_RDWR));
+  return fifo;
 }
 
 describe("subcommands.readLogForRender", () => {
@@ -709,7 +758,10 @@ describe("subcommands.runSubcommand routing", () => {
         String(process.pid),
         "anything",
       ]);
-      expect(code).toBe(1);
+      // Was 1. A record with no FIFO is the same fact as a FIFO nobody reads —
+      // nothing can be delivered — so it now carries the same distinguishable
+      // status. The message is unchanged.
+      expect(code).toBe(3);
       expect(stderr.join("")).toMatch(/no fifo_file recorded/);
     } finally {
       process.stderr.write = orig;
@@ -1712,13 +1764,17 @@ describe("subcommands.cmdSend safety guards", () => {
     // with AGENT_YES_PID set to that wrapper — so resolveSender maps it back to
     // this same agent, and sending to its own pid trips the self-send guard.
     const wrapperPid = 424242;
+    // A live target: every guard below is about the SENDER or the BODY, and
+    // `ay send` now refuses an unreachable target before reaching any of them.
+    const fifo = await liveFifo(process.pid);
+    if (!fifo) return; // no mkfifo on this box
     await appendGlobalPid({
       pid: process.pid,
       cli: "claude",
       prompt: null,
       cwd: process.cwd(),
       log_file: null,
-      fifo_file: "/tmp/ay-guard-test.fifo",
+      fifo_file: fifo,
       status: "active",
       exit_code: null,
       exit_reason: null,
@@ -1754,7 +1810,7 @@ describe("subcommands.cmdSend safety guards", () => {
       prompt: null,
       cwd: process.cwd(),
       log_file: null,
-      fifo_file: "/tmp/ay-length-test.fifo",
+      fifo_file: await liveFifo(process.pid),
       status: "active",
       exit_code: null,
       exit_reason: null,
@@ -1811,6 +1867,10 @@ describe("subcommands.cmdSend safety guards", () => {
       prompt: null,
       cwd: process.cwd(),
       log_file: null,
+      // Deliberately a dead path, and it no longer matters: the envelope cap is
+      // decided from the SENDER alone, before anything about the target is
+      // touched. That is what keeps this test ungated and green on Windows,
+      // where liveFifo() cannot create a FIFO at all.
       fifo_file: "/tmp/ay-envelope-cap-test.fifo",
       status: "active",
       exit_code: null,
@@ -1847,45 +1907,48 @@ describe("subcommands.cmdSend safety guards", () => {
     }
   });
 
-  it("applies the same cap to the `-` (stdin) body — the form the old hint recommended", async () => {
-    const { runSubcommand } = await loadModule();
-    const { appendGlobalPid } = await import("./globalPidIndex.ts");
-    await appendGlobalPid({
-      pid: process.pid,
-      cli: "claude",
-      prompt: null,
-      cwd: process.cwd(),
-      log_file: null,
-      fifo_file: "/tmp/ay-length-stdin-test.fifo",
-      status: "active",
-      exit_code: null,
-      exit_reason: null,
-      started_at: Date.now(),
-    });
-    const stderr: string[] = [];
-    const orig = process.stderr.write.bind(process.stderr);
-    (process.stderr as any).write = (s: any) => {
-      stderr.push(String(s));
-      return true;
-    };
-    const origStdin = Object.getOwnPropertyDescriptor(process, "stdin")!;
-    const long = "y".repeat(1780);
-    Object.defineProperty(process, "stdin", {
-      configurable: true,
-      value: (async function* () {
-        yield Buffer.from(long, "utf-8");
-      })(),
-    });
-    try {
-      const code = await runSubcommand(["bun", "cli.js", "send", String(process.pid), "-"]);
-      expect(code).toBe(1);
-      // The cap is on the body however it arrives, so `-` buys nothing.
-      expect(stderr.join("")).toMatch(/1780 chars, over the 1024-char limit/);
-    } finally {
-      process.stderr.write = orig;
-      Object.defineProperty(process, "stdin", origStdin);
-    }
-  });
+  it.skipIf(process.platform === "win32")(
+    "applies the same cap to the `-` (stdin) body — the form the old hint recommended",
+    async () => {
+      const { runSubcommand } = await loadModule();
+      const { appendGlobalPid } = await import("./globalPidIndex.ts");
+      await appendGlobalPid({
+        pid: process.pid,
+        cli: "claude",
+        prompt: null,
+        cwd: process.cwd(),
+        log_file: null,
+        fifo_file: await liveFifo(process.pid),
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: Date.now(),
+      });
+      const stderr: string[] = [];
+      const orig = process.stderr.write.bind(process.stderr);
+      (process.stderr as any).write = (s: any) => {
+        stderr.push(String(s));
+        return true;
+      };
+      const origStdin = Object.getOwnPropertyDescriptor(process, "stdin")!;
+      const long = "y".repeat(1780);
+      Object.defineProperty(process, "stdin", {
+        configurable: true,
+        value: (async function* () {
+          yield Buffer.from(long, "utf-8");
+        })(),
+      });
+      try {
+        const code = await runSubcommand(["bun", "cli.js", "send", String(process.pid), "-"]);
+        expect(code).toBe(1);
+        // The cap is on the body however it arrives, so `-` buys nothing.
+        expect(stderr.join("")).toMatch(/1780 chars, over the 1024-char limit/);
+      } finally {
+        process.stderr.write = orig;
+        Object.defineProperty(process, "stdin", origStdin);
+      }
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -2009,6 +2072,9 @@ describe("subcommands.cmdLs --all / --active / keyword filter / aliases", () => 
       exit_code: null,
       exit_reason: null,
       started_at: Date.now(),
+      // A wedged agent's wrapper is still alive and still reading its FIFO —
+      // `stuck` is what it must report, not `unreachable`.
+      fifo_file: await liveFifo(process.pid),
     });
     const cap = captureOutput();
     let code: number | null;
@@ -2302,6 +2368,13 @@ describe("subcommands.cmdNote", () => {
 // ---------------------------------------------------------------------------
 
 describe("subcommands.cmdStatus", () => {
+  // `ay status` reports the same states as `ay ls`, `unreachable` included. Give
+  // the fixtures the reachable stdin FIFO a live agent has, so the wait loops are
+  // measured on the state they are about rather than on a dead input channel.
+  beforeEach(async () => {
+    await liveFifo(process.pid);
+  });
+
   it("throws usage error when no keyword given", async () => {
     const { runSubcommand } = await loadModule();
     const stderr: string[] = [];
@@ -2703,6 +2776,19 @@ describe("subcommands.deriveLiveStatus", () => {
 });
 
 describe("subcommands.isAgentStuck / stuck state", () => {
+  // These fixtures are about the LOG-derived state (stuck / needs_input / idle),
+  // so give every one of them the reachable stdin FIFO a live agent has —
+  // otherwise the row is genuinely undeliverable and correctly reads
+  // `unreachable`, which is a different question than the one under test.
+  //
+  // That dependency makes the suite unix-only: `liveFifo` is a no-op where
+  // mkfifo does not exist, so on Windows every row here reads `unreachable` and
+  // the assertions invert. Same reason as this file's other FIFO-backed suites.
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
+  beforeEach(async () => {
+    await liveFifo(process.pid);
+  });
+
   const rec = (over: any) => ({
     pid: process.pid,
     cli: "claude",
@@ -2720,80 +2806,98 @@ describe("subcommands.isAgentStuck / stuck state", () => {
   const BUSY = "⏺ Cogitating…\r\nesc to interrupt · ← for agents\r\n";
   const tenMinAgo = () => new Date(Date.now() - 10 * 60 * 1000);
 
-  it("isAgentStuck: true when a busy marker is on screen and the log is long-silent", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
-    try {
-      const log = path.join(dir, "a.log");
-      await writeFile(log, BUSY);
-      await utimes(log, tenMinAgo(), tenMinAgo());
-      const mod = await loadModule();
-      expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(true);
-    } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => null);
-    }
-  });
+  it.skipIf(!itUnix)(
+    "isAgentStuck: true when a busy marker is on screen and the log is long-silent",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, BUSY);
+        await utimes(log, tenMinAgo(), tenMinAgo());
+        const mod = await loadModule();
+        expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
 
-  it("isAgentStuck: false when the busy log was written recently (still working)", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
-    try {
-      const log = path.join(dir, "a.log");
-      await writeFile(log, BUSY); // fresh mtime — under the stuck threshold
-      const mod = await loadModule();
-      expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(false);
-    } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => null);
-    }
-  });
+  it.skipIf(!itUnix)(
+    "isAgentStuck: false when the busy log was written recently (still working)",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, BUSY); // fresh mtime — under the stuck threshold
+        const mod = await loadModule();
+        expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
 
-  it("isAgentStuck: false when long-silent but no busy marker on screen (genuinely idle)", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
-    try {
-      const log = path.join(dir, "a.log");
-      await writeFile(log, "⏺ Done — all green.\r\n❯\r\n");
-      await utimes(log, tenMinAgo(), tenMinAgo());
-      const mod = await loadModule();
-      expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(false);
-    } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => null);
-    }
-  });
+  it.skipIf(!itUnix)(
+    "isAgentStuck: false when long-silent but no busy marker on screen (genuinely idle)",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, "⏺ Done — all green.\r\n❯\r\n");
+        await utimes(log, tenMinAgo(), tenMinAgo());
+        const mod = await loadModule();
+        expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
 
-  it("snapshotStatus: reports 'stuck' for a long-silent busy agent (not 'idle')", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
-    try {
-      const log = path.join(dir, "a.log");
-      await writeFile(log, BUSY);
-      await utimes(log, tenMinAgo(), tenMinAgo());
+  it.skipIf(!itUnix)(
+    "snapshotStatus: reports 'stuck' for a long-silent busy agent (not 'idle')",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, BUSY);
+        await utimes(log, tenMinAgo(), tenMinAgo());
+        const mod = await loadModule();
+        const snap = await mod.snapshotStatus(rec({ log_file: log }));
+        expect(snap.state).toBe("stuck");
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "snapshotStatus: reports 'stuck' when the Rust unresponsive flag is set (no log needed)",
+    async () => {
       const mod = await loadModule();
-      const snap = await mod.snapshotStatus(rec({ log_file: log }));
+      const snap = await mod.snapshotStatus(rec({ unresponsive: true, log_file: null }));
       expect(snap.state).toBe("stuck");
-    } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => null);
-    }
-  });
+    },
+  );
 
-  it("snapshotStatus: reports 'stuck' when the Rust unresponsive flag is set (no log needed)", async () => {
-    const mod = await loadModule();
-    const snap = await mod.snapshotStatus(rec({ unresponsive: true, log_file: null }));
-    expect(snap.state).toBe("stuck");
-  });
-
-  it("snapshotStatus: the unresponsive flag overrides a quiet (would-be idle) log", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
-    try {
-      const log = path.join(dir, "a.log");
-      // Long-silent, no busy marker → would read as `idle`; the flag forces `stuck`.
-      await writeFile(log, "⏺ Done — all green.\r\n❯\r\n");
-      await utimes(log, tenMinAgo(), tenMinAgo());
-      const mod = await loadModule();
-      expect((await mod.snapshotStatus(rec({ log_file: log }))).state).toBe("idle");
-      expect((await mod.snapshotStatus(rec({ log_file: log, unresponsive: true }))).state).toBe(
-        "stuck",
-      );
-    } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => null);
-    }
-  });
+  it.skipIf(!itUnix)(
+    "snapshotStatus: the unresponsive flag overrides a quiet (would-be idle) log",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+      try {
+        const log = path.join(dir, "a.log");
+        // Long-silent, no busy marker → would read as `idle`; the flag forces `stuck`.
+        await writeFile(log, "⏺ Done — all green.\r\n❯\r\n");
+        await utimes(log, tenMinAgo(), tenMinAgo());
+        const mod = await loadModule();
+        expect((await mod.snapshotStatus(rec({ log_file: log }))).state).toBe("idle");
+        expect((await mod.snapshotStatus(rec({ log_file: log, unresponsive: true }))).state).toBe(
+          "stuck",
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
 });
 
 // A CLI like Claude Code repaints by moving the cursor UP over the previous
@@ -3266,4 +3370,761 @@ describe("subcommands.cmdSend double-envelope warning", () => {
       await rm(tmp, { recursive: true, force: true }).catch(() => null);
     }
   });
+});
+
+// ---------------------------------------------------------------------------
+// Reachability: `ay ls` must not report an undeliverable row as `idle`
+// ---------------------------------------------------------------------------
+
+describe("subcommands.probeStdinReachable", () => {
+  // FIFO-backed, so unix-only — same reason as the other FIFO suites in this
+  // file. On Windows `probeStdinReachable` returns "unknown" by design (named
+  // pipes need a connect, not an open), so these assertions cannot hold there
+  // and skipping is the honest outcome rather than a weaker expectation.
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
+
+  /** A real FIFO plus a held O_RDWR fd, which is how both runtimes keep it open. */
+  async function withReadFifo(fn: (fifo: string) => Promise<void> | void) {
+    const { spawnSync } = await import("child_process");
+    const fs = await import("fs");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+    const fifo = path.join(dir, "stdin.fifo");
+    try {
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return; // no mkfifo — skip
+      const fd = fs.openSync(fifo, fs.constants.O_RDWR);
+      try {
+        await fn(fifo);
+      } finally {
+        fs.closeSync(fd);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  }
+
+  /** The same FIFO with NOBODY holding it open — the dead-agent shape. */
+  async function withReaderlessFifo(fn: (fifo: string) => Promise<void> | void) {
+    const { spawnSync } = await import("child_process");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+    const fifo = path.join(dir, "stdin.fifo");
+    try {
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      await fn(fifo);
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  }
+
+  it.skipIf(!itUnix)(
+    "is 'ok' while something holds the FIFO open — the positive control",
+    async () => {
+      const mod = await loadModule();
+      await withReadFifo((fifo) => {
+        expect(mod.probeStdinReachable({ pid: process.pid, fifo_file: fifo })).toBe("ok");
+      });
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "waits longer for a SEND than for a listing, because the costs differ",
+    async () => {
+      // A listing that is briefly wrong is cheap; refusing to deliver to an agent
+      // that was merely still starting is not. The send window must therefore
+      // outlast the display one, and a reader that appears between them must be
+      // seen by the send.
+      const { spawnSync } = await import("child_process");
+      const fs = await import("fs");
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+      try {
+        const fifo = path.join(dir, "stdin.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        const mod = await loadModule();
+        const rec = { pid: process.pid, fifo_file: fifo };
+        // Nothing is reading yet, and nothing will within the display window.
+        expect(await mod.confirmStdinUnreachable(rec)).toBe(true);
+        const late = setTimeout(() => fs.openSync(fifo, fs.constants.O_RDWR), 400);
+        try {
+          // …but the send keeps looking, and sees the reader arrive.
+          expect(await mod.confirmStdinUnreachable(rec, 3_000)).toBe(false);
+        } finally {
+          clearTimeout(late);
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "costs ONE window for many dead rows probed together, not one each",
+    async () => {
+      // The property `ay notifyd` depends on: it derives every child's state in
+      // parallel, so a fleet with several broken children costs one confirmation
+      // window per tick rather than one per child. Serially this would be 5×.
+      const { spawnSync } = await import("child_process");
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+      try {
+        const fifos: string[] = [];
+        for (let i = 0; i < 5; i++) {
+          const f = path.join(dir, `stdin-${i}.fifo`);
+          if (spawnSync("mkfifo", [f]).status !== 0) return;
+          fifos.push(f);
+        }
+        const mod = await loadModule();
+        const started = Date.now();
+        const answers = await Promise.all(
+          fifos.map((f) => mod.confirmStdinUnreachable({ pid: process.pid, fifo_file: f })),
+        );
+        const elapsed = Date.now() - started;
+        expect(answers).toEqual([true, true, true, true, true]);
+        // One window is 150ms; five serial ones would be 750ms. A generous bound,
+        // so this fails on the shape (serial) and not on a slow machine.
+        expect(elapsed).toBeLessThan(500);
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)("is 'unreachable' for a FIFO nobody is reading (the ENXIO row)", async () => {
+    const mod = await loadModule();
+    await withReaderlessFifo((fifo) => {
+      expect(mod.probeStdinReachable({ pid: process.pid, fifo_file: fifo })).toBe("unreachable");
+    });
+  });
+
+  it.skipIf(!itUnix)("is 'unreachable' when the FIFO is gone entirely", async () => {
+    const mod = await loadModule();
+    expect(
+      mod.probeStdinReachable({ pid: process.pid, fifo_file: path.join(testHome, "nope.fifo") }),
+    ).toBe("unreachable");
+  });
+
+  it.skipIf(!itUnix)(
+    "falls back to the conventional path when `fifo_file` was dropped",
+    async () => {
+      // The decisive test for the fallback, not just "a missing path is
+      // unreachable": a LIVE agent whose record lost the optional field (a Rust
+      // rewrite of pids.jsonl can drop it) must still read `ok`, because the FIFO
+      // is right where both runtimes put it.
+      const mod = await loadModule();
+      const pid = 4242;
+      const fifo = await liveFifo(pid); // creates <agentYesHome()>/fifo/4242.stdin
+      if (!fifo) return;
+      expect(mod.probeStdinReachable({ pid, fifo_file: null })).toBe("ok");
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "is 'unreachable' when no FIFO exists at the conventional path either",
+    async () => {
+      const mod = await loadModule();
+      expect(mod.probeStdinReachable({ pid: 4243, fifo_file: null })).toBe("unreachable");
+    },
+  );
+
+  // Portable: asserts the errno CLASSIFIER, which is a pure predicate — no
+  // FIFO and no probe, so it holds on Windows too.
+  it("classifies EPIPE as unreachable for a WRITE, though a probe can never see it", async () => {
+    // A reader present at open() that vanishes mid-write gives EPIPE. Only the
+    // write path produces it, so it belongs in the send's classification and not
+    // in the probe — but it must land on the same exit status, because it is the
+    // same mechanism noticed a moment later.
+    const mod = await loadModule();
+    expect(mod.isUnreachableWriteErrno("EPIPE")).toBe(true);
+    expect(mod.isUnreachableWriteErrno("ENXIO")).toBe(true);
+    expect(mod.isUnreachableWriteErrno("ENOENT")).toBe(true);
+    // A full pipe means a reader EXISTS and is slow — that is the retry loop,
+    // not a dead row.
+    expect(mod.isUnreachableWriteErrno("EAGAIN")).toBe(false);
+    expect(mod.isUnreachableWriteErrno("EACCES")).toBe(false);
+    expect(mod.isUnreachableWriteErrno(undefined)).toBe(false);
+  });
+
+  it.skipIf(!itUnix)(
+    "fails OPEN on any other errno rather than calling a live agent dead",
+    async () => {
+      const mod = await loadModule();
+      // A directory: open(O_WRONLY) gives EISDIR, which says nothing about whether
+      // an agent is reading. Anything but ENXIO/ENOENT must leave the state alone.
+      expect(mod.probeStdinReachable({ pid: process.pid, fifo_file: testHome })).toBe("unknown");
+    },
+  );
+});
+
+describe("subcommands.deriveLiveState reachability", () => {
+  // FIFO-backed, so unix-only — same reason as the other FIFO suites in this
+  // file. On Windows `probeStdinReachable` returns "unknown" by design (named
+  // pipes need a connect, not an open), so these assertions cannot hold there
+  // and skipping is the honest outcome rather than a weaker expectation.
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
+
+  const rec = (over: any) => ({
+    pid: process.pid,
+    cli: "codex",
+    prompt: null,
+    cwd: "/repo/alpha",
+    log_file: null,
+    fifo_file: null,
+    status: "active",
+    exit_code: null,
+    exit_reason: null,
+    started_at: 0,
+    ...over,
+  });
+
+  /** A log old enough that deriveLiveStatus reads `idle`. */
+  async function quietLog(dir: string): Promise<string> {
+    const log = path.join(dir, "a.log");
+    await writeFile(log, "waiting for work\n");
+    const old = new Date(Date.now() - 5 * 60 * 1000);
+    await utimes(log, old, old);
+    return log;
+  }
+
+  it.skipIf(!itUnix)(
+    "reports 'unreachable', not 'idle', for an alive pid whose FIFO takes no writer",
+    async () => {
+      const { spawnSync } = await import("child_process");
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+      try {
+        const fifo = path.join(dir, "stdin.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        const log = await quietLog(dir);
+        const mod = await loadModule();
+        expect(await mod.deriveLiveState(rec({ log_file: log, fifo_file: fifo }))).toEqual({
+          state: "unreachable",
+          question: null,
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  // Deliberately passes both before and after this change — that IS its job.
+  // The brief's condition is that a genuinely idle, reachable lane keeps reading
+  // `idle`; a fix that marked every quiet lane dead would look identical from
+  // the outside without it. It guards the fix, it does not prove it.
+  it.skipIf(!itUnix)(
+    "still reports 'idle' for a quiet lane that IS reachable — the positive control",
+    async () => {
+      const { spawnSync } = await import("child_process");
+      const fs = await import("fs");
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+      try {
+        const fifo = path.join(dir, "stdin.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        const held = fs.openSync(fifo, fs.constants.O_RDWR);
+        try {
+          const log = await quietLog(dir);
+          const mod = await loadModule();
+          expect(await mod.deriveLiveState(rec({ log_file: log, fifo_file: fifo }))).toEqual({
+            state: "idle",
+            question: null,
+          });
+        } finally {
+          fs.closeSync(held);
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "does NOT call a freshly spawned agent unreachable — the spawn-race guard",
+    async () => {
+      // Both runtimes register the record BEFORE the reader opens the FIFO, so a
+      // healthy agent has a reader-less FIFO for a moment at spawn. Its log is
+      // fresh then, so the row reads `active` and is never probed. If this ever
+      // reports `unreachable`, every new agent flashes dead on the way up.
+      const { spawnSync } = await import("child_process");
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+      try {
+        const fifo = path.join(dir, "stdin.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        const log = path.join(dir, "a.log");
+        await writeFile(log, "starting up\n"); // fresh mtime → `active`
+        const mod = await loadModule();
+        expect(await mod.deriveLiveState(rec({ log_file: log, fifo_file: fifo }))).toEqual({
+          state: "active",
+          question: null,
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "does NOT probe a young agent that INHERITED a stale log — the recycled-log race",
+    async () => {
+      // The quiet half of the grace period is not enough on its own. Rust's log
+      // writer opens `<pid>.raw.log` in APPEND mode, so a recycled pid can inherit
+      // a previous agent's log file and look quiet from its first millisecond —
+      // while its reader has not opened the FIFO yet. The AGE half is what covers
+      // this: the record was created seconds ago, so nothing is concluded from it.
+      const { spawnSync } = await import("child_process");
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+      try {
+        const fifo = path.join(dir, "stdin.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        const log = await quietLog(dir); // inherited: mtime 5 minutes old
+        const mod = await loadModule();
+        const state = await mod.deriveLiveState(
+          rec({ log_file: log, fifo_file: fifo, started_at: Date.now() - 1_000 }),
+        );
+        expect(state.state).not.toBe("unreachable");
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  // Portable: `fifo_file: null` with no FIFO on disk is ENOENT on every
+  // platform, so this needs neither mkfifo nor an ENXIO-capable pipe.
+  // Unix-only for a reason worth stating: on Windows `probeStdinReachable`
+  // returns "unknown" by design (named pipes need a connect, not an open), so
+  // `unreachable` is not a state that platform can produce at all. Asserting it
+  // there would be asserting a lie about the feature, not testing it.
+  it.skipIf(process.platform === "win32")(
+    "still probes an OLD record that has no log at all",
+    async () => {
+      // `log_file: null` reads `active` from the log heuristics because there is
+      // nothing to judge by — it must not therefore become unprobeable, or a row
+      // with no log could never be reported unreachable at all.
+      const mod = await loadModule();
+      expect(
+        await mod.deriveLiveState(rec({ log_file: null, fifo_file: null, started_at: 0 })),
+      ).toEqual({ state: "unreachable", question: null });
+    },
+  );
+
+  // Also a guard rather than a proof: `stopped` must keep winning, so a dead pid
+  // is never reported by the more specific-sounding `unreachable`.
+  // Portable: a stored exit short-circuits before any probe runs.
+  it("agrees with ay status on an exited record whose pid has been recycled", async () => {
+    // `ay ls` has always honoured a stored exit; `ay status` asked the OS alone,
+    // so a recycled pid made it call an exited row alive — and, once this change
+    // existed, `unreachable` — while `ay ls` said `stopped`. The two must not
+    // disagree about whether a row can be given work.
+    const mod = await loadModule();
+    const exited = rec({ status: "exited", pid: process.pid, fifo_file: null });
+    expect((await mod.deriveLiveState(exited)).state).toBe("stopped");
+    expect((await mod.snapshotStatus(exited)).state).toBe("stopped");
+  });
+
+  it.skipIf(!itUnix)(
+    "keeps reporting 'stopped' for a dead pid without probing anything",
+    async () => {
+      const mod = await loadModule();
+      expect(await mod.deriveLiveState(rec({ pid: 2147483646 }))).toEqual({
+        state: "stopped",
+        question: null,
+      });
+    },
+  );
+});
+
+describe("subcommands.cmdStop retiring an unreachable row", () => {
+  // FIFO-backed, so unix-only — same reason as the other FIFO suites in this
+  // file. On Windows `probeStdinReachable` returns "unknown" by design (named
+  // pipes need a connect, not an open), so these assertions cannot hold there
+  // and skipping is the honest outcome rather than a weaker expectation.
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
+
+  async function registerStopTarget(fifoFile: string | null) {
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "codex",
+      prompt: "stop-reach-test",
+      cwd: process.cwd(),
+      log_file: null,
+      fifo_file: fifoFile,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now() - 10 * 60 * 1000,
+    });
+  }
+
+  async function statusOf(pid: number): Promise<string | undefined> {
+    const { readGlobalPids } = await import("./globalPidIndex.ts");
+    return (await readGlobalPids()).find((r) => r.pid === pid)?.status;
+  }
+
+  it.skipIf(!itUnix)("retires it WITHOUT sending any signal, and says why", async () => {
+    // The only remedy that works on such a row: registry only. `ay send` points
+    // here, so it has to actually work — that was the defect this replaces.
+    const { spawnSync } = await import("child_process");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-stop-"));
+    try {
+      const fifo = path.join(dir, "stdin.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const mod = await loadModule();
+      await registerStopTarget(fifo);
+      const out: string[] = [];
+      const origOut = process.stdout.write.bind(process.stdout);
+      const origErr = process.stderr.write.bind(process.stderr);
+      (process.stdout as any).write = (x: any) => (out.push(String(x)), true);
+      (process.stderr as any).write = (x: any) => (out.push(String(x)), true);
+      let code: number | null;
+      try {
+        code = await mod.runSubcommand(["bun", "cli.js", "stop", String(process.pid)]);
+      } finally {
+        process.stdout.write = origOut;
+        process.stderr.write = origErr;
+      }
+      expect(code).toBe(0);
+      expect(out.join("")).toMatch(/unreachable/);
+      expect(out.join("")).toMatch(/no shutdown command was sent/);
+      expect(out.join("")).toMatch(/ps -p \d+ -o comm=/);
+      expect(await statusOf(process.pid)).toBe("exited");
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it.skipIf(!itUnix)(
+    "does NOT retire a row that is merely quiet — the control that matters",
+    async () => {
+      // A reachable agent with nothing to say must survive `ay stop` reaching the
+      // new branch: it has to fall through to the real shutdown path, leaving the
+      // record active. A stop that retires quiet lanes is worse than the bug.
+      const { spawnSync } = await import("child_process");
+      const fs = await import("fs");
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-stop-"));
+      try {
+        const fifo = path.join(dir, "stdin.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        const held = fs.openSync(fifo, fs.constants.O_RDWR); // a live reader
+        try {
+          const mod = await loadModule();
+          await registerStopTarget(fifo);
+          const out: string[] = [];
+          const origOut = process.stdout.write.bind(process.stdout);
+          const origErr = process.stderr.write.bind(process.stderr);
+          (process.stdout as any).write = (x: any) => (out.push(String(x)), true);
+          (process.stderr as any).write = (x: any) => (out.push(String(x)), true);
+          try {
+            await mod.runSubcommand(["bun", "cli.js", "stop", String(process.pid)]);
+          } finally {
+            process.stdout.write = origOut;
+            process.stderr.write = origErr;
+          }
+          expect(out.join("")).not.toMatch(/unreachable/);
+          expect(await statusOf(process.pid)).not.toBe("exited");
+        } finally {
+          fs.closeSync(held);
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+});
+
+describe("subcommands.cmdSend unreachable exit status", () => {
+  // FIFO-backed, so unix-only — same reason as the other FIFO suites in this
+  // file. On Windows `probeStdinReachable` returns "unknown" by design (named
+  // pipes need a connect, not an open), so these assertions cannot hold there
+  // and skipping is the honest outcome rather than a weaker expectation.
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
+
+  async function registerTarget(fifoFile: string | null) {
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "codex",
+      prompt: "reach-test",
+      cwd: process.cwd(),
+      log_file: null,
+      fifo_file: fifoFile,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+    });
+  }
+
+  function captureStderr() {
+    const out: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (s: any) => {
+      out.push(String(s));
+      return true;
+    };
+    return { out, restore: () => (process.stderr.write = orig) };
+  }
+
+  it.skipIf(!itUnix)(
+    "exits SEND_EXIT_UNREACHABLE (not 1) for a FIFO nobody is reading",
+    async () => {
+      const { spawnSync } = await import("child_process");
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+      try {
+        const fifo = path.join(dir, "stdin.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        const mod = await loadModule();
+        await registerTarget(fifo);
+        const cap = captureStderr();
+        try {
+          const code = await mod.runSubcommand([
+            "bun",
+            "cli.js",
+            "send",
+            String(process.pid),
+            "hi",
+          ]);
+          expect(code).toBe(mod.SEND_EXIT_UNREACHABLE);
+          expect(code).not.toBe(1);
+          expect(cap.out.join("")).toMatch(/UNREACHABLE/);
+          // The remedy it names must be one that WORKS on this row. `ay restart`
+          // writes the shutdown command to this same FIFO and fails identically —
+          // naming it was brief defect #1 reproduced inside its own fix.
+          expect(cap.out.join("")).toMatch(/ay stop \d+/);
+          expect(cap.out.join("")).toMatch(/Do NOT use ay restart/);
+          expect(cap.out.join("")).toMatch(/ps -p \d+ -o comm=/);
+        } finally {
+          cap.restore();
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)("uses the same status when the agent never registered a FIFO", async () => {
+    const mod = await loadModule();
+    await registerTarget(null);
+    const cap = captureStderr();
+    try {
+      const code = await mod.runSubcommand(["bun", "cli.js", "send", String(process.pid), "hi"]);
+      expect(code).toBe(mod.SEND_EXIT_UNREACHABLE);
+      expect(cap.out.join("")).toMatch(/no fifo_file recorded/);
+    } finally {
+      cap.restore();
+    }
+  });
+
+  // Ungated: it asserts an ordering that happens BEFORE any FIFO is touched, so
+  // it needs no pipe and holds on Windows.
+  it("reports an over-cap argv body immediately, without probing a dead target", async () => {
+    // Load-bearing twice over. The reachability probe can wait up to two
+    // seconds; an over-cap argv body is wrong whatever the target's state and
+    // costs nothing to detect. Probing first would make a caller wait to be told
+    // its own input was malformed, and would answer `unreachable` (3) for a send
+    // that was never going to be made — hiding the real, actionable error behind
+    // an incidental one.
+    const mod = await loadModule();
+    await registerTarget(null); // deliberately unreachable
+    const cap = captureStderr();
+    const started = Date.now();
+    let code: number | null;
+    try {
+      code = await mod.runSubcommand([
+        "bun",
+        "cli.js",
+        "send",
+        String(process.pid),
+        "x".repeat(5000),
+      ]);
+    } finally {
+      cap.restore();
+    }
+    const elapsed = Date.now() - started;
+    expect(code).toBe(1); // the caller error, NOT SEND_EXIT_UNREACHABLE
+    expect(cap.out.join("")).toMatch(/over the \d+-char limit/);
+    expect(cap.out.join("")).not.toMatch(/UNREACHABLE/);
+    // Well under the 2s confirm window, so it cannot pass by having probed.
+    expect(elapsed).toBeLessThan(1_000);
+  });
+
+  it.skipIf(!itUnix)("does not consume piped stdin when the target is unreachable", async () => {
+    // A send that cannot land must not eat the caller's body: `-` is resolved
+    // AFTER the reachability gate, so the text is still theirs to re-send.
+    const mod = await loadModule();
+    await registerTarget(null);
+    const cap = captureStderr();
+    let stdinRead = false;
+    const orig = Object.getOwnPropertyDescriptor(process, "stdin")!;
+    Object.defineProperty(process, "stdin", {
+      configurable: true,
+      get() {
+        stdinRead = true;
+        return orig.get ? orig.get.call(process) : orig.value;
+      },
+    });
+    try {
+      const code = await mod.runSubcommand(["bun", "cli.js", "send", String(process.pid), "-"]);
+      expect(code).toBe(mod.SEND_EXIT_UNREACHABLE);
+      expect(stdinRead).toBe(false);
+    } finally {
+      Object.defineProperty(process, "stdin", orig);
+      cap.restore();
+    }
+  });
+
+  it.skipIf(!itUnix)("exits the same way when the reader dies MID-SEND, end to end", async () => {
+    // The window the preflight probe cannot cover, driven through cmdSend rather
+    // than asserted on a predicate: reachable when the send starts, gone before
+    // it finishes. `writeToIpc` opens per call, so the failure the SECOND write
+    // meets here is ENXIO at open — EPIPE needs the reader to vanish inside one
+    // write, which the sibling test below produces directly. Both errnos go
+    // through the same catch, and this is the half that proves the catch is
+    // wired to cmdSend's exit status at all.
+    //
+    // Hold the FIFO with a read-only fd: an O_RDWR fd would BE a reader forever
+    // and the write could never fail.
+    const { spawnSync } = await import("child_process");
+    const fs = await import("fs");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-epipe-"));
+    const savedForce = process.env.AGENT_YES_FORCE_SEND;
+    try {
+      const fifo = path.join(dir, "stdin.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const readFd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+      let closed = false;
+
+      const mod = await loadModule();
+      // No log_file: cmdSend then takes the plain "body, pause, trailing" path,
+      // so there is a real gap between the two writes for the reader to vanish in.
+      await registerTarget(fifo);
+      process.env.AGENT_YES_FORCE_SEND = "1"; // this test is about delivery, not guards
+
+      // Armed only NOW, after module load and registration: a watchdog started
+      // before them can burn its deadline on a slow import under load, close the
+      // reader before the send begins, and quietly turn this into a test of the
+      // preflight probe instead of the mid-send path it is named for.
+      const closeOnFirstByte = (async () => {
+        const buf = Buffer.alloc(4096);
+        const deadline = Date.now() + 20_000;
+        while (Date.now() < deadline) {
+          try {
+            if (fs.readSync(readFd, buf, 0, buf.length, null) > 0) break;
+          } catch (err: any) {
+            if (err?.code !== "EAGAIN") break;
+          }
+          await new Promise((r) => setTimeout(r, 2));
+        }
+        fs.closeSync(readFd); // every reader gone → the next write fails
+        closed = true;
+      })();
+      const cap = captureStderr();
+      let code: number | null;
+      try {
+        code = await mod.runSubcommand(["bun", "cli.js", "send", String(process.pid), "hello"]);
+      } finally {
+        cap.restore();
+      }
+      await closeOnFirstByte;
+      expect(closed).toBe(true);
+      expect(code).toBe(mod.SEND_EXIT_UNREACHABLE);
+      expect(cap.out.join("")).toMatch(/UNREACHABLE mid-send/);
+    } finally {
+      if (savedForce === undefined) delete process.env.AGENT_YES_FORCE_SEND;
+      else process.env.AGENT_YES_FORCE_SEND = savedForce;
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  it.skipIf(!itUnix)(
+    "a reader lost INSIDE one write really does raise EPIPE, and it classifies",
+    async () => {
+      // Produces the errno rather than asserting a string: fill the pipe so
+      // `writeToIpc` is looping on EAGAIN, then take the reader away mid-loop.
+      // POSIX gives EPIPE for a write to a FIFO with no reader, and that is the
+      // one shape a preflight open() can never predict.
+      const { spawnSync } = await import("child_process");
+      const fs = await import("fs");
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-epipe-"));
+      try {
+        const fifo = path.join(dir, "stdin.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        const readFd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+        const mod = await loadModule();
+        // Far past any pipe buffer, and never drained, so the write backs up.
+        const huge = "z".repeat(1024 * 1024);
+        const write = mod.writeToIpc(fifo, huge);
+        setTimeout(() => fs.closeSync(readFd), 50); // every reader gone, mid-write
+        const err = await write.then(
+          () => null,
+          (e: NodeJS.ErrnoException) => e,
+        );
+        expect(err).not.toBeNull();
+        expect(err!.code).toBe("EPIPE");
+        expect(mod.isUnreachableWriteErrno(err!.code)).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  // Guard, not proof: pins that exit 1 keeps meaning "your call was wrong",
+  // so introducing 3 did not quietly widen into the caller-error cases.
+  it.skipIf(!itUnix)("does not refuse a target whose reader opens a moment later", async () => {
+    // The send-side half of the sustained reading: a wrapper that is still
+    // starting has no reader for a moment, and refusing delivery to it would be
+    // the same false positive as listing it dead.
+    const { spawnSync } = await import("child_process");
+    const fs = await import("fs");
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+    try {
+      const fifo = path.join(dir, "stdin.fifo");
+      if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+      const mod = await loadModule();
+      // Unreachable right now; a reader appears inside the confirm window.
+      const late = setTimeout(() => fs.openSync(fifo, fs.constants.O_RDWR), 100);
+      try {
+        expect(mod.probeStdinReachable({ pid: process.pid, fifo_file: fifo })).toBe("unreachable");
+        expect(await mod.confirmStdinUnreachable({ pid: process.pid, fifo_file: fifo })).toBe(
+          false,
+        );
+      } finally {
+        clearTimeout(late);
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true }).catch(() => null);
+    }
+  });
+
+  // Guard, not proof: pins that exit 1 keeps meaning "your call was wrong",
+  // so introducing 3 did not quietly widen into the caller-error cases.
+  it.skipIf(!itUnix)(
+    "keeps 1 for an over-cap body — that is a caller error, not a dead row",
+    async () => {
+      const { spawnSync } = await import("child_process");
+      const fs = await import("fs");
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-reach-"));
+      try {
+        const fifo = path.join(dir, "stdin.fifo");
+        if (spawnSync("mkfifo", [fifo]).status !== 0) return;
+        const held = fs.openSync(fifo, fs.constants.O_RDWR);
+        try {
+          const mod = await loadModule();
+          await registerTarget(fifo);
+          const cap = captureStderr();
+          try {
+            const code = await mod.runSubcommand([
+              "bun",
+              "cli.js",
+              "send",
+              String(process.pid),
+              "x".repeat(5000), // far past any cap this CLI has shipped
+            ]);
+            expect(code).toBe(1);
+            expect(cap.out.join("")).toMatch(/over the \d+-char limit/);
+          } finally {
+            cap.restore();
+          }
+        } finally {
+          fs.closeSync(held);
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
 });
