@@ -1857,12 +1857,11 @@ describe("subcommands.cmdSend safety guards", () => {
       prompt: null,
       cwd: process.cwd(),
       log_file: null,
-      // A LIVE fifo. On main this path never existed and the cap fired first, so
-      // the fixture was incidental; once `ay send` refuses an unreachable target
-      // BEFORE composing the envelope, a dead path makes this assert exit 3 and
-      // stop testing the thing it is named for. The envelope cap is what this
-      // test is about, so give it a target that can actually be written to.
-      fifo_file: await liveFifo(process.pid),
+      // Deliberately a dead path, and it no longer matters: the envelope cap is
+      // decided from the SENDER alone, before anything about the target is
+      // touched. That is what keeps this test ungated and green on Windows,
+      // where liveFifo() cannot create a FIFO at all.
+      fifo_file: "/tmp/ay-envelope-cap-test.fifo",
       status: "active",
       exit_code: null,
       exit_reason: null,
@@ -1898,45 +1897,48 @@ describe("subcommands.cmdSend safety guards", () => {
     }
   });
 
-  it("applies the same cap to the `-` (stdin) body — the form the old hint recommended", async () => {
-    const { runSubcommand } = await loadModule();
-    const { appendGlobalPid } = await import("./globalPidIndex.ts");
-    await appendGlobalPid({
-      pid: process.pid,
-      cli: "claude",
-      prompt: null,
-      cwd: process.cwd(),
-      log_file: null,
-      fifo_file: await liveFifo(process.pid),
-      status: "active",
-      exit_code: null,
-      exit_reason: null,
-      started_at: Date.now(),
-    });
-    const stderr: string[] = [];
-    const orig = process.stderr.write.bind(process.stderr);
-    (process.stderr as any).write = (s: any) => {
-      stderr.push(String(s));
-      return true;
-    };
-    const origStdin = Object.getOwnPropertyDescriptor(process, "stdin")!;
-    const long = "y".repeat(1780);
-    Object.defineProperty(process, "stdin", {
-      configurable: true,
-      value: (async function* () {
-        yield Buffer.from(long, "utf-8");
-      })(),
-    });
-    try {
-      const code = await runSubcommand(["bun", "cli.js", "send", String(process.pid), "-"]);
-      expect(code).toBe(1);
-      // The cap is on the body however it arrives, so `-` buys nothing.
-      expect(stderr.join("")).toMatch(/1780 chars, over the 1024-char limit/);
-    } finally {
-      process.stderr.write = orig;
-      Object.defineProperty(process, "stdin", origStdin);
-    }
-  });
+  it.skipIf(process.platform === "win32")(
+    "applies the same cap to the `-` (stdin) body — the form the old hint recommended",
+    async () => {
+      const { runSubcommand } = await loadModule();
+      const { appendGlobalPid } = await import("./globalPidIndex.ts");
+      await appendGlobalPid({
+        pid: process.pid,
+        cli: "claude",
+        prompt: null,
+        cwd: process.cwd(),
+        log_file: null,
+        fifo_file: await liveFifo(process.pid),
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: Date.now(),
+      });
+      const stderr: string[] = [];
+      const orig = process.stderr.write.bind(process.stderr);
+      (process.stderr as any).write = (s: any) => {
+        stderr.push(String(s));
+        return true;
+      };
+      const origStdin = Object.getOwnPropertyDescriptor(process, "stdin")!;
+      const long = "y".repeat(1780);
+      Object.defineProperty(process, "stdin", {
+        configurable: true,
+        value: (async function* () {
+          yield Buffer.from(long, "utf-8");
+        })(),
+      });
+      try {
+        const code = await runSubcommand(["bun", "cli.js", "send", String(process.pid), "-"]);
+        expect(code).toBe(1);
+        // The cap is on the body however it arrives, so `-` buys nothing.
+        expect(stderr.join("")).toMatch(/1780 chars, over the 1024-char limit/);
+      } finally {
+        process.stderr.write = orig;
+        Object.defineProperty(process, "stdin", origStdin);
+      }
+    },
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -2768,6 +2770,11 @@ describe("subcommands.isAgentStuck / stuck state", () => {
   // so give every one of them the reachable stdin FIFO a live agent has —
   // otherwise the row is genuinely undeliverable and correctly reads
   // `unreachable`, which is a different question than the one under test.
+  //
+  // That dependency makes the suite unix-only: `liveFifo` is a no-op where
+  // mkfifo does not exist, so on Windows every row here reads `unreachable` and
+  // the assertions invert. Same reason as this file's other FIFO-backed suites.
+  const itUnix = process.platform === "linux" || process.platform === "darwin";
   beforeEach(async () => {
     await liveFifo(process.pid);
   });
@@ -2789,80 +2796,98 @@ describe("subcommands.isAgentStuck / stuck state", () => {
   const BUSY = "⏺ Cogitating…\r\nesc to interrupt · ← for agents\r\n";
   const tenMinAgo = () => new Date(Date.now() - 10 * 60 * 1000);
 
-  it("isAgentStuck: true when a busy marker is on screen and the log is long-silent", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
-    try {
-      const log = path.join(dir, "a.log");
-      await writeFile(log, BUSY);
-      await utimes(log, tenMinAgo(), tenMinAgo());
-      const mod = await loadModule();
-      expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(true);
-    } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => null);
-    }
-  });
+  it.skipIf(!itUnix)(
+    "isAgentStuck: true when a busy marker is on screen and the log is long-silent",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, BUSY);
+        await utimes(log, tenMinAgo(), tenMinAgo());
+        const mod = await loadModule();
+        expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
 
-  it("isAgentStuck: false when the busy log was written recently (still working)", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
-    try {
-      const log = path.join(dir, "a.log");
-      await writeFile(log, BUSY); // fresh mtime — under the stuck threshold
-      const mod = await loadModule();
-      expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(false);
-    } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => null);
-    }
-  });
+  it.skipIf(!itUnix)(
+    "isAgentStuck: false when the busy log was written recently (still working)",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, BUSY); // fresh mtime — under the stuck threshold
+        const mod = await loadModule();
+        expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
 
-  it("isAgentStuck: false when long-silent but no busy marker on screen (genuinely idle)", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
-    try {
-      const log = path.join(dir, "a.log");
-      await writeFile(log, "⏺ Done — all green.\r\n❯\r\n");
-      await utimes(log, tenMinAgo(), tenMinAgo());
-      const mod = await loadModule();
-      expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(false);
-    } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => null);
-    }
-  });
+  it.skipIf(!itUnix)(
+    "isAgentStuck: false when long-silent but no busy marker on screen (genuinely idle)",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, "⏺ Done — all green.\r\n❯\r\n");
+        await utimes(log, tenMinAgo(), tenMinAgo());
+        const mod = await loadModule();
+        expect(await mod.isAgentStuck(rec({ log_file: log }))).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
 
-  it("snapshotStatus: reports 'stuck' for a long-silent busy agent (not 'idle')", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
-    try {
-      const log = path.join(dir, "a.log");
-      await writeFile(log, BUSY);
-      await utimes(log, tenMinAgo(), tenMinAgo());
+  it.skipIf(!itUnix)(
+    "snapshotStatus: reports 'stuck' for a long-silent busy agent (not 'idle')",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, BUSY);
+        await utimes(log, tenMinAgo(), tenMinAgo());
+        const mod = await loadModule();
+        const snap = await mod.snapshotStatus(rec({ log_file: log }));
+        expect(snap.state).toBe("stuck");
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "snapshotStatus: reports 'stuck' when the Rust unresponsive flag is set (no log needed)",
+    async () => {
       const mod = await loadModule();
-      const snap = await mod.snapshotStatus(rec({ log_file: log }));
+      const snap = await mod.snapshotStatus(rec({ unresponsive: true, log_file: null }));
       expect(snap.state).toBe("stuck");
-    } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => null);
-    }
-  });
+    },
+  );
 
-  it("snapshotStatus: reports 'stuck' when the Rust unresponsive flag is set (no log needed)", async () => {
-    const mod = await loadModule();
-    const snap = await mod.snapshotStatus(rec({ unresponsive: true, log_file: null }));
-    expect(snap.state).toBe("stuck");
-  });
-
-  it("snapshotStatus: the unresponsive flag overrides a quiet (would-be idle) log", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
-    try {
-      const log = path.join(dir, "a.log");
-      // Long-silent, no busy marker → would read as `idle`; the flag forces `stuck`.
-      await writeFile(log, "⏺ Done — all green.\r\n❯\r\n");
-      await utimes(log, tenMinAgo(), tenMinAgo());
-      const mod = await loadModule();
-      expect((await mod.snapshotStatus(rec({ log_file: log }))).state).toBe("idle");
-      expect((await mod.snapshotStatus(rec({ log_file: log, unresponsive: true }))).state).toBe(
-        "stuck",
-      );
-    } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => null);
-    }
-  });
+  it.skipIf(!itUnix)(
+    "snapshotStatus: the unresponsive flag overrides a quiet (would-be idle) log",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-stuck-"));
+      try {
+        const log = path.join(dir, "a.log");
+        // Long-silent, no busy marker → would read as `idle`; the flag forces `stuck`.
+        await writeFile(log, "⏺ Done — all green.\r\n❯\r\n");
+        await utimes(log, tenMinAgo(), tenMinAgo());
+        const mod = await loadModule();
+        expect((await mod.snapshotStatus(rec({ log_file: log }))).state).toBe("idle");
+        expect((await mod.snapshotStatus(rec({ log_file: log, unresponsive: true }))).state).toBe(
+          "stuck",
+        );
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
 });
 
 // A CLI like Claude Code repaints by moving the cursor UP over the previous

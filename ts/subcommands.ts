@@ -520,6 +520,35 @@ export const SEND_BODY_MAX_CHARS = 1024;
  * text, so charging the sender for them would be charging for something that
  * does not arrive.
  */
+/**
+ * How many chars the `<ay-msg …>` envelope will add for THIS sender, or 0 when
+ * none is added.
+ *
+ * Exists so the cap can be enforced before anything about the TARGET is touched.
+ * The envelope is composed from the sender's own identity — cli, cwd, pid,
+ * agent_id — and from the body; it never reads the target's record. So its size
+ * is knowable with no I/O about the recipient, which is what lets the whole
+ * caller-error check run ahead of the reachability probe.
+ *
+ * Deliberately builds the same shape `cmdSend` builds rather than estimating a
+ * constant: the length varies per sender (a deep worktree and a long branch name
+ * measure ~370 chars against ~160 for a short one), so a fixed number would be
+ * wrong for somebody. Kept adjacent to the real construction so the two are
+ * edited together — a divergence would under-count and let an over-cap payload
+ * through the early check, where the authoritative check still catches it.
+ */
+export async function envelopeCostFor(body: string, raw: boolean): Promise<number> {
+  if (raw || isSlashCommand(body)) return 0;
+  const sender = await senderContext();
+  if (!sender.agent) return 0;
+  const nonce = "00000000"; // 4 random bytes as hex — fixed width, so any value sizes alike
+  const identity = formatIdentity({ cwd: sender.agent.cwd, pid: sender.agent.pid });
+  const replyTarget = sender.agent.agent_id || sender.agent.pid;
+  const prefix = `<ay-msg ${nonce} from ${sender.agent.cli} ${identity} — reply: ay send ${replyTarget} "...">\n`;
+  const suffix = `\n</ay-msg ${nonce}>`;
+  return prefix.length + suffix.length;
+}
+
 export function sendPayloadCapError(bodyLen: number, envelopeLen: number): string | null {
   const transmitted = bodyLen + envelopeLen;
   if (transmitted <= SEND_BODY_MAX_CHARS) return null;
@@ -3642,19 +3671,25 @@ async function cmdSend(rest: string[]): Promise<number> {
     );
   }
 
-  // A caller error knowable WITHOUT any I/O is reported before we go looking at
-  // the target. An over-cap argv body is wrong whatever the target's state, the
-  // check is a pure function on bytes we already hold, and the reachability
-  // probe below can wait up to UNREACHABLE_CONFIRM_SEND_MS — so probing first
-  // would make a caller wait two seconds to be told its own input was
-  // malformed, and would report `unreachable` for a send that was never going
-  // to be made either way.
+  // ONE rule: everything decidable from the caller's own input is decided before
+  // anything about the target is touched. The reachability probe below can wait
+  // up to UNREACHABLE_CONFIRM_SEND_MS, so probing first would make a caller wait
+  // two seconds to be told its own input was malformed — and would answer
+  // `unreachable` for a send that was never going to be made either way, hiding
+  // the actionable error behind an incidental one.
   //
-  // `-` is deliberately excluded: resolving it means reading stdin, and a send
-  // that cannot land must not first consume the caller's piped body. That form
-  // keeps the reachability gate first and pays its cap check afterwards.
+  // The transmitted size is fully knowable here: the <ay-msg …> envelope is
+  // composed from the SENDER's identity alone (cli, cwd, pid, agent_id) and
+  // never from the target, so its length needs no I/O. `envelopeCostFor` is the
+  // one place that fact is encoded, and cmdSend below builds the real envelope
+  // from the same inputs.
+  //
+  // `-` is the exception: resolving it means reading stdin, and a send that
+  // cannot land must not first consume the caller's piped body. That form keeps
+  // the reachability gate first and pays its cap check afterwards.
   if (rawMessage !== "-") {
-    const err = sendPayloadCapError(rawMessage.length, 0);
+    const rawFlag = Boolean(argv.raw) || process.env.AGENT_YES_SEND_RAW === "1";
+    const err = sendPayloadCapError(rawMessage.length, await envelopeCostFor(rawMessage, rawFlag));
     if (err) throw new Error(err);
   }
 
