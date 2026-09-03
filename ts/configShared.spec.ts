@@ -95,6 +95,37 @@ describe("configShared", () => {
     expect(clis.bash?.bracketedPaste).toBeFalsy();
   });
 
+  // The DECIDE half of paste framing: cmdSend composes a config lookup, the
+  // body, and isSlashCommand into shouldFramePaste. Each piece is tested on its
+  // own; this pins the JOIN, which is the part that rots SILENTLY. A renamed
+  // config key, a CLI added to default.config.yaml without the flag, or
+  // isSlashCommand drifting would each leave `supported` false — nothing goes
+  // red, messages just start losing their heads again (the failure #455 fixed).
+  //
+  // Needs no FIFO, so unlike the byte-level DELIVER assertions it runs on every
+  // platform. It does NOT replace those: it cannot prove framed bytes reach the
+  // pipe, only that the decision this config drives is still the right one.
+  it("decides framing from the real config, the way cmdSend composes it", async () => {
+    const { isSlashCommand } = await import("./subcommands.ts");
+    const { shouldFramePaste } = await import("./bracketedPaste.ts");
+    const clis = await loadSharedCliDefaults(import.meta.url);
+    const decide = (cli: string, body: string) =>
+      shouldFramePaste({
+        supported: Boolean(clis[cli]?.bracketedPaste),
+        body,
+        isSlashCommand: isSlashCommand(body),
+      });
+
+    expect(decide("claude", "the deploy is green")).toBe(true);
+    expect(decide("codex", "the deploy is green")).toBe(true);
+    // A shell never enables the mode; the markers would land as literal text.
+    expect(decide("bash", "echo hi")).toBe(false);
+    // Recognized only when typed — pasted text is not typing.
+    expect(decide("claude", "/model opus")).toBe(false);
+    // An unknown CLI is unconfigured, so it must not be framed on a guess.
+    expect(decide("no-such-cli", "the deploy is green")).toBe(false);
+  });
+
   it("finds the shared defaults file by walking upward", async () => {
     const found = await findSharedCliDefaultsPath(import.meta.url);
     expect(found.endsWith("default.config.yaml")).toBe(true);
