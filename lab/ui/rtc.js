@@ -108,7 +108,7 @@ export async function sendRtcInput(rtc, pid, msg) {
   const r = await rtc.req(
     "POST",
     "/api/send",
-    JSON.stringify({ keyword: String(pid), msg, code: "none" }),
+    JSON.stringify({ keyword: String(pid), msg, code: "none", raw: true }),
   );
   if (r.status < 200 || r.status >= 300) throw new Error(r.text || `send failed (${r.status})`);
 }

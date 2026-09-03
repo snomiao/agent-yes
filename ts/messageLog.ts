@@ -41,8 +41,11 @@ export interface MessageRecord {
   /** What kind of stdin write this was. Omitted for a normal `ay send` text
    * message; "key" for raw keystrokes (`ay key`), "select" for a menu pick
    * (`ay select`), "auto-retry" for the wrapper's own recoverable-error nudge
-   * (from is null; `body` holds the paraphrased reason + backoff state). */
-  kind?: "key" | "select" | "auto-retry";
+   * (from is null; `body` holds the paraphrased reason + backoff state);
+   * "terminal" for a viewer forwarding its terminal's raw bytes — typing, mouse
+   * reports, the terminal's own answers — which the producer declares and
+   * {@link shouldRecord} never stores. */
+  kind?: "key" | "select" | "auto-retry" | "terminal";
   /** The message body (without the `[ay-msg …]` wrapper), or — for a key/select
    * record — the keystroke names / chosen option. */
   body: string;
@@ -73,7 +76,12 @@ export interface MessageRecord {
  * Raising MAILBOX_MAX_LINES cannot fix a rate; the rows have to stop being
  * recorded.
  *
- * TWO conditions, and only the first discriminates:
+ * THREE conditions. Condition 0 is the producer's own declaration; of the two
+ * that inspect the record, only the first discriminates:
+ *
+ *  0. The write was declared raw terminal forwarding (`kind: "terminal"`) — a
+ *     viewer pushing what its xterm emitted, which is never a message however
+ *     the bytes happen to look. See below for why shape could not do this.
  *
  *  1. The body is nothing but replies nobody asked for
  *     (`isUnpromptedTerminalReply`). That predicate is deliberately narrower
@@ -87,13 +95,23 @@ export interface MessageRecord {
  *     humans — an interactive human sender is also `from === null`, which is why
  *     every ambiguous shape has to be excluded by shape.
  *
- * NOT COVERED, named rather than silently missed: SGR mouse reports (36,616
- * rows) and plain CPR, both excluded because they collide with real input;
- * focus in/out (`ESC[I` / `ESC[O`, 215 rows), shape-identical to a two-byte CSI
- * key. What is left still drops 47,331 of 128,827 stored rows (36.7%) — and
- * 99.5% of the mailbox that was measured broken, whose noise was pure DECXCPR.
+ * NOT COVERED BY SHAPE, named rather than silently missed: SGR mouse reports
+ * (36,616 rows) and plain CPR, both excluded because they collide with real
+ * input; focus in/out (`ESC[I` / `ESC[O`, 215 rows), shape-identical to a
+ * two-byte CSI key. What shape alone drops is 47,331 of 128,827 stored rows
+ * (36.7%) — and 99.5% of the mailbox that was measured broken, whose noise was
+ * pure DECXCPR.
+ *
+ * Those families are what condition 0 is for. They are undecidable from the
+ * bytes BUT trivial at the source: a viewer forwarding its terminal's stdin
+ * knows none of it is a message. So the producer says so (`raw: true` on
+ * POST /api/send), serve tags the record `kind: "terminal"`, and this drops it
+ * without inferring anything from a shape a keypress could also make. A client
+ * that does not send the flag is unaffected — it falls through to conditions 1
+ * and 2 exactly as before.
  */
 export function shouldRecord(record: MessageRecord): boolean {
+  if (record.kind === "terminal") return false;
   if (record.from) return true;
   return !isUnpromptedTerminalReply(record.body ?? "");
 }

@@ -3739,13 +3739,16 @@ export async function cmdServe(rest: string[]): Promise<number> {
         msg: string;
         code?: string;
         from?: MailParty | null;
+        /** Set by a viewer forwarding its terminal's raw bytes — see the record
+         * below. Absent from every `ay send`, and from older consoles. */
+        raw?: boolean;
       };
       try {
         body = (await req.json()) as typeof body;
       } catch {
         return new Response("invalid JSON body", { status: 400 });
       }
-      const { keyword, msg = "", code = "enter", from = null } = body;
+      const { keyword, msg = "", code = "enter", from = null, raw = false } = body;
       if (!keyword || typeof keyword !== "string") {
         return new Response("missing keyword", { status: 400 });
       }
@@ -3789,6 +3792,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
         // outbox on its host). The sender crossed the wire, so `from.cwd` names a
         // path on another machine — mark it remote so the peer's cwd isn't misread
         // as local. Only real message bodies are logged. Best-effort.
+        //
+        // A console forwards its terminal's stdin over this same endpoint — every
+        // keystroke, xterm's own answers to the TUI's queries, and SGR mouse
+        // reports — and marks those writes `raw`. `shouldRecord` drops them: the
+        // mailbox is a message log, and mouse/keypress shapes are exactly the ones
+        // no byte-level predicate may claim (ts/messageLog.ts).
         if (msg) {
           const senderParty: MailParty | null =
             from && typeof from === "object" && typeof from.pid === "number"
@@ -3808,6 +3817,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
               cwd: record.cwd,
               agent_id: record.agent_id,
             },
+            kind: raw === true ? "terminal" : undefined,
             body: msg,
             code: code.toLowerCase() === "enter" ? undefined : code.toLowerCase(),
             confirmed: true,

@@ -5477,7 +5477,7 @@ my.translate = async (text, lang) => {
         if (!e || data == null) return;
         perfNote("in", typeof data === "string" ? data.length : (data?.byteLength ?? 0));
         txFor(e)
-          .post("/api/send", { keyword: String(e.pid), msg: data, code: "none" })
+          .post("/api/send", { keyword: String(e.pid), msg: data, code: "none", raw: true })
           .catch(() => {});
       }
       // Apply a pending sticky Ctrl/Alt to a typed character, then disarm. Only a
@@ -6768,6 +6768,10 @@ my.translate = async (text, lang) => {
         // tracking — click / drag-motion / wheel as SGR mouse reports. onBinary
         // covers the UTF-8 mouse encoding (DECSET 1005). Verified end-to-end:
         // a drag emits \x1b[<0;..M / \x1b[<32;..M / \x1b[<0;..m, wheel \x1b[<64/65..M.
+        // `raw: true` marks the whole wire as terminal forwarding so the host keeps
+        // it out of the agent's message log — mouse reports and keypresses have
+        // shapes no host-side predicate may claim, and stored as "messages" they
+        // evict real ones from a capped mailbox (ts/messageLog.ts shouldRecord).
         // keyword MUST be a string — ay serve's POST /api/send rejects a numeric
         // keyword with 400 (pid arrives as a number from /api/ls JSON).
         const kw = String(pid);
@@ -6779,7 +6783,7 @@ my.translate = async (text, lang) => {
         const input = createInputSender((msg) =>
           typeof tx.input === "function"
             ? tx.input(kw, msg)
-            : tx.post("/api/send", { keyword: kw, msg, code: "none" }),
+            : tx.post("/api/send", { keyword: kw, msg, code: "none", raw: true }),
         );
         const fwd = (d) => {
           if (sel !== e._key) return; // ignore a stale terminal mid-switch
