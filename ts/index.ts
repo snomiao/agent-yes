@@ -142,6 +142,14 @@ export type AgentCliConfig = {
   promptArg?: (string & {}) | "first-arg" | "last-arg" | "typed"; // argument name to pass the prompt, e.g. --prompt, first-arg for positional arg, or "typed" to type it into an interactive session after ready (shells)
 
   // handle special format
+  /**
+   * The CLI turns bracketed-paste mode on (DECSET 2004), so `ay send` can
+   * deliver a body as ONE paste instead of a burst the CLI has to segment by
+   * timing — see ts/bracketedPaste.ts for the failure this prevents. Opt-in
+   * because a CLI without the mode would show the markers as literal text.
+   * Verify before setting it: the agent's `.raw.log` contains `ESC[?2004h`.
+   */
+  bracketedPaste?: boolean;
   noEOL?: boolean; // if true, do not split lines by \n when handling inputs, e.g. for codex, which uses cursor-move csi code instead of \n to move lines
 
   // auto responds

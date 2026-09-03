@@ -29,11 +29,13 @@ import {
 import path from "path";
 import yargs from "yargs";
 import {
+  cliDefaults,
   controlCodeFromName,
   deriveLiveStatus,
   extractBadges,
   extractNeedsInput,
   extractTaskCounts,
+  isSlashCommand,
   isUserTyping,
   listRecords,
   readNotes,
@@ -58,6 +60,7 @@ import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
 import { CLAUDE_SESSION_PIN_ENV } from "./sessionEnv.ts";
 import { MAX_CALLBACK_MSG_BYTES, frameVisitorMessage, verifyCapability } from "./callbackCore.ts";
 import { isTerminalReply } from "./terminalReply.ts";
+import { framePaste, shouldFramePaste } from "./bracketedPaste.ts";
 import * as serveSampler from "./serveSampler.ts";
 import { withIpcLock } from "./ipcLock.ts";
 import { removeControlCharacters } from "./removeControlCharacters.ts";
@@ -3763,6 +3766,20 @@ export async function cmdServe(rest: string[]): Promise<number> {
           return new Response(`pid ${record.pid}: no fifo_file`, { status: 409 });
         const trailing = controlCodeFromName(code.toLowerCase());
         const fifo = record.fifo_file;
+        // Same one-paste delivery `ay send` uses locally (ts/bracketedPaste.ts):
+        // a remote send arrives here as a plain body and is written into a TUI
+        // that would otherwise have to segment the burst by timing. NOT for a
+        // `raw` write — that IS the viewer's terminal, already framing its own
+        // pastes, and re-framing would nest the markers.
+        const text =
+          !raw &&
+          shouldFramePaste({
+            supported: Boolean((await cliDefaults())[record.cli]?.bracketedPaste),
+            body: msg,
+            isSlashCommand: isSlashCommand(msg),
+          })
+            ? framePaste(msg)
+            : msg;
         // One transaction: the body and its Enter must reach the agent with
         // nothing spliced between them. The ~200ms settle gap below is a wide
         // window for another writer (a second viewer, an `ay send`) to land
@@ -3770,12 +3787,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
         await withIpcLock(
           record.pid,
           async () => {
-            if (msg && trailing) {
-              await writeToIpc(fifo, msg);
+            if (text && trailing) {
+              await writeToIpc(fifo, text);
               await new Promise((r) => setTimeout(r, 200));
               await writeToIpc(fifo, trailing);
             } else {
-              await writeToIpc(fifo, msg + trailing);
+              await writeToIpc(fifo, text + trailing);
             }
           },
           (why) =>

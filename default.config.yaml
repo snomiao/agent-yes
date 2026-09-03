@@ -1,6 +1,12 @@
 clis:
   claude:
     promptArg: last-arg
+    # `ay send` delivers the body as one bracketed paste (DECSET 2004) instead
+    # of a keystroke burst this CLI would have to segment by arrival timing.
+    # Without it the leading part of a long body is swallowed and the model sees
+    # only a tail — nondeterministically, so no length rule makes a sender safe.
+    # Measured before enabling: every claude agent log carries ESC[?2004h.
+    bracketedPaste: true
     systemPrompt: --append-system-prompt
     # yesArgs: appended when `-y` / --yes is passed. The per-CLI "yolo" flag.
     yesArgs:
@@ -288,6 +294,11 @@ clis:
 
   codex:
     promptArg: first-arg
+    # Verified the same way as claude's — codex's PTY log carries ESC[?2004h,
+    # so it honours a framed paste. That is the claim being made here; codex was
+    # NOT observed splitting an unframed burst the way claude does. Sending one
+    # message as one paste is right either way. See ts/bracketedPaste.ts.
+    bracketedPaste: true
     # yesArgs: `-y` / --yes maps to codex's own "yolo" flag. Codex rejects
     # claude's --dangerously-skip-permissions outright, and its bwrap sandbox
     # cannot initialize inside an already-sandboxed/containerized environment

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PASTE_END, PASTE_START } from "./bracketedPaste.ts";
 import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "fs/promises";
 import { appendFileSync } from "fs";
 import { tmpdir } from "os";
@@ -1025,11 +1026,69 @@ describe("subcommands.cmdSend writes bytes to FIFO", () => {
       const buf = Buffer.alloc(4096);
       const n = fs.readSync(rdwrFd, buf, 0, buf.length, null);
       const received = buf.subarray(0, n).toString();
-      expect(received).toBe("hello-fifo\r");
+      // Delivered as ONE bracketed paste (the target CLI declares the mode), so
+      // the receiving TUI never has to guess the burst's boundaries. The Enter
+      // is OUTSIDE the paste — inside, it would insert a newline, not submit.
+      expect(received).toBe(`${PASTE_START}hello-fifo${PASTE_END}\r`);
       fs.closeSync(rdwrFd);
     } finally {
       await rm(tmp, { recursive: true, force: true }).catch(() => null);
     }
+  });
+
+  // The two ways framing must NOT happen, checked on the wire rather than on the
+  // predicate — a wiring mistake here is invisible to a unit test.
+  const fifoCase = async (cli: string, body: string) => {
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const { spawnSync } = await import("child_process");
+    const tmp = await mkdtemp(path.join(tmpdir(), "ay-fifo-"));
+    const fifo = path.join(tmp, "test.fifo");
+    if (spawnSync("mkfifo", [fifo]).status !== 0) return null;
+    const fs = await import("fs");
+    const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR);
+    await appendGlobalPid({
+      pid: process.pid,
+      cli,
+      prompt: null,
+      cwd: process.cwd(),
+      log_file: null,
+      fifo_file: fifo,
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+    });
+    const orig = process.stdout.write.bind(process.stdout);
+    (process.stdout as any).write = () => true;
+    const savedAyPid = process.env.AGENT_YES_PID;
+    delete process.env.AGENT_YES_PID;
+    try {
+      await runSubcommand(["bun", "cli.js", "send", String(process.pid), body, "--force"]);
+    } finally {
+      process.stdout.write = orig;
+      if (savedAyPid !== undefined) process.env.AGENT_YES_PID = savedAyPid;
+    }
+    const buf = Buffer.alloc(4096);
+    const n = fs.readSync(rdwrFd, buf, 0, buf.length, null);
+    fs.closeSync(rdwrFd);
+    await rm(tmp, { recursive: true, force: true }).catch(() => null);
+    return buf.subarray(0, n).toString();
+  };
+
+  it.skipIf(!itUnix)("never frames a CLI that does not enable the mode", async () => {
+    // bash would receive ESC[200~ as literal text on its command line.
+    const received = await fifoCase("bash", "echo hi");
+    if (received === null) return;
+    expect(received).toBe("echo hi\r");
+  });
+
+  it.skipIf(!itUnix)("never frames a slash command — pasted text is not typing", async () => {
+    // A CLI recognizes /exit only when typed; framing it would deliver the text
+    // of a command the sender meant to run.
+    const received = await fifoCase("claude", "/model opus");
+    if (received === null) return;
+    expect(received).toBe("/model opus\r");
   });
 
   it("--code=none skips the trailing CR", async () => {
@@ -2977,8 +3036,9 @@ describe("subcommands.cmdSend double-envelope warning", () => {
         const buf = Buffer.alloc(8192);
         const n = fs.readSync(rdwrFd, buf, 0, buf.length, null);
         const received = buf.subarray(0, n).toString();
+        expect(received.startsWith(PASTE_START)).toBe(true);
         expect(received).toMatch(
-          /^<ay-msg [0-9a-f]{8} from claude [A-Za-z0-9._-]+@[A-Za-z0-9._-]+:\/repo\/beta#900001 — /,
+          /<ay-msg [0-9a-f]{8} from claude [A-Za-z0-9._-]+@[A-Za-z0-9._-]+:\/repo\/beta#900001 — /,
         );
         expect(received).toContain("<ay-msg deadbeef");
         fs.closeSync(rdwrFd);
@@ -3114,9 +3174,12 @@ describe("subcommands.cmdSend double-envelope warning", () => {
       const buf = Buffer.alloc(4096);
       const n = fs.readSync(rdwrFd, buf, 0, buf.length, null);
       const received = buf.subarray(0, n).toString();
-      // <user>@<host>:<path>:<branch>#<pid> — reply targets the agent_id.
+      // <user>@<host>:<path>:<branch>#<pid> — reply targets the agent_id. The
+      // envelope now opens just inside the paste marker, so the anchor moves
+      // from start-of-payload to start-of-paste.
+      expect(received.startsWith(PASTE_START)).toBe(true);
       expect(received).toMatch(
-        /^<ay-msg [0-9a-f]{8} from claude [A-Za-z0-9._-]+@[A-Za-z0-9._-]+:.+:crm-lane#900001 — reply: ay send cccc0000dddd "\.\.\.">/,
+        /<ay-msg [0-9a-f]{8} from claude [A-Za-z0-9._-]+@[A-Za-z0-9._-]+:.+:crm-lane#900001 — reply: ay send cccc0000dddd "\.\.\.">/,
       );
       fs.closeSync(rdwrFd);
     } finally {
