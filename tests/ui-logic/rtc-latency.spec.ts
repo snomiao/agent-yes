@@ -35,7 +35,13 @@ describe("RTC low-latency stdin", () => {
     await sendRtcInput(rtc, 42, "a");
 
     expect(calls).toEqual([
-      ["POST", "/api/send", JSON.stringify({ keyword: "42", msg: "a", code: "none" })],
+      [
+        "POST",
+        "/api/send",
+        // `raw` marks the wire as terminal forwarding — the host must not store
+        // these bytes in the agent's message log (ts/messageLog.ts shouldRecord).
+        JSON.stringify({ keyword: "42", msg: "a", code: "none", raw: true }),
+      ],
     ]);
   });
 

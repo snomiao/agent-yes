@@ -324,3 +324,70 @@ describe("messageLog unprompted-reply filter", () => {
     expect(inbox.some((r) => r.body === "seed 1")).toBe(false);
   });
 });
+
+describe("messageLog declared terminal-forwarding filter", () => {
+  let dir: string;
+  let prevCwd: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "msglog-raw-"));
+    prevCwd = process.cwd();
+  });
+
+  afterEach(async () => {
+    process.chdir(prevCwd);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // The families no byte-level predicate may claim, because a keypress can make
+  // the same shape. The producer declaring the wire is what settles them.
+  const FORWARDED = [
+    ["wheel — the second largest stored family", "\x1b[<64;24;25M"],
+    ["a click inside a TUI", "\x1b[<0;12;27m"],
+    ["plain CPR, shape-identical to modified F3", "\x1b[1;1R"],
+    ["focus in", "\x1b[I"],
+    ["an ordinary keystroke", "y"],
+    ["a pasted line", "run the tests\r"],
+  ] as const;
+
+  it("drops a write the producer declared terminal forwarding, whatever it looks like", () => {
+    for (const [name, body] of FORWARDED)
+      expect(shouldRecord(makeRecord({ from: null, kind: "terminal", body })), name).toBe(false);
+  });
+
+  it("keeps those same bodies when nothing declared them", () => {
+    // The regression this guards: inferring from the bytes would delete a
+    // keypress. Only the declaration may drop them.
+    for (const [name, body] of FORWARDED)
+      expect(shouldRecord(makeRecord({ from: null, body })), name).toBe(true);
+  });
+
+  it("lets the declaration outrank a sender", () => {
+    // `from` is a margin for reply SHAPES, not a licence to store a wire the
+    // producer already said carries no messages.
+    expect(
+      shouldRecord(
+        makeRecord({
+          from: { pid: 1111, cli: "claude", cwd: "/repo/alpha", agent_id: "agent-A" },
+          kind: "terminal",
+          body: "y",
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("writes NO mailbox line for declared forwarding, end to end", async () => {
+    const to = path.join(dir, "recipient");
+    process.chdir(dir);
+    for (const [, body] of FORWARDED)
+      await recordMessage(
+        makeRecord({
+          from: null,
+          kind: "terminal",
+          body,
+          to: { pid: 2222, cli: "codex", cwd: to, agent_id: "agent-B" },
+        }),
+      );
+    expect(await readMailbox(to, "inbox")).toHaveLength(0);
+  });
+});
