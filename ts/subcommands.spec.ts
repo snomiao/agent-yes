@@ -3483,24 +3483,23 @@ describe("subcommands.probeStdinReachable", () => {
     },
   );
 
-  it.skipIf(!itUnix)(
-    "classifies EPIPE as unreachable for a WRITE, though a probe can never see it",
-    async () => {
-      // A reader present at open() that vanishes mid-write gives EPIPE. Only the
-      // write path produces it, so it belongs in the send's classification and not
-      // in the probe — but it must land on the same exit status, because it is the
-      // same mechanism noticed a moment later.
-      const mod = await loadModule();
-      expect(mod.isUnreachableWriteErrno("EPIPE")).toBe(true);
-      expect(mod.isUnreachableWriteErrno("ENXIO")).toBe(true);
-      expect(mod.isUnreachableWriteErrno("ENOENT")).toBe(true);
-      // A full pipe means a reader EXISTS and is slow — that is the retry loop,
-      // not a dead row.
-      expect(mod.isUnreachableWriteErrno("EAGAIN")).toBe(false);
-      expect(mod.isUnreachableWriteErrno("EACCES")).toBe(false);
-      expect(mod.isUnreachableWriteErrno(undefined)).toBe(false);
-    },
-  );
+  // Portable: asserts the errno CLASSIFIER, which is a pure predicate — no
+  // FIFO and no probe, so it holds on Windows too.
+  it("classifies EPIPE as unreachable for a WRITE, though a probe can never see it", async () => {
+    // A reader present at open() that vanishes mid-write gives EPIPE. Only the
+    // write path produces it, so it belongs in the send's classification and not
+    // in the probe — but it must land on the same exit status, because it is the
+    // same mechanism noticed a moment later.
+    const mod = await loadModule();
+    expect(mod.isUnreachableWriteErrno("EPIPE")).toBe(true);
+    expect(mod.isUnreachableWriteErrno("ENXIO")).toBe(true);
+    expect(mod.isUnreachableWriteErrno("ENOENT")).toBe(true);
+    // A full pipe means a reader EXISTS and is slow — that is the retry loop,
+    // not a dead row.
+    expect(mod.isUnreachableWriteErrno("EAGAIN")).toBe(false);
+    expect(mod.isUnreachableWriteErrno("EACCES")).toBe(false);
+    expect(mod.isUnreachableWriteErrno(undefined)).toBe(false);
+  });
 
   it.skipIf(!itUnix)(
     "fails OPEN on any other errno rather than calling a live agent dead",
@@ -3643,7 +3642,9 @@ describe("subcommands.deriveLiveState reachability", () => {
     },
   );
 
-  it.skipIf(!itUnix)("still probes an OLD record that has no log at all", async () => {
+  // Portable: `fifo_file: null` with no FIFO on disk is ENOENT on every
+  // platform, so this needs neither mkfifo nor an ENXIO-capable pipe.
+  it("still probes an OLD record that has no log at all", async () => {
     // `log_file: null` reads `active` from the log heuristics because there is
     // nothing to judge by — it must not therefore become unprobeable, or a row
     // with no log could never be reported unreachable at all.
@@ -3655,19 +3656,17 @@ describe("subcommands.deriveLiveState reachability", () => {
 
   // Also a guard rather than a proof: `stopped` must keep winning, so a dead pid
   // is never reported by the more specific-sounding `unreachable`.
-  it.skipIf(!itUnix)(
-    "agrees with ay status on an exited record whose pid has been recycled",
-    async () => {
-      // `ay ls` has always honoured a stored exit; `ay status` asked the OS alone,
-      // so a recycled pid made it call an exited row alive — and, once this change
-      // existed, `unreachable` — while `ay ls` said `stopped`. The two must not
-      // disagree about whether a row can be given work.
-      const mod = await loadModule();
-      const exited = rec({ status: "exited", pid: process.pid, fifo_file: null });
-      expect((await mod.deriveLiveState(exited)).state).toBe("stopped");
-      expect((await mod.snapshotStatus(exited)).state).toBe("stopped");
-    },
-  );
+  // Portable: a stored exit short-circuits before any probe runs.
+  it("agrees with ay status on an exited record whose pid has been recycled", async () => {
+    // `ay ls` has always honoured a stored exit; `ay status` asked the OS alone,
+    // so a recycled pid made it call an exited row alive — and, once this change
+    // existed, `unreachable` — while `ay ls` said `stopped`. The two must not
+    // disagree about whether a row can be given work.
+    const mod = await loadModule();
+    const exited = rec({ status: "exited", pid: process.pid, fifo_file: null });
+    expect((await mod.deriveLiveState(exited)).state).toBe("stopped");
+    expect((await mod.snapshotStatus(exited)).state).toBe("stopped");
+  });
 
   it.skipIf(!itUnix)(
     "keeps reporting 'stopped' for a dead pid without probing anything",
