@@ -3642,6 +3642,22 @@ async function cmdSend(rest: string[]): Promise<number> {
     );
   }
 
+  // A caller error knowable WITHOUT any I/O is reported before we go looking at
+  // the target. An over-cap argv body is wrong whatever the target's state, the
+  // check is a pure function on bytes we already hold, and the reachability
+  // probe below can wait up to UNREACHABLE_CONFIRM_SEND_MS — so probing first
+  // would make a caller wait two seconds to be told its own input was
+  // malformed, and would report `unreachable` for a send that was never going
+  // to be made either way.
+  //
+  // `-` is deliberately excluded: resolving it means reading stdin, and a send
+  // that cannot land must not first consume the caller's piped body. That form
+  // keeps the reachability gate first and pays its cap check afterwards.
+  if (rawMessage !== "-") {
+    const err = sendPayloadCapError(rawMessage.length, 0);
+    if (err) throw new Error(err);
+  }
+
   const fifoPath = record.fifo_file;
   // Both shapes of "there is nobody to deliver to" exit with the same
   // distinguishable status, before we read stdin or take the input lock — a
@@ -3780,9 +3796,7 @@ async function cmdSend(rest: string[]): Promise<number> {
     const err = sendPayloadCapError(body.length, prefix.length + suffix.length);
     if (err) throw new Error(err);
   }
-  const fullBody = framePaste
-    ? frameAsPaste(prefix + body + suffix)
-    : prefix + body + suffix;
+  const fullBody = framePaste ? frameAsPaste(prefix + body + suffix) : prefix + body + suffix;
   const noWait = Boolean(argv.noWait) || process.env.AGENT_YES_SEND_NO_WAIT === "1";
 
   // Back off while the user is typing at the target's terminal — injecting our

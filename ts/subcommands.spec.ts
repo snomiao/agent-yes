@@ -1857,7 +1857,12 @@ describe("subcommands.cmdSend safety guards", () => {
       prompt: null,
       cwd: process.cwd(),
       log_file: null,
-      fifo_file: "/tmp/ay-envelope-cap-test.fifo",
+      // A LIVE fifo. On main this path never existed and the cap fired first, so
+      // the fixture was incidental; once `ay send` refuses an unreachable target
+      // BEFORE composing the envelope, a dead path makes this assert exit 3 and
+      // stop testing the thing it is named for. The envelope cap is what this
+      // test is about, so give it a target that can actually be written to.
+      fifo_file: await liveFifo(process.pid),
       status: "active",
       exit_code: null,
       exit_reason: null,
@@ -3860,6 +3865,39 @@ describe("subcommands.cmdSend unreachable exit status", () => {
     } finally {
       cap.restore();
     }
+  });
+
+  // Ungated: it asserts an ordering that happens BEFORE any FIFO is touched, so
+  // it needs no pipe and holds on Windows.
+  it("reports an over-cap argv body immediately, without probing a dead target", async () => {
+    // Load-bearing twice over. The reachability probe can wait up to two
+    // seconds; an over-cap argv body is wrong whatever the target's state and
+    // costs nothing to detect. Probing first would make a caller wait to be told
+    // its own input was malformed, and would answer `unreachable` (3) for a send
+    // that was never going to be made — hiding the real, actionable error behind
+    // an incidental one.
+    const mod = await loadModule();
+    await registerTarget(null); // deliberately unreachable
+    const cap = captureStderr();
+    const started = Date.now();
+    let code: number | null;
+    try {
+      code = await mod.runSubcommand([
+        "bun",
+        "cli.js",
+        "send",
+        String(process.pid),
+        "x".repeat(5000),
+      ]);
+    } finally {
+      cap.restore();
+    }
+    const elapsed = Date.now() - started;
+    expect(code).toBe(1); // the caller error, NOT SEND_EXIT_UNREACHABLE
+    expect(cap.out.join("")).toMatch(/over the \d+-char limit/);
+    expect(cap.out.join("")).not.toMatch(/UNREACHABLE/);
+    // Well under the 2s confirm window, so it cannot pass by having probed.
+    expect(elapsed).toBeLessThan(1_000);
   });
 
   it.skipIf(!itUnix)("does not consume piped stdin when the target is unreachable", async () => {
