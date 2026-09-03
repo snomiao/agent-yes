@@ -1027,8 +1027,12 @@ describe("subcommands.cmdSend writes bytes to FIFO", () => {
       const n = fs.readSync(rdwrFd, buf, 0, buf.length, null);
       const received = buf.subarray(0, n).toString();
       // Delivered as ONE bracketed paste (the target CLI declares the mode), so
-      // the receiving TUI never has to guess the burst's boundaries. The Enter
-      // is OUTSIDE the paste — inside, it would insert a newline, not submit.
+      // the receiving TUI never has to guess the burst's boundaries.
+      //
+      // The CR after the END marker is the load-bearing half: inside a paste a
+      // CR is content, so it would insert a newline and submit nothing, leaving
+      // the message unsent in the composer with no error anywhere. This is the
+      // guard against a refactor folding `trailing` into the framed string.
       expect(received).toBe(`${PASTE_START}hello-fifo${PASTE_END}\r`);
       fs.closeSync(rdwrFd);
     } finally {

@@ -33,6 +33,16 @@
  *   grep -ac $'\\x1b\\[?2004h' <the agent's .raw.log>
  */
 
+/**
+ * The submit Enter must be written AFTER the framed payload, never inside it.
+ * Inside a paste a CR is content — it inserts a newline and submits nothing, so
+ * the message would sit unsent in the composer. Callers therefore write
+ * `framePaste(body)` first and the trailing code as a separate write; a refactor
+ * that folds the trailing byte into the framed string would break delivery
+ * silently, with no error at either end. Pinned by the byte-level FIFO test in
+ * ts/subcommands.spec.ts, which asserts the CR lands after the END marker.
+ */
+
 /** DECSET 2004 paste start — what a terminal emits before pasted content. */
 export const PASTE_START = "\x1b[200~";
 /** DECSET 2004 paste end. */
