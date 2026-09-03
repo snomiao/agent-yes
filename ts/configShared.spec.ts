@@ -95,9 +95,11 @@ describe("configShared", () => {
     expect(clis.bash?.bracketedPaste).toBeFalsy();
   });
 
-  // The DECIDE half of paste framing: cmdSend composes a config lookup, the
-  // body, and isSlashCommand into shouldFramePaste. Each piece is tested on its
-  // own; this pins the JOIN, which is the part that rots SILENTLY. A renamed
+  // The DECIDE half of paste framing: BOTH send paths — cmdSend and serve.ts's
+  // POST /api/send — compose the same config lookup, the body, and
+  // isSlashCommand into shouldFramePaste. Each piece is tested on its own; this
+  // pins the JOIN, which is the part that rots SILENTLY, and it speaks for both
+  // sites because the composition is what it asserts, not one call site. A renamed
   // config key, a CLI added to default.config.yaml without the flag, or
   // isSlashCommand drifting would each leave `supported` false — nothing goes
   // red, messages just start losing their heads again (the failure #455 fixed).
@@ -105,7 +107,7 @@ describe("configShared", () => {
   // Needs no FIFO, so unlike the byte-level DELIVER assertions it runs on every
   // platform. It does NOT replace those: it cannot prove framed bytes reach the
   // pipe, only that the decision this config drives is still the right one.
-  it("decides framing from the real config, the way cmdSend composes it", async () => {
+  it("decides framing from the real config, the way both send paths compose it", async () => {
     const { isSlashCommand } = await import("./subcommands.ts");
     const { shouldFramePaste } = await import("./bracketedPaste.ts");
     const clis = await loadSharedCliDefaults(import.meta.url);
