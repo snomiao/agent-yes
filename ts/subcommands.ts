@@ -495,7 +495,60 @@ const SEND_TYPING_MAX_WAIT_MS = 10_000;
 // Lowered 4096 → 1024 (operator 2026-08-20): past ~1KB the bracketed paste keeps
 // re-rendering long enough that the trailing Enter lands mid-paste and is
 // swallowed, so the body sits unsent in the target's input line.
-const SEND_BODY_MAX_CHARS = 1024;
+export const SEND_BODY_MAX_CHARS = 1024;
+
+/**
+ * The cap, measured on what is actually WRITTEN to the agent's stdin.
+ *
+ * `ay send` checked the BODY against the cap and then transmitted the body plus
+ * an `<ay-msg …>` envelope — a header naming the sender's identity and a closing
+ * tag, together ~160 characters on real traffic. So the number the sender was
+ * told was safe was never the number that went down the pipe, and a body
+ * accepted at 1000 arrived as ~1160. The envelope is not a fixed surcharge either: it carries the
+ * sender's cwd, branch and pid, so its length differs per sender and no constant
+ * body budget can be quoted. Hence a check on the sum rather than a smaller
+ * hard-coded limit.
+ *
+ * Returns the error text, or null when the send fits. `envelopeLen` is 0 for a
+ * `--raw` send and for a slash command, both of which go out unwrapped — the
+ * budget is then the whole cap, which is why this is computed per send and not
+ * once.
+ *
+ * Paste framing (ts/bracketedPaste.ts) is deliberately NOT counted: those 12
+ * bytes are consumed by the receiving terminal as delimiters, never inserted as
+ * text, so charging the sender for them would be charging for something that
+ * does not arrive.
+ */
+export function sendPayloadCapError(bodyLen: number, envelopeLen: number): string | null {
+  const transmitted = bodyLen + envelopeLen;
+  if (transmitted <= SEND_BODY_MAX_CHARS) return null;
+  const budget = SEND_BODY_MAX_CHARS - envelopeLen;
+  const remedy =
+    `Write it to a file and send the PATH instead, e.g. ` +
+    `'ay send <keyword> "details: /path/to/notes.md"'`;
+  // Nothing bounds a cwd's depth or a branch name's length, so an envelope can
+  // in principle reach the cap on its own. Then NO body length works, and
+  // quoting a budget would print a negative number and tell the sender to
+  // shorten to ≤0 — an error naming a remedy that cannot work, which is the
+  // very defect this function exists to remove. Say what is actually true.
+  if (budget <= 0) {
+    return (
+      `the <ay-msg …> envelope alone is ${envelopeLen} chars, at or over the ` +
+      `${SEND_BODY_MAX_CHARS}-char limit, so no body length can fit. ${remedy} — ` +
+      `and send it with --raw, which omits the envelope.`
+    );
+  }
+  return (
+    `message would transmit ${transmitted} chars, over the ${SEND_BODY_MAX_CHARS}-char limit` +
+    (envelopeLen > 0
+      ? ` — ${bodyLen} of body plus ${envelopeLen} of <ay-msg …> envelope, which ` +
+        `ay send adds for you. Your budget for this send is ${budget} chars of body`
+      : "") +
+    `. Longer text isn't a terminal prompt. Piping it in with '-' hits this same ` +
+    `cap — the payload is capped however it arrives. ${remedy}, ` +
+    `or shorten the body to ≤${budget} chars.`
+  );
+}
 
 /**
  * Whether `name` is a subcommand. `managerCommands` (default true, for the
@@ -3453,14 +3506,14 @@ async function cmdSend(rest: string[]): Promise<number> {
   // What works is not sending the text at all: send the PATH and let the reader
   // open it. That also survives a truncated delivery, since the tail is what
   // arrives and a path is short enough to sit in it.
-  if (body.length > SEND_BODY_MAX_CHARS) {
-    throw new Error(
-      `message is ${body.length} chars, over the ${SEND_BODY_MAX_CHARS}-char limit. ` +
-        `Longer text isn't a terminal prompt. Piping it in with '-' hits this same ` +
-        `cap — the body is capped however it arrives. Write it to a file and send ` +
-        `the PATH instead, e.g. 'ay send <keyword> "details: /path/to/notes.md"', ` +
-        `or shorten to ≤${SEND_BODY_MAX_CHARS} chars.`,
-    );
+  //
+  // This is the cheap pre-check: a body that is already over the cap on its own
+  // cannot fit once the envelope is added either, so it fails here before the
+  // send guards run. The AUTHORITATIVE check is on the transmitted payload,
+  // below, once the envelope's length is known — see sendPayloadCapError.
+  {
+    const err = sendPayloadCapError(body.length, 0);
+    if (err) throw new Error(err);
   }
 
   // Who's sending, and have they actually looked at this target recently?
@@ -3540,6 +3593,14 @@ async function cmdSend(rest: string[]): Promise<number> {
     body,
     isSlashCommand: isSlashCommand(body),
   });
+  // The cap applies to what is WRITTEN, and the envelope is part of that. The
+  // pre-check above saw only the body, so a body just under the limit reaches
+  // here and is over it once wrapped — which is exactly the case that used to
+  // transmit silently. Framing markers are excluded: the terminal consumes them.
+  {
+    const err = sendPayloadCapError(body.length, prefix.length + suffix.length);
+    if (err) throw new Error(err);
+  }
   const fullBody = framePaste
     ? frameAsPaste(prefix + body + suffix)
     : prefix + body + suffix;

@@ -1783,6 +1783,70 @@ describe("subcommands.cmdSend safety guards", () => {
     }
   });
 
+  it("counts the envelope it adds — a body UNDER the cap that would transmit over it", async () => {
+    // The defect: the cap was checked on the body, then ~134 chars of
+    // <ay-msg …> envelope were added and the whole thing written. A body of
+    // 1000 was accepted and ~1134 went down the pipe. The enforced number was
+    // never the transmitted number.
+    const { runSubcommand } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const sender = {
+      pid: 900001,
+      cli: "claude" as const,
+      prompt: null,
+      cwd: "/repo/beta",
+      log_file: null,
+      fifo_file: null,
+      status: "active" as const,
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+      agent_id: "cccc0000dddd",
+      wrapper_pid: 900001,
+    };
+    await appendGlobalPid(sender);
+    await appendGlobalPid({
+      pid: process.pid,
+      cli: "claude",
+      prompt: null,
+      cwd: process.cwd(),
+      log_file: null,
+      fifo_file: "/tmp/ay-envelope-cap-test.fifo",
+      status: "active",
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now(),
+    });
+    const stderr: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    (process.stderr as any).write = (x: any) => {
+      stderr.push(String(x));
+      return true;
+    };
+    const savedAyPid = process.env.AGENT_YES_PID;
+    process.env.AGENT_YES_PID = "900001"; // an AGENT sender, so the envelope is added
+    try {
+      const body = "x".repeat(1000); // comfortably under the 1024 body cap
+      const code = await runSubcommand([
+        "bun",
+        "cli.js",
+        "send",
+        String(process.pid),
+        body,
+        "--force",
+      ]);
+      expect(code).toBe(1);
+      const out = stderr.join("");
+      expect(out).toMatch(/would transmit/);
+      expect(out).toMatch(/1000 of body/);
+      expect(out).toMatch(/envelope/);
+    } finally {
+      process.stderr.write = orig;
+      if (savedAyPid === undefined) delete process.env.AGENT_YES_PID;
+      else process.env.AGENT_YES_PID = savedAyPid;
+    }
+  });
+
   it("applies the same cap to the `-` (stdin) body — the form the old hint recommended", async () => {
     const { runSubcommand } = await loadModule();
     const { appendGlobalPid } = await import("./globalPidIndex.ts");
