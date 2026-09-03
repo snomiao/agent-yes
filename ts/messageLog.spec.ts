@@ -10,6 +10,7 @@ import {
   recordInbox,
   recordMessage,
   recordOutbox,
+  senderLabel,
   shouldRecord,
   type MessageRecord,
 } from "./messageLog.ts";
@@ -389,5 +390,64 @@ describe("messageLog declared terminal-forwarding filter", () => {
         }),
       );
     expect(await readMailbox(to, "inbox")).toHaveLength(0);
+  });
+});
+
+describe("messageLog sender provenance", () => {
+  let dir: string;
+  let prevCwd: string;
+
+  beforeEach(async () => {
+    dir = await mkdtemp(path.join(tmpdir(), "msglog-prov-"));
+    prevCwd = process.cwd();
+  });
+
+  afterEach(async () => {
+    process.chdir(prevCwd);
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  // The failure this guards: a lane saw 50 rows of a terminal's own cursor
+  // reports listed as "human". An agent that weighs a human's instruction above
+  // an agent's was being handed control bytes wearing the one label it obeys.
+  it("names a human ONLY for a local shell invocation", () => {
+    expect(senderLabel(makeRecord({ from: null, origin: "shell" }))).toBe("human");
+  });
+
+  it("never calls an unattributed wire write, or a public visitor, human", () => {
+    expect(senderLabel(makeRecord({ from: null, origin: "wire" }))).toBe("wire");
+    expect(senderLabel(makeRecord({ from: null, origin: "visitor" }))).toBe("visitor");
+  });
+
+  it("says unattributed when nothing recorded an origin", () => {
+    // Rows written before `origin` existed. "human" was the old default here,
+    // and it is exactly the claim the record cannot support.
+    expect(senderLabel(makeRecord({ from: null }))).toBe("unattributed");
+  });
+
+  it("still names the wrapper's own nudge, by origin or by legacy kind", () => {
+    expect(senderLabel(makeRecord({ from: null, origin: "wrapper" }))).toBe("agent-yes");
+    expect(senderLabel(makeRecord({ from: null, kind: "auto-retry" }))).toBe("agent-yes");
+  });
+
+  it("names an attributed sender by its agent, whatever the origin says", () => {
+    const from = { pid: 1111, cli: "claude", cwd: "/repo/alpha", agent_id: "agent-A" };
+    expect(senderLabel(makeRecord({ from }))).toBe("claude #1111");
+    expect(senderLabel(makeRecord({ from, origin: "wire" }))).toBe("claude #1111");
+  });
+
+  it("round-trips origin through a mailbox so a reader can check it itself", async () => {
+    const to = path.join(dir, "recipient");
+    process.chdir(dir);
+    await recordMessage(
+      makeRecord({
+        from: null,
+        origin: "wire",
+        body: "deploy is green",
+        to: { pid: 2222, cli: "codex", cwd: to, agent_id: "agent-B" },
+      }),
+    );
+    const [rec] = await readMailbox(to, "inbox");
+    expect(rec?.origin).toBe("wire");
   });
 });

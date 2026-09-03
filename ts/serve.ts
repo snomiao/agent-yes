@@ -3810,6 +3810,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
               : null;
           await recordInbox({
             at: Date.now(),
+            // Unattributed HTTP, not a person: the console, a remote `ay send`
+            // that sent no `from`, any client at all. Recorded so a listing can
+            // never mistake it for the operator.
+            origin: senderParty ? undefined : "wire",
             from: senderParty,
             to: {
               pid: record.pid,
@@ -4834,6 +4838,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
       await noteStdinWrite(record.pid, record.fifo_file, true);
       await recordInbox({
         at: Date.now(),
+        // A stranger on the public callback page. The framing in `body` says so
+        // to a reader; `origin` says so to the listing.
+        origin: "visitor",
         from: null,
         to: { pid: record.pid, cli: record.cli, cwd: record.cwd, agent_id: record.agent_id },
         body: framed,

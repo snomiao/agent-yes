@@ -994,6 +994,7 @@ export default async function agentYes({
             // runtime's record_auto_retry_inbox) — best-effort, never blocks.
             void recordInbox({
               at: now,
+              origin: "wrapper",
               from: null,
               to: { pid: process.pid, cli, cwd: workingDir },
               kind: "auto-retry",
