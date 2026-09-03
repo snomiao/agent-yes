@@ -140,6 +140,10 @@
           "type": "boolean",
           "description": "If true, don't split lines by newline (for CLIs using cursor movement like codex)"
         },
+        "bracketedPaste": {
+          "type": "boolean",
+          "description": "If true, `ay send` delivers the body as one bracketed paste (DECSET 2004) rather than a keystroke burst the CLI must segment by timing — which silently swallows the head of long bodies. Only set it for a CLI that enables the mode: its PTY .raw.log will contain ESC[?2004h."
+        },
         "enter": {
           "type": "array",
           "items": { "$ref": "#/definitions/RegexSource" },

@@ -65,6 +65,7 @@ import {
 import { loadSharedCliDefaults } from "./configShared.ts";
 import { invokedCliName } from "./invokedCli.ts";
 import type { AgentCliConfig } from "./index.ts";
+import { framePaste as frameAsPaste, shouldFramePaste } from "./bracketedPaste.ts";
 import yargs from "yargs";
 import { type ResolvedRemote, readRemotes, resolveRemoteSpec } from "./remotes.ts";
 import { isWebrtcSpec } from "./webrtcLink.ts";
@@ -2851,7 +2852,7 @@ export async function extractTaskCounts(logPath: string): Promise<TaskCounts | n
 // process from default.config.yaml. Type-only import of AgentCliConfig keeps the
 // heavy ts/index.ts module out of the `ay ls`/`ay status` startup path.
 let _cliDefaults: Promise<Record<string, AgentCliConfig>> | null = null;
-function cliDefaults(): Promise<Record<string, AgentCliConfig>> {
+export function cliDefaults(): Promise<Record<string, AgentCliConfig>> {
   return (_cliDefaults ??= loadSharedCliDefaults().catch(
     () => ({}) as Record<string, AgentCliConfig>,
   ));
@@ -3530,7 +3531,18 @@ async function cmdSend(rest: string[]): Promise<number> {
     }
   }
 
-  const fullBody = prefix + body + suffix;
+  // Deliver as ONE paste when the target CLI supports it, instead of a burst it
+  // has to segment by arrival timing — which silently eats the head of a long
+  // body. See ts/bracketedPaste.ts for the measurement and why no length or
+  // single-line rule can replace this.
+  const framePaste = shouldFramePaste({
+    supported: Boolean((await cliDefaults())[record.cli]?.bracketedPaste),
+    body,
+    isSlashCommand: isSlashCommand(body),
+  });
+  const fullBody = framePaste
+    ? frameAsPaste(prefix + body + suffix)
+    : prefix + body + suffix;
   const noWait = Boolean(argv.noWait) || process.env.AGENT_YES_SEND_NO_WAIT === "1";
 
   // Back off while the user is typing at the target's terminal — injecting our

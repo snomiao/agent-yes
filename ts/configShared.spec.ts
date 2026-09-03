@@ -84,6 +84,17 @@ describe("configShared", () => {
     ).toBe(true);
   });
 
+  it("declares bracketed paste only for CLIs measured to enable the mode", async () => {
+    const clis = await loadSharedCliDefaults(import.meta.url);
+    // Enabled where the agents' PTY logs actually carry ESC[?2004h.
+    expect(clis.claude?.bracketedPaste).toBe(true);
+    expect(clis.codex?.bracketedPaste).toBe(true);
+    // A shell is not opted in: it never turns the mode on, so the markers would
+    // land as literal text — and a multi-line body there is several commands,
+    // which is what the sender meant.
+    expect(clis.bash?.bracketedPaste).toBeFalsy();
+  });
+
   it("finds the shared defaults file by walking upward", async () => {
     const found = await findSharedCliDefaultsPath(import.meta.url);
     expect(found.endsWith("default.config.yaml")).toBe(true);
