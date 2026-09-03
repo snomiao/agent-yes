@@ -69,10 +69,20 @@ const heldFifoFds: number[] = [];
  * Returns the path, or null when `mkfifo` is unavailable (caller should skip).
  */
 async function liveFifo(pid: number, at?: string): Promise<string | null> {
+  // FIFOs are a unix construct. On Windows production uses a named pipe
+  // (`\\.\pipe\agent-yes-<pid>`, see pidStore.getFifoPath), so there is no
+  // path this helper could create — and handing production a unix-shaped path
+  // there makes it ENOENT on a file that can never exist. Return null, which
+  // every caller already treats as "skip".
+  if (process.platform === "win32") return null;
   const { spawnSync } = await import("child_process");
   const fs = await import("fs");
-  const { agentYesHome } = await import("./agentYesHome.ts");
-  const fifo = at ?? path.join(agentYesHome(), "fifo", `${pid}.stdin`);
+  const { PidStore } = await import("./pidStore.ts");
+  // Ask the OWNER for the path instead of rebuilding it: pidStore.getFifoPath
+  // is the single place that knows the shape, and a second copy here is exactly
+  // what drifted from it. `getFifoPath` reads no instance state, so the
+  // constructor's working dir is irrelevant to the answer.
+  const fifo = at ?? new PidStore(testHome).getFifoPath(pid);
   await mkdir(path.dirname(fifo), { recursive: true });
   await rm(fifo, { force: true }).catch(() => null);
   if (spawnSync("mkfifo", [fifo]).status !== 0) return null;

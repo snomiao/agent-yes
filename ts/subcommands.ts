@@ -22,6 +22,7 @@ import { formatIdentity } from "./identity.ts";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
 import { agentYesHome } from "./agentYesHome.ts";
+import { PidStore } from "./pidStore.ts";
 import {
   type MailParty,
   type MessageRecord,
@@ -1805,6 +1806,23 @@ export async function deriveLiveStatus(r: GlobalPidRecord): Promise<"active" | "
  * open — returns "unknown" and leaves the state alone. Marking a quiet-but-
  * healthy lane dead is a worse failure than the bug this fixes.
  */
+/**
+ * Where an agent's stdin FIFO lives when its record does not say.
+ *
+ * Delegates to `PidStore.getFifoPath`, the one place that knows the shape —
+ * which differs by platform (`\\.\pipe\agent-yes-<pid>` on Windows, a real
+ * FIFO under the state dir elsewhere). A second hand-written copy of that shape
+ * is how the test helper came to hand production a unix path on Windows; this
+ * had the same copy and was saved only by the `win32` guard above returning
+ * first, which is luck rather than design.
+ *
+ * `getFifoPath` reads no instance state, so the working dir passed here does not
+ * affect the answer.
+ */
+function defaultFifoPath(pid: number): string {
+  return new PidStore(process.cwd()).getFifoPath(pid);
+}
+
 export function probeStdinReachable(
   r: Pick<GlobalPidRecord, "pid" | "fifo_file">,
 ): "ok" | "unreachable" | "unknown" {
@@ -1818,7 +1836,7 @@ export function probeStdinReachable(
   // conventional path the FIFO actually lives at, and let the open() decide —
   // a dropped field finds the live reader, a FIFO that was never created is
   // ENOENT.
-  const fifo = r.fifo_file ?? path.resolve(agentYesHome(), "fifo", `${r.pid}.stdin`);
+  const fifo = r.fifo_file ?? defaultFifoPath(r.pid);
   try {
     const fd = openSync(fifo, fsConstants.O_WRONLY | fsConstants.O_NONBLOCK);
     closeSync(fd);
