@@ -3674,15 +3674,22 @@ describe("subcommands.deriveLiveState reachability", () => {
 
   // Portable: `fifo_file: null` with no FIFO on disk is ENOENT on every
   // platform, so this needs neither mkfifo nor an ENXIO-capable pipe.
-  it("still probes an OLD record that has no log at all", async () => {
-    // `log_file: null` reads `active` from the log heuristics because there is
-    // nothing to judge by — it must not therefore become unprobeable, or a row
-    // with no log could never be reported unreachable at all.
-    const mod = await loadModule();
-    expect(
-      await mod.deriveLiveState(rec({ log_file: null, fifo_file: null, started_at: 0 })),
-    ).toEqual({ state: "unreachable", question: null });
-  });
+  // Unix-only for a reason worth stating: on Windows `probeStdinReachable`
+  // returns "unknown" by design (named pipes need a connect, not an open), so
+  // `unreachable` is not a state that platform can produce at all. Asserting it
+  // there would be asserting a lie about the feature, not testing it.
+  it.skipIf(process.platform === "win32")(
+    "still probes an OLD record that has no log at all",
+    async () => {
+      // `log_file: null` reads `active` from the log heuristics because there is
+      // nothing to judge by — it must not therefore become unprobeable, or a row
+      // with no log could never be reported unreachable at all.
+      const mod = await loadModule();
+      expect(
+        await mod.deriveLiveState(rec({ log_file: null, fifo_file: null, started_at: 0 })),
+      ).toEqual({ state: "unreachable", question: null });
+    },
+  );
 
   // Also a guard rather than a proof: `stopped` must keep winning, so a dead pid
   // is never reported by the more specific-sounding `unreachable`.
