@@ -216,22 +216,103 @@ export async function fetchLatestVersion(): Promise<string | null> {
   }
 }
 
+/** A version split into its numeric core and its prerelease identifiers. */
+interface ParsedVersion {
+  /** Kept as STRINGS — see `compareNumericStrings` for why, not `Number`. */
+  core: string[];
+  /** Empty for a release; `["beta", "719", "1"]` for `-beta.719.1`. */
+  pre: string[];
+}
+
 /**
- * Compare two semantic versions
- * Returns: 1 if v1 > v2, -1 if v1 < v2, 0 if equal
+ * Compare two runs of digits as numbers, without going through `Number`.
+ *
+ * `Number` is exact only below 2^53, so a build counter past that compares EQUAL
+ * to its neighbour and the ordering silently collapses — the same class of
+ * mistake as the NaN this file is fixing, just further out. Digit strings have no
+ * such ceiling: strip leading zeros, then longer wins, then lexicographic.
+ */
+function compareNumericStrings(a: string, b: string): number {
+  const x = a.replace(/^0+(?=\d)/, "");
+  const y = b.replace(/^0+(?=\d)/, "");
+  if (x.length !== y.length) return x.length > y.length ? 1 : -1;
+  return x === y ? 0 : x > y ? 1 : -1;
+}
+
+/**
+ * Parse `1.2.3`, `v1.2.3`, `1.2.3-beta.4`, `1.2.3+build`. Returns null for
+ * anything else — including an empty string, a range, or a dist-tag name — so a
+ * caller can tell "older" from "I cannot read this".
+ *
+ * Build metadata is parsed and discarded: semver says it takes no part in
+ * precedence.
+ *
+ * Deliberately more PERMISSIVE than strict semver about what it accepts — a
+ * leading zero in an identifier, a core shorter or longer than three fields.
+ * This is an ordering function, not a validator: the cost of rejecting a version
+ * npm actually published would be paid as a refused upgrade, and the cost of
+ * ordering an odd-but-real one is nothing.
+ */
+export function parseVersion(v: string): ParsedVersion | null {
+  const m = /^v?(\d+(?:\.\d+)*)(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?$/.exec(v.trim());
+  if (!m) return null;
+  return { core: m[1]!.split("."), pre: m[2] ? m[2].split(".") : [] };
+}
+
+/**
+ * Compare two versions. 1 if v1 > v2, -1 if v1 < v2, 0 if equal OR if either
+ * side cannot be read.
+ *
+ * That last clause is the whole point of this rewrite. The previous version was
+ * `v.split(".").map(Number)` with `parts[i] || 0`, which cannot see a
+ * prerelease: `"1.290.6-beta.719.1"` splits to `["1","290","6-beta","719","1"]`,
+ * `Number("6-beta")` is NaN, and `NaN || 0` is 0 — so the build compared as
+ * 1.290.0 and read as OLDER than 1.290.5. `checkAndAutoUpdate` acts on exactly
+ * that answer, so it installed the older release over the newer prerelease and
+ * re-execed. Measured on a live fleet: every machine on a prerelease reverted
+ * itself to the `latest` dist-tag on its next invocation, silently.
+ *
+ * So an unreadable version now answers 0, not -1. A comparison that cannot parse
+ * its input must never be the thing that says "downgrade" — the honest answer to
+ * "is this older?" when you cannot tell is "no", because the caller's action on
+ * a yes is destructive and its action on a no is nothing.
+ *
+ * Precedence, per semver: numeric core field by field, a version WITH a
+ * prerelease below the same core without one, prerelease identifiers compared
+ * numerically when both are numeric (numeric below alphanumeric otherwise), and
+ * a shorter run of identifiers below a longer one that shares its prefix.
  */
 export function compareVersions(v1: string, v2: string): number {
-  const parts1 = v1.split(".").map(Number);
-  const parts2 = v2.split(".").map(Number);
+  const a = parseVersion(v1);
+  const b = parseVersion(v2);
+  if (!a || !b) return 0;
 
-  for (let i = 0; i < Math.max(parts1.length, parts2.length); i++) {
-    const part1 = parts1[i] || 0;
-    const part2 = parts2[i] || 0;
-
-    if (part1 > part2) return 1;
-    if (part1 < part2) return -1;
+  for (let i = 0; i < Math.max(a.core.length, b.core.length); i++) {
+    const cmp = compareNumericStrings(a.core[i] ?? "0", b.core[i] ?? "0");
+    if (cmp !== 0) return cmp;
   }
 
+  if (a.pre.length === 0 && b.pre.length === 0) return 0;
+  // A release outranks any prerelease of the same core: 1.2.3 > 1.2.3-beta.
+  if (a.pre.length === 0) return 1;
+  if (b.pre.length === 0) return -1;
+
+  for (let i = 0; i < Math.max(a.pre.length, b.pre.length); i++) {
+    const x = a.pre[i];
+    const y = b.pre[i];
+    if (x === undefined) return -1; // shorter prefix is lower
+    if (y === undefined) return 1;
+    const xNum = /^\d+$/.test(x);
+    const yNum = /^\d+$/.test(y);
+    if (xNum && yNum) {
+      const cmp = compareNumericStrings(x, y);
+      if (cmp !== 0) return cmp;
+    } else if (xNum !== yNum) {
+      return xNum ? -1 : 1; // numeric identifiers rank below alphanumeric ones
+    } else if (x !== y) {
+      return x > y ? 1 : -1;
+    }
+  }
   return 0;
 }
 
