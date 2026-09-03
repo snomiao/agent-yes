@@ -44,8 +44,26 @@ describe("sendPayloadCapError", () => {
     expect(err).toMatch(/'-' hits this same/);
   });
 
-  it("never quotes a negative budget for an envelope larger than the cap", () => {
-    const err = sendPayloadCapError(1, SEND_BODY_MAX_CHARS + 500)!;
-    expect(err).toContain("≤0 chars");
+  it("refuses to quote a budget when the envelope alone exceeds the cap", () => {
+    // Reachable by construction: nothing bounds a cwd's depth or a branch name's
+    // length. Quoting a budget here printed "-76 chars of body" and then
+    // "shorten to <=0" — contradictory, and impossible advice, since no body
+    // length works. Caught in review by a lane that probed the boundary.
+    const err = sendPayloadCapError(1, SEND_BODY_MAX_CHARS + 76)!;
+    expect(err).not.toMatch(/-\d+ chars/);
+    expect(err).not.toContain("budget");
+    expect(err).toContain("no body length can fit");
+    expect(err).toContain("--raw");
+  });
+
+  it("treats an envelope exactly at the cap as leaving no room", () => {
+    const err = sendPayloadCapError(1, SEND_BODY_MAX_CHARS)!;
+    expect(err).toContain("no body length can fit");
+  });
+
+  it("still quotes a real budget one char below that boundary", () => {
+    const err = sendPayloadCapError(500, SEND_BODY_MAX_CHARS - 1)!;
+    expect(err).toContain("1 chars of body");
+    expect(err).not.toContain("no body length can fit");
   });
 });

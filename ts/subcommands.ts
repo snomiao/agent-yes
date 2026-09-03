@@ -502,9 +502,9 @@ export const SEND_BODY_MAX_CHARS = 1024;
  *
  * `ay send` checked the BODY against the cap and then transmitted the body plus
  * an `<ay-msg …>` envelope — a header naming the sender's identity and a closing
- * tag, together a bit over 130 characters. So the number the sender was told was
- * safe was never the number that went down the pipe, and a body accepted at 1000
- * arrived as ~1140. The envelope is not a fixed surcharge either: it carries the
+ * tag, together ~160 characters on real traffic. So the number the sender was
+ * told was safe was never the number that went down the pipe, and a body
+ * accepted at 1000 arrived as ~1160. The envelope is not a fixed surcharge either: it carries the
  * sender's cwd, branch and pid, so its length differs per sender and no constant
  * body budget can be quoted. Hence a check on the sum rather than a smaller
  * hard-coded limit.
@@ -523,6 +523,21 @@ export function sendPayloadCapError(bodyLen: number, envelopeLen: number): strin
   const transmitted = bodyLen + envelopeLen;
   if (transmitted <= SEND_BODY_MAX_CHARS) return null;
   const budget = SEND_BODY_MAX_CHARS - envelopeLen;
+  const remedy =
+    `Write it to a file and send the PATH instead, e.g. ` +
+    `'ay send <keyword> "details: /path/to/notes.md"'`;
+  // Nothing bounds a cwd's depth or a branch name's length, so an envelope can
+  // in principle reach the cap on its own. Then NO body length works, and
+  // quoting a budget would print a negative number and tell the sender to
+  // shorten to ≤0 — an error naming a remedy that cannot work, which is the
+  // very defect this function exists to remove. Say what is actually true.
+  if (budget <= 0) {
+    return (
+      `the <ay-msg …> envelope alone is ${envelopeLen} chars, at or over the ` +
+      `${SEND_BODY_MAX_CHARS}-char limit, so no body length can fit. ${remedy} — ` +
+      `and send it with --raw, which omits the envelope.`
+    );
+  }
   return (
     `message would transmit ${transmitted} chars, over the ${SEND_BODY_MAX_CHARS}-char limit` +
     (envelopeLen > 0
@@ -530,9 +545,8 @@ export function sendPayloadCapError(bodyLen: number, envelopeLen: number): strin
         `ay send adds for you. Your budget for this send is ${budget} chars of body`
       : "") +
     `. Longer text isn't a terminal prompt. Piping it in with '-' hits this same ` +
-    `cap — the payload is capped however it arrives. Write it to a file and send ` +
-    `the PATH instead, e.g. 'ay send <keyword> "details: /path/to/notes.md"', ` +
-    `or shorten the body to ≤${Math.max(0, budget)} chars.`
+    `cap — the payload is capped however it arrives. ${remedy}, ` +
+    `or shorten the body to ≤${budget} chars.`
   );
 }
 
