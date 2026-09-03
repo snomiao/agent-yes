@@ -16,12 +16,25 @@ vi.mock("os", async () => {
   };
 });
 
+// The homedir mock alone does NOT isolate these tests: agentYesHome() reads
+// $AGENT_YES_HOME FIRST and only falls back to homedir(). On a machine where
+// that variable is set — an operator's shell, a runner that exports it — the
+// mock is bypassed and the tests below append to the REAL ~/.agent-yes:
+// pids.jsonl rows and IPC locks, under this process's own pid. Point the
+// variable at the same temp dir so both paths land there. Raised by a lane
+// that hit the identical hole in its own spec.
+let savedAyHome: string | undefined;
+
 beforeEach(async () => {
   testHome = await mkdtemp(path.join(tmpdir(), "ay-sub-test-"));
+  savedAyHome = process.env.AGENT_YES_HOME;
+  process.env.AGENT_YES_HOME = path.join(testHome, ".agent-yes");
   vi.resetModules();
 });
 
 afterEach(async () => {
+  if (savedAyHome === undefined) delete process.env.AGENT_YES_HOME;
+  else process.env.AGENT_YES_HOME = savedAyHome;
   await rm(testHome, { recursive: true, force: true }).catch(() => null);
 });
 
