@@ -43,13 +43,19 @@ export type SenderVia =
   /** No env, but an ancestor process is a registered agent. Not forgeable from
    * inside a message: a process cannot choose its own ancestors. */
   | "ancestry"
-  /** `AGENT_YES_PID` named one registered agent while a DIFFERENT registered
-   * agent is this process's actual ancestor. The two disagree, and the tree is
-   * the half that cannot be forged — so this is evidence, and the only value
-   * that says so out loud. */
+  /** The claimed lane is NOT this process's ancestor, and the process is running
+   * OUTSIDE that lane's working tree. Another tree is claiming this identity.
+   *
+   * The discriminator is the working directory, not "is some other registered
+   * lane my ancestor" — that earlier rule was measured backwards on real
+   * traffic: it fired on a lane's own nested processes (same tree, benign) and
+   * stayed silent on two documents a different worktree sent under this lane's
+   * name. A lane's own detached helper runs inside the lane's tree; a different
+   * lane's process does not. */
   | "env-uncorroborated"
-  /** `AGENT_YES_PID` named a registered agent and the process tree contains no
-   * registered agent at all — so there is nothing to agree or disagree with.
+  /** The claim could not be corroborated, and nothing contradicts it either: the
+   * process is running inside the claimed lane's own tree (so it is plausibly
+   * that lane's detached helper), or the ancestry could not be read at all.
    *
    * This is NOT evidence of anything. A detached helper, a process re-parented
    * to init, an `ay send` from a background job, or an unreadable process table
