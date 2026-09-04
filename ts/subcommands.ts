@@ -643,6 +643,44 @@ export const SEND_BODY_MAX_CHARS = 1024;
  * Shared by the real construction and by `envelopeCostFor` so the two cannot
  * drift — a marker in one and not the other would under-count the cap.
  */
+/**
+ * Build the `<ay-msg …>` envelope for one send.
+ *
+ * ONE builder, because there are now three callers — `cmdSend`, the remote send
+ * path, and `envelopeCostFor` (which must size exactly what is transmitted).
+ * Two of them were already hand-copied templates whose own comment warned that a
+ * divergence would under-count the cap; the third was missing entirely, which is
+ * the bug this exists to close.
+ *
+ * `remote` names the transport when the message crosses a host boundary. The
+ * reply route has to change with it: the sender's agent id resolves on the
+ * SENDER's host, so a bare `ay send <id>` on the receiving side would address
+ * nothing, or — worse — a local agent that happens to share the prefix. The
+ * receiver is told what it actually needs: the sender's stable id, the host to
+ * route to, and that its own alias for that host goes in front. No capability
+ * token appears here; the receiver's route back is its own to hold.
+ */
+export function buildEnvelope(opts: {
+  nonce: string;
+  cli: string;
+  identity: string;
+  replyTarget: string | number;
+  via: SenderVia;
+  /** Set when the message crossed a host boundary; the sender's own label for
+   * the far side is deliberately NOT used — it is meaningless to the receiver. */
+  remote?: { senderHost: string } | null;
+}): { prefix: string; suffix: string } {
+  const attrib = envelopeAttribution(opts.via);
+  const via = opts.remote ? " via remote" : "";
+  const reply = opts.remote
+    ? `reply: ay send <your-remote-alias-for-${opts.remote.senderHost}>:${opts.replyTarget} "..."`
+    : `reply: ay send ${opts.replyTarget} "..."`;
+  return {
+    prefix: `<ay-msg ${opts.nonce} from ${opts.cli}${attrib}${via} ${opts.identity} — ${reply}>\n`,
+    suffix: `\n</ay-msg ${opts.nonce}>`,
+  };
+}
+
 export function envelopeAttribution(via: SenderVia): string {
   switch (via) {
     case "ancestry":
@@ -665,9 +703,13 @@ export async function envelopeCostFor(body: string, raw: boolean): Promise<numbe
   const nonce = "00000000"; // 4 random bytes as hex — fixed width, so any value sizes alike
   const identity = formatIdentity({ cwd: sender.agent.cwd, pid: sender.agent.pid });
   const replyTarget = sender.agent.agent_id || sender.agent.pid;
-  const attrib = envelopeAttribution(sender.via);
-  const prefix = `<ay-msg ${nonce} from ${sender.agent.cli}${attrib} ${identity} — reply: ay send ${replyTarget} "...">\n`;
-  const suffix = `\n</ay-msg ${nonce}>`;
+  const { prefix, suffix } = buildEnvelope({
+    nonce,
+    cli: sender.agent.cli,
+    identity,
+    replyTarget,
+    via: sender.via,
+  });
   return prefix.length + suffix.length;
 }
 
@@ -1555,7 +1597,12 @@ async function runRemoteRead(
   return 0;
 }
 
-async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string): Promise<number> {
+async function runRemoteSend(
+  remote: ResolvedRemote,
+  msg: string,
+  code: string,
+  raw = false,
+): Promise<number> {
   const keyword = remote.keyword ?? "";
   if (!keyword) {
     process.stderr.write("remote send requires a keyword (e.g. token@host:port:keyword)\n");
@@ -1572,7 +1619,33 @@ async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string):
         agent_id: sender.agent.agent_id,
       }
     : null;
-  const res = await remotePost(remote, "/api/send", { keyword, msg, code, from });
+  // Wrap it, exactly as a local send does. This path used to post the bare body:
+  // `cmdSend` returns here BEFORE the envelope is built, so a message that
+  // crossed a host boundary arrived with no header, no nonce and no reply route
+  // — the receiving model saw an unattributed string. The provenance existed
+  // only in `from`, which the host records in its mailbox file and which the
+  // model asked to act on never reads. Same shape as #461: a provenance signal
+  // is only real for the reader it actually reaches.
+  //
+  // Skipped for a slash command (recognized only when it starts the line) and
+  // for --raw, matching cmdSend, and for a human shell with no agent identity to
+  // put in the header.
+  let wire = msg;
+  let nonce: string | undefined;
+  if (sender.agent && msg && msg !== "-" && !isSlashCommand(msg) && !raw) {
+    nonce = randomBytes(4).toString("hex");
+    const { prefix, suffix } = buildEnvelope({
+      nonce,
+      cli: sender.agent.cli,
+      identity: formatIdentity({ cwd: sender.agent.cwd, pid: sender.agent.pid }),
+      replyTarget: sender.agent.agent_id || sender.agent.pid,
+      via: sender.via,
+      // The receiver needs a route back to OUR host, not our label for theirs.
+      remote: { senderHost: localHost() },
+    });
+    wire = prefix + msg + suffix;
+  }
+  const res = await remotePost(remote, "/api/send", { keyword, msg: wire, code, from });
   if (!res.ok) {
     process.stderr.write(`remote error ${res.status}: ${await res.text()}\n`);
     return 1;
@@ -1589,6 +1662,8 @@ async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string):
   if (msg && msg !== "-") {
     await recordOutbox({
       at: Date.now(),
+      nonce,
+      wrapped: Boolean(nonce),
       origin: from ? undefined : "shell",
       from_via: sender.via,
       sender_observed: observedSender(),
@@ -1599,10 +1674,11 @@ async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string):
         cwd: data.cwd ?? "",
         agent_id: data.agentId,
       },
+      // The BODY as authored, not the wire form — the envelope is transport
+      // framing, and storing it would double-wrap on any later re-send.
       body: msg,
       code: code.toLowerCase() === "enter" ? undefined : code.toLowerCase(),
       confirmed: true,
-      wrapped: false,
       remote: remote.label,
     });
   }
@@ -3804,7 +3880,15 @@ async function cmdSend(rest: string[]): Promise<number> {
   const codeName = argv.code.toLowerCase();
   {
     const remote = await resolveRemoteSpec(keyword);
-    if (remote) return runRemoteSend(remote, rawMessage, codeName);
+    // --raw / AGENT_YES_SEND_RAW means "deliver verbatim"; it has to be honoured
+    // on this path too, now that the remote path wraps at all.
+    if (remote)
+      return runRemoteSend(
+        remote,
+        rawMessage,
+        codeName,
+        Boolean(argv.raw) || process.env.AGENT_YES_SEND_RAW === "1",
+      );
   }
   const trailing = controlCodeFromName(codeName);
 
@@ -3951,9 +4035,13 @@ async function cmdSend(rest: string[]): Promise<number> {
     const identity = formatIdentity({ cwd: sender.agent.cwd, pid: sender.agent.pid });
     // How strong this attribution is, stated IN the envelope — see
     // envelopeAttribution for why the mailbox file is not enough.
-    const attrib = envelopeAttribution(sender.via);
-    prefix = `<ay-msg ${nonce} from ${sender.agent.cli}${attrib} ${identity} — reply: ay send ${replyTarget} "...">\n`;
-    suffix = `\n</ay-msg ${nonce}>`;
+    ({ prefix, suffix } = buildEnvelope({
+      nonce,
+      cli: sender.agent.cli,
+      identity,
+      replyTarget: replyTarget!,
+      via: sender.via,
+    }));
     // A body that itself starts with an <ay-msg …> header is usually an agent
     // hand-wrapping what this send is about to wrap again — the recipient then
     // sees a double envelope with two (possibly conflicting) reply targets.
