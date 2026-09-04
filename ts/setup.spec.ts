@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { mkdtempSync, rmSync } from "fs";
-import { tmpdir } from "os";
+import { homedir, tmpdir } from "os";
 import path from "path";
 import { cmdSetup } from "./setup.ts";
 import { getWorkspaceRoot } from "./workspaceConfig.ts";
@@ -41,6 +41,32 @@ describe("cmdSetup", () => {
     const code = await cmdSetup([dir, "--no-share"]);
     expect(code).toBe(0);
     expect(getWorkspaceRoot()).toBe(path.resolve(dir));
+  });
+
+  // The snap guard: piped (no TTY) it must warn and carry on, never block.
+  it("warns but proceeds when running inside a snap sandbox", async () => {
+    // Point SNAP_USER_DATA at the real homedir() rather than mutating $HOME:
+    // Bun resolves os.homedir() without re-reading the env, so an env-only
+    // remap wouldn't be seen. Matching the actual home is what the guard checks.
+    const snapEnv = { SNAP_NAME: "bun-js", SNAP_REVISION: "87", SNAP_USER_DATA: homedir() };
+    const restore = Object.entries(snapEnv).map(([k, v]) => {
+      const prev = process.env[k];
+      process.env[k] = v;
+      return () => (prev === undefined ? delete process.env[k] : (process.env[k] = prev));
+    });
+    const write = process.stderr.write.bind(process.stderr);
+    let err = "";
+    process.stderr.write = ((s: string) => ((err += s), true)) as typeof process.stderr.write;
+    try {
+      expect(await cmdSetup([path.join(tmp, "snap-ws"), "--no-share"])).toBe(0);
+      expect(err).toContain("snap sandbox");
+      err = "";
+      expect(await cmdSetup([path.join(tmp, "snap-ws"), "--no-share", "--allow-snap"])).toBe(0);
+      expect(err).not.toContain("snap sandbox");
+    } finally {
+      process.stderr.write = write;
+      for (const undo of restore) undo();
+    }
   });
 
   it("--no-share with a --port flag still treats the path as the workspace", async () => {
