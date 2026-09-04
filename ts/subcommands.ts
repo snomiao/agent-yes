@@ -18,7 +18,7 @@ import ms from "ms";
 import { homedir } from "os";
 import path from "path";
 import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./globalPidIndex.ts";
-import { formatIdentity } from "./identity.ts";
+import { formatIdentity, localHost, localUser } from "./identity.ts";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
 import { agentYesHome } from "./agentYesHome.ts";
@@ -31,6 +31,7 @@ import {
   recordMessage,
   recordOutbox,
   senderLabel,
+  type ObservedSender,
 } from "./messageLog.ts";
 import { badgeLabel, matchBadges, TYPING_BADGE } from "./badges.ts";
 import {
@@ -68,6 +69,12 @@ import { loadSharedCliDefaults } from "./configShared.ts";
 import { invokedCliName } from "./invokedCli.ts";
 import type { AgentCliConfig } from "./index.ts";
 import { framePaste as frameAsPaste, shouldFramePaste } from "./bracketedPaste.ts";
+import {
+  ageMatchesRegistration,
+  findAgentAncestor,
+  readAncestryTable,
+  type SenderVia,
+} from "./senderAncestry.ts";
 import yargs from "yargs";
 import { type ResolvedRemote, readRemotes, resolveRemoteSpec } from "./remotes.ts";
 import { isWebrtcSpec } from "./webrtcLink.ts";
@@ -265,9 +272,54 @@ export async function recentMessageEdges(windowMs = READ_WINDOW_MS): Promise<Mes
 // pid>; the registered agent record carries that same wrapper_pid, so we map the
 // env value back to the agent's own canonical record. Falls back to a direct pid
 // match (back-compat), then null when there's no agent context (a human shell).
+/**
+ * What can be measured about THIS process, with no cooperation from anyone.
+ *
+ * Recorded on every send whether or not an agent was identified, so a receiver
+ * facing an unattributed message still has facts to act on instead of a blank.
+ * Deliberately cheap and total — no probing, no failure mode, nothing a caller
+ * can influence.
+ */
+function observedSender(): ObservedSender {
+  return {
+    user: localUser(),
+    host: localHost(),
+    cwd: process.cwd(),
+    pid: process.pid,
+  };
+}
+
 async function resolveSender(): Promise<GlobalPidRecord | null> {
-  const envPid = process.env.AGENT_YES_PID ? Number(process.env.AGENT_YES_PID) : null;
-  if (!envPid || Number.isNaN(envPid)) return null;
+  return (await resolveSenderVia()).agent;
+}
+
+/**
+ * The calling agent AND how that was established.
+ *
+ * `AGENT_YES_PID` is a claim the wrapper passes along; when it is absent — an
+ * SDK / `claude -p` session shelling out, anything re-exec'd through a scrubbed
+ * environment — this used to answer "no agent", which a receiver cannot tell
+ * apart from an anonymous stranger. The process tree is the fallback because it
+ * is a FACT the caller cannot forge: a lane's `ay send` is a descendant of that
+ * lane however many shells deep it runs. See ts/senderAncestry.ts.
+ *
+ * `via` is reported, never inferred by the reader, and "observed" (nothing
+ * identified the caller) stays expressible — no plausible sender is invented to
+ * fill the field.
+ */
+let _senderVia: Promise<{ agent: GlobalPidRecord | null; via: SenderVia }> | null = null;
+
+/**
+ * Memoized for the process lifetime. Who is calling cannot change inside one
+ * CLI invocation, and a single `ay send` asks twice — once to size the envelope
+ * for the cap check, once to attribute the message. Without this the `ps` and
+ * the registry read are both paid twice for one send.
+ */
+function resolveSenderVia(): Promise<{ agent: GlobalPidRecord | null; via: SenderVia }> {
+  return (_senderVia ??= computeSenderVia());
+}
+
+async function computeSenderVia(): Promise<{ agent: GlobalPidRecord | null; via: SenderVia }> {
   const recs = await listRecords(undefined, {
     all: true,
     active: false,
@@ -275,14 +327,56 @@ async function resolveSender(): Promise<GlobalPidRecord | null> {
     latest: false,
     cwdScope: null,
   });
-  return recs.find((r) => r.wrapper_pid === envPid) ?? recs.find((r) => r.pid === envPid) ?? null;
+  const byPid = (pid: number) =>
+    recs.find((r) => r.wrapper_pid === pid) ?? recs.find((r) => r.pid === pid) ?? null;
+
+  const envPid = process.env.AGENT_YES_PID ? Number(process.env.AGENT_YES_PID) : null;
+  const declared = envPid && !Number.isNaN(envPid) ? byPid(envPid) : null;
+
+  // ONE `ps` for both jobs below — the ancestry walk and the pid-reuse check —
+  // rather than a spawn each. ~40ms for 887 processes, and it is skipped
+  // entirely on the fast path when the env already resolved and is corroborated
+  // by the cheapest possible evidence.
+  const table = await readAncestryTable();
+  // pids are reused: a number matching a registered agent is not proof the
+  // process at that number IS that agent. Require it to be at least as old as
+  // the registration, so a pid handed to something new cannot inherit an
+  // identity. Unknown age ⇒ not attributed.
+  const isLiveAgent = (pid: number) => {
+    const rec = byPid(pid);
+    if (!rec) return null;
+    return ageMatchesRegistration(table?.get(pid)?.ageSecs, rec.started_at) ? rec : null;
+  };
+  const inherited = table
+    ? await findAgentAncestor(process.pid, isLiveAgent, { readTable: async () => table })
+    : null;
+
+  if (declared) {
+    // The honest path is unchanged in OUTCOME: the wrapper that injects
+    // AGENT_YES_PID is an ancestor of the `ay send` it spawns, so a normal lane
+    // corroborates and renders exactly as before.
+    const corroborated = inherited?.pid === declared.pid;
+    // A disagreement is REPORTED, never silently resolved. Attributing to the
+    // ancestor instead would break an honest lane whose tree we misread; giving
+    // it a plain "env" would launder a claim into a fact. So the claim stands
+    // and the receiver is told it stands alone.
+    return { agent: declared, via: corroborated ? "env" : "env-uncorroborated" };
+  }
+  // A set-but-unresolvable AGENT_YES_PID (stale env, aged-out record) is not a
+  // reason to stop: the process tree can still say who this is.
+  if (inherited) return { agent: inherited, via: "ancestry" };
+  return { agent: null, via: "observed" };
 }
 
 // The (key, agent) pair used to attribute reads and gate sends. Agents get a
 // stable per-agent key; a human shell shares the "human" bucket (warn-only).
-async function senderContext(): Promise<{ key: string; agent: GlobalPidRecord | null }> {
-  const agent = await resolveSender();
-  return { key: agent ? `agent:${agent.pid}` : "human", agent };
+async function senderContext(): Promise<{
+  key: string;
+  agent: GlobalPidRecord | null;
+  via: SenderVia;
+}> {
+  const { agent, via } = await resolveSenderVia();
+  return { key: agent ? `agent:${agent.pid}` : "human", agent, via };
 }
 
 /**
@@ -1469,6 +1563,8 @@ async function runRemoteSend(remote: ResolvedRemote, msg: string, code: string):
     await recordOutbox({
       at: Date.now(),
       origin: from ? undefined : "shell",
+      from_via: sender.via,
+      sender_observed: observedSender(),
       from,
       to: {
         pid: data.pid,
@@ -3410,7 +3506,7 @@ async function cmdSpawn(rest: string[]): Promise<number> {
 async function enforceSendGuards(
   record: GlobalPidRecord,
   force: boolean,
-): Promise<{ key: string; agent: GlobalPidRecord | null }> {
+): Promise<{ key: string; agent: GlobalPidRecord | null; via: SenderVia }> {
   const sender = await senderContext();
 
   // Self-send guard: an agent firing at its own pid is almost always a loop.
@@ -3826,7 +3922,12 @@ async function cmdSend(rest: string[]): Promise<number> {
     // cwd/pid into a role by hand. Every segment is clamped to a header-safe
     // charset in identity.ts — the open tag is not nonce-protected.
     const identity = formatIdentity({ cwd: sender.agent.cwd, pid: sender.agent.pid });
-    prefix = `<ay-msg ${nonce} from ${sender.agent.cli} ${identity} — reply: ay send ${replyTarget} "...">\n`;
+    // An identity established from the process tree is a weaker claim than one
+    // the wrapper declared. Say which, IN the envelope: the receiving model
+    // reads the body, not the mailbox file, so provenance that only exists in
+    // the JSONL cannot inform the decision it is meant to inform.
+    const attrib = sender.via === "ancestry" ? " via process-tree" : "";
+    prefix = `<ay-msg ${nonce} from ${sender.agent.cli}${attrib} ${identity} — reply: ay send ${replyTarget} "...">\n`;
     suffix = `\n</ay-msg ${nonce}>`;
     // A body that itself starts with an <ay-msg …> header is usually an agent
     // hand-wrapping what this send is about to wrap again — the recipient then
@@ -3953,6 +4054,11 @@ async function cmdSend(rest: string[]): Promise<number> {
       // A local CLI invocation. When there is no agent behind it, a terminal
       // is — the one unattributed origin a person is plausibly at.
       origin: sender.agent ? undefined : "shell",
+      // How the attribution was reached, and what was measured about the caller
+      // regardless. Recorded at the sink so no caller has to remember a flag:
+      // an SDK session that never heard of this field still gets described.
+      from_via: sender.via,
+      sender_observed: observedSender(),
       from: sender.agent
         ? {
             pid: sender.agent.pid,
@@ -4153,7 +4259,7 @@ async function resolveWritableAgent(keyword: string, opts: CommonOpts): Promise<
  * are on this host — recordMessage writes both. Best-effort.
  */
 async function recordKeyEvent(
-  sender: { agent: GlobalPidRecord | null },
+  sender: { agent: GlobalPidRecord | null; via: SenderVia },
   record: GlobalPidRecord,
   kind: "key" | "select",
   body: string,
@@ -4161,6 +4267,8 @@ async function recordKeyEvent(
   await recordMessage({
     at: Date.now(),
     origin: sender.agent ? undefined : "shell",
+    from_via: sender.via,
+    sender_observed: observedSender(),
     from: sender.agent
       ? {
           pid: sender.agent.pid,

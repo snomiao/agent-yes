@@ -19,6 +19,7 @@ import { appendFile, mkdir, readFile, writeFile } from "fs/promises";
 import path from "path";
 import { logger } from "./logger.ts";
 import { isUnpromptedTerminalReply } from "./terminalReply.ts";
+import type { SenderVia } from "./senderAncestry.ts";
 
 /**
  * Where a write entered this host — its provenance, as known at the door.
@@ -40,6 +41,22 @@ import { isUnpromptedTerminalReply } from "./terminalReply.ts";
  *  - `wrapper` — the agent's own supervisor (the auto-retry nudge).
  */
 export type MessageOrigin = "shell" | "wire" | "visitor" | "wrapper";
+
+/**
+ * Facts the transport measured about whoever invoked it — never anything the
+ * message body said about itself. A `[tree/main]` signature written into a body
+ * is a claim; these are observations.
+ */
+export interface ObservedSender {
+  /** OS user the sending process ran as. */
+  user: string;
+  /** Host it ran on. */
+  host: string;
+  /** Its working directory. */
+  cwd: string;
+  /** Its own pid — not an agent id; the process, not the lane. */
+  pid: number;
+}
 
 /** One end of a message: enough to attribute and to route a reply. */
 export interface MailParty {
@@ -63,6 +80,16 @@ export interface MessageRecord {
    * existed, which is why a missing value renders as unattributed and never as
    * a human. See {@link MessageOrigin}. */
   origin?: MessageOrigin;
+  /** HOW `from` was established — see {@link SenderVia}. Lets a receiver weigh
+   * a declared attribution against an inferred one instead of treating every
+   * named sender alike. Absent on rows predating the field. */
+  from_via?: SenderVia;
+  /** What the transport MEASURED about the calling process, recorded whether or
+   * not an agent was identified. This is the floor: a sender that cannot be
+   * named is still described by facts the kernel supplied, so "unattributed"
+   * never means "nothing is known". A body cannot supply, override or forge
+   * any of it. */
+  sender_observed?: ObservedSender;
   /** Recipient agent. */
   to: MailParty;
   /** What kind of stdin write this was. Omitted for a normal `ay send` text
@@ -147,7 +174,24 @@ export interface MessageRecord {
  * should read `origin` itself rather than this label.
  */
 export function senderLabel(record: MessageRecord): string {
-  if (record.from) return `${record.from.cli} #${record.from.pid}`;
+  if (record.from) {
+    const name = `${record.from.cli} #${record.from.pid}`;
+    // An attribution the transport INFERRED from the process tree is weaker
+    // than one the wrapper declared, and a receiver deciding whether to act on
+    // a message deserves to see which it got rather than have them flattened.
+    if (record.from_via === "ancestry") return `${name} (via process tree)`;
+    // The one attributed value that is only a claim — say so, since a receiver
+    // weighing whether to act on it cannot otherwise tell it from a fact.
+    if (record.from_via === "env-uncorroborated") return `${name} (UNCORROBORATED)`;
+    return name;
+  }
+  // No agent identified. Say what WAS measured rather than "unattributed" —
+  // an honest sender outside the wrapper is not a stranger, and a receiver that
+  // can see user@host:cwd can decide for itself.
+  if (record.sender_observed) {
+    const o = record.sender_observed;
+    return `unattributed (${o.user}@${o.host}:${o.cwd}#${o.pid})`;
+  }
   switch (record.origin) {
     case "shell":
       return "human";
