@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import path from "path";
 import { detectSnapConfinement, snapConfinementMessage } from "./snapGuard.ts";
 
 const SANDBOX_HOME = "/home/u/snap/bun-js/87";
@@ -35,11 +36,11 @@ describe("detectSnapConfinement", () => {
   });
 
   it("degrades to a nameless snap when the sandbox HOME is not the usual shape", () => {
-    const snap = detectSnapConfinement(
-      { SNAP: "/snap/x", SNAP_USER_DATA: "/var/sandbox" },
-      "/var/sandbox",
-    );
-    expect(snap).toEqual({ name: "snap", revision: undefined, home: "/var/sandbox" });
+    const sandbox = "/var/sandbox";
+    const snap = detectSnapConfinement({ SNAP: "/snap/x", SNAP_USER_DATA: sandbox }, sandbox);
+    // home comes back resolved, so compare resolved — a literal POSIX path
+    // fails on Windows, where path.resolve prefixes the current drive.
+    expect(snap).toEqual({ name: "snap", revision: undefined, home: path.resolve(sandbox) });
   });
 });
 
