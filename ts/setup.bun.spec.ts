@@ -33,6 +33,16 @@ describe("cmdSetup", () => {
     expect(getWorkspaceRoot()).toBe(path.resolve(dir));
   });
 
+  // Regression: with no --port, `rest.indexOf("--port")` is -1, so the old
+  // `i !== portIdx + 1` filter excluded index 0 — the documented
+  // `ay setup <workspace-dir>` form silently ignored its argument.
+  it("takes the workspace dir as the FIRST argument", async () => {
+    const dir = path.join(tmp, "first-arg");
+    const code = await cmdSetup([dir, "--no-share"]);
+    expect(code).toBe(0);
+    expect(getWorkspaceRoot()).toBe(path.resolve(dir));
+  });
+
   it("--no-share with a --port flag still treats the path as the workspace", async () => {
     const dir = path.join(tmp, "ws");
     const code = await cmdSetup(["--no-share", "--port", "7440", dir]);
