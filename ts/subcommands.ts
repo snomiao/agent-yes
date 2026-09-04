@@ -632,6 +632,32 @@ export const SEND_BODY_MAX_CHARS = 1024;
  * edited together — a divergence would under-count and let an over-cap payload
  * through the early check, where the authoritative check still catches it.
  */
+/**
+ * How the envelope names the strength of its own attribution.
+ *
+ * The receiving MODEL reads the body, not the mailbox file, so provenance that
+ * exists only in the JSONL cannot inform the decision it is meant to inform.
+ * `senderLabel` says this to a human reading `ay msgs`; this says it to the
+ * agent being asked to act.
+ *
+ * Shared by the real construction and by `envelopeCostFor` so the two cannot
+ * drift — a marker in one and not the other would under-count the cap.
+ */
+export function envelopeAttribution(via: SenderVia): string {
+  switch (via) {
+    case "ancestry":
+      // Derived from the process tree because the wrapper's env was absent.
+      return " via process-tree";
+    case "env-uncorroborated":
+      // The caller's own claim, and nothing corroborates it: any process can
+      // export another lane's pid (#461). Loud, because a receiver that acts on
+      // a message weighted by its sender must not be handed this as a fact.
+      return " UNCORROBORATED-SENDER";
+    default:
+      return "";
+  }
+}
+
 export async function envelopeCostFor(body: string, raw: boolean): Promise<number> {
   if (raw || isSlashCommand(body)) return 0;
   const sender = await senderContext();
@@ -639,7 +665,8 @@ export async function envelopeCostFor(body: string, raw: boolean): Promise<numbe
   const nonce = "00000000"; // 4 random bytes as hex — fixed width, so any value sizes alike
   const identity = formatIdentity({ cwd: sender.agent.cwd, pid: sender.agent.pid });
   const replyTarget = sender.agent.agent_id || sender.agent.pid;
-  const prefix = `<ay-msg ${nonce} from ${sender.agent.cli} ${identity} — reply: ay send ${replyTarget} "...">\n`;
+  const attrib = envelopeAttribution(sender.via);
+  const prefix = `<ay-msg ${nonce} from ${sender.agent.cli}${attrib} ${identity} — reply: ay send ${replyTarget} "...">\n`;
   const suffix = `\n</ay-msg ${nonce}>`;
   return prefix.length + suffix.length;
 }
@@ -3922,11 +3949,9 @@ async function cmdSend(rest: string[]): Promise<number> {
     // cwd/pid into a role by hand. Every segment is clamped to a header-safe
     // charset in identity.ts — the open tag is not nonce-protected.
     const identity = formatIdentity({ cwd: sender.agent.cwd, pid: sender.agent.pid });
-    // An identity established from the process tree is a weaker claim than one
-    // the wrapper declared. Say which, IN the envelope: the receiving model
-    // reads the body, not the mailbox file, so provenance that only exists in
-    // the JSONL cannot inform the decision it is meant to inform.
-    const attrib = sender.via === "ancestry" ? " via process-tree" : "";
+    // How strong this attribution is, stated IN the envelope — see
+    // envelopeAttribution for why the mailbox file is not enough.
+    const attrib = envelopeAttribution(sender.via);
     prefix = `<ay-msg ${nonce} from ${sender.agent.cli}${attrib} ${identity} — reply: ay send ${replyTarget} "...">\n`;
     suffix = `\n</ay-msg ${nonce}>`;
     // A body that itself starts with an <ay-msg …> header is usually an agent

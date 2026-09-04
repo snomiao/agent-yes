@@ -6,6 +6,7 @@ import {
   parseEtime,
   parseProcessTable,
 } from "./senderAncestry.ts";
+import { envelopeAttribution } from "./subcommands.ts";
 
 const table = (pairs: [number, number][]) => async () =>
   new Map(pairs.map(([pid, ppid]) => [pid, { ppid, ageSecs: 9_999 }]));
@@ -129,5 +130,76 @@ describe("ageMatchesRegistration", () => {
   it("declines when either side is unknown rather than assuming a match", () => {
     expect(ageMatchesRegistration(undefined, now - 3600_000, now)).toBe(false);
     expect(ageMatchesRegistration(3600, undefined, now)).toBe(false);
+  });
+});
+
+describe("ageMatchesRegistration — waiting does not defeat it", () => {
+  // A reviewer read the guard as one-sided: "an attacker starts a process, waits
+  // for the OS to hand it a dead agent's pid, and its large age passes". A pid
+  // is fixed at fork — a live process cannot acquire a different one — so the
+  // process that lands on a recycled pid is NEW. And waiting cannot help it,
+  // because BOTH quantities grow with the same clock:
+  //
+  //   ageSecs           = T - forkedAt
+  //   registeredAgoSecs = T - startedAt
+  //   difference        = startedAt - forkedAt   <- constant in T
+  //
+  // So the test is "was this process forked within tolerance of the
+  // registration", which no amount of elapsed time changes.
+  const T0 = 1_000_000_000;
+
+  it("stays false however long an attacker waits", () => {
+    const forkedAt = T0 + 5 * 60_000; // 5 minutes after the agent registered
+    for (const waitMin of [0, 10, 60, 60 * 24, 60 * 24 * 30]) {
+      const now = forkedAt + waitMin * 60_000;
+      expect(ageMatchesRegistration((now - forkedAt) / 1000, T0, now), `waited ${waitMin}m`).toBe(
+        false,
+      );
+    }
+  });
+
+  it("stays true however long an honest lane runs", () => {
+    const forkedAt = T0 - 2000; // the process predates its own record slightly
+    for (const runMin of [0, 60, 60 * 24 * 30]) {
+      const now = T0 + runMin * 60_000;
+      expect(ageMatchesRegistration((now - forkedAt) / 1000, T0, now), `ran ${runMin}m`).toBe(true);
+    }
+  });
+
+  it("names the residual: the tolerance IS a window", () => {
+    // Honest statement of what remains — a process forked inside the tolerance
+    // of the registration passes, and passes permanently. Narrow (it needs the
+    // agent to have died within a minute of registering, and its record to
+    // still be present) but real, and better stated than discovered later.
+    const forkedAt = T0 + 30_000; // inside the 60s tolerance
+    const now = forkedAt + 60 * 24 * 60_000;
+    expect(ageMatchesRegistration((now - forkedAt) / 1000, T0, now)).toBe(true);
+  });
+
+  it("fails SAFE when the wall clock jumps forward", () => {
+    // ageSecs is kernel elapsed; startedAt is wall clock. An NTP step inflates
+    // registeredAgoSecs and rejects an honest ancestor — losing an attribution,
+    // never inventing one.
+    const forkedAt = T0;
+    const now = T0 + 60_000;
+    expect(ageMatchesRegistration((now - forkedAt) / 1000, T0 - 3600_000, now)).toBe(false);
+  });
+});
+
+describe("envelopeAttribution", () => {
+  it("marks an uncorroborated claim in the body the receiving model reads", () => {
+    // The mailbox JSONL is not enough: the model reads the body. A forged
+    // sender presented as fully legitimate defeats the point of deriving
+    // provenance at all.
+    expect(envelopeAttribution("env-uncorroborated")).toContain("UNCORROBORATED");
+  });
+
+  it("marks a process-tree derivation", () => {
+    expect(envelopeAttribution("ancestry")).toContain("process-tree");
+  });
+
+  it("says nothing for a corroborated env send — the honest path is unchanged", () => {
+    expect(envelopeAttribution("env")).toBe("");
+    expect(envelopeAttribution("observed")).toBe("");
   });
 });

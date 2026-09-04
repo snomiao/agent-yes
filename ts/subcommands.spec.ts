@@ -3189,11 +3189,19 @@ describe("subcommands.cmdSend double-envelope warning", () => {
           exit_code: null,
           exit_reason: null,
           started_at: Date.now(),
-          wrapper_pid: 424242,
+          // A wrapper that is a REAL ancestor of this test process. Two reasons it
+        // is `ppid` and not `pid`: a pid that never existed cannot be
+        // corroborated by the process tree, so the envelope would carry an
+        // UNCORROBORATED marker and this fixture would stop testing the shape it
+        // is named for; and the ancestry walk deliberately starts at the parent,
+        // because a bare `ay send` is not its own sender. In production the
+        // wrapper really is an ancestor — measured 26/26 on the live fleet — so
+        // this is the production shape, not a workaround.
+        wrapper_pid: process.ppid,
           agent_id: "cccc0000dddd",
         });
         const savedAyPid = process.env.AGENT_YES_PID;
-        process.env.AGENT_YES_PID = "424242";
+        process.env.AGENT_YES_PID = String(process.ppid);
         const stderr: string[] = [];
         const origErr = process.stderr.write.bind(process.stderr);
         (process.stderr as any).write = (s: any) => (stderr.push(String(s)), true);
@@ -3264,11 +3272,19 @@ describe("subcommands.cmdSend double-envelope warning", () => {
         exit_code: null,
         exit_reason: null,
         started_at: Date.now(),
-        wrapper_pid: 424242,
+        // A wrapper that is a REAL ancestor of this test process. Two reasons it
+        // is `ppid` and not `pid`: a pid that never existed cannot be
+        // corroborated by the process tree, so the envelope would carry an
+        // UNCORROBORATED marker and this fixture would stop testing the shape it
+        // is named for; and the ancestry walk deliberately starts at the parent,
+        // because a bare `ay send` is not its own sender. In production the
+        // wrapper really is an ancestor — measured 26/26 on the live fleet — so
+        // this is the production shape, not a workaround.
+        wrapper_pid: process.ppid,
         agent_id: "cccc0000dddd",
       });
       const savedAyPid = process.env.AGENT_YES_PID;
-      process.env.AGENT_YES_PID = "424242";
+      process.env.AGENT_YES_PID = String(process.ppid);
       const stderr: string[] = [];
       const origErr = process.stderr.write.bind(process.stderr);
       (process.stderr as any).write = (s: any) => (stderr.push(String(s)), true);
@@ -3333,11 +3349,19 @@ describe("subcommands.cmdSend double-envelope warning", () => {
         exit_code: null,
         exit_reason: null,
         started_at: Date.now(),
-        wrapper_pid: 424242,
+        // A wrapper that is a REAL ancestor of this test process. Two reasons it
+        // is `ppid` and not `pid`: a pid that never existed cannot be
+        // corroborated by the process tree, so the envelope would carry an
+        // UNCORROBORATED marker and this fixture would stop testing the shape it
+        // is named for; and the ancestry walk deliberately starts at the parent,
+        // because a bare `ay send` is not its own sender. In production the
+        // wrapper really is an ancestor — measured 26/26 on the live fleet — so
+        // this is the production shape, not a workaround.
+        wrapper_pid: process.ppid,
         agent_id: "cccc0000dddd",
       });
       const savedAyPid = process.env.AGENT_YES_PID;
-      process.env.AGENT_YES_PID = "424242";
+      process.env.AGENT_YES_PID = String(process.ppid);
       const origOut = process.stdout.write.bind(process.stdout);
       (process.stdout as any).write = () => true;
       try {
