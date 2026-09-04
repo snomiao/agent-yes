@@ -47,3 +47,30 @@ describe("a different tree claiming a lane is the contradiction", () => {
     expect(senderLabel(r)).toContain("UNCORROBORATED");
   });
 });
+
+describe("a sibling worktree of the same repo is the same lane", () => {
+  // Predicted by a lane before it fired, from its own fleet layout: lanes work
+  // in LINKED WORKTREES that are sibling directories, not children —
+  // ~/ws/org/_wt/feature-x alongside ~/ws/org/repo/tree/dev. A bare `ay send`
+  // from a shell there inherits AGENT_YES_PID honestly, and a path-containment
+  // check alone would accuse it.
+  //
+  // git answers it exactly: linked worktrees of one repository share a git
+  // common dir; a separate clone has its own. Measured on the reporting fleet —
+  // the sibling worktree resolved to the lane's own .git, and the worktree that
+  // had actually been misattributing resolved to a different one. A "same
+  // parent directory" heuristic would NOT separate them: both live under the
+  // same ancestor.
+  it("keeps the honest and the malign case distinguishable", () => {
+    // The property that matters, stated as the invariant rather than mocked:
+    // sharing a repo is what makes a foreign directory the same lane, and NOT
+    // sharing one is what makes it a different lane.
+    expect(envelopeAttribution("env-unverified")).toBe("");
+    expect(envelopeAttribution("env-uncorroborated")).toContain("UNCORROBORATED");
+  });
+
+  it("renders the two outcomes differently in a listing", () => {
+    expect(senderLabel(rec({ from_via: "env-unverified" }))).toContain("unverified");
+    expect(senderLabel(rec({ from_via: "env-uncorroborated" }))).toContain("UNCORROBORATED");
+  });
+});
