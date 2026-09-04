@@ -355,12 +355,20 @@ async function computeSenderVia(): Promise<{ agent: GlobalPidRecord | null; via:
     // The honest path is unchanged in OUTCOME: the wrapper that injects
     // AGENT_YES_PID is an ancestor of the `ay send` it spawns, so a normal lane
     // corroborates and renders exactly as before.
-    const corroborated = inherited?.pid === declared.pid;
-    // A disagreement is REPORTED, never silently resolved. Attributing to the
-    // ancestor instead would break an honest lane whose tree we misread; giving
-    // it a plain "env" would launder a claim into a fact. So the claim stands
-    // and the receiver is told it stands alone.
-    return { agent: declared, via: corroborated ? "env" : "env-uncorroborated" };
+    // Three outcomes, not two. Collapsing the last two into one accusation is
+    // what made the loud marker fire on an honest long-lived lane the first
+    // time it ever fired.
+    if (inherited?.pid === declared.pid) return { agent: declared, via: "env" };
+    // A DIFFERENT registered agent is the real ancestor: the claim and the tree
+    // disagree, and the tree is the half that cannot be forged. Reported, never
+    // silently resolved — attributing to the ancestor instead would break an
+    // honest lane whose tree we misread, and a plain "env" would launder a
+    // claim into a fact.
+    if (inherited) return { agent: declared, via: "env-uncorroborated" };
+    // No registered agent anywhere in the ancestry: nothing agrees OR disagrees.
+    // A detached helper, a process re-parented to init, an unreadable table.
+    // Unverifiable is not suspicious, and must not be dressed as it.
+    return { agent: declared, via: "env-unverified" };
   }
   // A set-but-unresolvable AGENT_YES_PID (stale env, aged-out record) is not a
   // reason to stop: the process tree can still say who this is.
@@ -687,10 +695,16 @@ export function envelopeAttribution(via: SenderVia): string {
       // Derived from the process tree because the wrapper's env was absent.
       return " via process-tree";
     case "env-uncorroborated":
-      // The caller's own claim, and nothing corroborates it: any process can
-      // export another lane's pid (#461). Loud, because a receiver that acts on
-      // a message weighted by its sender must not be handed this as a fact.
+      // The claim and the process tree name DIFFERENT lanes. Loud, because this
+      // is the case a receiver acting on sender weight must not be handed as a
+      // fact — and loud only here, so it keeps meaning something.
       return " UNCORROBORATED-SENDER";
+    case "env-unverified":
+      // Nothing to disagree with. Silent in the envelope: the receiver gains
+      // nothing actionable from "we could not check", and a marker on honest
+      // traffic is how the loud one stops being read. It is still recorded in
+      // from_via for anyone who wants to weigh it.
+      return "";
     default:
       return "";
   }
