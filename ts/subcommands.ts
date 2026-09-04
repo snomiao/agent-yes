@@ -12,7 +12,7 @@
  */
 
 import { randomBytes } from "crypto";
-import { closeSync, constants as fsConstants, openSync } from "fs";
+import { closeSync, constants as fsConstants, openSync, realpathSync } from "fs";
 import { appendFile, mkdir, open, readFile, stat, writeFile } from "fs/promises";
 import ms from "ms";
 import { homedir } from "os";
@@ -355,19 +355,41 @@ async function computeSenderVia(): Promise<{ agent: GlobalPidRecord | null; via:
     // The honest path is unchanged in OUTCOME: the wrapper that injects
     // AGENT_YES_PID is an ancestor of the `ay send` it spawns, so a normal lane
     // corroborates and renders exactly as before.
-    // Three outcomes, not two. Collapsing the last two into one accusation is
-    // what made the loud marker fire on an honest long-lived lane the first
-    // time it ever fired.
+    // The claimed lane is our ancestor: claim and kernel agree.
     if (inherited?.pid === declared.pid) return { agent: declared, via: "env" };
-    // A DIFFERENT registered agent is the real ancestor: the claim and the tree
-    // disagree, and the tree is the half that cannot be forged. Reported, never
-    // silently resolved — attributing to the ancestor instead would break an
-    // honest lane whose tree we misread, and a plain "env" would launder a
-    // claim into a fact.
-    if (inherited) return { agent: declared, via: "env-uncorroborated" };
-    // No registered agent anywhere in the ancestry: nothing agrees OR disagrees.
-    // A detached helper, a process re-parented to init, an unreadable table.
-    // Unverifiable is not suspicious, and must not be dressed as it.
+
+    // It is not. That alone does not say which of two very different things is
+    // happening, and the earlier rule — "is some OTHER registered lane my
+    // ancestor" — picked the wrong discriminator. Measured on real traffic it
+    // was inverted: it fired on a lane's own nested processes (same tree,
+    // benign) and stayed silent while a different worktree sent two documents
+    // under this lane's name.
+    //
+    // The working directory separates them. A lane's own detached helper runs
+    // inside that lane's tree; a process in a DIFFERENT tree claiming the lane
+    // is the case the marker exists for. cwd is observed, not asserted — the
+    // body cannot set it.
+    // BOTH sides are realpath'd first. macOS resolves /tmp -> /private/tmp and
+    // /var -> /private/var, so a lane registered under a symlinked path would
+    // otherwise never appear to contain its own processes and every honest send
+    // from it would be accused. Caught by a same-tree test that went loud.
+    // Best-effort: an unreadable path falls back to the raw string rather than
+    // failing the send.
+    const real = (p2: string): string => {
+      try {
+        return realpathSync(p2).replace(/\/+$/, "");
+      } catch {
+        return p2.replace(/\/+$/, "");
+      }
+    };
+    const here = real(process.cwd());
+    const claimedRoot = declared.cwd ? real(declared.cwd) : "";
+    const insideClaimedTree =
+      Boolean(claimedRoot) && (here === claimedRoot || here.startsWith(claimedRoot + path.sep));
+    if (!insideClaimedTree) return { agent: declared, via: "env-uncorroborated" };
+
+    // Inside the claimed lane's own tree, or nothing to compare against:
+    // unverifiable, not suspicious, and must not be dressed as it.
     return { agent: declared, via: "env-unverified" };
   }
   // A set-but-unresolvable AGENT_YES_PID (stale env, aged-out record) is not a
