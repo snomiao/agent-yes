@@ -80,9 +80,7 @@ describe("cmdDsh", () => {
     const spawn: DshSpawn = (cmd) => {
       calls.push(cmd);
       return {
-        exited: Promise.resolve(
-          cmd[1] === "--version" ? 0 : (undefined as unknown as number),
-        ),
+        exited: Promise.resolve(cmd[1] === "--version" ? 0 : (undefined as unknown as number)),
       };
     };
     expect(await cmdDsh(["alpha"], spawn)).toBe(0);

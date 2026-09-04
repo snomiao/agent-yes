@@ -118,10 +118,10 @@ Each left out with a one-line reason; none is required to fix the reported pain.
   `feat/state-events`) — see "What shipped next" above.
 - **Join-wait — `ay ls --wait` (block until the whole batch is settled).** The
   blocking counterpart to `ay ls --watch`: exit once _every_ matched agent is in
-  a terminal-for-the-operator state (`needs_input | idle | stuck | unreachable |
-  stopped`), so a
-  fan-out parent can `ay ls <scope> --wait` and get control back the moment the
-  batch collectively needs it. _Why not now:_ `--watch` already delivers the
+  a terminal-for-the-operator state
+  (`needs_input | idle | stuck | unreachable | stopped`), so a fan-out parent can
+  `ay ls <scope> --wait` and get control back the moment the batch collectively
+  needs it. _Why not now:_ `--watch` already delivers the
   events; the parent can implement the join itself by consuming the stream. This
   overlaps with P5 (`ay wait --until`) and is best designed together with it
   (target-state set + multi-pid in one flag) rather than bolted onto `ls`.

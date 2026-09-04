@@ -491,8 +491,9 @@ describe("messageLog sender provenance — derived vs asserted", () => {
   it("describes an unidentified sender by what was MEASURED, not as a blank", () => {
     // The failure this fixes: an honest sender outside the wrapper rendered
     // identically to an anonymous stranger, so receiving lanes refused it.
-    expect(senderLabel(makeRecord({ from: null, from_via: "observed", sender_observed: observed })))
-      .toBe("unattributed (alice@box:/repo/alpha#4242)");
+    expect(
+      senderLabel(makeRecord({ from: null, from_via: "observed", sender_observed: observed })),
+    ).toBe("unattributed (alice@box:/repo/alpha#4242)");
   });
 
   it("still says unattributed when even the observation is missing", () => {
@@ -534,7 +535,8 @@ describe("messageLog sender provenance — derived vs asserted", () => {
 
   it("keeps an unattributed message DELIVERABLE, just visibly unattributed", () => {
     // Dropping them would recreate the same starvation from the other side.
-    expect(shouldRecord(makeRecord({ from: null, from_via: "observed", sender_observed: observed })))
-      .toBe(true);
+    expect(
+      shouldRecord(makeRecord({ from: null, from_via: "observed", sender_observed: observed })),
+    ).toBe(true);
   });
 });
