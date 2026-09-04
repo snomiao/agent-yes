@@ -9,6 +9,7 @@
 // so the AES-GCM / transcript-hash handshake is byte-identical to the browser
 // console and the host.
 import { RTCPeerConnection } from "node-datachannel/polyfill";
+import { probeSignalingHost, signalingFailureHint } from "./signalingHint.ts";
 import {
   deriveAuthToken,
   deriveDirKeys,
@@ -253,7 +254,19 @@ export async function startWebrtcBridge(link: string): Promise<WebrtcBridge> {
   const parsed = parseWebrtcLink(link);
   if (!parsed) throw new Error(`not a WebRTC share link: ${link}`);
   const conn = new WebRtcConn(parsed);
-  await conn.ready;
+  try {
+    await conn.ready;
+  } catch (e) {
+    // Every remote command routes through here, so this is the one place a
+    // signaling failure has to become actionable. The raw error names the URL
+    // and says "failed to connect" — all true, none of it pointing at the cause
+    // when the cause is the local environment rather than the network. Probe
+    // and say which; see ts/signalingHint.ts for why it is derived rather than
+    // guessed.
+    const cause = String((e as Error)?.message ?? e);
+    const probe = await probeSignalingHost(parsed.host);
+    throw new Error(signalingFailureHint(cause, probe, parsed.host));
+  }
 
   const server = Bun.serve({
     port: 0,
