@@ -183,6 +183,9 @@ export function senderLabel(record: MessageRecord): string {
     // The one attributed value that is only a claim — say so, since a receiver
     // weighing whether to act on it cannot otherwise tell it from a fact.
     if (record.from_via === "env-uncorroborated") return `${name} (UNCORROBORATED)`;
+    // Visible in a listing, where a human is reading deliberately, but never in
+    // the envelope — see envelopeAttribution.
+    if (record.from_via === "env-unverified") return `${name} (unverified)`;
     return name;
   }
   // No agent identified. Say what WAS measured rather than "unattributed" —

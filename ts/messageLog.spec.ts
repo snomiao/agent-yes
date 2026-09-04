@@ -14,6 +14,7 @@ import {
   shouldRecord,
   type MessageRecord,
 } from "./messageLog.ts";
+import { envelopeAttribution } from "./subcommands.ts";
 
 function makeRecord(over: Partial<MessageRecord> = {}): MessageRecord {
   return {
@@ -538,5 +539,37 @@ describe("messageLog sender provenance — derived vs asserted", () => {
     expect(
       shouldRecord(makeRecord({ from: null, from_via: "observed", sender_observed: observed })),
     ).toBe(true);
+  });
+});
+
+describe("unverifiable is not contradicted", () => {
+  // The direction matters more than the fact. Collapsing UNKNOWN into SUSPICIOUS
+  // trains every reader to dismiss the marker on legitimate traffic, so when a
+  // real contradiction arrives it reads as more of the same — the alarm is spent
+  // before its first true positive. The reverse error would merely miss one.
+  it("stays SILENT in the envelope when there is nothing to disagree with", () => {
+    expect(envelopeAttribution("env-unverified")).toBe("");
+  });
+
+  it("keeps the loud marker for a genuine contradiction only", () => {
+    expect(envelopeAttribution("env-uncorroborated")).toContain("UNCORROBORATED");
+  });
+
+  it("still records the distinction for a reader who wants it", () => {
+    // Silent in the body is not the same as thrown away: `ay msgs` shows it,
+    // and from_via carries it for anything that wants to weigh it.
+    const from = { pid: 1111, cli: "claude", cwd: "/repo/alpha", agent_id: "agent-A" };
+    expect(senderLabel(makeRecord({ from, from_via: "env-unverified" }))).toBe(
+      "claude #1111 (unverified)",
+    );
+    expect(senderLabel(makeRecord({ from, from_via: "env-uncorroborated" }))).toBe(
+      "claude #1111 (UNCORROBORATED)",
+    );
+  });
+
+  it("does not weaken the honest path", () => {
+    const from = { pid: 1111, cli: "claude", cwd: "/repo/alpha", agent_id: "agent-A" };
+    expect(senderLabel(makeRecord({ from, from_via: "env" }))).toBe("claude #1111");
+    expect(envelopeAttribution("env")).toBe("");
   });
 });

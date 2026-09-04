@@ -43,14 +43,22 @@ export type SenderVia =
   /** No env, but an ancestor process is a registered agent. Not forgeable from
    * inside a message: a process cannot choose its own ancestors. */
   | "ancestry"
-  /** `AGENT_YES_PID` named a registered agent that is NOT among this process's
-   * ancestors, or ancestry could not be read to check. The attribution is the
-   * caller's own claim and nothing corroborates it. Any process can export that
-   * variable, so this is the one attributed value a receiver should not trust
-   * on its own. Kept attributed rather than discarded: a stale env on an honest
-   * lane lands here too, and dropping it would be the starvation this exists to
-   * end. */
+  /** `AGENT_YES_PID` named one registered agent while a DIFFERENT registered
+   * agent is this process's actual ancestor. The two disagree, and the tree is
+   * the half that cannot be forged — so this is evidence, and the only value
+   * that says so out loud. */
   | "env-uncorroborated"
+  /** `AGENT_YES_PID` named a registered agent and the process tree contains no
+   * registered agent at all — so there is nothing to agree or disagree with.
+   *
+   * This is NOT evidence of anything. A detached helper, a process re-parented
+   * to init, an `ay send` from a background job, or an unreadable process table
+   * all land here, and every one of them is honest. Distinguishing it from a
+   * real contradiction is the whole point: the first live firing of the loud
+   * marker was a legitimate long-lived lane, and a warning that fires on honest
+   * traffic is one people learn to skip — which destroys the signal for the
+   * case it was built for. Unknown has to stay expressible AS unknown. */
+  | "env-unverified"
   /** Nothing identified the caller; only its observable facts are recorded. */
   | "observed";
 
