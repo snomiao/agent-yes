@@ -29,7 +29,14 @@ describe("parseProcessTable", () => {
 describe("ancestorPids", () => {
   it("walks parents nearest-first", async () => {
     expect(
-      await ancestorPids(400, { readTable: table([[400, 300], [300, 200], [200, 100], [100, 1]]) }),
+      await ancestorPids(400, {
+        readTable: table([
+          [400, 300],
+          [300, 200],
+          [200, 100],
+          [100, 1],
+        ]),
+      }),
     ).toEqual([300, 200, 100]);
   });
 
@@ -39,9 +46,15 @@ describe("ancestorPids", () => {
 
   it("terminates on a cycle instead of spinning", async () => {
     // pid reuse can produce a table that loops; a spin here hangs every send.
-    expect(await ancestorPids(10, { readTable: table([[10, 20], [20, 30], [30, 10]]) })).toEqual([
-      20, 30,
-    ]);
+    expect(
+      await ancestorPids(10, {
+        readTable: table([
+          [10, 20],
+          [20, 30],
+          [30, 10],
+        ]),
+      }),
+    ).toEqual([20, 30]);
   });
 
   it("respects the hop bound", async () => {
@@ -64,11 +77,17 @@ describe("ancestorPids", () => {
 });
 
 describe("findAgentAncestor", () => {
-  const chain = table([[400, 300], [300, 200], [200, 100], [100, 1]]);
+  const chain = table([
+    [400, 300],
+    [300, 200],
+    [200, 100],
+    [100, 1],
+  ]);
 
   it("finds a registered ancestor however many hops up", async () => {
-    expect(await findAgentAncestor(400, (p) => (p === 100 ? "lane-A" : null), { readTable: chain }))
-      .toBe("lane-A");
+    expect(
+      await findAgentAncestor(400, (p) => (p === 100 ? "lane-A" : null), { readTable: chain }),
+    ).toBe("lane-A");
   });
 
   it("prefers the NEAREST enclosing agent", async () => {
@@ -89,8 +108,9 @@ describe("findAgentAncestor", () => {
 
   it("does not attribute the caller to ITSELF", async () => {
     // The walk starts at the parent: a bare `ay send` is not its own sender.
-    expect(await findAgentAncestor(400, (p) => (p === 400 ? "self" : null), { readTable: chain }))
-      .toBeNull();
+    expect(
+      await findAgentAncestor(400, (p) => (p === 400 ? "self" : null), { readTable: chain }),
+    ).toBeNull();
   });
 });
 

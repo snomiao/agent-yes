@@ -479,7 +479,8 @@ export class RTCClient {
   // The host still returns cumulative acknowledgements for observability and
   // rejection reporting; callers only await admission to the wire.
   sendInput(pid, msg) {
-    if (typeof msg !== "string") return Promise.reject(new TypeError("terminal input must be text"));
+    if (typeof msg !== "string")
+      return Promise.reject(new TypeError("terminal input must be text"));
     const seq = ++this._inputSeq;
     return this._dcSend(0, { t: "stdin", pid: String(pid), seq, msg });
   }

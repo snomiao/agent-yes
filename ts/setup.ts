@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
+import { detectSnapConfinement, snapConfinementMessage } from "./snapGuard.ts";
 import { getWorkspaceRoot, setWorkspaceRoot } from "./workspaceConfig.ts";
 
 // `ay setup` — guided onboarding. Two steps:
@@ -22,16 +23,41 @@ export async function cmdSetup(rest: string[]): Promise<number> {
         `Options:\n` +
         `  workspace-dir   default directory for new agents (skips the prompt)\n` +
         `  --no-share      set the workspace only; don't install the share daemon\n` +
-        `  --port N        HTTP API port for the share daemon (default: 7432)\n`,
+        `  --port N        HTTP API port for the share daemon (default: 7432)\n` +
+        `  --allow-snap    proceed even when running inside a snap sandbox\n`,
     );
     return 0;
+  }
+
+  // 0. Snap sandbox check. A strictly confined snap runtime remaps $HOME into a
+  //    per-revision sandbox dir and confines every agent we spawn — see
+  //    snapGuard for why no path rewrite can fix it. Warn before we write any
+  //    state; in a TTY make continuing the deliberate choice.
+  if (!rest.includes("--allow-snap")) {
+    const snap = detectSnapConfinement();
+    if (snap) {
+      process.stderr.write(snapConfinementMessage(snap));
+      if (stdin.isTTY && stdout.isTTY) {
+        const rl = createInterface({ input: stdin, output: stdout });
+        try {
+          const ans = (await rl.question("continue anyway? [y/N]: ")).trim();
+          if (!/^y(es)?$/i.test(ans)) return 1;
+        } finally {
+          rl.close();
+        }
+      }
+      // Non-interactive: the warning stands, but setup never blocks on input.
+    }
   }
 
   const noShare = rest.includes("--no-share");
   const portIdx = rest.indexOf("--port");
   const port = portIdx >= 0 ? rest[portIdx + 1] : undefined;
   // The workspace is the first non-flag token (and not the value of --port).
-  const positional = rest.filter((a, i) => !a.startsWith("-") && i !== portIdx + 1);
+  // Guard on portIdx >= 0: without --port, indexOf returns -1 and a bare
+  // `portIdx + 1` is 0, which would silently drop the dir in `ay setup <dir>`.
+  const portValueIdx = portIdx >= 0 ? portIdx + 1 : -1;
+  const positional = rest.filter((a, i) => !a.startsWith("-") && i !== portValueIdx);
 
   // 1. Workspace root.
   let ws = positional[0];
