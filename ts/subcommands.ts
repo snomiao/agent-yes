@@ -78,6 +78,14 @@ import {
 } from "./senderAncestry.ts";
 import yargs from "yargs";
 import { type ResolvedRemote, readRemotes, resolveRemoteSpec } from "./remotes.ts";
+import {
+  noteRemoteResult,
+  pruneRemoteHealth,
+  readRemoteHealth,
+  remoteBackoffMs,
+  shouldSkipRemote,
+  writeRemoteHealth,
+} from "./remoteHealth.ts";
 import { isWebrtcSpec } from "./webrtcLink.ts";
 import { withIpcLock } from "./ipcLock.ts";
 
@@ -452,8 +460,7 @@ async function computeSenderVia(): Promise<{ agent: GlobalPidRecord | null; via:
       if (a === null || b === null) return false;
       return a === b || a.startsWith(b + path.sep) || b.startsWith(a + path.sep);
     };
-    if (!insideClaimedTree && !sameRepo())
-      return { agent: declared, via: "env-uncorroborated" };
+    if (!insideClaimedTree && !sameRepo()) return { agent: declared, via: "env-uncorroborated" };
 
     // Inside the claimed lane's own tree, or nothing to compare against:
     // unverifiable, not suspicious, and must not be dressed as it.
@@ -1893,6 +1900,14 @@ async function fetchRemoteRecordsRaw(
   url: string,
   token: string,
   opts: { all: boolean; active: boolean; keyword?: string },
+  /**
+   * Set true when the host ANSWERED, false when it did not. A healthy host with
+   * no agents — or one where `--keyword` matched nothing — returns [] exactly
+   * like a dead one, so row count cannot stand in for reachability: using it
+   * would mark a live-but-empty host failed and hide it for up to 32 minutes,
+   * which is the failure this whole change exists to avoid.
+   */
+  onReachable?: (ok: boolean) => void,
 ): Promise<any[]> {
   const params = new URLSearchParams();
   if (opts.all) params.set("all", "1");
@@ -1913,9 +1928,13 @@ async function fetchRemoteRecordsRaw(
       headers: { Authorization: `Bearer ${bearer}` },
       signal: AbortSignal.timeout(8000),
     });
+    // A 4xx/5xx still means the host is THERE and talking; only a throw (DNS,
+    // refused connection, connect timeout, aborted bridge) means unreachable.
+    onReachable?.(true);
     if (!res.ok) return [];
     return (await res.json()) as any[];
   } catch {
+    onReachable?.(false);
     return [];
   } finally {
     bridge?.close();
@@ -1936,15 +1955,46 @@ async function runAllRemotesLs(opts: {
     cwdScope: null,
   };
 
+  // A remote that is not answering costs a full connect timeout (25s for a
+  // WebRTC spec) and returns nothing, and this gathers them together — so two
+  // dead entries made every `ay ls` here take 27s instead of 5s. Skip a host
+  // that has been failing, on a doubling backoff, and keep LISTING it as
+  // unreachable so the config stays honest and the operator can see it is being
+  // skipped rather than silently dropped. See ts/remoteHealth.ts.
+  const health = await readRemoteHealth();
+  const healthNow = Date.now();
+  const skipped = new Set(
+    [...remotes.keys()].filter((alias) => shouldSkipRemote(health[alias], healthNow)),
+  );
+  const probed = [...remotes.entries()].filter(([alias]) => !skipped.has(alias));
+
   const [localResult, ...remoteResults] = await Promise.allSettled([
     listRecords(opts.keyword, localOpts).then((recs) => ({
       host: "local",
       records: recs as any[],
     })),
-    ...Array.from(remotes.entries()).map(([alias, cfg]) =>
-      fetchRemoteRecordsRaw(cfg.url, cfg.token, opts).then((records) => ({ host: alias, records })),
-    ),
+    ...probed.map(([alias, cfg]) => {
+      let reachable = false;
+      return fetchRemoteRecordsRaw(cfg.url, cfg.token, opts, (ok) => {
+        reachable = ok;
+      }).then((records) => ({ host: alias, records, ok: reachable }));
+    }),
   ]);
+
+  // Record what we learned, then persist once. A host that answered clears its
+  // streak; one that did not extends it. Best-effort: a health file we cannot
+  // write must never break `ay ls`.
+  {
+    // Prune first, so an alias removed from remotes.yaml stops being carried
+    // forever. `remotes` is the live configured set.
+    const next = pruneRemoteHealth({ ...health }, remotes.keys());
+    for (const [i, [alias]] of probed.entries()) {
+      const res = remoteResults[i];
+      const ok = res?.status === "fulfilled" && (res.value as any).ok === true;
+      next[alias] = noteRemoteResult(health[alias], ok, healthNow);
+    }
+    await writeRemoteHealth(next).catch(() => {});
+  }
 
   // Group by host in a stable order (local first, then each remote alias in
   // config order), so the aggregated table reads top-down per machine.
@@ -1984,6 +2034,28 @@ async function runAllRemotesLs(opts: {
       }),
     );
     byHost.push({ host: "local", records: enriched });
+  }
+  // A skipped host is REPORTED, not dropped. Silently omitting it would make a
+  // machine that can come back disappear from the fleet view with nothing to
+  // notice — the same failure as deleting it from the config, which is why we
+  // did not do that. One line to stderr per skipped host, so `--json` and any
+  // parser downstream stay unaffected.
+  for (const alias of skipped) {
+    const h = health[alias];
+    // Time REMAINING, not the window length: a host with one second left would
+    // otherwise report "retrying in up to 32m", which is true of the window and
+    // false of the wait, and the operator is reading this to decide whether to
+    // wait or force a probe.
+    const leftMs = Math.max(
+      0,
+      remoteBackoffMs(h?.streak ?? 1) - (healthNow - (h?.lastFailedAt ?? healthNow)),
+    );
+    const left =
+      leftMs >= 60_000 ? `${Math.round(leftMs / 60_000)}m` : `${Math.ceil(leftMs / 1000)}s`;
+    process.stderr.write(
+      `${alias}: unreachable — skipped after ${h?.streak ?? 0} failed attempt(s), ` +
+        `retrying in ${left} (ay ls ${alias} to force a probe now)\n`,
+    );
   }
   for (const res of remoteResults) {
     if (res.status === "fulfilled")
