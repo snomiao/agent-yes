@@ -78,6 +78,13 @@ import {
 } from "./senderAncestry.ts";
 import yargs from "yargs";
 import { type ResolvedRemote, readRemotes, resolveRemoteSpec } from "./remotes.ts";
+import {
+  noteRemoteResult,
+  readRemoteHealth,
+  remoteBackoffMs,
+  shouldSkipRemote,
+  writeRemoteHealth,
+} from "./remoteHealth.ts";
 import { isWebrtcSpec } from "./webrtcLink.ts";
 import { withIpcLock } from "./ipcLock.ts";
 
@@ -452,8 +459,7 @@ async function computeSenderVia(): Promise<{ agent: GlobalPidRecord | null; via:
       if (a === null || b === null) return false;
       return a === b || a.startsWith(b + path.sep) || b.startsWith(a + path.sep);
     };
-    if (!insideClaimedTree && !sameRepo())
-      return { agent: declared, via: "env-uncorroborated" };
+    if (!insideClaimedTree && !sameRepo()) return { agent: declared, via: "env-uncorroborated" };
 
     // Inside the claimed lane's own tree, or nothing to compare against:
     // unverifiable, not suspicious, and must not be dressed as it.
@@ -1936,15 +1942,45 @@ async function runAllRemotesLs(opts: {
     cwdScope: null,
   };
 
+  // A remote that is not answering costs a full connect timeout (25s for a
+  // WebRTC spec) and returns nothing, and this gathers them together — so two
+  // dead entries made every `ay ls` here take 27s instead of 5s. Skip a host
+  // that has been failing, on a doubling backoff, and keep LISTING it as
+  // unreachable so the config stays honest and the operator can see it is being
+  // skipped rather than silently dropped. See ts/remoteHealth.ts.
+  const health = await readRemoteHealth();
+  const healthNow = Date.now();
+  const skipped = new Set(
+    [...remotes.keys()].filter((alias) => shouldSkipRemote(health[alias], healthNow)),
+  );
+  const probed = [...remotes.entries()].filter(([alias]) => !skipped.has(alias));
+
   const [localResult, ...remoteResults] = await Promise.allSettled([
     listRecords(opts.keyword, localOpts).then((recs) => ({
       host: "local",
       records: recs as any[],
     })),
-    ...Array.from(remotes.entries()).map(([alias, cfg]) =>
-      fetchRemoteRecordsRaw(cfg.url, cfg.token, opts).then((records) => ({ host: alias, records })),
+    ...probed.map(([alias, cfg]) =>
+      fetchRemoteRecordsRaw(cfg.url, cfg.token, opts).then((records) => ({
+        host: alias,
+        records,
+        ok: records.length > 0,
+      })),
     ),
   ]);
+
+  // Record what we learned, then persist once. A host that answered clears its
+  // streak; one that did not extends it. Best-effort: a health file we cannot
+  // write must never break `ay ls`.
+  {
+    const next = { ...health };
+    for (const [i, [alias]] of probed.entries()) {
+      const res = remoteResults[i];
+      const ok = res?.status === "fulfilled" && (res.value as any).ok === true;
+      next[alias] = noteRemoteResult(health[alias], ok, healthNow);
+    }
+    await writeRemoteHealth(next).catch(() => {});
+  }
 
   // Group by host in a stable order (local first, then each remote alias in
   // config order), so the aggregated table reads top-down per machine.
@@ -1984,6 +2020,19 @@ async function runAllRemotesLs(opts: {
       }),
     );
     byHost.push({ host: "local", records: enriched });
+  }
+  // A skipped host is REPORTED, not dropped. Silently omitting it would make a
+  // machine that can come back disappear from the fleet view with nothing to
+  // notice — the same failure as deleting it from the config, which is why we
+  // did not do that. One line to stderr per skipped host, so `--json` and any
+  // parser downstream stay unaffected.
+  for (const alias of skipped) {
+    const h = health[alias];
+    const mins = Math.round(remoteBackoffMs(h?.streak ?? 1) / 60_000);
+    process.stderr.write(
+      `${alias}: unreachable — skipped after ${h?.streak ?? 0} failed attempt(s), ` +
+        `retrying in up to ${mins}m (ay ls ${alias} to force a probe now)\n`,
+    );
   }
   for (const res of remoteResults) {
     if (res.status === "fulfilled")
