@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { mkdir, readFile, rename, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
 
@@ -63,6 +63,8 @@ export function shouldSkipRemote(health: RemoteHealth | undefined, now: number):
   // which is why no test covers that clause and none pretends to. Kept because
   // it states the invariant at the point a reader needs it, and it stops a
   // future change to the backoff curve from silently making "healthy" skippable.
+  // The tripwire for that lives in the spec, on `remoteBackoffMs(0) === 0` —
+  // reachable, so it can actually fail — and says there that it guards this.
   if (!health || health.streak <= 0) return false;
   const elapsed = now - health.lastFailedAt;
   if (elapsed < 0) return false; // clock moved backwards — probe rather than guess
@@ -97,15 +99,51 @@ function healthPath(): string {
 export async function readRemoteHealth(): Promise<Record<string, RemoteHealth>> {
   try {
     const raw = await readFile(healthPath(), "utf-8");
-    const parsed = JSON.parse(raw) as Record<string, RemoteHealth>;
-    return parsed && typeof parsed === "object" ? parsed : {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
+    // Validate each entry rather than trusting the file. This is derived data in
+    // a writable path: a hand-edited or half-migrated record with a plausible
+    // streak would otherwise skip a healthy host, and the whole point of the
+    // fail-open design is that no bad input can hide a live agent.
+    const out: Record<string, RemoteHealth> = {};
+    for (const [alias, v] of Object.entries(parsed as Record<string, unknown>)) {
+      if (!v || typeof v !== "object") continue;
+      const { streak, lastFailedAt } = v as Partial<RemoteHealth>;
+      if (typeof streak !== "number" || !Number.isFinite(streak)) continue;
+      if (typeof lastFailedAt !== "number" || !Number.isFinite(lastFailedAt)) continue;
+      out[alias] = { streak, lastFailedAt };
+    }
+    return out;
   } catch {
     return {}; // missing, unreadable, or corrupt — fail open
   }
 }
 
-/** Best-effort write. A health file we cannot persist must never break `ay ls`. */
+/**
+ * Best-effort write. A health file we cannot persist must never break `ay ls`.
+ *
+ * Written to a temp file and renamed, so a concurrent reader sees either the old
+ * file or the new one and never a truncated one. Two `ay ls` processes finishing
+ * together still last-writer-wins — that is acceptable here because the loser's
+ * data is one probe's worth of a self-correcting counter, and because reading a
+ * torn file already fails open to "probe".
+ */
 export async function writeRemoteHealth(health: Record<string, RemoteHealth>): Promise<void> {
-  await mkdir(path.dirname(healthPath()), { recursive: true });
-  await writeFile(healthPath(), JSON.stringify(health, null, 2));
+  const dest = healthPath();
+  await mkdir(path.dirname(dest), { recursive: true });
+  const tmp = `${dest}.${process.pid}.tmp`;
+  await writeFile(tmp, JSON.stringify(health, null, 2));
+  await rename(tmp, dest);
+}
+
+/**
+ * Drop entries for aliases that are no longer configured, so the file cannot
+ * grow without bound as remotes come and go. Called with the live alias set.
+ */
+export function pruneRemoteHealth(
+  health: Record<string, RemoteHealth>,
+  aliases: Iterable<string>,
+): Record<string, RemoteHealth> {
+  const live = new Set(aliases);
+  return Object.fromEntries(Object.entries(health).filter(([alias]) => live.has(alias)));
 }

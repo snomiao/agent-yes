@@ -80,6 +80,7 @@ import yargs from "yargs";
 import { type ResolvedRemote, readRemotes, resolveRemoteSpec } from "./remotes.ts";
 import {
   noteRemoteResult,
+  pruneRemoteHealth,
   readRemoteHealth,
   remoteBackoffMs,
   shouldSkipRemote,
@@ -1899,6 +1900,14 @@ async function fetchRemoteRecordsRaw(
   url: string,
   token: string,
   opts: { all: boolean; active: boolean; keyword?: string },
+  /**
+   * Set true when the host ANSWERED, false when it did not. A healthy host with
+   * no agents — or one where `--keyword` matched nothing — returns [] exactly
+   * like a dead one, so row count cannot stand in for reachability: using it
+   * would mark a live-but-empty host failed and hide it for up to 32 minutes,
+   * which is the failure this whole change exists to avoid.
+   */
+  onReachable?: (ok: boolean) => void,
 ): Promise<any[]> {
   const params = new URLSearchParams();
   if (opts.all) params.set("all", "1");
@@ -1919,9 +1928,13 @@ async function fetchRemoteRecordsRaw(
       headers: { Authorization: `Bearer ${bearer}` },
       signal: AbortSignal.timeout(8000),
     });
+    // A 4xx/5xx still means the host is THERE and talking; only a throw (DNS,
+    // refused connection, connect timeout, aborted bridge) means unreachable.
+    onReachable?.(true);
     if (!res.ok) return [];
     return (await res.json()) as any[];
   } catch {
+    onReachable?.(false);
     return [];
   } finally {
     bridge?.close();
@@ -1960,20 +1973,21 @@ async function runAllRemotesLs(opts: {
       host: "local",
       records: recs as any[],
     })),
-    ...probed.map(([alias, cfg]) =>
-      fetchRemoteRecordsRaw(cfg.url, cfg.token, opts).then((records) => ({
-        host: alias,
-        records,
-        ok: records.length > 0,
-      })),
-    ),
+    ...probed.map(([alias, cfg]) => {
+      let reachable = false;
+      return fetchRemoteRecordsRaw(cfg.url, cfg.token, opts, (ok) => {
+        reachable = ok;
+      }).then((records) => ({ host: alias, records, ok: reachable }));
+    }),
   ]);
 
   // Record what we learned, then persist once. A host that answered clears its
   // streak; one that did not extends it. Best-effort: a health file we cannot
   // write must never break `ay ls`.
   {
-    const next = { ...health };
+    // Prune first, so an alias removed from remotes.yaml stops being carried
+    // forever. `remotes` is the live configured set.
+    const next = pruneRemoteHealth({ ...health }, remotes.keys());
     for (const [i, [alias]] of probed.entries()) {
       const res = remoteResults[i];
       const ok = res?.status === "fulfilled" && (res.value as any).ok === true;
@@ -2028,10 +2042,19 @@ async function runAllRemotesLs(opts: {
   // parser downstream stay unaffected.
   for (const alias of skipped) {
     const h = health[alias];
-    const mins = Math.round(remoteBackoffMs(h?.streak ?? 1) / 60_000);
+    // Time REMAINING, not the window length: a host with one second left would
+    // otherwise report "retrying in up to 32m", which is true of the window and
+    // false of the wait, and the operator is reading this to decide whether to
+    // wait or force a probe.
+    const leftMs = Math.max(
+      0,
+      remoteBackoffMs(h?.streak ?? 1) - (healthNow - (h?.lastFailedAt ?? healthNow)),
+    );
+    const left =
+      leftMs >= 60_000 ? `${Math.round(leftMs / 60_000)}m` : `${Math.ceil(leftMs / 1000)}s`;
     process.stderr.write(
       `${alias}: unreachable — skipped after ${h?.streak ?? 0} failed attempt(s), ` +
-        `retrying in up to ${mins}m (ay ls ${alias} to force a probe now)\n`,
+        `retrying in ${left} (ay ls ${alias} to force a probe now)\n`,
     );
   }
   for (const res of remoteResults) {

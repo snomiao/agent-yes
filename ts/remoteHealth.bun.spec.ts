@@ -3,6 +3,7 @@ import {
   REMOTE_BACKOFF_BASE_MS,
   REMOTE_BACKOFF_MAX_MS,
   noteRemoteResult,
+  pruneRemoteHealth,
   remoteBackoffMs,
   shouldSkipRemote,
 } from "./remoteHealth.ts";
@@ -15,11 +16,18 @@ describe("remoteHealth.remoteBackoffMs", () => {
     expect(remoteBackoffMs(99)).toBe(REMOTE_BACKOFF_MAX_MS);
   });
 
-  it("is zero for a host that has not failed", () => {
+  it("is zero for a host that has not failed — and this GUARDS the clause below", () => {
     // A streak of 0 must never produce a wait: that is the difference between
     // "healthy" and "failed once", and getting it wrong skips a live host.
     expect(remoteBackoffMs(0)).toBe(0);
     expect(remoteBackoffMs(-1)).toBe(0);
+
+    // This is also the tripwire for `shouldSkipRemote`'s `streak <= 0` clause.
+    // That clause is UNREACHABLE while this holds, which is why no test can
+    // redden it directly — but change the curve so a non-positive streak yields
+    // a non-zero wait and the clause goes LIVE, with nothing behind it, at the
+    // exact moment someone is editing the thing it guards. So the invariant is
+    // pinned HERE, where it is reachable and can fail loudly, instead.
   });
 
   it("does not overflow on an absurd streak", () => {
@@ -55,6 +63,48 @@ describe("remoteHealth.shouldSkipRemote", () => {
     // A backwards clock makes `elapsed` negative, which would otherwise read as
     // "still inside the window" and skip the host until the clock caught up.
     expect(shouldSkipRemote({ streak: 3, lastFailedAt: NOW }, NOW - 60_000)).toBe(false);
+  });
+});
+
+describe("remoteHealth.readRemoteHealth validation", () => {
+  it("ignores an entry whose shape it cannot trust", async () => {
+    // The file is derived data in a writable path. A valid-JSON record with a
+    // plausible-looking streak must not be able to hide a live agent, so
+    // anything that is not two finite numbers is dropped rather than trusted.
+    const { mkdtemp, writeFile } = await import("fs/promises");
+    const { tmpdir } = await import("os");
+    const path = (await import("path")).default;
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-health-"));
+    const saved = process.env.AGENT_YES_HOME;
+    process.env.AGENT_YES_HOME = dir;
+    try {
+      await writeFile(
+        path.join(dir, "remote-health.json"),
+        JSON.stringify({
+          good: { streak: 2, lastFailedAt: 123 },
+          missingField: { streak: 2 },
+          wrongType: { streak: "9", lastFailedAt: 1 },
+          notFinite: { streak: Number.POSITIVE_INFINITY, lastFailedAt: 1 },
+          notAnObject: 7,
+        }),
+      );
+      const { readRemoteHealth } = await import("./remoteHealth.ts");
+      expect(await readRemoteHealth()).toEqual({ good: { streak: 2, lastFailedAt: 123 } });
+    } finally {
+      if (saved === undefined) delete process.env.AGENT_YES_HOME;
+      else process.env.AGENT_YES_HOME = saved;
+    }
+  });
+});
+
+describe("remoteHealth.pruneRemoteHealth", () => {
+  it("drops aliases no longer configured, so the file cannot grow forever", () => {
+    const h = {
+      live: { streak: 1, lastFailedAt: 5 },
+      removed: { streak: 9, lastFailedAt: 5 },
+    };
+    expect(pruneRemoteHealth(h, ["live"])).toEqual({ live: { streak: 1, lastFailedAt: 5 } });
+    expect(pruneRemoteHealth(h, [])).toEqual({});
   });
 });
 
