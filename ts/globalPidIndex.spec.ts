@@ -389,6 +389,159 @@ describe("globalPidIndex", () => {
     });
   });
 
+  describe("sweepOrphanLogs", () => {
+    const DAY = 24 * 60 * 60 * 1000;
+
+    // The sweep always includes the caller's own cwd. Pin it inside the temp
+    // home so the suite can never reach the real repo's `.agent-yes/`.
+    beforeEach(() => {
+      vi.spyOn(process, "cwd").mockReturnValue(testHome);
+    });
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    /** Backdate a file so it falls outside the retention window. */
+    async function backdate(file: string, ageMs: number) {
+      const { utimes } = await import("fs/promises");
+      const when = new Date(Date.now() - ageMs);
+      await utimes(file, when, when);
+    }
+
+    it("reclaims a dead pid's logs that no index record points at", async () => {
+      const mod = await loadModule();
+      const { mkdir, writeFile } = await import("fs/promises");
+      const { existsSync } = await import("fs");
+
+      // A project dir the index reaches only via a *sibling* record — the
+      // orphan's own record was already compacted away.
+      const projectCwd = path.join(testHome, "proj");
+      const dir = path.join(projectCwd, ".agent-yes");
+      await mkdir(dir, { recursive: true });
+
+      const orphanRaw = path.join(dir, "999999.raw.log");
+      const orphanDebug = path.join(dir, "999999.debug.log");
+      for (const f of [orphanRaw, orphanDebug]) {
+        await writeFile(f, "0123456789"); // 10 bytes each
+        await backdate(f, 30 * DAY);
+      }
+
+      // The only record in the index belongs to a different, live session.
+      const liveRaw = path.join(dir, `${process.pid}.raw.log`);
+      await writeFile(liveRaw, "x");
+      await backdate(liveRaw, 30 * DAY);
+      await mod.appendGlobalPid({
+        pid: process.pid,
+        cli: "claude",
+        prompt: null,
+        cwd: projectCwd,
+        log_file: liveRaw,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: Date.now(),
+      });
+
+      const res = await mod.sweepOrphanLogs();
+
+      expect(res.removed.sort()).toEqual([orphanDebug, orphanRaw].sort());
+      expect(res.freedBytes).toBe(20);
+      expect(existsSync(orphanRaw)).toBe(false);
+      expect(existsSync(orphanDebug)).toBe(false);
+      expect(existsSync(liveRaw)).toBe(true); // pid still running
+    });
+
+    it("keeps logs inside the retention window and non-log files", async () => {
+      const mod = await loadModule();
+      const { mkdir, writeFile } = await import("fs/promises");
+      const { existsSync } = await import("fs");
+
+      const projectCwd = path.join(testHome, "proj");
+      const dir = path.join(projectCwd, ".agent-yes");
+      await mkdir(dir, { recursive: true });
+
+      const recent = path.join(dir, "999998.raw.log"); // dead pid, but fresh
+      await writeFile(recent, "x");
+
+      // Runtime state that shares the dir and must never be swept.
+      const inbox = path.join(dir, "inbox.jsonl");
+      const sqlite = path.join(dir, "pid.sqlite");
+      const records = path.join(dir, "pid-records.jsonl");
+      for (const f of [inbox, sqlite, records]) {
+        await writeFile(f, "x");
+        await backdate(f, 30 * DAY);
+      }
+
+      await mod.appendGlobalPid({
+        pid: 999998,
+        cli: "claude",
+        prompt: null,
+        cwd: projectCwd,
+        log_file: recent,
+        status: "exited",
+        exit_code: 0,
+        exit_reason: null,
+        started_at: Date.now(),
+      });
+
+      const res = await mod.sweepOrphanLogs();
+
+      expect(res.removed).toEqual([]);
+      for (const f of [recent, inbox, sqlite, records]) expect(existsSync(f)).toBe(true);
+    });
+
+    it("does not throw when the index is empty and the cwd has no .agent-yes", async () => {
+      const mod = await loadModule();
+      const res = await mod.sweepOrphanLogs();
+      expect(res.removed).toEqual([]);
+      expect(res.freedBytes).toBe(0);
+    });
+  });
+
+  describe("gcLogs", () => {
+    beforeEach(() => {
+      vi.spyOn(process, "cwd").mockReturnValue(testHome);
+    });
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("counts a file once when both passes would claim it", async () => {
+      const mod = await loadModule();
+      const { mkdir, writeFile, utimes } = await import("fs/promises");
+      const { existsSync } = await import("fs");
+
+      const projectCwd = path.join(testHome, "proj");
+      const dir = path.join(projectCwd, ".agent-yes");
+      await mkdir(dir, { recursive: true });
+
+      // Dead + old in BOTH senses: the index still has its record (so the
+      // retention pass claims it) and its mtime is stale (so the sweep would
+      // too). It must be reported exactly once.
+      const raw = path.join(dir, "999999.raw.log");
+      await writeFile(raw, "01234"); // 5 bytes
+      const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+      await utimes(raw, old, old);
+      await mod.appendGlobalPid({
+        pid: 999999,
+        cli: "claude",
+        prompt: null,
+        cwd: projectCwd,
+        log_file: raw,
+        status: "exited",
+        exit_code: 0,
+        exit_reason: null,
+        started_at: old.getTime(),
+      });
+
+      const res = await mod.gcLogs();
+
+      expect(res.removed).toEqual([raw]);
+      expect(res.freedBytes).toBe(5);
+      expect(existsSync(raw)).toBe(false);
+    });
+  });
+
   it("skips corrupt lines without throwing", async () => {
     const mod = await loadModule();
     await mod.appendGlobalPid({

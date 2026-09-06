@@ -1117,14 +1117,28 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
       }
       case "gc": {
         const { gcOldBinaryDirs } = await import("./rustBinary.ts");
-        const res = gcOldBinaryDirs();
-        if (res.removed.length === 0) {
+        const { gcLogs } = await import("./globalPidIndex.ts");
+        const bins = gcOldBinaryDirs();
+        // Logs are the bigger leak of the two: binary dirs are ~20-30 MiB per
+        // release, while a single long-lived session's raw log can pass 500.
+        const logs = await gcLogs();
+
+        if (bins.removed.length === 0) {
           process.stdout.write("no old agent-yes binary cache dirs to remove\n");
         } else {
-          for (const v of res.removed) process.stdout.write(`removed ${v}\n`);
-          const mib = (res.freedBytes / 1024 / 1024).toFixed(1);
+          for (const v of bins.removed) process.stdout.write(`removed ${v}\n`);
+          const mib = (bins.freedBytes / 1024 / 1024).toFixed(1);
           process.stdout.write(
-            `freed ${mib} MiB (${res.freedBytes} bytes) across ${res.removed.length} version dir(s)\n`,
+            `freed ${mib} MiB (${bins.freedBytes} bytes) across ${bins.removed.length} version dir(s)\n`,
+          );
+        }
+
+        if (logs.removed.length === 0) {
+          process.stdout.write("no stale session logs to remove\n");
+        } else {
+          const mib = (logs.freedBytes / 1024 / 1024).toFixed(1);
+          process.stdout.write(
+            `freed ${mib} MiB (${logs.freedBytes} bytes) across ${logs.removed.length} session log file(s)\n`,
           );
         }
         return 0;
@@ -1266,7 +1280,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay result <keyword> [--wait]        pull an agent's structured result envelope\n` +
       `  ay result set '<json>'              (inside an agent) deposit your result envelope\n` +
       `  ay reap                             kill process groups leaked by dead agents\n` +
-      `  ay gc                               remove old-version binary cache dirs and report freed space\n` +
+      `  ay gc                               reclaim old-version binary cache dirs + stale session logs\n` +
       `  ay dsh-legacy [args...]              launch the DeepSeek Harness terminal client (dsh-tui)\n` +
       wsLines +
       `\n` +
@@ -5610,10 +5624,7 @@ async function cmdRestart(rest: string[]): Promise<number> {
       // would delete restart's force-kill from that platform entirely. Where
       // we cannot tell, behaviour is exactly what it was before this guard.
       const table = await readAncestryTable();
-      const owns = pidOwnershipVerdict(
-        table?.get(record.pid)?.ageSecs,
-        record.started_at,
-      );
+      const owns = pidOwnershipVerdict(table?.get(record.pid)?.ageSecs, record.started_at);
       if (owns === "reused") {
         process.stderr.write(
           `pid ${record.pid} is alive but is NOT the agent that registered it — ` +
