@@ -33,9 +33,14 @@ function sources(dir: string, out: string[] = []): string[] {
  * inside a block comment can only ever ADD a false offender, which fails
  * loudly and is fixed by rewording; it can never hide a real producer. The
  * count assertion below covers the opposite slip, a scan that stops matching.
+ *
+ * Split on /\r?\n/, not "\n": on a CRLF checkout every line would keep a
+ * trailing \r, and `.` does not match \r in JS, so `//.*$` silently stops
+ * stripping comments and every line of prose about the protocol becomes a
+ * false offender. This test failed on Windows only, for exactly that.
  */
 function callSites(file: string): { line: number; window: string }[] {
-  const lines = readFileSync(file, "utf-8").split("\n");
+  const lines = readFileSync(file, "utf-8").split(/\r?\n/);
   const hits: { line: number; window: string }[] = [];
   lines.forEach((raw, i) => {
     const code = raw.replace(/\/\/.*$/, "");
