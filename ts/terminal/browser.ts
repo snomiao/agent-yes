@@ -233,6 +233,10 @@ export class AyTerminal {
     // Interactive input (opt-in): forward keystrokes to the agent's stdin as raw
     // bytes (code:"none" — the terminal itself sends \r). Fails closed to a mirror
     // on a 403 (a read-only token), like the rgui embed's attachStdin/onDenied.
+    //
+    // `raw: true` marks this a terminal wire, not a message (#453). Without it
+    // every keystroke and SGR mouse report becomes an inbox row, and the inbox
+    // is capacity-capped — a mouse scrolled over the pane evicts real messages.
     if (!this.readOnly) {
       this.term.onData((data: string) => {
         if (!this.writable) return;
@@ -240,7 +244,7 @@ export class AyTerminal {
           .fetch(this.url("/api/send"), {
             method: "POST",
             headers: { "content-type": "application/json" },
-            body: JSON.stringify({ keyword: this.pid, msg: data, code: "none" }),
+            body: JSON.stringify({ keyword: this.pid, msg: data, code: "none", raw: true }),
           })
           .then((r: any) => {
             if (r.status === 403 || r.status === 401) this.revokeWrite();

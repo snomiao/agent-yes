@@ -1028,7 +1028,11 @@ function writePredictiveVisual(term: Xterm, data: string): void {
 function attachStdin(term: Xterm, key: string, predictor: PredictiveEcho, onDenied: () => void) {
   let denied = false;
   const queue = new OrderedInputQueue(
-    (msg) => apiPost("/api/send", { keyword: pidOf(key), msg, code: "none" }, srcOf(key)),
+    // `raw: true` marks this a terminal wire, not a message (#453) — otherwise
+    // every keystroke and mouse report lands in the agent's capacity-capped
+    // inbox and evicts the real messages behind it.
+    (msg) =>
+      apiPost("/api/send", { keyword: pidOf(key), msg, code: "none", raw: true }, srcOf(key)),
     () => {
       if (!denied) {
         denied = true;
