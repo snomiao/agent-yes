@@ -73,6 +73,7 @@ import { framePaste as frameAsPaste, shouldFramePaste } from "./bracketedPaste.t
 import {
   ageMatchesRegistration,
   findAgentAncestor,
+  pidOwnershipVerdict,
   readAncestryTable,
   type SenderVia,
 } from "./senderAncestry.ts";
@@ -5590,6 +5591,39 @@ async function cmdRestart(rest: string[]): Promise<number> {
     let exited = await waitForExit(record.pid, 30_000);
     if (!exited) {
       // Wouldn't go gracefully — SIGKILL the pid (the reaper sweeps its pgid).
+      //
+      // But ONLY if the process at that number is still plausibly the agent we
+      // registered. pids are reused: a row can outlive its agent and name
+      // whatever now holds the number. This host carried a row 89 days old,
+      // surviving a reboot, whose pid was macOS `login` running as root.
+      //
+      // Nothing in this code was declining to kill that. The OS was, with
+      // EPERM, and only because the owner differed — a same-user recycled pid
+      // would have been killed. Deciding is the code's job, not the kernel's.
+      //
+      // Same age test the send path uses (#460): a process that started AFTER
+      // its registration cannot be the thing that registered.
+      //
+      // Refuse on EVIDENCE, not on ignorance. "Could not establish" is a third
+      // answer, not a quiet synonym for "reused": win32 has no process table
+      // reader, so treating unknown as reused would not guard this kill, it
+      // would delete restart's force-kill from that platform entirely. Where
+      // we cannot tell, behaviour is exactly what it was before this guard.
+      const table = await readAncestryTable();
+      const owns = pidOwnershipVerdict(
+        table?.get(record.pid)?.ageSecs,
+        record.started_at,
+      );
+      if (owns === "reused") {
+        process.stderr.write(
+          `pid ${record.pid} is alive but is NOT the agent that registered it — ` +
+            `its process is younger than the registration, so the number was reused. ` +
+            `Refusing to kill it.\n` +
+            `  check with: ps -p ${record.pid} -o pid=,user=,comm=\n` +
+            `  retire the stale row instead: ay stop ${record.pid}\n`,
+        );
+        return 1;
+      }
       try {
         process.kill(record.pid, "SIGKILL");
       } catch {
