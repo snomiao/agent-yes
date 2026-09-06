@@ -211,6 +211,30 @@ export async function findAgentAncestor<T>(
  * Exposed so a caller can do the ancestry walk AND the pid-reuse age check off
  * a single `ps`, instead of paying for the spawn twice.
  */
+export type PidOwnership = "ours" | "reused" | "unknown";
+
+/**
+ * Whether the process holding a pid is still the agent that registered it.
+ *
+ * Three-way on purpose, and the third value is the point. "Cannot establish"
+ * is not "established that it is not ours": win32 has no process table reader
+ * here at all, so folding unknown into reused would not guard a destructive
+ * action on that platform — it would delete the action from it, permanently,
+ * to protect a case that has never occurred. Callers refuse on evidence
+ * ("reused") and keep their prior behaviour on "unknown".
+ */
+export function pidOwnershipVerdict(
+  ageSecs: number | undefined,
+  startedAt: number | undefined,
+  now = Date.now(),
+  toleranceSecs = 60,
+): PidOwnership {
+  if (ageSecs === undefined || startedAt === undefined) return "unknown";
+  return ageMatchesRegistration(ageSecs, startedAt, now, toleranceSecs)
+    ? "ours"
+    : "reused";
+}
+
 export async function readAncestryTable(
   read: () => Promise<Map<number, ProcRow>> = readProcessTable,
 ): Promise<Map<number, ProcRow> | null> {
