@@ -1,4 +1,5 @@
-import { appendFile, mkdir, readFile, rename, unlink, writeFile } from "fs/promises";
+import type { Dirent } from "fs";
+import { appendFile, mkdir, readdir, readFile, rename, stat, unlink, writeFile } from "fs/promises";
 import { homedir } from "os";
 import type { AgentPermissions } from "./agentPermissions.ts";
 import path from "path";
@@ -246,6 +247,33 @@ function logSiblings(logFile: string | null): string[] {
   return [`${base}.raw.log`, `${base}.log`, `${base}.lines.log`, `${base}.debug.log`];
 }
 
+export interface LogGcResult {
+  /** Absolute paths of the log files that were removed. */
+  removed: string[];
+  /** Total bytes reclaimed (0 for files whose size could not be read). */
+  freedBytes: number;
+}
+
+/**
+ * Delete one log file, reporting the bytes it held. Returns null when nothing
+ * was removed (already gone, or not ours to delete) so callers can count only
+ * real deletions.
+ */
+async function removeLogFile(file: string): Promise<number | null> {
+  let size = 0;
+  try {
+    size = (await stat(file)).size;
+  } catch {
+    // Unreadable/missing — unlink below still decides whether it counted.
+  }
+  try {
+    await unlink(file);
+    return size;
+  } catch {
+    return null; // missing / already gone — ignore
+  }
+}
+
 /**
  * Index-driven retention sweep: delete the log files of sessions whose process
  * is gone (exited or dead pid) and that started longer ago than the retention
@@ -254,30 +282,143 @@ function logSiblings(logFile: string | null): string[] {
  * Best-effort; never throws. Returns the number of files removed.
  */
 export async function pruneOldLogs(maxAgeMs: number = retentionMs()): Promise<number> {
+  const { removed } = await pruneOldLogsDetailed(maxAgeMs);
+  return removed.length;
+}
+
+async function pruneOldLogsDetailed(maxAgeMs: number = retentionMs()): Promise<LogGcResult> {
+  const result: LogGcResult = { removed: [], freedBytes: 0 };
   let records: GlobalPidRecord[];
   try {
     records = await readGlobalPidsRaw();
   } catch {
-    return 0;
+    return result;
   }
   const now = Date.now();
-  let removed = 0;
   for (const r of records) {
     const dead = r.status === "exited" || !isProcessAlive(r.pid);
     const old = now - (r.started_at ?? now) > maxAgeMs;
     if (!dead || !old) continue;
     for (const f of logSiblings(r.log_file)) {
-      try {
-        await unlink(f);
-        removed++;
-      } catch {
-        // missing / already gone — ignore
-      }
+      const freed = await removeLogFile(f);
+      if (freed === null) continue;
+      result.removed.push(f);
+      result.freedBytes += freed;
     }
   }
-  if (removed > 0) {
-    logger.debug(`[globalPidIndex] pruned ${removed} stale log file(s)`);
+  if (result.removed.length > 0) {
+    logger.debug(`[globalPidIndex] pruned ${result.removed.length} stale log file(s)`);
     await maybeCompactGlobalPids();
   }
-  return removed;
+  return result;
+}
+
+/** `<pid>.log`, `<pid>.raw.log`, `<pid>.lines.log`, `<pid>.debug.log` — nothing else. */
+const PID_LOG_FILE = /^(\d+)\.(?:raw\.log|lines\.log|debug\.log|log)$/;
+
+/**
+ * Every `.agent-yes/` dir that might hold logs: this process's cwd plus the
+ * dir of each path the index knows about. Records are the only breadcrumb to
+ * *other* projects, so a pid whose record is gone is still reachable as long
+ * as some sibling record points at the same dir.
+ */
+function candidateLogDirs(records: GlobalPidRecord[]): string[] {
+  const dirs = new Set<string>([path.resolve(process.cwd(), ".agent-yes")]);
+  for (const r of records) {
+    if (r.log_file) dirs.add(path.resolve(path.dirname(r.log_file)));
+    if (r.cwd) dirs.add(path.resolve(r.cwd, ".agent-yes"));
+  }
+  return [...dirs];
+}
+
+/**
+ * Directory-driven sweep for **orphaned** logs — the ones `pruneOldLogs` can
+ * never see.
+ *
+ * `maybeCompactGlobalPids` drops records that are dead AND exited, but
+ * `pruneOldLogs` only deletes a log once its record is older than the
+ * retention window. A session that exits cleanly is therefore compacted out of
+ * the index long before its log ages out, and with the record goes the only
+ * record of the `log_file` path — the file is then unreclaimable by any
+ * index-driven pass. Left alone, those accumulate for as long as a machine
+ * keeps running agents, and a single long-lived session's raw log can reach
+ * hundreds of MiB on its own.
+ *
+ * So this pass ignores the index for *what* to delete and trusts the
+ * filesystem: in each candidate dir, any `<pid>.*.log` whose pid is no longer
+ * running and whose mtime is outside the retention window. Guards:
+ *
+ * - the name must parse as a pid log (never `inbox.jsonl`, `pid.sqlite`, …);
+ * - `isProcessAlive(pid)` must be false — pid reuse can only make a dead pid
+ *   look alive, which keeps a file that a later run collects, never the
+ *   reverse;
+ * - mtime, not `started_at`, bounds the age, so a log still being appended to
+ *   is safe even when its session started long ago.
+ *
+ * Best-effort; never throws.
+ */
+export async function sweepOrphanLogs(maxAgeMs: number = retentionMs()): Promise<LogGcResult> {
+  const result: LogGcResult = { removed: [], freedBytes: 0 };
+  let records: GlobalPidRecord[] = [];
+  try {
+    records = await readGlobalPidsRaw();
+  } catch {
+    // No index at all — the cwd is still worth sweeping.
+  }
+  const now = Date.now();
+
+  for (const dir of candidateLogDirs(records)) {
+    let entries: Dirent[];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      continue; // dir gone / unreadable — nothing to collect here
+    }
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const match = PID_LOG_FILE.exec(entry.name);
+      if (!match) continue;
+      const pid = Number(match[1]);
+      if (!Number.isInteger(pid) || pid <= 0 || isProcessAlive(pid)) continue;
+
+      const file = path.join(dir, entry.name);
+      let mtimeMs: number;
+      try {
+        mtimeMs = (await stat(file)).mtimeMs;
+      } catch {
+        continue; // raced with deletion
+      }
+      if (now - mtimeMs <= maxAgeMs) continue; // still inside the window
+
+      const freed = await removeLogFile(file);
+      if (freed === null) continue;
+      result.removed.push(file);
+      result.freedBytes += freed;
+    }
+  }
+
+  if (result.removed.length > 0) {
+    logger.debug(`[globalPidIndex] swept ${result.removed.length} orphaned log file(s)`);
+  }
+  return result;
+}
+
+/**
+ * The full log reclaim `ay gc` runs: the index-driven retention pass first
+ * (it also compacts the index), then the directory sweep for whatever the
+ * index no longer remembers. Paths are deduped, so a file both passes could
+ * claim is only counted once.
+ */
+export async function gcLogs(maxAgeMs: number = retentionMs()): Promise<LogGcResult> {
+  const pruned = await pruneOldLogsDetailed(maxAgeMs);
+  const swept = await sweepOrphanLogs(maxAgeMs);
+  const seen = new Set(pruned.removed);
+  const result: LogGcResult = { ...pruned };
+  for (const f of swept.removed) {
+    if (seen.has(f)) continue;
+    seen.add(f);
+    result.removed.push(f);
+  }
+  result.freedBytes = pruned.freedBytes + swept.freedBytes;
+  return result;
 }
