@@ -7,6 +7,12 @@ on:
     branches: [main]
     paths:
       - "rs/**"
+      # The workflow itself: a change to WHAT gets built or shipped (a new [[bin]]
+      # in the artifact step, a --bin filter on a cross leg) is exactly the change
+      # whose cross-compile legs cannot be reproduced locally — and with only
+      # `rs/**` here it merged untested, because touching the recipe never
+      # triggered the matrix that runs it.
+      - ".github/workflows/rust-build.yml"
 
   # Triggered by release.yml after semantic-release creates a new tag
   workflow_dispatch:
@@ -150,7 +156,7 @@ jobs:
             -w /io \
             -e CARGO_TERM_COLOR=always \
             ghcr.io/rust-cross/cargo-zigbuild:latest \
-            bash -c "rustup target add ${{ matrix.target }} && cargo zigbuild --release --target ${{ matrix.target }} --bin agent-yes"
+            bash -c "rustup target add ${{ matrix.target }} && cargo zigbuild --release --target ${{ matrix.target }} --bin agent-yes --bin ayrs"
 
       - name: Build with cargo
         if: "!matrix.cross && !matrix.zig"
@@ -163,6 +169,14 @@ jobs:
           mkdir -p artifacts
           cp rs/target/${{ matrix.target }}/release/agent-yes${{ matrix.ext }} artifacts/${{ matrix.artifact }}${{ matrix.ext }}
           chmod +x artifacts/${{ matrix.artifact }}${{ matrix.ext }} || true
+          # `ayrs` — the standalone Rust serve daemon (a third [[bin]]). Rides in
+          # the same per-target archive as ay-spawn-hidden does, so it extracts
+          # beside the main binary in rustBinary.ts getBinDir() and reaches every
+          # setup.sh user with no installer change. Keeps its plain name (the
+          # archive is already per-platform), unlike the target-suffixed main
+          # binary that is also downloaded standalone.
+          cp rs/target/${{ matrix.target }}/release/ayrs${{ matrix.ext }} artifacts/ayrs${{ matrix.ext }}
+          chmod +x artifacts/ayrs${{ matrix.ext }} || true
           # Windows also ships the ay-spawn-hidden launcher (a second [[bin]]).
           # `ay serve install` interposes it so pm2/oxmgr don't flash a console
           # window on each daemon (re)start. It rides along in the same zip and

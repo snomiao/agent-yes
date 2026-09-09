@@ -1,0 +1,225 @@
+<!doctype html>
+<!--
+  Room link landing page. ONE string serves two audiences:
+    - pasted into a terminal → `ay serve --webrtc <link>` joins that room
+    - opened in a browser    → this guide, which builds the install one-liner
+  Open with a room in the fragment:
+    https://agent-yes.com/room/#room=<id>&s=e1.<S>[&sig=<host>]
+
+  The fragment never leaves the browser (never sent with the request, never in a
+  Referer), so this page renders the one-liner — secret and all — entirely
+  client-side. That is the whole reason the command can be shown here at all: a
+  server-rendered page would have to receive the room secret to print it.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>join a room · agent-yes</title>
+    <link rel="icon" href="/w/icon.svg" />
+    <style>
+      :root {
+        color-scheme: dark;
+      }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family:
+          system-ui,
+          -apple-system,
+          sans-serif;
+        background: #14151a;
+        color: #e6e6ea;
+      }
+      .card {
+        max-width: 640px;
+        padding: 28px;
+        background: #1b1d24;
+        border: 1px solid #2c2f3a;
+        border-radius: 16px;
+        margin: 20px;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0 0 6px;
+      }
+      p {
+        opacity: 0.72;
+        font-size: 14px;
+        line-height: 1.55;
+      }
+      .room {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 13px;
+        opacity: 0.6;
+      }
+      .step {
+        margin-top: 22px;
+      }
+      .step h2 {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        opacity: 0.5;
+        margin: 0 0 8px;
+      }
+      pre {
+        position: relative;
+        background: #0f1014;
+        border: 1px solid #2c2f3a;
+        border-radius: 10px;
+        padding: 14px 14px;
+        overflow-x: auto;
+        font-size: 12.5px;
+        line-height: 1.5;
+        margin: 0;
+      }
+      code {
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      button {
+        margin-top: 8px;
+        background: #23262f;
+        border: 1px solid #363a46;
+        color: #e6e6ea;
+        border-radius: 8px;
+        padding: 7px 12px;
+        font-size: 13px;
+        cursor: pointer;
+      }
+      button:hover {
+        background: #2b2f3a;
+      }
+      .warn {
+        margin-top: 22px;
+        padding: 12px 14px;
+        border-radius: 10px;
+        border: 1px solid #4a3b1e;
+        background: #241d0f;
+        font-size: 13px;
+        line-height: 1.55;
+      }
+      a {
+        color: #8ab4ff;
+      }
+      .err {
+        color: #ff9b9b;
+      }
+      .hide {
+        display: none;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div id="bad" class="hide">
+        <h1>No room in this link</h1>
+        <p>
+          A room link looks like
+          <span class="room">https://agent-yes.com/room/#room=&lt;id&gt;&amp;s=e1.&lt;secret&gt;</span
+          >. Mint one with <span class="room">ay serve --webrtc</span> on the machine you want to
+          reach.
+        </p>
+      </div>
+
+      <div id="ok" class="hide">
+        <h1>Attach a machine to this room</h1>
+        <p>
+          Run this on the machine you want to reach. It installs agent-yes if needed, then serves
+          into room <span class="room" id="roomid"></span>.
+        </p>
+
+        <div class="step">
+          <h2>Install and join</h2>
+          <pre><code id="oneliner"></code></pre>
+          <button id="copy1">Copy</button>
+        </div>
+
+        <div class="step">
+          <h2>Already have agent-yes</h2>
+          <pre><code id="serveonly"></code></pre>
+          <button id="copy2">Copy</button>
+        </div>
+
+        <div class="warn">
+          <strong>One machine per link.</strong> A room has a single host: point two servers at the
+          same link and they compete to answer, rather than sharing the room. Mint a separate link
+          per machine.
+          <br /><br />
+          This link is a credential — anyone holding it can reach the agents on that machine.
+        </div>
+
+        <p class="step">
+          Already attached? <a id="console" href="#">Open the console for this room →</a>
+        </p>
+      </div>
+    </div>
+
+    <script>
+      (function () {
+        // Parse our own fragment. URLSearchParams decodes percent-escapes and
+        // reads "+" as a space — fine here (room ids and the hex secret contain
+        // neither), but anything added later must be encodeURIComponent'd.
+        var q = new URLSearchParams(location.hash.replace(/^#\??/, ""));
+        var room = q.get("room");
+        var s = q.get("s");
+        var sig = q.get("sig") || "";
+        var ok = !!(room && s);
+        document.getElementById(ok ? "ok" : "bad").classList.remove("hide");
+        if (!ok) return;
+
+        var origin = location.origin;
+        var link =
+          origin +
+          "/room/#room=" +
+          encodeURIComponent(room) +
+          "&s=" +
+          encodeURIComponent(s) +
+          (sig ? "&sig=" + encodeURIComponent(sig) : "");
+
+        // Single-quote the link so the shell can't touch the "&" and "#"; a
+        // single quote can't appear in it (room is [A-Za-z0-9_-], s is hex),
+        // but refuse rather than emit a broken command if that ever changes.
+        if (link.indexOf("'") !== -1) {
+          document.getElementById("oneliner").textContent = "malformed room link";
+          return;
+        }
+
+        // Pass the link in the ENVIRONMENT, not as an argv word: on Linux
+        // /proc/<pid>/cmdline is world-readable, so an argument would expose the
+        // room secret to every local user for the life of the process, while
+        // /proc/<pid>/environ is readable only by the owner (and root).
+        document.getElementById("oneliner").textContent =
+          "AY_JOIN='" + link + "' sh -c \"$(curl -fsSL " + origin + '/setup.sh)"';
+        document.getElementById("serveonly").textContent = "ay serve --webrtc '" + link + "'";
+        document.getElementById("roomid").textContent = room;
+
+        // The console shows the room's agents; it reads the older positional
+        // fragment (#<room>:<token>[@<sighost>]) that /w/ has always used.
+        document.getElementById("console").href =
+          origin + "/w/#" + encodeURIComponent(room) + ":" + encodeURIComponent(s) + (sig ? "@" + sig : "");
+
+        function wire(btnId, srcId) {
+          var btn = document.getElementById(btnId);
+          btn.addEventListener("click", function () {
+            navigator.clipboard.writeText(document.getElementById(srcId).textContent).then(
+              function () {
+                btn.textContent = "Copied";
+                setTimeout(function () {
+                  btn.textContent = "Copy";
+                }, 1500);
+              },
+              function () {
+                btn.textContent = "Press ⌘/Ctrl+C";
+              },
+            );
+          });
+        }
+        wire("copy1", "oneliner");
+        wire("copy2", "serveonly");
+      })();
+    </script>
+  </body>
+</html>

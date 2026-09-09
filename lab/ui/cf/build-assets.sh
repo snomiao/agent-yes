@@ -20,6 +20,11 @@ cp ../index.html ../ch.html ../*.js ../manifest.webmanifest ../icon.svg ./public
 # existing dir copies the source dir INSIDE it).
 rm -rf ./public/w/vendor && cp -R ../vendor ./public/w/vendor
 cp ../landing.html ./public/index.html
+# The room landing page (a room link opened in a browser). Its own directory so
+# the URL keeps its trailing slash: a bare /room WOULD match worker.ts's
+# signaling route (/^\/([A-Za-z0-9_-]{1,64})$/) on a websocket upgrade and be
+# read as a room literally named "room".
+mkdir -p ./public/room && cp ../room.html ./public/room/index.html
 cp ../architecture.html ./public/architecture.html
 # The lab (design notes) is GENERATED from lab/ui/lab into ./public/lab, which
 # worker.ts serves as lab.agent-yes.com (its LAB_HOST branch rewrites / → /lab).
