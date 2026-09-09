@@ -64,6 +64,10 @@ describe("createFrameScheduler", () => {
     expect(frames.size).toBe(1);
     frames.values().next().value!();
     expect(runs).toBe(1);
+    scheduler.schedule();
+    expect(frames.size).toBe(2); // fired frame remains in this deliberately tiny fake
+    [...frames.values()].at(-1)!();
+    expect(runs).toBe(2);
   });
 
   it("cancels pending work on dispose", () => {
@@ -329,6 +333,50 @@ describe("layeredRows parentEntry", () => {
     const childRow = rows.find((r) => r.entry?.pid === 2);
     expect(rootRow?.parentEntry).toBeNull();
     expect(childRow?.parentEntry).toBe(root);
+  });
+});
+
+// Two machines that report the SAME device label — cloned images, container
+// fleets, or several daemons on one box. Reproduced live: two codehost peers in
+// one room both reported this machine's hostname, their agents merged into one
+// PID forest, the layer looked single-membered and was hidden, and the console
+// showed two unlabelled sibling rows with nothing saying which box was which.
+// Identity is the source; the label is only for reading.
+describe("layeredRows peer grouping with duplicate device labels", () => {
+  const onEach = () => [
+    { ...agent({ pid: 100, wrapper_pid: 100 }), _room: "r1", _src: "r1/peerAAA111", _host: "u@box" },
+    { ...agent({ pid: 200, wrapper_pid: 200 }), _room: "r1", _src: "r1/peerBBB222", _host: "u@box" },
+  ];
+
+  it("keeps two same-labelled machines as separate peer groups", () => {
+    const peers = layeredRows(onEach()).filter((r) => r.kind === "peer");
+    expect(peers).toHaveLength(2);
+    expect(new Set(peers.map((p) => p.src)).size).toBe(2);
+  });
+
+  it("disambiguates the shared label so the rows can be told apart", () => {
+    const peers = layeredRows(onEach()).filter((r) => r.kind === "peer");
+    const labels = peers.map((p) => p.label);
+    expect(new Set(labels).size).toBe(2);
+    for (const l of labels) expect(l).toContain("u@box");
+  });
+
+  it("does not parent one machine's agent under the other's", () => {
+    const rows = layeredRows(onEach());
+    for (const pid of [100, 200])
+      expect(rows.find((r) => r.entry?.pid === pid)?.parentEntry).toBeNull();
+  });
+
+  it("leaves a single machine unsuffixed and its peer layer hidden", () => {
+    const rows = layeredRows([onEach()[0]]);
+    expect(rows.filter((r) => r.kind === "peer")).toHaveLength(0);
+    expect(rows.filter((r) => r.kind === "agent")).toHaveLength(1);
+  });
+
+  it("still labels two machines that report DIFFERENT hosts, unsuffixed", () => {
+    const [a, b] = onEach();
+    const peers = layeredRows([a, { ...b, _host: "u@other" }]).filter((r) => r.kind === "peer");
+    expect(peers.map((p) => p.label).sort()).toEqual(["u@box", "u@other"]);
   });
 });
 
