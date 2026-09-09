@@ -619,13 +619,33 @@ export function layeredRows(entries) {
   // parent — which is what makes single-node layers vanish.
   const roomNodes = [];
   for (const [rid, re] of groupBy(entries, (e) => e._room || "")) {
-    const peerGroups = groupBy(re, (e) => e._host || "");
+    // Group by SOURCE, not by the device label. A label is not an identity: two
+    // machines routinely report the same `user@host` — cloned images and
+    // container fleets are the normal provisioning case, and several daemons on
+    // one box report it too. Grouping by `_host` merged those into one peer
+    // group, so their agents landed in a single PID forest and could be shown
+    // parented to each other, and the layer then looked single-membered and was
+    // hidden entirely — two machines rendered as unlabelled sibling rows with
+    // nothing saying which box was which. `_src` is one machine by construction
+    // (`<room>/<peerId>` for a codehost peer, the room id for an ay-share room).
+    const peerGroups = groupBy(re, (e) => e._src || e._host || "");
     const multiPeer = peerGroups.length > 1;
+    // Labels only have to be unique for READING; identity is `_src` above. When
+    // two sources really do share a label, suffix a short slice of the source so
+    // the operator can still tell the rows apart before sending a command to one.
+    const labelCounts = new Map();
+    for (const [, pe] of peerGroups) {
+      const l = pe[0]?._host || "";
+      if (l) labelCounts.set(l, (labelCounts.get(l) || 0) + 1);
+    }
     const underRoom = [];
-    for (const [host, pe] of peerGroups) {
+    for (const [src, pe] of peerGroups) {
       const agentNodes = agentForestNodes(pe).map(toAgentNode);
-      if (multiPeer && host)
-        underRoom.push({ kind: "peer", label: host, room: rid, host, children: agentNodes });
+      const host = pe[0]?._host || "";
+      const label =
+        host && labelCounts.get(host) > 1 ? `${host} (${String(src).slice(-6)})` : host;
+      if (multiPeer && label)
+        underRoom.push({ kind: "peer", label, room: rid, host, src, children: agentNodes });
       else underRoom.push(...agentNodes); // single/unlabelled peer hidden
     }
     if (multiRoom && rid) roomNodes.push({ kind: "room", label: rid, children: underRoom });
@@ -646,6 +666,9 @@ export function layeredRows(entries) {
       entry: node.entry,
       room: node.room, // peer headers: (room,host) keys the connection-type cache
       host: node.host,
+      // The peer's source id. `host` can repeat across machines, so anything
+      // keying per-machine state off a header must use this, not (room,host).
+      src: node.src,
       parentEntry: node.kind === "agent" ? parentAgent : null,
       branch: railPrefix(ancestorsLast),
       depth: ancestorsLast.length,
