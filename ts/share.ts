@@ -183,7 +183,13 @@ export async function loadOrCreateShareRoom(sighost = DEFAULT_SIGHOST): Promise<
 
 function parseShareUrl(s: string): { room: string; token: string; host: string } {
   const m = /^webrtc:\/\/([^:@/]+):([^@/]+)@(.+)$/.exec(s);
-  if (!m) throw new Error(`bad --share url: ${s} (want webrtc://room:token@host)`);
+  // Callers normalize any user-facing spelling (https://…/room/#…) to this
+  // internal form via toWebrtcUrl, so reaching here means a caller bug — point at
+  // the shape operators actually hold rather than at the internal one.
+  if (!m)
+    throw new Error(
+      `bad room url: ${s} (want a https://agent-yes.com/room/#room=<id>&s=e1.<secret> link)`,
+    );
   return { room: m[1]!, token: m[2]!, host: m[3]! };
 }
 

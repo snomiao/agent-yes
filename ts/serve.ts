@@ -77,6 +77,7 @@ import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
 import { negotiateSize, sanitizeCap, type SizeCap } from "./sizeNego.ts";
 import { listStrayServeProcesses } from "./strayServe.ts";
+import { isWebrtcSpec, toWebrtcUrl } from "./webrtcLink.ts";
 import {
   getProvisionHook,
   getProvisionRoot,
@@ -1160,19 +1161,17 @@ async function warnStrayServeProcesses(): Promise<void> {
   );
 }
 
-// An explicit webrtc:// URL passed to --webrtc/--share in the daemon's serve args,
-// or undefined for a bare flag (which mints a persisted room instead). Mirrors how
-// cmdServe resolves argv.webrtc/argv.share, but over the raw arg list install holds
-// (oxmgr splits the command on whitespace → `--webrtc url`; pm2/`=` → `--webrtc=url`).
+// An explicit room URL passed to --webrtc/--share in the daemon's serve args,
+// normalized to the internal webrtc:// form — or undefined for a bare flag (which
+// mints a persisted room instead). Mirrors how cmdServe resolves argv.webrtc/argv.share,
+// but over the raw arg list install holds (oxmgr splits the command on whitespace →
+// `--webrtc url`; pm2/`=` → `--webrtc=url`).
 function explicitWebrtcUrl(args: string[]): string | undefined {
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
     for (const flag of ["--webrtc", "--share"]) {
-      if (a === flag && args[i + 1]?.startsWith("webrtc://")) return args[i + 1];
-      if (a.startsWith(`${flag}=`)) {
-        const v = a.slice(flag.length + 1);
-        if (v.startsWith("webrtc://")) return v;
-      }
+      const v = a === flag ? args[i + 1] : a.startsWith(`${flag}=`) ? a.slice(flag.length + 1) : "";
+      if (v && isWebrtcSpec(v)) return toWebrtcUrl(v) ?? undefined;
     }
   }
   return undefined;
@@ -1630,7 +1629,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `Modes (default: --http):\n` +
         `  --http            HTTP API + web console on --port; no WebRTC\n` +
         `  --webrtc [URL]    Share over WebRTC (bare flag mints a room+link on\n` +
-        `                    agent-yes.com, or pass webrtc://room:token@host).\n` +
+        `                    agent-yes.com, or pass a room link to join that room:\n` +
+        `                    https://agent-yes.com/room/#room=<id>&s=e1.<secret>).\n` +
         `                    Alone it needs NO port — combine with --http for both.\n` +
         `                    The minted room persists in ~/.agent-yes/.share-room\n` +
         `                    (stable link across restarts; delete the file to rotate).\n` +
@@ -1706,7 +1706,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
     .option("webrtc", {
       type: "string",
       description:
-        "Share over WebRTC: bare flag mints a room+link, or pass webrtc://room:token@host. Needs no port unless combined with --http",
+        "Share over WebRTC: bare flag mints a room+link, or pass a https://…/room/#… link to join that room. Needs no port unless combined with --http",
     })
     .option("share", {
       type: "string",
@@ -1749,6 +1749,26 @@ export async function cmdServe(rest: string[]): Promise<number> {
 
   const wantWebrtc = argv.webrtc !== undefined || argv.share !== undefined;
   const wantHttp = argv.http === true || argv.share !== undefined || argv.webrtc === undefined;
+  // Resolve --webrtc/--share's value to the internal webrtc:// form up front, so a
+  // bad link fails before any port is bound or lock taken. A value that LOOKS like
+  // a room link but doesn't parse must fail LOUDLY: the old check gated on the
+  // `webrtc://` scheme alone, so every https://…/room/#… link — the shape actually
+  // printed to operators — fell through to the mint-a-fresh-room path. `--webrtc
+  // <someone else's link>` then served its OWN room while the operator believed it
+  // had joined theirs. Empty string = the bare flag, which mints by design.
+  const webrtcArg = (argv.webrtc ?? argv.share) as string | undefined;
+  let explicitRoomUrl: string | undefined;
+  if (typeof webrtcArg === "string" && webrtcArg !== "") {
+    explicitRoomUrl = (isWebrtcSpec(webrtcArg) && toWebrtcUrl(webrtcArg)) || undefined;
+    if (!explicitRoomUrl) {
+      process.stderr.write(
+        `ay serve: --webrtc: not a room link: ${webrtcArg}\n` +
+          `  want  https://agent-yes.com/room/#room=<id>&s=e1.<secret>\n` +
+          `  or a bare --webrtc to mint a room of your own\n`,
+      );
+      return 1;
+    }
+  }
   const fixedPort = typeof argv.port === "number";
   const usePortless = wantHttp && !fixedPort;
   if (argv.local === true && fixedPort) {
@@ -5062,9 +5082,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // webrtc:// value joins an explicit one.
   let closeShare: (() => void) | undefined; // closes WebRTC peers on shutdown
   if (wantWebrtc) {
-    const webrtcVal = (argv.webrtc ?? argv.share) as string | undefined;
-    const explicitUrl =
-      typeof webrtcVal === "string" && webrtcVal.startsWith("webrtc://") ? webrtcVal : undefined;
+    // Validated (and normalized to webrtc://) up front, alongside wantWebrtc.
+    const explicitUrl = explicitRoomUrl;
     try {
       const { startShare, loadOrCreateShareRoom } = await import("./share.ts");
       const linkFile = path.join(

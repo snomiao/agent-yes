@@ -31,6 +31,8 @@ describe("shareLinkFromRoomUrl", () => {
   });
 
   it("rejects a malformed room url", () => {
-    expect(() => shareLinkFromRoomUrl("not-a-webrtc-url")).toThrow(/webrtc:\/\//);
+    // The message must name the shape operators actually hold (the /room/ link),
+    // not the internal webrtc:// form they are never shown.
+    expect(() => shareLinkFromRoomUrl("not-a-webrtc-url")).toThrow(/\/room\/#room=/);
   });
 });
