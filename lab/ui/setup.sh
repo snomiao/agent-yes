@@ -12,6 +12,31 @@ set -eu
 AY_PACKAGE="agent-yes"
 AY_CONSOLE_ORIGIN="https://agent-yes.com"
 
+# A room link to attach this machine to once installed (the /room/ page builds
+# the whole command, secret included, from its own fragment — which never
+# reaches a server). Two ways in:
+#
+#   AY_JOIN='https://…/room/#room=…&s=…' sh -c "$(curl -fsSL …/setup.sh)"   preferred
+#   curl -fsSL …/setup.sh | sh -s -- --join 'https://…/room/#room=…&s=…'
+#
+# Prefer the environment: on Linux /proc/<pid>/cmdline is world-readable, so an
+# argument leaks the room secret to every local user for as long as this script
+# runs, whereas /proc/<pid>/environ is owner+root only. --join also lands in
+# shell history. The link CANNOT ride in the curl URL's fragment: curl strips
+# the fragment client-side, and a query string would put a live secret in the
+# CDN's request logs.
+AY_JOIN="${AY_JOIN:-}"
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --join) AY_JOIN=${2:-}; shift 2 || true ;;
+    --join=*) AY_JOIN=${1#--join=}; shift ;;
+    *)
+      printf '\033[31m✘ unknown option: %s (usage: setup.sh [--join <room-link>])\033[0m\n' "$1" >&2
+      exit 1
+      ;;
+  esac
+done
+
 say() { printf '\033[36m▸\033[0m %s\n' "$1"; }
 err() { printf '\033[31m✘ %s\033[0m\n' "$1" >&2; }
 
@@ -125,6 +150,23 @@ EOF
 # whole script (exit 2), even inside this `if` and even with the error muted by
 # `2>/dev/null`. The subshell confines that fatal exit; the parent just reads its
 # non-zero status and skips the prompt cleanly.
+# --- join a room, if one was handed to us ------------------------------------
+# An explicit room means the operator already decided; don't stop to ask. stdin
+# is still curl's pipe here, so hand the server /dev/tty when there is one (for
+# its own prompts) and /dev/null when there isn't, rather than the pipe.
+if [ -n "$AY_JOIN" ]; then
+  if ! command -v ay >/dev/null 2>&1; then
+    err "installed, but 'ay' is not on PATH yet — open a new shell and run: ay serve --webrtc '$AY_JOIN'"
+    exit 1
+  fi
+  say "Joining room…"
+  if ( : < /dev/tty ) 2>/dev/null; then
+    exec ay serve --webrtc "$AY_JOIN" < /dev/tty
+  else
+    exec ay serve --webrtc "$AY_JOIN" < /dev/null
+  fi
+fi
+
 if command -v ay >/dev/null 2>&1 && ( : < /dev/tty ) 2>/dev/null; then
   printf '\n\033[36m▸\033[0m Start sharing now and get a console link? [Y/n] ' > /dev/tty
   read -r ans < /dev/tty || ans=""

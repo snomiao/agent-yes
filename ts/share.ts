@@ -147,7 +147,7 @@ export interface ShareOpts {
    *  generation/token), startShare mints a fresh room, persists it, and calls
    *  this so the caller can refresh its stored link. Leave unset for explicit
    *  webrtc:// URLs, which must NOT be silently rotated. */
-  onRotate?: (info: { room: string; link: string }) => void | Promise<void>;
+  onRotate?: (info: { room: string; link: string; joinLink: string }) => void | Promise<void>;
 }
 
 // The room+token persist like the serve token, so the share link (and any
@@ -204,6 +204,27 @@ function formatShareLink(room: string, S: string, host: string): string {
   const ui = host === "s.agent-yes.com" ? "https://agent-yes.com/w" : "http://localhost:7778/w";
   const suffix = host === "s.agent-yes.com" ? "" : "@" + host;
   return `${ui}/#${room}:${MARKER}${S}${suffix}`;
+}
+
+// The /room/ link for a room — the one you hand to ANOTHER machine to attach it
+// to this room. Opened in a browser it's a guide page (which renders the install
+// one-liner client-side from this very fragment, so the secret never reaches a
+// server); passed to `ay serve --webrtc` it joins.
+//
+// The fragment is key=value (URLSearchParams) rather than the positional form
+// /w/ uses: the fragment namespace is shared with #k=, #ch= and #launch=, and a
+// positional grammar can only be told apart from those by a blocklist someone
+// has to remember to update (see parseRoomHash in lab/ui/rtc.js). Bare `k=v&…`
+// — no leading "?" — matches OAuth 2.0's implicit-grant fragment (RFC 6749
+// §4.2.2), the same trick for the same reason: a credential the server must
+// never see.
+export function formatRoomLink(room: string, S: string, host: string): string {
+  const prod = host === DEFAULT_SIGHOST;
+  const ui = prod ? "https://agent-yes.com/room" : "http://localhost:7778/room";
+  // Values must be URL-safe: `s` is hex and `room` is [A-Za-z0-9_-], but encode
+  // anyway — URLSearchParams decodes on the way out and reads "+" as a space.
+  const q = `room=${encodeURIComponent(room)}&s=${encodeURIComponent(MARKER + S)}`;
+  return `${ui}/#${q}${prod ? "" : `&sig=${encodeURIComponent(host)}`}`;
 }
 
 // Derive the shareable console link from a persisted/explicit webrtc://room:token@host
@@ -313,7 +334,7 @@ export async function importRTC(): Promise<any> {
  *  process exits, reconnecting signaling on drop. Returns the shareable link. */
 export async function startShare(
   opts: ShareOpts,
-): Promise<{ room: string; link: string; close: () => void }> {
+): Promise<{ room: string; link: string; joinLink: string; close: () => void }> {
   const minted = !opts.url;
   const sighost = opts.sighost ?? DEFAULT_SIGHOST;
   const initial = opts.url
@@ -343,8 +364,12 @@ export async function startShare(
 
   const wsScheme = host.startsWith("localhost") || host.startsWith("127.") ? "ws" : "wss";
   const mkLink = () => formatShareLink(room, S, host);
+  // The /room/ link — handed to ANOTHER machine to attach it to this room,
+  // where the console link above is for a human to watch it.
+  const mkJoinLink = () => formatRoomLink(room, S, host);
   let authToken = await deriveAuthToken(S, room, host);
   let link = mkLink();
+  let joinLink = mkJoinLink();
 
   const RTCPeerConnection = await importRTC();
 
@@ -362,6 +387,7 @@ export async function startShare(
     S = parseSecret(token).s;
     authToken = await deriveAuthToken(S, room, host);
     link = mkLink();
+    joinLink = mkJoinLink();
     // close() may have run during the await above — don't persist/announce or let
     // the caller reconnect a room for a share that's shutting down.
     if (closed) return false;
@@ -371,7 +397,7 @@ export async function startShare(
     } catch {
       /* best effort — in-memory rotation still lets new browsers join */
     }
-    await opts.onRotate({ room, link });
+    await opts.onRotate({ room, link, joinLink });
     return true;
   };
 
@@ -891,5 +917,5 @@ export async function startShare(
     }
     for (const peerId of [...peers.keys()]) closePeer(peerId);
   };
-  return { room, link, close };
+  return { room, link, joinLink, close };
 }

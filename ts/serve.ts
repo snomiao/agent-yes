@@ -5092,7 +5092,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       );
       // Announce the link — reused for the initial share and for any auto-rotation
       // (when the signaling server rejects a stale persisted room).
-      const announce = async (room: string, link: string, rotated: boolean) => {
+      const announce = async (room: string, link: string, joinLink: string, rotated: boolean) => {
         const lead = rotated
           ? "the room was rejected by signaling (stale generation) — rotated to a fresh link"
           : "shared over WebRTC — open this link (the token is eaten from the URL on open)";
@@ -5100,7 +5100,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
           const persistNote = explicitUrl
             ? "\n"
             : `  (persistent room — same link across restarts; delete ~/.agent-yes/.share-room to rotate)\n\n`;
-          process.stdout.write(`${wantHttp ? "\n" : ""}${lead}:\n  ${link}\n` + persistNote);
+          process.stdout.write(
+            `${wantHttp ? "\n" : ""}${lead}:\n  ${link}\n` +
+              `\nto attach ANOTHER machine to this room, open this there (or paste it into\n` +
+              `\`ay serve --webrtc\`) — one machine per link:\n  ${joinLink}\n` +
+              persistNote,
+          );
           // Offer to open the console (default yes) on the FIRST share only —
           // an auto-rotation shouldn't pop a fresh tab from under the operator.
           if (!rotated) {
@@ -5111,7 +5116,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
           // Non-TTY (daemon/journal/CI): the link embeds the room secret S, so never
           // write it to a log stream. Stash it in a 0600 file and point there instead.
           try {
-            await writeFile(linkFile, link + "\n", { mode: 0o600 });
+            await writeFile(linkFile, `${link}\n${joinLink}\n`, { mode: 0o600 });
           } catch {
             /* best effort */
           }
@@ -5125,14 +5130,16 @@ export async function cmdServe(rest: string[]): Promise<number> {
       // saved like the serve token), so the link is stable across restarts.
       // Only the persisted path may auto-rotate (onRotate set); an explicit URL
       // is the operator's choice and must not be silently changed.
-      const { room, link, close } = await startShare({
+      const { room, link, joinLink, close } = await startShare({
         url: explicitUrl ?? (await loadOrCreateShareRoom()),
         localFetch: apiFetch,
         apiToken: token,
-        onRotate: explicitUrl ? undefined : (info) => announce(info.room, info.link, true),
+        onRotate: explicitUrl
+          ? undefined
+          : (info) => announce(info.room, info.link, info.joinLink, true),
       });
       closeShare = close;
-      await announce(room, link, false);
+      await announce(room, link, joinLink, false);
     } catch (e) {
       process.stderr.write(`ay serve --webrtc failed: ${(e as Error).message}\n`);
       if (!wantHttp) {
