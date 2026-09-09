@@ -71,7 +71,15 @@
         border: 1px solid #2c2f3a;
         border-radius: 10px;
         padding: 14px 14px;
-        overflow-x: auto;
+        /* Wrap rather than scroll. The room secret makes these commands far
+           wider than the card, and a horizontally scrolled <pre> hides the tail
+           off-screen with no scrollbar visible until you try — on a page whose
+           whole job is showing a command, the reader could not see what they
+           were about to run. break-all because the long run is one unbroken
+           token (the URL), which normal word wrapping will not split. */
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        word-break: break-all;
         font-size: 12.5px;
         line-height: 1.5;
         margin: 0;
