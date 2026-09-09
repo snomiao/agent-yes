@@ -7,6 +7,12 @@ on:
     branches: [main]
     paths:
       - "rs/**"
+      # The workflow itself: a change to WHAT gets built or shipped (a new [[bin]]
+      # in the artifact step, a --bin filter on a cross leg) is exactly the change
+      # whose cross-compile legs cannot be reproduced locally — and with only
+      # `rs/**` here it merged untested, because touching the recipe never
+      # triggered the matrix that runs it.
+      - ".github/workflows/rust-build.yml"
 
   # Triggered by release.yml after semantic-release creates a new tag
   workflow_dispatch:
