@@ -207,8 +207,27 @@ jobs:
       - name: Combine into single directory
         run: |
           mkdir -p combined
+          # Each per-target dir holds its main binary ALREADY target-suffixed
+          # (agent-yes-darwin-arm64 — it is also downloaded standalone) plus
+          # companion bins under their plain cargo names (ayrs,
+          # ay-spawn-hidden.exe). Flattening 7 dirs meant every platform's `ayrs`
+          # landed on the same path and the last write won, so this bundle shipped
+          # ONE arbitrary platform's binary under a name claiming all of them.
+          # Give the companions the same platform alias the main binary carries.
+          # The release job is unaffected: it tars each per-target dir whole, so a
+          # user's archive still gets a plain `ayrs` beside the main binary, which
+          # is the name rustBinary.ts getBinDir() resolves.
           for dir in binaries/*/; do
-            cp "$dir"* combined/ || true
+            plat="$(basename "$dir")"; plat="${plat#agent-yes-}"
+            for f in "$dir"*; do
+              [ -e "$f" ] || continue
+              base="$(basename "$f")"
+              case "$base" in
+                agent-yes-*) cp "$f" "combined/$base" ;;
+                *.exe)       cp "$f" "combined/${base%.exe}-${plat}.exe" ;;
+                *)           cp "$f" "combined/${base}-${plat}" ;;
+              esac
+            done
           done
           ls -la combined/
 
