@@ -26,16 +26,35 @@ AY_CONSOLE_ORIGIN="https://agent-yes.com"
 # the fragment client-side, and a query string would put a live secret in the
 # CDN's request logs.
 AY_JOIN="${AY_JOIN:-}"
+# A FLEET token puts this machine in a room shared with every OTHER host
+# provisioned from the same token — the cloud-init case, where one identical
+# string goes into every image and nobody collects links afterwards. Unlike
+# --join (one machine per link, because a share room has a single host), a fleet
+# token is meant to be reused across machines.
+#
+# Generate it CENTRALLY, once, with real entropy — never a memorable password:
+#   TOKEN=$(openssl rand -base64 24)
+# The token IS the room: anyone holding it can see and control every agent on
+# every host that joined, so a guessable one is a fleet-wide compromise, and it
+# cannot be revoked per host — rotating means re-provisioning.
+AY_FLEET="${AY_FLEET:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --join) AY_JOIN=${2:-}; shift 2 || true ;;
     --join=*) AY_JOIN=${1#--join=}; shift ;;
+    --fleet) AY_FLEET=${2:-}; shift 2 || true ;;
+    --fleet=*) AY_FLEET=${1#--fleet=}; shift ;;
     *)
-      printf '\033[31m✘ unknown option: %s (usage: setup.sh [--join <room-link>])\033[0m\n' "$1" >&2
+      printf '\033[31m✘ unknown option: %s (usage: setup.sh [--join <room-link>] [--fleet <token>])\033[0m\n' "$1" >&2
       exit 1
       ;;
   esac
 done
+
+if [ -n "$AY_JOIN" ] && [ -n "$AY_FLEET" ]; then
+  printf '\033[31m✘ --join and --fleet name different rooms; pass only one\033[0m\n' >&2
+  exit 1
+fi
 
 say() { printf '\033[36m▸\033[0m %s\n' "$1"; }
 err() { printf '\033[31m✘ %s\033[0m\n' "$1" >&2; }
@@ -150,6 +169,65 @@ EOF
 # whole script (exit 2), even inside this `if` and even with the error muted by
 # `2>/dev/null`. The subshell confines that fatal exit; the parent just reads its
 # non-zero status and skips the prompt cleanly.
+# --- enrol into a fleet room, if a token was handed to us ---------------------
+# Many machines, one room, one token — via codehost, whose signaling room is
+# addressed purely by its token and already holds N daemons. Its agent-yes plugin
+# advertises this box's agents (read from ~/.agent-yes, so they show even when
+# ay serve is down) and proxies the local ay-serve API, which is what the
+# agent-yes console consumes as one fleet source per machine.
+#
+# Two services, deliberately:
+#   ay serve --http   the plugin proxies CONTROL to 127.0.0.1:$AY_FLEET_PORT.
+#                     A --webrtc-only daemon advertises fine but 502s every
+#                     control call, which looks like a hung console, so the HTTP
+#                     listener is required here even though sharing is not.
+#   codehost serve    joins the room and keeps this machine in it.
+# Both are daemonized (oxmgr) rather than exec'd: cloud-init has no terminal and
+# must survive reboot, so the foreground shape --join uses is wrong here.
+AY_FLEET_PORT="${AY_FLEET_PORT:-7432}"
+if [ -n "$AY_FLEET" ]; then
+  if ! command -v ay >/dev/null 2>&1; then
+    err "installed, but 'ay' is not on PATH yet — open a new shell and re-run with AY_FLEET set."
+    exit 1
+  fi
+
+  say "Installing codehost (fleet room transport)…"
+  # shellcheck disable=SC2086
+  $PM codehost || {
+    err "could not install codehost — a fleet room needs it; install it and re-run."
+    exit 1
+  }
+  if ! command -v codehost >/dev/null 2>&1; then
+    err "codehost installed but not on PATH — open a new shell and re-run with AY_FLEET set."
+    exit 1
+  fi
+
+  say "Installing ay serve (HTTP API on 127.0.0.1:${AY_FLEET_PORT}, for fleet control)…"
+  ay serve install --http --port "$AY_FLEET_PORT" </dev/null || {
+    err "ay serve install failed — agents would be listed but not controllable."
+    exit 1
+  }
+
+  say "Joining fleet room…"
+  # --daemon puts it under oxmgr with login autostart. The token goes in argv
+  # here because codehost's CLI takes no env form; on a multi-user box that is
+  # visible via /proc/<pid>/cmdline, so prefer single-tenant hosts for fleets.
+  codehost serve --token "$AY_FLEET" --daemon --name "$(hostname 2>/dev/null || echo agent-yes)" </dev/null || {
+    err "codehost serve failed — this host is not in the fleet room."
+    exit 1
+  }
+
+  cat <<EOF
+
+  This host is in the fleet. Open the console with the SAME token:
+
+    ${AY_CONSOLE_ORIGIN}/w/#fleet:<your-token>@codehost
+
+  Every host provisioned with that token appears there as its own machine.
+EOF
+  exit 0
+fi
+
 # --- join a room, if one was handed to us ------------------------------------
 # An explicit room means the operator already decided; don't stop to ask. stdin
 # is still curl's pipe here, so hand the server /dev/tty when there is one (for
