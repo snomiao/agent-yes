@@ -8360,17 +8360,20 @@ my.translate = async (text, lang) => {
         // a chosen name lets a SECOND room saved under the same name overwrite the
         // first one's token — silently, and the lost room is unrecoverable from
         // this browser. Two people both calling their fleet "fleet" is the obvious
-        // way to hit it. Canonicalise to the token-derived name the ch: paste form
-        // already uses, so the key is a property of the token rather than of what
-        // someone typed, and the same token added twice dedupes onto one entry
-        // instead of forking a second connection.
+        // way to hit it. Only the COLLIDING add moves aside — to the token-derived
+        // name the ch: paste form already uses. Renaming unconditionally instead
+        // would re-key every saved room on reconnect, orphaning its old entry and
+        // breaking #room:pid deep links that carry the old name, which is a worse
+        // bug than the one being fixed.
         //
-        // chName is a 4-char base36 FNV-1a, so it is not injective — but the
-        // keyspace is 36^4 and MAX_ROOMS is 16, which puts an accidental clash at
-        // ~0.007%, against a chosen-name clash that is routine ("fleet", "prod").
-        // Trading a certainty for that is the point; it is not a claim of freedom
-        // from collisions.
-        if (host === CH_HOST) room = chName(token);
+        // chName is a 4-char base36 FNV-1a, so it is not injective — but 36^4
+        // against MAX_ROOMS=16 puts an accidental clash near 0.007%, versus a
+        // chosen-name clash that is routine ("fleet", "prod"). It is a better
+        // key here, not a collision-free one.
+        if (host === CH_HOST) {
+          const saved = loadRooms()[room];
+          if (saved && saved.token !== token) room = chName(token);
+        }
         saveRoom(room, token, host); // cache so the badge can list & reconnect later
         // A codehost room is a connection, not a machine: it contributes one source
         // per machine as peers announce themselves (CodehostRoom.syncPeers).
