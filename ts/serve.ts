@@ -1180,18 +1180,46 @@ function explicitWebrtcUrl(args: string[]): string | undefined {
 // Ask the live daemon its version over the local HTTP API. null if it's not
 // listening (webrtc-only) or too old to expose /api/version — both of which we
 // treat as "outdated" so a re-install rolls it forward.
-async function fetchDaemonVersion(port: number | null, token: string): Promise<string | null> {
-  if (port === null) return null;
+/** Why a version probe came back empty. "slow" is NOT "down" — see probeDaemon. */
+export type DaemonProbe =
+  | { kind: "ok"; version: string | null }
+  | { kind: "slow" }
+  | { kind: "down" };
+
+// A loaded box answers /api/version in seconds, not milliseconds: the endpoint
+// does almost nothing, but the process still has to be scheduled and paged in.
+// Measured on this host under memory pressure: 1.1s for a no-op call. The old 3s
+// budget turned that into `ay serve status` reporting "not reachable … (not
+// running)" for a daemon that lsof showed LISTENING and answering — the most
+// misleading moment possible, since a slow box is exactly when someone runs
+// status. A refused connection fails instantly regardless, so a longer deadline
+// only costs time in the case where waiting is the right answer.
+const DAEMON_PROBE_TIMEOUT_MS = 15_000;
+
+export async function probeDaemon(
+  port: number | null,
+  token: string,
+  timeoutMs: number = DAEMON_PROBE_TIMEOUT_MS,
+): Promise<DaemonProbe> {
+  if (port === null) return { kind: "down" };
   try {
     const r = await fetch(`http://127.0.0.1:${port}/api/version`, {
       headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(3000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!r.ok) return null;
-    return ((await r.json()) as { version?: string }).version ?? null;
-  } catch {
-    return null;
+    if (!r.ok) return { kind: "down" };
+    return { kind: "ok", version: ((await r.json()) as { version?: string }).version ?? null };
+  } catch (e) {
+    // AbortSignal.timeout aborts with a TimeoutError; anything else (ECONNREFUSED,
+    // EHOSTUNREACH, a socket hangup) means nothing is listening there.
+    const name = (e as { name?: string } | null)?.name;
+    return name === "TimeoutError" || name === "AbortError" ? { kind: "slow" } : { kind: "down" };
   }
+}
+
+async function fetchDaemonVersion(port: number | null, token: string): Promise<string | null> {
+  const p = await probeDaemon(port, token);
+  return p.kind === "ok" ? p.version : null;
 }
 
 // ay serve start | stop — control the ALREADY-INSTALLED daemon's run state via
@@ -1552,7 +1580,9 @@ async function cmdServeStatus(args: string[]): Promise<number> {
 
   // Probe the local HTTP API — catches both a daemon and a foreground `ay serve`.
   // Webrtc-only servers open no port, so a null probe there is expected, not down.
-  const runningVersion = httpish && token ? await fetchDaemonVersion(port, token) : null;
+  const probe: DaemonProbe =
+    httpish && token ? await probeDaemon(port, token) : { kind: "down" as const };
+  const runningVersion = probe.kind === "ok" ? probe.version : null;
   const current = getInstalledPackage().version;
 
   if (json) {
@@ -1566,7 +1596,12 @@ async function cmdServeStatus(args: string[]): Promise<number> {
           port: httpish ? port : null,
           localUrl: httpish ? localUrl : null,
           reachable: runningVersion !== null,
+          // Additive: `reachable:false` alone cannot tell a caller whether the
+          // daemon is gone or merely slow, and those want opposite responses
+          // (reinstall vs wait). Existing consumers of `reachable` are unaffected.
+          probe: probe.kind,
           runningVersion,
+
           currentVersion: current,
           upToDate: runningVersion !== null && runningVersion === current,
           args: a,
@@ -1599,8 +1634,14 @@ async function cmdServeStatus(args: string[]): Promise<number> {
   } else if (mode === "webrtc") {
     w(`http api:     none (webrtc-only)`);
   } else {
+    const where = local ? `via ${localUrl}` : `on 127.0.0.1:${port}`;
+    // A timeout is not an absence. Saying "not running" for a daemon that is
+    // listening but slow sends the reader off to reinstall something that was
+    // never broken; name the machine instead.
     w(
-      `http api:     not reachable ${local ? `via ${localUrl}` : `on 127.0.0.1:${port}`} (not running)`,
+      probe.kind === "slow"
+        ? `http api:     listening ${where} but did not answer within ${DAEMON_PROBE_TIMEOUT_MS / 1000}s — the daemon is up and the host is overloaded, not down`
+        : `http api:     not reachable ${where} (not running)`,
     );
   }
   w(`token:        ${token ?? "(none yet — created on first serve)"}`);
