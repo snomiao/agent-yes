@@ -683,6 +683,30 @@
         color: var(--muted);
         font-size: 11.5px;
       }
+      /* Collapsed intro. `hidden` does the hiding (see the toggle) — these rules
+         only space it out once shown, so the header stays one line by default. */
+      .about {
+        margin-top: 2px;
+      }
+      .abouttoggle {
+        background: none;
+        border: 1px solid var(--line);
+        color: var(--muted);
+        border-radius: 999px;
+        font-size: 11px;
+        line-height: 1;
+        padding: 2px 6px;
+        margin-left: 6px;
+        cursor: pointer;
+        vertical-align: middle;
+      }
+      .abouttoggle:hover {
+        color: var(--fg);
+      }
+      .abouttoggle[aria-expanded="true"] {
+        color: var(--fg);
+        border-color: var(--fg);
+      }
       .install code {
         cursor: pointer;
         color: var(--green);
@@ -2160,12 +2184,27 @@
             <span class="tag">agent-yes</span> · console
             <span class="build" id="buildtag" title="frontend build (deploy commit)"></span>
             <a class="envswitch" id="envswitch" hidden></a>
+            <button
+              type="button"
+              class="abouttoggle"
+              id="abouttoggle"
+              aria-expanded="false"
+              aria-controls="about"
+              title="what this is · install commands"
+            >
+              ⓘ
+            </button>
           </h1>
-          <div class="sub">
-            Live <code>ay ls</code> + per-agent tail &amp; send. Backed by <code>ay serve</code>.
-          </div>
-          <div class="install" title="click to copy">
-            install:
+          <!-- The blurb and the install one-liners are read once and then never
+               again, but they cost ~70px of header on every load — on a phone that
+               is a third of the list. Collapsed by default behind the ⓘ; the agent
+               list is what people come back for. -->
+          <div id="about" class="about" hidden>
+            <div class="sub">
+              Live <code>ay ls</code> + per-agent tail &amp; send. Backed by <code>ay serve</code>.
+            </div>
+            <div class="install" title="click to copy">
+              install:
             <code class="copy" id="setup-sh">curl -fsSL https://agent-yes.com/setup.sh | sh</code>
             <span class="winhint"
               >·&nbsp;Windows:
@@ -2173,6 +2212,7 @@
                 >powershell -c "irm https://agent-yes.com/setup.ps1 | iex"</code
               ></span
             >
+            </div>
           </div>
           <div class="ibox">
             <span class="mag">⌕</span>
@@ -2727,6 +2767,43 @@
       $("setup-sh").title = `installs ${installPackage}`;
       $("setup-ps").textContent = `powershell -c "irm ${installOrigin}/setup.ps1 | iex"`;
       $("setup-ps").title = `installs ${installPackage}`;
+
+      // Intro + install one-liners: read once, then pure header tax on every
+      // later visit. Collapsed by default; the choice persists so someone who
+      // wants them open keeps them open. A first-time visitor with no agents to
+      // look at still needs the install command, so open it for them — that is
+      // the only case where the header is more useful than the list.
+      (() => {
+        const box = $("about");
+        const btn = $("abouttoggle");
+        if (!box || !btn) return;
+        const KEY = "ay.about.open";
+        let open = false;
+        try {
+          const saved = localStorage.getItem(KEY);
+          // No stored preference and no saved rooms yet → first run, so show the
+          // install command. Read the rooms key directly: loadRooms() is a `const`
+          // defined much further down, so calling it from here is a TDZ error.
+          const rooms = localStorage.getItem("ay.rooms");
+          open = saved === null ? !rooms || rooms === "{}" : saved === "1";
+        } catch {
+          /* private mode / storage blocked — stay collapsed */
+        }
+        const apply = () => {
+          box.hidden = !open;
+          btn.setAttribute("aria-expanded", String(open));
+        };
+        btn.addEventListener("click", () => {
+          open = !open;
+          apply();
+          try {
+            localStorage.setItem(KEY, open ? "1" : "0");
+          } catch {
+            /* best effort */
+          }
+        });
+        apply();
+      })();
       // Escape for HTML — including BOTH quote styles, because esc() is
       // interpolated into double-quoted attribute values (title="${esc(...)}",
       // data-key="${esc(...)}", …), not just element text. A remote host controls
@@ -8278,6 +8355,22 @@ my.translate = async (text, lang) => {
       // next poll picks up its agents once the tunnel is open.
       async function addRoomSource(room, token, host) {
         host = host || SIG_DEFAULT;
+        // A codehost room is identified by its TOKEN; the name is a local label
+        // someone typed. Saved rooms are keyed by name (see saveRoom), so honouring
+        // a chosen name lets a SECOND room saved under the same name overwrite the
+        // first one's token — silently, and the lost room is unrecoverable from
+        // this browser. Two people both calling their fleet "fleet" is the obvious
+        // way to hit it. Canonicalise to the token-derived name the ch: paste form
+        // already uses, so the key is a property of the token rather than of what
+        // someone typed, and the same token added twice dedupes onto one entry
+        // instead of forking a second connection.
+        //
+        // chName is a 4-char base36 FNV-1a, so it is not injective — but the
+        // keyspace is 36^4 and MAX_ROOMS is 16, which puts an accidental clash at
+        // ~0.007%, against a chosen-name clash that is routine ("fleet", "prod").
+        // Trading a certainty for that is the point; it is not a claim of freedom
+        // from collisions.
+        if (host === CH_HOST) room = chName(token);
         saveRoom(room, token, host); // cache so the badge can list & reconnect later
         // A codehost room is a connection, not a machine: it contributes one source
         // per machine as peers announce themselves (CodehostRoom.syncPeers).
