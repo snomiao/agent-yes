@@ -1,12 +1,28 @@
 import { readFile } from "fs/promises";
 import { describe, expect, it } from "vitest";
 import {
+  argsUsePortless,
+  probeDaemon,
   installerArgv,
   isNoNodeExecError,
   oxmgrVersionHasWindowsFix,
   parseGitUrl,
   portlessConsoleUrl,
 } from "./serve.ts";
+
+describe("argsUsePortless", () => {
+  it("keeps Portless opt-in", () => {
+    expect(argsUsePortless([])).toBe(false);
+    expect(argsUsePortless(["--http"])).toBe(false);
+    expect(argsUsePortless(["--portless"])).toBe(true);
+    expect(argsUsePortless(["--local"])).toBe(true);
+  });
+
+  it("does not combine Portless with a fixed port or WebRTC-only mode", () => {
+    expect(argsUsePortless(["--portless", "--port", "4123"])).toBe(false);
+    expect(argsUsePortless(["--portless", "--webrtc"])).toBe(false);
+  });
+});
 
 describe("portlessConsoleUrl", () => {
   it("uses the stable local HTTPS hostname and keeps auth in the fragment", () => {
@@ -162,5 +178,54 @@ describe("parseGitUrl", () => {
     expect(parseGitUrl("https://gitlab.com/tools")).toBeNull();
     expect(parseGitUrl("https://gitlab.com/../evil")).toBeNull();
     expect(parseGitUrl("file:///etc/passwd")).toBeNull();
+  });
+});
+
+// `ay serve status` reported a LISTENING, answering daemon as "not running"
+// because the probe's 3s budget expired on an overloaded host — a no-op
+// /api/version measured 1.1s there. A timeout is not an absence, and the two
+// want opposite responses (wait vs reinstall), so they must not collapse.
+// node:net / node:http here, not Bun.*: this suite runs under BOTH runtimes.
+describe("probeDaemon", () => {
+  const listen = async (srv: { listen: (p: number, h: string, cb: () => void) => void }) => {
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    return (srv as unknown as { address(): { port: number } }).address().port;
+  };
+
+  it("reports down when nothing is listening on the port", async () => {
+    const { createServer } = await import("node:net");
+    const srv = createServer();
+    const port = await listen(srv);
+    await new Promise<void>((r) => srv.close(() => r())); // free it, so the port refuses
+    expect((await probeDaemon(port, "tok", 2000)).kind).toBe("down");
+  });
+
+  it("reports SLOW, not down, for a port that accepts but never answers", async () => {
+    const { createServer } = await import("node:net");
+    const srv = createServer(() => {}); // accept, then hold — an overloaded daemon
+    const port = await listen(srv);
+    try {
+      expect((await probeDaemon(port, "tok", 250)).kind).toBe("slow");
+    } finally {
+      srv.close();
+    }
+  });
+
+  it("reports the version when the daemon answers", async () => {
+    const { createServer } = await import("node:http");
+    const srv = createServer((_req, res) => {
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ version: "9.9.9" }));
+    });
+    const port = await listen(srv);
+    try {
+      expect(await probeDaemon(port, "tok", 5000)).toEqual({ kind: "ok", version: "9.9.9" });
+    } finally {
+      srv.close();
+    }
+  });
+
+  it("treats a null port as down without dialling", async () => {
+    expect((await probeDaemon(null, "tok", 1)).kind).toBe("down");
   });
 });

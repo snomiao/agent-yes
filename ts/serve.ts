@@ -12,6 +12,7 @@ import {
 } from "fs/promises";
 import { existsSync, renameSync, watch, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createServer } from "node:net";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
 import {
@@ -93,6 +94,19 @@ const DEFAULT_PORT = 0;
 const PORTLESS_APP_NAME = "agent-yes";
 const PORTLESS_CHILD_ENV = "AGENT_YES_PORTLESS_CHILD";
 
+async function availableLoopbackPort(host: string): Promise<number> {
+  return await new Promise<number>((resolve, reject) => {
+    const probe = createServer();
+    probe.unref();
+    probe.once("error", reject);
+    probe.listen({ port: 0, host }, () => {
+      const address = probe.address();
+      const selected = typeof address === "object" && address ? address.port : 0;
+      probe.close((error) => (error ? reject(error) : resolve(selected)));
+    });
+  });
+}
+
 export function portlessConsoleUrl(token?: string): string {
   return portlessConsoleUrlForOrigin(
     process.env.PORTLESS_URL?.replace(/\/$/, "") || `https://${PORTLESS_APP_NAME}.localhost`,
@@ -133,10 +147,17 @@ async function runWithPortless(rest: string[]): Promise<number> {
   const script = process.argv[1];
   const self =
     script && /\.[cm]?[jt]s$/.test(script) ? [process.execPath, script] : [process.execPath];
-  const proc = Bun.spawn([portless, PORTLESS_APP_NAME, ...self, "serve", ...rest], {
-    stdio: ["inherit", "inherit", "inherit"],
-    env: { ...liveEnv(), [PORTLESS_CHILD_ENV]: "1" },
-  });
+  // Portless options must precede the app name. Keep them out of the child
+  // argv so `ay serve --portless --force` actually takes over an old route.
+  const portlessArgs = rest.filter((arg) => arg === "--force");
+  const childArgs = rest.filter((arg) => arg !== "--force");
+  const proc = Bun.spawn(
+    [portless, ...portlessArgs, PORTLESS_APP_NAME, ...self, "serve", ...childArgs],
+    {
+      stdio: ["inherit", "inherit", "inherit"],
+      env: { ...liveEnv(), [PORTLESS_CHILD_ENV]: "1" },
+    },
+  );
   return (await proc.exited) ?? 1;
 }
 
@@ -1096,11 +1117,14 @@ function portFromArgs(args: string[]): number | null {
   return m ? Number(m[1]) : null;
 }
 
-function argsUsePortless(args: string[]): boolean {
+export function argsUsePortless(args: string[]): boolean {
   const wantsHttp =
     args.some((a) => a.startsWith("--http") || a.startsWith("--share")) ||
     !args.some((a) => a.startsWith("--webrtc"));
-  return wantsHttp && portFromArgs(args) === null;
+  const explicitlyEnabled = args.some(
+    (a) => a === "--portless" || a === "--portless=true" || a === "--local",
+  );
+  return wantsHttp && explicitlyEnabled && portFromArgs(args) === null;
 }
 
 async function portlessAppPort(): Promise<number | null> {
@@ -1180,18 +1204,46 @@ function explicitWebrtcUrl(args: string[]): string | undefined {
 // Ask the live daemon its version over the local HTTP API. null if it's not
 // listening (webrtc-only) or too old to expose /api/version — both of which we
 // treat as "outdated" so a re-install rolls it forward.
-async function fetchDaemonVersion(port: number | null, token: string): Promise<string | null> {
-  if (port === null) return null;
+/** Why a version probe came back empty. "slow" is NOT "down" — see probeDaemon. */
+export type DaemonProbe =
+  | { kind: "ok"; version: string | null }
+  | { kind: "slow" }
+  | { kind: "down" };
+
+// A loaded box answers /api/version in seconds, not milliseconds: the endpoint
+// does almost nothing, but the process still has to be scheduled and paged in.
+// Measured on this host under memory pressure: 1.1s for a no-op call. The old 3s
+// budget turned that into `ay serve status` reporting "not reachable … (not
+// running)" for a daemon that lsof showed LISTENING and answering — the most
+// misleading moment possible, since a slow box is exactly when someone runs
+// status. A refused connection fails instantly regardless, so a longer deadline
+// only costs time in the case where waiting is the right answer.
+const DAEMON_PROBE_TIMEOUT_MS = 15_000;
+
+export async function probeDaemon(
+  port: number | null,
+  token: string,
+  timeoutMs: number = DAEMON_PROBE_TIMEOUT_MS,
+): Promise<DaemonProbe> {
+  if (port === null) return { kind: "down" };
   try {
     const r = await fetch(`http://127.0.0.1:${port}/api/version`, {
       headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(3000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!r.ok) return null;
-    return ((await r.json()) as { version?: string }).version ?? null;
-  } catch {
-    return null;
+    if (!r.ok) return { kind: "down" };
+    return { kind: "ok", version: ((await r.json()) as { version?: string }).version ?? null };
+  } catch (e) {
+    // AbortSignal.timeout aborts with a TimeoutError; anything else (ECONNREFUSED,
+    // EHOSTUNREACH, a socket hangup) means nothing is listening there.
+    const name = (e as { name?: string } | null)?.name;
+    return name === "TimeoutError" || name === "AbortError" ? { kind: "slow" } : { kind: "down" };
   }
+}
+
+async function fetchDaemonVersion(port: number | null, token: string): Promise<string | null> {
+  const p = await probeDaemon(port, token);
+  return p.kind === "ok" ? p.version : null;
 }
 
 // ay serve start | stop — control the ALREADY-INSTALLED daemon's run state via
@@ -1552,7 +1604,9 @@ async function cmdServeStatus(args: string[]): Promise<number> {
 
   // Probe the local HTTP API — catches both a daemon and a foreground `ay serve`.
   // Webrtc-only servers open no port, so a null probe there is expected, not down.
-  const runningVersion = httpish && token ? await fetchDaemonVersion(port, token) : null;
+  const probe: DaemonProbe =
+    httpish && token ? await probeDaemon(port, token) : { kind: "down" as const };
+  const runningVersion = probe.kind === "ok" ? probe.version : null;
   const current = getInstalledPackage().version;
 
   if (json) {
@@ -1566,6 +1620,10 @@ async function cmdServeStatus(args: string[]): Promise<number> {
           port: httpish ? port : null,
           localUrl: httpish ? localUrl : null,
           reachable: runningVersion !== null,
+          // Additive: `reachable:false` alone cannot tell a caller whether the
+          // daemon is gone or merely slow, and those want opposite responses
+          // (reinstall vs wait). Existing consumers of `reachable` are unaffected.
+          probe: probe.kind,
           runningVersion,
           currentVersion: current,
           upToDate: runningVersion !== null && runningVersion === current,
@@ -1599,8 +1657,14 @@ async function cmdServeStatus(args: string[]): Promise<number> {
   } else if (mode === "webrtc") {
     w(`http api:     none (webrtc-only)`);
   } else {
+    const where = local ? `via ${localUrl}` : `on 127.0.0.1:${port}`;
+    // A timeout is not an absence. Saying "not running" for a daemon that is
+    // listening but slow sends the reader off to reinstall something that was
+    // never broken; name the machine instead.
     w(
-      `http api:     not reachable ${local ? `via ${localUrl}` : `on 127.0.0.1:${port}`} (not running)`,
+      probe.kind === "slow"
+        ? `http api:     listening ${where} but did not answer within ${DAEMON_PROBE_TIMEOUT_MS / 1000}s — the daemon is up and the host is overloaded, not down`
+        : `http api:     not reachable ${where} (not running)`,
     );
   }
   w(`token:        ${token ?? "(none yet — created on first serve)"}`);
@@ -1636,12 +1700,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `                    (stable link across restarts; delete the file to rotate).\n` +
         `  --share [URL]     Legacy alias for --http --webrtc\n\n` +
         `Options:\n` +
-        `  --port N          Bypass Portless and listen on a fixed HTTP port\n` +
+        `  --port N          Listen on a fixed HTTP port (default: auto-assign)\n` +
         `  --host HOST       Interface to bind (default: 127.0.0.1; use 0.0.0.0 to expose)\n` +
         `  --token TOKEN     Auth token (auto-generated and saved if omitted)\n` +
         `  -d, --daemon      Install these flags as a background daemon (pm2/oxmgr)\n` +
         `                    (same as: ay serve install <flags>)\n` +
-        `  --local           Explicitly use Portless (the default for HTTP mode)\n` +
+        `  --portless        Use Portless for local HTTPS at\n` +
         `                    ${portlessConsoleUrl()}\n` +
         `  --allow-spawn     Deprecated no-op — the console can always spawn agents\n` +
         `  --tls-cert FILE   TLS certificate PEM\n` +
@@ -1721,7 +1785,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
     .option("local", {
       type: "boolean",
       default: false,
-      description: `Use Portless at ${portlessConsoleUrl()} (default for HTTP mode)`,
+      description: "Deprecated alias for --portless",
+    })
+    .option("portless", {
+      type: "boolean",
+      default: false,
+      description: `Use Portless at ${portlessConsoleUrl()} (requires Portless installed)`,
     })
     .option("allow-spawn", {
       type: "boolean",
@@ -1770,9 +1839,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
     }
   }
   const fixedPort = typeof argv.port === "number";
-  const usePortless = wantHttp && !fixedPort;
-  if (argv.local === true && fixedPort) {
-    process.stderr.write("ay serve: --local and --port cannot be used together\n");
+  const requestedPortless = argv.portless === true || argv.local === true;
+  const usePortless = wantHttp && requestedPortless && !fixedPort;
+  if (requestedPortless && fixedPort) {
+    process.stderr.write("ay serve: --portless and --port cannot be used together\n");
     return 1;
   }
   if (usePortless && process.env[PORTLESS_CHILD_ENV] !== "1" && process.env.PORTLESS !== "0") {
@@ -1799,8 +1869,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // top-level agents regardless of the spawn path.
   delete process.env.AGENT_YES_PID;
 
-  const port = (argv.port as number | undefined) ?? (Number(process.env.PORT) || DEFAULT_PORT);
   const host = (argv.host as string) ?? "127.0.0.1";
+  const configuredPort =
+    (argv.port as number | undefined) ?? (Number(process.env.PORT) || DEFAULT_PORT);
+  const port = configuredPort || (wantHttp ? await availableLoopbackPort(host) : DEFAULT_PORT);
   const tokenFlag = typeof argv.token === "string" ? argv.token : undefined;
   const certPath = typeof argv["tls-cert"] === "string" ? argv["tls-cert"] : undefined;
   const keyPath = typeof argv["tls-key"] === "string" ? argv["tls-key"] : undefined;

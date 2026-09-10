@@ -30,7 +30,7 @@ Then: `ay claude` (run an agent with auto-yes) · `ay serve --share` (web consol
 starting an agent names a CLI (`ay claude`, `ay codex`, …). `cy` remains the one-word
 shortcut that launches claude with no arguments.
 
-For the local web console, install [Portless](https://portless.sh/) once with `npm install -g portless`, then run `ay serve`. It assigns a free internal port and serves the console at `https://agent-yes.localhost/`. `ay serve --port N` remains available for a fixed-port API listener.
+Run `ay serve` for the local web console on an automatically assigned loopback port. Optionally install [Portless](https://portless.sh/) globally and run `ay serve --portless` to use the stable `https://agent-yes.localhost/` URL. `ay serve --port N` remains available for a fixed-port API listener.
 
 ## Features
 
