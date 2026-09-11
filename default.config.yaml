@@ -43,8 +43,20 @@ clis:
     typingRespond:
       "1\n":
         - '│ Do you want to use this API key\?'
+      # Trust dialog, current layout: un-numbered, and the cursor starts on
+      # "No, exit" (Enter alone would quit the CLI). Press Down so the cursor
+      # lands on "Yes, I trust this folder"; the matching `enter` pattern below
+      # then confirms it once the screen has moved. Single-line on purpose —
+      # the TS runtime matches typingRespond per rendered line.
+      "\u001b[B":
+        - pattern: '❯ ?No, exit'
+          flags: m
     enter:
+      # Trust dialog, legacy numbered layout (cursor already on Yes).
       - pattern: ' > 1\. Yes, I trust this folder'
+        flags: m
+      # Trust dialog, current layout — after the Down above moved the cursor.
+      - pattern: '❯ ?Yes, I trust this folder'
         flags: m
       - pattern: '❯ ?1\. ?Dark mode ?✔'
         flags: m
@@ -193,8 +205,20 @@ clis:
     typingRespond:
       "1\n":
         - '│ Do you want to use this API key\?'
+      # Trust dialog, current layout: un-numbered, and the cursor starts on
+      # "No, exit" (Enter alone would quit the CLI). Press Down so the cursor
+      # lands on "Yes, I trust this folder"; the matching `enter` pattern below
+      # then confirms it once the screen has moved. Single-line on purpose —
+      # the TS runtime matches typingRespond per rendered line.
+      "\u001b[B":
+        - pattern: '❯ ?No, exit'
+          flags: m
     enter:
+      # Trust dialog, legacy numbered layout (cursor already on Yes).
       - pattern: ' > 1\. Yes, I trust this folder'
+        flags: m
+      # Trust dialog, current layout — after the Down above moved the cursor.
+      - pattern: '❯ ?Yes, I trust this folder'
         flags: m
       - pattern: '❯ ?1\. ?Dark mode ?✔'
         flags: m
