@@ -6,6 +6,7 @@ import {
   oxmgrVersionHasWindowsFix,
   parseGitUrl,
   portlessConsoleUrl,
+  shareLinkStatus,
 } from "./serve.ts";
 
 describe("portlessConsoleUrl", () => {
@@ -162,5 +163,25 @@ describe("parseGitUrl", () => {
     expect(parseGitUrl("https://gitlab.com/tools")).toBeNull();
     expect(parseGitUrl("https://gitlab.com/../evil")).toBeNull();
     expect(parseGitUrl("file:///etc/passwd")).toBeNull();
+  });
+});
+
+// `ay serve status` reads ~/.agent-yes/.share-link, which outlives the daemon
+// config that minted it: reinstalling without --share leaves the file behind
+// while nothing hosts the room. The link must then be flagged stale, not shown
+// as if it were live.
+describe("shareLinkStatus", () => {
+  const link = "https://agent-yes.com/w/#r111111:e1.aaaa";
+  it("reports a link as live when the registered daemon shares", () => {
+    expect(shareLinkStatus(link, true, true)).toEqual({ link, stale: false });
+  });
+  it("flags the link stale when the daemon is installed without --share/--webrtc", () => {
+    expect(shareLinkStatus(link, true, false)).toEqual({ link, stale: true });
+  });
+  it("does not call it stale when no daemon is registered (a foreground serve may host it)", () => {
+    expect(shareLinkStatus(link, false, false)).toEqual({ link, stale: false });
+  });
+  it("returns no link when the file is absent", () => {
+    expect(shareLinkStatus(null, true, false)).toEqual({ link: null, stale: false });
   });
 });

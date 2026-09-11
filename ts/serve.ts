@@ -1524,6 +1524,22 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
   return 1;
 }
 
+// How `ay serve status` should report the persisted share link. The link file
+// outlives the daemon config that minted it: `ay serve install` (no --share)
+// over an older --share install leaves ~/.agent-yes/.share-link in place while
+// nothing hosts that room any more. Printing it verbatim then reads as "this
+// link is live" — an operator opens it, sees "rooms offline / 0 agents", and
+// debugs the console instead of the daemon. Only a daemon registered WITH
+// --share/--webrtc can be hosting the room; anything else is `stale`.
+export function shareLinkStatus(
+  shareLink: string | null,
+  installed: boolean,
+  webrtcish: boolean,
+): { link: string | null; stale: boolean } {
+  if (!shareLink) return { link: null, stale: false };
+  return { link: shareLink, stale: installed && !webrtcish };
+}
+
 // ay serve status — report whether the server is installed as a daemon and/or
 // currently reachable, plus its mode, port, version, token, and share link.
 // Read-only: never mints a token or disturbs the daemon. `--json` for scripts.
@@ -1554,6 +1570,7 @@ async function cmdServeStatus(args: string[]): Promise<number> {
   // Webrtc-only servers open no port, so a null probe there is expected, not down.
   const runningVersion = httpish && token ? await fetchDaemonVersion(port, token) : null;
   const current = getInstalledPackage().version;
+  const share = shareLinkStatus(shareLink, installed, webrtcish);
 
   if (json) {
     process.stdout.write(
@@ -1571,7 +1588,10 @@ async function cmdServeStatus(args: string[]): Promise<number> {
           upToDate: runningVersion !== null && runningVersion === current,
           args: a,
           hasToken: !!token,
-          shareLink,
+          shareLink: share.link,
+          // true when the link file is left over from an earlier --share install
+          // and the registered daemon no longer hosts that room.
+          shareLinkStale: share.stale,
         },
         null,
         2,
@@ -1604,7 +1624,15 @@ async function cmdServeStatus(args: string[]): Promise<number> {
     );
   }
   w(`token:        ${token ?? "(none yet — created on first serve)"}`);
-  if (shareLink) w(`share link:   ${shareLink}`);
+  if (share.link) {
+    if (share.stale) {
+      w(`share link:   (stale) ${share.link}`);
+      w(`              the daemon runs without --share, so nothing hosts that room —`);
+      w(`              re-enable with:  ay serve install --share`);
+    } else {
+      w(`share link:   ${share.link}`);
+    }
+  }
   if (token && httpish) {
     w();
     if (local) w(`console:  ${localUrl}`);
