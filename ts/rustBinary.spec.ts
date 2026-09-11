@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { gcOldBinaryDirs } from "./rustBinary.ts";
+import { devBuildInfo, gcOldBinaryDirs } from "./rustBinary.ts";
 import { _setInstalledPackageForTesting } from "./versionChecker.ts";
 
 // Startup GC for the versioned binary download cache (PERFORMANCE-EVENT
@@ -77,5 +77,41 @@ describe("gcOldBinaryDirs", () => {
     } finally {
       _setInstalledPackageForTesting({ name: "agent-yes", version: "1.272.0" });
     }
+  });
+});
+
+// The dev-build auto-rebuild used a `/`-only path match, so on Windows (where
+// path.resolve yields backslashes) it never recognised target/release and a
+// stale exe kept shipping bugs already fixed on main. Both separators must work.
+describe("devBuildInfo", () => {
+  it("recognises a POSIX dev build path", () => {
+    expect(devBuildInfo("/repo/alpha/rs/target/release/agent-yes")).toEqual({
+      rsDir: "/repo/alpha/rs",
+      isRelease: true,
+    });
+    expect(devBuildInfo("/repo/alpha/rs/target/debug/agent-yes")).toEqual({
+      rsDir: "/repo/alpha/rs",
+      isRelease: false,
+    });
+  });
+
+  it("recognises a Windows dev build path with backslashes and .exe", () => {
+    expect(devBuildInfo(String.raw`C:\x\alpha\rs\target\release\agent-yes.exe`)).toEqual({
+      rsDir: String.raw`C:\x\alpha\rs`,
+      isRelease: true,
+    });
+    expect(devBuildInfo(String.raw`C:\x\alpha\rs\target\debug\agent-yes.exe`)).toEqual({
+      rsDir: String.raw`C:\x\alpha\rs`,
+      isRelease: false,
+    });
+  });
+
+  it("returns undefined for a downloaded/cached binary", () => {
+    expect(
+      devBuildInfo("/home/alice/.cache/agent-yes/bin/1.2.3/agent-yes-linux-x64"),
+    ).toBeUndefined();
+    expect(
+      devBuildInfo(String.raw`C:\x\.cache\agent-yes\bin\1.2.3\agent-yes-win32-x64.exe`),
+    ).toBeUndefined();
   });
 });

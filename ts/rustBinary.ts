@@ -359,12 +359,28 @@ function getRustBinaryVersion(binaryPath: string): string | null {
 }
 
 /**
+ * Locate a local dev build from its binary path: `<rsDir>/target/{release,debug}/agent-yes[.exe]`.
+ * Accepts both `/` and `\` separators — `path.resolve` yields backslashes on
+ * Windows, and a `/`-only match silently disabled the auto-rebuild there (the
+ * stale `target/release` exe then kept shipping bugs already fixed on main).
+ * Returns undefined for a downloaded/cached (non-dev) binary.
+ */
+export function devBuildInfo(
+  binaryPath: string,
+): { rsDir: string; isRelease: boolean } | undefined {
+  const m = binaryPath.match(/^(.*)[\\/]target[\\/](release|debug)[\\/]agent-yes(?:\.exe)?$/);
+  if (!m) return undefined;
+  return { rsDir: m[1]!, isRelease: m[2] === "release" };
+}
+
+/**
  * Check if a binary path is inside a git repo (dev build), and rebuild if outdated.
  * Returns the same path if up-to-date or rebuilt, undefined if rebuild failed.
  */
 function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
   // Only auto-rebuild for local dev builds (target/release or target/debug)
-  if (!binaryPath.includes("/target/release") && !binaryPath.includes("/target/debug")) {
+  const dev = devBuildInfo(binaryPath);
+  if (!dev) {
     return true; // not a dev build, skip
   }
 
@@ -379,7 +395,7 @@ function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
   }
 
   // Find the rs/ directory relative to the binary (binary is at rs/target/release/agent-yes)
-  const rsDir = binaryPath.replace(/\/target\/(release|debug)\/agent-yes.*$/, "");
+  const { rsDir, isRelease } = dev;
   if (!existsSync(path.join(rsDir, "Cargo.toml"))) {
     if (verbose) console.log(`[rust] Cannot find Cargo.toml at ${rsDir}, skipping rebuild`);
     return true; // can't rebuild, use as-is
@@ -390,7 +406,6 @@ function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
   );
 
   try {
-    const isRelease = binaryPath.includes("/target/release");
     const args = ["build", ...(isRelease ? ["--release"] : [])];
     execFileSync("cargo", args, {
       cwd: rsDir,
