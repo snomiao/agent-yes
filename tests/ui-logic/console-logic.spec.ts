@@ -586,6 +586,13 @@ describe("age", () => {
     expect(age(agent({ started_at: now - 5 * 60_000 }), now)).toBe("5m");
     expect(age(agent({ started_at: now - 3 * 3_600_000 }), now)).toBe("3h");
   });
+  it("switches to days after 48h and weeks after 14d instead of piling up hours", () => {
+    expect(age(agent({ started_at: now - 47 * 3_600_000 }), now)).toBe("47h");
+    expect(age(agent({ started_at: now - 48 * 3_600_000 }), now)).toBe("2d");
+    expect(age(agent({ started_at: now - 13 * 86_400_000 }), now)).toBe("13d");
+    expect(age(agent({ started_at: now - 14 * 86_400_000 }), now)).toBe("2w");
+    expect(age(agent({ started_at: now - 2196 * 3_600_000 }), now)).toBe("13w"); // was "2196h"
+  });
   it("clamps a future start time to 0s instead of going negative", () => {
     expect(age(agent({ started_at: now + 10_000 }), now)).toBe("0s");
   });

@@ -383,7 +383,12 @@ export function age(e, now = Date.now()) {
   const s = Math.max(0, (now - at) / 1000);
   if (s < 60) return Math.floor(s) + "s";
   if (s < 3600) return Math.floor(s / 60) + "m";
-  return Math.floor(s / 3600) + "h";
+  // Hours stop being a unit anyone converts in their head after a couple of
+  // days: "2196h" is a row that has been dead for three months, and the column
+  // exists so the eye can rank rows by recency. Days from 48h, weeks from 14d.
+  if (s < 48 * 3600) return Math.floor(s / 3600) + "h";
+  if (s < 14 * 86400) return Math.floor(s / 86400) + "d";
+  return Math.floor(s / (7 * 86400)) + "w";
 }
 
 // The gist of a spawn prompt for a one-line label: the `<ay-msg …>` provenance
