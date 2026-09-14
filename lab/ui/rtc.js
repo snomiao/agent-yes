@@ -93,6 +93,31 @@ function maybeSlow(scope, event, startedAt, data = {}) {
   else perfLog(scope, event, { ms, ...data });
 }
 
+// What the FIRST chunk of a subscribe stream carried, for the `stream.first`
+// perf record. `bytes` is the chunk size; `full` says whether that chunk began
+// with an SSE `data:` event whose JSON is a full-snapshot delta (`"full":true`
+// — /api/ls/subscribe sends one first, then deltas). A room whose first frame
+// is small and NOT full is exactly the "list shows only the agents that changed
+// since I subscribed" failure, and until now `window.__ayPerf` recorded only
+// the latency of that frame, so it looked healthy. `full` is null when the
+// chunk isn't a parseable SSE data event (a raw tail stream, a ping, or a
+// snapshot split across chunks).
+export function streamFirstFrameInfo(chunk) {
+  const text = typeof chunk === "string" ? chunk : "";
+  let full = null;
+  if (text.startsWith("data: ")) {
+    const end = text.indexOf("\n\n");
+    const line = text.slice(6, end === -1 ? undefined : end);
+    try {
+      const ev = JSON.parse(line);
+      full = ev && typeof ev === "object" ? ev.full === true : null;
+    } catch {
+      full = null;
+    }
+  }
+  return { bytes: text.length, full };
+}
+
 export function updateStreamTrace(stream, seq, receivedAt) {
   const expected = stream.nextSeq;
   const gap = typeof seq === "number" && seq !== expected ? { expected, actual: seq } : null;
@@ -403,6 +428,7 @@ export class RTCClient {
           maybeSlow("rtc", "stream.first", stream.startedAt, {
             room: this.room,
             path: stream.path,
+            ...streamFirstFrameInfo(r.chunk),
           });
         }
         stream.chunks++;

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { RTCClient, sendRtcInput, updateStreamTrace } from "../../lab/ui/rtc.js";
+import { RTCClient, sendRtcInput, streamFirstFrameInfo, updateStreamTrace } from "../../lab/ui/rtc.js";
 
 describe("RTC stream latency telemetry", () => {
   test("tracks sequence gaps and maximum inter-chunk delay", () => {
@@ -88,3 +88,40 @@ describe("RTC low-latency stdin", () => {
     );
   });
 });
+
+// The `stream.first` perf record used to carry only latency, so a subscribe
+// stream whose first frame was a tiny delta instead of the full snapshot (the
+// "room lists only the agents that changed since I subscribed" failure) looked
+// healthy in window.__ayPerf. It now records the frame's size and whether it
+// was a full snapshot.
+describe("stream.first payload telemetry", () => {
+  test("classifies the first SSE frame", () => {
+    const full = 'data: {"full":true,"upsert":[{"pid":1111}],"remove":[]}\n\n';
+    expect(streamFirstFrameInfo(full)).toEqual({ bytes: full.length, full: true });
+    const delta = 'data: {"upsert":[{"pid":1111}],"remove":[]}\n\n';
+    expect(streamFirstFrameInfo(delta)).toEqual({ bytes: delta.length, full: false });
+    // Not an SSE data event (raw tail bytes, a ping, a split snapshot): unknown.
+    expect(streamFirstFrameInfo("\x1b[2J hello")).toEqual({ bytes: 10, full: null });
+    expect(streamFirstFrameInfo(": ping\n\n")).toEqual({ bytes: 8, full: null });
+    expect(streamFirstFrameInfo('data: {"full":tr')).toEqual({ bytes: 16, full: null });
+  });
+
+  test("the first data frame of a stream lands bytes+full in the perf record", () => {
+    const g = globalThis as { __ayPerf?: Array<Record<string, unknown>> };
+    g.__ayPerf = [];
+    const rtc = new RTCClient("signal.test", "room", "token");
+    rtc._dcSend = async () => {};
+    rtc.subscribe("/api/ls/subscribe?all=1", () => {});
+    const id = [...rtc.streams.keys()][0];
+    const chunk = 'data: {"full":true,"upsert":[],"remove":[]}\n\n';
+    rtc._recv({ t: "res", id, status: 200, ct: "text/event-stream" });
+    rtc._recv({ t: "data", id, seq: 0, chunk });
+    const rec = g.__ayPerf.find((r) => r.event === "stream.first");
+    expect(rec).toMatchObject({
+      path: "/api/ls/subscribe?all=1",
+      bytes: chunk.length,
+      full: true,
+    });
+  });
+});
+
