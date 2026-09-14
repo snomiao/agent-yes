@@ -2579,6 +2579,7 @@
         nextIndex,
         identContext,
         compactIdent,
+        IDENT_CAP,
         fullIdent,
         hasIdent,
         deviceCount,
@@ -6196,7 +6197,7 @@ my.translate = async (text, lang) => {
                 if (r.kind !== "agent") return headerHtml(r);
                 const e = r.entry;
                 const t = e.title || e.status_text || e.prompt || "";
-                const id = compactIdent(e, ctx, 3, r.parentEntry);
+                const id = compactIdent(e, ctx, IDENT_CAP, r.parentEntry);
                 const cli = cliLabel(e);
                 return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">${rowIoHeat(e)}
         ${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}

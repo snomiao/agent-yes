@@ -243,8 +243,8 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
     const list = [agent(), agent({ cwd: "/x/me/widgets/tree/dev" })];
     const ctx = identContext(list);
     expect(ctx.anyDevice).toBe(false);
-    expect(compactIdent(list[0], ctx)).toBe("sno/age/mai");
-    expect(compactIdent(list[1], ctx)).toBe("me/wid/dev");
+    expect(compactIdent(list[0], ctx)).toBe("snomiao/agent-yes/main");
+    expect(compactIdent(list[1], ctx)).toBe("me/widgets/dev");
   });
   it("all on one device: device blanked but @ : kept", () => {
     const list = [
@@ -252,8 +252,8 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
       agent({ _host: "sno@taka", cwd: "/x/me/widgets/tree/dev" }),
     ];
     const ctx = identContext(list);
-    expect(compactIdent(list[0], ctx)).toBe("@:sno/age/mai");
-    expect(compactIdent(list[1], ctx)).toBe("@:me/wid/dev");
+    expect(compactIdent(list[0], ctx)).toBe("@:snomiao/agent-yes/main");
+    expect(compactIdent(list[1], ctx)).toBe("@:me/widgets/dev");
   });
   it("mixed devices: device shown and capped; uniform user blanked", () => {
     const list = [
@@ -261,16 +261,16 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
       agent({ _host: "sno@beelink", cwd: "/x/me/widgets/tree/dev" }),
     ];
     const ctx = identContext(list);
-    // user "sno" is uniform → blanked; host differs → shown, capped to 3.
-    expect(compactIdent(list[0], ctx)).toBe("@tak:sno/age/mai");
-    expect(compactIdent(list[1], ctx)).toBe("@bee:me/wid/dev");
+    // user "sno" is uniform → blanked; host differs → shown.
+    expect(compactIdent(list[0], ctx)).toBe("@taka:snomiao/agent-yes/main");
+    expect(compactIdent(list[1], ctx)).toBe("@beelink:me/widgets/dev");
   });
   it("uniform owner blanked in a local list (separators kept)", () => {
     const list = [agent(), agent({ cwd: "/home/u/ws/snomiao/widgets/tree/dev" })];
     const ctx = identContext(list);
     // same owner snomiao → blanked; repo/branch differ.
-    expect(compactIdent(list[0], ctx)).toBe("/age/mai");
-    expect(compactIdent(list[1], ctx)).toBe("/wid/dev");
+    expect(compactIdent(list[0], ctx)).toBe("/agent-yes/main");
+    expect(compactIdent(list[1], ctx)).toBe("/widgets/dev");
   });
   it("uniform repo blanked while branch differs (separators preserved)", () => {
     const list = [
@@ -279,8 +279,19 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
     ];
     const ctx = identContext(list);
     // owner+repo uniform → blanked; user+host+branch differ.
-    expect(compactIdent(list[0], ctx)).toBe("a@h1://mai");
+    expect(compactIdent(list[0], ctx)).toBe("a@h1://main");
     expect(compactIdent(list[1], ctx)).toBe("b@h2://dev");
+  });
+  it("clips a field longer than the cap, so a long branch name cannot crowd the title", () => {
+    const list = [
+      agent({ cwd: "/x/me/repo/tree/feature-very-long-branch-name" }),
+      agent({ cwd: "/x/me/repo/tree/main" }),
+    ];
+    const ctx = identContext(list);
+    expect(compactIdent(list[0], ctx)).toBe("//feature-very");
+    expect(compactIdent(list[1], ctx)).toBe("//main");
+    // The legacy 3-char stub is still reachable for callers that ask for it.
+    expect(compactIdent(list[0], ctx, 3)).toBe("//fea");
   });
   it("appends a submodule leaf with → when the cwd is nested", () => {
     const list = [

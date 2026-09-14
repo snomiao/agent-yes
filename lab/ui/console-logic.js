@@ -170,19 +170,27 @@ export function identContext(entries) {
   return { uniform, anyDevice };
 }
 
+// Per-field clip for the compact identity. Was 3, which turned every row into
+// an unreadable "sno/age/mai" — three-letter stubs distinguish nothing a human
+// can name, and the field-blanking below already removes what is uniform, so
+// what survives is exactly the part worth reading. 12 fits the common repo and
+// branch names whole ("agent-yes", "CapsLockX", "main") and still bounds a
+// long feature-branch name so the title column keeps its room.
+export const IDENT_CAP = 12;
+
 // Build an agent's compact identity against a precomputed identContext. Each
 // field is clipped to `cap` chars (compact one-liner) and BLANKED when uniform
 // across the list — but the separators (@ : / /) are kept so the string stays
-// machine-parseable: e.g. all on one device → "@:age/mai", a mixed-device list →
-// "sno@tak:age/mai". A purely local list (no devices anywhere) falls back to the
-// legacy "own/rep/bra" with no device prefix.
+// machine-parseable: e.g. all on one device → "@:agent-yes/main", a mixed-device
+// list → "sno@taka:agent-yes/main". A purely local list (no devices anywhere)
+// falls back to the legacy "owner/repo/branch" with no device prefix.
 //
 // `parent` is this row's tree parent entry (a subagent's superagent), when it
 // has one. A field that matches the parent's is ALSO blanked: the nesting
 // already conveys it, so a subagent in the same worktree as its parent shows
 // only what differs — often just the submodule leaf (e.g. "//→bot"), or nothing
 // at all (hidden by hasIdent) when it's the very same checkout.
-export function compactIdent(e, ctx, cap = 3, parent = null) {
+export function compactIdent(e, ctx, cap = IDENT_CAP, parent = null) {
   const m = identFields(e);
   const p = parent ? identFields(parent) : null;
   const clip = (s) => (cap && s.length > cap ? s.slice(0, cap) : s);
