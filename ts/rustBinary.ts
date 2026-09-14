@@ -235,6 +235,28 @@ export function findTrayLauncher(): string | undefined {
 }
 
 /**
+ * Locate the `ayrs` binary (the Rust `serve` daemon). Same install shapes as
+ * the agent runtime — a dev `rs/target` build, the downloaded release bin dir
+ * (CI ships ayrs in every platform bundle since #473), or `~/.cargo/bin` on
+ * PATH after `bun run build:rs`. Undefined when absent (an older release, or a
+ * platform whose bundle predates it) — callers fall back to the TS server.
+ */
+export function findAyrsBinary(): string | undefined {
+  const exe = process.platform === "win32" ? "ayrs.exe" : "ayrs";
+  const dir = import.meta.dirname ?? import.meta.dir;
+  const searchPaths = [
+    path.resolve(dir, `../rs/target/release/${exe}`),
+    path.resolve(dir, `../rs/target/debug/${exe}`),
+    path.join(getBinDir(), exe),
+    Bun.which("ayrs") ?? "",
+  ];
+  for (const p of searchPaths) {
+    if (p && existsSync(p)) return p;
+  }
+  return undefined;
+}
+
+/**
  * Get GitHub release download URL for the binary
  */
 export function getDownloadUrl(version = "latest"): string {
