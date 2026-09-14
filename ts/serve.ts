@@ -1534,6 +1534,26 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
   return 1;
 }
 
+/**
+ * Content type for a `/vendor/<name>` console asset, or null when `name` is not
+ * one we ship. The set is the exact list index.html loads (see lab/ui/vendor/
+ * and #317): a request for anything else — a traversal attempt, a stray file
+ * in the directory — is a 404, never a read.
+ */
+export function vendorAssetType(name: string): string | null {
+  switch (name) {
+    case "xterm.min.css":
+      return "text/css; charset=utf-8";
+    case "xterm.min.js":
+    case "addon-fit.min.js":
+    case "addon-web-links.min.js":
+    case "addon-clipboard.min.js":
+      return "text/javascript; charset=utf-8";
+    default:
+      return null;
+  }
+}
+
 // How `ay serve status` should report the persisted share link. The link file
 // outlives the daemon config that minted it: `ay serve install` (no --share)
 // over an older --share install leaves ~/.agent-yes/.share-link in place while
@@ -5018,6 +5038,17 @@ export async function cmdServe(rest: string[]): Promise<number> {
     if (req.method === "GET" && p === "/manifest.webmanifest")
       return serveUiFile("manifest.webmanifest", "application/manifest+json");
     if (req.method === "GET" && p === "/icon.svg") return serveUiFile("icon.svg", "image/svg+xml");
+    // Self-hosted xterm (lab/ui/vendor/*, #317). The page loads these
+    // same-origin and render-blocking, so a 401 here — which is what the
+    // token-gated API fallthrough returned — leaves the terminal pane on
+    // "connecting…" forever with `Terminal is not defined`. Allowlisted by
+    // basename (no directory walk): the CSS and the pinned xterm builds only.
+    if (req.method === "GET" && p.startsWith("/vendor/")) {
+      const name = p.slice("/vendor/".length);
+      const type = vendorAssetType(name);
+      if (type) return serveUiFile(`vendor/${name}`, type);
+      return new Response("not found", { status: 404 });
+    }
     if (req.method === "GET" && p === "/favicon.ico") return new Response(null, { status: 204 });
     if (p.startsWith("/cb/")) return handleCallback(req, p);
     // CORS-open the embeddable terminal routes (tail/size/send) so a cross-origin

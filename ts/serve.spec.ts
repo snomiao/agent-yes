@@ -8,6 +8,7 @@ import {
   parseGitUrl,
   portlessConsoleUrl,
   shareLinkStatus,
+  vendorAssetType,
 } from "./serve.ts";
 
 describe("portlessConsoleUrl", () => {
@@ -197,11 +198,33 @@ describe("oxmgrCmd", () => {
     expect(oxmgrCmd([String.raw`C:\x\ay.exe`, "serve", "--share"])).toBe(
       String.raw`"C:\x\ay.exe" serve --share`,
     );
-    expect(oxmgrCmd(["/usr/bin/bun", "/x/a b/ay", "serve"])).toBe(
-      '/usr/bin/bun "/x/a b/ay" serve',
-    );
+    expect(oxmgrCmd(["/usr/bin/bun", "/x/a b/ay", "serve"])).toBe('/usr/bin/bun "/x/a b/ay" serve');
   });
   it("escapes an embedded double quote inside a quoted arg", () => {
     expect(oxmgrCmd(['say "hi"'])).toBe(String.raw`"say \"hi\""`);
+  });
+});
+
+// The console self-hosts xterm from ./vendor/ (#317), but the TS daemon's
+// static allowlist never routed /vendor/*, so those render-blocking scripts
+// fell through to the token-gated API and came back 401 — the terminal pane
+// sat on "connecting…" with `Terminal is not defined`. Exactly the shipped
+// files are served; anything else (a traversal, a stray file) is a 404.
+describe("vendorAssetType", () => {
+  it("types the pinned xterm builds the page loads", () => {
+    expect(vendorAssetType("xterm.min.css")).toBe("text/css; charset=utf-8");
+    for (const js of [
+      "xterm.min.js",
+      "addon-fit.min.js",
+      "addon-web-links.min.js",
+      "addon-clipboard.min.js",
+    ]) {
+      expect(vendorAssetType(js)).toBe("text/javascript; charset=utf-8");
+    }
+  });
+  it("refuses anything that is not a shipped vendor asset", () => {
+    expect(vendorAssetType("../index.html")).toBeNull();
+    expect(vendorAssetType("xterm.min.js.map")).toBeNull();
+    expect(vendorAssetType("")).toBeNull();
   });
 });
