@@ -1298,8 +1298,10 @@ impl AgentContext {
             }
         }
 
-        // Check patterns on heartbeat (for no-EOL CLIs)
-        if self.cli_config.no_eol {
+        // Check patterns on heartbeat: always for no-EOL CLIs, and once after a
+        // pending-Enter cycle ended (end_pending_enter cleared the checked-hash),
+        // since a static dialog may emit no output to trigger the usual path.
+        if self.cli_config.no_eol || self.last_checked_screen_hash.is_none() {
             self.check_patterns(msg_ctx).await?;
         }
 
@@ -1360,10 +1362,7 @@ impl AgentContext {
                 if self.next_stdout.is_ready().await {
                     // Got response, clear pending state
                     debug!("Got response after Enter, clearing pending state");
-                    self.pending_enter = false;
-                    self.pending_enter_detected_at = None;
-                    self.enter_sent_at = None;
-                    self.enter_retry_count = 0;
+                    self.end_pending_enter();
                 } else {
                     // No response yet, check for retry
                     let elapsed_since_send = now.duration_since(sent_at).as_millis() as u64;
@@ -1383,18 +1382,34 @@ impl AgentContext {
                             elapsed_since_send
                         );
                         self.do_send_enter(msg_ctx)?;
-                        self.enter_retry_count = 2;
                         // After second retry, just keep waiting
-                        self.pending_enter = false;
-                        self.pending_enter_detected_at = None;
-                        self.enter_sent_at = None;
-                        self.enter_retry_count = 0;
+                        self.end_pending_enter();
                     }
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// End a pending-Enter cycle (answered, or retries exhausted) and make the
+    /// CURRENT screen eligible for a full pattern check again.
+    ///
+    /// While `pending_enter` is set, `check_patterns` records the screen it saw
+    /// but its enter branch does nothing — so if the cycle ends without the
+    /// screen changing, the short-circuit on `last_checked_screen_hash` means
+    /// that screen is never re-examined and a still-matching enter pattern can
+    /// only be rescued by the 60s idle scan. Observed on Claude's trust dialog:
+    /// the CLI re-mounted the dialog (cursor back to "No") right as our Enter
+    /// landed, a second typingRespond Down moved it to "Yes" again, and the
+    /// redraw from that Down counted as the "response" to the swallowed Enter —
+    /// leaving "❯ Yes, I trust this folder" on screen, unchecked, for a minute.
+    fn end_pending_enter(&mut self) {
+        self.pending_enter = false;
+        self.pending_enter_detected_at = None;
+        self.enter_sent_at = None;
+        self.enter_retry_count = 0;
+        self.last_checked_screen_hash = None;
     }
 
     /// Actually send the Enter key
