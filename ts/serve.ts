@@ -1648,6 +1648,34 @@ async function cmdServeStatus(args: string[]): Promise<number> {
 // ay serve
 // ---------------------------------------------------------------------------
 
+// Run `ayrs serve …` in the foreground with our stdio, forwarding the signals a
+// terminal sends us so Ctrl-C reaches the daemon (which closes its room peers)
+// and the manager's SIGTERM on `stop` isn't swallowed by the launcher.
+async function runAyrsServe(ayrs: string, argv: string[]): Promise<number> {
+  const child = Bun.spawn([ayrs, ...argv], {
+    stdio: ["inherit", "inherit", "inherit"],
+    env: process.env,
+    cwd: process.cwd(),
+  });
+  const forward = (sig: NodeJS.Signals) => () => {
+    try {
+      child.kill(sig);
+    } catch {
+      /* already gone */
+    }
+  };
+  const onInt = forward("SIGINT");
+  const onTerm = forward("SIGTERM");
+  process.on("SIGINT", onInt);
+  process.on("SIGTERM", onTerm);
+  try {
+    return await child.exited;
+  } finally {
+    process.off("SIGINT", onInt);
+    process.off("SIGTERM", onTerm);
+  }
+}
+
 export async function cmdServe(rest: string[]): Promise<number> {
   if (rest.includes("-h") || rest.includes("--help")) {
     process.stdout.write(
@@ -1663,6 +1691,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `                    The minted room persists in ~/.agent-yes/.share-room\n` +
         `                    (stable link across restarts; delete the file to rotate).\n` +
         `  --share [URL]     Legacy alias for --http --webrtc\n\n` +
+        `Runtime: like \`ay <cli>\`, the Rust daemon (ayrs serve) runs by default for\n` +
+        `  the flags it supports — --webrtc [webrtc://url], --port N, --sighost H.\n` +
+        `  Everything else (bare \`ay serve\`, --share/--http/--host/--tls-*, the\n` +
+        `  subcommands) runs the TypeScript server. --no-rust forces TypeScript.\n\n` +
         `Options:\n` +
         `  --port N          Bypass Portless and listen on a fixed HTTP port\n` +
         `  --host HOST       Interface to bind (default: 127.0.0.1; use 0.0.0.0 to expose)\n` +
@@ -1684,6 +1716,25 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  ay remote add <alias> http://<token>@<host>:<port>\n`,
     );
     return 0;
+  }
+
+  // Rust first, like `ay <cli>`: an invocation `ayrs serve` can express runs
+  // the Rust daemon; the rest stays here. See ts/serveRust.ts for the split.
+  // `--no-rust` is stripped for the parsers below either way.
+  {
+    const { planRustServe } = await import("./serveRust.ts");
+    const plan = planRustServe(rest);
+    if (plan.kind === "rust") {
+      const { findAyrsBinary } = await import("./rustBinary.ts");
+      const ayrs = findAyrsBinary();
+      if (ayrs) return runAyrsServe(ayrs, plan.argv);
+      process.stderr.write(
+        `ay serve: ayrs binary not found — running the TypeScript server ` +
+          `(bun run build:rs, or reinstall, to get the Rust daemon)\n`,
+      );
+    } else {
+      rest = plan.rest;
+    }
   }
 
   // Daemon subcommands
