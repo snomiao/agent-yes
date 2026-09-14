@@ -32,6 +32,8 @@ shortcut that launches claude with no arguments.
 
 For the local web console, install [Portless](https://portless.sh/) once with `npm install -g portless`, then run `ay serve`. It assigns a free internal port and serves the console at `https://agent-yes.localhost/`. `ay serve --port N` remains available for a fixed-port API listener.
 
+Like `ay <cli>`, `ay serve` runs the Rust daemon (`ayrs serve`) by default for the flags it supports — `--webrtc [webrtc://url]`, `--port N`, `--sighost H`. The bare `ay serve` (Portless), `--share`, and the `install`/`status`/`logs` subcommands still run the TypeScript server; `--no-rust` (or `AGENT_YES_NO_RUST=1`) forces it for everything.
+
 ## Features
 
 - **Multi-CLI Support**: Works with Claude, Codex, Copilot, and Cursor CLI tools
