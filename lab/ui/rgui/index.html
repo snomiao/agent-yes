@@ -4,14 +4,23 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>agent-yes · rgui — live agent tree</title>
-    <link
-      rel="icon"
-      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%231c2126'/%3E%3Crect x='6' y='6' width='9' height='9' rx='2' fill='%239b34bf'/%3E%3Crect x='17' y='6' width='9' height='9' rx='2' fill='%23c74be0'/%3E%3Crect x='6' y='17' width='9' height='9' rx='2' fill='%23f3820d'/%3E%3Crect x='17' y='17' width='9' height='9' rx='2' fill='%23ffd21c'/%3E%3C/svg%3E"
-    />
+    <!-- PWA: installable graph view under /r/ (own manifest/scope + app title,
+         so it installs SEPARATELY from the /w/ console). The service worker is
+         network-first for the shell (never runs stale) and cache-first for the
+         pinned CDN libs, so an installed rgui launches and renders offline. -->
+    <meta name="theme-color" content="#1c2126" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icon.svg" />
+    <link rel="apple-touch-icon" href="./icon.svg" />
     <meta
       name="description"
       content="The live agent-yes agent forest rendered with @snomiao/rgui — a semantic-zoom readable-grid node graph. Parent agents contain their subagents; zoom out and a busy tree renormalizes into one readable block."
     />
+    <script>
+      if ("serviceWorker" in navigator) {
+        addEventListener("load", () => navigator.serviceWorker.register("./sw.js").catch(() => {}));
+      }
+    </script>
     <script>
       // set the theme BEFORE first paint (no flash): saved choice, else OS
       document.documentElement.dataset.theme =

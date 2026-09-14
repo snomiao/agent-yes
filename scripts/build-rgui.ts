@@ -76,5 +76,11 @@ if (!result.success) {
   throw new Error("[build-rgui] bundle failed");
 }
 
-await cp(path.join(root, "lab/ui/rgui/index.html"), path.join(outdir, "index.html"));
-console.log(`[build-rgui] → ${path.relative(root, outdir)}/ (index.html + main.js)`);
+// Ship the shell + PWA assets beside the bundle so /r/ (and the /rgui/ alias) is
+// an installable, offline-capable PWA — its own manifest/app-title/icon + a
+// service worker, separate from the /w/ console's.
+const PWA_ASSETS = ["index.html", "manifest.webmanifest", "sw.js", "icon.svg"];
+for (const f of PWA_ASSETS) {
+  await cp(path.join(root, "lab/ui/rgui", f), path.join(outdir, f));
+}
+console.log(`[build-rgui] → ${path.relative(root, outdir)}/ (${PWA_ASSETS.join(", ")} + main.js)`);

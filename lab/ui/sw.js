@@ -145,8 +145,15 @@ self.addEventListener("install", (e) => {
 self.addEventListener("activate", (e) => {
   e.waitUntil(
     (async () => {
+      // Only evict OUR OWN stale versions. Cache Storage is per-origin and
+      // agent-yes.com also hosts the /r/ rgui PWA (cache prefix
+      // "agent-yes-rgui-") — a blanket delete would wipe its offline shell.
       const keys = await caches.keys();
-      await Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k)));
+      await Promise.all(
+        keys
+          .filter((k) => k.startsWith("agent-yes-w-") && k !== CACHE)
+          .map((k) => caches.delete(k)),
+      );
       await self.clients.claim();
     })(),
   );
