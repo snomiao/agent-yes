@@ -760,7 +760,7 @@ fn exec_restart(prog: &str, args: &[String]) -> Result<String> {
 
 /// A restart only manages an EXISTING registration — it never writes a unit —
 /// so a missing one is a user error, not something to paper over by installing.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
 fn ensure_installed(path: &std::path::Path) -> Result<()> {
     if path.exists() {
         return Ok(());
@@ -817,9 +817,39 @@ pub fn restart() -> Result<()> {
             bail!("no systemd --user bus and no oxmgr on PATH — nothing to restart");
         }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(windows)]
     {
-        // Bails with the "only supported on macOS/Linux" message.
+        // Task Scheduler has no "restart": stop the running instance, then start
+        // the task again. This path used to fall through to the unsupported-OS
+        // arm below, which — once unit_path() gained a Windows branch — returned
+        // Ok(()) having done nothing, so `ayrs serve restart` silently left the
+        // old binary serving.
+        let path = unit_path()?;
+        ensure_installed(&path)?;
+        let dir = log_dir()?;
+        let out_log = dir.join("ayrs-serve.log");
+        let err_log = dir.join("ayrs-serve.err.log");
+        // /end returns once the stop is REQUESTED; a stopped-but-not-yet-gone
+        // instance still holds the logs deny-write, and starting the new one
+        // before it lets go makes the shim's `>>` fail with no output anywhere.
+        let _ = Command::new("schtasks")
+            .args(["/end", "/tn", LABEL])
+            .output();
+        wait_for_logs_released(&[&out_log, &err_log]);
+        let before = std::fs::metadata(&err_log).map(|m| m.len()).unwrap_or(0);
+        run("schtasks", &["/run", "/tn", LABEL])
+            .with_context(|| format!("{LABEL} is not registered — run `ayrs serve install`"))?;
+        if !wait_for_daemon_output(&err_log, before) {
+            bail!(
+                "task {LABEL} was started, but the daemon produced no output within 10s —                  inspect {} and `schtasks /query /tn {LABEL} /fo LIST /v`",
+                err_log.display()
+            );
+        }
+        println!("restarted {LABEL}");
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    {
+        // Bails with the "only supported on …" message.
         unit_path()?;
     }
 
