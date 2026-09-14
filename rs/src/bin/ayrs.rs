@@ -6,6 +6,9 @@
 
 #[path = "../agent_permissions.rs"]
 mod agent_permissions;
+// pid_store::wrap_spawn_prompt renders the parent's standardized identity.
+#[path = "../identity.rs"]
+mod identity;
 #[path = "../pid_store.rs"]
 mod pid_store;
 // needs_input classification reuses the CLI `needsInput`/`working` patterns

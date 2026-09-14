@@ -175,6 +175,18 @@ impl PidStore {
         }
     }
 
+    /// Resolve the agent record for `pid`, preferring a `wrapper_pid` match (the
+    /// AGENT_YES_PID a child inherits IS the parent's `wrapper_pid`) and falling
+    /// back to the raw pid. Mirrors `resolveSender` in ts/subcommands.ts.
+    pub fn find_agent(&self, pid: u32) -> Option<PidRecord> {
+        let records = self.read_all().ok()?;
+        records
+            .iter()
+            .find(|r| r.wrapper_pid == Some(pid))
+            .or_else(|| records.iter().find(|r| r.pid == pid))
+            .cloned()
+    }
+
     pub fn update_status(
         &self,
         pid: u32,
@@ -538,6 +550,81 @@ fn store_path() -> PathBuf {
     crate::log_files::global_dir()
         .unwrap_or_else(|| PathBuf::from(".agent-yes"))
         .join("pids.jsonl")
+}
+
+/// True when `body` is a slash command (`/foo`). Such a body must stay on line 1
+/// to be recognized by the CLI, so it is never wrapped. Mirrors `isSlashCommand`
+/// in ts/ayMsg.ts.
+fn is_slash_command(body: &str) -> bool {
+    let mut chars = body.chars();
+    chars.next() == Some('/') && matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+}
+
+/// Render the `<ay-msg …>` envelope around `body` for a parent identified by
+/// (`cli`, `identity`, `reply_target`). Byte-for-byte the shape `buildEnvelope`
+/// in ts/subcommands.ts produces for a plain local send (no attribution
+/// suffix, no `via remote`), so a receiver sees ONE envelope grammar whichever
+/// runtime spawned it or sent to it. Pure, so the layout is unit-testable.
+pub fn render_spawn_envelope(
+    nonce: &str,
+    cli: &str,
+    identity: &str,
+    reply_target: &str,
+    body: &str,
+) -> String {
+    format!(
+        "<ay-msg {nonce} from {cli} {identity} — reply: ay send {reply_target} \"...\">\n{body}\n</ay-msg {nonce}>"
+    )
+}
+
+/// Wrap `body` in the nonce-tagged `<ay-msg …>` provenance envelope used for
+/// trusted agent-to-agent messages, when this process was spawned BY another
+/// agent (AGENT_YES_PID points at the parent's `wrapper_pid`). Mirrors the wrap
+/// `ay send` applies (ts/subcommands.ts cmdSend), so a child's *bootstrap
+/// prompt* gets the same forgery-proof attribution a follow-up `ay send` would —
+/// the recipient LLM can trust the block's boundaries because the nonce is
+/// minted here, after the body was authored, so text inside the body can't
+/// forge a matching open/close marker. The spawn path previously handed the raw
+/// prompt over unmarked, leaving the one message a child most needs to
+/// authenticate (it bootstraps the child's entire threat model for the parent)
+/// with no provenance at all.
+///
+/// Returns `body` unchanged when there is no parent agent (a human-launched,
+/// top-level agent has no AGENT_YES_PID; a stale one names no live record) or
+/// when `body` is a slash command.
+pub fn wrap_spawn_prompt(body: &str) -> String {
+    if is_slash_command(body) {
+        return body.to_string();
+    }
+    let Some(env_pid) = std::env::var("AGENT_YES_PID")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok())
+    else {
+        return body.to_string();
+    };
+    let Some(parent) = PidStore::new().find_agent(env_pid) else {
+        return body.to_string();
+    };
+    let nonce = {
+        use rand::RngCore;
+        let mut b = [0u8; 4];
+        rand::thread_rng().fill_bytes(&mut b);
+        hex::encode(b)
+    };
+    // The same standardized identity `ay send` puts in its header
+    // (<user>@<host>:<cwd>:<branch>#<pid>), so the two are indistinguishable to
+    // the receiver. The reply target is the parent's stable agent id when it has
+    // one (survives its restarts), else its pid.
+    let identity = crate::identity::format_identity(&crate::identity::IdentityParts {
+        cwd: &parent.cwd,
+        pid: parent.pid,
+        ..Default::default()
+    });
+    let reply_target = parent
+        .agent_id
+        .clone()
+        .unwrap_or_else(|| parent.pid.to_string());
+    render_spawn_envelope(&nonce, &parent.cli, &identity, &reply_target, body)
 }
 
 fn log_retention_ms() -> i64 {
@@ -1085,5 +1172,47 @@ mod tests {
             acquire_lock(&path).is_some(),
             "stale lock must be taken over"
         );
+    }
+
+    #[test]
+    fn slash_commands_are_never_wrapped() {
+        assert!(is_slash_command("/compact"));
+        assert!(is_slash_command("/exit now"));
+        assert!(!is_slash_command("/ not a command"));
+        assert!(!is_slash_command("//comment"));
+        assert!(!is_slash_command("fix the build"));
+    }
+
+    #[test]
+    fn spawn_envelope_matches_the_ay_send_shape() {
+        let out = render_spawn_envelope(
+            "0a1b2c3d",
+            "claude",
+            "alice@box:~/repo/alpha:main#1111",
+            "ab12cd34ef56",
+            "build the thing",
+        );
+        assert_eq!(
+            out,
+            "<ay-msg 0a1b2c3d from claude alice@box:~/repo/alpha:main#1111 — reply: ay send ab12cd34ef56 \"...\">\n\
+             build the thing\n\
+             </ay-msg 0a1b2c3d>"
+        );
+    }
+
+    #[test]
+    fn a_top_level_agent_gets_its_prompt_back_untouched() {
+        // No AGENT_YES_PID in the environment → no parent → no envelope. Serialized
+        // with the other env-touching tests via the shared lock.
+        let _g = crate::log_files::ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var_os("AGENT_YES_PID");
+        std::env::remove_var("AGENT_YES_PID");
+        let out = wrap_spawn_prompt("hello");
+        if let Some(v) = prev {
+            std::env::set_var("AGENT_YES_PID", v);
+        }
+        assert_eq!(out, "hello");
     }
 }
