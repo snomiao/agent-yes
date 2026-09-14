@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   installerArgv,
   isNoNodeExecError,
+  oxmgrCmd,
   oxmgrVersionHasWindowsFix,
   parseGitUrl,
   portlessConsoleUrl,
@@ -183,5 +184,24 @@ describe("shareLinkStatus", () => {
   });
   it("returns no link when the file is absent", () => {
     expect(shareLinkStatus(null, true, false)).toEqual({ link: null, stale: false });
+  });
+});
+
+// oxmgr takes its command as ONE string and shell-splits it, treating `\` as
+// an escape: an unquoted Windows path lost every separator on the way in
+// (`C:\Users\…\ay.exe` → `C:Users…ay.exe` → "failed to spawn"). Quoting is what
+// suppresses that, so every arg carrying a backslash, whitespace or a quote
+// must be double-quoted; plain args stay bare.
+describe("oxmgrCmd", () => {
+  it("quotes args with backslashes or spaces and leaves plain ones bare", () => {
+    expect(oxmgrCmd([String.raw`C:\x\ay.exe`, "serve", "--share"])).toBe(
+      String.raw`"C:\x\ay.exe" serve --share`,
+    );
+    expect(oxmgrCmd(["/usr/bin/bun", "/x/a b/ay", "serve"])).toBe(
+      '/usr/bin/bun "/x/a b/ay" serve',
+    );
+  });
+  it("escapes an embedded double quote inside a quoted arg", () => {
+    expect(oxmgrCmd(['say "hi"'])).toBe(String.raw`"say \"hi\""`);
   });
 });

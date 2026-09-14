@@ -940,6 +940,15 @@ async function bootstrapDaemonManager(): Promise<DaemonManager | null> {
 // environment may not have ~/.bun/bin on PATH, so we use an absolute path.
 // On Windows the `ay` bin is a self-contained launcher (ay.exe) we exec
 // directly; on POSIX it's a `#!/usr/bin/env bun` script we run through bun.
+// oxmgr takes its command as ONE string and shell-splits it, treating `\` as an
+// escape — so a bare Windows path arrives with every separator eaten
+// (`C:\Users\…\ay.exe` → `C:Users…ay.exe` → "failed to spawn"). Double-quoting
+// suppresses the escape handling, so quote any arg carrying a backslash or a
+// space. pm2 is unaffected: it gets program + args as separate argv entries.
+export function oxmgrCmd(argv: string[]): string {
+  return argv.map((a) => (/[\\\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(" ");
+}
+
 function ayServeArgv(args: string[]): string[] {
   const ayBin = Bun.which("ay");
   const launcher = ayBin
@@ -1395,7 +1404,8 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     const spawnHidden = findSpawnHiddenLauncher();
     // The command the manager launches: unchanged normally, or the launcher
     // followed by the real argv when interposing. Split into program + args for
-    // pm2 (which takes `<program> … -- <args>`); oxmgr takes the joined string.
+    // pm2 (which takes `<program> … -- <args>`); oxmgr takes it as one quoted
+    // string via oxmgrCmd (see there for why bare backslashes can't be used).
     const managedArgv = spawnHidden ? [spawnHidden, ...serveArgv] : serveArgv;
     // WebRTC daemons get an oxmgr health watchdog: the native WebRTC stack can
     // freeze the JS event loop (host answers nobody, no in-process timer can
@@ -1406,7 +1416,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       webrtcDaemon && mgr.id === "oxmgr"
         ? [
             "--health-cmd",
-            ayServeArgv(["healthcheck"]).join(" "),
+            oxmgrCmd(ayServeArgv(["healthcheck"])),
             "--health-interval",
             "10",
             "--health-timeout",
@@ -1420,7 +1430,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
         ? [
             mgr.bin,
             "start",
-            managedArgv.join(" "),
+            oxmgrCmd(managedArgv),
             "--name",
             DAEMON_NAME,
             "--restart",
