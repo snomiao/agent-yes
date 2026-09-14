@@ -3,8 +3,9 @@
 // Prefers the platform's own supervisor so the *ayrs* daemon tree stays pure
 // Rust (no Node/Bun), the whole point of the Rust daemon:
 //
-//   macOS  -> launchd user agent  ~/Library/LaunchAgents/<LABEL>.plist
-//   Linux  -> systemd user unit   ~/.config/systemd/user/<LABEL>.service
+//   macOS   -> launchd user agent  ~/Library/LaunchAgents/<LABEL>.plist
+//   Linux   -> systemd user unit   ~/.config/systemd/user/<LABEL>.service
+//   Windows -> Task Scheduler task <LABEL>, defined by ~/.agent-yes/<LABEL>.xml
 //
 // Fallback: on Linux WITHOUT a usable systemd `--user` bus (e.g. a container),
 // register with oxmgr instead of failing (see the oxmgr block below). oxmgr is a
@@ -14,6 +15,20 @@
 //
 // The systemd/launchd label is distinct from the oxmgr name the TS daemon
 // registers (`agent-yes`), so both can be installed at once during migration.
+//
+// Windows shape, and why it isn't an `sc.exe` service: a real Windows service
+// needs admin rights, runs in session 0, and must answer the SCM control
+// dispatcher — none of which fits a per-user daemon that spawns agents in the
+// user's own session. A Task Scheduler logon task is the user-level equivalent
+// of a launchd agent / `systemd --user` unit. Two Windows-only wrinkles:
+//
+//   * Task Scheduler gives a console program a visible console window, so the
+//     task launches `ay-spawn-hidden` (GUI subsystem, spawns its child with
+//     CREATE_NO_WINDOW under a kill-on-close job) when that sibling binary is
+//     present — the same shim `ay serve install` interposes for oxmgr.
+//   * Task Scheduler cannot redirect stdout/stderr the way launchd's
+//     StandardOutPath does, so the action runs a generated `.cmd` shim that
+//     does the `>>` redirect into the same log files the other platforms use.
 
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -33,7 +48,14 @@ fn exe() -> Result<String> {
     // Resolve symlinks (~/.cargo/bin/ayrs is real, but a `bun link`-style
     // shim would otherwise bake in a path that moves).
     let p = std::fs::canonicalize(&p).unwrap_or(p);
-    Ok(p.to_string_lossy().into_owned())
+    Ok(strip_verbatim(&p.to_string_lossy()))
+}
+
+/// Windows `canonicalize` returns a `\\?\C:\…` verbatim path. CreateProcess
+/// accepts it, but `cmd.exe` and the Task Scheduler UI do not, so drop the
+/// prefix before it gets baked into the generated files.
+fn strip_verbatim(p: &str) -> String {
+    p.strip_prefix(r"\\?\").unwrap_or(p).to_string()
 }
 
 fn log_dir() -> Result<PathBuf> {
@@ -131,10 +153,25 @@ fn unit_path() -> Result<PathBuf> {
         .join(format!("{LABEL}.service")))
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(windows)]
+fn unit_path() -> Result<PathBuf> {
+    // Kept beside the logs rather than in a system location: the task XML is a
+    // user-owned artifact, and `log_dir()` already honours AGENT_YES_HOME.
+    Ok(log_dir()?.join(format!("{LABEL}.xml")))
+}
+
+/// The `.cmd` shim the task actually launches — it exists solely to give the
+/// daemon the stdout/stderr redirect Task Scheduler can't do itself.
+#[cfg(windows)]
+fn script_path() -> Result<PathBuf> {
+    Ok(log_dir()?.join(format!("{LABEL}.cmd")))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn unit_path() -> Result<PathBuf> {
     bail!(
-        "`ayrs serve` service management is only supported on macOS (launchd) and Linux (systemd --user)"
+        "`ayrs serve` service management is only supported on macOS (launchd), \
+         Linux (systemd --user) and Windows (Task Scheduler)"
     )
 }
 
@@ -195,7 +232,193 @@ fn render_unit(exe: &str, args: &[String], _out: &str, _err: &str) -> String {
     )
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+/// `DOMAIN\user` for the task's principal and logon trigger. Task Scheduler
+/// accepts a bare username too, but the qualified form is what its own exports
+/// use and it stays unambiguous on a domain-joined box.
+#[cfg(windows)]
+fn current_user() -> String {
+    let user = std::env::var("USERNAME").unwrap_or_default();
+    match std::env::var("USERDOMAIN") {
+        Ok(d) if !d.is_empty() && !user.is_empty() => format!("{d}\\{user}"),
+        _ => user,
+    }
+}
+
+/// `ay-spawn-hidden.exe` next to this binary, if it shipped with this install.
+#[cfg(windows)]
+fn spawn_hidden() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let p = exe.parent()?.join("ay-spawn-hidden.exe");
+    p.is_file().then_some(p)
+}
+
+/// (Command, Arguments) for the task's `<Exec>` action.
+///
+/// `cmd.exe /d /c call "<script>"` rather than `/c "<script>"`: when the string
+/// after `/c` starts with a quote, cmd strips the outer pair, which would break
+/// a home directory containing a space. `call` puts a bare token first, so the
+/// quoting survives. `/d` skips AutoRun registry commands.
+#[cfg(windows)]
+fn task_action(script: &std::path::Path) -> (String, String) {
+    let inner = format!("/d /c call \"{}\"", script.display());
+    match spawn_hidden() {
+        // The shim is GUI-subsystem, so Task Scheduler allocates it no console
+        // at all, and it starts cmd with CREATE_NO_WINDOW — nothing flashes.
+        Some(l) => (
+            strip_verbatim(&l.to_string_lossy()),
+            format!("cmd.exe {inner}"),
+        ),
+        None => ("cmd.exe".to_string(), inner),
+    }
+}
+
+/// The `.cmd` the task runs: the daemon with its output appended to the same
+/// log files launchd names via StandardOutPath/StandardErrorPath.
+#[cfg(windows)]
+fn render_launcher_cmd(exe: &str, args: &[String], out_log: &str, err_log: &str) -> String {
+    // `%` is the one character batch re-interprets inside a quoted token.
+    let q = |s: &str| format!("\"{}\"", s.replace('%', "%%"));
+    let argv: Vec<String> = args.iter().map(|a| q(a)).collect();
+    format!(
+        "@echo off\r\n\
+         rem Generated by `ayrs serve install` — regenerated on every install.\r\n\
+         rem Task Scheduler cannot redirect stdio, so the redirect lives here.\r\n\
+         {exe} {args} >> {out} 2>> {err}\r\n",
+        exe = q(exe),
+        args = argv.join(" "),
+        out = q(out_log),
+        err = q(err_log),
+    )
+}
+
+/// Task Scheduler 1.2 XML. Element order follows the schema sequence that the
+/// Task Scheduler UI itself exports — the parser rejects a reordered `Settings`.
+#[cfg(windows)]
+fn render_task_xml(user: &str, command: &str, arguments: &str) -> String {
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>agent-yes Rust serve daemon (ayrs)</Description>
+    <URI>\{label}</URI>
+  </RegistrationInfo>
+  <Triggers>
+    <LogonTrigger>
+      <Enabled>true</Enabled>
+      <UserId>{user}</UserId>
+    </LogonTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="Author">
+      <UserId>{user}</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>LeastPrivilege</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>999</Count>
+    </RestartOnFailure>
+  </Settings>
+  <Actions Context="Author">
+    <Exec>
+      <Command>{command}</Command>
+      <Arguments>{arguments}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+"#,
+        label = LABEL,
+        user = xml_escape(user),
+        command = xml_escape(command),
+        arguments = xml_escape(arguments),
+    )
+}
+
+#[cfg(windows)]
+fn render_unit(exe: &str, args: &[String], out_log: &str, err_log: &str) -> String {
+    // The XML names the shim; the shim's script is written separately by
+    // install() from the same exe/args, so both stay in sync.
+    let script = script_path().unwrap_or_else(|_| PathBuf::from(format!("{LABEL}.cmd")));
+    let _ = (exe, args, out_log, err_log);
+    let (command, arguments) = task_action(&script);
+    render_task_xml(&current_user(), &command, &arguments)
+}
+
+/// Block until nothing else holds the log files open, so a reinstall doesn't
+/// race the instance it just stopped.
+///
+/// `schtasks /end` returns as soon as the kill is *requested*; the old daemon
+/// can outlive the call by a beat. That matters because the shim's `>>`
+/// redirect opens the logs deny-write: starting the replacement too early makes
+/// cmd fail to open them and the daemon exits immediately — with no output, in
+/// the very files that would have explained it. Probing with `share_mode(0)`
+/// tests exactly the access cmd is about to need.
+#[cfg(windows)]
+fn wait_for_logs_released(paths: &[&std::path::Path]) {
+    use std::os::windows::fs::OpenOptionsExt;
+    for _ in 0..100 {
+        let all_free = paths.iter().all(|p| {
+            !p.exists()
+                || std::fs::OpenOptions::new()
+                    .append(true)
+                    .share_mode(0)
+                    .open(p)
+                    .is_ok()
+        });
+        if all_free {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// `schtasks /run` reports only that the *launch* was accepted, and the task's
+/// exit code surfaces as a locale-dependent "Last Result" line. Watching the
+/// error log grow instead is locale-independent and proves the daemon actually
+/// reached its startup banner.
+#[cfg(windows)]
+fn wait_for_daemon_output(err_log: &std::path::Path, before: u64) -> bool {
+    for _ in 0..100 {
+        if std::fs::metadata(err_log).map(|m| m.len()).unwrap_or(0) > before {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    false
+}
+
+/// `schtasks /xml` only reads UTF-16 — a UTF-8 file fails with a bare
+/// "The task XML is malformed", so encode explicitly rather than `fs::write`.
+#[cfg(windows)]
+fn write_utf16(path: &std::path::Path, body: &str) -> Result<()> {
+    let mut bytes = vec![0xFF, 0xFE]; // UTF-16LE BOM
+    for u in body.encode_utf16() {
+        bytes.extend_from_slice(&u.to_le_bytes());
+    }
+    std::fs::write(path, bytes)?;
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
 fn render_unit(_e: &str, _a: &[String], _o: &str, _r: &str) -> String {
     String::new()
 }
@@ -337,6 +560,26 @@ pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
         // Reinstalling over a loaded unit: unload first so the new definition
         // actually takes effect instead of silently keeping the old one running.
         let _ = uninstall_quiet();
+        // Windows needs two files, not one: Task Scheduler can't do launchd's
+        // StandardOutPath redirect, so the task action runs a generated `.cmd`
+        // shim that appends to the same logs; and `schtasks /xml` only accepts
+        // UTF-16, so the task definition goes through write_utf16.
+        #[cfg(windows)]
+        {
+            let script = script_path()?;
+            std::fs::write(
+                &script,
+                render_launcher_cmd(
+                    &exe,
+                    &args,
+                    &out_log.to_string_lossy(),
+                    &err_log.to_string_lossy(),
+                ),
+            )?;
+            println!("wrote {}", script.display());
+            write_utf16(&path, &body)?;
+        }
+        #[cfg(not(windows))]
         std::fs::write(&path, &body)?;
         println!("wrote {}", path.display());
         Ok(())
@@ -380,6 +623,39 @@ pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
             );
         }
     }
+    #[cfg(windows)]
+    {
+        write_native_unit()?;
+        run(
+            "schtasks",
+            &[
+                "/create",
+                "/tn",
+                LABEL,
+                "/xml",
+                &path.to_string_lossy(),
+                "/f",
+            ],
+        )?;
+        wait_for_logs_released(&[&out_log, &err_log]);
+        let before = std::fs::metadata(&err_log).map(|m| m.len()).unwrap_or(0);
+        // /create only registers it; the logon trigger won't fire until the next
+        // sign-in, so start it now the way launchctl kickstart / systemd --now do.
+        run("schtasks", &["/run", "/tn", LABEL])?;
+        if !wait_for_daemon_output(&err_log, before) {
+            bail!(
+                "task {LABEL} was registered and started, but the daemon produced no output \
+                 within 10s — inspect {} and `schtasks /query /tn {LABEL} /fo LIST /v`",
+                err_log.display()
+            );
+        }
+        if spawn_hidden().is_none() {
+            eprintln!(
+                "note: ay-spawn-hidden.exe was not found next to ayrs.exe, so the task \
+                 launches cmd.exe directly and a console window will appear at logon."
+            );
+        }
+    }
 
     println!("webrtc: {webrtc_url}");
     println!("console: {browser_url}");
@@ -406,6 +682,17 @@ fn uninstall_quiet() -> Result<()> {
             let _ = Command::new(oxmgr).args(["delete", OXMGR_NAME]).output();
         }
     }
+    #[cfg(windows)]
+    {
+        // /end stops the running instance; /delete deregisters it. Both are
+        // no-ops (non-zero exit, ignored) when the task isn't there.
+        let _ = Command::new("schtasks")
+            .args(["/end", "/tn", LABEL])
+            .output();
+        let _ = Command::new("schtasks")
+            .args(["/delete", "/tn", LABEL, "/f"])
+            .output();
+    }
     Ok(())
 }
 
@@ -423,6 +710,13 @@ pub fn uninstall() -> Result<()> {
         println!("removed {}", path.display());
     } else {
         println!("{LABEL} uninstalled (or was not installed)");
+    }
+    #[cfg(windows)]
+    if let Ok(script) = script_path() {
+        if script.exists() {
+            std::fs::remove_file(&script)?;
+            println!("removed {}", script.display());
+        }
     }
     Ok(())
 }
@@ -582,6 +876,19 @@ pub fn status() -> Result<()> {
             println!("state = no supervisor (no systemd --user bus, no oxmgr)");
         }
     }
+    #[cfg(windows)]
+    {
+        // Plain /fo LIST (not /v): six lines including Status and Next Run Time,
+        // and no dependence on which field names this Windows locale prints.
+        match run("schtasks", &["/query", "/tn", LABEL, "/fo", "LIST"]) {
+            Ok(s) => {
+                for line in s.lines().filter(|l| !l.trim().is_empty()) {
+                    println!("{}", line.trim_end());
+                }
+            }
+            Err(_) => println!("state = not registered"),
+        }
+    }
     Ok(())
 }
 
@@ -694,6 +1001,67 @@ mod tests {
             super::super::share::resolve_share_urls(Some(&room_url), "ignored.example").unwrap();
         assert_eq!(webrtc, room_url);
         assert_eq!(console, format!("https://agent-yes.com/w/#r1:e1.{secret}"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn task_xml_is_well_formed_and_escaped() {
+        let xml = render_task_xml(
+            "BOX\\me",
+            "C:\\bin\\ay-spawn-hidden.exe",
+            "cmd.exe /d /c call \"C:\\a&b\\s.cmd\"",
+        );
+        assert!(xml.starts_with("<?xml version=\"1.0\" encoding=\"UTF-16\"?>"));
+        assert!(xml.contains("<UserId>BOX\\me</UserId>"));
+        assert!(xml.contains("<Command>C:\\bin\\ay-spawn-hidden.exe</Command>"));
+        // `&` must survive as an entity or Task Scheduler rejects the document.
+        assert!(xml.contains("C:\\a&amp;b\\s.cmd"));
+        assert!(xml.contains("<LogonType>InteractiveToken</LogonType>"));
+        assert!(xml.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn launcher_cmd_quotes_paths_and_redirects_both_streams() {
+        let s = render_launcher_cmd(
+            "C:\\Program Files\\ayrs.exe",
+            &service_args(&Some(String::new()), "s.agent-yes.com"),
+            "C:\\logs\\o.log",
+            "C:\\logs\\e.log",
+        );
+        assert!(s.contains("\"C:\\Program Files\\ayrs.exe\" \"serve\" \"--webrtc\""));
+        assert!(s.contains(">> \"C:\\logs\\o.log\" 2>> \"C:\\logs\\e.log\""));
+        assert!(s.starts_with("@echo off"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn launcher_cmd_escapes_percent_so_batch_cannot_expand_it() {
+        let s = render_launcher_cmd(
+            "C:\\a\\ayrs.exe",
+            &["serve".into(), "%PATH%".into()],
+            "o",
+            "e",
+        );
+        assert!(s.contains("\"%%PATH%%\""));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn task_action_uses_call_so_a_spaced_home_survives_cmd_quote_stripping() {
+        let (_cmd, args) = task_action(std::path::Path::new("C:\\Users\\a b\\.agent-yes\\x.cmd"));
+        assert!(args.ends_with("/d /c call \"C:\\Users\\a b\\.agent-yes\\x.cmd\""));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn utf16_xml_gets_the_bom_schtasks_requires() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("t.xml");
+        write_utf16(&p, "<Task/>").unwrap();
+        let b = std::fs::read(&p).unwrap();
+        assert_eq!(&b[..2], &[0xFF, 0xFE]);
+        assert_eq!(&b[2..6], &[b'<', 0, b'T', 0]);
     }
 
     #[cfg(target_os = "macos")]
