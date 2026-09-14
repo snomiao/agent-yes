@@ -44,6 +44,9 @@ import {
   createInputSender,
   createFrameScheduler,
   createSettledFrameScheduler,
+  isTransientTitle,
+  promptGist,
+  rowTitle,
 } from "../../lab/ui/console-logic.js";
 
 describe("createFrameScheduler", () => {
@@ -355,8 +358,18 @@ describe("layeredRows parentEntry", () => {
 // Identity is the source; the label is only for reading.
 describe("layeredRows peer grouping with duplicate device labels", () => {
   const onEach = () => [
-    { ...agent({ pid: 100, wrapper_pid: 100 }), _room: "r1", _src: "r1/peerAAA111", _host: "u@box" },
-    { ...agent({ pid: 200, wrapper_pid: 200 }), _room: "r1", _src: "r1/peerBBB222", _host: "u@box" },
+    {
+      ...agent({ pid: 100, wrapper_pid: 100 }),
+      _room: "r1",
+      _src: "r1/peerAAA111",
+      _host: "u@box",
+    },
+    {
+      ...agent({ pid: 200, wrapper_pid: 200 }),
+      _room: "r1",
+      _src: "r1/peerBBB222",
+      _host: "u@box",
+    },
   ];
 
   it("keeps two same-labelled machines as separate peer groups", () => {
@@ -503,6 +516,63 @@ describe("gitLabel", () => {
     ).toBe("±2 ⑂1 ⊙4");
     // zero pins/subDirty (or absent) add nothing
     expect(gitLabel(agent({ git: { dirty: true, changed: 1, pins: 0, subDirty: 0 } }))).toBe("±1");
+  });
+});
+
+// The row label must say what the agent is ABOUT. The transient status line
+// ("Cogitated for 1m 15s · done 9:15 PM") used to win over the spawn prompt for
+// every agent without a terminal title, so the list was full of footers.
+describe("rowTitle", () => {
+  it("prefers title, then note, then the prompt gist, then the status line", () => {
+    const base = {
+      title: "",
+      note: "",
+      prompt: "install the antigravity for me in cli",
+      status_text: "Cogitated for 1m 15s · done 9:15 PM",
+    };
+    expect(rowTitle(agent({ ...base, title: "Agy install" }))).toBe("Agy install");
+    expect(rowTitle(agent({ ...base, note: "left lane" }))).toBe("left lane");
+    expect(rowTitle(agent(base))).toBe("install the antigravity for me in cli");
+    expect(rowTitle(agent({ ...base, prompt: "" }))).toBe("Cogitated for 1m 15s · done 9:15 PM");
+    expect(rowTitle(agent({ ...base, prompt: "", status_text: "  " }))).toBe("");
+  });
+  it("demotes a title that is really Claude's status line, keeping it as last resort", () => {
+    // Claude Code writes its own spinner / completion stamp / last message into
+    // the terminal title; those must not outrank the prompt.
+    for (const t of [
+      "✻ Cogitated for 1m 15s · done 9:15 PM",
+      "✽ Fiddle-faddling… (6m 50s · ↓ 11.8k token )",
+      "● Remote Control not started here · another Claude Code on this machine",
+    ]) {
+      expect(isTransientTitle(t)).toBe(true);
+      expect(rowTitle(agent({ title: t, prompt: "do the supervised swap now" }))).toBe(
+        "do the supervised swap now",
+      );
+      expect(rowTitle(agent({ title: t, prompt: "", status_text: "" }))).toBe(t);
+      // The topic the page saw a moment ago beats both the prompt and the status.
+      expect(rowTitle(agent({ title: t, prompt: "do the swap" }), "✳ Agy install")).toBe(
+        "✳ Agy install",
+      );
+    }
+    for (const t of ["✳ Agy install", "Webcode service", "fix the done handler · v2"]) {
+      expect(isTransientTitle(t)).toBe(false);
+      expect(rowTitle(agent({ title: t, prompt: "ignored" }))).toBe(t);
+    }
+  });
+});
+
+describe("promptGist", () => {
+  it("drops the ay-msg envelope a spawned agent's prompt carries", () => {
+    const p =
+      '<ay-msg 0a1b2c3d from claude alice@box:~/repo/alpha:main#1111 — reply: ay send ab12 "...">\n' +
+      "build the thing\n" +
+      "</ay-msg 0a1b2c3d>";
+    expect(promptGist(p)).toBe("build the thing");
+  });
+  it("takes the first non-blank line and clips long ones", () => {
+    expect(promptGist("\n\n  second para first line\nmore")).toBe("second para first line");
+    expect(promptGist("x".repeat(200), 20)).toBe("x".repeat(19) + "…");
+    expect(promptGist(null)).toBe("");
   });
 });
 

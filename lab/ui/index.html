@@ -2205,13 +2205,13 @@
             </div>
             <div class="install" title="click to copy">
               install:
-            <code class="copy" id="setup-sh">curl -fsSL https://agent-yes.com/setup.sh | sh</code>
-            <span class="winhint"
-              >·&nbsp;Windows:
-              <code class="copy" id="setup-ps"
-                >powershell -c "irm https://agent-yes.com/setup.ps1 | iex"</code
-              ></span
-            >
+              <code class="copy" id="setup-sh">curl -fsSL https://agent-yes.com/setup.sh | sh</code>
+              <span class="winhint"
+                >·&nbsp;Windows:
+                <code class="copy" id="setup-ps"
+                  >powershell -c "irm https://agent-yes.com/setup.ps1 | iex"</code
+                ></span
+              >
             </div>
           </div>
           <div class="ibox">
@@ -2580,6 +2580,8 @@
         identContext,
         compactIdent,
         IDENT_CAP,
+        rowTitle,
+        isTransientTitle,
         fullIdent,
         hasIdent,
         deviceCount,
@@ -6156,6 +6158,8 @@ my.translate = async (text, lang) => {
         }
         return `<div class="ioheat"><svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" shape-rendering="crispEdges" style="position:absolute;inset:0;width:100%;height:100%">${cells.join("")}</svg></div>`;
       }
+      // Last non-transient (topic) title seen per agent key — see rowTitle.
+      const topicTitles = new Map();
       function renderList() {
         // The graph view (/r/) only exists on the hosted origin — a local
         // `ay serve --http` console (served at /) has no /r/ route, so the
@@ -6196,7 +6200,10 @@ my.translate = async (text, lang) => {
               .map((r) => {
                 if (r.kind !== "agent") return headerHtml(r);
                 const e = r.entry;
-                const t = e.title || e.status_text || e.prompt || "";
+                // Remember the agent's last topic title so a status-line title
+                // (spinner / "· done" stamp) doesn't replace it on the next draw.
+                if (e.title && !isTransientTitle(e.title)) topicTitles.set(e._key, e.title);
+                const t = rowTitle(e, topicTitles.get(e._key));
                 const id = compactIdent(e, ctx, IDENT_CAP, r.parentEntry);
                 const cli = cliLabel(e);
                 return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">${rowIoHeat(e)}
