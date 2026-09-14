@@ -305,6 +305,26 @@
       .ay-info-head b {
         color: #ffd60a;
       }
+      /* "pair a machine" — mints a room and swaps the install rows for the
+         one-liners that join it. Sits inline at the end of the head row. */
+      .ay-info-pair {
+        float: right;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--text-dim);
+        border-radius: 6px;
+        padding: 5px 10px;
+        font: inherit;
+        font-size: 11px;
+        cursor: pointer;
+      }
+      .ay-info-pair:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .ay-info-rows {
+        display: contents;
+      }
       :root[data-theme="light"] .ay-info-head b {
         color: #c8860a;
       }

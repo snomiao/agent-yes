@@ -33,6 +33,7 @@ import { OrderedInputQueue, PredictiveEcho } from "./terminal-input";
 // scripts/build-rgui.ts. A .js module with no types → treated as any here.
 // @ts-ignore — sibling JS module, no .d.ts (bundled, not type-checked)
 import { RTCClient, parseRoomHash } from "../rtc.js";
+import { SIG_DEFAULT, mintPairing, type Pairing } from "./pairing";
 
 // ── /api/ls record shape (subset we use; see ts/globalPidIndex.ts + serve.ts) ──
 type AgentStatus = "active" | "idle" | "needs_input" | "stuck" | "exited";
@@ -1411,13 +1412,78 @@ function drawInfoCard(ctx: CanvasRenderingContext2D, rect: { width: number; heig
 // (canvas can't host either). Built once and handed to annotationNode as its
 // `el`; rgui glues it over the note-card frame and re-binds it across setGraph.
 let infoOverlayEl: HTMLElement | null = null;
+const escText = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
+// Attributes need `&` escaped too: a room link is full of `&s=`/`&sig=`, and
+// an unescaped `&` in an attribute is an entity reference waiting to happen.
+const escAttr = (s: string) => escText(s).replace(/"/g, "&quot;");
 function copyRow(label: string, cmd: string): string {
   return (
     `<div class="ay-info-row"><span class="ay-info-lbl">${label}</span>` +
-    `<code>${cmd.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</code>` +
-    `<button class="ay-info-copy" data-cmd="${cmd.replace(/"/g, "&quot;")}">copy</button></div>`
+    `<code>${escText(cmd)}</code>` +
+    `<button class="ay-info-copy" data-cmd="${escAttr(cmd)}">copy</button></div>`
   );
 }
+
+const INFO_TAG_DEFAULT = `Live <code>ay ls</code> + per-agent tail &amp; send. Backed by <code>ay serve</code>.`;
+
+// Pairing state for this page load. One pairing per load: each mint starts its
+// own reconnect loop, so re-minting on a click would leave the abandoned room
+// retrying forever in the background. "start over" reloads instead.
+let pairing: Pairing | null = null;
+let pairPoll: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * Attach a machine that doesn't have agent-yes yet.
+ *
+ * Mints a room here, shows the one-liner that installs and joins it, and opens
+ * the console's own wire to that room. addRtcWire already retries with
+ * backoff, so the empty room simply keeps trying until the machine shows up —
+ * no extra waiting machinery. The secret never leaves this page except inside
+ * the command the operator pastes.
+ */
+function startPairing(el: HTMLElement): void {
+  const tag = el.querySelector<HTMLElement>(".ay-info-tag");
+  const rows = el.querySelector<HTMLElement>(".ay-info-rows");
+  const btn = el.querySelector<HTMLElement>(".ay-info-pair");
+  if (!tag || !rows) return;
+
+  try {
+    pairing = mintPairing({ origin: location.origin });
+  } catch {
+    tag.textContent = "could not build a pairing command";
+    return;
+  }
+  const p = pairing;
+
+  rows.innerHTML = copyRow("join", p.sh) + copyRow("windows", p.ps);
+  tag.textContent = "Run this on the machine you want to add — waiting for it to join…";
+  if (btn) btn.textContent = "start over";
+
+  saveRoom(p.room, p.token, SIG_DEFAULT);
+  addRtcWire(p.room, p.token, SIG_DEFAULT);
+  // Leave a token-less #<room> behind so a reload reconnects from the cache —
+  // the same shape resolveRoom rewrites to, and via replaceState so it does not
+  // trip the reload-on-hashchange rule. Only when no room is already pinned;
+  // an explicit share link stays the page's primary room.
+  if (!roomInfo) {
+    history.replaceState(null, document.title, location.pathname + location.search + "#" + p.room);
+  }
+
+  if (pairPoll) clearInterval(pairPoll);
+  const started = Date.now();
+  pairPoll = setInterval(() => {
+    if (wires.get(p.room)?.connected) {
+      tag.textContent = `Paired ✓ — this machine is in the console as ${p.room}.`;
+      if (pairPoll) clearInterval(pairPoll);
+      pairPoll = null;
+    } else if (Date.now() - started > 15 * 60_000) {
+      tag.textContent = `No machine joined ${p.room} yet — the command is still valid.`;
+      if (pairPoll) clearInterval(pairPoll);
+      pairPoll = null;
+    }
+  }, 1000);
+}
+
 function ensureInfoOverlay(): HTMLElement {
   if (infoOverlayEl) return infoOverlayEl;
   const el = document.createElement("div");
@@ -1426,12 +1492,20 @@ function ensureInfoOverlay(): HTMLElement {
   el.style.width = `${INFO_W}px`;
   el.style.height = `${INFO_H}px`;
   el.innerHTML =
-    `<div class="ay-info-head"><b>agent-yes</b> · console</div>` +
-    `<div class="ay-info-tag">Live <code>ay ls</code> + per-agent tail &amp; send. Backed by <code>ay serve</code>.</div>` +
-    copyRow("install", SETUP_SH) +
-    copyRow("windows", SETUP_PS) +
+    `<div class="ay-info-head"><b>agent-yes</b> · console` +
+    `<button class="ay-info-pair">pair a machine</button></div>` +
+    `<div class="ay-info-tag">${INFO_TAG_DEFAULT}</div>` +
+    `<div class="ay-info-rows">${copyRow("install", SETUP_SH) + copyRow("windows", SETUP_PS)}</div>` +
     `<a class="ay-info-link" href="https://agent-yes.com" target="_blank" rel="noopener">agent-yes.com ↗</a>`;
   el.addEventListener("click", async (e) => {
+    const pair = (e.target as HTMLElement).closest<HTMLElement>(".ay-info-pair");
+    if (pair) {
+      e.stopPropagation();
+      if (pairing)
+        location.reload(); // "start over" — drop this load's room
+      else startPairing(el);
+      return;
+    }
     const btn = (e.target as HTMLElement).closest<HTMLElement>(".ay-info-copy");
     if (!btn) return;
     e.stopPropagation();
