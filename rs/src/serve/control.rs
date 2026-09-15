@@ -496,15 +496,12 @@ pub fn spawn(body: &str) -> super::api::ApiResponse {
             Err((code, msg)) => return bad(code, msg),
         }
     } else {
-        let plain = b
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if plain.is_empty() {
-            return bad(400, "missing cwd");
-        }
+        let requested = b.get("cwd").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let plain = if requested.is_empty() {
+            super::ws::spawn_workspace().to_string_lossy().into_owned()
+        } else {
+            requested.to_string()
+        };
         // mkdir -p so a not-yet-created workspace folder doesn't ENOENT the spawn.
         if let Err(e) = std::fs::create_dir_all(&plain) {
             return bad(400, format!("cannot create cwd {plain}: {e}"));
@@ -557,9 +554,8 @@ mod tests {
     }
 
     #[test]
-    fn spawn_rejects_unknown_cli_and_missing_cwd() {
+    fn spawn_rejects_unknown_cli() {
         assert_eq!(spawn(r#"{"cli":"nope","cwd":"/tmp"}"#).status, 400);
-        assert_eq!(spawn(r#"{"cli":"claude"}"#).status, 400);
     }
 
     #[test]
