@@ -17,8 +17,9 @@ pub use crate::supported_clis::SUPPORTED_CLIS;
 ///
 /// A detached daemon (launchd/systemd) has a PATH WITHOUT ~/.bun/bin and
 /// ~/.cargo/bin, so a bare "ay" fails with "Executable not found" — the exact
-/// error the console used to surface on restart. Prefer this process's own
-/// binary (always present, since the daemon IS agent-yes), then PATH.
+/// error the console used to surface on restart. Prefer the sibling wrapper,
+/// then the same recovered shell PATH used to launch children. Cache installs
+/// may contain only `ayrs`, so the sibling is not guaranteed to exist.
 fn ay_bin() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         // `ayrs` and `agent-yes` are installed side by side by `cargo install`.
@@ -33,14 +34,19 @@ fn ay_bin() -> Option<std::path::PathBuf> {
             }
         }
     }
-    which_in_path("ay").or_else(|| which_in_path("agent-yes"))
+    super::shell_env::login_shell_env()
+        .and_then(|env| env.get("PATH"))
+        .and_then(|path| ay_on_path(std::ffi::OsStr::new(path)))
+        .or_else(|| std::env::var_os("PATH").and_then(|path| ay_on_path(&path)))
 }
 
-fn which_in_path(name: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|d| d.join(name))
-        .find(|p| p.is_file())
+fn ay_on_path(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    ["ay", "agent-yes"].into_iter().find_map(|name| {
+        let name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+        std::env::split_paths(path)
+            .map(|d| d.join(&name))
+            .find(|p| p.is_file())
+    })
 }
 
 /// Launch a detached, fully orphaned child that outlives this request AND is
