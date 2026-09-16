@@ -278,6 +278,8 @@ pub fn kill(body: &str) -> super::api::ApiResponse {
         Ok(r) => r,
         Err(e) => return bad(404, e),
     };
+    // Only the unix block below pushes into it (Windows 501s above).
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut killed: Vec<String> = Vec::new();
     #[cfg(unix)]
     {

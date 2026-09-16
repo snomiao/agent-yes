@@ -105,8 +105,12 @@ describe("walkWorkspaces", () => {
     mkdirSync(path.join(root, "o/r/notes"), { recursive: true }); // no tree/ marker
     mkdirSync(path.join(root, ".hidden/x/tree/y"), { recursive: true });
     mkdirSync(path.join(root, "loop/r/tree"), { recursive: true });
-    // symlink cycle under tree/ must not hang or be reported
-    symlinkSync(path.join(root, "loop"), path.join(root, "loop/r/tree/self"));
+    // symlink cycle under tree/ must not hang or be reported. "junction" is a
+    // Windows-only hint (ignored elsewhere): a directory junction needs no
+    // Developer Mode / admin rights, unlike a real directory symlink (EPERM),
+    // and lstat still reports it as a symbolic link, which is what the walker
+    // keys on.
+    symlinkSync(path.join(root, "loop"), path.join(root, "loop/r/tree/self"), "junction");
     const found = await walkWorkspaces(root);
     expect(found.map((w) => `${w.owner}/${w.repo}@${w.branch}`)).toEqual(["o/r@main"]);
   });

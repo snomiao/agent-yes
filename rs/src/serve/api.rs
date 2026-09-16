@@ -915,6 +915,8 @@ fn spawn_ls_subscribe(all: bool, active: bool, keyword: String) -> mpsc::Receive
     rx
 }
 
+// `pid` only feeds the unix live-output subscription below.
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn spawn_tail(pid: u32, log_file: String, raw: bool) -> mpsc::Receiver<Vec<u8>> {
     let (tx, rx) = mpsc::channel::<Vec<u8>>(64);
     tokio::spawn(async move {
@@ -1264,6 +1266,8 @@ fn host_info() -> Value {
     let cpus = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(0);
+    // Only getloadavg (unix) writes into it; stays all-zero elsewhere.
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut loadavg = [0f64; 3];
     #[cfg(unix)]
     unsafe {

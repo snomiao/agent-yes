@@ -359,6 +359,10 @@ pub fn write_local_cap(pid: u32, cols: u16, rows: u16) {
 
 /// Remove this agent's `local` size cap (operator terminal gone / agent exiting),
 /// so negotiation stops counting it immediately instead of waiting for the TTL.
+/// Only the unix SIGWINCH/heartbeat path in context.rs calls it; the Windows
+/// poller never removes a cap, so without the cfg `-D warnings` flags it dead
+/// code on a Windows `cargo check`.
+#[cfg(unix)]
 pub fn remove_local_cap(pid: u32) {
     if let Some(dir) = crate::log_files::global_dir() {
         let _ = std::fs::remove_file(dir.join("caps").join(pid.to_string()).join("local"));
