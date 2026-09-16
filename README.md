@@ -144,6 +144,10 @@ ZAI_API_KEY=... glm-yes -- help me with this code
 # (https://github.com/earendil-works/pi)
 pi-yes -- refactor this module
 
+# Use Antigravity CLI (Google, Gemini-backed) — no *-yes bin, run it via ay
+# (https://antigravity.google/docs/cli/)
+ay agy -y -- refactor this module
+
 claude-yes "help me with this code"
 claude-yes "optimize performance"
 ```
@@ -376,6 +380,7 @@ For deploying to cloud platforms like Google Cloud Run, AWS, Azure, see [Cloud D
 | Qwen             | `qwen`       | Alibaba's Qwen Code CLI            | `npm install -g @qwen-code/qwen-code@latest`        |
 | Auggie           | `auggie`     | Augment Code's Auggie CLI          | `npm install -g @augmentcode-inc/auggie-cli@latest` |
 | DeepSeek Harness | `dsh-legacy` | DeepSeek Harness (interactive TUI) | `npm install -g @deepseek-ai/dsh@latest`            |
+| Antigravity      | `agy`        | Google Antigravity CLI (Gemini)    | See https://antigravity.google/docs/cli/install/    |
 
 The tool will:
 

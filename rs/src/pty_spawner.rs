@@ -81,11 +81,94 @@ fn resolve_program(binary: &str, path_env: Option<&str>) -> Result<String> {
     ))
 }
 
-/// Windows spawns through `cmd.exe /c`, which applies its own PATH/PATHEXT
-/// resolution — the cwd-shadowing bug above is unix-specific, so pass through.
+/// Windows: resolve a bare name through PATH + PATHEXT ourselves, so the spawn
+/// below can tell a native `.exe` from a `.cmd`/`.bat` shim.
+///
+/// The spawn used to route EVERY program through `cmd.exe /c` (which does the
+/// PATHEXT lookup for free), but cmd.exe re-parses the command line as a shell
+/// command and a newline ends it: `cmd /c agy -i "line one<LF>line two"` hands agy
+/// only `line one`. Every multi-line prompt was silently cut to its first line —
+/// including the `<ay-init-msg …>` envelope around a sub-agent's task, whose
+/// first line is the header, so a Windows sub-agent got its provenance tag and
+/// no task. A native exe launched directly gets the whole argument (the Win32
+/// command line is not shell-parsed, and CommandLineToArgv keeps a quoted
+/// newline), so this resolves the name and `spawn_agent` only falls back to
+/// cmd.exe for the `.cmd`/`.bat` shims that genuinely need a shell.
+///
+/// An unresolvable name is returned untouched rather than rejected: the spawn
+/// then goes through cmd.exe exactly as before, so a name only cmd.exe can run
+/// keeps working and the installer pre-flight stays the place a missing CLI is
+/// reported.
 #[cfg(not(unix))]
-fn resolve_program(binary: &str, _path_env: Option<&str>) -> Result<String> {
-    Ok(binary.to_string())
+fn resolve_program(binary: &str, path_env: Option<&str>) -> Result<String> {
+    Ok(
+        resolve_on_windows_path(binary, path_env, std::env::var("PATHEXT").ok().as_deref())
+            .unwrap_or_else(|| binary.to_string()),
+    )
+}
+
+/// PATH + PATHEXT lookup, split out from `resolve_program` so the PATH and
+/// PATHEXT inputs are injectable for tests. A name that already carries a
+/// separator is a path, not a lookup, and passes through. Within each PATH dir
+/// the exact name is tried first (for a name spelled with its extension), then
+/// name + each PATHEXT extension, in PATHEXT order — cmd.exe's own precedence.
+#[cfg(not(unix))]
+fn resolve_on_windows_path(
+    binary: &str,
+    path_env: Option<&str>,
+    pathext: Option<&str>,
+) -> Option<String> {
+    if binary.contains('/') || binary.contains('\\') {
+        return Some(binary.to_string());
+    }
+    let path = match path_env {
+        Some(p) => p.to_string(),
+        None => std::env::var("PATH").unwrap_or_default(),
+    };
+    let exts: Vec<&str> = pathext
+        .unwrap_or(".COM;.EXE;.BAT;.CMD")
+        .split(';')
+        .filter(|e| !e.is_empty())
+        .collect();
+    let has_ext = std::path::Path::new(binary).extension().is_some();
+    for dir in std::env::split_paths(&path) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let mut candidates = Vec::with_capacity(exts.len() + 1);
+        if has_ext {
+            candidates.push(dir.join(binary));
+        }
+        // PATHEXT is conventionally upper-case; the file system is case-insensitive,
+        // so spell the extension lower-case for a tidier resolved path.
+        candidates.extend(
+            exts.iter()
+                .map(|ext| dir.join(format!("{binary}{}", ext.to_ascii_lowercase()))),
+        );
+        for candidate in candidates {
+            if std::fs::metadata(&candidate)
+                .map(|m| m.is_file())
+                .unwrap_or(false)
+            {
+                return Some(candidate.to_string_lossy().into_owned());
+            }
+        }
+    }
+    None
+}
+
+/// Whether a resolved Windows program is a native executable that can be
+/// launched directly — as opposed to a `.cmd`/`.bat` shim (or an unresolved
+/// name) that needs `cmd.exe /c`. See `resolve_program` for why it matters.
+#[cfg(not(unix))]
+fn is_native_windows_exe(program: &str) -> bool {
+    std::path::Path::new(program)
+        .extension()
+        .map(|e| {
+            let e = e.to_string_lossy().to_ascii_lowercase();
+            e == "exe" || e == "com"
+        })
+        .unwrap_or(false)
 }
 
 /// Expand `${VAR}` references in `raw` against the current process environment.
@@ -515,9 +598,14 @@ pub async fn spawn_agent(
     let binary = binary.as_str();
 
     // Build command - inherits parent environment by default
-    // On Windows, use cmd.exe /c to resolve .cmd/.bat files via PATHEXT
+    // On Windows a native exe is launched directly so multi-line arguments
+    // survive; only a .cmd/.bat shim (or a name PATH+PATHEXT couldn't resolve)
+    // goes through cmd.exe /c, which needs the shell but cuts the command line
+    // at the first newline — see resolve_program.
     #[cfg(target_os = "windows")]
-    let mut cmd = {
+    let mut cmd = if is_native_windows_exe(binary) {
+        CommandBuilder::new(binary)
+    } else {
         let mut c = CommandBuilder::new("cmd.exe");
         c.arg("/c");
         c.arg(binary);
@@ -771,6 +859,59 @@ mod tests {
         // Missing binaries produce a real error instead of a doomed spawn.
         let err = resolve_program("ay-does-not-exist", Some(&path)).unwrap_err();
         assert!(err.to_string().contains("command not found"));
+
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    // Windows: a native exe must resolve to its full path (so spawn_agent can
+    // launch it WITHOUT cmd.exe and a multi-line prompt survives), a .cmd shim
+    // must still be recognised as one, and PATHEXT order must decide a tie.
+    #[cfg(windows)]
+    #[test]
+    fn test_resolve_program_windows_pathext() {
+        let tmp = std::env::temp_dir().join(format!("ay-resolve-{}", std::process::id()));
+        let bin_dir = tmp.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let exe = bin_dir.join("ayfake.exe");
+        let cmd = bin_dir.join("ayshim.cmd");
+        let both_exe = bin_dir.join("ayboth.exe");
+        let both_cmd = bin_dir.join("ayboth.cmd");
+        for f in [&exe, &cmd, &both_exe, &both_cmd] {
+            std::fs::write(f, "").unwrap();
+        }
+        // A directory named like the CLI must not be mistaken for the program.
+        std::fs::create_dir_all(bin_dir.join("aydir.exe")).unwrap();
+        let path = bin_dir.to_string_lossy().into_owned();
+        let pathext = Some(".COM;.EXE;.BAT;.CMD");
+
+        let r = resolve_on_windows_path("ayfake", Some(&path), pathext).unwrap();
+        assert_eq!(r, exe.to_string_lossy());
+        assert!(is_native_windows_exe(&r));
+
+        let r = resolve_on_windows_path("ayshim", Some(&path), pathext).unwrap();
+        assert_eq!(r, cmd.to_string_lossy());
+        assert!(!is_native_windows_exe(&r));
+
+        // PATHEXT order: .EXE before .CMD.
+        let r = resolve_on_windows_path("ayboth", Some(&path), pathext).unwrap();
+        assert_eq!(r, both_exe.to_string_lossy());
+        // A name spelled with its extension is taken as-is.
+        let r = resolve_on_windows_path("ayboth.cmd", Some(&path), pathext).unwrap();
+        assert_eq!(r, both_cmd.to_string_lossy());
+
+        assert!(resolve_on_windows_path("aydir", Some(&path), pathext).is_none());
+        // Unresolvable: resolve_program passes the name through so the spawn
+        // falls back to cmd.exe (which does NOT count as a native exe).
+        assert_eq!(
+            resolve_program("ay-does-not-exist", Some(&path)).unwrap(),
+            "ay-does-not-exist"
+        );
+        assert!(!is_native_windows_exe("ay-does-not-exist"));
+        // A name with a separator is a path, not a lookup.
+        assert_eq!(
+            resolve_on_windows_path(r"C:\x\ayfake.exe", Some(&path), pathext).unwrap(),
+            r"C:\x\ayfake.exe"
+        );
 
         std::fs::remove_dir_all(&tmp).ok();
     }

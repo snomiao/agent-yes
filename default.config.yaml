@@ -316,6 +316,61 @@ clis:
       - /quit
     defaultArgs: []
 
+  # Antigravity CLI (`agy`) — Google's Gemini-backed terminal coding agent
+  # (https://antigravity.google/docs/cli/). Its TUI is claude-shaped: a `>`
+  # input box between two rules, `? for shortcuts` in the footer while parked at
+  # the prompt, `esc to cancel` while generating, a first-launch "Do you trust
+  # the contents of this project?" dialog with the cursor `>` already on "Yes",
+  # and numbered tool-permission menus with the cursor on "1. Yes, run command".
+  # All markers below were read off agy 1.2.4's PTY output.
+  agy:
+    binary: agy
+    # A bare positional is NOT a prompt and `--prompt` is print mode (runs once,
+    # non-interactive); `-i` (--prompt-interactive) runs the prompt and then
+    # stays in the session, which is what an `ay send`-able agent needs.
+    promptArg: -i
+    # agy's PTY output carries ESC[?2004h, so `ay send` can deliver one framed
+    # paste instead of a keystroke burst.
+    bracketedPaste: true
+    yesArgs:
+      - --dangerously-skip-permissions
+    help: https://antigravity.google/docs/cli/
+    install:
+      powershell: 'powershell -Command "irm https://antigravity.google/cli/install.ps1 | iex"'
+      bash: "curl -fsSL https://antigravity.google/cli/install.sh | bash"
+      windows: "winget install Google.AntigravityCLI"
+    ready:
+      - '\? for shortcuts'
+      - "^>[  ]"
+      - "──────────+"
+    working:
+      - esc to cancel
+      - 'Generating\.\.\.'
+      - 'Running command\.\.\.'
+    wedgeTimeoutSecs: 1800
+    # A permission/selection menu the `enter` list below did NOT auto-resolve —
+    # the cursor `>` sits on a numbered option other than the auto-accepted "1.".
+    needsInput:
+      - pattern: '^ {0,4}> ?\d+\.'
+        flags: m
+    enter:
+      # First-launch trust dialog; cursor starts on "Yes, I trust this folder".
+      - pattern: '^ {0,4}> ?Yes, I trust this folder'
+        flags: m
+      # Tool permission menu ("1. Yes, run command" / "1. Yes, ..."); the
+      # cursor starts on option 1.
+      - pattern: '^ {0,4}> ?1\. ?Yes'
+        flags: m
+      - pattern: Press Enter to continue
+        flags: m
+    fatal:
+      - "^flag provided but not defined"
+    restoreArgs:
+      - --continue
+    exitCommands:
+      - /exit
+    defaultArgs: []
+
   codex:
     promptArg: first-arg
     # Verified the same way as claude's — codex's PTY log carries ESC[?2004h,

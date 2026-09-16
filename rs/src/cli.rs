@@ -757,10 +757,10 @@ mod tests {
 
     #[test]
     fn test_supported_clis_count() {
-        assert_eq!(SUPPORTED_CLIS.len(), 19);
+        assert_eq!(SUPPORTED_CLIS.len(), 20);
         // The claude-compatible providers (run the `claude` binary via env) must
         // be present, else their `*-yes` bins fail validation in the Rust runtime.
-        for cli in ["glm", "pi"] {
+        for cli in ["glm", "pi", "agy"] {
             assert!(SUPPORTED_CLIS.contains(&cli), "missing {cli}");
         }
         // Each listed CLI must resolve to a real config (catches a name in this
