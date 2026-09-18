@@ -39,6 +39,20 @@ const SIG_REFRESH_MS: u64 = 4 * 60_000;
 const PEER_OP_TIMEOUT_MS: u64 = 30_000;
 /// Ceiling on tearing one peer down, for the same reason.
 const PEER_CLOSE_TIMEOUT_MS: u64 = 10_000;
+/// How long a peer may sit between `peer-join` and key-confirmed before it is
+/// torn down. This is the leak the two timeouts above do NOT cover: a browser
+/// that closes its tab mid-handshake, or vanishes across the 4-minute signaling
+/// refresh so no `peer-leave` ever arrives, leaves a peer whose every webrtc-rs
+/// call has returned promptly — and whose task then waits in `rx.recv()` for a
+/// command that never comes. Its RTCPeerConnection never leaves `New`, so the
+/// Failed/Disconnected callback never fires, and `Mailboxes` deliberately
+/// outlives signaling sessions, so nothing prunes it. Each such peer keeps its
+/// ICE UDP sockets for the life of the process. Measured on one host: 501
+/// `peer-join` against 234 `key-confirmed` over the log's lifetime, and a
+/// launchd-supervised `ayrs serve` that ran out of file descriptors (256 soft)
+/// after ~a day, at which point even DNS lookups failed and the share was dead.
+/// A real handshake completes in a few seconds; this is a crash barrier.
+const PEER_SETUP_DEADLINE_MS: u64 = 60_000;
 const STUN_URL: &str = "stun:stun.l.google.com:19302";
 const MAX_ROTATES: u32 = 5;
 /// How long to wait between re-checks while parked behind a live room holder.
@@ -938,6 +952,108 @@ mod dispatch_tests {
         .await;
         assert_eq!(mailboxes.lock().await.len(), 1);
     }
+
+    /// A peer whose handshake never completes must not live forever. This is
+    /// the browser that closed its tab between `peer-join` and its answer, or
+    /// that vanished across a signaling refresh so no `peer-leave` ever came:
+    /// no command fails, no state-change callback fires, and before the
+    /// deadline the task simply waited in `rx.recv()` holding its ICE sockets.
+    #[tokio::test]
+    async fn an_unconfirmed_peer_is_torn_down_at_the_setup_deadline() {
+        let peers = empty_peers();
+        let mailboxes: Mailboxes = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        mailboxes
+            .lock()
+            .await
+            .insert("ghost".to_string(), tx.clone());
+        let (sig_tx, _sig_rx) = mpsc::unbounded_channel();
+        spawn_peer_task_with_deadline(
+            "ghost".to_string(),
+            rx,
+            peers,
+            mailboxes.clone(),
+            "secret".to_string(),
+            "token".to_string(),
+            sig_tx,
+            Arc::new(Scope::Full),
+            Duration::from_millis(50),
+        );
+        // `tx` is deliberately kept alive: the mailbox must be removed by the
+        // deadline, not by the channel closing.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !mailboxes.lock().await.is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "unconfirmed peer was not torn down at its setup deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        drop(tx);
+    }
+
+    /// The control: the deadline is a check, not a kill switch. A peer that
+    /// HAS confirmed by the time it fires keeps its task and its mailbox.
+    #[tokio::test]
+    async fn a_confirmed_peer_survives_the_setup_deadline() {
+        let peers = empty_peers();
+        let mailboxes: Mailboxes = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        mailboxes
+            .lock()
+            .await
+            .insert("live".to_string(), tx.clone());
+        let (sig_tx, _sig_rx) = mpsc::unbounded_channel();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let pc = APIBuilder::new()
+            .build()
+            .new_peer_connection(RTCConfiguration::default())
+            .await
+            .expect("offline RTCPeerConnection");
+        peers.lock().await.insert(
+            "live".to_string(),
+            Peer {
+                pc: Arc::new(pc),
+                out_tx,
+                offer_sdp: String::new(),
+                reqs: HashMap::new(),
+                crypto: None,
+                recv: e2e::RecvState { last_seen: None },
+                my_nonce: String::new(),
+                confirmed_in: true,
+                confirmed_out: true,
+                confirmed: true,
+            },
+        );
+        spawn_peer_task_with_deadline(
+            "live".to_string(),
+            rx,
+            peers.clone(),
+            mailboxes.clone(),
+            "secret".to_string(),
+            "token".to_string(),
+            sig_tx,
+            Arc::new(Scope::Full),
+            Duration::from_millis(50),
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            mailboxes.lock().await.len(),
+            1,
+            "confirmed peer was torn down"
+        );
+        // Ending the channel is what tears it down, as before.
+        drop(tx);
+        mailboxes.lock().await.clear();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while peers.lock().await.contains_key("live") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "peer not closed after leave"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
 }
 
 /// One peer's serialized worker. Commands are processed strictly in arrival
@@ -947,7 +1063,7 @@ mod dispatch_tests {
 #[allow(clippy::too_many_arguments)]
 fn spawn_peer_task(
     peer_id: String,
-    mut rx: mpsc::UnboundedReceiver<PeerCmd>,
+    rx: mpsc::UnboundedReceiver<PeerCmd>,
     peers: Peers,
     mailboxes: Mailboxes,
     secret: String,
@@ -955,8 +1071,65 @@ fn spawn_peer_task(
     sig_tx: mpsc::UnboundedSender<SigOut>,
     scope: Arc<Scope>,
 ) {
+    spawn_peer_task_with_deadline(
+        peer_id,
+        rx,
+        peers,
+        mailboxes,
+        secret,
+        api_token,
+        sig_tx,
+        scope,
+        Duration::from_millis(PEER_SETUP_DEADLINE_MS),
+    );
+}
+
+/// `spawn_peer_task` with the setup deadline injectable, so a test can watch a
+/// peer that never completes its handshake get torn down without waiting a
+/// minute for it.
+#[allow(clippy::too_many_arguments)]
+fn spawn_peer_task_with_deadline(
+    peer_id: String,
+    mut rx: mpsc::UnboundedReceiver<PeerCmd>,
+    peers: Peers,
+    mailboxes: Mailboxes,
+    secret: String,
+    api_token: String,
+    sig_tx: mpsc::UnboundedSender<SigOut>,
+    scope: Arc<Scope>,
+    setup_deadline: Duration,
+) {
     tokio::spawn(async move {
-        while let Some(cmd) = rx.recv().await {
+        // Armed from the moment the peer joins; checked, not tracked — when it
+        // fires, a peer that has key-confirmed is left alone and the timer is
+        // disarmed, anything else is torn down. See PEER_SETUP_DEADLINE_MS.
+        let deadline = tokio::time::sleep(setup_deadline);
+        tokio::pin!(deadline);
+        let mut deadline_armed = true;
+        loop {
+            let cmd = tokio::select! {
+                cmd = rx.recv() => match cmd {
+                    Some(cmd) => cmd,
+                    None => break, // peer-leave / connection died
+                },
+                _ = &mut deadline, if deadline_armed => {
+                    deadline_armed = false;
+                    let confirmed = peers
+                        .lock()
+                        .await
+                        .get(&peer_id)
+                        .map(|p| p.confirmed)
+                        .unwrap_or(false);
+                    if confirmed {
+                        continue;
+                    }
+                    eprintln!(
+                        "[ayrs share] peer {peer_id} never completed its handshake within {}ms — closing it",
+                        setup_deadline.as_millis()
+                    );
+                    break;
+                }
+            };
             // Every webrtc-rs call gets a ceiling: a stuck one must kill its own
             // peer, not linger holding sockets and a task forever.
             let timeout = Duration::from_millis(PEER_OP_TIMEOUT_MS);
@@ -1008,7 +1181,8 @@ fn spawn_peer_task(
                 break;
             }
         }
-        // Channel closed (peer-leave / connection died) or a command failed.
+        // Channel closed (peer-leave / connection died), a command failed, or
+        // the setup deadline passed without a confirmed handshake.
         close_peer(&peers, &peer_id).await;
         mailboxes.lock().await.remove(&peer_id);
     });
