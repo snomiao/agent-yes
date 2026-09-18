@@ -540,7 +540,11 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
                 tokio::time::sleep(Duration::from_millis(1000)).await;
             }
             Err(e) => {
-                eprintln!("[ayrs share] signaling error: {e:#}");
+                // The held-peer count is the gauge for the fd leak this loop
+                // is most likely to be reporting: a `getaddrinfo` failure with
+                // DNS otherwise fine means the process is out of descriptors.
+                let held = peers.lock().await.len();
+                eprintln!("[ayrs share] signaling error: {e:#} ({held} peers held)");
                 tokio::time::sleep(Duration::from_millis(2000)).await;
             }
         }
@@ -1054,6 +1058,65 @@ mod dispatch_tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
+
+    /// `start_peer` now registers the connection before it builds the offer, so
+    /// a setup that stalls is still reachable by `close_peer`. The normal path
+    /// must be unchanged by that: the registered peer ends up holding the offer
+    /// it sent, and exactly one offer goes out on signaling.
+    #[tokio::test]
+    async fn a_started_peer_is_registered_with_the_offer_it_sent() {
+        let peers = empty_peers();
+        let mailboxes: Mailboxes = Arc::new(Mutex::new(HashMap::new()));
+        let (sig_tx, mut sig_rx) = mpsc::unbounded_channel();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            start_peer(
+                "fresh".to_string(),
+                "token",
+                &peers,
+                &mailboxes,
+                &sig_tx,
+                Arc::new(Scope::Full),
+            ),
+        )
+        .await
+        .expect("start_peer stalled")
+        .expect("offline start_peer");
+
+        // Trickle-ICE candidates share this channel and may land before the
+        // offer, so look at everything that went out, not just the first frame.
+        let mut offers = Vec::new();
+        while let Ok(SigOut::Send(text)) = sig_rx.try_recv() {
+            let m: Value = serde_json::from_str(&text).unwrap();
+            if m["type"] == "offer" {
+                offers.push(m);
+            }
+        }
+        assert_eq!(
+            offers.len(),
+            1,
+            "expected exactly one offer, got {offers:?}"
+        );
+        assert_eq!(offers[0]["to"], "fresh");
+        let offer_sdp = offers[0]["sdp"].as_str().unwrap_or("").to_string();
+        assert!(
+            offer_sdp.contains("v=0"),
+            "offer is not an SDP: {offer_sdp:?}"
+        );
+
+        {
+            let map = peers.lock().await;
+            let p = map.get("fresh").expect("peer not registered");
+            assert_eq!(
+                p.offer_sdp, offer_sdp,
+                "registered peer holds a different offer"
+            );
+            assert!(!p.confirmed);
+        }
+        // And it is closable through the ordinary path.
+        close_peer(&peers, "fresh").await;
+        assert!(!peers.lock().await.contains_key("fresh"));
+    }
 }
 
 /// One peer's serialized worker. Commands are processed strictly in arrival
@@ -1211,12 +1274,26 @@ async fn close_peer(peers: &Peers, peer_id: &str) {
         for (_, h) in p.reqs {
             h.abort();
         }
-        // Bounded: a wedged close must not strand this task either.
-        if tokio::time::timeout(Duration::from_millis(PEER_CLOSE_TIMEOUT_MS), p.pc.close())
+        // Bounded wait, but the close itself is detached. Dropping a slow
+        // `close()` future mid-way used to be how a wedged close was handled —
+        // and it freed nothing: webrtc-rs's internal tasks hold their own Arcs
+        // to the connection, so an abandoned RTCPeerConnection kept its ICE UDP
+        // sockets for the life of the process. Let the close run to completion
+        // on its own task; only this caller stops waiting for it.
+        let pc = p.pc;
+        let id = peer_id.to_string();
+        let close = tokio::spawn(async move {
+            if let Err(e) = pc.close().await {
+                eprintln!("[ayrs share] peer {id} close failed: {e}");
+            }
+        });
+        if tokio::time::timeout(Duration::from_millis(PEER_CLOSE_TIMEOUT_MS), close)
             .await
             .is_err()
         {
-            eprintln!("[ayrs share] peer {peer_id} close timed out — abandoning it");
+            eprintln!(
+                "[ayrs share] peer {peer_id} close still running after {PEER_CLOSE_TIMEOUT_MS}ms — left to finish in the background"
+            );
         }
     }
 }
@@ -1238,6 +1315,33 @@ async fn start_peer(
         ..Default::default()
     };
     let pc = Arc::new(api.new_peer_connection(config).await?);
+
+    // sealed-frame sender task input: (flags, envelope) → seal in order → dc.send
+    let (out_tx, out_rx) = mpsc::unbounded_channel::<(u8, Value)>();
+
+    // Register the connection BEFORE any further webrtc-rs await. The caller
+    // bounds this whole function with PEER_OP_TIMEOUT and tears the peer down
+    // via `close_peer` afterwards — which can only close what it finds in
+    // `peers`. With the insert at the end (after create_offer /
+    // set_local_description), a setup that timed out or errored part-way had
+    // already bound its ICE sockets but was never registered, so nothing ever
+    // closed it. `offer_sdp` is filled in once the offer exists; nothing reads
+    // it before the browser's answer, which can only follow the offer.
+    peers.lock().await.insert(
+        peer_id.clone(),
+        Peer {
+            pc: pc.clone(),
+            out_tx,
+            offer_sdp: String::new(),
+            reqs: HashMap::new(),
+            crypto: None,
+            recv: e2e::RecvState { last_seen: None },
+            my_nonce: e2e::random_hex(16),
+            confirmed_in: false,
+            confirmed_out: false,
+            confirmed: false,
+        },
+    );
 
     // trickle ICE → signaling writer
     {
@@ -1287,8 +1391,7 @@ async fn start_peer(
 
     let dc = pc.create_data_channel("api", None).await?;
 
-    // sealed-frame sender task: (flags, envelope) → seal in order → dc.send
-    let (out_tx, out_rx) = mpsc::unbounded_channel::<(u8, Value)>();
+    // sealed-frame sender task (its input channel was created with the peer)
     spawn_sender(
         dc.clone(),
         out_rx,
@@ -1364,21 +1467,12 @@ async fn start_peer(
     let offer_sdp = offer.sdp.clone();
     pc.set_local_description(offer).await?;
 
-    peers.lock().await.insert(
-        peer_id.clone(),
-        Peer {
-            pc: pc.clone(),
-            out_tx,
-            offer_sdp: offer_sdp.clone(),
-            reqs: HashMap::new(),
-            crypto: None,
-            recv: e2e::RecvState { last_seen: None },
-            my_nonce: e2e::random_hex(16),
-            confirmed_in: false,
-            confirmed_out: false,
-            confirmed: false,
-        },
-    );
+    // The peer was torn down while we were setting up (leave / deadline).
+    // Don't send an offer for a connection that is already being closed.
+    match peers.lock().await.get_mut(&peer_id) {
+        Some(p) => p.offer_sdp = offer_sdp.clone(),
+        None => return Ok(()),
+    }
 
     let ice_servers = json!([{ "urls": STUN_URL }]);
     let _ = sig_tx.send(SigOut::Send(
@@ -1391,6 +1485,9 @@ async fn on_answer(peer_id: &str, sdp: String, secret: &str, peers: &Peers) -> R
     let (pc, offer_sdp) = {
         let map = peers.lock().await;
         let p = map.get(peer_id).ok_or_else(|| anyhow!("unknown peer"))?;
+        if p.offer_sdp.is_empty() {
+            bail!("answer arrived before the offer was sent");
+        }
         (p.pc.clone(), p.offer_sdp.clone())
     };
     let answer = RTCSessionDescription::answer(sdp.clone())?;
