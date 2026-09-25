@@ -633,13 +633,15 @@ impl AgentContext {
         let mut force_ready_sent = false;
         let exit_code: i32;
 
-        // Set terminal to raw mode for proper signal handling
-        let _raw_mode = terminal::enable_raw_mode();
-        // Windows: also enable VT input so keys arrive as VT bytes (Backspace =
+        // Save the original Windows mode BEFORE crossterm changes it. Saving
+        // after enable_raw_mode would restore LINE/ECHO/PROCESSED as disabled.
+        // Windows: enable VT input so keys arrive as VT bytes (Backspace =
         // 0x7f, not 0x08 — which ConPTY would hand to the child as
         // Ctrl+Backspace = delete-word, #349). See enable_vt_input.
         #[cfg(windows)]
         let saved_console_in_mode = crate::pty_spawner::enable_vt_input();
+        // Set terminal to raw mode for proper signal handling.
+        let _raw_mode = terminal::enable_raw_mode();
 
         // Watch channel for terminal resize events (SIGWINCH → child PTY).
         // watch semantics: sender never blocks, receiver always sees the latest value.

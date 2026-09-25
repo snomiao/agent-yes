@@ -722,6 +722,8 @@ pub async fn spawn_agent(
     thread::spawn(move || {
         let mut buf = [0u8; 8192]; // 8KB buffer like bun-pty
         let mut partial = Vec::new(); // Buffer for incomplete UTF-8 sequences
+        #[cfg(windows)]
+        let mut mode_filter = crate::conpty_mode_filter::ConptyModeFilter::default();
         loop {
             match reader.read(&mut buf) {
                 Ok(0) => break, // EOF
@@ -739,7 +741,11 @@ pub async fn spawn_agent(
                     let (valid, leftover) = extract_valid_utf8(bytes);
 
                     if !valid.is_empty() {
-                        if output_tx.send(valid.to_string()).is_err() {
+                        #[cfg(windows)]
+                        let output = mode_filter.feed(valid);
+                        #[cfg(not(windows))]
+                        let output = valid.to_string();
+                        if !output.is_empty() && output_tx.send(output).is_err() {
                             break; // Channel closed
                         }
                     }
@@ -751,6 +757,13 @@ pub async fn spawn_agent(
                     debug!("PTY read error: {}", e);
                     break;
                 }
+            }
+        }
+        #[cfg(windows)]
+        {
+            let tail = mode_filter.finish();
+            if !tail.is_empty() {
+                let _ = output_tx.send(tail);
             }
         }
     });
