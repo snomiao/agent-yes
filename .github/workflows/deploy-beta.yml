@@ -55,3 +55,9 @@ jobs:
         run: >
           npx --yes wrangler@4 pages deploy ./public
           --project-name agent-yes --branch beta --commit-dirty=true
+      # `wrangler ... exit 0` is not evidence the new bytes are live. Ask the
+      # origin what it is actually running — the same assertion prod runs, and
+      # the one promote-release.yml consults before shipping this commit on.
+      - name: Assert beta serves this commit
+        working-directory: lab/ui/cf
+        run: sh ./assert-deployed.sh https://beta.agent-yes.pages.dev "${{ github.sha }}"
