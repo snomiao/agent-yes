@@ -8,6 +8,11 @@ name: Promote main → release (1h soak)
 # deploy-agent-yes.yml (prod Worker deploy), path-filtered so ts/-only batches
 # move the branch without redeploying the site.
 #
+# The train also self-gates: it refuses to promote while beta is serving a
+# commit older than the batch's last UI change (i.e. a beta deploy failed), and
+# both deploys now assert the origin really serves what they shipped. See
+# lab/ui/cf/assert-deployed.sh.
+#
 # Stop the train:  gh variable set HOLD_PROD --body 1     (resume: --body 0)
 # Roll prod back:  git push origin <good-sha>:release --force
 #                  (this workflow only fast-forwards, so the reset holds until
@@ -64,6 +69,36 @@ jobs:
             echo "release ($CURRENT) is not behind target ($TARGET) — manual state, skipping."
             exit 0
           fi
+          # --- gate: beta must not be BEHIND what we are about to ship -----
+          # Everything here is already CI-gated pre-merge, so the risk this
+          # catches is not "bad code" — it is "the beta deploy for this UI
+          # never actually landed", which no diff review can see (see
+          # assert-deployed.sh for the two incidents).
+          #
+          # Compare against the newest SITE-touching commit up to TARGET, not
+          # TARGET itself: beta only redeploys on site paths and tracks main's
+          # tip, so on a ts/-only batch it legitimately serves an older commit,
+          # and on a busy hour a newer one. Both are fine — "at or ahead of the
+          # last UI commit" is the invariant that means beta deploys are
+          # landing. Only strictly-behind means one failed.
+          LAST_UI=$(git rev-list -1 "$TARGET" -- lab/ui scripts/build-rgui.ts || true)
+          BETA=$(sh lab/ui/cf/live-build.sh https://beta.agent-yes.pages.dev || true)
+          if [ -z "$LAST_UI" ]; then
+            echo "No site-touching commit in history — nothing for beta to have deployed."
+          elif [ -z "$BETA" ] || ! git rev-parse -q --verify "$BETA^{commit}" >/dev/null; then
+            # FAIL-SAFE, deliberately. A silent stall is the failure mode this
+            # whole design exists to avoid, and an unreachable/unknown beta is
+            # not evidence prod would break — prod has its own post-deploy
+            # assertion now. Say so loudly and keep the train moving.
+            echo "::warning::Could not read beta's build stamp (got '${BETA:-<none>}') — promoting anyway."
+          elif git merge-base --is-ancestor "$LAST_UI" "$BETA"; then
+            echo "beta is at or ahead of $(git rev-parse --short "$LAST_UI") — ok to promote."
+          else
+            echo "::error::beta serves $BETA, which is BEHIND the last UI commit $(git rev-parse --short "$LAST_UI")."
+            echo "Its deploy failed or never ran, so this batch has not been exercised anywhere. Holding."
+            exit 1
+          fi
+
           echo "Promoting release: ${CURRENT:-<new>} → $TARGET"
           git push origin "$TARGET:refs/heads/release"
           # The push above cannot be relied on to trigger the deploy workflow
