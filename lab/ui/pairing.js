@@ -1,10 +1,18 @@
-// "Pair a machine": mint a room the console waits in, and render the install
+// "Pair a machine": mint a room a console can watch, and render the install
 // one-liners that attach a machine to it.
+//
+// ONE implementation, shared by every page that offers pairing so they can
+// never diverge (the same rule e2e.js follows):
+//   - the landing page (lab/ui/landing.html) imports it over HTTP as
+//     /w/pairing.js — build-assets.sh copies lab/ui/*.js into public/w/
+//   - the rgui console (lab/ui/rgui/main.ts) imports it as ../pairing.js and
+//     bundles it via scripts/build-rgui.ts
+//   - the test suite (tests/ui-logic/pairing.spec.ts) imports it directly
 //
 // This INVERTS the usual direction. Normally the host mints the room — `ay
 // serve --webrtc` with a bare flag makes room+secret and prints a link you
 // carry to the console (ts/share.ts). That needs agent-yes already installed,
-// so it can't be the first thing a new machine does. Here the console mints
+// so it can't be the first thing a new machine does. Here the browser mints
 // first, so a machine with nothing on it is attached by pasting one command.
 //
 // The crypto is unchanged: same room/secret shape as ts/share.ts (`r`+12 hex,
@@ -18,24 +26,27 @@ export const MARKER = "e1.";
 /** Default signaling host — mirrors SIG_DEFAULT in lab/ui/rtc.js. */
 export const SIG_DEFAULT = "s.agent-yes.com";
 
-export interface Pairing {
-  /** Room id — a non-secret mnemonic (`r` + 12 hex). */
-  room: string;
-  /** `e1.<64hex>` — what the console's RTC wire authenticates with. */
-  token: string;
-  /** The room link carrying S in its fragment. */
-  link: string;
-  /** POSIX one-liner (sh/bash/zsh). */
-  sh: string;
-  /** PowerShell one-liner. */
-  ps: string;
-}
+/**
+ * @typedef {object} Pairing
+ * @property {string} room  Room id — a non-secret mnemonic (`r` + 12 hex).
+ * @property {string} token `e1.<64hex>` — what a console's RTC wire authenticates with.
+ * @property {string} link  The room link carrying S in its fragment.
+ * @property {string} sh    POSIX one-liner (sh/bash/zsh).
+ * @property {string} ps    PowerShell one-liner.
+ * @property {string} consoleUrl  Console deep link that connects to this room.
+ */
 
-type RandomFill = (buf: Uint8Array) => void;
+/** @typedef {(buf: Uint8Array) => void} RandomFill */
 
-const defaultRandom: RandomFill = (buf) => globalThis.crypto.getRandomValues(buf);
+/** @type {RandomFill} */
+const defaultRandom = (buf) => globalThis.crypto.getRandomValues(buf);
 
-function hex(bytes: number, rand: RandomFill): string {
+/**
+ * @param {number} bytes
+ * @param {RandomFill} rand
+ * @returns {string}
+ */
+function hex(bytes, rand) {
   const buf = new Uint8Array(bytes);
   rand(buf);
   let out = "";
@@ -54,11 +65,13 @@ function hex(bytes: number, rand: RandomFill): string {
  * throws rather than escapes: reaching it means the shape changed upstream and
  * the caller should stop, not paper over it. room.html makes the same check on
  * the links it is handed.
+ *
+ * @param {string} link
+ * @returns {string}
  */
-export function assertShellSafe(link: string): string {
+export function assertShellSafe(link) {
   // Quote/backslash/whitespace, plus C0 and DEL — a control byte in a pasted
   // command is never legitimate here.
-  // eslint-disable-next-line no-control-regex
   if (/['"\\\s]|[\u0000-\u001f\u007f]/.test(link)) throw new Error("unsafe room link");
   return link;
 }
@@ -79,11 +92,11 @@ export function assertShellSafe(link: string): string {
  * empty string, since it isn't set yet — and the inner shell receives
  * `='https://…'; irm …`, a syntax error. Emitting the native form means it
  * works when pasted where a Windows user actually pastes it.
+ *
+ * @param {{origin: string, link: string}} opts
+ * @returns {{sh: string, ps: string}}
  */
-export function pairingCommands(opts: { origin: string; link: string }): {
-  sh: string;
-  ps: string;
-} {
+export function pairingCommands(opts) {
   const link = assertShellSafe(opts.link);
   const origin = opts.origin.replace(/\/+$/, "");
   return {
@@ -93,15 +106,36 @@ export function pairingCommands(opts: { origin: string; link: string }): {
 }
 
 /**
- * Mint a fresh single-machine room and the commands that join it.
+ * The console deep link for a pairing — where the operator goes to watch the
+ * machine arrive and then drive it.
  *
- * One pairing is one machine: a share room has a single host, so a second
- * paste displaces the first. `AY_FLEET` is the reusable-token shape for the
- * many-machines case (see setup.sh).
+ * Uses the positional `#<room>:<token>[@<sighost>]` form that /w/ has always
+ * read (parseRoomHash in rtc.js), which is also what room.html hands out. Like
+ * every other carrier of S this is a FRAGMENT, so the secret is never sent to
+ * the server that serves the console.
+ *
+ * @param {{origin: string, room: string, token: string, sigHost?: string}} opts
+ * @returns {string}
  */
-export function mintPairing(
-  opts: { origin: string; sigHost?: string; rand?: RandomFill } = { origin: "" },
-): Pairing {
+export function consoleUrlFor(opts) {
+  const origin = opts.origin.replace(/\/+$/, "");
+  const sig = opts.sigHost && opts.sigHost !== SIG_DEFAULT ? "@" + opts.sigHost : "";
+  return (
+    `${origin}/w/#` + encodeURIComponent(opts.room) + ":" + encodeURIComponent(opts.token) + sig
+  );
+}
+
+/**
+ * Mint a fresh single-machine room and everything needed to join and watch it.
+ *
+ * One pairing is one machine: a star room has a single host, so a second paste
+ * displaces the first. `AY_FLEET` is the reusable-token shape for the
+ * many-machines case (see setup.sh).
+ *
+ * @param {{origin: string, sigHost?: string, rand?: RandomFill}} opts
+ * @returns {Pairing}
+ */
+export function mintPairing(opts = { origin: "" }) {
   const rand = opts.rand ?? defaultRandom;
   const origin = opts.origin.replace(/\/+$/, "");
   const sigHost = opts.sigHost && opts.sigHost !== SIG_DEFAULT ? opts.sigHost : "";
@@ -112,5 +146,12 @@ export function mintPairing(
     `${origin}/room/#room=${encodeURIComponent(room)}&s=${encodeURIComponent(token)}` +
     (sigHost ? `&sig=${encodeURIComponent(sigHost)}` : "");
   const { sh, ps } = pairingCommands({ origin, link });
-  return { room, token, link, sh, ps };
+  return {
+    room,
+    token,
+    link,
+    sh,
+    ps,
+    consoleUrl: consoleUrlFor({ origin, room, token, sigHost }),
+  };
 }

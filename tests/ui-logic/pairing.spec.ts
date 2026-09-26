@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { MARKER, assertShellSafe, mintPairing, pairingCommands } from "../../lab/ui/rgui/pairing";
+import {
+  MARKER,
+  assertShellSafe,
+  consoleUrlFor,
+  mintPairing,
+  pairingCommands,
+} from "../../lab/ui/pairing.js";
 
 const ORIGIN = "https://agent-yes.com";
 
@@ -73,6 +79,34 @@ describe("pairingCommands", () => {
     // shell when pasted into PowerShell, so the inner shell gets `='…'`.
     expect(ps).toBe(`$env:AY_JOIN='${link}'; irm ${ORIGIN}/setup.ps1 | iex`);
     expect(ps).not.toContain("powershell -c");
+  });
+});
+
+describe("consoleUrlFor", () => {
+  it("uses the positional #room:token form /w/ reads, secret in the fragment", () => {
+    const token = `${MARKER}${"b".repeat(64)}`;
+    const url = consoleUrlFor({ origin: ORIGIN, room: "rdeadbeef0000", token });
+    expect(url).toBe(`${ORIGIN}/w/#rdeadbeef0000:${token}`);
+    // Everything before the '#' is what a server would see — the secret must
+    // not be in it.
+    expect(url.split("#")[0]).not.toContain(token);
+    expect(url.split("#")[1]).toContain(token);
+  });
+
+  it("appends @sighost only for a non-default signaling host", () => {
+    const token = `${MARKER}${"c".repeat(64)}`;
+    expect(consoleUrlFor({ origin: ORIGIN, room: "r1", token, sigHost: "sig.example.com" })).toBe(
+      `${ORIGIN}/w/#r1:${token}@sig.example.com`,
+    );
+    expect(consoleUrlFor({ origin: ORIGIN, room: "r1", token, sigHost: "s.agent-yes.com" })).toBe(
+      `${ORIGIN}/w/#r1:${token}`,
+    );
+  });
+
+  it("is the link mintPairing hands the landing page, for the same room", () => {
+    const p = mintPairing({ origin: ORIGIN, rand: seq });
+    expect(p.consoleUrl).toBe(consoleUrlFor({ origin: ORIGIN, room: p.room, token: p.token }));
+    expect(p.consoleUrl).toContain(p.room);
   });
 });
 

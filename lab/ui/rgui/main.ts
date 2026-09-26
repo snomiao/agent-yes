@@ -33,7 +33,11 @@ import { OrderedInputQueue, PredictiveEcho } from "./terminal-input";
 // scripts/build-rgui.ts. A .js module with no types → treated as any here.
 // @ts-ignore — sibling JS module, no .d.ts (bundled, not type-checked)
 import { RTCClient, parseRoomHash } from "../rtc.js";
-import { SIG_DEFAULT, mintPairing, type Pairing } from "./pairing";
+// Shared pairing mint (lab/ui/pairing.js) — the SAME module the landing page
+// imports over HTTP as /w/pairing.js, so the two can never emit different
+// commands. A .js module with no types → treated as any here.
+// @ts-ignore — sibling JS module, no .d.ts (bundled, not type-checked)
+import { SIG_DEFAULT, mintPairing } from "../pairing.js";
 
 // ── /api/ls record shape (subset we use; see ts/globalPidIndex.ts + serve.ts) ──
 type AgentStatus = "active" | "idle" | "needs_input" | "stuck" | "exited";
@@ -1429,7 +1433,7 @@ const INFO_TAG_DEFAULT = `Live <code>ay ls</code> + per-agent tail &amp; send. B
 // Pairing state for this page load. One pairing per load: each mint starts its
 // own reconnect loop, so re-minting on a click would leave the abandoned room
 // retrying forever in the background. "start over" reloads instead.
-let pairing: Pairing | null = null;
+let pairing: ReturnType<typeof mintPairing> | null = null;
 let pairPoll: ReturnType<typeof setInterval> | null = null;
 
 /**
