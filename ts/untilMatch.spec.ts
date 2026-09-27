@@ -1,5 +1,11 @@
 import { expect, test } from "vitest";
-import { compileUntil, linesAfterAnchor, makeTally, untilExitCode } from "./untilMatch.ts";
+import {
+  compileUntil,
+  linesAfterAnchor,
+  makeJudge,
+  makeTally,
+  untilExitCode,
+} from "./untilMatch.ts";
 
 const lit = (pattern: string, ignoreCase = false) =>
   compileUntil({ pattern, regex: false, ignoreCase });
@@ -113,4 +119,55 @@ test("exit codes follow the --wait family (0 match / 1 exited / 2 no match / 3 f
   expect(untilExitCode("stopped")).toBe(2);
   // --fail-on is its own code: "it went wrong" is not "it never happened".
   expect(untilExitCode("failed")).toBe(3);
+});
+
+test("the judge settles on --until when no --fail-on is armed", () => {
+  const j = makeJudge(makeTally(lit("PASS")), null);
+  expect(j.test("building")).toBe(false);
+  expect(j.test("PASS: 12 tests")).toBe(true);
+  expect(j.outcome).toBe("match");
+  expect(j.matched).toBe("PASS: 12 tests");
+});
+
+test("the judge settles on --fail-on before --until on the same line", () => {
+  // A line matching both is a failure: a caller branching on exit 0 must not be
+  // told "matched" by the very line saying it went wrong.
+  const j = makeJudge(makeTally(lit("step")), makeTally(lit("step"), 1));
+  expect(j.test("step 3 of 4")).toBe(true);
+  expect(j.outcome).toBe("failed");
+  expect(j.matched).toBe("step 3 of 4");
+});
+
+test("whichever pattern lands first wins across lines", () => {
+  const good = () => makeJudge(makeTally(lit("PASS")), makeTally(lit("FAIL"), 1));
+  const a = good();
+  a.testAll(["PASS now", "FAIL later"]);
+  expect(a.outcome).toBe("match");
+  const b = good();
+  b.testAll(["FAIL now", "PASS later"]);
+  expect(b.outcome).toBe("failed");
+});
+
+test("--fail-on does not settle a --count wait early on --until hits", () => {
+  const j = makeJudge(makeTally(lit("ok"), 2), makeTally(lit("bad"), 1));
+  expect(j.test("ok one")).toBe(false);
+  expect(j.settled).toBe(false);
+  expect(j.test("ok two")).toBe(true);
+  expect(j.outcome).toBe("match");
+});
+
+test("a settled judge stays settled and ignores later lines", () => {
+  const j = makeJudge(makeTally(lit("ok")), makeTally(lit("bad"), 1));
+  expect(j.test("ok")).toBe(true);
+  expect(j.test("bad")).toBe(true);
+  expect(j.outcome).toBe("match");
+  expect(j.matched).toBe("ok");
+});
+
+test("an unsettled judge reports no outcome", () => {
+  const j = makeJudge(makeTally(lit("ok")), null);
+  expect(j.testAll(["a", "b"])).toBe(false);
+  expect(j.settled).toBe(false);
+  expect(j.outcome).toBe(null);
+  expect(j.matched).toBe(null);
 });

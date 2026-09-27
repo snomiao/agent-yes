@@ -141,6 +141,62 @@ export function linesAfterAnchor(lines: readonly string[], anchor: string | null
   return lines.slice(at + 1);
 }
 
+/**
+ * The verdict half of a wait: feed it lines, ask whether the wait is over.
+ *
+ * Both followers (the local vterm stream and the remote SSE stream) run the same
+ * judge, so the precedence rule — `--fail-on` is tested BEFORE `--until`, and a
+ * line matching both is a failure — can't drift between them. A caller that
+ * branches on exit 0 must never be told "matched" by the very line saying it went
+ * wrong.
+ */
+export interface UntilJudge {
+  /** Feed one line; returns true once the wait is settled. */
+  test(line: string): boolean;
+  /** Feed many; returns true once settled (stops early). */
+  testAll(lines: readonly string[]): boolean;
+  readonly settled: boolean;
+  /** "match" | "failed" once settled, else null. */
+  readonly outcome: Extract<UntilOutcome, "match" | "failed"> | null;
+  /** The line that settled it, or null. */
+  readonly matched: string | null;
+}
+
+export function makeJudge(tally: UntilTally, failTally: UntilTally | null): UntilJudge {
+  let outcome: Extract<UntilOutcome, "match" | "failed"> | null = null;
+  let matched: string | null = null;
+  const judge: UntilJudge = {
+    get settled() {
+      return outcome !== null;
+    },
+    get outcome() {
+      return outcome;
+    },
+    get matched() {
+      return matched;
+    },
+    test(line) {
+      if (outcome !== null) return true;
+      if (failTally?.feed(line)) {
+        outcome = "failed";
+        matched = failTally.last;
+        return true;
+      }
+      if (tally.feed(line)) {
+        outcome = "match";
+        matched = tally.last;
+        return true;
+      }
+      return false;
+    },
+    testAll(lines) {
+      for (const line of lines) if (judge.test(line)) return true;
+      return outcome !== null;
+    },
+  };
+  return judge;
+}
+
 /** Why an `--until` follow stopped. Maps 1:1 to the process exit code. */
 export type UntilOutcome = "match" | "exited" | "timeout" | "stopped" | "failed";
 
