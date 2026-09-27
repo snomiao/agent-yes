@@ -45,11 +45,11 @@ import {
 import { diffLsStates, type LiveState, type LsAgentState } from "./lsWatch.ts";
 import {
   compileUntil,
-  firstMatch,
   linesAfterAnchor,
+  makeTally,
   untilExitCode,
-  type UntilMatcher,
   type UntilOutcome,
+  type UntilTally,
 } from "./untilMatch.ts";
 import {
   filterSinceSeq,
@@ -1264,7 +1264,8 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `                                        agent's whole process tree, + box vitals\n` +
       `  ay tail [-f] [-n N] <keyword>       last N lines (96), -f to follow\n` +
       `  ay tail <keyword> --until TEXT      block until TEXT is printed, then exit 0\n` +
-      `      [--timeout 10m] [-q] [--regex]    (1 = agent exited without it, 2 = no match)\n` +
+      `      [--timeout 10m] [-q] [--regex]    (1 = agent exited without it, 2 = no match,\n` +
+      `      [--fail-on TEXT] [--count N]       3 = --fail-on hit first)\n` +
       `  ay read <keyword> [page opts]       paginate: --last/--head N, --range A:B,\n` +
       `                                        --before-line L [--limit N]\n` +
       `  ay cat <keyword>                    full log\n` +
@@ -2866,8 +2867,11 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
         "  --last N | --head N         last / first N lines\n" +
         "  --range A:B                 lines A..B (1-indexed, inclusive)\n" +
         "  --before-line L [--limit N] the page of N lines ending just above line L\n\n" +
-        "Wait for output (follow with a predicate; exit 0 matched / 1 exited / 2 no match):\n" +
+        "Wait for output (follow with a predicate; exit 0 matched / 1 exited /\n" +
+        "2 no match / 3 --fail-on hit):\n" +
         "  --until TEXT [--timeout 10m]   return as soon as TEXT is printed\n" +
+        "  --fail-on TEXT                 give up early (exit 3) if TEXT shows up first\n" +
+        "  --count N                      require N hits of --until (default 1)\n" +
         "  --regex | -i | -q              regex / case-insensitive / only print the match",
     )
     .option("follow", {
@@ -2880,8 +2884,19 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
       type: "string",
       description:
         "Follow until this text appears in the output, then exit. Implies -f. " +
-        "Exit 0 matched, 1 agent exited without it, 2 --timeout/interrupted. " +
+        "Exit 0 matched, 1 agent exited without it, 2 --timeout/interrupted, " +
+        "3 --fail-on hit first. " +
         "Literal substring by default; matches only output arriving from now on.",
+    })
+    .option("fail-on", {
+      type: "string",
+      description:
+        "Give up with exit 3 if this text appears before --until does " +
+        "(e.g. --until 'all tests passed' --fail-on 'FAILED')",
+    })
+    .option("count", {
+      type: "number",
+      description: "Require this many --until hits before returning (default 1)",
     })
     .option("regex", {
       type: "boolean",
@@ -2959,24 +2974,33 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
   // isn't reading a live TUI anyway.
   const until = typeof argv.until === "string" ? argv.until : null;
   const plain = Boolean(argv.plain) || until !== null || !process.stdout.isTTY;
+  const failOn = typeof argv["fail-on"] === "string" ? (argv["fail-on"] as string) : null;
   const untilOnlyFlags: [string, boolean][] = [
     ["--regex", argv.regex],
     ["--ignore-case", argv["ignore-case"] as boolean],
     ["--match-backlog", argv["match-backlog"] as boolean],
     ["--timeout", typeof argv.timeout === "string" && argv.timeout.length > 0],
+    ["--fail-on", failOn !== null],
+    ["--count", argv.count !== undefined],
   ];
   if (until === null) {
     const stray = untilOnlyFlags.find(([, set]) => set);
     if (stray) throw new Error(`${stray[0]} requires --until <pattern>`);
   }
-  const untilMatch =
-    until !== null
-      ? compileUntil({
-          pattern: until,
-          regex: argv.regex,
-          ignoreCase: argv["ignore-case"] as boolean,
-        })
-      : null;
+  // --regex / -i describe how a pattern is read, so they govern --fail-on too:
+  // one flag pair for both keeps `--until 'PASS' --fail-on 'FAIL|ERROR' --regex`
+  // doing the obvious thing instead of silently treating one as a literal.
+  const compileSpec = (pattern: string) =>
+    compileUntil({
+      pattern,
+      regex: argv.regex,
+      ignoreCase: argv["ignore-case"] as boolean,
+    });
+  const untilCount = argv.count === undefined ? 1 : Number(argv.count);
+  if (until !== null && (!Number.isInteger(untilCount) || untilCount < 1))
+    throw new Error(`--count must be a positive integer (got ${argv.count})`);
+  const untilMatch = until !== null ? compileSpec(until) : null;
+  const failMatch = failOn !== null ? compileSpec(failOn) : null;
   let untilTimeoutMs: number | null = null;
   if (typeof argv.timeout === "string" && argv.timeout.length > 0) {
     untilTimeoutMs = parseDurationMs(argv.timeout);
@@ -3062,12 +3086,21 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
       process.stdout.write(rendered);
       if (!rendered.endsWith("\n")) process.stdout.write("\n");
     }
+    // The tallies outlive the backlog scan: under --match-backlog a `--count 3`
+    // wait that already saw 2 hits in the context window needs only 1 more from
+    // the live stream, so the counts must carry into the follow.
+    const tally = untilMatch ? makeTally(untilMatch, untilCount) : null;
+    const failTally = failMatch ? makeTally(failMatch, 1) : null;
     // --match-backlog: test the context window we just printed. Off by default,
     // because a hit left over from a PREVIOUS run of the same task would exit 0
     // immediately — the silent-wrong-answer failure, versus a loud --timeout.
-    if (untilMatch && argv["match-backlog"]) {
-      const hit = firstMatch(rendered.split("\n"), untilMatch);
-      if (hit !== null) return reportUntil("match", hit, Boolean(argv.quiet));
+    if (tally && argv["match-backlog"]) {
+      const lines = rendered.split("\n");
+      // --fail-on first: if both already sit in the backlog, the failure is the
+      // honest verdict — reporting the success pattern would hide it.
+      if (failTally?.feedAll(lines))
+        return reportUntil("failed", failTally.last, Boolean(argv.quiet), failOn);
+      if (tally.feedAll(lines)) return reportUntil("match", tally.last, Boolean(argv.quiet));
     }
     // Keep the read marker fresh while actively following, so a long-running
     // `ay tail -f` doesn't "expire" past the send window mid-watch.
@@ -3081,10 +3114,12 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
           logPath,
           buf,
           stats.size,
-          untilMatch
+          tally
             ? {
-                match: untilMatch,
+                tally,
+                failTally,
                 pattern: until as string,
+                failPattern: failOn,
                 quiet: Boolean(argv.quiet),
                 timeoutMs: untilTimeoutMs,
                 pid: record.pid,
@@ -3345,11 +3380,18 @@ async function followPlainLocal(
   until?: FollowUntil,
   geom?: RenderGeom,
 ): Promise<number> {
-  process.stderr.write(
-    until
-      ? `waiting for ${JSON.stringify(until.pattern)}${until.timeoutMs !== null ? ` (timeout ${Math.round(until.timeoutMs / 1000)}s)` : ""}… (Ctrl-C / SIGTERM to stop)\n`
-      : `following... (plain; Ctrl-C / SIGTERM to stop)\n`,
-  );
+  if (until) {
+    // Say exactly what would end the wait, so a run that hangs is diagnosable
+    // from its first line instead of from the flags the caller thinks it passed.
+    const parts = [`waiting for ${JSON.stringify(until.pattern)}`];
+    if (until.tally.needed > 1) parts.push(`x${until.tally.needed}`);
+    if (until.tally.hits > 0) parts.push(`(${until.tally.hits} already seen)`);
+    if (until.failPattern !== null) parts.push(`| fail on ${JSON.stringify(until.failPattern)}`);
+    if (until.timeoutMs !== null) parts.push(`| timeout ${Math.round(until.timeoutMs / 1000)}s`);
+    process.stderr.write(`${parts.join(" ")}… (Ctrl-C / SIGTERM to stop)\n`);
+  } else {
+    process.stderr.write(`following... (plain; Ctrl-C / SIGTERM to stop)\n`);
+  }
   const Terminal = await loadXtermTerminal();
   const term = new Terminal({
     cols: geom?.cols ?? 200,
@@ -3385,11 +3427,27 @@ async function followPlainLocal(
   const ac = new AbortController();
   let outcome: UntilOutcome = "stopped";
   let matched: string | null = null;
-  const noteMatch = (line: string) => {
-    if (matched !== null) return;
-    matched = line;
-    outcome = "match";
-    ac.abort();
+  const settled = () => matched !== null;
+
+  /**
+   * Test one line against both patterns, stopping the wait once either is
+   * satisfied. `--fail-on` is checked FIRST: on a line matching both, the failure
+   * is the honest verdict, and a caller that branches on exit 0 must not be told
+   * "matched" by the very line that says it went wrong.
+   */
+  const testLine = (line: string): void => {
+    if (settled() || !until) return;
+    if (until.failTally?.feed(line)) {
+      matched = until.failTally.last;
+      outcome = "failed";
+      ac.abort();
+      return;
+    }
+    if (until.tally.feed(line)) {
+      matched = until.tally.last;
+      outcome = "match";
+      ac.abort();
+    }
   };
 
   // `emitted` only advances, so a redraw that moves the cursor back up doesn't
@@ -3399,7 +3457,7 @@ async function followPlainLocal(
       if (!until?.quiet) process.stdout.write(line + "\n");
       if (!until) continue;
       if (line) anchor = line;
-      if (matched === null && until.match(line)) noteMatch(line);
+      testLine(line);
     }
     emitted = cursorAbs(term);
   };
@@ -3454,10 +3512,7 @@ async function followPlainLocal(
     if (!until) return;
     // Seen, so the post-exit drain resumes after it rather than re-printing it.
     anchor = last;
-    if (matched === null && until.match(last)) {
-      matched = last;
-      outcome = "match";
-    }
+    testLine(last);
   };
 
   const stoppedAt = await watchAppend(
@@ -3481,7 +3536,7 @@ async function followPlainLocal(
   // Drain whatever landed after the watcher's last read. An exiting agent flushes
   // its last bytes in exactly this window, and they are the ones most likely to
   // hold the line being waited for ("DONE", then exit).
-  if (matched === null) {
+  if (!settled()) {
     const tailBytes = await readFile(logPath).catch(() => null);
     if (tailBytes === null) {
       // The followed log is GONE, which is what a clean exit looks like: the
@@ -3489,11 +3544,7 @@ async function followPlainLocal(
       // (rs/src/context.rs finalize_log), repointing the pid index at the render.
       // So the tail we raced for isn't lost — it moved. Go read it there.
       flushPartial();
-      const drained = await drainFinalLog(until.pid, logPath, anchor, until);
-      if (drained !== null) {
-        matched = drained;
-        outcome = "match";
-      }
+      await drainFinalLog(until.pid, logPath, anchor, until, testLine);
     } else if (tailBytes.length > stoppedAt) {
       await feed(tailBytes.slice(stoppedAt));
       flushCommitted();
@@ -3501,7 +3552,10 @@ async function followPlainLocal(
   }
 
   flushPartial();
-  return reportUntil(outcome, matched, until.quiet);
+  return reportUntil(outcome, matched, until.quiet, until.failPattern, {
+    hits: until.tally.hits,
+    needed: until.tally.needed,
+  });
 }
 
 /** Cadence of the `--until` liveness poll; two ticks are needed to call it dead. */
@@ -3525,15 +3579,18 @@ const ANCHOR_LOOKBACK_ROWS = 200;
  * anchor can't be located the drain is skipped rather than guessed at — a missed
  * match surfaces as a loud exit 1, a false one as a silent wrong answer.
  *
- * Returns the matching line, or null.
+ * Feeds those lines to `testLine`, which owns the verdict — so a `--count` wait
+ * finishes on hits split across the stream and this drain, and `--fail-on` still
+ * wins over `--until` on the agent's last line.
  */
 async function drainFinalLog(
   pid: number,
   followedPath: string,
   anchor: string | null,
   until: FollowUntil,
-): Promise<string | null> {
-  if (anchor === null) return null;
+  testLine: (line: string) => void,
+): Promise<void> {
+  if (anchor === null) return;
   // Prefer the path the registry now advertises; fall back to the `.raw.log` →
   // `.log` convention both runtimes follow (rs/src/context.rs finalize_log,
   // pid_store's log-sibling pruning), because the index repoint can land a moment
@@ -3544,27 +3601,31 @@ async function drainFinalLog(
     ? followedPath.slice(0, -".raw.log".length) + ".log"
     : null;
   const finalPath = advertised && advertised !== followedPath ? advertised : derived;
-  if (!finalPath) return null;
+  if (!finalPath) return;
   const text = await readFile(finalPath, "utf8").catch(() => null);
-  if (text === null) return null;
+  if (text === null) return;
 
   const fresh = linesAfterAnchor(
     text.split("\n").map((l) => l.trimEnd()),
     anchor,
   );
-  if (fresh === null) return null;
+  if (fresh === null) return;
   for (const line of fresh) {
     if (!until.quiet) process.stdout.write(line + "\n");
-    if (until.match(line)) return line;
+    testLine(line);
   }
-  return null;
 }
 
 /** What `followPlainLocal` needs to run an `--until` predicate over the stream. */
 interface FollowUntil {
-  match: UntilMatcher;
+  /** The `--until` tally (`--count` hits required). */
+  tally: UntilTally;
+  /** The `--fail-on` tally (always 1 hit), or null. */
+  failTally: UntilTally | null;
   /** The raw pattern, for the human-facing "waiting for …" / result lines. */
   pattern: string;
+  /** The raw `--fail-on` pattern, for the same. */
+  failPattern: string | null;
   /** Suppress the streamed output; print only the matching line. */
   quiet: boolean;
   timeoutMs: number | null;
@@ -3576,17 +3637,36 @@ interface FollowUntil {
  * Report an `--until` result and return its exit code. In quiet mode the matching
  * line is the whole of stdout (a caller can capture it); the human-readable
  * verdict always goes to stderr so it never contaminates that.
+ *
+ * `progress` (hits/needed) is named on the failure paths only when `--count` asked
+ * for more than one: "timed out with 2/3 matches" is the difference between a wait
+ * that was close and one that never started.
  */
-function reportUntil(outcome: UntilOutcome, matched: string | null, quiet: boolean): number {
+function reportUntil(
+  outcome: UntilOutcome,
+  matched: string | null,
+  quiet: boolean,
+  failPattern?: string | null,
+  progress?: { hits: number; needed: number },
+): number {
+  const short =
+    progress && progress.needed > 1 ? ` (${progress.hits}/${progress.needed} matches)` : "";
   if (outcome === "match" && matched !== null) {
     if (quiet) process.stdout.write(matched + "\n");
     process.stderr.write(`[until] matched: ${matched}\n`);
+  } else if (outcome === "failed") {
+    // The failing line goes to stdout under -q too: it is the answer the caller
+    // asked for, and exit 3 alone doesn't say which line tripped it.
+    if (quiet && matched !== null) process.stdout.write(matched + "\n");
+    process.stderr.write(
+      `[until] --fail-on ${JSON.stringify(failPattern ?? "")} hit first: ${matched ?? ""}\n`,
+    );
   } else if (outcome === "exited") {
-    process.stderr.write(`[until] agent exited without printing it\n`);
+    process.stderr.write(`[until] agent exited without printing it${short}\n`);
   } else if (outcome === "timeout") {
-    process.stderr.write(`[until] timed out with no match\n`);
+    process.stderr.write(`[until] timed out with no match${short}\n`);
   } else {
-    process.stderr.write(`[until] stopped before a match\n`);
+    process.stderr.write(`[until] stopped before a match${short}\n`);
   }
   return untilExitCode(outcome);
 }
