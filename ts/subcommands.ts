@@ -2964,7 +2964,9 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
     // `buf.length` — `buf` may be a capped tail window, so its length is not the
     // file offset. `buf` still seeds the terminal render (identical final state).
     return plain
-      ? followPlainLocal(logPath, buf, stats.size)
+      ? // Same geometry the static context window above was rendered at, so the
+        // stream doesn't reflow mid-follow.
+        followPlainLocal(logPath, buf, stats.size, { cols: size?.cols, rows: size?.rows })
       : followRawLocal(logPath, buf, stats.size);
   }
 
@@ -3194,10 +3196,16 @@ async function followPlainLocal(
   logPath: string,
   buf: Uint8Array,
   startOffset = buf.length,
+  geom?: RenderGeom,
 ): Promise<number> {
   process.stderr.write(`following... (plain; Ctrl-C / SIGTERM to stop)\n`);
   const Terminal = await loadXtermTerminal();
-  const term = new Terminal({ cols: 200, rows: 50, scrollback: 50000, allowProposedApi: true });
+  const term = new Terminal({
+    cols: geom?.cols ?? 200,
+    rows: geom?.rows ?? 50,
+    scrollback: 50000,
+    allowProposedApi: true,
+  });
   const feed = (b: Uint8Array) => new Promise<void>((r) => term.write(b, () => r()));
   const lineAt = (i: number) => {
     const l = term.buffer.active.getLine(i);
