@@ -61,14 +61,63 @@ export function compileUntil(spec: UntilSpec): UntilMatcher {
 }
 
 /**
- * Find the first line satisfying the matcher, or null.
+ * A matcher plus the "how many hits are enough" threshold (`--count`), as a small
+ * stateful tally.
  *
- * Used for `--match-backlog` (scan the context window `tail` prints before it
- * starts following) and for the final drain after the agent exits.
+ * The same tally is fed by all three sources a wait can see — the live stream, the
+ * printed context window under `--match-backlog`, and the final log drained after
+ * the agent exits — so `--count 3` means three hits total, wherever they land,
+ * rather than three per source.
+ *
+ * Note what a "hit" is: one FINALIZED rendered line that matches. A full-screen
+ * TUI repaint can re-finalize the same visible row, so `--count` counts lines
+ * printed, not logical events — fine for "the third test file finished", wrong for
+ * counting a value that a live-updating panel rewrites in place.
  */
-export function firstMatch(lines: readonly string[], match: UntilMatcher): string | null {
-  for (const line of lines) if (match(line)) return line;
-  return null;
+export interface UntilTally {
+  /** Feed one line; returns true once `needed` hits have accumulated. */
+  feed(line: string): boolean;
+  /** Feed many; returns true once the threshold is reached (stops early). */
+  feedAll(lines: readonly string[]): boolean;
+  /** Hits so far. */
+  readonly hits: number;
+  /** How many are required. */
+  readonly needed: number;
+  /** The most recent matching line, or null. */
+  readonly last: string | null;
+  /** Whether the threshold has been reached. */
+  readonly done: boolean;
+}
+
+export function makeTally(match: UntilMatcher, needed = 1): UntilTally {
+  if (!Number.isInteger(needed) || needed < 1)
+    throw new Error(`--count must be a positive integer (got ${needed})`);
+  let hits = 0;
+  let last: string | null = null;
+  const tally: UntilTally = {
+    get hits() {
+      return hits;
+    },
+    needed,
+    get last() {
+      return last;
+    },
+    get done() {
+      return hits >= needed;
+    },
+    feed(line) {
+      if (hits < needed && match(line)) {
+        hits++;
+        last = line;
+      }
+      return hits >= needed;
+    },
+    feedAll(lines) {
+      for (const line of lines) if (tally.feed(line)) return true;
+      return hits >= needed;
+    },
+  };
+  return tally;
 }
 
 /**
@@ -93,7 +142,7 @@ export function linesAfterAnchor(lines: readonly string[], anchor: string | null
 }
 
 /** Why an `--until` follow stopped. Maps 1:1 to the process exit code. */
-export type UntilOutcome = "match" | "exited" | "timeout" | "stopped";
+export type UntilOutcome = "match" | "exited" | "timeout" | "stopped" | "failed";
 
 /**
  * Exit code for an `--until` run. Mirrors the code family already established by
@@ -103,6 +152,8 @@ export type UntilOutcome = "match" | "exited" | "timeout" | "stopped";
  *   0  the pattern appeared
  *   1  the agent exited without ever printing it (it's done; it never will)
  *   2  `--timeout` elapsed, or we were signalled away, with no match
+ *   3  a `--fail-on` pattern appeared first — the thing went wrong, and waiting
+ *      out the timeout would only delay finding out
  *
  * `stopped` (Ctrl-C / SIGTERM, e.g. an outer `timeout(1)`) deliberately shares
  * exit 2 with a timeout rather than the plain-follow 0: for a caller using this
@@ -117,5 +168,7 @@ export function untilExitCode(outcome: UntilOutcome): number {
     case "timeout":
     case "stopped":
       return 2;
+    case "failed":
+      return 3;
   }
 }
