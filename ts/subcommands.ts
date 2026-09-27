@@ -46,8 +46,10 @@ import { diffLsStates, type LiveState, type LsAgentState } from "./lsWatch.ts";
 import {
   compileUntil,
   linesAfterAnchor,
+  makeJudge,
   makeTally,
   untilExitCode,
+  type UntilJudge,
   type UntilOutcome,
   type UntilTally,
 } from "./untilMatch.ts";
@@ -1629,6 +1631,7 @@ async function runRemoteRead(
   n: number,
   reconnectTimeoutMs = 120_000,
   _plain = false,
+  until?: UntilWait,
 ): Promise<number> {
   const keyword = remote.keyword ?? "";
   if (!keyword) {
@@ -1640,6 +1643,85 @@ async function runRemoteRead(
 
   if (mode === "tail" && follow) {
     const ac = new AbortController();
+    // --until over the wire. Same judge and exit codes as the local follower; what
+    // differs is the shape of the stream, handled below:
+    //   * the server opens every connection with a rendered ~96-line context
+    //     window, which is BACKLOG — testing it by default would report a hit
+    //     from before the wait began (see --match-backlog);
+    //   * frames are text chunks, not lines, so they're reassembled here;
+    //   * there is no pid to poll, so "agent exited" is inferred from the server
+    //     closing the stream, and a reconnect that never lands is a give-up (2),
+    //     not an exit (1).
+    const judge = until ? makeJudge(until.tally, until.failTally) : null;
+    let outcome: UntilOutcome = "stopped";
+    const settle = (o: UntilOutcome) => {
+      outcome = o;
+      ac.abort();
+    };
+    const untilTimer =
+      until && until.timeoutMs !== null
+        ? setTimeout(() => settle("timeout"), until.timeoutMs)
+        : null;
+    // There is no pid to poll across a network, and the server does NOT close the
+    // SSE stream when the agent exits (its heartbeat keeps pinging an empty log),
+    // so without this a remote wait on a finished agent burns its whole --timeout
+    // and reports 2 where the local follower reports 1. Poll the status endpoint
+    // instead; one tick of grace lets trailing output arrive first, mirroring the
+    // local liveness poll.
+    let remoteDeadSince: number | null = null;
+    // Require having SEEN it live before believing it's gone, so a keyword that
+    // never resolved reads as "still waiting" (and times out saying so) rather
+    // than as an agent that exited on us.
+    let sawRemoteLive = false;
+    const statusPoll = until
+      ? setInterval(() => {
+          void (async () => {
+            const liveness = await remoteAgentLiveness(remote, keyword);
+            if (liveness === null) return; // transient: a failed poll is not a death
+            if (liveness === "live") {
+              sawRemoteLive = true;
+              remoteDeadSince = null;
+              return;
+            }
+            if (!sawRemoteLive) return;
+            if (remoteDeadSince === null) {
+              remoteDeadSince = Date.now();
+              return;
+            }
+            if (!judge?.settled) settle("exited");
+          })();
+        }, UNTIL_REMOTE_STATUS_POLL_MS)
+      : null;
+    statusPoll?.unref?.();
+    /** Reassembles frames into lines; `flush` tests a trailing partial at the end. */
+    let lineBuf = "";
+    const consume = (text: string, test: boolean): void => {
+      if (!until?.quiet) {
+        process.stdout.write(text);
+        if (!text.endsWith("\n")) process.stdout.write("\n");
+      }
+      if (!judge) return;
+      lineBuf += text;
+      const lines = lineBuf.split("\n");
+      lineBuf = lines.pop() ?? "";
+      if (!test) return;
+      if (judge.testAll(lines.map((l) => l.trimEnd()))) settle(judge.outcome ?? "match");
+    };
+    const flushLineBuf = (): void => {
+      if (!judge || lineBuf.length === 0) return;
+      const last = lineBuf.trimEnd();
+      lineBuf = "";
+      // A pattern printed without a trailing newline is still on screen.
+      if (last && judge.test(last)) settle(judge.outcome ?? "match");
+    };
+    const finishUntil = (): number => {
+      if (untilTimer) clearTimeout(untilTimer);
+      if (statusPoll) clearInterval(statusPoll);
+      return reportUntil(outcome, judge?.matched ?? null, until!.quiet, until!.failPattern, {
+        hits: until!.tally.hits,
+        needed: until!.tally.needed,
+      });
+    };
     // SIGINT/SIGTERM/SIGHUP and a closed pipe all abort the stream, so
     // `timeout … ay tail -f` and `kill` terminate promptly (was SIGINT-only,
     // which let `timeout` run the full --reconnect-timeout window). The server
@@ -1651,7 +1733,9 @@ async function runRemoteRead(
     let attempt = 0;
 
     process.stderr.write(
-      `[remote ${remote.label}  ${keyword}]\nfollowing... (Ctrl-C to stop, timeout: ${Math.round(reconnectTimeoutMs / 1000)}s)\n`,
+      until
+        ? `[remote ${remote.label}  ${keyword}]\n${untilBanner(until)}`
+        : `[remote ${remote.label}  ${keyword}]\nfollowing... (Ctrl-C to stop, timeout: ${Math.round(reconnectTimeoutMs / 1000)}s)\n`,
     );
 
     while (!ac.signal.aborted) {
@@ -1669,13 +1753,23 @@ async function runRemoteRead(
           throw new Error(`HTTP ${res.status}`);
         }
 
-        if (attempt > 0) process.stderr.write("remote: reconnected\n");
+        if (attempt > 0) {
+          process.stderr.write("remote: reconnected\n");
+          if (until)
+            // The reconnect brings a fresh context window, so output printed during
+            // the gap is indistinguishable from pre-wait backlog and stays untested.
+            // Say so: a remote wait is at-most-once across a disconnect.
+            process.stderr.write("remote: output during the gap was not tested for --until\n");
+        }
         delay = 1_000; // reset backoff on successful connect
 
         const reader = res.body!.getReader();
         const dec = new TextDecoder();
         let buf = "";
-        while (true) {
+        // Every connection's FIRST frame is the server's context window, not new
+        // output — matched only under --match-backlog, exactly as locally.
+        let firstFrame = true;
+        while (!ac.signal.aborted) {
           const { done, value } = await reader.read();
           if (done) break;
           buf += dec.decode(value, { stream: true });
@@ -1685,20 +1779,47 @@ async function runRemoteRead(
             if (!line.startsWith("data: ")) continue;
             try {
               const text = JSON.parse(line.slice(6)) as string;
-              process.stdout.write(text);
-              if (!text.endsWith("\n")) process.stdout.write("\n");
+              const isContext = firstFrame;
+              firstFrame = false;
+              consume(text, !isContext || Boolean(until?.matchBacklog));
+              if (ac.signal.aborted) break;
             } catch {
               /* skip non-JSON */
             }
           }
+          if (ac.signal.aborted) break;
+        }
+        if (until) {
+          if (judge?.settled) return finishUntil();
+          if (ac.signal.aborted) {
+            flushLineBuf();
+            return finishUntil();
+          }
+          // Server closed the stream: the agent is gone, so the pattern can no
+          // longer arrive. Same verdict as the local liveness poll — exit 1.
+          flushLineBuf();
+          if (!judge?.settled) outcome = "exited";
+          return finishUntil();
         }
         break; // stream ended cleanly
       } catch (e: any) {
-        if (e.name === "AbortError" || ac.signal.aborted) return 0;
+        if (e.name === "AbortError" || ac.signal.aborted) {
+          if (until) {
+            flushLineBuf();
+            return finishUntil();
+          }
+          return 0;
+        }
         if (Date.now() >= deadline) {
           process.stderr.write(
             `remote: timeout after ${Math.round(reconnectTimeoutMs / 1000)}s, giving up\n`,
           );
+          // Under --until this is "gave up waiting" (2), never "the agent finished
+          // without printing it" (1) — we never got to watch it.
+          if (until) {
+            outcome = "timeout";
+            return finishUntil();
+          }
           return 1;
         }
         process.stderr.write(
@@ -1711,10 +1832,20 @@ async function runRemoteRead(
             reject(new Error("abort"));
           });
         }).catch(() => {});
-        if (ac.signal.aborted) return 0;
+        if (ac.signal.aborted) {
+          if (until) {
+            flushLineBuf();
+            return finishUntil();
+          }
+          return 0;
+        }
         delay = Math.min(delay * 2, 30_000);
         attempt++;
       }
+    }
+    if (until) {
+      flushLineBuf();
+      return finishUntil();
     }
     return 0;
   }
@@ -3025,16 +3156,19 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
           : 96;
     const reconnectTimeoutMs = ((argv["reconnect-timeout"] as number) ?? 120) * 1000;
     if (remote) {
-      // Refuse rather than stream and ignore the predicate: a caller branching on
-      // `ay tail … --until X`'s exit code would read a remote follow's plain 0 as
-      // "matched". The remote SSE path can grow a matcher later; until then the
-      // flag must not silently become a no-op.
-      if (until !== null)
-        throw new Error(
-          "--until is not supported for remote targets yet — " +
-            `poll instead: ay status ${remote.keyword ?? "<keyword>"} --wait`,
-        );
-      return runRemoteRead(remote, mode, argv.follow, n2, reconnectTimeoutMs, plain);
+      if (untilMatch === null)
+        return runRemoteRead(remote, mode, argv.follow, n2, reconnectTimeoutMs, plain);
+      // A remote wait follows the server's SSE stream instead of a local log, but
+      // reports the same exit codes. `--until` implies -f here too.
+      return runRemoteRead(remote, mode, true, n2, reconnectTimeoutMs, plain, {
+        tally: makeTally(untilMatch, untilCount),
+        failTally: failMatch ? makeTally(failMatch, 1) : null,
+        pattern: until as string,
+        failPattern: failOn,
+        quiet: Boolean(argv.quiet),
+        timeoutMs: untilTimeoutMs,
+        matchBacklog: Boolean(argv["match-backlog"]),
+      });
     }
   }
   const follow = argv.follow || until !== null;
@@ -3122,6 +3256,7 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
                 failPattern: failOn,
                 quiet: Boolean(argv.quiet),
                 timeoutMs: untilTimeoutMs,
+                matchBacklog: Boolean(argv["match-backlog"]),
                 pid: record.pid,
               }
             : undefined,
@@ -3380,18 +3515,11 @@ async function followPlainLocal(
   until?: FollowUntil,
   geom?: RenderGeom,
 ): Promise<number> {
-  if (until) {
-    // Say exactly what would end the wait, so a run that hangs is diagnosable
-    // from its first line instead of from the flags the caller thinks it passed.
-    const parts = [`waiting for ${JSON.stringify(until.pattern)}`];
-    if (until.tally.needed > 1) parts.push(`x${until.tally.needed}`);
-    if (until.tally.hits > 0) parts.push(`(${until.tally.hits} already seen)`);
-    if (until.failPattern !== null) parts.push(`| fail on ${JSON.stringify(until.failPattern)}`);
-    if (until.timeoutMs !== null) parts.push(`| timeout ${Math.round(until.timeoutMs / 1000)}s`);
-    process.stderr.write(`${parts.join(" ")}… (Ctrl-C / SIGTERM to stop)\n`);
-  } else {
-    process.stderr.write(`following... (plain; Ctrl-C / SIGTERM to stop)\n`);
-  }
+  // Say exactly what would end the wait, so a run that hangs is diagnosable from
+  // its first line instead of from the flags the caller thinks it passed.
+  process.stderr.write(
+    until ? untilBanner(until) : `following... (plain; Ctrl-C / SIGTERM to stop)\n`,
+  );
   const Terminal = await loadXtermTerminal();
   const term = new Terminal({
     cols: geom?.cols ?? 200,
@@ -3426,26 +3554,11 @@ async function followPlainLocal(
   // the timer, the liveness poll and a match each overwrite it before aborting.
   const ac = new AbortController();
   let outcome: UntilOutcome = "stopped";
-  let matched: string | null = null;
-  const settled = () => matched !== null;
-
-  /**
-   * Test one line against both patterns, stopping the wait once either is
-   * satisfied. `--fail-on` is checked FIRST: on a line matching both, the failure
-   * is the honest verdict, and a caller that branches on exit 0 must not be told
-   * "matched" by the very line that says it went wrong.
-   */
+  const judge: UntilJudge | null = until ? makeJudge(until.tally, until.failTally) : null;
+  const settled = () => judge?.settled === true;
   const testLine = (line: string): void => {
-    if (settled() || !until) return;
-    if (until.failTally?.feed(line)) {
-      matched = until.failTally.last;
-      outcome = "failed";
-      ac.abort();
-      return;
-    }
-    if (until.tally.feed(line)) {
-      matched = until.tally.last;
-      outcome = "match";
+    if (judge && !judge.settled && judge.test(line)) {
+      outcome = judge.outcome ?? "match";
       ac.abort();
     }
   };
@@ -3552,7 +3665,7 @@ async function followPlainLocal(
   }
 
   flushPartial();
-  return reportUntil(outcome, matched, until.quiet, until.failPattern, {
+  return reportUntil(outcome, judge?.matched ?? null, until.quiet, until.failPattern, {
     hits: until.tally.hits,
     needed: until.tally.needed,
   });
@@ -3560,6 +3673,50 @@ async function followPlainLocal(
 
 /** Cadence of the `--until` liveness poll; two ticks are needed to call it dead. */
 const UNTIL_LIVENESS_POLL_MS = 500;
+
+/**
+ * Cadence of the REMOTE liveness poll; two ticks are needed to call it dead.
+ * Slower than the local one because each tick is an HTTP round trip, and the
+ * stream itself — not this poll — is what a wait normally ends on.
+ */
+const UNTIL_REMOTE_STATUS_POLL_MS = 2_000;
+
+/**
+ * Whether a remote agent is still running: "live", "gone" (the host answered and
+ * the agent is exited or no longer listed), or null when the poll itself failed.
+ *
+ * Asks `/api/ls`, not `/api/status/<kw>`: only the TS server serves the latter,
+ * while the Rust server — the default `ay serve` — has no such route and 404s
+ * every poll, so a status-based probe silently never fires.
+ *
+ * Null is deliberately distinct from "gone": a dropped packet or a restarting
+ * host would otherwise end a wait with "the agent exited", the one verdict a
+ * caller acts on by giving up and reporting the work unfinished.
+ */
+async function remoteAgentLiveness(
+  remote: ResolvedRemote,
+  keyword: string,
+): Promise<"live" | "gone" | null> {
+  const params = new URLSearchParams({ keyword, all: "1" });
+  try {
+    const res = await remoteGet(remote, `/api/ls?${params}`);
+    if (!res.ok) return null;
+    const records = (await res.json()) as { status?: unknown }[];
+    if (!Array.isArray(records)) return null;
+    // `all=1` keeps exited agents in the listing, so an empty result means the
+    // host doesn't know this keyword at all — which, once we've seen it live, is
+    // the reaped-agent case.
+    if (records.length === 0) return "gone";
+    // Only an EXPLICIT "exited" counts as gone (the registry's third status; see
+    // GlobalPidRecord). Treating anything unrecognized as gone would turn a new or
+    // renamed status into a false "the agent exited" — the verdict that makes a
+    // caller stop waiting — so the unknown case stays "live" and lets --timeout,
+    // which claims much less, be the thing that ends the wait.
+    return records.every((r) => r.status === "exited") ? "gone" : "live";
+  } catch {
+    return null;
+  }
+}
 
 /** How far back from the live frontier to look for a non-empty anchor line. */
 const ANCHOR_LOOKBACK_ROWS = 200;
@@ -3616,8 +3773,8 @@ async function drainFinalLog(
   }
 }
 
-/** What `followPlainLocal` needs to run an `--until` predicate over the stream. */
-interface FollowUntil {
+/** Everything an `--until` wait needs, independent of where the output comes from. */
+interface UntilWait {
   /** The `--until` tally (`--count` hits required). */
   tally: UntilTally;
   /** The `--fail-on` tally (always 1 hit), or null. */
@@ -3629,8 +3786,24 @@ interface FollowUntil {
   /** Suppress the streamed output; print only the matching line. */
   quiet: boolean;
   timeoutMs: number | null;
+  /** Also test the context window printed before the follow starts. */
+  matchBacklog: boolean;
+}
+
+/** What `followPlainLocal` needs to run an `--until` predicate over the stream. */
+interface FollowUntil extends UntilWait {
   /** The agent's pid, polled so an exit ends the wait with exit 1. */
   pid: number;
+}
+
+/** The "waiting for X | fail on Y | timeout Ns…" banner shared by both followers. */
+function untilBanner(wait: UntilWait): string {
+  const parts = [`waiting for ${JSON.stringify(wait.pattern)}`];
+  if (wait.tally.needed > 1) parts.push(`x${wait.tally.needed}`);
+  if (wait.tally.hits > 0) parts.push(`(${wait.tally.hits} already seen)`);
+  if (wait.failPattern !== null) parts.push(`| fail on ${JSON.stringify(wait.failPattern)}`);
+  if (wait.timeoutMs !== null) parts.push(`| timeout ${Math.round(wait.timeoutMs / 1000)}s`);
+  return `${parts.join(" ")}… (Ctrl-C / SIGTERM to stop)\n`;
 }
 
 /**
