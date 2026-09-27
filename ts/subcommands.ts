@@ -3127,6 +3127,26 @@ async function followRawLocal(
 }
 
 /**
+ * `@xterm/headless`'s Terminal constructor, across runtimes.
+ *
+ * The package is CJS, so `await import()` resolves to `{ default: { Terminal } }`
+ * under node while bun hoists the named exports — a plain
+ * `const { Terminal } = await import(…)` is therefore `undefined` on node and
+ * every render throws "Terminal is not a constructor". That is the runtime npm
+ * users get from `dist/`, where it silently degraded the static render to the
+ * ANSI-strip fallback and broke `ay tail -f` into a pipe outright.
+ */
+async function loadXtermTerminal(): Promise<typeof import("@xterm/headless").Terminal> {
+  const mod = (await import("@xterm/headless")) as unknown as {
+    Terminal?: typeof import("@xterm/headless").Terminal;
+    default?: { Terminal: typeof import("@xterm/headless").Terminal };
+  };
+  const Terminal = mod.Terminal ?? mod.default?.Terminal;
+  if (!Terminal) throw new Error("@xterm/headless: no Terminal export");
+  return Terminal;
+}
+
+/**
  * Minimal view of an @xterm/headless buffer — just what the line-finalization
  * logic needs, so it can be unit-tested against a real Terminal or a stub.
  */
@@ -3176,7 +3196,7 @@ async function followPlainLocal(
   startOffset = buf.length,
 ): Promise<number> {
   process.stderr.write(`following... (plain; Ctrl-C / SIGTERM to stop)\n`);
-  const { Terminal } = await import("@xterm/headless");
+  const Terminal = await loadXtermTerminal();
   const term = new Terminal({ cols: 200, rows: 50, scrollback: 50000, allowProposedApi: true });
   const feed = (b: Uint8Array) => new Promise<void>((r) => term.write(b, () => r()));
   const lineAt = (i: number) => {
@@ -3336,8 +3356,7 @@ export async function renderRawLogLines(buf: Uint8Array, geom?: RenderGeom): Pro
   const scrollback = 50000;
 
   try {
-    const xtermPkg = await import("@xterm/headless");
-    const { Terminal } = xtermPkg;
+    const Terminal = await loadXtermTerminal();
     const term = new Terminal({ cols, rows, scrollback, allowProposedApi: true });
     await new Promise<void>((resolve) => term.write(buf, resolve));
     const active = term.buffer.active;
