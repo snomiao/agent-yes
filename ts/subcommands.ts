@@ -655,6 +655,8 @@ const SUBCOMMANDS = new Set([
   "tray",
   "schedule",
   "remote",
+  "share",
+  "connect",
   "expose",
   "callback",
   "reap",
@@ -1108,6 +1110,14 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         const { cmdRemote } = await import("./remotes.ts");
         return cmdRemote(rest);
       }
+      case "share": {
+        const { cmdShare } = await import("./shareCmd.ts");
+        return cmdShare(rest);
+      }
+      case "connect": {
+        const { cmdConnect } = await import("./remotes.ts");
+        return cmdConnect(rest);
+      }
       case "expose": {
         const { cmdExpose } = await import("./expose.ts");
         return cmdExpose(rest);
@@ -1299,6 +1309,8 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `\n` +
       `Remote:\n` +
       setupLine +
+      `  ay share [local|lan|tailscale|webrtc]  share this machine: one URL for web console + CLI\n` +
+      `  ay connect <share-url> [alias]      save another machine's share URL as a remote\n` +
       `  ay schedule <when> <cli> -- <msg>   run an agent on a schedule (HH:MM or cron)\n` +
       `  ay serve [--port N]                 start HTTP API server (prints token)\n` +
       `  ay serve status                     show serve daemon/server status\n` +

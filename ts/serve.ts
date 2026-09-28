@@ -1140,6 +1140,28 @@ export async function resolveLocalServeUrl(): Promise<string | null> {
 }
 
 /**
+ * What `ay share` needs to know about this host's daemon: the args it was
+ * installed with (null = none installed), whether its HTTP API answers, and the token.
+ * `port` is the loopback HTTP port (fixed --port, else the portless backend).
+ */
+export async function inspectServeDaemon(): Promise<{
+  args: string[] | null;
+  port: number | null;
+  httpUp: boolean; // answers /api/version on `port` (a webrtc-only daemon never does)
+  token: string;
+  consoleUrl: string | null;
+}> {
+  const mgr = await resolveActiveManager();
+  const args = mgr ? await readDaemonServeArgs(mgr) : null;
+  const token = await loadOrCreateToken(undefined);
+  const portless = args !== null && argsUsePortless(args);
+  const port = args === null ? null : portless ? await portlessAppPort() : portFromArgs(args);
+  const httpUp = args !== null && (await fetchDaemonVersion(port, token)) !== null;
+  const consoleUrl = portless ? await resolvedPortlessConsoleUrl(token) : null;
+  return { args, port, httpUp, token, consoleUrl };
+}
+
+/**
  * Best-effort HTTP base URL of the LOCAL running daemon, for CLI→daemon calls
  * (`ay widget`). More robust than resolveLocalServeUrl for UNMANAGED daemons: it
  * also reads the portless proxy backend port (~/.portless/routes.json) and the

@@ -85,5 +85,7 @@ export function toWebrtcUrl(link: string): string | null {
 
 /** True if `spec` looks like a WebRTC share link (vs. an http remote or alias). */
 export function isWebrtcSpec(spec: string): boolean {
-  return spec.startsWith("webrtc://") || (/^https?:\/\//.test(spec) && spec.includes("#"));
+  // An http(s) URL counts only when its fragment parses as a room — an
+  // `ay share` console link (…/#k=<token>) is an http remote, not a room.
+  return spec.startsWith("webrtc://") || parseRaw(spec) !== null;
 }
