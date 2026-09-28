@@ -1633,11 +1633,12 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
       const log = path.join(dir, "a.log");
       await writeFile(log, "❯ \r\n"); // would fail to confirm if checked — but we opt out
       await withDrainedFifo(async (fifo) => {
-        const start = Date.now();
+        // The log never grows, so the confirm path — had it run — would report
+        // "NOT confirmed" and exit non-zero; these two asserts prove it was
+        // skipped. (No wall-clock bound: a <1s limit flaked on a loaded host.)
         const { code, stdout } = await send(fifo, log, "hello", ["--no-wait"]);
         expect(code).toBe(0);
         expect(stdout).not.toMatch(/NOT confirmed/);
-        expect(Date.now() - start).toBeLessThan(1000); // fast — no settle/confirm polling
       });
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => null);
