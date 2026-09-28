@@ -199,6 +199,16 @@ describe("subcommands.isSubcommand", () => {
     expect(isSubcommand("ls", false)).toBe(true);
     expect(isSubcommand("send", false)).toBe(true);
   });
+
+  it("gates `share` / `connect` on the manager entry — they are prompt words", async () => {
+    const { isSubcommand } = await loadModule();
+    // `cy connect the frontend to the API` / `cy share this design` must reach
+    // the agent; the commands live on `ay share` / `ay connect`.
+    for (const sub of ["share", "connect"]) {
+      expect(isSubcommand(sub, true)).toBe(true);
+      expect(isSubcommand(sub, false)).toBe(false);
+    }
+  });
 });
 
 describe("subcommands ↔ rs/src/cli.rs subcommand mirror", () => {
@@ -293,6 +303,15 @@ describe("subcommands.cmdHelp", () => {
     expect(await capture(false)).not.toContain("ay setup"); // cli-bound alias (cy)
     expect(await capture(false)).toContain("ay ls"); // universal commands still shown
     expect(await capture()).toContain("ay notify watch --unread"); // Management entry
+  });
+
+  it("labels `ay share` / `ay connect` as ay-only for cli-bound aliases", async () => {
+    // Both lines stay listed (sharing is how the console is reached at all) but
+    // must not read as invokable through `cy`, where those words are prompt text.
+    const alias = await capture(false);
+    expect(alias).toContain("ay share");
+    expect(alias).toContain("`cy share`/`cy connect` are prompts");
+    expect(await capture(true)).not.toContain("are prompts");
   });
 
   it("stays plain for a human shell (no AGENT_YES_PID)", async () => {

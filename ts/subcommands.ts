@@ -655,8 +655,6 @@ const SUBCOMMANDS = new Set([
   "tray",
   "schedule",
   "remote",
-  "share",
-  "connect",
   "expose",
   "callback",
   "reap",
@@ -665,11 +663,21 @@ const SUBCOMMANDS = new Set([
   "help",
 ]);
 
-// Subcommands reserved for the GENERIC manager (`ay` / `agent-yes`). A cli-bound
-// alias like `cy` (= claude-yes = "agent-yes claude") must NOT treat these as
-// subcommands — `cy setup …` should run claude with that text, not manage the
-// host. Kept separate from SUBCOMMANDS so a runner alias falls straight through.
-const MANAGER_SUBCOMMANDS = new Set(["setup", "ws"]);
+// Subcommands recognised ONLY on the GENERIC manager entry (`ay` / `agent-yes`).
+// A cli-bound alias like `cy` (= claude-yes = "agent-yes claude") must NOT treat
+// these as subcommands — it falls straight through to running the agent with that
+// text. Two reasons a name lands here: it manages the host, or it is an ordinary
+// English verb people open prompts with (`cy connect the frontend to the API`
+// must reach claude). Kept one per line so the two runtimes' copies of this list
+// stay easy to keep in sync.
+const MANAGER_SUBCOMMANDS = new Set([
+  // manage this host
+  "setup",
+  "ws",
+  // prompt-word verbs: reachable as `ay share` / `ay connect`
+  "share",
+  "connect",
+]);
 
 const IDLE_THRESHOLD_MS = 60 * 1000;
 
@@ -1262,6 +1270,13 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
     ? `  ay ws ls [--status]                 list <owner>/<repo>/tree/<branch> workspaces\n` +
       `  ay ws new <owner>/<repo>[@branch]   clone/refresh a workspace (ay ws help for more)\n`
     : ``;
+  // `share` / `connect` are manager-entry-only for the other reason in
+  // MANAGER_SUBCOMMANDS: they are prompt words, so `cy share …` runs the agent.
+  // Both lines stay visible (`ay share` is how you reach the console at all) —
+  // just labelled, so nobody types `cy connect <url>` and starts a session.
+  const shareAliasNote = managerCommands
+    ? ``
+    : `                                      (\`ay\` only — \`cy share\`/\`cy connect\` are prompts)\n`;
   // Only agents carry AGENT_YES_PID — a human shell never sets it — so this
   // section is skipped entirely (no async work at all) for interactive use.
   const self = process.env.AGENT_YES_PID ? await resolveSender() : null;
@@ -1311,6 +1326,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       setupLine +
       `  ay share [local|lan|tailscale|webrtc]  share this machine: one URL for web console + CLI\n` +
       `  ay connect <share-url> [alias]      save another machine's share URL as a remote\n` +
+      shareAliasNote +
       `  ay schedule <when> <cli> -- <msg>   run an agent on a schedule (HH:MM or cron)\n` +
       `  ay serve [--port N]                 start HTTP API server (prints token)\n` +
       `  ay serve status                     show serve daemon/server status\n` +
