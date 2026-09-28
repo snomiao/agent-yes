@@ -1,141 +1,35 @@
 import { networkInterfaces } from "node:os";
 import { stdin, stdout } from "node:process";
 import { createInterface } from "node:readline/promises";
+import {
+  DEFAULT_SHARE_PORT,
+  DEFAULT_TS_PATH,
+  SHARE_MODES,
+  type ShareMode,
+  dropFlagWithValue,
+  findTailscaleRoute,
+  flagValue,
+  hasFlag,
+  httpShareUrl,
+  pickLanIp,
+  planDaemonArgs,
+  portlessInstallArgv,
+  tailscaleDnsName,
+  tailscaleServeArgv,
+  tailscaleServeOffArgv,
+} from "./shareCore.ts";
 
-// `ay share [local|lan|tailscale|webrtc]` — guided "make this machine reachable".
+// `ay share [local|portless|lan|tailscale|webrtc]` — guided "make this machine reachable".
 // Picks HOW (a TTY picker when no mode is given), makes sure the serve daemon runs
 // with the args that mode needs (delegating to `ay serve install`), and prints ONE
 // URL that both opens the web console in a browser and is what another machine
 // passes to `ay connect`. The HTTP modes carry the host's serve token in the
 // fragment (#k=), the webrtc mode the room link — same secret for UI and CLI.
 //
-// Tailscale is guide-only: we detect the tailnet name and an existing
-// `tailscale serve` route, and print the command to add one — changing the
-// operator's tailnet config is left to them.
-
-export type ShareMode = "local" | "lan" | "tailscale" | "webrtc";
-export const SHARE_MODES: ShareMode[] = ["local", "lan", "tailscale", "webrtc"];
-export const DEFAULT_SHARE_PORT = 7432;
-export const DEFAULT_TS_PATH = "/ay";
-
-function flagValue(args: string[], flag: string): string | undefined {
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]!;
-    if (a === flag) return args[i + 1];
-    if (a.startsWith(`${flag}=`)) return a.slice(flag.length + 1);
-  }
-  return undefined;
-}
-
-function hasFlag(args: string[], flag: string): boolean {
-  return args.some((a) => a === flag || a.startsWith(`${flag}=`));
-}
-
-function dropFlagWithValue(args: string[], flag: string): string[] {
-  const out: string[] = [];
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]!;
-    if (a === flag) {
-      i++;
-      continue;
-    }
-    if (a.startsWith(`${flag}=`)) continue;
-    out.push(a);
-  }
-  return out;
-}
-
-/**
- * The daemon args a mode needs, built on top of whatever the daemon already runs
- * with (so sharing over one more way never drops an existing one). `prior` null =
- * no daemon installed. Returns `prior` unchanged when it already fits.
- */
-export function planDaemonArgs(
-  prior: string[] | null,
-  mode: ShareMode,
-  defaultPort = DEFAULT_SHARE_PORT,
-): string[] {
-  let args = [...(prior ?? [])];
-  const hasWebrtc = hasFlag(args, "--webrtc") || hasFlag(args, "--share");
-  // HTTP is the default mode — on unless the daemon is webrtc-only.
-  const hasHttp = hasFlag(args, "--http") || hasFlag(args, "--share") || !hasWebrtc;
-
-  if (mode === "webrtc") {
-    if (!hasWebrtc) {
-      if (prior !== null && hasHttp && !hasFlag(args, "--http")) args.push("--http");
-      args.push("--webrtc");
-    }
-    return args;
-  }
-  if (!hasHttp) args.push("--http");
-  // local is fine on Portless (no fixed port); lan/tailscale need a stable port
-  // to point the LAN or the tailscale proxy at.
-  if (mode !== "local" && flagValue(args, "--port") === undefined)
-    args.push("--port", String(defaultPort));
-  if (mode === "lan" && flagValue(args, "--host") !== "0.0.0.0") {
-    args = dropFlagWithValue(args, "--host");
-    args.push("--host", "0.0.0.0");
-  }
-  return args;
-}
-
-type Ifaces = ReturnType<typeof networkInterfaces>;
-
-/** First private-range IPv4 (not loopback, not Tailscale's 100.64/10 CGNAT). */
-export function pickLanIp(ifaces: Ifaces): string | null {
-  for (const list of Object.values(ifaces)) {
-    for (const a of list ?? []) {
-      if (a.family !== "IPv4" || a.internal) continue;
-      const [x, y] = a.address.split(".").map(Number) as [number, number];
-      const priv = x === 10 || (x === 192 && y === 168) || (x === 172 && y >= 16 && y <= 31);
-      if (priv) return a.address;
-    }
-  }
-  return null;
-}
-
-/** MagicDNS name of this node from `tailscale status --json`, or null when not up. */
-export function tailscaleDnsName(status: any): string | null {
-  if (!status || status.BackendState !== "Running") return null;
-  const dns = String(status.Self?.DNSName ?? "").replace(/\.$/, "");
-  return dns || null;
-}
-
-export type TsRoute =
-  | { status: "ok" }
-  | { status: "missing" }
-  | { status: "conflict"; proxy: string };
-
-/**
- * Is `https://<dns>/<mount>` already proxied to our loopback port? Tailscale
- * strips the mount before forwarding, so the target must be the port's root.
- */
-export function findTailscaleRoute(
-  serveStatus: any,
-  dns: string,
-  mount: string,
-  port: number,
-): TsRoute {
-  const handlers = serveStatus?.Web?.[`${dns}:443`]?.Handlers ?? {};
-  const want = mount.replace(/\/+$/, "");
-  for (const [p, h] of Object.entries<any>(handlers)) {
-    if (p.replace(/\/+$/, "") !== want) continue;
-    const proxy = String(h?.Proxy ?? "");
-    const m = /^(?:https?:\/\/)?(?:127\.0\.0\.1|localhost|\[::1\]):(\d+)(\/.*)?$/.exec(proxy);
-    if (m && Number(m[1]) === port && (!m[2] || m[2] === "/")) return { status: "ok" };
-    return { status: "conflict", proxy };
-  }
-  return { status: "missing" };
-}
-
-export function tailscaleServeCommand(mount: string, port: number): string {
-  return `tailscale serve --bg --https=443 --set-path=${mount} http://127.0.0.1:${port}`;
-}
-
-/** The one URL for the web console AND `ay connect` (HTTP modes). */
-export function httpShareUrl(base: string, token: string): string {
-  return `${base.replace(/\/+$/, "")}/#k=${encodeURIComponent(token)}`;
-}
+// Every command we'd run on the user's behalf — our own daemon install and,
+// above all, third-party tools (tailscale, portless) — is printed verbatim and
+// gated on a [y/N] prompt (default no), so what happens is exactly what they
+// read. `--yes` is the scripted form of that consent; the commands still print.
 
 // Spawn a CLI that prints JSON, with a deadline. On timeout the reader is
 // abandoned, not awaited (see CLAUDE.md: a grandchild may hold the pipe open).
@@ -174,25 +68,106 @@ async function ask(q: string): Promise<string> {
   }
 }
 
+const showCmd = (argv: string[]) => argv.map((a) => (/[\s'"$]/.test(a) ? `'${a}'` : a)).join(" ");
+
+/**
+ * Print the exact commands, then ask [y/N] (default NO). `--yes` answers yes;
+ * without a TTY and without --yes it's a no, and the caller prints the manual
+ * steps. Returns whether the user approved.
+ */
+async function confirmRun(why: string, cmds: string[][], yes: boolean): Promise<boolean> {
+  process.stderr.write(`\n${why}\n${cmds.map((c) => `  $ ${showCmd(c)}\n`).join("")}`);
+  if (yes) {
+    process.stderr.write(`(--yes: running it)\n`);
+    return true;
+  }
+  if (!(stdin.isTTY && stdout.isTTY)) return false;
+  return /^y(es)?$/i.test(await ask(`run ${cmds.length > 1 ? "these" : "this"}? [y/N]: `));
+}
+
+async function runInherit(argv: string[]): Promise<number> {
+  try {
+    const p = Bun.spawn(argv, { stdio: ["inherit", "inherit", "inherit"] });
+    return (await p.exited) ?? 1;
+  } catch (e) {
+    process.stderr.write(`failed to run ${argv[0]}: ${(e as Error).message}\n`);
+    return 1;
+  }
+}
+
+/** GET <base>/api/version with the token — the end-to-end health check. */
+async function probe(base: string, token: string): Promise<string | null> {
+  try {
+    const r = await fetch(`${base}/api/version`, {
+      headers: { Authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(8000),
+    });
+    return r.ok ? null : `HTTP ${r.status}`;
+  } catch (e) {
+    return (e as Error).message;
+  }
+}
+
 const HELP =
-  `Usage: ay share [local|lan|tailscale|webrtc] [options]\n\n` +
+  `Usage: ay share [local|portless|lan|tailscale|webrtc] [options]\n` +
+  `       ay share status\n\n` +
   `Make this machine's agents reachable and print ONE share URL: open it in a\n` +
   `browser for the web console, or pass it to \`ay connect\` on another machine.\n` +
   `With no mode (in a terminal) it asks which way to share.\n\n` +
   `Modes:\n` +
-  `  local       this machine only (loopback)\n` +
+  `  local       http://127.0.0.1:<port> — this machine only\n` +
+  `  portless    https://agent-yes.localhost — this machine, via portless (3rd-party)\n` +
   `  lan         http://<lan-ip>:<port> — anyone on your network (plain HTTP)\n` +
-  `  tailscale   https://<machine>.<tailnet>.ts.net/ay/ — your tailnet devices;\n` +
-  `              prints the \`tailscale serve\` command to run (doesn't run it)\n` +
+  `  tailscale   https://<machine>.<tailnet>.ts.net/ay/ — your tailnet devices,\n` +
+  `              via \`tailscale serve\` (3rd-party)\n` +
   `  webrtc      https://agent-yes.com/w/#… — anywhere, end-to-end encrypted\n` +
   `              through the agent-yes.com signaling server\n\n` +
+  `Every command ay would run for you (daemon install, tailscale, portless) is\n` +
+  `shown first and needs a y at a [y/N] prompt.\n\n` +
   `Options:\n` +
-  `  --port N      HTTP port for lan/tailscale (default: ${DEFAULT_SHARE_PORT}, or the daemon's)\n` +
+  `  --port N      HTTP port (default: ${DEFAULT_SHARE_PORT}, or the daemon's)\n` +
   `  --path /ay    tailscale mount path (default: ${DEFAULT_TS_PATH})\n` +
-  `  -y, --yes     (re)install the serve daemon without asking\n` +
+  `  -y, --yes     approve the shown commands without prompting\n` +
   `  --json        print {mode, url} as JSON\n\n` +
   `The URL carries this host's serve token: whoever holds it can read and steer\n` +
   `every agent here. Rotate: rm ~/.agent-yes/.serve-token && ay serve install\n`;
+
+// ay share status — end-to-end health of each way this machine is shared.
+async function cmdShareStatus(mount: string): Promise<number> {
+  const { inspectServeDaemon } = await import("./serve.ts");
+  const [d, ts] = await Promise.all([inspectServeDaemon(), detectTailscale()]);
+  const line = (k: string, v: string) => process.stdout.write(`${k.padEnd(11)}${v}\n`);
+  if (d.args === null) {
+    line("daemon:", "not installed — run `ay share`");
+    return 1;
+  }
+  line("daemon:", `ay serve ${d.args.join(" ") || "(defaults: portless)"}`);
+  const webrtc = hasFlag(d.args, "--webrtc") || hasFlag(d.args, "--share");
+  line(
+    "http:",
+    d.port ? (d.httpUp ? `up on 127.0.0.1:${d.port}` : `DOWN (127.0.0.1:${d.port})`) : "off",
+  );
+  if (d.consoleUrl) line("portless:", d.httpUp ? d.consoleUrl.replace(/#.*/, "") : "DOWN");
+  line("webrtc:", webrtc ? "on (agent-yes.com room)" : "off");
+  if (!ts) {
+    line("tailscale:", Bun.which("tailscale") ? "not running" : "not installed");
+    return d.httpUp || webrtc ? 0 : 1;
+  }
+  const route = d.port
+    ? findTailscaleRoute(ts.serveStatus, ts.dns, mount, d.port)
+    : { status: "missing" as const };
+  if (route.status !== "ok") {
+    line(
+      "tailscale:",
+      route.status === "conflict" ? `${mount} → ${route.proxy} (not ay)` : `no ${mount} route`,
+    );
+    return d.httpUp || webrtc ? 0 : 1;
+  }
+  const base = `https://${ts.dns}${mount}`;
+  const err = await probe(base, d.token);
+  line("tailscale:", err ? `route ok, but ${base}/ FAILS: ${err}` : `${base}/ ok`);
+  return err ? 1 : 0;
+}
 
 export async function cmdShare(rest: string[]): Promise<number> {
   if (rest.includes("-h") || rest.includes("--help")) {
@@ -212,6 +187,7 @@ export async function cmdShare(rest: string[]): Promise<number> {
   const positional = rest.filter((a, i) => !a.startsWith("-") && !valueIdx.has(i));
   const say = (s: string) => (json ? process.stderr : process.stdout).write(s);
 
+  if (positional[0] === "status") return cmdShareStatus(mount);
   let mode = positional[0] as ShareMode | undefined;
   if (mode && !SHARE_MODES.includes(mode)) {
     process.stderr.write(`ay share: unknown mode '${mode}' — one of ${SHARE_MODES.join(", ")}\n`);
@@ -224,7 +200,12 @@ export async function cmdShare(rest: string[]): Promise<number> {
 
   if (!mode) {
     const opts: { mode: ShareMode; desc: string; ok: boolean }[] = [
-      { mode: "local", desc: "this machine only", ok: true },
+      { mode: "local", desc: "http://127.0.0.1 — this machine only", ok: true },
+      {
+        mode: "portless",
+        desc: "https://agent-yes.localhost — this machine (3rd-party portless)",
+        ok: true,
+      },
       {
         mode: "lan",
         desc: lanIp ? `http://${lanIp}:<port> — your network, plain HTTP` : "no LAN address found",
@@ -237,7 +218,7 @@ export async function cmdShare(rest: string[]): Promise<number> {
       },
       { mode: "webrtc", desc: "agent-yes.com link — anywhere, e2e encrypted", ok: true },
     ];
-    const def = ts ? 3 : 1;
+    const def = ts ? 4 : 1;
     if (!(stdin.isTTY && stdout.isTTY)) {
       process.stderr.write(`ay share: pick a mode — ${SHARE_MODES.join(" | ")}\n\n` + HELP);
       return 1;
@@ -267,29 +248,53 @@ export async function cmdShare(rest: string[]): Promise<number> {
     return 1;
   }
 
+  // 0. portless is a third-party dependency: offer to install it, never silently.
+  if (mode === "portless" && !Bun.which("portless")) {
+    const argv = portlessInstallArgv((b) => !!Bun.which(b));
+    if (!argv) {
+      process.stderr.write(
+        `ay share: portless isn't installed and neither npm nor bun is on PATH\n`,
+      );
+      return 1;
+    }
+    if (
+      !(await confirmRun("portless (third-party) isn't installed. To install it:", [argv], yes))
+    ) {
+      process.stderr.write(`not installed — run it yourself, then \`ay share portless\`\n`);
+      return 1;
+    }
+    if ((await runInherit(argv)) !== 0 || !Bun.which("portless")) {
+      process.stderr.write(`ay share: installing portless failed\n`);
+      return 1;
+    }
+  }
+
   // 1. The daemon: install / reconfigure it when the mode needs different args.
   const want = planDaemonArgs(daemon.args, mode, portArg ? Number(portArg) : undefined);
-  if (portArg && mode !== "webrtc" && flagValue(want, "--port") !== portArg) {
+  if (
+    portArg &&
+    mode !== "webrtc" &&
+    mode !== "portless" &&
+    flagValue(want, "--port") !== portArg
+  ) {
     want.splice(0, want.length, ...dropFlagWithValue(want, "--port"), "--port", portArg);
   }
   const changed = JSON.stringify(want) !== JSON.stringify(daemon.args);
   const down = mode !== "webrtc" && !daemon.httpUp;
   let state = daemon;
   if (changed || down) {
-    const cmd = `ay serve install ${want.join(" ")}`.trim();
-    say(
+    const why =
       daemon.args === null
-        ? `\nno serve daemon yet — sharing needs one:\n  ${cmd}\n`
+        ? `no serve daemon yet — sharing needs one:`
         : changed
-          ? `\nthe serve daemon runs \`${daemon.args.join(" ") || "(defaults)"}\`; ${mode} needs:\n  ${cmd}\n`
-          : `\nthe serve daemon isn't answering — restart it:\n  ${cmd}\n`,
-    );
-    let go = yes;
-    if (!go && stdin.isTTY && stdout.isTTY) go = !/^n(o)?$/i.test(await ask(`run it now? [Y/n]: `));
-    if (!go) {
-      process.stderr.write(
-        `not changed — run the command above (or pass --yes), then \`ay share ${mode}\`\n`,
-      );
+          ? `the serve daemon runs \`ay serve ${daemon.args.join(" ") || "(defaults)"}\`; ${mode} needs:`
+          : `the serve daemon isn't answering — restart it:`;
+    const note =
+      mode === "portless"
+        ? `\n(the daemon then runs under third-party portless: \`portless agent-yes ay serve …\`)`
+        : "";
+    if (!(await confirmRun(why + note, [["ay", "serve", "install", ...want]], yes))) {
+      process.stderr.write(`not changed — run the command above, then \`ay share ${mode}\`\n`);
       return 1;
     }
     const code = await cmdServe(["install", ...want]);
@@ -297,31 +302,55 @@ export async function cmdShare(rest: string[]): Promise<number> {
     state = await inspectServeDaemon();
   }
 
-  // 2. The URL.
+  // 2. The URL (+ for tailscale, the route and an end-to-end check).
   let url: string;
   const port = state.port ?? (portArg ? Number(portArg) : DEFAULT_SHARE_PORT);
   if (mode === "webrtc") {
     const { loadOrCreateShareRoom, shareLinkFromRoomUrl } = await import("./share.ts");
     url = shareLinkFromRoomUrl(await loadOrCreateShareRoom());
+  } else if (mode === "portless") {
+    url = state.consoleUrl ?? httpShareUrl("https://agent-yes.localhost", state.token);
   } else if (mode === "local") {
-    url = state.consoleUrl ?? httpShareUrl(`http://127.0.0.1:${port}`, state.token);
+    url = httpShareUrl(`http://127.0.0.1:${port}`, state.token);
   } else if (mode === "lan") {
     url = httpShareUrl(`http://${lanIp}:${port}`, state.token);
   } else {
-    url = httpShareUrl(`https://${ts!.dns}${mount}`, state.token);
+    const base = `https://${ts!.dns}${mount}`;
+    url = httpShareUrl(base, state.token);
     const route = findTailscaleRoute(ts!.serveStatus, ts!.dns, mount, port);
     if (route.status !== "ok") {
-      say(
-        `\n${route.status === "conflict" ? `${mount} is already proxied to ${route.proxy} — replace it` : `one step left — route ${mount} on your tailnet to ay`}:\n` +
-          (route.status === "conflict"
-            ? `  tailscale serve --https=443 --set-path=${mount} off\n`
-            : ``) +
-          `  ${tailscaleServeCommand(mount, port)}\n` +
-          `(tailnet-only, TLS by Tailscale's ts.net cert. "Access denied"? run once:\n` +
-          `  sudo tailscale set --operator=$USER)\n` +
-          `then re-run \`ay share tailscale\` to check the route.\n`,
-      );
-    } else say(`\ntailscale route ok: https://${ts!.dns}${mount}/ → 127.0.0.1:${port}\n`);
+      const cmds = [
+        ...(route.status === "conflict" ? [tailscaleServeOffArgv(mount)] : []),
+        tailscaleServeArgv(mount, port),
+      ];
+      const why =
+        (route.status === "conflict"
+          ? `${mount} on your tailnet already proxies to ${route.proxy}; to point it at ay instead`
+          : `to route https://${ts!.dns}${mount}/ to ay (tailnet-only, TLS by tailscale)`) +
+        `, ay will run third-party tailscale:`;
+      if (await confirmRun(why, cmds, yes)) {
+        for (const c of cmds) {
+          if ((await runInherit(c)) !== 0) {
+            process.stderr.write(
+              `ay share: \`${showCmd(c)}\` failed. "Access denied"? allow your user once:\n` +
+                `  sudo tailscale set --operator=$USER\n`,
+            );
+            return 1;
+          }
+        }
+      } else {
+        process.stderr.write(
+          `not changed — run the command(s) above yourself, then \`ay share status\`\n`,
+        );
+      }
+    }
+    // Health: the route actually reaches THIS daemon with THIS token, end to end.
+    const err = await probe(base, state.token);
+    say(
+      err
+        ? `\nhealth: ${base}/ not reachable yet (${err}) — check \`ay share status\`\n`
+        : `\nhealth: ${base}/ ok\n`,
+    );
   }
 
   if (json) {

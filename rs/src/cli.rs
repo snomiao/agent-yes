@@ -56,6 +56,8 @@ pub const SUBCOMMANDS: &[&str] = &[
     "tray",
     "schedule",
     "remote",
+    "share",
+    "connect",
     "expose",
     "callback",
     "reap",
