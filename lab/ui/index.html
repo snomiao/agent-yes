@@ -3064,11 +3064,17 @@
       // boot() stores the token and local /api calls carry it as ?token= (query,
       // not header — EventSource can't set headers). When served via the lab
       // proxy instead, no token is stored and paths stay bare (proxy injects).
+      // The page may be mounted under a sub-path by a reverse proxy that strips
+      // it before forwarding (`tailscale serve --set-path=/ay` → console at
+      // https://<host>.ts.net/ay/), so local calls resolve against the page's
+      // own directory: "/ay/" → "/ay/api/…", "/" → "/api/…".
+      const LOCAL_BASE = location.pathname.replace(/\/[^/]*$/, "");
       const withTok = (path) => {
         const t = localStorage.getItem("ay.localToken");
-        return t
-          ? path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(t)
-          : path;
+        return (
+          LOCAL_BASE +
+          (t ? path + (path.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(t) : path)
+        );
       };
 
       // ---- transports: a uniform { fetchJSON, post, subscribe } over each wire ----
