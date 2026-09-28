@@ -447,6 +447,27 @@ function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
 }
 
 /**
+ * macOS only: does `binaryPath` carry a code signature the kernel will accept?
+ *
+ * On Apple Silicon an arm64 Mach-O with no (or a broken) signature is SIGKILLed
+ * at exec — no stderr, just exit 137 — so a cached download damaged on disk
+ * makes every `ay <cli>` die silently right after the version banner. Release
+ * binaries are linker-signed (ad-hoc), so `codesign --verify` passing is the
+ * cheap "will this even start" check. Off macOS, or when `codesign` itself is
+ * unavailable, report valid: never block a run on the probe.
+ */
+export function hasValidMacSignature(binaryPath: string): boolean {
+  if (process.platform !== "darwin") return true;
+  try {
+    execFileSync("codesign", ["--verify", binaryPath], { timeout: 10_000, stdio: "ignore" });
+    return true;
+  } catch (err) {
+    // ENOENT → no codesign on this machine; can't tell, so don't block.
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT";
+  }
+}
+
+/**
  * Get or download the Rust binary
  */
 export async function getRustBinary(
@@ -476,7 +497,16 @@ export async function getRustBinary(
   // First try to find existing binary
   if (!forceDownload) {
     const existing = findRustBinary(verbose);
-    if (existing) {
+    if (existing && !devBuildInfo(existing) && !hasValidMacSignature(existing)) {
+      // A downloaded binary macOS would SIGKILL on exec: drop it and fall
+      // through to a fresh download instead of dying silently.
+      process.stderr.write(
+        `\x1b[33m[rust] Cached binary has an invalid code signature, re-downloading: ${existing}\x1b[0m\n`,
+      );
+      try {
+        unlinkSync(existing);
+      } catch {}
+    } else if (existing) {
       if (verbose) {
         console.log(`[rust] Using existing binary: ${existing}`);
       }

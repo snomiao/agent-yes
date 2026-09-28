@@ -1,8 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { devBuildInfo, gcOldBinaryDirs } from "./rustBinary.ts";
+import { devBuildInfo, gcOldBinaryDirs, hasValidMacSignature } from "./rustBinary.ts";
 import { _setInstalledPackageForTesting } from "./versionChecker.ts";
 
 // Startup GC for the versioned binary download cache (PERFORMANCE-EVENT
@@ -113,5 +113,25 @@ describe("devBuildInfo", () => {
     expect(
       devBuildInfo(String.raw`C:\x\.cache\agent-yes\bin\1.2.3\agent-yes-win32-x64.exe`),
     ).toBeUndefined();
+  });
+});
+
+// A cached download that lost its code signature is SIGKILLed by macOS at exec
+// (silent exit 137), so getRustBinary() must spot it and re-download.
+describe("hasValidMacSignature", () => {
+  it.skipIf(process.platform !== "darwin")("accepts a signed system binary", () => {
+    const signed = path.join(root, "signed-ls");
+    copyFileSync("/bin/ls", signed);
+    expect(hasValidMacSignature(signed)).toBe(true);
+  });
+
+  it.skipIf(process.platform !== "darwin")("rejects an unsigned file", () => {
+    const unsigned = path.join(root, "agent-yes-darwin-arm64-unsigned");
+    writeFileSync(unsigned, "not a mach-o");
+    expect(hasValidMacSignature(unsigned)).toBe(false);
+  });
+
+  it.skipIf(process.platform === "darwin")("always reports valid off macOS", () => {
+    expect(hasValidMacSignature(path.join(root, "does-not-exist"))).toBe(true);
   });
 });
