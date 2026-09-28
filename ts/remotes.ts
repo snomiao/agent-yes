@@ -266,7 +266,7 @@ export function defaultConnectAlias(link: string): string {
   const w = parseWebrtcLink(link);
   if (w) return `webrtc-${w.room.slice(0, 8)}`;
   const host = new URL(link).hostname;
-  // symubu.tailnet.ts.net → symubu; 192.168.1.5 → 192-168-1-5
+  // box.tailnet.ts.net → box; 192.168.1.5 → 192-168-1-5
   if (/^[\d.]+$/.test(host) || host.includes(":")) return host.replace(/[.:]/g, "-");
   return host.split(".")[0] || host;
 }
