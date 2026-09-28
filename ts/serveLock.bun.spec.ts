@@ -192,9 +192,14 @@ describe("acquireWebrtcHostLock — held-lock lifecycle", () => {
     "escalates to SIGKILL when the owner ignores SIGTERM",
     async () => {
       const { spawn } = await import("node:child_process");
-      const stubborn = spawn("/bin/sh", ["-c", "trap '' TERM; sleep 30"], { stdio: "ignore" });
+      // Wait for the child to SAY the trap is installed: a fixed sleep raced it on
+      // a loaded host, so SIGTERM landed before `trap` and killed it outright.
+      const stubborn = spawn("/bin/sh", ["-c", "trap '' TERM; echo ready; sleep 30"], {
+        stdio: ["ignore", "pipe", "ignore"],
+      });
       const pid = stubborn.pid!;
-      await new Promise((r) => setTimeout(r, 100)); // let the trap install
+      await new Promise((r) => stubborn.stdout!.once("data", r));
+      const exited = new Promise((r) => stubborn.once("exit", r));
       const { mkdir: mkd, writeFile: wf } = await import("fs/promises");
       await mkd(path.join(home, "webrtc-host.lock"), { recursive: true });
       await wf(ownerFile(), JSON.stringify({ pid, started_at: Date.now(), beat_at: Date.now() }));
@@ -202,7 +207,7 @@ describe("acquireWebrtcHostLock — held-lock lifecycle", () => {
       const got = await acquireWebrtcHostLock({ takeover: true, graceMs: 0, takeoverWaitMs: 200 });
       expect(got.ok).toBe(true);
       if (got.ok) releases.push(got.release);
-      await new Promise((r) => setTimeout(r, 100));
+      await exited;
       expect(stubborn.signalCode).toBe("SIGKILL");
     },
   );
