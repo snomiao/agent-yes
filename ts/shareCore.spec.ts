@@ -5,12 +5,16 @@ import {
   httpShareUrl,
   pickLanIp,
   planDaemonArgs,
+  portlessInstallArgv,
   tailscaleDnsName,
-} from "./shareCmd.ts";
+  tailscaleServeArgv,
+  tailscaleServeOffArgv,
+} from "./shareCore.ts";
 
 describe("planDaemonArgs", () => {
   it("fresh install per mode", () => {
-    expect(planDaemonArgs(null, "local")).toEqual([]);
+    expect(planDaemonArgs(null, "local")).toEqual(["--port", "7432"]);
+    expect(planDaemonArgs(null, "portless")).toEqual([]);
     expect(planDaemonArgs(null, "tailscale")).toEqual(["--port", "7432"]);
     expect(planDaemonArgs(null, "lan")).toEqual(["--port", "7432", "--host", "0.0.0.0"]);
     expect(planDaemonArgs(null, "webrtc")).toEqual(["--webrtc"]);
@@ -54,6 +58,21 @@ describe("planDaemonArgs", () => {
       "--host=0.0.0.0",
       "--port=1",
     ]);
+  });
+});
+
+describe("portless vs fixed port", () => {
+  it("portless is the mode without --port; local pins one", () => {
+    expect(planDaemonArgs(["--port", "9000"], "portless")).toEqual([]);
+    expect(planDaemonArgs(["--webrtc"], "portless")).toEqual(["--webrtc", "--http"]);
+    expect(planDaemonArgs([], "local")).toEqual(["--port", "7432"]);
+    expect(planDaemonArgs([], "portless")).toEqual([]);
+  });
+
+  it("installs portless with npm, else bun", () => {
+    expect(portlessInstallArgv((b) => b === "npm")).toEqual(["npm", "install", "-g", "portless"]);
+    expect(portlessInstallArgv((b) => b === "bun")).toEqual(["bun", "add", "-g", "portless"]);
+    expect(portlessInstallArgv(() => false)).toBeNull();
   });
 });
 
@@ -117,6 +136,26 @@ describe("tailscale", () => {
     expect(
       findTailscaleRoute(serve({ "/ay": "http://127.0.0.1:7432/ay" }), dns, "/ay", 7432).status,
     ).toBe("conflict");
+  });
+});
+
+describe("tailscale commands", () => {
+  it("are exactly what the [y/N] prompt shows", () => {
+    expect(tailscaleServeArgv("/ay", 7432)).toEqual([
+      "tailscale",
+      "serve",
+      "--bg",
+      "--https=443",
+      "--set-path=/ay",
+      "http://127.0.0.1:7432",
+    ]);
+    expect(tailscaleServeOffArgv("/ay")).toEqual([
+      "tailscale",
+      "serve",
+      "--https=443",
+      "--set-path=/ay",
+      "off",
+    ]);
   });
 });
 
