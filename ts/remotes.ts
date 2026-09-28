@@ -87,7 +87,18 @@ export function parseDirectRemoteSpec(
  *   http://<token>@192.168.1.5:7432       legacy userinfo form (`ay remote add`)
  * The base keeps any path prefix (a reverse proxy mount like /ay), minus a
  * trailing slash / index.html. Null when there's no token or it isn't http(s).
+ *
+ * Never throws: every http(s) spec reaches here through resolveRemoteSpec, so a
+ * malformed one must come back as "not a share URL", not as an exception.
  */
+function decodeMaybe(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s; // not valid percent-encoding — take it literally
+  }
+}
+
 export function parseShareUrl(spec: string): { url: string; token: string } | null {
   if (!/^https?:\/\//i.test(spec)) return null;
   let u: URL;
@@ -97,7 +108,10 @@ export function parseShareUrl(spec: string): { url: string; token: string } | nu
     return null;
   }
   const hash = new URLSearchParams(u.hash.replace(/^#/, ""));
-  const token = hash.get("k") || decodeURIComponent(u.username);
+  // URLSearchParams decodes `#k=` leniently; match that for the userinfo form.
+  // `decodeURIComponent` alone THREW a URIError on a stray percent
+  // (`http://100%@host/`), which surfaced as a crash from `ay ls <url>`.
+  const token = hash.get("k") || decodeMaybe(u.username);
   if (!token) return null;
   u.username = "";
   u.password = "";
@@ -261,7 +275,11 @@ export async function cmdRemote(rest: string[]): Promise<number> {
   return 1;
 }
 
-/** Default alias for a share URL: the machine's short name. */
+/**
+ * Default alias for a share URL: the machine's short name. Call only on a link
+ * that already parsed (a webrtc link or `parseShareUrl` hit) — it assumes a
+ * valid URL and throws otherwise.
+ */
 export function defaultConnectAlias(link: string): string {
   const w = parseWebrtcLink(link);
   if (w) return `webrtc-${w.room.slice(0, 8)}`;
@@ -290,19 +308,24 @@ export async function cmdConnect(rest: string[]): Promise<number> {
     );
     return link ? 0 : 1;
   }
+  // Recognise the link BEFORE naming it: defaultConnectAlias parses it as a URL,
+  // so deriving the alias first turned a scheme-less paste
+  // (`box.ts.net/ay/#k=…`) into a bare "Invalid URL" and buried the message
+  // below, which is the one that explains the actual mistake.
+  const webrtc = isWebrtcSpec(link);
+  const parsed = webrtc ? null : parseShareUrl(link);
+  if (!webrtc && !parsed) {
+    process.stderr.write(
+      `ay connect: not a share URL: '${link}' — expected https://<host>/ay/#k=<token>\n` +
+        `  (quote it: the # starts a comment in most shells)\n`,
+    );
+    return 1;
+  }
   const alias = aliasArg ?? defaultConnectAlias(link);
 
-  if (isWebrtcSpec(link)) {
+  if (!parsed) {
     await writeRemoteAlias(alias, { url: link, token: "" });
   } else {
-    const parsed = parseShareUrl(link);
-    if (!parsed) {
-      process.stderr.write(
-        `ay connect: not a share URL: '${link}' — expected https://<host>/ay/#k=<token>\n` +
-          `  (quote it: the # starts a comment in most shells)\n`,
-      );
-      return 1;
-    }
     try {
       const r = await fetch(`${parsed.url}/api/version`, {
         headers: { Authorization: `Bearer ${parsed.token}` },

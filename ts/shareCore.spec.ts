@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { defaultConnectAlias, parseShareUrl } from "./remotes.ts";
+import { describe, expect, it, vi } from "vitest";
+import { cmdConnect, defaultConnectAlias, parseShareUrl } from "./remotes.ts";
 import {
   findTailscaleRoute,
   httpShareUrl,
@@ -186,5 +186,51 @@ describe("share URL round trip", () => {
   it("default alias is the host's short name", () => {
     expect(defaultConnectAlias("https://box.tailnet.ts.net/ay/#k=t")).toBe("box");
     expect(defaultConnectAlias("http://192.168.1.5:7432/#k=t")).toBe("192-168-1-5");
+  });
+
+  it("never throws on a malformed URL — resolveRemoteSpec feeds it every spec", () => {
+    // A stray percent is not valid percent-encoding: decodeURIComponent threw a
+    // URIError here, so `ay ls 'http://100%@host/'` crashed instead of reporting
+    // an unusable spec.
+    expect(() => parseShareUrl("http://100%@host:7432/")).not.toThrow();
+    expect(parseShareUrl("http://100%@host:7432/")).toEqual({
+      url: "http://host:7432",
+      token: "100%",
+    });
+    expect(parseShareUrl("http://%@%/")).not.toBeUndefined();
+  });
+});
+
+describe("ay connect", () => {
+  const stderr = () => {
+    let out = "";
+    const spy = vi.spyOn(process.stderr, "write").mockImplementation((s: unknown) => {
+      out += String(s);
+      return true;
+    });
+    return { read: () => out, restore: () => spy.mockRestore() };
+  };
+
+  it("explains a scheme-less paste instead of failing on URL parsing", async () => {
+    // The alias used to be derived (via `new URL`) BEFORE the link was checked,
+    // so this printed a bare "Invalid URL" and the hint below never ran.
+    const err = stderr();
+    try {
+      expect(await cmdConnect(["box.tailnet.ts.net/ay/#k=tok"])).toBe(1);
+    } finally {
+      err.restore();
+    }
+    expect(err.read()).toContain("not a share URL");
+    expect(err.read()).toContain("the # starts a comment");
+  });
+
+  it("rejects an http URL with no token without touching the remote store", async () => {
+    const err = stderr();
+    try {
+      expect(await cmdConnect(["https://box.ts.net/ay/"])).toBe(1);
+    } finally {
+      err.restore();
+    }
+    expect(err.read()).toContain("not a share URL");
   });
 });
