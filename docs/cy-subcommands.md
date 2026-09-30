@@ -9,7 +9,8 @@
 
 ```
 cy ls   [keyword] [--all] [--cwd <dir>] [--json]
-cy read <keyword> [--last N|--head N|--range A:B|--before-line L [--limit N]] [--latest]
+ay read <keyword> [--last N|--head N|--range A:B|--before-line L [--limit N]] [--latest]
+                                        # read だけは `ay` 専用（下記「read は ay 専用」）
 cy cat  <keyword>                       # read の全文エイリアス（窓指定なし＝全行）
 cy tail <keyword> [-f] [-n N] [--latest]  # 末尾 N 行（既定 96）、-f で追従
 cy head <keyword> [-n N] [--latest]     # 既定 N=96
@@ -17,6 +18,19 @@ cy send <keyword> <msg> [--code=enter|esc|ctrl-c|ctrl-y|ctrl-d|ctrl-\|tab|none|r
 cy attach <keyword> [--escape ctrl-\] [--latest] [--cwd <dir>]
 cy stop <keyword> [--method=auto|graceful|double-ctrl-c]
 ```
+
+## `read` は `ay` 専用
+
+`cy` は `claude-yes`（= `agent-yes claude`）の別名なので、サブコマンドに
+一致しない先頭語はそのまま **claude へのプロンプト** になる。`read` は
+`ay ls` などと違って日常語であり、`cy read ts/cli.ts and explain it` は
+「ログを読む」ではなく「claude に読ませる」意図しかない。よって `read` は
+`setup` / `ws` と同じく **汎用マネージャ入口（`ay` / `agent-yes`）専用** に
+してある（`SUBCOMMANDS` ではなく `MANAGER_SUBCOMMANDS`、TS/Rust 両方）。
+
+- ログのページャ → `ay read <keyword>`（`cy read` は claude 起動）
+- `cat` / `tail` / `head` / `ls` / `send` などは従来どおり `cy` でも動く
+  （プロンプトの先頭語にはならないため）
 
 ## キーワード解決順
 
@@ -55,7 +69,7 @@ rename・ロック付き、ベストエフォート）。コンパクション�
 exited` かつ既に死亡している PID はまるごと破棄される。手動で起動
 したい場合は `maybeCompactGlobalPids()` を直接呼び出してもよい。
 
-## `cy read|tail|head` の描画
+## `ay read` / `cy tail|head|cat` の描画
 
 各エージェントは生 PTY 出力を `<pid>.raw.log` に追記している（TS:
 `<cwd>/.agent-yes/<pid>.raw.log`、Rust: `~/.agent-yes/<pid>.raw.log`）。
@@ -65,7 +79,7 @@ exited` かつ既に死亡している PID はまるごと破棄される。手�
 解決した上で出力する（`renderRawLogLines`）。スクロールバックは 5 万行を
 確保する。
 
-### ページネーション（`cy read`）
+### ページネーション（`ay read`）
 
 ログ途中からの再描画は PTY のカーソル移動・画面クリア・行折り返しを
 壊すため不可能。よって **一度全文を描画し、描画後の行配列を窓で切り出す**
@@ -79,7 +93,7 @@ range/limit 操作であり、「過去のその瞬間の画面」ではなく *
 4. mode 既定 + `-n` — `tail`/`head` は末尾/先頭 N（既定 96）、`cat`/`read` は全行
 
 静的読み出しのフッターは、現在表示の先頭行を使った **ページ送りカーソル**
-`cy read <pid> --before-line <先頭行> --limit <表示行数>` をそのまま出力する
+`ay read <pid> --before-line <先頭行> --limit <表示行数>` をそのまま出力する
 （上にさらに行がある場合のみ）。これを打てば 1 つ上のページに遡れる。
 `-f`（追従）時はページネーションを無視し、初期コンテキストを出してから
 ライブ差分を流す。リモート読み出し（`token@host:port:keyword`）も同様に

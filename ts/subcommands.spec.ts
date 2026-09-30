@@ -200,14 +200,19 @@ describe("subcommands.isSubcommand", () => {
     expect(isSubcommand("send", false)).toBe(true);
   });
 
-  it("gates `share` / `connect` on the manager entry — they are prompt words", async () => {
+  it("gates the prompt-word verbs so `cy read …` / `cy connect …` are prompt text", async () => {
     const { isSubcommand } = await loadModule();
-    // `cy connect the frontend to the API` / `cy share this design` must reach
-    // the agent; the commands live on `ay share` / `ay connect`.
-    for (const sub of ["share", "connect"]) {
+    // `read` / `share` / `connect` are ordinary English verbs: `cy read ts/cli.ts
+    // and explain it` and `cy connect the frontend to the API` must reach claude.
+    // The commands live on the manager entry (`ay read`, `ay share`, `ay connect`).
+    for (const sub of ["read", "share", "connect"]) {
       expect(isSubcommand(sub, true)).toBe(true);
       expect(isSubcommand(sub, false)).toBe(false);
     }
+    // Their siblings are not prompt openers, so they stay universal.
+    expect(isSubcommand("cat", false)).toBe(true);
+    expect(isSubcommand("tail", false)).toBe(true);
+    expect(isSubcommand("head", false)).toBe(true);
   });
 });
 
@@ -305,13 +310,18 @@ describe("subcommands.cmdHelp", () => {
     expect(await capture()).toContain("ay notify watch --unread"); // Management entry
   });
 
-  it("labels `ay share` / `ay connect` as ay-only for cli-bound aliases", async () => {
-    // Both lines stay listed (sharing is how the console is reached at all) but
-    // must not read as invokable through `cy`, where those words are prompt text.
+  it("labels the ay-only lines for cli-bound aliases", async () => {
+    // `read` / `share` / `connect` stay listed (pagination flags are worth
+    // knowing; `ay share` is how the console is reached at all) but must not read
+    // as invokable through `cy`, where those words are prompt text.
     const alias = await capture(false);
+    expect(alias).toContain("ay read <keyword>");
+    expect(alias).toContain("`cy read …` is a prompt");
     expect(alias).toContain("ay share");
     expect(alias).toContain("`cy share`/`cy connect` are prompts");
-    expect(await capture(true)).not.toContain("are prompts");
+    const manager = await capture(true);
+    expect(manager).not.toContain("is a prompt");
+    expect(manager).not.toContain("are prompts");
   });
 
   it("stays plain for a human shell (no AGENT_YES_PID)", async () => {

@@ -164,7 +164,7 @@ claude-yes --exit-on-idle=60s "run all tests and commit current changes"
 claude-code-execute claude-yes "your task here"
 ```
 
-### Inspect and message running agents (`cy ls / read / send`)
+### Inspect and message running agents (`cy ls / tail / send`)
 
 From any terminal you can list and interact with agents that are already
 running on the machine — both TS- and Rust-spawned ones:
@@ -173,7 +173,9 @@ running on the machine — both TS- and Rust-spawned ones:
 cy ls                                  # list all running agents
 cy ls codex                            # filter (matches pid, cwd, cli, or prompt)
 cy tail <keyword>                      # render last 96 lines via @xterm/headless
-cy read <keyword>                      # full rendered log
+cy cat <keyword>                       # full rendered log
+ay read <keyword>                      # same, with pagination (--last/--range/…)
+                                       #   `read` is `ay`-only: `cy read foo.ts` is a prompt
 cy send <keyword> "next: run tests"    # append a prompt to that agent's stdin
 cy send <keyword> "" --code=ctrl-c     # send a Ctrl+C
 cy attach <keyword>                    # interactive attach (detach: Ctrl-\)

@@ -627,7 +627,6 @@ const SUBCOMMANDS = new Set([
   "result",
   "notify",
   "notifyd",
-  "read",
   "cat",
   "tail",
   "head",
@@ -666,15 +665,21 @@ const SUBCOMMANDS = new Set([
 // Subcommands recognised ONLY on the GENERIC manager entry (`ay` / `agent-yes`).
 // A cli-bound alias like `cy` (= claude-yes = "agent-yes claude") must NOT treat
 // these as subcommands — it falls straight through to running the agent with that
-// text. Two reasons a name lands here: it manages the host, or it is an ordinary
-// English verb people open prompts with (`cy connect the frontend to the API`
-// must reach claude). Kept one per line so the two runtimes' copies of this list
-// stay easy to keep in sync.
+// text. Two reasons a name lands here:
+//   - host management: `cy setup …` / `cy ws …` should prompt claude, not share
+//     the machine over WebRTC (#67).
+//   - it is an ordinary English verb people start prompts with: `cy read ts/cli.ts
+//     and explain it` / `cy connect the frontend to the API` must reach claude.
+//     The commands stay reachable on the manager entry (`ay read`, `ay share`,
+//     `ay connect`); `cy cat` / `cy tail` / `cy head` / `cy ls` are unchanged —
+//     nobody opens a prompt with those.
+// Kept one name per line so both runtimes' copies stay easy to keep in sync.
 const MANAGER_SUBCOMMANDS = new Set([
   // manage this host
   "setup",
   "ws",
-  // prompt-word verbs: reachable as `ay share` / `ay connect`
+  // prompt-word verbs
+  "read",
   "share",
   "connect",
 ]);
@@ -906,8 +911,9 @@ export function isUnreachableWriteErrno(code: string | undefined): boolean {
 /**
  * Whether `name` is a subcommand. `managerCommands` (default true, for the
  * generic `ay`/`agent-yes` entry) additionally admits manager-only commands
- * like `setup`; pass false for a cli-bound alias (cy/claude-yes/…) so those
- * names fall through to running the agent instead.
+ * (`setup`, `ws`, `read`); pass false for a cli-bound alias (cy/claude-yes/…) so
+ * those names fall through to running the agent instead — `cy read <file>` is a
+ * prompt, `ay read <keyword>` is the log pager.
  */
 export function isSubcommand(name: string | undefined, managerCommands = true): boolean {
   if (!name) return false;
@@ -991,9 +997,10 @@ async function writeStdoutFlushed(text: string): Promise<void> {
  */
 export async function runSubcommand(argv: string[]): Promise<number | null> {
   const sub = argv[2];
-  // Manager-only subcommands (setup) aren't subcommands for a cli-bound alias
-  // like `cy` — they fall through to running the agent. Computed once from argv
-  // so it holds regardless of caller, and reused to hide manager-only help.
+  // Manager-only subcommands (setup / ws / read) aren't subcommands for a
+  // cli-bound alias like `cy` — they fall through to running the agent with that
+  // word as prompt text. Computed once from argv so it holds regardless of
+  // caller, and reused to hide manager-only help.
   const managerCommands = !invokedCliName(argv);
   if (!isSubcommand(sub, managerCommands)) return null;
 
@@ -1270,10 +1277,15 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
     ? `  ay ws ls [--status]                 list <owner>/<repo>/tree/<branch> workspaces\n` +
       `  ay ws new <owner>/<repo>[@branch]   clone/refresh a workspace (ay ws help for more)\n`
     : ``;
-  // `share` / `connect` are manager-entry-only for the other reason in
-  // MANAGER_SUBCOMMANDS: they are prompt words, so `cy share …` runs the agent.
-  // Both lines stay visible (`ay share` is how you reach the console at all) —
-  // just labelled, so nobody types `cy connect <url>` and starts a session.
+  // `read` is manager-entry-only too, but for the opposite reason: it's a word
+  // people open prompts with, so `cy read …` runs the agent. Unlike setup/ws the
+  // line stays visible (pagination is worth knowing about) — just labelled, so
+  // nobody types `cy read <pid>` and gets a claude session instead of a log.
+  const readAliasNote = managerCommands
+    ? ``
+    : `                                        (\`ay read\` only — \`cy read …\` is a prompt)\n`;
+  // Same for `share` / `connect`: prompt words, but `ay share` is how the web
+  // console is reached at all, so label the lines rather than hide the feature.
   const shareAliasNote = managerCommands
     ? ``
     : `                                      (\`ay\` only — \`cy share\`/\`cy connect\` are prompts)\n`;
@@ -1295,6 +1307,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `      [--fail-on TEXT] [--count N]       3 = --fail-on hit first)\n` +
       `  ay read <keyword> [page opts]       paginate: --last/--head N, --range A:B,\n` +
       `                                        --before-line L [--limit N]\n` +
+      readAliasNote +
       `  ay cat <keyword>                    full log\n` +
       `  ay head <keyword>                   first N lines\n` +
       `  ay hist [-n 6] [--all] [--json]     past agent conversations (claude/codex\n` +
