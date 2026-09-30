@@ -37,6 +37,54 @@ use std::process::Command;
 
 pub const LABEL: &str = "com.snomiao.ayrs-serve";
 
+/// Soft open-files limit the daemon wants. Every browser peer costs one ICE UDP
+/// socket per local interface plus one for STUN, and supervisors hand out small
+/// defaults (launchd: 256) that a few dozen busy — or leaked — peers exhaust.
+/// Past that point `socket()` fails, and with it `getaddrinfo`, so the
+/// signaling reconnect itself dies ("failed to lookup address information"
+/// with DNS otherwise fine). The generated units request this figure and
+/// [`raise_fd_limit`] asks for it again at startup, which also covers the oxmgr
+/// fallback, a hand-copied unit, and a foreground run.
+pub const WANTED_NOFILE: u64 = 65_536;
+
+/// Raise the soft `RLIMIT_NOFILE` toward [`WANTED_NOFILE`], never above the
+/// hard limit. macOS additionally rejects anything above its per-process
+/// ceiling with EINVAL, so fall back to the classic OPEN_MAX before giving up.
+/// Returns `(before, after)`; a failure leaves the limit alone and returns
+/// `None` — it must never stop the daemon from starting.
+#[cfg(unix)]
+pub fn raise_fd_limit() -> Option<(u64, u64)> {
+    let mut lim = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: plain libc call with a valid out-pointer.
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) } != 0 {
+        return None;
+    }
+    let before = lim.rlim_cur as u64;
+    for want in [WANTED_NOFILE, 10_240] {
+        let want = want.min(lim.rlim_max as u64);
+        if want <= before {
+            return Some((before, before));
+        }
+        let new = libc::rlimit {
+            rlim_cur: want as libc::rlim_t,
+            rlim_max: lim.rlim_max,
+        };
+        // SAFETY: plain libc call with a valid in-pointer.
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &new) } == 0 {
+            return Some((before, want));
+        }
+    }
+    None
+}
+
+#[cfg(not(unix))]
+pub fn raise_fd_limit() -> Option<(u64, u64)> {
+    None
+}
+
 fn home() -> Result<PathBuf> {
     dirs::home_dir().context("cannot resolve home directory")
 }
@@ -199,12 +247,15 @@ fn render_unit(exe: &str, args: &[String], out_log: &str, err_log: &str) -> Stri
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
+  <key>SoftResourceLimits</key>
+  <dict><key>NumberOfFiles</key><integer>{nofile}</integer></dict>
   <key>StandardOutPath</key><string>{out}</string>
   <key>StandardErrorPath</key><string>{err}</string>
 </dict>
 </plist>
 "#,
         prog = prog,
+        nofile = WANTED_NOFILE,
         out = xml_escape(out_log),
         err = xml_escape(err_log),
     )
@@ -224,11 +275,13 @@ fn render_unit(exe: &str, args: &[String], _out: &str, _err: &str) -> String {
          Type=simple\n\
          ExecStart='{exe}' {args}\n\
          Restart=always\n\
-         RestartSec=5\n\n\
+         RestartSec=5\n\
+         LimitNOFILE={nofile}\n\n\
          [Install]\n\
          WantedBy=default.target\n",
         exe = exe,
         args = quoted.join(" "),
+        nofile = WANTED_NOFILE,
     )
 }
 
@@ -1012,6 +1065,51 @@ mod tests {
             sh_quote("webrtc://r1:e1.ab@s.agent-yes.com"),
             "webrtc://r1:e1.ab@s.agent-yes.com"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fd_limit_is_raised_to_the_wanted_figure_or_the_hard_cap() {
+        let (before, after) = raise_fd_limit().expect("setrlimit must not fail on a dev box");
+        assert!(after >= before, "limit went down: {before} -> {after}");
+        let mut lim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut lim) }, 0);
+        // What the kernel reports is what we returned, and it is at least the
+        // fallback figure unless the hard limit is lower still.
+        assert_eq!(lim.rlim_cur as u64, after);
+        assert!(after >= 10_240.min(lim.rlim_max as u64));
+        // Idempotent: a second call is a no-op that reports the raised value.
+        assert_eq!(raise_fd_limit(), Some((after, after)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn launchd_unit_requests_the_open_files_limit() {
+        let plist = render_unit(
+            "/x/bin/ayrs",
+            &service_args(&Some(String::new()), "s.agent-yes.com"),
+            "/x/out.log",
+            "/x/err.log",
+        );
+        assert!(plist.contains("<key>SoftResourceLimits</key>"));
+        assert!(plist.contains(&format!(
+            "<key>NumberOfFiles</key><integer>{WANTED_NOFILE}</integer>"
+        )));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_unit_requests_the_open_files_limit() {
+        let unit = render_unit(
+            "/x/bin/ayrs",
+            &service_args(&Some(String::new()), "s.agent-yes.com"),
+            "/x/out.log",
+            "/x/err.log",
+        );
+        assert!(unit.contains(&format!("\nLimitNOFILE={WANTED_NOFILE}\n")));
     }
 
     #[test]
