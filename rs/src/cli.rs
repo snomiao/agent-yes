@@ -64,9 +64,16 @@ pub const SUBCOMMANDS: &[&str] = &[
     "help",
 ];
 
-/// Subcommands reserved for the generic manager entry (`ay`/`agent-yes`), not a
-/// cli-bound alias like `cy`. Mirrors `MANAGER_SUBCOMMANDS` in ts/subcommands.ts.
-pub const MANAGER_SUBCOMMANDS: &[&str] = &["setup", "ws"];
+/// Subcommands recognised only on the generic manager entry (`ay`/`agent-yes`),
+/// not on a cli-bound alias like `cy`. Two reasons a name lands here: it manages
+/// the host (setup, ws), or it is an ordinary English verb people open prompts
+/// with (share, connect — `cy connect the frontend to the API` must reach the
+/// agent). Mirrors `MANAGER_SUBCOMMANDS` in ts/subcommands.ts.
+pub const MANAGER_SUBCOMMANDS: &[&str] = &[
+    // manage this host
+    "setup", "ws", // prompt-word verbs: reachable as `ay share` / `ay connect`
+    "share", "connect",
+];
 
 /// Whether `name` is a management subcommand. `manager_commands` (true for the
 /// generic `ay`/`agent-yes` entry) additionally admits manager-only commands
@@ -552,6 +559,14 @@ mod tests {
         // cli-bound alias like `cy` (there it's a prompt word).
         assert!(is_subcommand("setup", true));
         assert!(!is_subcommand("setup", false));
+        // `share` / `connect` are manager-only for the other reason: they are
+        // prompt words. `cy connect the frontend to the API` must run the agent.
+        for sub in ["share", "connect"] {
+            assert!(is_subcommand(sub, true), "ay {sub} is a subcommand");
+            assert!(!is_subcommand(sub, false), "cy {sub} is prompt text");
+            assert!(should_delegate(sub, "ay"));
+            assert!(!should_delegate(sub, "cy"));
+        }
     }
 
     #[test]
