@@ -4608,7 +4608,9 @@ export function submissionState(screen: string[]): "submitted" | "queued" | "not
   const prompt = screen.findLastIndex((line) => /^\s*[❯›]($|\s)/u.test(line));
   if (prompt < 0) return "not-submitted";
   const composer = screen[prompt]!.replace(/^\s*[❯›]\s*/u, "");
-  if (composer.trim()) return "not-submitted";
+  // Claude renders the queue placeholder on the prompt line itself.
+  const inlineQueue = /^Press up to edit queued messages$/i.test(composer.trim());
+  if (composer.trim() && !inlineQueue) return "not-submitted";
   // Wrapped/multiline input may start with an empty first line. Require a
   // boundary before treating subsequent nonblank lines as footer chrome.
   for (const line of screen.slice(prompt + 1)) {
@@ -4617,7 +4619,7 @@ export function submissionState(screen: string[]): "submitted" | "queued" | "not
     if (/^\s*(?:[←→] .*agents|\? for shortcuts|esc to interrupt|ctrl\+t to)/i.test(line)) break;
     if (line.trim()) return "not-submitted";
   }
-  return screen.some((line) => /Press up to edit queued messages/i.test(line))
+  return inlineQueue || screen.some((line) => /Press up to edit queued messages/i.test(line))
     ? "queued"
     : "submitted";
 }

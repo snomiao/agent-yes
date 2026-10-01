@@ -1514,7 +1514,7 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
       const { submitAndConfirm } = await loadModule();
       await withFifo(async (fifo, onKeystroke) => {
         const reaction = onKeystroke().then((got) => {
-          if (got) appendFileSync(log, "❯ \r\nPress up to edit queued messages\r\n");
+          if (got) appendFileSync(log, "❯ Press up to edit queued messages\r\n");
           return got;
         });
         const result = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
@@ -1532,6 +1532,8 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
     expect(submissionState(["❯ pending", "────────"])).toBe("not-submitted");
     expect(submissionState(["❯", "  pending", "────────"])).toBe("not-submitted");
     expect(submissionState(["❯", "────────"])).toBe("submitted");
+    expect(submissionState(["❯ Press up to edit queued messages", "────────"])).toBe("queued");
+    expect(submissionState(["❯ pending Press up to edit queued messages"])).toBe("not-submitted");
     expect(submissionState([])).toBe("not-submitted");
     expect(submissionState(["esc to interrupt"])).toBe("not-submitted");
     expect(submissionState(["❯ pending", "Press up to edit queued messages"])).toBe(
@@ -1681,7 +1683,7 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
     const log = path.join(dir, "a.log");
     await writeFile(log, "❯ waiting\r\n");
     const redraw = setInterval(
-      () => appendFileSync(log, "❯ \r\nPress up to edit queued messages\r\n"),
+      () => appendFileSync(log, "❯ Press up to edit queued messages\r\n"),
       40,
     );
     try {
