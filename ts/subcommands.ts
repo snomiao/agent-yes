@@ -4670,6 +4670,26 @@ export function submissionState(screen: string[], identity = ""): SubmissionStat
   return inspectSubmission(screen, identity).submission;
 }
 
+/** A collapsed paste is not delivery evidence; it can only authorize a retry. */
+function collapsedPasteToken(screen: string[]): string | null {
+  const prompt = screen.findLastIndex((line) => /^\s*❯($|\s)/u.test(line));
+  if (prompt < 0) return null;
+  const input = screen[prompt]!.replace(/^\s*❯\s*/u, "").trim();
+  return /^\[Pasted text #\d+ \+\d+ lines\]$/.test(input) ? input : null;
+}
+
+export function ownedCollapsedPaste(
+  cli: string,
+  beforePaste: string[] | null | undefined,
+  afterPaste: string[],
+): string | null {
+  if (cli !== "claude" || !beforePaste) return null;
+  const token = collapsedPasteToken(afterPaste);
+  // Snapshot under the input lock BEFORE writing the body. A pre-existing
+  // placeholder (even in history), missing snapshot, or another CLI is unknown.
+  return token && !beforePaste.join("\n").includes(token) ? token : null;
+}
+
 export const SEND_EXIT_QUEUED = 4;
 
 /** Retry only Enter, never the body. Three attempts, phi delay capped at 400ms. */
@@ -4678,12 +4698,16 @@ export async function submitAndConfirm(
   fifoPath: string,
   trailing: string,
   identity: string,
+  beforePaste?: string[] | null,
 ): Promise<{ confirmed: boolean; screen: string[]; submission: SubmissionState }> {
   const logFile = record.log_file!;
   const geometry = (await readAgentPtysize(record)) ?? undefined;
   const cfg = (await cliDefaults())[record.cli];
   let screen = (await renderLogTailLines(logFile, 40, geometry)) ?? [];
   const baseline = inspectSubmission(screen, identity).transcriptMatches;
+  const ownPaste = ownedCollapsedPaste(record.cli, beforePaste, screen);
+  const canRetry = (evidence: ReturnType<typeof inspectSubmission>, current: string[]) =>
+    evidence.retry || (ownPaste !== null && collapsedPasteToken(current) === ownPaste);
   for (let attempt = 0; attempt <= SEND_SUBMIT_MAX_RETRIES; attempt++) {
     if (attempt) {
       await new Promise((r) => setTimeout(r, Math.min(400, 150 * 1.618 ** (attempt - 1))));
@@ -4697,7 +4721,7 @@ export async function submitAndConfirm(
           submission: settled.submission,
         };
       if (
-        !settled.retry ||
+        !canRetry(settled, screen) ||
         (cfg?.needsInput?.length &&
           parseMenu(screen, { needsInput: cfg.needsInput, working: cfg.working }))
       )
@@ -4714,7 +4738,7 @@ export async function submitAndConfirm(
         submission: evidence.submission,
       };
     }
-    if (!evidence.retry) break;
+    if (!canRetry(evidence, screen)) break;
   }
   return { confirmed: false, screen, submission: "not-submitted" };
 }
@@ -5050,6 +5074,14 @@ async function cmdSend(rest: string[]): Promise<number> {
       record.pid,
       async () => {
         if (fullBody && trailing) {
+          const beforePaste =
+            canConfirm && record.log_file
+              ? await renderLogTailLines(
+                  record.log_file,
+                  40,
+                  (await readAgentPtysize(record)) ?? undefined,
+                )
+              : null;
           await writeToIpc(fifoPath, fullBody);
           if (canConfirm && record.log_file) {
             // Wait for the paste to actually finish rendering — a long/multi-line body
@@ -5065,6 +5097,7 @@ async function cmdSend(rest: string[]): Promise<number> {
               fifoPath,
               trailing,
               nonce ? `<ay-msg ${nonce}` : body,
+              beforePaste,
             ));
           } else {
             await new Promise((r) => setTimeout(r, 200));
