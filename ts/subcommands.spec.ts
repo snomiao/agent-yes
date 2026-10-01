@@ -1676,6 +1676,75 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
     10_000,
   );
 
+  it("owns only a newly appeared Claude collapsed paste, never an existing or unreadable baseline", async () => {
+    const { ownedCollapsedPaste } = await loadModule();
+    const token = "[Pasted text #2 +12 lines]";
+    const after = [`❯ ${token}`];
+    expect(ownedCollapsedPaste("claude", ["❯"], after)).toBe(token);
+    expect(ownedCollapsedPaste("claude", after, after)).toBeNull();
+    expect(ownedCollapsedPaste("claude", [token, "❯"], after)).toBeNull();
+    expect(ownedCollapsedPaste("claude", null, after)).toBeNull();
+    expect(ownedCollapsedPaste("codex", ["❯"], after)).toBeNull();
+    expect(ownedCollapsedPaste("claude", ["❯"], ["❯ unrelated draft"])).toBeNull();
+  });
+
+  it.skipIf(!itUnix)(
+    "retries our newly collapsed paste until its nonce appears in the transcript",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-collapsed-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const marker = "<ay-msg abc12345";
+        await writeFile(log, "❯ [Pasted text #2 +12 lines]\r\n");
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reaction = (async () => {
+            expect(await onKeystroke()).toBe(true);
+            expect(await onKeystroke()).toBe(true);
+            appendFileSync(log, `\r\n${marker} hello\r\n❯\r\n────────────\r\n`);
+          })();
+          const result = await submitAndConfirm(rec({ log_file: log }), fifo, "\r", marker, ["❯"]);
+          await reaction;
+          expect(result.confirmed).toBe(true);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)("does not retry a collapsed paste that existed before our write", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-existing-paste-"));
+    try {
+      const log = path.join(dir, "a.log");
+      const screen = ["❯ [Pasted text #2 +12 lines]"];
+      await writeFile(log, screen.join("\r\n"));
+      const { submitAndConfirm } = await loadModule();
+      await withFifo(async (fifo) => {
+        const result = await submitAndConfirm(
+          rec({ log_file: log }),
+          fifo,
+          "\r",
+          "<ay-msg abc12345",
+          screen,
+        );
+        expect(result.confirmed).toBe(false);
+        const fs = await import("fs");
+        const fd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+        try {
+          const bytes = Buffer.alloc(16);
+          const count = fs.readSync(fd, bytes, 0, bytes.length, null);
+          expect(bytes.subarray(0, count).toString()).toBe("\r");
+        } finally {
+          fs.closeSync(fd);
+        }
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(!itUnix)(
     "gives up after exhausting retries when the Enter is swallowed (screen never changes)",
     async () => {
@@ -1814,6 +1883,30 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
       }
     },
   );
+
+  it.skipIf(!itUnix)("captures collapsed-paste ownership before writing the body", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-collapse-wiring-"));
+    const log = path.join(dir, "a.log");
+    await writeFile(log, "❯\r\n");
+    let enters = 0;
+    try {
+      await withDrainedFifo(
+        async (fifo) => {
+          const { code } = await send(fifo, log, "collapsed-message");
+          expect(code).toBe(0);
+          expect(enters).toBe(2);
+        },
+        (bytes) => {
+          if (bytes.includes("collapsed-message"))
+            appendFileSync(log, "\x1b[2J\x1b[H❯ [Pasted text #3 +20 lines]\r\n");
+          if (bytes.includes("\r") && ++enters === 2)
+            appendFileSync(log, "collapsed-message\r\n❯\r\n");
+        },
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
   it.skipIf(!itUnix)("reports QUEUED with its distinct exit 4", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "ay-queue-e2e-"));
