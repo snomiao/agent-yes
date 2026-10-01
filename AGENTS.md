@@ -1,6 +1,10 @@
 # agent-yes
 
-## After making changes, always rebuild and relink
+## After making changes, rebuild; relink only on a personal dev machine
+
+共有ホストではグローバルの `bun link` / `bun add -g` / `cargo install` を実行しない。全 lane の実行先が未レビューの worktree に変わり、worktree の削除で全員が起動できなくなるため。TypeScript の検証は `bun run build` と `bun ./dist/agent-yes.js ...`、Rust は `cargo build --manifest-path rs/Cargo.toml` と生成バイナリの直接実行を使う。共有環境への配布はレビュー後の merge・release 経由にする。
+
+以下の relink / install 手順は個人専用の開発環境に限る。
 
 **TypeScript changes:**
 

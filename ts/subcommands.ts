@@ -701,7 +701,7 @@ const STUCK_THRESHOLD_MS = (() => {
 // trailing Enter before that settles gets swallowed by the CLI's paste handling
 // (it lands mid-paste instead of submitting). So instead of a blind fixed sleep,
 // we poll the log for actual quiet, then confirm the Enter landed by watching for
-// an empty destination composer or an explicit queue receipt, retrying if not.
+// our message identity in the transcript; retry only while it remains in input.
 const SEND_SETTLE_QUIET_MS = 150; // no log growth for this long → paste finished rendering
 const SEND_SETTLE_MAX_MS = 1500; // cap: don't wait forever on a screen that's busy for other reasons
 const SEND_CONFIRM_QUIET_MS = 400; // after Enter, no growth for this long → response has settled
@@ -4603,25 +4603,71 @@ export async function backoffWhileTyping(
   return { clear: false, waitedMs: Date.now() - start };
 }
 
-/** Destination evidence only: redraw bytes and spinners cannot prove submission. */
-export function submissionState(screen: string[]): "submitted" | "queued" | "not-submitted" {
+type SubmissionState = "submitted" | "queued" | "not-submitted";
+
+/** Attribute the evidence to THIS message, never to redraws or another turn. */
+export function inspectSubmission(
+  screen: string[],
+  identity: string,
+): {
+  submission: SubmissionState;
+  retry: boolean;
+  transcriptMatches: number;
+} {
+  const unknown = { submission: "not-submitted" as const, retry: false, transcriptMatches: 0 };
   const prompt = screen.findLastIndex((line) => /^\s*[❯›]($|\s)/u.test(line));
-  if (prompt < 0) return "not-submitted";
-  const composer = screen[prompt]!.replace(/^\s*[❯›]\s*/u, "");
-  // Claude renders the queue placeholder on the prompt line itself.
-  const inlineQueue = /^Press up to edit queued messages$/i.test(composer.trim());
-  if (composer.trim() && !inlineQueue) return "not-submitted";
-  // Wrapped/multiline input may start with an empty first line. Require a
-  // boundary before treating subsequent nonblank lines as footer chrome.
+  if (prompt < 0 || !identity.trim()) return unknown;
+  // Strip whitespace to tolerate terminal wrapping of the nonce/header or body.
+  const compact = (text: string) => text.replace(/\s+/gu, "");
+  const needle = compact(identity);
+  const wrapped = identity.startsWith("<ay-msg ");
+  const transcriptLines = screen.slice(0, prompt);
+  const transcript = compact(transcriptLines.join("\n"));
+  // For raw sends, a short body such as "x" must not match "Codex" or a
+  // suggestion containing that character. Match whole rendered message lines.
+  let transcriptMatches = wrapped ? transcript.split(needle).length - 1 : 0;
+  if (!wrapped) {
+    const lines = transcriptLines.map((line) => compact(line.replace(/^\s*[❯›]\s*/u, "")));
+    for (let start = 0; start < lines.length; start++) {
+      let candidate = "";
+      for (let end = start; end < lines.length && candidate.length < needle.length; end++) {
+        candidate += lines[end];
+        if (candidate === needle) {
+          transcriptMatches++;
+          break;
+        }
+      }
+    }
+  }
+  const input: string[] = [screen[prompt]!.replace(/^\s*[❯›]\s*/u, "")];
   for (const line of screen.slice(prompt + 1)) {
     if (/^\s*[─━]{3,}/u.test(line)) break;
-    if (/Press up to edit queued messages/i.test(line)) return "queued";
-    if (/^\s*(?:[←→] .*agents|\? for shortcuts|esc to interrupt|ctrl\+t to)/i.test(line)) break;
-    if (line.trim()) return "not-submitted";
+    // Claude and Codex footer chrome, including the model/cwd status row.
+    if (
+      /^\s*(?:[←→] .*agents|\? for shortcuts|esc to interrupt|ctrl\+t to|GPT-[^·]*·|gpt-[^·]*·)/i.test(
+        line,
+      )
+    )
+      break;
+    input.push(line);
   }
-  return inlineQueue || screen.some((line) => /Press up to edit queued messages/i.test(line))
-    ? "queued"
-    : "submitted";
+  const composer = compact(input.join("\n"));
+  if (wrapped ? composer.includes(needle) : composer === needle) {
+    return { submission: "not-submitted", retry: true, transcriptMatches };
+  }
+  const queued = screen.some((line) =>
+    /^\s*(?:[❯›]\s*)?Press up to edit queued messages\s*$/iu.test(line),
+  );
+  if (transcriptMatches) {
+    // Empty prompts, Codex placeholders and Claude suggestions all mean that
+    // our message has left the composer when its identity is in the transcript.
+    return { submission: queued ? "queued" : "submitted", retry: false, transcriptMatches };
+  }
+  return unknown;
+}
+
+export function submissionState(screen: string[], identity = ""): SubmissionState {
+  return inspectSubmission(screen, identity).submission;
 }
 
 export const SEND_EXIT_QUEUED = 4;
@@ -4631,33 +4677,44 @@ export async function submitAndConfirm(
   record: GlobalPidRecord,
   fifoPath: string,
   trailing: string,
-): Promise<{
-  confirmed: boolean;
-  screen: string[];
-  submission: "submitted" | "queued" | "not-submitted";
-}> {
+  identity: string,
+): Promise<{ confirmed: boolean; screen: string[]; submission: SubmissionState }> {
   const logFile = record.log_file!;
   const geometry = (await readAgentPtysize(record)) ?? undefined;
-  let screen: string[] = [];
-  const beforeSize = await stat(logFile)
-    .then((s) => s.size)
-    .catch(() => null);
+  const cfg = (await cliDefaults())[record.cli];
+  let screen = (await renderLogTailLines(logFile, 40, geometry)) ?? [];
+  const baseline = inspectSubmission(screen, identity).transcriptMatches;
   for (let attempt = 0; attempt <= SEND_SUBMIT_MAX_RETRIES; attempt++) {
-    if (attempt)
+    if (attempt) {
       await new Promise((r) => setTimeout(r, Math.min(400, 150 * 1.618 ** (attempt - 1))));
-    await writeToIpc(fifoPath, trailing);
-    const afterSize = await waitForLogQuiet(logFile, SEND_CONFIRM_QUIET_MS, SEND_CONFIRM_MAX_MS);
-    screen = (await renderLogTailLines(logFile, 40, geometry)) ?? [];
-    const submission = submissionState(screen);
-    // A static empty prompt may predate the paste; require destination change.
-    if (
-      submission !== "not-submitted" &&
-      beforeSize !== null &&
-      afterSize !== null &&
-      afterSize > beforeSize
-    ) {
-      return { confirmed: submission === "submitted", screen, submission };
+      // Recheck after the delay: the target could have accepted the earlier Enter.
+      screen = (await renderLogTailLines(logFile, 40, geometry)) ?? [];
+      const settled = inspectSubmission(screen, identity);
+      if (settled.submission !== "not-submitted" && settled.transcriptMatches > baseline)
+        return {
+          confirmed: settled.submission === "submitted",
+          screen,
+          submission: settled.submission,
+        };
+      if (
+        !settled.retry ||
+        (cfg?.needsInput?.length &&
+          parseMenu(screen, { needsInput: cfg.needsInput, working: cfg.working }))
+      )
+        break;
     }
+    await writeToIpc(fifoPath, trailing);
+    await waitForLogQuiet(logFile, SEND_CONFIRM_QUIET_MS, SEND_CONFIRM_MAX_MS);
+    screen = (await renderLogTailLines(logFile, 40, geometry)) ?? [];
+    const evidence = inspectSubmission(screen, identity);
+    if (evidence.submission !== "not-submitted" && evidence.transcriptMatches > baseline) {
+      return {
+        confirmed: evidence.submission === "submitted",
+        screen,
+        submission: evidence.submission,
+      };
+    }
+    if (!evidence.retry) break;
   }
   return { confirmed: false, screen, submission: "not-submitted" };
 }
@@ -5003,7 +5060,12 @@ async function cmdSend(rest: string[]): Promise<number> {
               confirmed,
               screen: lastScreen,
               submission: receipt.submission,
-            } = await submitAndConfirm(record, fifoPath, trailing));
+            } = await submitAndConfirm(
+              record,
+              fifoPath,
+              trailing,
+              nonce ? `<ay-msg ${nonce}` : body,
+            ));
           } else {
             await new Promise((r) => setTimeout(r, 200));
             await writeToIpc(fifoPath, trailing);
@@ -5039,7 +5101,7 @@ async function cmdSend(rest: string[]): Promise<number> {
       ? "QUEUED"
       : confirmed
         ? "sent"
-        : "NOT SUBMITTED (NOT confirmed: composer not cleared or destination evidence unavailable)";
+        : "NOT SUBMITTED (NOT confirmed: our message remains in input or destination evidence is unavailable)";
   process.stdout.write(
     `${status} to pid ${record.pid} (${record.cli}): ${truncate(payload, 80)}\n`,
   );
@@ -5083,7 +5145,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   }
   if (!confirmed && submission !== "queued") {
     process.stderr.write(
-      `\nwarning: couldn't confirm the CLI acted on it after ${SEND_SUBMIT_MAX_RETRIES + 1} attempt(s) — ` +
+      `\nwarning: couldn't confirm the CLI acted on this message — ` +
         `it may still be sitting unsubmitted in the prompt. Last screen:\n` +
         lastScreen
           .slice(-8)
