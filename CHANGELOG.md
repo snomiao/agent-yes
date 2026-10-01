@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
 
+## Unreleased
+
+- `ay send` がログの再描画だけで送信成功を報告する問題を修正。今回のメッセージが履歴に移ったことを確認し、自分の本文が入力欄に残る場合だけ Enter を再試行します。未確認は `NOT SUBMITTED`（終了コード 1）、受付済みの処理待ちは `QUEUED`（終了コード 4）として区別します。
+
 ### [1.31.41](https://github.com/snomiao/claude-yes/compare/v1.31.40...v1.31.41) (2025-11-08)
 
 ### [1.31.40](https://github.com/snomiao/claude-yes/compare/v1.31.39...v1.31.40) (2025-11-07)

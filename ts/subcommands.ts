@@ -701,12 +701,11 @@ const STUCK_THRESHOLD_MS = (() => {
 // trailing Enter before that settles gets swallowed by the CLI's paste handling
 // (it lands mid-paste instead of submitting). So instead of a blind fixed sleep,
 // we poll the log for actual quiet, then confirm the Enter landed by watching for
-// either a `working` busy marker or a meaningful size bump, retrying if not.
+// our message identity in the transcript; retry only while it remains in input.
 const SEND_SETTLE_QUIET_MS = 150; // no log growth for this long → paste finished rendering
 const SEND_SETTLE_MAX_MS = 1500; // cap: don't wait forever on a screen that's busy for other reasons
 const SEND_CONFIRM_QUIET_MS = 400; // after Enter, no growth for this long → response has settled
 const SEND_CONFIRM_MAX_MS = 1200; // cap per confirm attempt
-const SEND_CONFIRM_MIN_GROWTH_BYTES = 8; // filters out pure cursor-blink/frame noise
 const SEND_SUBMIT_MAX_RETRIES = 2; // total attempts = 1 + this
 // `ay send` typing-backoff: if the user is actively typing at the target's
 // terminal, injecting our body mid-line would fuse into their text and submit a
@@ -4604,43 +4603,144 @@ export async function backoffWhileTyping(
   return { clear: false, waitedMs: Date.now() - start };
 }
 
-/**
- * Send the trailing submit code and confirm the CLI actually acted on it —
- * either a `working` busy marker appears, or the log grows meaningfully. Retries
- * (re-sending just the trailing code) up to SEND_SUBMIT_MAX_RETRIES times when
- * neither shows, since a swallowed Enter looks identical to a slow one until we
- * check. Returns whether submission was confirmed, plus the final rendered tail
- * (for a caller to show the user when it wasn't).
- */
+type SubmissionState = "submitted" | "queued" | "not-submitted";
+
+/** Attribute the evidence to THIS message, never to redraws or another turn. */
+export function inspectSubmission(
+  screen: string[],
+  identity: string,
+): {
+  submission: SubmissionState;
+  retry: boolean;
+  transcriptMatches: number;
+} {
+  const unknown = { submission: "not-submitted" as const, retry: false, transcriptMatches: 0 };
+  const prompt = screen.findLastIndex((line) => /^\s*[❯›]($|\s)/u.test(line));
+  if (prompt < 0 || !identity.trim()) return unknown;
+  // Strip whitespace to tolerate terminal wrapping of the nonce/header or body.
+  const compact = (text: string) => text.replace(/\s+/gu, "");
+  const needle = compact(identity);
+  const wrapped = identity.startsWith("<ay-msg ");
+  const transcriptLines = screen.slice(0, prompt);
+  const transcript = compact(transcriptLines.join("\n"));
+  // For raw sends, a short body such as "x" must not match "Codex" or a
+  // suggestion containing that character. Match whole rendered message lines.
+  let transcriptMatches = wrapped ? transcript.split(needle).length - 1 : 0;
+  if (!wrapped) {
+    const lines = transcriptLines.map((line) => compact(line.replace(/^\s*[❯›]\s*/u, "")));
+    for (let start = 0; start < lines.length; start++) {
+      let candidate = "";
+      for (let end = start; end < lines.length && candidate.length < needle.length; end++) {
+        candidate += lines[end];
+        if (candidate === needle) {
+          transcriptMatches++;
+          break;
+        }
+      }
+    }
+  }
+  const input: string[] = [screen[prompt]!.replace(/^\s*[❯›]\s*/u, "")];
+  for (const line of screen.slice(prompt + 1)) {
+    if (/^\s*[─━]{3,}/u.test(line)) break;
+    // Claude and Codex footer chrome, including the model/cwd status row.
+    if (
+      /^\s*(?:[←→] .*agents|\? for shortcuts|esc to interrupt|ctrl\+t to|GPT-[^·]*·|gpt-[^·]*·)/i.test(
+        line,
+      )
+    )
+      break;
+    input.push(line);
+  }
+  const composer = compact(input.join("\n"));
+  if (wrapped ? composer.includes(needle) : composer === needle) {
+    return { submission: "not-submitted", retry: true, transcriptMatches };
+  }
+  const queued = screen.some((line) =>
+    /^\s*(?:[❯›]\s*)?Press up to edit queued messages\s*$/iu.test(line),
+  );
+  if (transcriptMatches) {
+    // Empty prompts, Codex placeholders and Claude suggestions all mean that
+    // our message has left the composer when its identity is in the transcript.
+    return { submission: queued ? "queued" : "submitted", retry: false, transcriptMatches };
+  }
+  return unknown;
+}
+
+export function submissionState(screen: string[], identity = ""): SubmissionState {
+  return inspectSubmission(screen, identity).submission;
+}
+
+/** A collapsed paste is not delivery evidence; it can only authorize a retry. */
+function collapsedPasteToken(screen: string[]): string | null {
+  const prompt = screen.findLastIndex((line) => /^\s*❯($|\s)/u.test(line));
+  if (prompt < 0) return null;
+  const input = screen[prompt]!.replace(/^\s*❯\s*/u, "").trim();
+  return /^\[Pasted text #\d+ \+\d+ lines\]$/.test(input) ? input : null;
+}
+
+export function ownedCollapsedPaste(
+  cli: string,
+  beforePaste: string[] | null | undefined,
+  afterPaste: string[],
+): string | null {
+  if (cli !== "claude" || !beforePaste) return null;
+  const token = collapsedPasteToken(afterPaste);
+  // Snapshot under the input lock BEFORE writing the body. A pre-existing
+  // placeholder (even in history), missing snapshot, or another CLI is unknown.
+  return token && !beforePaste.join("\n").includes(token) ? token : null;
+}
+
+export const SEND_EXIT_QUEUED = 4;
+
+/** Retry only Enter, never the body. Three attempts, phi delay capped at 400ms. */
 export async function submitAndConfirm(
   record: GlobalPidRecord,
   fifoPath: string,
   trailing: string,
-): Promise<{ confirmed: boolean; screen: string[] }> {
+  identity: string,
+  beforePaste?: string[] | null,
+): Promise<{ confirmed: boolean; screen: string[]; submission: SubmissionState }> {
   const logFile = record.log_file!;
+  const geometry = (await readAgentPtysize(record)) ?? undefined;
   const cfg = (await cliDefaults())[record.cli];
-  let screen: string[] = [];
+  let screen = (await renderLogTailLines(logFile, 40, geometry)) ?? [];
+  const baseline = inspectSubmission(screen, identity).transcriptMatches;
+  const ownPaste = ownedCollapsedPaste(record.cli, beforePaste, screen);
+  const canRetry = (evidence: ReturnType<typeof inspectSubmission>, current: string[]) =>
+    evidence.retry || (ownPaste !== null && collapsedPasteToken(current) === ownPaste);
   for (let attempt = 0; attempt <= SEND_SUBMIT_MAX_RETRIES; attempt++) {
-    const sizeBefore =
-      (await stat(logFile)
-        .then((s) => s.size)
-        .catch(() => null)) ?? 0;
-    // A working marker already on screen BEFORE this attempt (e.g. a busy agent
-    // that queues typed input) proves nothing about whether THIS Enter landed —
-    // it could just be leftover from whatever the agent was already doing. Only
-    // a working marker that WASN'T there before, or actual log growth, counts.
-    const wasAlreadyWorking = isWorkingScreen(
-      (await renderLogTailLines(logFile, 40)) ?? [],
-      cfg?.working,
-    );
+    if (attempt) {
+      await new Promise((r) => setTimeout(r, Math.min(400, 150 * 1.618 ** (attempt - 1))));
+      // Recheck after the delay: the target could have accepted the earlier Enter.
+      screen = (await renderLogTailLines(logFile, 40, geometry)) ?? [];
+      const settled = inspectSubmission(screen, identity);
+      if (settled.submission !== "not-submitted" && settled.transcriptMatches > baseline)
+        return {
+          confirmed: settled.submission === "submitted",
+          screen,
+          submission: settled.submission,
+        };
+      if (
+        !canRetry(settled, screen) ||
+        (cfg?.needsInput?.length &&
+          parseMenu(screen, { needsInput: cfg.needsInput, working: cfg.working }))
+      )
+        break;
+    }
     await writeToIpc(fifoPath, trailing);
-    const sizeAfter = await waitForLogQuiet(logFile, SEND_CONFIRM_QUIET_MS, SEND_CONFIRM_MAX_MS);
-    screen = (await renderLogTailLines(logFile, 40)) ?? [];
-    const grew = sizeAfter !== null && sizeAfter >= sizeBefore + SEND_CONFIRM_MIN_GROWTH_BYTES;
-    const nowWorking = isWorkingScreen(screen, cfg?.working);
-    if ((nowWorking && !wasAlreadyWorking) || grew) return { confirmed: true, screen };
+    await waitForLogQuiet(logFile, SEND_CONFIRM_QUIET_MS, SEND_CONFIRM_MAX_MS);
+    screen = (await renderLogTailLines(logFile, 40, geometry)) ?? [];
+    const evidence = inspectSubmission(screen, identity);
+    if (evidence.submission !== "not-submitted" && evidence.transcriptMatches > baseline) {
+      return {
+        confirmed: evidence.submission === "submitted",
+        screen,
+        submission: evidence.submission,
+      };
+    }
+    if (!canRetry(evidence, screen)) break;
   }
-  return { confirmed: false, screen };
+  return { confirmed: false, screen, submission: "not-submitted" };
 }
 
 /** Poll until the agent is no longer parked on a menu (selection accepted → it
@@ -4961,7 +5061,10 @@ async function cmdSend(rest: string[]): Promise<number> {
   // double-interrupt. Checked against the resolved byte, not the code NAME, so
   // every alias that resolves to Enter (--code=enter or --code=cr) is covered.
   const canConfirm = trailing === "\r" && Boolean(fullBody) && !noWait;
-  let confirmed = true;
+  let confirmed = !canConfirm;
+  const receipt: { submission: "submitted" | "queued" | "not-submitted" | "unchecked" } = {
+    submission: canConfirm ? "not-submitted" : "unchecked",
+  };
   let lastScreen: string[] = [];
   // The body and its Enter are ONE transaction: every gap between them (the
   // paste-settle wait, the submit-confirm retries) is a window where another
@@ -4971,16 +5074,30 @@ async function cmdSend(rest: string[]): Promise<number> {
       record.pid,
       async () => {
         if (fullBody && trailing) {
+          const beforePaste =
+            canConfirm && record.log_file
+              ? await renderLogTailLines(
+                  record.log_file,
+                  40,
+                  (await readAgentPtysize(record)) ?? undefined,
+                )
+              : null;
           await writeToIpc(fifoPath, fullBody);
           if (canConfirm && record.log_file) {
             // Wait for the paste to actually finish rendering — a long/multi-line body
             // can take longer than any fixed guess, and sending Enter mid-paste gets
             // swallowed by the CLI's bracketed-paste handling instead of submitting.
             await waitForLogQuiet(record.log_file, SEND_SETTLE_QUIET_MS, SEND_SETTLE_MAX_MS);
-            ({ confirmed, screen: lastScreen } = await submitAndConfirm(
+            ({
+              confirmed,
+              screen: lastScreen,
+              submission: receipt.submission,
+            } = await submitAndConfirm(
               record,
               fifoPath,
               trailing,
+              nonce ? `<ay-msg ${nonce}` : body,
+              beforePaste,
             ));
           } else {
             await new Promise((r) => setTimeout(r, 200));
@@ -5010,8 +5127,14 @@ async function cmdSend(rest: string[]): Promise<number> {
     );
     return SEND_EXIT_UNREACHABLE;
   }
+  const { submission } = receipt;
   const payload = body + trailing;
-  const status = confirmed ? "sent" : "sent but NOT confirmed submitted";
+  const status =
+    submission === "queued"
+      ? "QUEUED"
+      : confirmed
+        ? "sent"
+        : "NOT SUBMITTED (NOT confirmed: our message remains in input or destination evidence is unavailable)";
   process.stdout.write(
     `${status} to pid ${record.pid} (${record.cli}): ${truncate(payload, 80)}\n`,
   );
@@ -5049,12 +5172,13 @@ async function cmdSend(rest: string[]): Promise<number> {
       body,
       code: trailing === "\r" ? undefined : codeName,
       confirmed,
+      submission,
       wrapped: Boolean(nonce),
     });
   }
-  if (!confirmed) {
+  if (!confirmed && submission !== "queued") {
     process.stderr.write(
-      `\nwarning: couldn't confirm the CLI acted on it after ${SEND_SUBMIT_MAX_RETRIES + 1} attempt(s) — ` +
+      `\nwarning: couldn't confirm the CLI acted on this message — ` +
         `it may still be sitting unsubmitted in the prompt. Last screen:\n` +
         lastScreen
           .slice(-8)
@@ -5096,7 +5220,7 @@ async function cmdSend(rest: string[]): Promise<number> {
     const tip = stopTipForCli(record.cli, record.pid);
     if (tip) process.stderr.write(tip);
   }
-  return confirmed ? 0 : 1;
+  return submission === "queued" ? SEND_EXIT_QUEUED : confirmed ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -5205,7 +5329,8 @@ async function cmdMsgs(rest: string[]): Promise<number> {
     const fromLabel = senderLabel(rec);
     const peer = dir === "out" ? `→ ${rec.to.cli} #${rec.to.pid}` : `← ${fromLabel}`;
     const via = rec.remote ? ` (via ${rec.remote})` : "";
-    const flag = rec.confirmed === false ? " (unconfirmed)" : "";
+    const flag =
+      rec.submission === "queued" ? " (QUEUED)" : rec.confirmed === false ? " (unconfirmed)" : "";
     const tag = rec.kind ? `[${rec.kind}] ` : "";
     const line = tag + truncate(rec.body.replace(/\s+/g, " "), 100);
     process.stdout.write(`${when}  ${peer.padEnd(20)}${via}${flag}  ${line}\n`);

@@ -1108,8 +1108,8 @@ describe("subcommands.cmdSend writes bytes to FIFO", () => {
           "hello-fifo",
           "--force",
         ]);
-        expect(code).toBe(0);
-        expect(stdout.join("")).toMatch(/sent to pid/);
+        expect(code).toBe(1); // Bytes written, but no destination log proves submission.
+        expect(stdout.join("")).toMatch(/NOT SUBMITTED/);
       } finally {
         process.stdout.write = orig;
         if (savedAyPid !== undefined) process.env.AGENT_YES_PID = savedAyPid;
@@ -1419,10 +1419,15 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
           // has actually landed — a genuine idle→busy transition, and one that
           // provably happens AFTER submitAndConfirm's pre-write snapshot.
           const reacted = onKeystroke().then((got) => {
-            if (got) appendFileSync(log, BUSY);
+            if (got) appendFileSync(log, "some leftover unsent text\r\n" + BUSY + "❯ \r\n");
             return got;
           });
-          const { confirmed, screen } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          const { confirmed, screen } = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "some leftover unsent text",
+          );
           expect(await reacted).toBe(true); // the fifo really carried the Enter
           expect(confirmed).toBe(true);
           expect(screen.join("\n")).toContain("esc to interrupt");
@@ -1446,7 +1451,12 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
         await writeFile(log, BUSY);
         const { submitAndConfirm } = await loadModule();
         await withFifo(async (fifo) => {
-          const { confirmed } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          const { confirmed } = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "some leftover unsent text",
+          );
           expect(confirmed).toBe(false);
         });
       } finally {
@@ -1456,25 +1466,282 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
     10_000,
   );
 
-  it.skipIf(!itUnix)("confirms via log growth even without a recognized busy marker", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+  it.skipIf(!itUnix)(
+    "confirms a cleared composer after a response without a busy marker",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, "❯ \r\n");
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          // The CLI starts responding once the Enter lands. Keyed off the actual
+          // keystroke so the growth cannot be folded into `sizeBefore`.
+          const reacted = onKeystroke().then((got) => {
+            if (got)
+              appendFileSync(
+                log,
+                "some leftover unsent text\r\nsome real response text appears here\r\n❯ \r\n",
+              );
+            return got;
+          });
+          const { confirmed } = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "some leftover unsent text",
+          );
+          expect(await reacted).toBe(true);
+          expect(confirmed).toBe(true);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "rejects growing logs while the message remains in the composer",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-redraw-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, IDLE);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reaction = onKeystroke().then((got) => {
+            if (got) appendFileSync(log, BUSY + IDLE);
+            return got;
+          });
+          const result = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "some leftover unsent text",
+          );
+          expect(await reaction).toBe(true);
+          expect(result.confirmed).toBe(false);
+          expect(result.submission).toBe("not-submitted");
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)("distinguishes a queued receipt from submission", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-queued-"));
     try {
       const log = path.join(dir, "a.log");
-      await writeFile(log, "❯ \r\n");
+      await writeFile(log, IDLE);
       const { submitAndConfirm } = await loadModule();
       await withFifo(async (fifo, onKeystroke) => {
-        // The CLI starts responding once the Enter lands. Keyed off the actual
-        // keystroke so the growth cannot be folded into `sizeBefore`.
-        const reacted = onKeystroke().then((got) => {
-          if (got) appendFileSync(log, "some real response text appears here\r\n");
+        const reaction = onKeystroke().then((got) => {
+          if (got) appendFileSync(log, "❯ Press up to edit queued messages\r\n");
           return got;
         });
-        const { confirmed } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
-        expect(await reacted).toBe(true);
-        expect(confirmed).toBe(true);
+        const result = await submitAndConfirm(
+          rec({ log_file: log }),
+          fifo,
+          "\r",
+          "some leftover unsent text",
+        );
+        expect(await reaction).toBe(true);
+        expect(result.confirmed).toBe(false);
+        expect(result.submission).toBe("queued");
       });
     } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => null);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires our identity to move out of the composer into the transcript", async () => {
+    const { submissionState, inspectSubmission } = await loadModule();
+    const marker = "<ay-msg abc12345";
+    expect(submissionState([`❯ ${marker}`, "────────"], marker)).toBe("not-submitted");
+    expect(inspectSubmission(["❯", `  ${marker}`, "────────"], marker).retry).toBe(true);
+    expect(submissionState([marker, "❯", "────────"], marker)).toBe("submitted");
+    expect(
+      submissionState([marker, "❯ Press up to edit queued messages", "────────"], marker),
+    ).toBe("queued");
+    expect(submissionState(["❯", "────────"], marker)).toBe("not-submitted");
+    expect(submissionState([], marker)).toBe("not-submitted");
+    expect(inspectSubmission(["❯ unrelated draft"], marker).retry).toBe(false);
+    expect(inspectSubmission(["Codex", "› Ask Codex to do anything"], "x")).toMatchObject({
+      submission: "not-submitted",
+      retry: false,
+    });
+  });
+
+  it("recognizes captured Codex idle/working and Claude suggestion layouts only with our transcript identity", async () => {
+    const { submissionState, inspectSubmission } = await loadModule();
+    const marker = "<ay-msg abc12345";
+    // Layouts from the reviewer's captured fleet screens, with synthetic message identity.
+    const screens = [
+      [
+        "• Ran tests",
+        "",
+        "› Ask Codex to do anything",
+        "  GPT-6-Astra low · ~/ws/x · Read brief",
+        "  ? for shortcuts                ⚠ 2 warnings · f2 to view",
+      ],
+      [
+        "• Working (10m 54s • esc to interrupt)",
+        "  └ Tip: Start a fresh idea with /new",
+        "› Ask Codex to do anything",
+        "  GPT-6-Astra low · ~/ws/x · Read brief",
+        "  ? for shortcuts",
+      ],
+      [
+        "✻ Churned for 15s",
+        "────────────",
+        "❯ push it and open the PR",
+        "────────────",
+        "  ⏵⏵ auto mode on",
+      ],
+    ];
+    for (const screen of screens) {
+      expect(submissionState([marker, ...screen], marker)).toBe("submitted");
+      expect(submissionState(screen, marker)).toBe("not-submitted");
+      expect(inspectSubmission(screen, marker).retry).toBe(false);
+    }
+  });
+
+  it.skipIf(!itUnix)(
+    "sends zero extra Enters for unrelated composer text, placeholders and dialogs",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-no-retry-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const { submitAndConfirm } = await loadModule();
+        for (const screen of [
+          "❯ push it and open the PR",
+          "› Ask Codex to do anything",
+          "Allow this command?\r\n❯ 1. Yes",
+        ]) {
+          await writeFile(log, screen + "\r\n");
+          await withFifo(async (fifo) => {
+            const result = await submitAndConfirm(
+              rec({ log_file: log }),
+              fifo,
+              "\r",
+              "<ay-msg abc12345",
+            );
+            expect(result.confirmed).toBe(false);
+            const fs = await import("fs");
+            const fd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+            try {
+              const bytes = Buffer.alloc(16);
+              const count = fs.readSync(fd, bytes, 0, bytes.length, null);
+              expect(bytes.subarray(0, count).toString()).toBe("\r");
+            } finally {
+              fs.closeSync(fd);
+            }
+          });
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "retries a swallowed Enter only for our composer and confirms its transcript",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-own-retry-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const marker = "<ay-msg abc12345";
+        await writeFile(log, `❯ ${marker} hello\r\n`);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reaction = (async () => {
+            expect(await onKeystroke()).toBe(true); // first Enter is swallowed
+            expect(await onKeystroke()).toBe(true); // only our message gets retried
+            appendFileSync(
+              log,
+              `\r\n${marker} hello\r\n❯ push it and open the PR\r\n────────────\r\n`,
+            );
+          })();
+          const result = await submitAndConfirm(rec({ log_file: log }), fifo, "\r", marker);
+          await reaction;
+          expect(result.confirmed).toBe(true);
+          expect(result.submission).toBe("submitted");
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  it("owns only a newly appeared Claude collapsed paste, never an existing or unreadable baseline", async () => {
+    const { ownedCollapsedPaste } = await loadModule();
+    const token = "[Pasted text #2 +12 lines]";
+    const after = [`❯ ${token}`];
+    expect(ownedCollapsedPaste("claude", ["❯"], after)).toBe(token);
+    expect(ownedCollapsedPaste("claude", after, after)).toBeNull();
+    expect(ownedCollapsedPaste("claude", [token, "❯"], after)).toBeNull();
+    expect(ownedCollapsedPaste("claude", null, after)).toBeNull();
+    expect(ownedCollapsedPaste("codex", ["❯"], after)).toBeNull();
+    expect(ownedCollapsedPaste("claude", ["❯"], ["❯ unrelated draft"])).toBeNull();
+  });
+
+  it.skipIf(!itUnix)(
+    "retries our newly collapsed paste until its nonce appears in the transcript",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-collapsed-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const marker = "<ay-msg abc12345";
+        await writeFile(log, "❯ [Pasted text #2 +12 lines]\r\n");
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reaction = (async () => {
+            expect(await onKeystroke()).toBe(true);
+            expect(await onKeystroke()).toBe(true);
+            appendFileSync(log, `\r\n${marker} hello\r\n❯\r\n────────────\r\n`);
+          })();
+          const result = await submitAndConfirm(rec({ log_file: log }), fifo, "\r", marker, ["❯"]);
+          await reaction;
+          expect(result.confirmed).toBe(true);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)("does not retry a collapsed paste that existed before our write", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-existing-paste-"));
+    try {
+      const log = path.join(dir, "a.log");
+      const screen = ["❯ [Pasted text #2 +12 lines]"];
+      await writeFile(log, screen.join("\r\n"));
+      const { submitAndConfirm } = await loadModule();
+      await withFifo(async (fifo) => {
+        const result = await submitAndConfirm(
+          rec({ log_file: log }),
+          fifo,
+          "\r",
+          "<ay-msg abc12345",
+          screen,
+        );
+        expect(result.confirmed).toBe(false);
+        const fs = await import("fs");
+        const fd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+        try {
+          const bytes = Buffer.alloc(16);
+          const count = fs.readSync(fd, bytes, 0, bytes.length, null);
+          expect(bytes.subarray(0, count).toString()).toBe("\r");
+        } finally {
+          fs.closeSync(fd);
+        }
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 
@@ -1487,7 +1754,12 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
         await writeFile(log, IDLE); // never touched again — nothing to confirm
         const { submitAndConfirm } = await loadModule();
         await withFifo(async (fifo) => {
-          const { confirmed, screen } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          const { confirmed, screen } = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "some leftover unsent text",
+          );
           expect(confirmed).toBe(false);
           expect(screen.join("\n")).toContain("leftover unsent text");
         });
@@ -1505,7 +1777,10 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
 
   // A background drain so cmdSend's writes to the FIFO never block, mirroring
   // the "delivers a message to a real FIFO" setup above.
-  async function withDrainedFifo(fn: (fifo: string) => Promise<void>) {
+  async function withDrainedFifo(
+    fn: (fifo: string) => Promise<void>,
+    onBytes?: (bytes: string) => void,
+  ) {
     const { spawnSync } = await import("child_process");
     const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-"));
     const fifo = path.join(dir, "test.fifo");
@@ -1523,7 +1798,9 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
       const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
       const drain = setInterval(() => {
         try {
-          fs.readSync(rdwrFd, Buffer.alloc(4096), 0, 4096, null);
+          const bytes = Buffer.alloc(4096);
+          const count = fs.readSync(rdwrFd, bytes, 0, bytes.length, null);
+          if (count) onBytes?.(bytes.subarray(0, count).toString());
         } catch {
           /* EAGAIN or similar — nothing pending, ignore */
         }
@@ -1587,33 +1864,76 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
     "exits 0 and reports 'sent' when a working marker appears after the Enter (genuine confirm)",
     async () => {
       const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-log-"));
-      // A STATIC pre-existing busy marker cannot confirm — that's the #157
-      // wasAlreadyWorking guard (see the "already on screen before sending" test).
-      // Confirmation needs a real idle→working transition (or >=8 bytes of growth)
-      // AFTER the submit. Model that: the log is idle until we send, then a steady
-      // trickle of the working marker lands within submitAndConfirm's window, so it
-      // confirms deterministically without fragile single-shot timing.
       const log = path.join(dir, "a.log");
-      await writeFile(log, "❯ \r\n"); // idle until the submitted Enter lands
-      let working = false;
-      const respond = setInterval(() => {
-        if (working) appendFileSync(log, BUSY);
-      }, 40);
-      respond.unref();
+      await writeFile(log, "❯ hello\r\n");
       try {
-        await withDrainedFifo(async (fifo) => {
-          working = true; // the submitted Enter kicks the agent into working
-          const { code, stdout } = await send(fifo, log, "hello");
-          expect(code).toBe(0);
-          expect(stdout).toMatch(/^sent to pid/);
-          expect(stdout).not.toMatch(/NOT confirmed/);
-        });
+        await withDrainedFifo(
+          async (fifo) => {
+            const { code, stdout } = await send(fifo, log, "hello");
+            expect(code).toBe(0);
+            expect(stdout).toMatch(/^sent to pid/);
+            expect(stdout).not.toMatch(/NOT confirmed/);
+          },
+          (bytes) => {
+            if (bytes.includes("\r")) appendFileSync(log, "\r\nhello\r\n" + BUSY + "❯ \r\n");
+          },
+        );
       } finally {
-        clearInterval(respond);
         await rm(dir, { recursive: true, force: true }).catch(() => null);
       }
     },
   );
+
+  it.skipIf(!itUnix)("captures collapsed-paste ownership before writing the body", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-collapse-wiring-"));
+    const log = path.join(dir, "a.log");
+    await writeFile(log, "❯\r\n");
+    let enters = 0;
+    try {
+      await withDrainedFifo(
+        async (fifo) => {
+          const { code } = await send(fifo, log, "collapsed-message");
+          expect(code).toBe(0);
+          expect(enters).toBe(2);
+        },
+        (bytes) => {
+          if (bytes.includes("collapsed-message"))
+            appendFileSync(log, "\x1b[2J\x1b[H❯ [Pasted text #3 +20 lines]\r\n");
+          if (bytes.includes("\r") && ++enters === 2)
+            appendFileSync(log, "collapsed-message\r\n❯\r\n");
+        },
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!itUnix)("reports QUEUED with its distinct exit 4", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-queue-e2e-"));
+    const log = path.join(dir, "a.log");
+    await writeFile(log, "❯ waiting\r\n");
+    try {
+      await withDrainedFifo(
+        async (fifo) => {
+          const { code, stdout } = await send(fifo, log, "queued-receipt-test");
+          expect(code).toBe(4);
+          expect(stdout).toMatch(/^QUEUED to pid/);
+          const { readMailbox } = await import("./messageLog.ts");
+          const receipt = (await readMailbox(process.cwd(), "outbox")).findLast(
+            (r) => r.body === "queued-receipt-test",
+          );
+          expect(receipt?.confirmed).toBe(false);
+          expect(receipt?.submission).toBe("queued");
+        },
+        (bytes) => {
+          if (bytes.includes("\r"))
+            appendFileSync(log, "queued-receipt-test\r\n❯ Press up to edit queued messages\r\n");
+        },
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
   it.skipIf(!itUnix)(
     "exits non-zero and reports the leftover screen when submission can't be confirmed",
@@ -3246,7 +3566,7 @@ describe("subcommands.cmdSend double-envelope warning", () => {
             '<ay-msg deadbeef from claude #900001 @ /repo/beta — reply: ay send 900001 "...">hi</ay-msg deadbeef>',
             "--force",
           ]);
-          expect(code).toBe(0);
+          expect(code).toBe(1); // This FIFO fixture has no destination log.
           expect(stderr.join("")).toMatch(/DOUBLE wrapper/);
         } finally {
           process.stderr.write = origErr;
@@ -3329,7 +3649,7 @@ describe("subcommands.cmdSend double-envelope warning", () => {
           "plain body, quoting <ay-msg deadbeef …> mid-text is fine",
           "--force",
         ]);
-        expect(code).toBe(0);
+        expect(code).toBe(1); // This FIFO fixture has no destination log.
         expect(stderr.join("")).not.toMatch(/DOUBLE wrapper/);
       } finally {
         process.stderr.write = origErr;
@@ -3403,7 +3723,7 @@ describe("subcommands.cmdSend double-envelope warning", () => {
           "hello from crm",
           "--force",
         ]);
-        expect(code).toBe(0);
+        expect(code).toBe(1); // This FIFO fixture has no destination log.
       } finally {
         process.stdout.write = origOut;
         if (savedAyPid === undefined) delete process.env.AGENT_YES_PID;

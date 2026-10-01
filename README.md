@@ -231,6 +231,8 @@ Tasks move through a lifecycle per `--kind`, and gated transitions require
 
 ### Ask another agent a question (`ay ask`)
 
+`ay send` の送信確認では、今回のメッセージ識別子が入力欄から履歴へ移ったことを調べます。終了コードは `0` = 送信確認済み、`1` = `NOT SUBMITTED`（宛先を確認してから再送）、`3` = 宛先到達不能、`4` = `QUEUED`（受付済み・処理待ち）です。`4` は失敗として本文を再送せず、宛先の処理を待ってください。確認できない画面や入力候補・ダイアログには Enter を追加しません。`--no-wait` は従来どおり確認を省略するため、終了コード `0` でも送信確認を意味しません。
+
 `ay send` delivers a question but leaves no trace of it: if the asker moves on
 and the other agent dies, wedges, or simply never replies, nothing records that
 an answer is owed. `ay ask` delivers the same way — returning immediately — and

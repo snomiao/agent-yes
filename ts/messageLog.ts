@@ -107,6 +107,8 @@ export interface MessageRecord {
   code?: string;
   /** Whether `ay send` confirmed the CLI acted on it. */
   confirmed?: boolean;
+  /** Destination submission evidence; queued is accepted but not yet submitted. */
+  submission?: "submitted" | "queued" | "not-submitted" | "unchecked";
   /** Whether the body was wrapped in an `[ay-msg …]` attribution block. */
   wrapped: boolean;
   /** The remote url/alias when this message crossed the wire (`ay send <remote>:<kw>`);
