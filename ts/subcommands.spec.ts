@@ -1108,8 +1108,8 @@ describe("subcommands.cmdSend writes bytes to FIFO", () => {
           "hello-fifo",
           "--force",
         ]);
-        expect(code).toBe(0);
-        expect(stdout.join("")).toMatch(/sent to pid/);
+        expect(code).toBe(1); // Bytes written, but no destination log proves submission.
+        expect(stdout.join("")).toMatch(/NOT SUBMITTED/);
       } finally {
         process.stdout.write = orig;
         if (savedAyPid !== undefined) process.env.AGENT_YES_PID = savedAyPid;
@@ -1419,7 +1419,7 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
           // has actually landed — a genuine idle→busy transition, and one that
           // provably happens AFTER submitAndConfirm's pre-write snapshot.
           const reacted = onKeystroke().then((got) => {
-            if (got) appendFileSync(log, BUSY);
+            if (got) appendFileSync(log, BUSY + "❯ \r\n");
             return got;
           });
           const { confirmed, screen } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
@@ -1456,26 +1456,87 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
     10_000,
   );
 
-  it.skipIf(!itUnix)("confirms via log growth even without a recognized busy marker", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+  it.skipIf(!itUnix)(
+    "confirms a cleared composer after a response without a busy marker",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, "❯ \r\n");
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          // The CLI starts responding once the Enter lands. Keyed off the actual
+          // keystroke so the growth cannot be folded into `sizeBefore`.
+          const reacted = onKeystroke().then((got) => {
+            if (got) appendFileSync(log, "some real response text appears here\r\n❯ \r\n");
+            return got;
+          });
+          const { confirmed } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          expect(await reacted).toBe(true);
+          expect(confirmed).toBe(true);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "rejects growing logs while the message remains in the composer",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-redraw-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, IDLE);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reaction = onKeystroke().then((got) => {
+            if (got) appendFileSync(log, BUSY + IDLE);
+            return got;
+          });
+          const result = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          expect(await reaction).toBe(true);
+          expect(result.confirmed).toBe(false);
+          expect(result.submission).toBe("not-submitted");
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)("distinguishes a queued receipt from submission", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-queued-"));
     try {
       const log = path.join(dir, "a.log");
-      await writeFile(log, "❯ \r\n");
+      await writeFile(log, IDLE);
       const { submitAndConfirm } = await loadModule();
       await withFifo(async (fifo, onKeystroke) => {
-        // The CLI starts responding once the Enter lands. Keyed off the actual
-        // keystroke so the growth cannot be folded into `sizeBefore`.
-        const reacted = onKeystroke().then((got) => {
-          if (got) appendFileSync(log, "some real response text appears here\r\n");
+        const reaction = onKeystroke().then((got) => {
+          if (got) appendFileSync(log, "❯ \r\nPress up to edit queued messages\r\n");
           return got;
         });
-        const { confirmed } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
-        expect(await reacted).toBe(true);
-        expect(confirmed).toBe(true);
+        const result = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+        expect(await reaction).toBe(true);
+        expect(result.confirmed).toBe(false);
+        expect(result.submission).toBe("queued");
       });
     } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => null);
+      await rm(dir, { recursive: true, force: true });
     }
+  });
+
+  it("requires an empty composer including continuation lines", async () => {
+    const { submissionState } = await loadModule();
+    expect(submissionState(["❯ pending", "────────"])).toBe("not-submitted");
+    expect(submissionState(["❯", "  pending", "────────"])).toBe("not-submitted");
+    expect(submissionState(["❯", "────────"])).toBe("submitted");
+    expect(submissionState([])).toBe("not-submitted");
+    expect(submissionState(["esc to interrupt"])).toBe("not-submitted");
+    expect(submissionState(["❯ pending", "Press up to edit queued messages"])).toBe(
+      "not-submitted",
+    );
   });
 
   it.skipIf(!itUnix)(
@@ -1597,7 +1658,7 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
       await writeFile(log, "❯ \r\n"); // idle until the submitted Enter lands
       let working = false;
       const respond = setInterval(() => {
-        if (working) appendFileSync(log, BUSY);
+        if (working) appendFileSync(log, BUSY + "❯ \r\n");
       }, 40);
       respond.unref();
       try {
@@ -1614,6 +1675,32 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
       }
     },
   );
+
+  it.skipIf(!itUnix)("reports QUEUED with its distinct exit 4", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-queue-e2e-"));
+    const log = path.join(dir, "a.log");
+    await writeFile(log, "❯ waiting\r\n");
+    const redraw = setInterval(
+      () => appendFileSync(log, "❯ \r\nPress up to edit queued messages\r\n"),
+      40,
+    );
+    try {
+      await withDrainedFifo(async (fifo) => {
+        const { code, stdout } = await send(fifo, log, "queued-receipt-test");
+        expect(code).toBe(4);
+        expect(stdout).toMatch(/^QUEUED to pid/);
+        const { readMailbox } = await import("./messageLog.ts");
+        const receipt = (await readMailbox(process.cwd(), "outbox")).findLast(
+          (r) => r.body === "queued-receipt-test",
+        );
+        expect(receipt?.confirmed).toBe(false);
+        expect(receipt?.submission).toBe("queued");
+      });
+    } finally {
+      clearInterval(redraw);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
   it.skipIf(!itUnix)(
     "exits non-zero and reports the leftover screen when submission can't be confirmed",
@@ -3246,7 +3333,7 @@ describe("subcommands.cmdSend double-envelope warning", () => {
             '<ay-msg deadbeef from claude #900001 @ /repo/beta — reply: ay send 900001 "...">hi</ay-msg deadbeef>',
             "--force",
           ]);
-          expect(code).toBe(0);
+          expect(code).toBe(1); // This FIFO fixture has no destination log.
           expect(stderr.join("")).toMatch(/DOUBLE wrapper/);
         } finally {
           process.stderr.write = origErr;
@@ -3329,7 +3416,7 @@ describe("subcommands.cmdSend double-envelope warning", () => {
           "plain body, quoting <ay-msg deadbeef …> mid-text is fine",
           "--force",
         ]);
-        expect(code).toBe(0);
+        expect(code).toBe(1); // This FIFO fixture has no destination log.
         expect(stderr.join("")).not.toMatch(/DOUBLE wrapper/);
       } finally {
         process.stderr.write = origErr;
@@ -3403,7 +3490,7 @@ describe("subcommands.cmdSend double-envelope warning", () => {
           "hello from crm",
           "--force",
         ]);
-        expect(code).toBe(0);
+        expect(code).toBe(1); // This FIFO fixture has no destination log.
       } finally {
         process.stdout.write = origOut;
         if (savedAyPid === undefined) delete process.env.AGENT_YES_PID;
