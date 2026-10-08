@@ -60,8 +60,9 @@ const FOOTER_RE =
 // ← for agents · …", "shell, 1 monitor · …"), and ink's partial redraws can leave
 // it garbled ("1       · esc to …", "↓ t…"). Unmatched, the whole row was
 // counted as a 20-40 char draft and every send to an idle lane was parked. So a
-// row is also the footer when any later segment is one of its fixed hints.
-const FOOTER_SEGMENT_RE = /·\s*(?:[←→] .*agents?|↓ |esc to interrupt)/u;
+// row is also the footer when any later segment is one of its fixed hints, or
+// when only the mode label's "(shift+tab to cycle)" tail survived the redraw.
+const FOOTER_SEGMENT_RE = /·\s*(?:[←→] .*agents?|↓ |esc to interrupt)|\(shift\+tab to /u;
 
 /**
  * The composer's prompt row among plain-text rows (oldest first), or -1.

@@ -140,6 +140,7 @@ describe("classifyComposer", () => {
       "  PR #1234 · 2 shells · ← 2 agents · ↓ to manage",
       // ink partial redraws leave the row garbled in the replayed tail
       "  1       · esc to interrupt · ← 2 agents · ↓ t…",
+      "                  (shift+tab to cy le)",
     ];
     it.each(footers)("does not count a dim suggestion over %j", async (footer) => {
       const frame = `reply\r\n\r\n❯ \x1b[2mbump the lib pin in the parent repo\x1b[22m\r\n\r\n${GRAY(footer)}`;
