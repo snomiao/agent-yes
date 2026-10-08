@@ -2015,9 +2015,22 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
     try {
       await withDrainedFifo(
         async (fifo) => {
-          const { code, stdout } = await send(fifo, log, "queued-receipt-test");
+          const errs: string[] = [];
+          const origErr = process.stderr.write.bind(process.stderr);
+          process.stderr.write = ((c: string | Uint8Array) => (
+            errs.push(String(c)), true
+          )) as typeof process.stderr.write;
+          let res: { code: number | null; stdout: string };
+          try {
+            res = await send(fifo, log, "queued-receipt-test");
+          } finally {
+            process.stderr.write = origErr;
+          }
+          const { code, stdout } = res;
           expect(code).toBe(4);
           expect(stdout).toMatch(/^QUEUED to pid/);
+          // The receipt says so, so a lane does not read rc=4 as a failure and resend.
+          expect(errs.join("")).toContain("Queued, do not resend.");
           const { readMailbox } = await import("./messageLog.ts");
           const receipt = (await readMailbox(process.cwd(), "outbox")).findLast(
             (r) => r.body === "queued-receipt-test",

@@ -101,8 +101,15 @@ import { isWebrtcSpec } from "./webrtcLink.ts";
 import { withIpcLock } from "./ipcLock.ts";
 import { isWithin, resolveWorkDir } from "./workDir.ts";
 import {
+  bodyHash,
   classifyComposer,
   composerPromptRow,
+  DUPLICATE_WINDOW_MS,
+  findRecentDuplicate,
+  noteRecentSend,
+  queuedReceipt,
+  senderKey,
+  type RecentSend,
   isComposerChrome,
   claimPending,
   type ComposerState,
@@ -4985,6 +4992,9 @@ async function cmdSendDrain(rest: string[]): Promise<number> {
   if ((await liveDrainer(pid)) !== process.pid) return 0;
   try {
     let attempt = 0;
+    // sender + body hash → when this drainer delivered it: a second parked copy
+    // of the same message from the same agent within the window is dropped.
+    const delivered = new Map<string, number>();
     for (;;) {
       const names = await listPending(pid);
       if (!names.length) {
@@ -5020,8 +5030,22 @@ async function cmdSendDrain(rest: string[]): Promise<number> {
         if (gone) return 1;
         continue;
       }
+      const from = senderKey(
+        (msg.record as { from?: { agent_id?: string; pid?: number } | null }).from,
+      );
+      const msgBody = (msg.record as { body?: string }).body ?? "";
+      const dupKey = from && msgBody ? `${from}|${bodyHash(msgBody)}` : null;
+      const prev = dupKey ? delivered.get(dupKey) : undefined;
+      if (prev !== undefined && msg.queuedAt - prev <= DUPLICATE_WINDOW_MS) {
+        await retirePending(
+          pid,
+          name,
+          `duplicate of the same sender's identical message delivered ${Math.round((Date.now() - prev) / 1000)}s ago`,
+        );
+        continue;
+      }
       const record = (await readGlobalPids()).find((r) => r.pid === pid);
-      let delivered: Awaited<ReturnType<typeof deliverBody>> | null = null;
+      let result: Awaited<ReturnType<typeof deliverBody>> | null = null;
       if (record && !(await isUserTyping(pid))) {
         await withIpcLock(pid, async () => {
           // Re-check under the lock, right before the write.
@@ -5031,7 +5055,7 @@ async function cmdSendDrain(rest: string[]): Promise<number> {
           const composer = await readComposerState(record);
           if (composer.kind !== "empty") return;
           if (!(await claimPending(pid, name))) return;
-          delivered = await deliverBody(
+          result = await deliverBody(
             record,
             msg.fifoPath,
             msg.fullBody,
@@ -5041,8 +5065,9 @@ async function cmdSendDrain(rest: string[]): Promise<number> {
           );
         });
       }
-      if (delivered) {
-        const d = delivered as Awaited<ReturnType<typeof deliverBody>>;
+      if (result) {
+        const d = result as Awaited<ReturnType<typeof deliverBody>>;
+        if (dupKey) delivered.set(dupKey, Date.now());
         await recordMessage({
           at: Date.now(),
           ...(msg.record as Omit<MessageRecord, "at">),
@@ -5075,7 +5100,8 @@ async function cmdSend(rest: string[]): Promise<number> {
         "Exit: 0 sent, 3 target unreachable (nothing sent; ay ls shows it as\n" +
         "'unreachable' — ay restart <pid> revives it), 4 QUEUED (accepted, not yet\n" +
         "submitted: either the CLI queued it, or its input box held someone's draft and\n" +
-        "the message was parked for delivery once the box is empty — do not resend),\n" +
+        "the message was parked for delivery once the box is empty — do not resend;\n" +
+        "an identical resend from the same agent within 60s is dropped as a DUPLICATE),\n" +
         "1 everything else.",
     )
     .option("code", {
@@ -5373,6 +5399,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   };
   let lastScreen: string[] = [];
   let parked = false;
+  let duplicateOf: RecentSend | null = null;
   // The mailbox fields known before delivery; a parked message carries them to
   // the drainer so its eventual record names the real sender, not the drainer.
   const mailBase = {
@@ -5405,6 +5432,14 @@ async function cmdSend(rest: string[]): Promise<number> {
         // other `ay send` can change the composer between the check and the
         // paste. A message already parked for this pid also parks this one, so
         // delivery keeps send order.
+        // Dedupe at the sink: the same agent re-sending the same body within a
+        // minute (it read rc=4 QUEUED as a failure) is dropped, not typed or
+        // parked twice. --force and human (shell) senders are exempt.
+        const dedupeKey = force || !body ? null : senderKey(mailBase.from);
+        if (dedupeKey) {
+          duplicateOf = await findRecentDuplicate(record.pid, dedupeKey, body);
+          if (duplicateOf) return;
+        }
         if (fullBody) {
           if (!parkReason && (await listPending(record.pid)).length)
             parkReason = "earlier messages to this agent are still queued";
@@ -5417,6 +5452,8 @@ async function cmdSend(rest: string[]): Promise<number> {
                 `warning: ay send could not see pid ${record.pid}'s input box (${composer.reason}) — sending without the draft check.\n`,
               );
           }
+          if (dedupeKey)
+            await noteRecentSend(record.pid, dedupeKey, body, parkReason ? "queued" : "sent");
           if (parkReason) {
             await enqueuePending({
               queuedAt: Date.now(),
@@ -5457,18 +5494,30 @@ async function cmdSend(rest: string[]): Promise<number> {
     );
     return SEND_EXIT_UNREACHABLE;
   }
+  if (duplicateOf) {
+    const dup = duplicateOf as RecentSend;
+    const ago = Math.max(0, Math.round((Date.now() - dup.at) / 1000));
+    process.stdout.write(
+      `DUPLICATE (not resent) to pid ${record.pid} (${record.cli}): ${truncate(body + trailing, 80)}\n`,
+    );
+    process.stderr.write(
+      queuedReceipt(
+        "duplicate",
+        `you sent this exact message to pid ${record.pid} ${ago}s ago and it was ${dup.outcome}`,
+      ) + "\n",
+    );
+    return dup.outcome === "queued" ? SEND_EXIT_QUEUED : 0;
+  }
   if (parked) {
     const drainer = await ensureSendDrainer(record.pid);
     process.stdout.write(
       `QUEUED to pid ${record.pid} (${record.cli}): ${truncate(body + trailing, 80)}\n`,
     );
     process.stderr.write(
-      `ay send: nothing was typed — ${parkReason}. The message is parked and will be delivered ` +
-        `once the input box is empty and nobody is typing` +
+      queuedReceipt("parked", parkReason!) +
         (drainer
-          ? ` (drainer pid ${drainer}).`
-          : ` — but the drainer did not start; run: ay send-drain ${record.pid}`) +
-        ` Do not resend it.\n`,
+          ? ` (drainer pid ${drainer})\n`
+          : `\nay send: the drainer did not start; run: ay send-drain ${record.pid}\n`),
     );
     if (body)
       await recordMessage({
@@ -5490,6 +5539,8 @@ async function cmdSend(rest: string[]): Promise<number> {
   process.stdout.write(
     `${status} to pid ${record.pid} (${record.cli}): ${truncate(payload, 80)}\n`,
   );
+  if (submission === "queued")
+    process.stderr.write(queuedReceipt("cli-queued", `${record.cli} is busy`) + "\n");
 
   // Persist a durable record of the exchange from both ends' point of view (the
   // sender's outbox + the recipient's inbox). Only real message bodies are

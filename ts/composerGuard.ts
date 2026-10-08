@@ -23,7 +23,7 @@
  * Inverse cells are ignored too: a TUI that paints its own cursor as an inverse
  * block over the first ghost character must not turn a suggestion into a draft.
  */
-import { randomBytes } from "crypto";
+import { createHash, randomBytes } from "crypto";
 import { mkdir, readdir, readFile, rename, rm, writeFile } from "fs/promises";
 import path from "path";
 import { agentYesHome } from "./agentYesHome.ts";
@@ -237,4 +237,102 @@ export async function retirePending(pid: number, name: string, why: string): Pro
   await mkdir(dir, { recursive: true, mode: 0o700 }).catch(() => {});
   await rename(path.join(pendingDir(pid), name), path.join(dir, name)).catch(() => {});
   await writeFile(path.join(dir, `${name}.why`), `${why}\n`, { mode: 0o600 }).catch(() => {});
+}
+
+// ---------------------------------------------------------------------------
+// Duplicate suppression at the sink. With the guard, rc=4 QUEUED is common, and
+// a lane that reads it as "failed" resends the same report (observed
+// 2026-10-08: [mitm-compat] → CTO twice, 6 s apart). The target keeps a tiny
+// ledger of what agents recently sent it — sender, body HASH, time, outcome;
+// never the body — read and written under the same input lock as the paste,
+// so a resend racing the original still sees it.
+// ---------------------------------------------------------------------------
+
+/** An identical body from the same sender within this window is a resend. */
+export const DUPLICATE_WINDOW_MS = 60_000;
+
+export interface RecentSend {
+  at: number;
+  sender: string;
+  hash: string;
+  outcome: "sent" | "queued";
+}
+
+export function recentSendsPath(pid: number): string {
+  return path.join(agentYesHome(), "pending", `${pid}.recent.jsonl`);
+}
+
+/** Who sent it, for dedupe purposes: an agent's stable id (or pid). A person at
+ *  a shell (no agent) is never deduped — typing "continue" twice is deliberate. */
+export function senderKey(
+  from: { agent_id?: string | null; pid?: number | null } | null | undefined,
+): string | null {
+  if (!from) return null;
+  if (from.agent_id) return `a:${from.agent_id}`;
+  return typeof from.pid === "number" ? `p:${from.pid}` : null;
+}
+
+export function bodyHash(body: string): string {
+  return createHash("sha256").update(body).digest("hex");
+}
+
+async function readRecent(pid: number): Promise<RecentSend[]> {
+  const raw = await readFile(recentSendsPath(pid), "utf-8").catch(() => "");
+  const out: RecentSend[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      out.push(JSON.parse(line) as RecentSend);
+    } catch {
+      /* torn line */
+    }
+  }
+  return out;
+}
+
+/** The earlier identical send this one repeats, or null. Call under the input lock. */
+export async function findRecentDuplicate(
+  pid: number,
+  sender: string,
+  body: string,
+  now = Date.now(),
+): Promise<RecentSend | null> {
+  const hash = bodyHash(body);
+  const hits = (await readRecent(pid)).filter(
+    (r) =>
+      r.sender === sender &&
+      r.hash === hash &&
+      now - r.at >= 0 &&
+      now - r.at <= DUPLICATE_WINDOW_MS,
+  );
+  return hits.at(-1) ?? null;
+}
+
+/** Note a send (before it is typed or parked) and drop entries past the window. */
+export async function noteRecentSend(
+  pid: number,
+  sender: string,
+  body: string,
+  outcome: RecentSend["outcome"],
+  now = Date.now(),
+): Promise<void> {
+  const kept = (await readRecent(pid)).filter((r) => now - r.at <= DUPLICATE_WINDOW_MS);
+  kept.push({ at: now, sender, hash: bodyHash(body), outcome });
+  const file = recentSendsPath(pid);
+  await mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  const tmp = `${file}.${randomBytes(4).toString("hex")}.tmp`;
+  await writeFile(tmp, kept.map((r) => JSON.stringify(r)).join("\n") + "\n", { mode: 0o600 });
+  await rename(tmp, file);
+}
+
+/** What `ay send` prints when a send exits 4, so no caller reads it as a failure. */
+export function queuedReceipt(kind: "parked" | "cli-queued" | "duplicate", detail: string): string {
+  switch (kind) {
+    case "parked":
+      return `ay send: nothing was typed — ${detail}. The message is parked and will be delivered once the input box is empty and nobody is typing. Queued, do not resend.`;
+    case "cli-queued":
+      return `ay send: the target accepted it into its own queue (${detail}); it runs after the current turn. Queued, do not resend.`;
+    case "duplicate":
+      return `ay send: not resent — ${detail}. Do not resend.`;
+  }
 }

@@ -6,11 +6,17 @@ import { Terminal } from "@xterm/headless";
 import {
   claimPending,
   classifyComposer,
+  DUPLICATE_WINDOW_MS,
   enqueuePending,
+  findRecentDuplicate,
   listPending,
+  noteRecentSend,
+  queuedReceipt,
   readPending,
+  recentSendsPath,
   retirePending,
   rowsFromXterm,
+  senderKey,
 } from "./composerGuard.ts";
 
 const RULE = "─".repeat(40);
@@ -168,5 +174,65 @@ describe("pending queue", () => {
     expect(await listPending(4242)).toEqual([]);
     const kept = await readdir(path.join(home, "pending", "4242", "undelivered"));
     expect(kept.sort()).toEqual([name!, `${name!}.why`].sort());
+  });
+});
+
+// CTO 2026-10-08: [mitm-compat] sent the same report twice, 6 s apart, after
+// reading rc=4 QUEUED as a failure. The sink drops the resend.
+describe("duplicate suppression at the sink", () => {
+  let home: string;
+  const prev = process.env.AGENT_YES_HOME;
+  beforeEach(async () => {
+    home = await mkdtemp(path.join(tmpdir(), "ay-dedupe-"));
+    process.env.AGENT_YES_HOME = home;
+  });
+  afterEach(async () => {
+    if (prev === undefined) delete process.env.AGENT_YES_HOME;
+    else process.env.AGENT_YES_HOME = prev;
+    await rm(home, { recursive: true, force: true });
+  });
+
+  const lane = senderKey({ agent_id: "mitm-compat-1", pid: 3212601 })!;
+  const other = senderKey({ agent_id: "gtm-1", pid: 3061746 })!;
+  const T = 1_800_000_000_000;
+
+  it("an identical body from the same agent within 60 s is a duplicate, and keeps the first outcome", async () => {
+    await noteRecentSend(4242, lane, "[mitm-compat] report", "queued", T);
+    expect(await findRecentDuplicate(4242, lane, "[mitm-compat] report", T + 6_000)).toMatchObject({
+      outcome: "queued",
+      at: T,
+    });
+  });
+
+  it("is NOT a duplicate: another sender, another body, another target, or past the window", async () => {
+    await noteRecentSend(4242, lane, "report", "sent", T);
+    expect(await findRecentDuplicate(4242, other, "report", T + 1_000)).toBeNull();
+    expect(await findRecentDuplicate(4242, lane, "report v2", T + 1_000)).toBeNull();
+    expect(await findRecentDuplicate(4343, lane, "report", T + 1_000)).toBeNull();
+    expect(await findRecentDuplicate(4242, lane, "report", T + DUPLICATE_WINDOW_MS + 1)).toBeNull();
+  });
+
+  it("a person at a shell (no agent) is never deduped", () => {
+    expect(senderKey(null)).toBeNull();
+    expect(senderKey({ pid: null })).toBeNull();
+    expect(senderKey({ pid: 7 })).toBe("p:7");
+  });
+
+  it("the ledger keeps hashes, not bodies, and forgets entries past the window", async () => {
+    await noteRecentSend(4242, lane, "secret customer detail", "sent", T);
+    await noteRecentSend(4242, lane, "later", "sent", T + DUPLICATE_WINDOW_MS + 10);
+    const { readFile } = await import("fs/promises");
+    const raw = await readFile(recentSendsPath(4242), "utf-8");
+    expect(raw).not.toContain("secret customer detail");
+    expect(raw.trim().split("\n")).toHaveLength(1);
+  });
+
+  it("every rc=4 receipt tells the caller not to resend", () => {
+    for (const kind of ["parked", "cli-queued", "duplicate"] as const) {
+      expect(queuedReceipt(kind, "x")).toMatch(/do not resend/i);
+    }
+    expect(queuedReceipt("parked", "its input box holds a draft (3 chars)")).toContain(
+      "Queued, do not resend.",
+    );
   });
 });
