@@ -55,6 +55,13 @@ const PROMPT_RE = /^\s*[❯›]($|\s)/u;
 const SEPARATOR_RE = /^\s*[─━]{3,}/u;
 const FOOTER_RE =
   /^\s*(?:·\s*)?(?:[←→] .*agents|\? for shortcuts|esc to interrupt|ctrl\+t to|GPT-[^·]*·|gpt-[^·]*·|⏵⏵|⏸|⏎ send|\d+% context left)/iu;
+// Claude Code's status footer often LEADS with other `·`-separated segments
+// ("1 shell · esc to interrupt · ← 2 agents · ↓ to manage", "PR #12 · 2 shells ·
+// ← for agents · …", "shell, 1 monitor · …"), and ink's partial redraws can leave
+// it garbled ("1       · esc to …", "↓ t…"). Unmatched, the whole row was
+// counted as a 20-40 char draft and every send to an idle lane was parked. So a
+// row is also the footer when any later segment is one of its fixed hints.
+const FOOTER_SEGMENT_RE = /·\s*(?:[←→] .*agents?|↓ |esc to interrupt)/u;
 
 /**
  * The composer's prompt row among plain-text rows (oldest first), or -1.
@@ -73,7 +80,7 @@ export function composerPromptRow(texts: string[]): number {
 
 /** Is this row composer chrome (a rule or a Claude/Codex footer) — the end of the input? */
 export function isComposerChrome(text: string): boolean {
-  return SEPARATOR_RE.test(text) || FOOTER_RE.test(text);
+  return SEPARATOR_RE.test(text) || FOOTER_RE.test(text) || FOOTER_SEGMENT_RE.test(text);
 }
 
 /**

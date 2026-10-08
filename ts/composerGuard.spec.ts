@@ -126,6 +126,42 @@ describe("classifyComposer", () => {
       ghost: true,
     });
   });
+
+  // 2026-10-09: idle Claude lanes rendered without the composer's rules in the
+  // 32 KB tail, and their status footer led with other segments, so the footer
+  // row was counted as a 26-43 char "draft" and every send was parked (rc=4).
+  describe("Claude's status footer with leading segments", () => {
+    const GRAY = (s: string) => `\x1b[38;2;153;153;153m${s}\x1b[39m`;
+    const footers = [
+      "                  · 1 shell · ← for agents · ↓ to manage",
+      "                      shell · ← for agents · ↓ to manage",
+      "  1 shell · esc to interrupt · ← 2 agents · ↓ to manage",
+      "  shell, 1 monitor · esc to interrupt · ← for agents · ↓ …",
+      "  PR #1234 · 2 shells · ← 2 agents · ↓ to manage",
+      // ink partial redraws leave the row garbled in the replayed tail
+      "  1       · esc to interrupt · ← 2 agents · ↓ t…",
+    ];
+    it.each(footers)("does not count a dim suggestion over %j", async (footer) => {
+      const frame = `reply\r\n\r\n❯ \x1b[2mbump the lib pin in the parent repo\x1b[22m\r\n\r\n${GRAY(footer)}`;
+      expect(await classify(frame, 80)).toEqual({ kind: "empty", ghost: true });
+    });
+    it.each(footers)("does not count an empty composer over %j", async (footer) => {
+      const frame = `reply\r\n\r\n❯ \r\n\r\n${GRAY(footer)}`;
+      expect(await classify(frame, 80)).toEqual({ kind: "empty", ghost: false });
+    });
+    it.each(footers)("still counts real typed text over %j", async (footer) => {
+      const frame = `reply\r\n\r\n❯ btw how\r\n\r\n${GRAY(footer)}`;
+      expect(await classify(frame, 80)).toEqual({ kind: "draft", chars: 6 });
+    });
+    it("ignores the update banner above the composer's top rule", async () => {
+      const frame = `${GRAY("                ✔ Update installed · Restart to update")}\r\n${RULE}\r\n❯ \r\n${RULE}\r\n${GRAY(footers[0]!)}`;
+      expect(await classify(frame, 80)).toEqual({ kind: "empty", ghost: false });
+    });
+    it("still counts a draft line that merely contains a middle dot", async () => {
+      const frame = `❯ first\r\n  a · b\r\n\r\n${GRAY(footers[0]!)}`;
+      expect(await classify(frame, 80)).toEqual({ kind: "draft", chars: 8 });
+    });
+  });
 });
 
 describe("pending queue", () => {
