@@ -14,7 +14,7 @@
 import { randomBytes } from "crypto";
 import { closeSync, constants as fsConstants, openSync, realpathSync } from "fs";
 import { execFileSync } from "node:child_process";
-import { appendFile, mkdir, open, readFile, stat, writeFile } from "fs/promises";
+import { appendFile, mkdir, open, readFile, rm, stat, writeFile } from "fs/promises";
 import ms from "ms";
 import { homedir } from "os";
 import path from "path";
@@ -100,6 +100,17 @@ import {
 import { isWebrtcSpec } from "./webrtcLink.ts";
 import { withIpcLock } from "./ipcLock.ts";
 import { isWithin, resolveWorkDir } from "./workDir.ts";
+import {
+  classifyComposer,
+  claimPending,
+  type ComposerState,
+  enqueuePending,
+  listPending,
+  PENDING_MAX_AGE_MS,
+  readPending,
+  retirePending,
+  rowsFromXterm,
+} from "./composerGuard.ts";
 
 // ---------------------------------------------------------------------------
 // notes store  (~/.agent-yes/notes.jsonl)
@@ -634,6 +645,7 @@ const SUBCOMMANDS = new Set([
   "hist",
   "history",
   "send",
+  "send-drain",
   "msgs",
   "key",
   "select",
@@ -1037,6 +1049,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await (await import("./hist.ts")).cmdHist(rest);
       case "send":
         return await cmdSend(rest);
+      case "send-drain":
+        return await cmdSendDrain(rest);
       case "msgs":
         return await cmdMsgs(rest);
       case "key":
@@ -4243,6 +4257,47 @@ export async function renderLogTailLines(
   n = 40,
   geom?: RenderGeom,
 ): Promise<string[] | null> {
+  const buf = await readLogTailBytes(logPath);
+  if (!buf) return null;
+  try {
+    // Render at the agent's REAL PTY geometry when provided — the raw log is full
+    // of absolute cursor-positioning, so replaying at the wrong width reflows the
+    // TUI into garbage (chars land in the wrong columns). Callers with a pid pass
+    // readPtysize(pid); without it we fall back to the default width.
+    return (await renderRawLog(buf, { mode: "tail", n, cols: geom?.cols, rows: geom?.rows })).split(
+      "\n",
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What the target's composer holds right now, read from the same 32 KB tail
+ * `renderLogTailLines` renders, but keeping per-cell attributes (dim/inverse) so
+ * ghost text can be told from a real draft. See ts/composerGuard.ts.
+ */
+export async function readComposerState(record: GlobalPidRecord): Promise<ComposerState> {
+  if (!record.log_file) return { kind: "unknown", reason: "no log file recorded" };
+  const buf = await readLogTailBytes(record.log_file);
+  if (!buf) return { kind: "unknown", reason: "log unreadable or empty" };
+  const geom = (await readAgentPtysize(record)) ?? undefined;
+  try {
+    const Terminal = await loadXtermTerminal();
+    const term = new Terminal({
+      cols: geom?.cols && geom.cols > 0 ? geom.cols : 200,
+      rows: geom?.rows && geom.rows > 0 ? geom.rows : 50,
+      scrollback: 5000,
+      allowProposedApi: true,
+    });
+    await new Promise<void>((resolve) => term.write(buf, resolve));
+    return classifyComposer(rowsFromXterm(term as never, 40));
+  } catch (e) {
+    return { kind: "unknown", reason: `render failed: ${(e as Error)?.message ?? e}` };
+  }
+}
+
+async function readLogTailBytes(logPath: string): Promise<Uint8Array | null> {
   const TAIL_BYTES = 32 * 1024;
   let buf: Uint8Array;
   try {
@@ -4264,17 +4319,7 @@ export async function renderLogTailLines(
   } catch {
     return null;
   }
-  try {
-    // Render at the agent's REAL PTY geometry when provided — the raw log is full
-    // of absolute cursor-positioning, so replaying at the wrong width reflows the
-    // TUI into garbage (chars land in the wrong columns). Callers with a pid pass
-    // readPtysize(pid); without it we fall back to the default width.
-    return (await renderRawLog(buf, { mode: "tail", n, cols: geom?.cols, rows: geom?.rows })).split(
-      "\n",
-    );
-  } catch {
-    return null;
-  }
+  return buf;
 }
 
 export async function extractNeedsInput(logPath: string, cli: string): Promise<NeedsInput | null> {
@@ -4794,6 +4839,187 @@ async function waitForNeedsInputClear(
   return false;
 }
 
+/**
+ * Write one message and its trailing code to the target, then (when `canConfirm`)
+ * confirm the submit. The caller holds the input lock. The body is written
+ * exactly once; only Enter is ever retried (see submitAndConfirm).
+ */
+async function deliverBody(
+  record: GlobalPidRecord,
+  fifoPath: string,
+  fullBody: string,
+  trailing: string,
+  identity: string,
+  canConfirm: boolean,
+): Promise<{
+  confirmed: boolean;
+  screen: string[];
+  submission: "submitted" | "queued" | "not-submitted" | "unchecked";
+}> {
+  if (fullBody && trailing) {
+    const beforePaste =
+      canConfirm && record.log_file
+        ? await renderLogTailLines(
+            record.log_file,
+            40,
+            (await readAgentPtysize(record)) ?? undefined,
+          )
+        : null;
+    await writeToIpc(fifoPath, fullBody);
+    if (canConfirm && record.log_file) {
+      // Wait for the paste to actually finish rendering — a long/multi-line body
+      // can take longer than any fixed guess, and sending Enter mid-paste gets
+      // swallowed by the CLI's bracketed-paste handling instead of submitting.
+      await waitForLogQuiet(record.log_file, SEND_SETTLE_QUIET_MS, SEND_SETTLE_MAX_MS);
+      return submitAndConfirm(record, fifoPath, trailing, identity, beforePaste);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    await writeToIpc(fifoPath, trailing);
+  } else {
+    await writeToIpc(fifoPath, fullBody + trailing);
+  }
+  return {
+    confirmed: !canConfirm,
+    screen: [],
+    submission: canConfirm ? "not-submitted" : "unchecked",
+  };
+}
+
+// Drainer pacing: poll the parked target with a φ backoff from 500 ms up to 5 s,
+// reset after every delivery. Worst case a message waits PENDING_MAX_AGE_MS.
+const DRAIN_POLL_BASE_MS = 500;
+const DRAIN_POLL_CAP_MS = 5000;
+
+function drainerLockPath(pid: number): string {
+  return path.join(agentYesHome(), "pending", `${pid}.drainer`);
+}
+
+/** The pid of a live drainer for `pid`'s queue, or null. */
+async function liveDrainer(pid: number): Promise<number | null> {
+  const raw = await readFile(drainerLockPath(pid), "utf-8").catch(() => null);
+  const owner = Number(raw?.trim());
+  if (!Number.isInteger(owner) || owner <= 0) return null;
+  try {
+    process.kill(owner, 0);
+    return owner;
+  } catch {
+    return null;
+  }
+}
+
+/** Start the per-target drainer unless one is already running. */
+async function ensureSendDrainer(pid: number): Promise<number | null> {
+  const existing = await liveDrainer(pid);
+  if (existing) return existing;
+  const { spawn } = await import("node:child_process");
+  // The script running THIS send first: the drainer must be the same build that
+  // parked the message (an older `ay` on PATH has no send-drain).
+  const ayBin = process.argv[1] ?? Bun.which("ay");
+  if (!ayBin) return null;
+  const launcher = process.platform === "win32" ? [ayBin] : [process.execPath, ayBin];
+  const [cmd, ...pre] = launcher;
+  const child = spawn(cmd!, [...pre, "send-drain", String(pid)], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.on("error", () => {});
+  child.unref();
+  return child.pid ?? null;
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
+/**
+ * `ay send-drain <pid>` — deliver the messages `ay send` parked for <pid>
+ * because its composer held a draft. Runs until the queue is empty, the target
+ * exits, or every message expired. One drainer per target (a pid file under
+ * pending/); a second one exits at once. Normally started by `ay send` itself.
+ */
+async function cmdSendDrain(rest: string[]): Promise<number> {
+  const pid = Number(rest[0]);
+  if (!Number.isInteger(pid) || pid <= 0) throw new Error("usage: ay send-drain <pid>");
+  const lockFile = drainerLockPath(pid);
+  await mkdir(path.dirname(lockFile), { recursive: true });
+  const other = await liveDrainer(pid);
+  if (other && other !== process.pid) return 0;
+  await writeFile(lockFile, `${process.pid}\n`);
+  // Two drainers can both pass the check above; the last writer owns the queue
+  // and the other one leaves. claimPending keeps a message from going out twice
+  // even inside that window.
+  await new Promise((r) => setTimeout(r, 50));
+  if ((await liveDrainer(pid)) !== process.pid) return 0;
+  try {
+    let attempt = 0;
+    for (;;) {
+      const names = await listPending(pid);
+      if (!names.length) return 0;
+      const name = names[0]!;
+      const msg = await readPending(pid, name);
+      if (!msg) {
+        await retirePending(pid, name, "unparseable pending file");
+        continue;
+      }
+      const gone = !pidAlive(pid);
+      const expired = Date.now() - msg.queuedAt > PENDING_MAX_AGE_MS;
+      if (gone || expired) {
+        const why = gone ? "target exited before its input box was free" : "expired after 24h";
+        for (const n of gone ? names : [name]) await retirePending(pid, n, why);
+        await recordMessage({
+          at: Date.now(),
+          ...(msg.record as Omit<MessageRecord, "at">),
+          confirmed: false,
+          submission: "not-submitted",
+        } as MessageRecord);
+        if (gone) return 1;
+        continue;
+      }
+      const record = (await readGlobalPids()).find((r) => r.pid === pid);
+      let delivered: Awaited<ReturnType<typeof deliverBody>> | null = null;
+      if (record && !(await isUserTyping(pid))) {
+        await withIpcLock(pid, async () => {
+          // Re-check under the lock, right before the write.
+          if (await isUserTyping(pid)) return;
+          const composer = await readComposerState(record);
+          if (composer.kind === "draft") return;
+          if (!(await claimPending(pid, name))) return;
+          delivered = await deliverBody(
+            record,
+            msg.fifoPath,
+            msg.fullBody,
+            msg.trailing,
+            msg.identity,
+            msg.trailing === "\r" && Boolean(record.log_file),
+          );
+        });
+      }
+      if (delivered) {
+        const d = delivered as Awaited<ReturnType<typeof deliverBody>>;
+        await recordMessage({
+          at: Date.now(),
+          ...(msg.record as Omit<MessageRecord, "at">),
+          confirmed: d.confirmed,
+          submission: d.submission,
+        } as MessageRecord);
+        attempt = 0;
+        continue;
+      }
+      attempt++;
+      await new Promise((r) =>
+        setTimeout(r, Math.min(DRAIN_POLL_CAP_MS, DRAIN_POLL_BASE_MS * 1.618 ** (attempt - 1))),
+      );
+    }
+  } finally {
+    if ((await liveDrainer(pid)) === process.pid) await rm(lockFile, { force: true });
+  }
+}
+
 async function cmdSend(rest: string[]): Promise<number> {
   const y = yargs(rest)
     // Disable yargs' `--no-<flag>` negation: without this, `--no-wait` is parsed
@@ -4805,7 +5031,10 @@ async function cmdSend(rest: string[]): Promise<number> {
     .usage(
       "Usage: ay send <keyword> <msg|-> [options]\n\n" +
         "Exit: 0 sent, 3 target unreachable (nothing sent; ay ls shows it as\n" +
-        "'unreachable' — ay restart <pid> revives it), 1 everything else.",
+        "'unreachable' — ay restart <pid> revives it), 4 QUEUED (accepted, not yet\n" +
+        "submitted: either the CLI queued it, or its input box held someone's draft and\n" +
+        "the message was parked for delivery once the box is empty — do not resend),\n" +
+        "1 everything else.",
     )
     .option("code", {
       type: "string",
@@ -5076,15 +5305,13 @@ async function cmdSend(rest: string[]): Promise<number> {
   // body mid-line fuses into their text and submits a mangled line. Only for a
   // real text body; skipped for --force (caller means it), --no-wait
   // (fire-and-forget), and empty bodies (a bare esc/ctrl-c interrupt is usually
-  // intentional and time-sensitive). Sends anyway after the deadline so a
-  // message is never silently dropped.
+  // intentional and time-sensitive). If they are still typing at the deadline
+  // the message is parked (see the composer guard below) instead of interleaved.
+  let parkReason: string | null = null;
   if (fullBody && !noWait && !force) {
     const { clear, waitedMs } = await backoffWhileTyping(record.pid, SEND_TYPING_MAX_WAIT_MS);
     if (!clear) {
-      process.stderr.write(
-        `warning: user still typing at pid ${record.pid} after ${Math.round(waitedMs / 1000)}s — ` +
-          `sending anyway (may interleave with their line). Use --force to skip this wait.\n`,
-      );
+      parkReason = `user still typing after ${Math.round(waitedMs / 1000)}s`;
     } else if (waitedMs > 0) {
       process.stderr.write(
         `waited ${Math.round(waitedMs / 1000)}s for the user to pause typing before sending.\n`,
@@ -5097,11 +5324,33 @@ async function cmdSend(rest: string[]): Promise<number> {
   // double-interrupt. Checked against the resolved byte, not the code NAME, so
   // every alias that resolves to Enter (--code=enter or --code=cr) is covered.
   const canConfirm = trailing === "\r" && Boolean(fullBody) && !noWait;
+  const identity = nonce ? `<ay-msg ${nonce}` : body;
   let confirmed = !canConfirm;
   const receipt: { submission: "submitted" | "queued" | "not-submitted" | "unchecked" } = {
     submission: canConfirm ? "not-submitted" : "unchecked",
   };
   let lastScreen: string[] = [];
+  let parked = false;
+  // The mailbox fields known before delivery; a parked message carries them to
+  // the drainer so its eventual record names the real sender, not the drainer.
+  const mailBase = {
+    nonce,
+    origin: sender.agent ? undefined : ("shell" as const),
+    from_via: sender.via,
+    sender_observed: observedSender(),
+    from: sender.agent
+      ? {
+          pid: sender.agent.pid,
+          cli: sender.agent.cli,
+          cwd: sender.agent.cwd,
+          agent_id: sender.agent.agent_id,
+        }
+      : null,
+    to: { pid: record.pid, cli: record.cli, cwd: record.cwd, agent_id: record.agent_id },
+    body,
+    code: trailing === "\r" ? undefined : codeName,
+    wrapped: Boolean(nonce),
+  };
   // The body and its Enter are ONE transaction: every gap between them (the
   // paste-settle wait, the submit-confirm retries) is a window where another
   // writer's bytes would land mid-message. See ts/ipcLock.ts.
@@ -5109,39 +5358,42 @@ async function cmdSend(rest: string[]): Promise<number> {
     await withIpcLock(
       record.pid,
       async () => {
-        if (fullBody && trailing) {
-          const beforePaste =
-            canConfirm && record.log_file
-              ? await renderLogTailLines(
-                  record.log_file,
-                  40,
-                  (await readAgentPtysize(record)) ?? undefined,
-                )
-              : null;
-          await writeToIpc(fifoPath, fullBody);
-          if (canConfirm && record.log_file) {
-            // Wait for the paste to actually finish rendering — a long/multi-line body
-            // can take longer than any fixed guess, and sending Enter mid-paste gets
-            // swallowed by the CLI's bracketed-paste handling instead of submitting.
-            await waitForLogQuiet(record.log_file, SEND_SETTLE_QUIET_MS, SEND_SETTLE_MAX_MS);
-            ({
-              confirmed,
-              screen: lastScreen,
-              submission: receipt.submission,
-            } = await submitAndConfirm(
-              record,
-              fifoPath,
-              trailing,
-              nonce ? `<ay-msg ${nonce}` : body,
-              beforePaste,
-            ));
-          } else {
-            await new Promise((r) => setTimeout(r, 200));
-            await writeToIpc(fifoPath, trailing);
+        // Composer guard (ts/composerGuard.ts): never type into someone else's
+        // draft. Checked under the input lock, right before the write, so no
+        // other `ay send` can change the composer between the check and the
+        // paste. A message already parked for this pid also parks this one, so
+        // delivery keeps send order.
+        if (fullBody) {
+          if (!parkReason && (await listPending(record.pid)).length)
+            parkReason = "earlier messages to this agent are still queued";
+          if (!parkReason) {
+            const composer = await readComposerState(record);
+            if (composer.kind === "draft")
+              parkReason = `its input box holds a draft (${composer.chars} chars)`;
+            else if (composer.kind === "unknown")
+              process.stderr.write(
+                `warning: ay send could not see pid ${record.pid}'s input box (${composer.reason}) — sending without the draft check.\n`,
+              );
           }
-        } else {
-          await writeToIpc(fifoPath, fullBody + trailing);
+          if (parkReason) {
+            await enqueuePending({
+              queuedAt: Date.now(),
+              pid: record.pid,
+              fifoPath,
+              fullBody,
+              trailing,
+              identity,
+              record: mailBase,
+            });
+            parked = true;
+            return;
+          }
         }
+        ({
+          confirmed,
+          screen: lastScreen,
+          submission: receipt.submission,
+        } = await deliverBody(record, fifoPath, fullBody, trailing, identity, canConfirm));
       },
       (why) =>
         process.stderr.write(
@@ -5162,6 +5414,28 @@ async function cmdSend(rest: string[]): Promise<number> {
       `ay send: pid ${record.pid} (${record.cli}) became UNREACHABLE mid-send — its stdin FIFO ${fifoPath} stopped taking a writer (${code}). The message may be partly delivered. Retire the row with: ay stop ${record.pid} (registry only, sends no signal); ay restart writes to this same FIFO and would fail the same way.\n`,
     );
     return SEND_EXIT_UNREACHABLE;
+  }
+  if (parked) {
+    const drainer = await ensureSendDrainer(record.pid);
+    process.stdout.write(
+      `QUEUED to pid ${record.pid} (${record.cli}): ${truncate(body + trailing, 80)}\n`,
+    );
+    process.stderr.write(
+      `ay send: nothing was typed — ${parkReason}. The message is parked and will be delivered ` +
+        `once the input box is empty and nobody is typing` +
+        (drainer
+          ? ` (drainer pid ${drainer}).`
+          : ` — but the drainer did not start; run: ay send-drain ${record.pid}`) +
+        ` Do not resend it.\n`,
+    );
+    if (body)
+      await recordMessage({
+        at: Date.now(),
+        ...mailBase,
+        confirmed: false,
+        submission: "queued",
+      } as MessageRecord);
+    return SEND_EXIT_QUEUED;
   }
   const { submission } = receipt;
   const payload = body + trailing;
