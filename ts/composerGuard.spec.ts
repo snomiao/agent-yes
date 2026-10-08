@@ -158,6 +158,10 @@ describe("classifyComposer", () => {
       const frame = `${GRAY("                ✔ Update installed · Restart to update")}\r\n${RULE}\r\n❯ \r\n${RULE}\r\n${GRAY(footers[0]!)}`;
       expect(await classify(frame, 80)).toEqual({ kind: "empty", ghost: false });
     });
+    it("still counts a typed draft line that reads like a footer segment (luna review)", async () => {
+      const frame = `❯\u00a0notes\r\n  then · esc to interrupt · ↓ to manage\r\n\r\n${GRAY(footers[0]!)}`;
+      expect(await classify(frame, 80)).toEqual({ kind: "draft", chars: 34 });
+    });
     it("still counts a draft line that merely contains a middle dot", async () => {
       const frame = `❯ first\r\n  a · b\r\n\r\n${GRAY(footers[0]!)}`;
       expect(await classify(frame, 80)).toEqual({ kind: "draft", chars: 8 });

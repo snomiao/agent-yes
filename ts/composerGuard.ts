@@ -33,6 +33,8 @@ export interface ComposerCell {
   ch: string;
   dim: boolean;
   inverse: boolean;
+  /** Drawn in a non-default foreground colour (Claude's footer is; typed text is not). */
+  colored: boolean;
 }
 
 /** A rendered row: its plain text plus per-cell attributes. */
@@ -62,6 +64,9 @@ const FOOTER_RE =
 // counted as a 20-40 char draft and every send to an idle lane was parked. So a
 // row is also the footer when any later segment is one of its fixed hints, or
 // when only the mode label's "(shift+tab to cycle)" tail survived the redraw.
+// Unanchored, that could also match a draft line that happens to contain
+// "· esc to interrupt", so the draft check only accepts it on a row drawn
+// entirely in colour, as the footer is — typed input is in the default colour.
 const FOOTER_SEGMENT_RE = /·\s*(?:[←→] .*agents?|↓ |esc to interrupt)|\(shift\+tab to /u;
 
 /**
@@ -79,9 +84,15 @@ export function composerPromptRow(texts: string[]): number {
   return texts.findLastIndex((t) => PROMPT_RE.test(t));
 }
 
-/** Is this row composer chrome (a rule or a Claude/Codex footer) — the end of the input? */
-export function isComposerChrome(text: string): boolean {
-  return SEPARATOR_RE.test(text) || FOOTER_RE.test(text) || FOOTER_SEGMENT_RE.test(text);
+/**
+ * Is this row composer chrome (a rule or a Claude/Codex footer) — the end of the
+ * input? Pass the row's `cells` when known: the loose footer match then also
+ * requires every visible cell to be coloured, so a typed line is never cut off.
+ */
+export function isComposerChrome(text: string, cells?: ComposerCell[]): boolean {
+  if (SEPARATOR_RE.test(text) || FOOTER_RE.test(text)) return true;
+  if (!FOOTER_SEGMENT_RE.test(text)) return false;
+  return !cells || cells.every((c) => !c.ch.trim() || c.ch === "\u00a0" || c.colored);
 }
 
 /**
@@ -110,7 +121,7 @@ export function classifyComposer(rows: ComposerRow[]): ComposerState {
   for (let i = prompt; i < rows.length; i++) {
     const row = rows[i]!;
     if (i > prompt) {
-      if (isComposerChrome(row.text)) break;
+      if (isComposerChrome(row.text, row.cells)) break;
       if (!row.text.trim()) continue;
     }
     let cells = row.cells;
@@ -137,10 +148,14 @@ type XtermLike = {
         | {
             length: number;
             translateToString(trim: boolean): string;
-            getCell(
-              x: number,
-            ):
-              | { getChars(): string; isDim(): number; isInverse(): number; getWidth(): number }
+            getCell(x: number):
+              | {
+                  getChars(): string;
+                  isDim(): number;
+                  isInverse(): number;
+                  isFgDefault(): boolean;
+                  getWidth(): number;
+                }
               | undefined;
           }
         | undefined;
@@ -162,7 +177,12 @@ export function rowsFromXterm(term: XtermLike, n: number): ComposerRow[] {
     for (let x = 0; x < line.length; x++) {
       const c = line.getCell(x);
       if (!c || c.getWidth() === 0) continue; // trailing half of a wide char
-      cells.push({ ch: c.getChars() || " ", dim: c.isDim() !== 0, inverse: c.isInverse() !== 0 });
+      cells.push({
+        ch: c.getChars() || " ",
+        dim: c.isDim() !== 0,
+        inverse: c.isInverse() !== 0,
+        colored: !c.isFgDefault(),
+      });
     }
     rows.push({ text: line.translateToString(true), cells });
   }
