@@ -58,21 +58,42 @@ const FOOTER_RE =
 
 /**
  * Classify the composer from rendered rows (oldest first, screen bottom last).
- * The composer is the LAST prompt row (text after the glyph) plus the wrapped
- * rows under it, up to the separator or the footer.
+ *
+ * Claude Code draws the composer as a box: a rule, the prompt row, any further
+ * draft rows, a rule. The box is found by its TOP rule (the last rule directly
+ * followed by a prompt row) and runs to the next rule, so a draft line that
+ * itself starts with `›`/`❯`, or a blank line inside a multi-line draft, stays
+ * inside it. When the bottom rule is not on screen (a partial redraw in the
+ * replayed tail) the box ends at the footer instead.
+ *
+ * Without a top rule (Codex) the composer is the last prompt row plus the rows
+ * under it up to a blank row, a rule or the footer. There a draft whose own
+ * line starts with a prompt glyph, or whose first line is blank, can be misread.
  */
 export function classifyComposer(rows: ComposerRow[]): ComposerState {
-  const prompt = rows.findLastIndex((r) => PROMPT_RE.test(r.text));
+  const isRule = (i: number) => SEPARATOR_RE.test(rows[i]!.text);
+  const isPrompt = (i: number) => PROMPT_RE.test(rows[i]!.text);
+  let prompt = -1;
+  for (let i = rows.length - 2; i >= 0; i--) {
+    if (isRule(i) && isPrompt(i + 1)) {
+      prompt = i + 1;
+      break;
+    }
+  }
+  const boxed = prompt >= 0;
+  if (!boxed) prompt = rows.findLastIndex((_, i) => isPrompt(i));
   if (prompt < 0) return { kind: "unknown", reason: "no prompt row on screen" };
   let real = 0;
   let ghost = false;
   for (let i = prompt; i < rows.length; i++) {
     const row = rows[i]!;
-    // A blank row also ends the box: the bottom rule is not always on screen (a
-    // partial redraw in the replayed tail), and the footer under it is chrome.
-    // A draft whose FIRST line is blank is the one shape this can miss.
-    if (i > prompt && (!row.text.trim() || SEPARATOR_RE.test(row.text) || FOOTER_RE.test(row.text)))
-      break;
+    if (i > prompt) {
+      if (isRule(i) || FOOTER_RE.test(row.text)) break;
+      if (!row.text.trim()) {
+        if (boxed) continue;
+        break;
+      }
+    }
     let cells = row.cells;
     if (i === prompt) {
       // Skip the indentation and the prompt glyph itself.
@@ -80,7 +101,7 @@ export function classifyComposer(rows: ComposerRow[]): ComposerState {
       cells = glyph >= 0 ? cells.slice(glyph + 1) : cells;
     }
     for (const c of cells) {
-      if (!c.ch.trim() || c.ch === " ") continue;
+      if (!c.ch.trim() || c.ch === "\u00a0") continue;
       if (c.inverse) continue;
       if (c.dim) ghost = true;
       else real++;

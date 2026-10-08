@@ -78,6 +78,16 @@ describe("classifyComposer", () => {
     expect(await classify(frame)).toEqual({ kind: "empty", ghost: false });
   });
 
+  it("keeps a blank line inside a multi-line draft in the box (codex review)", async () => {
+    const frame = `${RULE}\r\n❯\u00a0\r\n  \r\n  human draft\r\n${RULE}\r\n${FOOTER}`;
+    expect(await classify(frame)).toEqual({ kind: "draft", chars: 10 });
+  });
+
+  it("keeps a draft line that starts with a prompt glyph in the box (codex review)", async () => {
+    const frame = `${RULE}\r\n❯\u00a0human draft\r\n  › \r\n${RULE}\r\n${FOOTER}`;
+    expect(await classify(frame)).toEqual({ kind: "draft", chars: 11 });
+  });
+
   it("is unknown when no composer is on screen", async () => {
     expect((await classify("Do you trust this folder?\r\n  1. Yes\r\n  2. No")).kind).toBe(
       "unknown",

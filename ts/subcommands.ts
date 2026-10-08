@@ -4959,7 +4959,19 @@ async function cmdSendDrain(rest: string[]): Promise<number> {
     let attempt = 0;
     for (;;) {
       const names = await listPending(pid);
-      if (!names.length) return 0;
+      if (!names.length) {
+        // Give up ownership only under the input lock, which every enqueue also
+        // holds: a sender that parks a message after this re-check finds no
+        // drainer pid file and starts a new drainer; one that parked before it
+        // is seen here and keeps this drainer running.
+        const done = await withIpcLock(pid, async () => {
+          if ((await listPending(pid)).length) return false;
+          await rm(lockFile, { force: true });
+          return true;
+        });
+        if (done) return 0;
+        continue;
+      }
       const name = names[0]!;
       const msg = await readPending(pid, name);
       if (!msg) {
@@ -4986,8 +4998,10 @@ async function cmdSendDrain(rest: string[]): Promise<number> {
         await withIpcLock(pid, async () => {
           // Re-check under the lock, right before the write.
           if (await isUserTyping(pid)) return;
+          // Only a positive reading releases a parked message: an unreadable
+          // screen or one without a composer (a menu) waits for the next poll.
           const composer = await readComposerState(record);
-          if (composer.kind === "draft") return;
+          if (composer.kind !== "empty") return;
           if (!(await claimPending(pid, name))) return;
           delivered = await deliverBody(
             record,
