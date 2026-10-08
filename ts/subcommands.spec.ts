@@ -1478,6 +1478,80 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
     10_000,
   );
 
+  // Codex review (2ecc427): counting copies in a 40-row window cannot confirm a
+  // repeated raw message: the old "continue" scrolls out as the new one lands,
+  // and the count stays 1. Leaving the visible composer is the evidence.
+  it.skipIf(!itUnix)(
+    "confirms a repeated raw message whose earlier copy scrolls out of the window",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const RULE = "─".repeat(20);
+        await writeFile(log, `❯ continue\r\nok\r\n${RULE}\r\n❯ continue\r\n${RULE}\r\n`);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reacted = onKeystroke().then((got) => {
+            if (got) {
+              const output = Array.from({ length: 50 }, (_, i) => `output line ${i}`).join("\r\n");
+              appendFileSync(
+                log,
+                `\x1b[2J\x1b[H❯ continue\r\n${output}\r\n${RULE}\r\n❯ \r\n${RULE}\r\n`,
+              );
+            }
+            return got;
+          });
+          const { confirmed, submission } = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "continue",
+          );
+          expect(await reacted).toBe(true);
+          expect(submission).toBe("submitted");
+          expect(confirmed).toBe(true);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)(
+    "does not take a vanished composer (a menu took the screen) for delivery",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const RULE = "─".repeat(20);
+        await writeFile(log, `${RULE}\r\n❯ continue\r\n${RULE}\r\n`);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reacted = onKeystroke().then((got) => {
+            if (got)
+              appendFileSync(
+                log,
+                `\x1b[2J\x1b[HDo you trust this folder?\r\n  1. Yes\r\n  2. No\r\n`,
+              );
+            return got;
+          });
+          const { confirmed } = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "continue",
+          );
+          expect(await reacted).toBe(true);
+          expect(confirmed).toBe(false);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+
   it.skipIf(!itUnix)(
     "confirms a cleared composer after a response without a busy marker",
     async () => {
@@ -1583,6 +1657,20 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
     expect(inspectSubmission(["Codex", "› Ask Codex to do anything"], "x")).toMatchObject({
       submission: "not-submitted",
       retry: false,
+    });
+  });
+
+  // Codex review (2ecc427): the last prompt-looking row was taken for the prompt,
+  // so a quoted `› line` inside our unsent message put its nonce in "transcript".
+  it("does not take a quoted prompt glyph inside our unsent message for the prompt", async () => {
+    const { inspectSubmission } = await loadModule();
+    const marker = "<ay-msg abc12345";
+    const screen = ["older history", "────────", `❯ ${marker}`, "  › quoted line", "────────"];
+    expect(inspectSubmission(screen, marker)).toMatchObject({
+      transcriptMatches: 0,
+      retry: true,
+      inComposer: true,
+      composerVisible: true,
     });
   });
 

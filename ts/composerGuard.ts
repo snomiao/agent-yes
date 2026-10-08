@@ -54,7 +54,27 @@ const PROMPT_RE = /^\s*[❯›]($|\s)/u;
 // the Claude/Codex footer rows.
 const SEPARATOR_RE = /^\s*[─━]{3,}/u;
 const FOOTER_RE =
-  /^\s*(?:·\s*)?(?:[←→] .*agents|\? for shortcuts|esc to interrupt|ctrl\+t to|GPT-[^·]*·|gpt-[^·]*·|⏵⏵|⏸)/iu;
+  /^\s*(?:·\s*)?(?:[←→] .*agents|\? for shortcuts|esc to interrupt|ctrl\+t to|GPT-[^·]*·|gpt-[^·]*·|⏵⏵|⏸|⏎ send|\d+% context left)/iu;
+
+/**
+ * The composer's prompt row among plain-text rows (oldest first), or -1.
+ * Claude Code boxes its composer, so the prompt is the row directly under the
+ * LAST rule that has a prompt row under it — a `›`/`❯` that merely starts a
+ * line of a multi-line draft is inside the box, not a second prompt. Without
+ * any box (Codex) it is the last prompt-looking row. Shared by the draft check
+ * and by submission confirmation, so both agree on where history ends.
+ */
+export function composerPromptRow(texts: string[]): number {
+  for (let i = texts.length - 2; i >= 0; i--) {
+    if (SEPARATOR_RE.test(texts[i]!) && PROMPT_RE.test(texts[i + 1]!)) return i + 1;
+  }
+  return texts.findLastIndex((t) => PROMPT_RE.test(t));
+}
+
+/** Is this row composer chrome (a rule or a Claude/Codex footer) — the end of the input? */
+export function isComposerChrome(text: string): boolean {
+  return SEPARATOR_RE.test(text) || FOOTER_RE.test(text);
+}
 
 /**
  * Classify the composer from rendered rows (oldest first, screen bottom last).
@@ -66,33 +86,24 @@ const FOOTER_RE =
  * inside it. When the bottom rule is not on screen (a partial redraw in the
  * replayed tail) the box ends at the footer instead.
  *
- * Without a top rule (Codex) the composer is the last prompt row plus the rows
- * under it up to a blank row, a rule or the footer. There a draft whose own
- * line starts with a prompt glyph, or whose first line is blank, can be misread.
+ * Without a top rule (Codex) the composer is the last prompt row plus every row
+ * under it up to a rule or the footer (Codex's `⏎ send` hints / `% context
+ * left` row) — blank rows included, so a multi-line draft with a blank line in
+ * it is not cut short and read as empty (codex review). Any other non-dim text
+ * down there counts as a draft: parking a message is recoverable, typing into a
+ * draft is not. A draft whose own line starts with a prompt glyph can still be
+ * misread there.
  */
 export function classifyComposer(rows: ComposerRow[]): ComposerState {
-  const isRule = (i: number) => SEPARATOR_RE.test(rows[i]!.text);
-  const isPrompt = (i: number) => PROMPT_RE.test(rows[i]!.text);
-  let prompt = -1;
-  for (let i = rows.length - 2; i >= 0; i--) {
-    if (isRule(i) && isPrompt(i + 1)) {
-      prompt = i + 1;
-      break;
-    }
-  }
-  const boxed = prompt >= 0;
-  if (!boxed) prompt = rows.findLastIndex((_, i) => isPrompt(i));
+  const prompt = composerPromptRow(rows.map((r) => r.text));
   if (prompt < 0) return { kind: "unknown", reason: "no prompt row on screen" };
   let real = 0;
   let ghost = false;
   for (let i = prompt; i < rows.length; i++) {
     const row = rows[i]!;
     if (i > prompt) {
-      if (isRule(i) || FOOTER_RE.test(row.text)) break;
-      if (!row.text.trim()) {
-        if (boxed) continue;
-        break;
-      }
+      if (isComposerChrome(row.text)) break;
+      if (!row.text.trim()) continue;
     }
     let cells = row.cells;
     if (i === prompt) {

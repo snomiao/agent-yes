@@ -102,6 +102,8 @@ import { withIpcLock } from "./ipcLock.ts";
 import { isWithin, resolveWorkDir } from "./workDir.ts";
 import {
   classifyComposer,
+  composerPromptRow,
+  isComposerChrome,
   claimPending,
   type ComposerState,
   enqueuePending,
@@ -4694,9 +4696,22 @@ export function inspectSubmission(
   submission: SubmissionState;
   retry: boolean;
   transcriptMatches: number;
+  /** A composer is on screen (so `inComposer` means something). */
+  composerVisible: boolean;
+  /** Our message is sitting in that composer, unsent. */
+  inComposer: boolean;
 } {
-  const unknown = { submission: "not-submitted" as const, retry: false, transcriptMatches: 0 };
-  const prompt = screen.findLastIndex((line) => /^\s*[❯›]($|\s)/u.test(line));
+  const unknown = {
+    submission: "not-submitted" as const,
+    retry: false,
+    transcriptMatches: 0,
+    composerVisible: false,
+    inComposer: false,
+  };
+  // The same boundary the draft check uses: a quoted `› line` inside our own
+  // unsent message must not be taken for the prompt (that would count the
+  // message's nonce as transcript evidence — codex review).
+  const prompt = composerPromptRow(screen);
   if (prompt < 0 || !identity.trim()) return unknown;
   // Strip whitespace to tolerate terminal wrapping of the nonce/header or body.
   const compact = (text: string) => text.replace(/\s+/gu, "");
@@ -4722,19 +4737,19 @@ export function inspectSubmission(
   }
   const input: string[] = [screen[prompt]!.replace(/^\s*[❯›]\s*/u, "")];
   for (const line of screen.slice(prompt + 1)) {
-    if (/^\s*[─━]{3,}/u.test(line)) break;
-    // Claude and Codex footer chrome, including the model/cwd status row.
-    if (
-      /^\s*(?:[←→] .*agents|\? for shortcuts|esc to interrupt|ctrl\+t to|GPT-[^·]*·|gpt-[^·]*·)/i.test(
-        line,
-      )
-    )
-      break;
+    // A rule or the Claude/Codex footer chrome (incl. the model/cwd status row).
+    if (isComposerChrome(line)) break;
     input.push(line);
   }
   const composer = compact(input.join("\n"));
   if (wrapped ? composer.includes(needle) : composer === needle) {
-    return { submission: "not-submitted", retry: true, transcriptMatches };
+    return {
+      submission: "not-submitted",
+      retry: true,
+      transcriptMatches,
+      composerVisible: true,
+      inComposer: true,
+    };
   }
   const queued = screen.some((line) =>
     /^\s*(?:[❯›]\s*)?Press up to edit queued messages\s*$/iu.test(line),
@@ -4742,9 +4757,15 @@ export function inspectSubmission(
   if (transcriptMatches) {
     // Empty prompts, Codex placeholders and Claude suggestions all mean that
     // our message has left the composer when its identity is in the transcript.
-    return { submission: queued ? "queued" : "submitted", retry: false, transcriptMatches };
+    return {
+      submission: queued ? "queued" : "submitted",
+      retry: false,
+      transcriptMatches,
+      composerVisible: true,
+      inComposer: false,
+    };
   }
-  return unknown;
+  return { ...unknown, composerVisible: true };
 }
 
 export function submissionState(screen: string[], identity = ""): SubmissionState {
@@ -4785,7 +4806,25 @@ export async function submitAndConfirm(
   const geometry = (await readAgentPtysize(record)) ?? undefined;
   const cfg = (await cliDefaults())[record.cli];
   let screen = (await renderLogTailLines(logFile, 40, geometry)) ?? [];
-  const baseline = inspectSubmission(screen, identity).transcriptMatches;
+  const before = inspectSubmission(screen, identity);
+  const baseline = before.transcriptMatches;
+  // Delivered = a NEW copy in the transcript, or — what a count in a rolling
+  // 40-line window cannot show for a repeated raw message like "continue" —
+  // our text was in the visible composer before Enter and has left it while
+  // the composer is still on screen (codex review).
+  const delivered = (e: ReturnType<typeof inspectSubmission>): boolean =>
+    (e.submission !== "not-submitted" && e.transcriptMatches > baseline) ||
+    (before.inComposer && e.composerVisible && !e.inComposer);
+  const outcome = (e: ReturnType<typeof inspectSubmission>, current: string[]) => {
+    const queued =
+      e.submission === "queued" ||
+      current.some((line) => /^\s*(?:[❯›]\s*)?Press up to edit queued messages\s*$/iu.test(line));
+    return {
+      confirmed: !queued,
+      screen: current,
+      submission: (queued ? "queued" : "submitted") as SubmissionState,
+    };
+  };
   const ownPaste = ownedCollapsedPaste(record.cli, beforePaste, screen);
   const canRetry = (evidence: ReturnType<typeof inspectSubmission>, current: string[]) =>
     evidence.retry || (ownPaste !== null && collapsedPasteToken(current) === ownPaste);
@@ -4795,12 +4834,7 @@ export async function submitAndConfirm(
       // Recheck after the delay: the target could have accepted the earlier Enter.
       screen = (await renderLogTailLines(logFile, 40, geometry)) ?? [];
       const settled = inspectSubmission(screen, identity);
-      if (settled.submission !== "not-submitted" && settled.transcriptMatches > baseline)
-        return {
-          confirmed: settled.submission === "submitted",
-          screen,
-          submission: settled.submission,
-        };
+      if (delivered(settled)) return outcome(settled, screen);
       if (
         !canRetry(settled, screen) ||
         (cfg?.needsInput?.length &&
@@ -4812,13 +4846,7 @@ export async function submitAndConfirm(
     await waitForLogQuiet(logFile, SEND_CONFIRM_QUIET_MS, SEND_CONFIRM_MAX_MS);
     screen = (await renderLogTailLines(logFile, 40, geometry)) ?? [];
     const evidence = inspectSubmission(screen, identity);
-    if (evidence.submission !== "not-submitted" && evidence.transcriptMatches > baseline) {
-      return {
-        confirmed: evidence.submission === "submitted",
-        screen,
-        submission: evidence.submission,
-      };
-    }
+    if (delivered(evidence)) return outcome(evidence, screen);
     if (!canRetry(evidence, screen)) break;
   }
   return { confirmed: false, screen, submission: "not-submitted" };

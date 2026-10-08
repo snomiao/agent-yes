@@ -94,6 +94,25 @@ describe("classifyComposer", () => {
     );
   });
 
+  // Codex review (2ecc427): without a top rule the scan stopped at the first
+  // blank row, so a multi-line Codex draft read as empty and was typed into.
+  it("keeps a blank line inside an unboxed (Codex) multi-line draft", async () => {
+    expect(await classify(`history\r\n› \r\n\r\n  human draft\r\n`)).toEqual({
+      kind: "draft",
+      chars: 10,
+    });
+  });
+  it("still ends an unboxed composer at Codex's footer, past blank rows", async () => {
+    expect(
+      await classify(
+        `› \x1b[2mAsk Codex to do anything\x1b[22m\r\n\r\n  ⏎ send   ⌃J newline   ⌃T transcript\r\n  100% context left\r\n`,
+      ),
+    ).toEqual({
+      kind: "empty",
+      ghost: true,
+    });
+  });
+
   it("reads Codex's › prompt the same way", async () => {
     expect((await classify(`› fix the bug\r\n`)).kind).toBe("draft");
     expect(await classify(`› \x1b[2mAsk Codex to do anything\x1b[22m\r\n`)).toEqual({
