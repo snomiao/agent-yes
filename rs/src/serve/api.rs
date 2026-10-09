@@ -693,6 +693,17 @@ fn matches_keyword(r: &PidRecord, kw: &str) -> bool {
             .map(|id| id.starts_with(&kw.to_ascii_lowercase()))
             .unwrap_or(false);
     }
+    // An id-shaped keyword (12-32 hex, the agent_id format) is an identity
+    // selector too: a vanished agent's id still sits in its sublanes' prompts,
+    // and a prompt match would hand its traffic to one of them. Mirrors
+    // ts/subcommands.ts isAgentIdShaped.
+    if (12..=32).contains(&kw.len()) && kw.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return r
+            .agent_id
+            .as_deref()
+            .map(|id| id.starts_with(&kw.to_ascii_lowercase()))
+            .unwrap_or(false);
+    }
     if let Some(id) = &r.agent_id {
         if id.starts_with(&kw.to_ascii_lowercase()) {
             return true;
@@ -1774,6 +1785,24 @@ mod tests {
         // non-numeric keywords keep the substring rules
         assert!(matches_keyword(&peer, "repo/beta"));
         assert!(matches_keyword(&peer, "gamma"));
+    }
+
+    #[test]
+    fn id_shaped_keyword_is_identity_not_substring() {
+        // A parent's wrapper restarted under a new id; its old id, quoted in a
+        // sublane's prompt, must not resolve to that sublane.
+        let rec = |j: serde_json::Value| -> PidRecord { serde_json::from_value(j).unwrap() };
+        let quoting = rec(json!({
+            "pid": 3333, "cli": "claude", "cwd": "/repo/alpha/tree/d3e4f5a6b7c8",
+            "prompt": "reply: ay send d3e4f5a6b7c8",
+            "log_file": null, "status": "active", "exit_code": null,
+            "exit_reason": null, "started_at": 1_000, "agent_id": "0123456789ab"
+        }));
+        assert!(!matches_keyword(&quoting, "d3e4f5a6b7c8"));
+        assert!(matches_keyword(&quoting, "0123456789ab"));
+        assert!(matches_keyword(&quoting, "0123456789AB"));
+        // a short hex word keeps the substring rules
+        assert!(matches_keyword(&quoting, "d3e4f5"));
     }
 
     #[test]

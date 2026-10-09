@@ -597,6 +597,23 @@ describe("subcommands.matchKeyword", () => {
     expect(matchKeyword(r, "b2c3")).toBe(false); // not a prefix (mid-string)
     expect(matchKeyword({ ...baseRecord, agent_id: null }, "a1b2")).toBe(false);
   });
+
+  // A vanished agent's id still sits in its sublanes' prompts ("reply: ay send
+  // <id>"); an id-shaped keyword must never fall through to that prompt match.
+  it("treats an id-shaped keyword as an identity selector (no cwd/prompt match)", async () => {
+    const { matchKeyword } = await loadModule();
+    const quoting = {
+      ...baseRecord,
+      agent_id: "0123456789ab",
+      prompt: "you were spawned by d3e4f5a6b7c8 — reply: ay send d3e4f5a6b7c8",
+      cwd: "/repo/alpha/tree/d3e4f5a6b7c8",
+    };
+    expect(matchKeyword(quoting, "d3e4f5a6b7c8")).toBe(false);
+    expect(matchKeyword(quoting, "0123456789ab")).toBe(true); // its own id
+    expect(matchKeyword(quoting, "0123456789AB")).toBe(true);
+    // a short hex word is still an ordinary keyword
+    expect(matchKeyword(quoting, "d3e4f5")).toBe(true);
+  });
 });
 
 describe("subcommands.resolveOne exact-identity precedence", () => {
@@ -675,6 +692,41 @@ describe("subcommands.resolveOne exact-identity precedence", () => {
 
     const record = await resolveOne("a1b2c3d4e5f6", opts);
     expect(record.pid).toBe(111);
+  });
+  // 2026-10-09: a parent's wrapper restarted under a new id; sends to the old
+  // id keyword-matched every sublane whose prompt quoted it. With exactly one
+  // such lane left, the send would have gone to that lane.
+  it("refuses a stale id instead of resolving it to a lane that quotes it", async () => {
+    const { resolveOne } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const base = {
+      cwd: process.cwd(),
+      log_file: null,
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now() - 1_000,
+    };
+    await appendGlobalPid({
+      ...base,
+      pid: 3333,
+      cli: "claude",
+      status: "active" as const,
+      agent_id: "0123456789ab",
+      prompt: "<ay-msg from parent — reply: ay send d3e4f5a6b7c8>",
+    });
+    await expect(resolveOne("d3e4f5a6b7c8", opts)).rejects.toThrow(/no live agent has id/);
+    // the exited parent is named when its record is still in the index
+    await appendGlobalPid({
+      ...base,
+      pid: 4444,
+      cli: "claude",
+      status: "exited" as const,
+      agent_id: "d3e4f5a6b7c8",
+      prompt: "cto",
+    });
+    await expect(resolveOne("d3e4f5a6b7c8", opts)).rejects.toThrow(/pid 4444 exited/);
+    // the quoting lane is still reachable by its own id
+    expect((await resolveOne("0123456789ab", opts)).pid).toBe(3333);
   });
 });
 
