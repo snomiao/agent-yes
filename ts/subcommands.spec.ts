@@ -4778,6 +4778,21 @@ describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () =
     expect((await stateOf(turn.repeat(3000), "codex")).kind).toBe("draft");
   });
 
+  it("follows what is appended after the first reading, and a truncated log", async () => {
+    const { readComposerState } = await loadModule();
+    const file = path.join(testHome, "2222.raw.log");
+    const record = { pid: 2222, cli: "claude", log_file: file } as never;
+    await writeFile(file, idleLog(""));
+    expect(await readComposerState(record)).toEqual({ kind: "empty", ghost: false });
+    appendFileSync(file, at(48, "❯ btw how"));
+    expect(await readComposerState(record)).toEqual({ kind: "draft", chars: 6 });
+    appendFileSync(file, at(48, "❯ "));
+    expect(await readComposerState(record)).toEqual({ kind: "empty", ghost: false });
+    const box = `${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n❯ hi\r\n${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n`;
+    await writeFile(file, "x\r\n".repeat(100) + box);
+    expect(await readComposerState(record)).toEqual({ kind: "draft", chars: 2 });
+  });
+
   it("keeps a typed draft on screen in the 32 KB tail", async () => {
     const box = `${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n❯ btw how\r\n${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n`;
     expect(await stateOf("x\r\n".repeat(20000) + box)).toEqual({ kind: "draft", chars: 6 });
