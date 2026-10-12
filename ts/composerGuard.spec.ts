@@ -6,6 +6,7 @@ import { Terminal } from "@xterm/headless";
 import {
   claimPending,
   classifyComposer,
+  composerBoxed,
   DUPLICATE_WINDOW_MS,
   enqueuePending,
   findRecentDuplicate,
@@ -275,5 +276,21 @@ describe("duplicate suppression at the sink", () => {
     expect(queuedReceipt("parked", "its input box holds a draft (3 chars)")).toContain(
       "Queued, do not resend.",
     );
+  });
+});
+
+describe("composerBoxed", () => {
+  const RULE = "─".repeat(40);
+  const FOOTER = "  ? for shortcuts";
+  it("accepts the box at the bottom, closed or left open by a partial redraw", () => {
+    expect(composerBoxed(["● done", RULE, "❯ ", RULE, FOOTER])).toBe(true);
+    expect(composerBoxed(["● done", RULE, "❯ btw how"])).toBe(true);
+  });
+  it("rejects a screen whose prompt row has no rule above it", () => {
+    expect(composerBoxed(["● done", "❯ please summarise", "  answer"])).toBe(false);
+  });
+  it("rejects a stale box that history has been drawn under", () => {
+    expect(composerBoxed([RULE, "❯ old draft", RULE, "● done", "❯ please summarise", "  answer"])).toBe(false);
+    expect(composerBoxed([RULE, "❯ ", RULE, "  a", "  b", "  c", "  d", "  e"])).toBe(false);
   });
 });

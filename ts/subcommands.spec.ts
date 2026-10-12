@@ -4713,7 +4713,7 @@ describe("readComposerState on a lane idle for hours", () => {
   const COLS = 200;
   const GRAY = "\x1b[38;2;153;153;153m";
   const at = (row: number, text: string) => `\x1b[${row};1H\x1b[2K${text}`;
-  function idleLog(composer: string): string {
+  function idleLog(composer: string, staleBox?: string): string {
     const screen: string[] = [];
     for (let i = 0; i < 38; i++) screen.push(`● step ${i}: lorem ipsum dolor sit amet`);
     screen.push("❯ please summarise the plan");
@@ -4727,6 +4727,9 @@ describe("readComposerState on a lane idle for hours", () => {
     let log = "\x1b[2J" + screen.map((t, i) => at(i + 1, t)).join("") + "\x1b[48;3H";
     for (let k = 0; log.length < 200 * 1024; k++) {
       for (let r = 39; r <= 46; r++) log += at(r, screen[r - 1]! + (r === 46 ? ` ${k % 10}` : ""));
+      // A fragment of an older frame's box, still holding what was typed then.
+      if (staleBox !== undefined)
+        log += at(30, `${GRAY}${"─".repeat(COLS)}\x1b[0m`) + at(31, `❯ ${staleBox}`) + at(32, `${GRAY}${"─".repeat(COLS)}\x1b[0m`);
       log += "\x1b[48;3H";
     }
     return log;
@@ -4741,6 +4744,10 @@ describe("readComposerState on a lane idle for hours", () => {
   it("reads the empty composer drawn before the last 32 KB, not the transcript", async () => {
     // The 32 KB tail alone renders the old turn as the prompt and its answer as a draft.
     expect(await stateOf(idleLog(""))).toEqual({ kind: "empty", ghost: false });
+  });
+
+  it("does not stop at an older box that history was drawn under", async () => {
+    expect(await stateOf(idleLog("", "old draft"))).toEqual({ kind: "empty", ghost: false });
   });
 
   it("still reads a typed draft in that composer", async () => {

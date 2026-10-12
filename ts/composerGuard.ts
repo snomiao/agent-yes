@@ -85,16 +85,23 @@ export function composerPromptRow(texts: string[]): number {
 }
 
 /**
- * Does a rule sit directly above a prompt row, i.e. is Claude Code's composer box
- * on screen? When it is not, composerPromptRow fell back to the last prompt-looking
- * row, which on a Claude screen can be an old turn in the transcript.
+ * Is Claude Code's composer box the bottom of the screen: a rule directly above a
+ * prompt row, and below the rule or footer that closes the box (if any) nothing
+ * but a few footer rows? When it is not, composerPromptRow either fell back to the last
+ * prompt-looking row (on a Claude screen, possibly an old turn in the transcript)
+ * or found a box that history has since been drawn under, so it is a stale one.
  */
 export function composerBoxed(texts: string[]): boolean {
-  for (let i = texts.length - 2; i >= 0; i--) {
-    if (SEPARATOR_RE.test(texts[i]!) && PROMPT_RE.test(texts[i + 1]!)) return true;
-  }
-  return false;
+  const prompt = composerPromptRow(texts);
+  if (prompt < 1 || !SEPARATOR_RE.test(texts[prompt - 1]!)) return false;
+  const close = texts.findIndex((t, i) => i > prompt && isComposerChrome(t));
+  if (close < 0) return true; // a partial redraw left it open: it runs to the bottom
+  const below = texts.slice(close + 1).filter((t) => t.trim());
+  return below.length <= MAX_ROWS_BELOW_BOX && !below.some((t) => PROMPT_RE.test(t));
 }
+
+/** Footer rows Claude Code draws under its composer box (mode, hints, agents, notices). */
+const MAX_ROWS_BELOW_BOX = 4;
 
 /**
  * Is this row composer chrome (a rule or a Claude/Codex footer) — the end of the
