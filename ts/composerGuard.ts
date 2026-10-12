@@ -85,6 +85,18 @@ export function composerPromptRow(texts: string[]): number {
 }
 
 /**
+ * Does a rule sit directly above a prompt row, i.e. is Claude Code's composer box
+ * on screen? When it is not, composerPromptRow fell back to the last prompt-looking
+ * row, which on a Claude screen can be an old turn in the transcript.
+ */
+export function composerBoxed(texts: string[]): boolean {
+  for (let i = texts.length - 2; i >= 0; i--) {
+    if (SEPARATOR_RE.test(texts[i]!) && PROMPT_RE.test(texts[i + 1]!)) return true;
+  }
+  return false;
+}
+
+/**
  * Is this row composer chrome (a rule or a Claude/Codex footer) — the end of the
  * input? Pass the row's `cells` when known: the loose footer match then also
  * requires every visible cell to be coloured, so a typed line is never cut off.

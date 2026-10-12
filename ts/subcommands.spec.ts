@@ -2070,7 +2070,8 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
           const errs: string[] = [];
           const origErr = process.stderr.write.bind(process.stderr);
           process.stderr.write = ((c: string | Uint8Array) => (
-            errs.push(String(c)), true
+            errs.push(String(c)),
+            true
           )) as typeof process.stderr.write;
           let res: { code: number | null; stdout: string };
           try {
@@ -4702,5 +4703,52 @@ describe("drainerLauncher", () => {
       "/opt/ay/ay",
     ]);
     expect(drainerLauncher("C:\\tools\\ay.exe", undefined, null)).toEqual(["C:\\tools\\ay.exe"]);
+  });
+});
+
+describe("readComposerState on a lane idle for hours", () => {
+  // A renderer that addresses rows absolutely and re-emits only the rows that
+  // changed: the full frame (both rules, the empty prompt) is drawn once, then
+  // >32 KB of redraws touch only transcript rows, an old "❯" turn among them.
+  const COLS = 200;
+  const GRAY = "\x1b[38;2;153;153;153m";
+  const at = (row: number, text: string) => `\x1b[${row};1H\x1b[2K${text}`;
+  function idleLog(composer: string): string {
+    const screen: string[] = [];
+    for (let i = 0; i < 38; i++) screen.push(`● step ${i}: lorem ipsum dolor sit amet`);
+    screen.push("❯ please summarise the plan");
+    for (let i = 0; i < 7; i++) screen.push(`  answer line ${i}: sed do eiusmod tempor`);
+    screen.push(
+      `${GRAY}${"─".repeat(COLS)}\x1b[0m`,
+      `❯ ${composer}`,
+      `${GRAY}${"─".repeat(COLS)}\x1b[0m`,
+    );
+    screen.push(`${GRAY}  ? for shortcuts\x1b[0m`);
+    let log = "\x1b[2J" + screen.map((t, i) => at(i + 1, t)).join("") + "\x1b[48;3H";
+    for (let k = 0; log.length < 200 * 1024; k++) {
+      for (let r = 39; r <= 46; r++) log += at(r, screen[r - 1]! + (r === 46 ? ` ${k % 10}` : ""));
+      log += "\x1b[48;3H";
+    }
+    return log;
+  }
+  async function stateOf(log: string, cli = "claude") {
+    const { readComposerState } = await loadModule();
+    const file = path.join(testHome, "1111.raw.log");
+    await writeFile(file, log);
+    return readComposerState({ pid: 1111, cli, log_file: file } as never);
+  }
+
+  it("reads the empty composer drawn before the last 32 KB, not the transcript", async () => {
+    // The 32 KB tail alone renders the old turn as the prompt and its answer as a draft.
+    expect(await stateOf(idleLog(""))).toEqual({ kind: "empty", ghost: false });
+  });
+
+  it("still reads a typed draft in that composer", async () => {
+    expect(await stateOf(idleLog("btw how"))).toEqual({ kind: "draft", chars: 6 });
+  });
+
+  it("keeps a typed draft on screen in the 32 KB tail", async () => {
+    const box = `${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n❯ btw how\r\n${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n`;
+    expect(await stateOf("x\r\n".repeat(20000) + box)).toEqual({ kind: "draft", chars: 6 });
   });
 });

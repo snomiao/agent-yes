@@ -103,6 +103,7 @@ import { isWithin, resolveWorkDir } from "./workDir.ts";
 import {
   bodyHash,
   classifyComposer,
+  composerBoxed,
   composerPromptRow,
   DUPLICATE_WINDOW_MS,
   findRecentDuplicate,
@@ -4303,32 +4304,55 @@ export async function renderLogTailLines(
 }
 
 /**
+ * Tail windows the composer check renders, smallest first. Rendering a tail
+ * starts mid-stream, and Claude Code's renderer redraws only the rows that
+ * changed: on a lane that has sat idle for hours the last 32 KB can hold
+ * redraws of transcript rows (an old `❯` turn among them) but not the unchanged
+ * rule and empty prompt row of the composer box, so the old turn was read as
+ * the prompt and the transcript under it as a draft. A Claude screen without
+ * its box is therefore re-rendered from further back. Logs run to 100+ MB and
+ * the drainer re-checks every few seconds, so the window grows only on demand.
+ */
+const COMPOSER_WINDOWS = [32 * 1024, 1024 * 1024, 8 * 1024 * 1024];
+
+/**
  * What the target's composer holds right now, read from the same 32 KB tail
- * `renderLogTailLines` renders, but keeping per-cell attributes (dim/inverse) so
- * ghost text can be told from a real draft. See ts/composerGuard.ts.
+ * `renderLogTailLines` renders (further back when a Claude screen shows no
+ * composer box), keeping per-cell attributes (dim/inverse) so ghost text can be
+ * told from a real draft. See ts/composerGuard.ts.
  */
 export async function readComposerState(record: GlobalPidRecord): Promise<ComposerState> {
   if (!record.log_file) return { kind: "unknown", reason: "no log file recorded" };
-  const buf = await readLogTailBytes(record.log_file);
-  if (!buf) return { kind: "unknown", reason: "log unreadable or empty" };
   const geom = (await readAgentPtysize(record)) ?? undefined;
-  try {
-    const Terminal = await loadXtermTerminal();
-    const term = new Terminal({
-      cols: geom?.cols && geom.cols > 0 ? geom.cols : 200,
-      rows: geom?.rows && geom.rows > 0 ? geom.rows : 50,
-      scrollback: 5000,
-      allowProposedApi: true,
-    });
-    await new Promise<void>((resolve) => term.write(buf, resolve));
-    return classifyComposer(rowsFromXterm(term as never, 40));
-  } catch (e) {
-    return { kind: "unknown", reason: `render failed: ${(e as Error)?.message ?? e}` };
+  let state: ComposerState = { kind: "unknown", reason: "log unreadable or empty" };
+  for (const bytes of COMPOSER_WINDOWS) {
+    const buf = await readLogTailBytes(record.log_file, bytes);
+    if (!buf) return state;
+    let rows: ReturnType<typeof rowsFromXterm>;
+    try {
+      const Terminal = await loadXtermTerminal();
+      const term = new Terminal({
+        cols: geom?.cols && geom.cols > 0 ? geom.cols : 200,
+        rows: geom?.rows && geom.rows > 0 ? geom.rows : 50,
+        scrollback: 5000,
+        allowProposedApi: true,
+      });
+      await new Promise<void>((resolve) => term.write(buf, resolve));
+      rows = rowsFromXterm(term as never, 40);
+    } catch (e) {
+      return { kind: "unknown", reason: `render failed: ${(e as Error)?.message ?? e}` };
+    }
+    state = classifyComposer(rows);
+    const wholeLog = buf.length < bytes;
+    if (wholeLog || record.cli !== "claude" || composerBoxed(rows.map((r) => r.text))) break;
   }
+  return state;
 }
 
-async function readLogTailBytes(logPath: string): Promise<Uint8Array | null> {
-  const TAIL_BYTES = 32 * 1024;
+async function readLogTailBytes(
+  logPath: string,
+  TAIL_BYTES = 32 * 1024,
+): Promise<Uint8Array | null> {
   let buf: Uint8Array;
   try {
     const fh = await open(logPath, "r");
