@@ -4310,15 +4310,18 @@ export async function renderLogTailLines(
  * redraws of transcript rows (an old `❯` turn among them) but not the unchanged
  * rule and empty prompt row of the composer box, so the old turn was read as
  * the prompt and the transcript under it as a draft. A Claude screen without
- * its box is therefore re-rendered from further back. Logs run to 100+ MB and
- * the drainer re-checks every few seconds, so the window grows only on demand
- * and stops at 8 MB: a Claude screen with no box at all (a permission dialog)
- * renders every window on every check (~2 s at 8 MB), and the whole log, up to
- * MAX_RENDER_BYTES, would cost ~10 s each time. When no window shows the box,
- * a draft read under some other prompt row is reported as "hidden" rather than
- * as a draft: the send still parks, and the drainer waits for the box.
+ * its box is therefore re-rendered from further back, last of all from as far
+ * back as `ay read` renders. Logs run to 100+ MB, so the window grows only on
+ * demand, and a reading is cached until the log changes: a lane parked on a
+ * screen with no box (a permission dialog) pays for the large renders once,
+ * not on every drainer poll. When even that shows no box, a draft read under
+ * some other prompt row is reported as "hidden" rather than as a draft: the
+ * send still parks, and the drainer waits for the box.
  */
-const COMPOSER_WINDOWS = [32 * 1024, 1024 * 1024, 8 * 1024 * 1024];
+const COMPOSER_WINDOWS = [32 * 1024, 1024 * 1024, 8 * 1024 * 1024, MAX_RENDER_BYTES];
+
+/** Last reading per log file, valid while the log's size and mtime are unchanged. */
+const composerCache = new Map<string, { key: string; state: ComposerState }>();
 
 /**
  * What the target's composer holds right now, read from the same 32 KB tail
@@ -4327,11 +4330,31 @@ const COMPOSER_WINDOWS = [32 * 1024, 1024 * 1024, 8 * 1024 * 1024];
  * told from a real draft. See ts/composerGuard.ts.
  */
 export async function readComposerState(record: GlobalPidRecord): Promise<ComposerState> {
-  if (!record.log_file) return { kind: "unknown", reason: "no log file recorded" };
+  const logPath = record.log_file;
+  if (!logPath) return { kind: "unknown", reason: "no log file recorded" };
   const geom = (await readAgentPtysize(record)) ?? undefined;
+  let key: string;
+  try {
+    const st = await stat(logPath);
+    key = `${st.size}:${st.mtimeMs}:${geom?.cols}x${geom?.rows}:${record.cli}`;
+  } catch {
+    return { kind: "unknown", reason: "log unreadable or empty" };
+  }
+  const cached = composerCache.get(logPath);
+  if (cached?.key === key) return cached.state;
+  const state = await renderComposerState(logPath, record.cli, geom);
+  composerCache.set(logPath, { key, state });
+  return state;
+}
+
+async function renderComposerState(
+  logPath: string,
+  cli: string,
+  geom: RenderGeom | undefined,
+): Promise<ComposerState> {
   let state: ComposerState = { kind: "unknown", reason: "log unreadable or empty" };
   for (const bytes of COMPOSER_WINDOWS) {
-    const buf = await readLogTailBytes(record.log_file, bytes);
+    const buf = await readLogTailBytes(logPath, bytes);
     if (!buf) return { kind: "unknown", reason: "log unreadable or empty" };
     let rows: ReturnType<typeof rowsFromXterm>;
     try {
@@ -4348,7 +4371,7 @@ export async function readComposerState(record: GlobalPidRecord): Promise<Compos
       return { kind: "unknown", reason: `render failed: ${(e as Error)?.message ?? e}` };
     }
     state = classifyComposer(rows);
-    if (record.cli !== "claude" || composerBoxed(rows.map((r) => r.text))) return state;
+    if (cli !== "claude" || composerBoxed(rows.map((r) => r.text))) return state;
     if (buf.length < bytes) break; // the whole log, and still no box
   }
   // No window showed the box, so a "draft" was read under some other prompt row,

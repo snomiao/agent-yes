@@ -4713,7 +4713,7 @@ describe("readComposerState on a lane idle for hours", () => {
   const COLS = 200;
   const GRAY = "\x1b[38;2;153;153;153m";
   const at = (row: number, text: string) => `\x1b[${row};1H\x1b[2K${text}`;
-  function idleLog(composer: string, staleBox?: string): string {
+  function idleLog(composer: string, staleBox?: string, bytes = 200 * 1024): string {
     const screen: string[] = [];
     for (let i = 0; i < 38; i++) screen.push(`● step ${i}: lorem ipsum dolor sit amet`);
     screen.push("❯ please summarise the plan");
@@ -4725,7 +4725,7 @@ describe("readComposerState on a lane idle for hours", () => {
     );
     screen.push(`${GRAY}  ? for shortcuts\x1b[0m`);
     let log = "\x1b[2J" + screen.map((t, i) => at(i + 1, t)).join("") + "\x1b[48;3H";
-    for (let k = 0; log.length < 200 * 1024; k++) {
+    for (let k = 0; log.length < bytes; k++) {
       for (let r = 39; r <= 46; r++) log += at(r, screen[r - 1]! + (r === 46 ? ` ${k % 10}` : ""));
       // A fragment of an older frame's box, still holding what was typed then.
       if (staleBox !== undefined)
@@ -4734,9 +4734,10 @@ describe("readComposerState on a lane idle for hours", () => {
     }
     return log;
   }
+  let logs = 0;
   async function stateOf(log: string, cli = "claude") {
     const { readComposerState } = await loadModule();
-    const file = path.join(testHome, "1111.raw.log");
+    const file = path.join(testHome, `${1111 + logs++}.raw.log`);
     await writeFile(file, log);
     return readComposerState({ pid: 1111, cli, log_file: file } as never);
   }
@@ -4744,6 +4745,13 @@ describe("readComposerState on a lane idle for hours", () => {
   it("reads the empty composer drawn before the last 32 KB, not the transcript", async () => {
     // The 32 KB tail alone renders the old turn as the prompt and its answer as a draft.
     expect(await stateOf(idleLog(""))).toEqual({ kind: "empty", ghost: false });
+  });
+
+  it("finds a box drawn more than 8 MB back, as `ay read` would", { timeout: 60_000 }, async () => {
+    expect(await stateOf(idleLog("", undefined, 9 * 1024 * 1024))).toEqual({
+      kind: "empty",
+      ghost: false,
+    });
   });
 
   it("does not stop at an older box that history was drawn under", async () => {
