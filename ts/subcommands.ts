@@ -4311,7 +4311,11 @@ export async function renderLogTailLines(
  * rule and empty prompt row of the composer box, so the old turn was read as
  * the prompt and the transcript under it as a draft. A Claude screen without
  * its box is therefore re-rendered from further back. Logs run to 100+ MB and
- * the drainer re-checks every few seconds, so the window grows only on demand.
+ * the drainer re-checks every few seconds, so the window grows only on demand
+ * and stops at 8 MB: a Claude screen with no box at all (a permission dialog)
+ * reaches the last window on every check, and the whole log would cost ~10 s
+ * each time. A box drawn more than 8 MB back is still missed. That reading
+ * errs the safe way: the message parks instead of being typed into a draft.
  */
 const COMPOSER_WINDOWS = [32 * 1024, 1024 * 1024, 8 * 1024 * 1024];
 
