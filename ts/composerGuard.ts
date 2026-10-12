@@ -92,17 +92,18 @@ export function composerPromptRow(texts: string[]): number {
 
 /**
  * Is Claude Code's composer box the bottom of the screen: a rule directly above a
- * prompt row, and below the rule or footer that closes the box (if any) nothing
- * but a few footer rows? When it is not, composerPromptRow either fell back to the last
+ * prompt row, and below the rule or footer that closes the box nothing but a few
+ * footer rows? When it is not, composerPromptRow either fell back to the last
  * prompt-looking row (on a Claude screen, possibly an old turn in the transcript)
  * or found a box that history has since been drawn under, so it is a stale one.
  */
 export function composerBoxed(texts: string[]): boolean {
   const prompt = composerPromptRow(texts);
   if (prompt < 1 || !SEPARATOR_RE.test(texts[prompt - 1]!)) return false;
+  // A box a partial redraw left open is measured from its prompt row: a long
+  // multi-line draft then fails the check too, and reads "hidden", which parks.
   const close = texts.findIndex((t, i) => i > prompt && isComposerChrome(t));
-  if (close < 0) return true; // a partial redraw left it open: it runs to the bottom
-  const below = texts.slice(close + 1).filter((t) => t.trim());
+  const below = texts.slice((close < 0 ? prompt : close) + 1).filter((t) => t.trim());
   return below.length <= MAX_ROWS_BELOW_BOX && !below.some((t) => PROMPT_RE.test(t));
 }
 

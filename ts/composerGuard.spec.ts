@@ -292,5 +292,8 @@ describe("composerBoxed", () => {
   it("rejects a stale box that history has been drawn under", () => {
     expect(composerBoxed([RULE, "❯ old draft", RULE, "● done", "❯ please summarise", "  answer"])).toBe(false);
     expect(composerBoxed([RULE, "❯ ", RULE, "  a", "  b", "  c", "  d", "  e"])).toBe(false);
+    // Left open by a partial redraw, with history drawn under it.
+    expect(composerBoxed([RULE, "❯ ", "● done", "❯ please summarise", "  answer"])).toBe(false);
+    expect(composerBoxed([RULE, "❯ ", "  a", "  b", "  c", "  d", "  e"])).toBe(false);
   });
 });
