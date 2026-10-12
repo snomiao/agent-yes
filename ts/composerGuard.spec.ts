@@ -282,9 +282,14 @@ describe("duplicate suppression at the sink", () => {
 describe("composerBoxed", () => {
   const RULE = "─".repeat(40);
   const FOOTER = "  ? for shortcuts";
-  it("accepts the box at the bottom, closed or left open by a partial redraw", () => {
+  it("accepts the box at the bottom, closed by its rule or the footer", () => {
     expect(composerBoxed(["● done", RULE, "❯ ", RULE, FOOTER])).toBe(true);
-    expect(composerBoxed(["● done", RULE, "❯ btw how"])).toBe(true);
+    expect(composerBoxed(["● done", RULE, "❯ btw how", FOOTER])).toBe(true);
+  });
+
+  it("rejects a box a partial redraw left open, however short", () => {
+    expect(composerBoxed(["● done", RULE, "❯ btw how"])).toBe(false);
+    expect(composerBoxed([RULE, "❯ ", "  answer line"])).toBe(false);
   });
   it("rejects a screen whose prompt row has no rule above it", () => {
     expect(composerBoxed(["● done", "❯ please summarise", "  answer"])).toBe(false);

@@ -4322,6 +4322,7 @@ export const COMPOSER_WINDOWS = [32 * 1024, 1024 * 1024, 8 * 1024 * 1024, MAX_RE
 
 /** Last reading per log file, valid while the log's size and mtime are unchanged. */
 const composerCache = new Map<string, { key: string; state: ComposerState }>();
+const COMPOSER_CACHE_MAX = 64;
 
 /**
  * What the target's composer holds right now, read from the same 32 KB tail
@@ -4346,7 +4347,12 @@ export async function readComposerState(
   const cached = composerCache.get(logPath);
   if (cached?.key === key) return cached.state;
   const state = await renderComposerState(logPath, record.cli, geom, windows);
+  composerCache.delete(logPath);
   composerCache.set(logPath, { key, state });
+  // Oldest first in insertion order: drop it once a long-lived process has
+  // looked at more lanes than the cap.
+  if (composerCache.size > COMPOSER_CACHE_MAX)
+    composerCache.delete(composerCache.keys().next().value!);
   return state;
 }
 
