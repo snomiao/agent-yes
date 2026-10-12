@@ -4318,7 +4318,7 @@ export async function renderLogTailLines(
  * some other prompt row is reported as "hidden" rather than as a draft: the
  * send still parks, and the drainer waits for the box.
  */
-const COMPOSER_WINDOWS = [32 * 1024, 1024 * 1024, 8 * 1024 * 1024, MAX_RENDER_BYTES];
+export const COMPOSER_WINDOWS = [32 * 1024, 1024 * 1024, 8 * 1024 * 1024, MAX_RENDER_BYTES];
 
 /** Last reading per log file, valid while the log's size and mtime are unchanged. */
 const composerCache = new Map<string, { key: string; state: ComposerState }>();
@@ -4329,20 +4329,23 @@ const composerCache = new Map<string, { key: string; state: ComposerState }>();
  * composer box), keeping per-cell attributes (dim/inverse) so ghost text can be
  * told from a real draft. See ts/composerGuard.ts.
  */
-export async function readComposerState(record: GlobalPidRecord): Promise<ComposerState> {
+export async function readComposerState(
+  record: GlobalPidRecord,
+  windows = COMPOSER_WINDOWS,
+): Promise<ComposerState> {
   const logPath = record.log_file;
   if (!logPath) return { kind: "unknown", reason: "no log file recorded" };
   const geom = (await readAgentPtysize(record)) ?? undefined;
   let key: string;
   try {
     const st = await stat(logPath);
-    key = `${st.size}:${st.mtimeMs}:${geom?.cols}x${geom?.rows}:${record.cli}`;
+    key = `${st.size}:${st.mtimeMs}:${geom?.cols}x${geom?.rows}:${record.cli}:${windows.join()}`;
   } catch {
     return { kind: "unknown", reason: "log unreadable or empty" };
   }
   const cached = composerCache.get(logPath);
   if (cached?.key === key) return cached.state;
-  const state = await renderComposerState(logPath, record.cli, geom);
+  const state = await renderComposerState(logPath, record.cli, geom, windows);
   composerCache.set(logPath, { key, state });
   return state;
 }
@@ -4351,9 +4354,10 @@ async function renderComposerState(
   logPath: string,
   cli: string,
   geom: RenderGeom | undefined,
+  windows: number[],
 ): Promise<ComposerState> {
   let state: ComposerState = { kind: "unknown", reason: "log unreadable or empty" };
-  for (const bytes of COMPOSER_WINDOWS) {
+  for (const bytes of windows) {
     const buf = await readLogTailBytes(logPath, bytes);
     if (!buf) return { kind: "unknown", reason: "log unreadable or empty" };
     let rows: ReturnType<typeof rowsFromXterm>;

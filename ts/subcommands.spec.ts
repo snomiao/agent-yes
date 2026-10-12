@@ -4706,7 +4706,7 @@ describe("drainerLauncher", () => {
   });
 });
 
-describe("readComposerState on a lane idle for hours", () => {
+describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () => {
   // A renderer that addresses rows absolutely and re-emits only the rows that
   // changed: the full frame (both rules, the empty prompt) is drawn once, then
   // >32 KB of redraws touch only transcript rows, an old "❯" turn among them.
@@ -4735,11 +4735,11 @@ describe("readComposerState on a lane idle for hours", () => {
     return log;
   }
   let logs = 0;
-  async function stateOf(log: string, cli = "claude") {
+  async function stateOf(log: string, cli = "claude", windows?: number[]) {
     const { readComposerState } = await loadModule();
     const file = path.join(testHome, `${1111 + logs++}.raw.log`);
     await writeFile(file, log);
-    return readComposerState({ pid: 1111, cli, log_file: file } as never);
+    return readComposerState({ pid: 1111, cli, log_file: file } as never, windows);
   }
 
   it("reads the empty composer drawn before the last 32 KB, not the transcript", async () => {
@@ -4747,8 +4747,14 @@ describe("readComposerState on a lane idle for hours", () => {
     expect(await stateOf(idleLog(""))).toEqual({ kind: "empty", ghost: false });
   });
 
-  it("finds a box drawn more than 8 MB back, as `ay read` would", { timeout: 60_000 }, async () => {
-    expect(await stateOf(idleLog("", undefined, 9 * 1024 * 1024))).toEqual({
+  it("searches as far back as `ay read` renders before giving up on the box", async () => {
+    const { COMPOSER_WINDOWS, MAX_RENDER_BYTES } = await loadModule();
+    expect(COMPOSER_WINDOWS.at(-1)).toBe(MAX_RENDER_BYTES);
+    // Scaled down: windows that stop short of the box report it hidden, one more
+    // that reaches it reads the empty composer.
+    const log = idleLog("", undefined, 300 * 1024);
+    expect((await stateOf(log, "claude", [32 * 1024, 64 * 1024])).kind).toBe("hidden");
+    expect(await stateOf(log, "claude", [32 * 1024, 64 * 1024, 512 * 1024])).toEqual({
       kind: "empty",
       ghost: false,
     });
