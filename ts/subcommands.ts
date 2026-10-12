@@ -4314,8 +4314,9 @@ export async function renderLogTailLines(
  * the drainer re-checks every few seconds, so the window grows only on demand
  * and stops at 8 MB: a Claude screen with no box at all (a permission dialog)
  * renders every window on every check (~2 s at 8 MB), and the whole log, up to
- * MAX_RENDER_BYTES, would cost ~10 s each time. A box drawn more than 8 MB back is still missed. That reading
- * errs the safe way: the message parks instead of being typed into a draft.
+ * MAX_RENDER_BYTES, would cost ~10 s each time. When no window shows the box,
+ * a draft read under some other prompt row is reported as "hidden" rather than
+ * as a draft: the send still parks, and the drainer waits for the box.
  */
 const COMPOSER_WINDOWS = [32 * 1024, 1024 * 1024, 8 * 1024 * 1024];
 
@@ -4331,7 +4332,7 @@ export async function readComposerState(record: GlobalPidRecord): Promise<Compos
   let state: ComposerState = { kind: "unknown", reason: "log unreadable or empty" };
   for (const bytes of COMPOSER_WINDOWS) {
     const buf = await readLogTailBytes(record.log_file, bytes);
-    if (!buf) return state;
+    if (!buf) return { kind: "unknown", reason: "log unreadable or empty" };
     let rows: ReturnType<typeof rowsFromXterm>;
     try {
       const Terminal = await loadXtermTerminal();
@@ -4347,10 +4348,12 @@ export async function readComposerState(record: GlobalPidRecord): Promise<Compos
       return { kind: "unknown", reason: `render failed: ${(e as Error)?.message ?? e}` };
     }
     state = classifyComposer(rows);
-    const wholeLog = buf.length < bytes;
-    if (wholeLog || record.cli !== "claude" || composerBoxed(rows.map((r) => r.text))) break;
+    if (record.cli !== "claude" || composerBoxed(rows.map((r) => r.text))) return state;
+    if (buf.length < bytes) break; // the whole log, and still no box
   }
-  return state;
+  // No window showed the box, so a "draft" was read under some other prompt row,
+  // possibly an old turn: say so instead of reporting its transcript as a draft.
+  return state.kind === "draft" ? { kind: "hidden", reason: "its input box is not on screen" } : state;
 }
 
 async function readLogTailBytes(
@@ -5513,6 +5516,7 @@ async function cmdSend(rest: string[]): Promise<number> {
             const composer = await readComposerState(record);
             if (composer.kind === "draft")
               parkReason = `its input box holds a draft (${composer.chars} chars)`;
+            else if (composer.kind === "hidden") parkReason = composer.reason;
             else if (composer.kind === "unknown")
               process.stderr.write(
                 `warning: ay send could not see pid ${record.pid}'s input box (${composer.reason}) — sending without the draft check.\n`,

@@ -49,7 +49,13 @@ export type ComposerState =
   /** Real input is sitting in the composer. `chars` counts the real cells. */
   | { kind: "draft"; chars: number }
   /** No composer is visible (menu, trust dialog, unknown CLI screen). */
-  | { kind: "unknown"; reason: string };
+  | { kind: "unknown"; reason: string }
+  /**
+   * Text was read under a prompt row, but Claude Code's composer box is not on
+   * screen (a dialog, or no box in any window rendered), so it may be an old
+   * turn rather than a draft. Parks like a draft; unlike "unknown", which sends.
+   */
+  | { kind: "hidden"; reason: string };
 
 const PROMPT_RE = /^\s*[❯›]($|\s)/u;
 // Same chrome inspectSubmission stops at: the separator rule under the box and

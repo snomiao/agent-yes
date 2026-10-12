@@ -4754,6 +4754,16 @@ describe("readComposerState on a lane idle for hours", () => {
     expect(await stateOf(idleLog("btw how"))).toEqual({ kind: "draft", chars: 6 });
   });
 
+  it("reads a Claude screen that never shows its box as hidden, not as a draft", async () => {
+    const turn = "❯ please summarise the plan\r\n  answer: sed do eiusmod tempor\r\n";
+    expect(await stateOf(turn.repeat(3000))).toEqual({
+      kind: "hidden",
+      reason: "its input box is not on screen",
+    });
+    // CLIs without a box keep reading the last prompt row in the 32 KB tail.
+    expect((await stateOf(turn.repeat(3000), "codex")).kind).toBe("draft");
+  });
+
   it("keeps a typed draft on screen in the 32 KB tail", async () => {
     const box = `${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n❯ btw how\r\n${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n`;
     expect(await stateOf("x\r\n".repeat(20000) + box)).toEqual({ kind: "draft", chars: 6 });
