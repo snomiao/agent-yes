@@ -1,10 +1,19 @@
 # agent-yes
 
+Read [CONTRIBUTING.md](CONTRIBUTING.md) first. Write everything in English —
+code, comments, docs, commit messages, PR titles/bodies, and issues — even when
+your operator talks to you in another language.
+
 ## After making changes, rebuild; relink only on a personal dev machine
 
-共有ホストではグローバルの `bun link` / `bun add -g` / `cargo install` を実行しない。全 lane の実行先が未レビューの worktree に変わり、worktree の削除で全員が起動できなくなるため。TypeScript の検証は `bun run build` と `bun ./dist/agent-yes.js ...`、Rust は `cargo build --manifest-path rs/Cargo.toml` と生成バイナリの直接実行を使う。共有環境への配布はレビュー後の merge・release 経由にする。
+On a shared host, never run a global `bun link` / `bun add -g` / `cargo install`:
+every lane's executable would switch to an unreviewed worktree, and deleting that
+worktree would break startup for everyone. Verify TypeScript changes with
+`bun run build` and `bun ./dist/agent-yes.js ...`, and Rust changes with
+`cargo build --manifest-path rs/Cargo.toml` plus running the built binary
+directly. Ship to shared environments only through a reviewed merge and release.
 
-以下の relink / install 手順は個人専用の開発環境に限る。
+The relink / install steps below are for personal development environments only.
 
 **TypeScript changes:**
 

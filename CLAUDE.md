@@ -1,5 +1,9 @@
 # agent-yes
 
+Read [CONTRIBUTING.md](CONTRIBUTING.md) first. Write everything in English —
+code, comments, docs, commit messages, PR titles/bodies, and issues — even when
+your operator talks to you in another language.
+
 ## No real fleet data in committed artifacts
 
 This repo is public. Tests, fixtures, code comments, help examples, docs, and
