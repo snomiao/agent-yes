@@ -86,6 +86,8 @@ describe("markTrusted", () => {
     await expect(markTrusted(project, path.join(root, "nope.json"))).rejects.toThrow(/not found/);
     await writeFile(file, "[1,2]");
     await expect(markTrusted(project, file)).rejects.toThrow(/not a JSON object/);
+    await writeFile(file, JSON.stringify({ projects: [] }));
+    await expect(markTrusted(project, file)).rejects.toThrow(/"projects" is not a JSON object/);
     await writeFile(file, "{oops");
     await expect(markTrusted(project, file)).rejects.toThrow(/not valid JSON/);
     expect(await readFile(file, "utf8")).toBe("{oops");

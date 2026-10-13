@@ -15,8 +15,8 @@
 //
 // Known limit: claude takes no lock on this file that we could share, so the
 // compare-and-swap is check-then-rename, not atomic — a write landing in the
-// instant between the two is lost. The window is one stat + one rename; the
-// backup holds the version we replaced.
+// instant between the two is lost, and the backup (the version we READ) does
+// not contain it either. The window is one stat + one rename.
 
 import { readFile, realpath, rename, stat, unlink, writeFile } from "fs/promises";
 import { homedir } from "os";
@@ -46,6 +46,13 @@ function parseConfig(raw: string, file: string): ClaudeConfig {
   }
   if (!doc || typeof doc !== "object" || Array.isArray(doc)) {
     throw new Error(`${file} is not a JSON object — not touching it`);
+  }
+  const projects = (doc as ClaudeConfig).projects;
+  if (
+    projects !== undefined &&
+    (!projects || typeof projects !== "object" || Array.isArray(projects))
+  ) {
+    throw new Error(`${file}: "projects" is not a JSON object — not touching it`);
   }
   return doc as ClaudeConfig;
 }
@@ -92,10 +99,9 @@ export async function markTrusted(
     } finally {
       await unlink(tmp).catch(() => {});
     }
-    // Read back the WHOLE file, not just the flag: if it is not byte-for-byte
-    // what we wrote, someone wrote after us and the outcome is theirs to own.
+    // Read back and confirm the flag actually persisted.
     const after = await readFile(real, "utf8");
-    if (after !== body && !isTrusted(parseConfig(after, real), key)) {
+    if (!isTrusted(parseConfig(after, real), key)) {
       throw new Error(
         `wrote ${real}, but a concurrent writer replaced it without the flag — re-run ay trust`,
       );
