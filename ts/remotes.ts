@@ -209,10 +209,13 @@ export function maskRemoteUrl(url: string): string {
   );
   if (hashAt < 0) return base;
   const frag = url.slice(hashAt + 1);
-  // key=value fragment when the first `&`-separated part is `<key>=…` with no
-  // `:` in the key; anything else is the positional #<room>:<token>[@<sighost>].
-  if (/^\??[^:=&@]+=/.test(frag)) return `${base}#${maskFragmentParams(frag)}`;
-  return `${base}#${frag.replace(/^([^:@]*:)[^@]*/, `$1${MASK}`)}`;
+  // Classify exactly as the connection parser does (parseFragment in
+  // webrtcLink.ts): key=value only when it starts with a plain `<letters>=`;
+  // otherwise positional #<room>:<token>[@<sighost>]. A fragment that is
+  // neither (e.g. an encoded `#%73=…`) still gets its secret keys masked.
+  if (/^\??[A-Za-z_]+=/.test(frag)) return `${base}#${maskFragmentParams(frag)}`;
+  if (/^[^:@]*:/.test(frag)) return `${base}#${frag.replace(/^([^:@]*:)[^@]*/, `$1${MASK}`)}`;
+  return `${base}#${maskFragmentParams(frag)}`;
 }
 
 /** Secret-bearing fragment keys: `s` (room secret) and `k` (`ay share` token). */

@@ -3,6 +3,7 @@ import { tmpdir } from "os";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { cmdRemote, MASK, maskRemoteUrl, writeRemoteAlias } from "./remotes.ts";
+import { parseWebrtcLink } from "./webrtcLink.ts";
 
 // Synthetic secrets only — a v2 share secret shape (e1.<64 hex>) and a plain token.
 const SECRET = "e1.0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
@@ -41,6 +42,11 @@ describe("maskRemoteUrl", () => {
       `https://box.example.ts.net/ay/#?%6B=${MASK}`,
     );
   });
+  it("treats a room id containing `=` as positional, like the parser does", () => {
+    expect(maskRemoteUrl(`https://agent-yes.com/w/#room1=demo:${SECRET}`)).toBe(
+      `https://agent-yes.com/w/#room1=demo:${MASK}`,
+    );
+  });
   it("masks a malformed webrtc:// link that has no @host", () => {
     expect(maskRemoteUrl(`webrtc://room1:${SECRET}`)).toBe(`webrtc://room1:${MASK}`);
   });
@@ -51,6 +57,28 @@ describe("maskRemoteUrl", () => {
     expect(maskRemoteUrl("http://192.0.2.5:7432")).toBe("http://192.0.2.5:7432");
     expect(maskRemoteUrl("https://box.example.ts.net/ay")).toBe("https://box.example.ts.net/ay");
   });
+});
+
+// Cross-check against the real parser: whatever it accepts as a working share
+// link, the masked form must not contain the secret it would connect with.
+describe("maskRemoteUrl vs parseWebrtcLink", () => {
+  const HEX = SECRET.slice(3);
+  const links = [
+    `webrtc://room1:${SECRET}@s.example.com`,
+    `https://agent-yes.com/w/#room1:${SECRET}`,
+    `https://agent-yes.com/w/#room1:${SECRET}@s.example.com`,
+    `https://agent-yes.com/w/#room1=demo:${SECRET}`,
+    `https://agent-yes.com/room/#room=room1&s=${SECRET}`,
+    `https://agent-yes.com/room/#?room=room1&s=${SECRET}&sig=s.example.com`,
+    `https://agent-yes.com/room/#room=room1&%73=${SECRET}`,
+    `https://agent-yes.com/room/#s=${SECRET}&room=room1`,
+  ];
+  for (const link of links) {
+    it(`hides the secret of ${link.replace(SECRET, "<secret>")}`, () => {
+      expect(parseWebrtcLink(link)?.s).toBe(HEX); // the parser accepts it
+      expect(maskRemoteUrl(link)).not.toContain(HEX.slice(0, 16));
+    });
+  }
 });
 
 describe("ay remote ls", () => {
