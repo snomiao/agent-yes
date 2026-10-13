@@ -113,11 +113,15 @@ export async function markTrusted(
 
 export async function cmdTrust(rest: string[]): Promise<number> {
   const usage =
-    "usage: ay trust [dir] [--check] [--config <file>]\n" +
+    "usage: ay trust [dir] [--check] [--config <file>] [--settle <seconds>]\n" +
     "  Mark <dir> (default: .) as trusted for Claude Code, so it starts without the\n" +
     "  folder-trust dialog. --check only reports. --config defaults to ~/.claude.json\n" +
-    "  ($CLAUDE_CONFIG_DIR/.claude.json when set).\n";
+    "  ($CLAUDE_CONFIG_DIR/.claude.json when set). After writing, re-reads the file\n" +
+    "  again after --settle seconds (default 15) and reports whether the flag stuck.\n" +
+    "  Best run when no claude session is live in <dir>: claude takes no lock on the\n" +
+    "  file, so a session saving at the same instant can overwrite the change.\n";
   let check = false;
+  let settleSecs = 15;
   let file: string | undefined;
   const positional: string[] = [];
   for (let i = 0; i < rest.length; i++) {
@@ -133,7 +137,14 @@ export async function cmdTrust(rest: string[]): Promise<number> {
         return 1;
       }
     } else if (a.startsWith("--config=")) file = a.slice("--config=".length);
-    else if (a.startsWith("-")) {
+    else if (a === "--settle" || a.startsWith("--settle=")) {
+      const v = a === "--settle" ? rest[++i] : a.slice("--settle=".length);
+      settleSecs = Number(v);
+      if (v === undefined || v === "" || !Number.isFinite(settleSecs) || settleSecs < 0) {
+        process.stderr.write(`ay trust: --settle needs a number of seconds\n${usage}`);
+        return 1;
+      }
+    } else if (a.startsWith("-")) {
       process.stderr.write(`ay trust: unknown option '${a}'\n${usage}`);
       return 1;
     } else positional.push(a);
@@ -153,11 +164,30 @@ export async function cmdTrust(rest: string[]): Promise<number> {
     }
     const result = await markTrusted(key, target);
     const real = await realpath(target);
+    if (result === "already-trusted") {
+      process.stdout.write(`${key} is already trusted (${target})\n`);
+      return 0;
+    }
     process.stdout.write(
-      result === "trusted"
-        ? `trusted ${key} (${real}; previous version saved as ${real}.ay-trust.bak)\n`
-        : `${key} is already trusted (${target})\n`,
+      `trusted ${key} (${real}; previous version saved as ${real}.ay-trust.bak)\n`,
     );
+    // A live claude session holds the whole config in memory and rewrites the
+    // file on its next save; if it missed our change, that save reverts it.
+    // Re-read once more after a pause so a revert is reported, not discovered
+    // later as a dialog nobody answers.
+    if (settleSecs > 0) {
+      process.stdout.write(`re-checking in ${settleSecs}s that the flag sticks…\n`);
+      await new Promise((r) => setTimeout(r, settleSecs * 1000));
+      const doc = parseConfig(await readFile(real, "utf8"), real);
+      if (!isTrusted(doc, key)) {
+        process.stderr.write(
+          `ay trust: the flag was reverted within ${settleSecs}s — a running claude session ` +
+            `rewrote ${real}. Re-run ay trust when no session is live in ${key}.\n`,
+        );
+        return 1;
+      }
+      process.stdout.write(`still trusted after ${settleSecs}s\n`);
+    }
     return 0;
   } catch (e) {
     process.stderr.write(`ay trust: ${(e as Error).message}\n`);

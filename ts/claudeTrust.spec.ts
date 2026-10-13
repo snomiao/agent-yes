@@ -121,7 +121,7 @@ describe("ay trust", () => {
   it("--check reports, marking trusts, a second run is a no-op", async () => {
     expect(await cmdTrust([project, "--check", "--config", file])).toBe(1);
     expect(out).toMatch(/not marked trusted/);
-    expect(await cmdTrust([project, `--config=${file}`])).toBe(0);
+    expect(await cmdTrust([project, `--config=${file}`, "--settle", "0"])).toBe(0);
     expect(out).toMatch(/^trusted /m);
     expect(await cmdTrust([project, "--config", file])).toBe(0);
     expect(out).toMatch(/already trusted/);
@@ -134,6 +134,21 @@ describe("ay trust", () => {
     expect(await cmdTrust([project, "--config"])).toBe(1);
     expect(await cmdTrust([project, "--config", "--check"])).toBe(1);
     expect(err).toMatch(/--config needs a file path/);
+    expect((await read()).projects[project]).toBeUndefined();
+  });
+  it("re-reads after --settle and reports a revert by a concurrent session", async () => {
+    const run = cmdTrust([project, "--config", file, "--settle", "0.3"]);
+    // A live session saves its stale in-memory copy shortly after our write.
+    setTimeout(() => void writeFile(file, JSON.stringify(seed, null, 2)), 150);
+    expect(await run).toBe(1);
+    expect(err).toMatch(/reverted within 0.3s/);
+  });
+  it("reports success when the flag survives the settle period", async () => {
+    expect(await cmdTrust([project, "--config", file, "--settle=0.1"])).toBe(0);
+    expect(out).toMatch(/still trusted after 0.1s/);
+  });
+  it("rejects a bad --settle value before writing anything", async () => {
+    expect(await cmdTrust([project, "--config", file, "--settle", "soon"])).toBe(1);
     expect((await read()).projects[project]).toBeUndefined();
   });
   it("rejects unknown options and extra args", async () => {
