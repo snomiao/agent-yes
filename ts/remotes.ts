@@ -195,25 +195,51 @@ export const MASK = "***";
  * enough to join without the token.
  */
 export function maskRemoteUrl(url: string): string {
-  const wr = /^(webrtc:\/\/[^:]+:)[^@]+(@.+)$/.exec(url);
-  if (wr) return `${wr[1]}${MASK}${wr[2]}`;
+  if (/^webrtc:\/\//i.test(url)) {
+    // Same grammar as parseRaw (token runs to the `@`); a malformed link with no
+    // `@` still has everything after the room masked rather than printed.
+    return url.replace(/^(webrtc:\/\/[^:]*:)[^@]*/i, `$1${MASK}`);
+  }
   if (!/^https?:\/\//i.test(url)) return url;
   const hashAt = url.indexOf("#");
-  let base = hashAt >= 0 ? url.slice(0, hashAt) : url;
-  let frag = hashAt >= 0 ? url.slice(hashAt + 1) : null;
   // userinfo (`http://<token>@host` or `http://user:pass@host`) — before the path.
-  base = base.replace(/^(https?:\/\/)[^/@]+@/i, `$1${MASK}@`);
-  if (frag !== null) {
-    if (/^\??[A-Za-z_]+=/.test(frag)) {
-      // key=value fragment: mask the secret-bearing keys, keep the rest verbatim.
-      frag = frag.replace(/(^|[?&])(s|k)=[^&]*/g, `$1$2=${MASK}`);
-    } else {
-      // positional #<room>:<token>[@<sighost>]
-      frag = frag.replace(/^([^:@]*:)[^@]*/, `$1${MASK}`);
-    }
-    return `${base}#${frag}`;
-  }
-  return base;
+  const base = (hashAt >= 0 ? url.slice(0, hashAt) : url).replace(
+    /^(https?:\/\/)[^/@]+@/i,
+    `$1${MASK}@`,
+  );
+  if (hashAt < 0) return base;
+  const frag = url.slice(hashAt + 1);
+  // key=value fragment when the first `&`-separated part is `<key>=…` with no
+  // `:` in the key; anything else is the positional #<room>:<token>[@<sighost>].
+  if (/^\??[^:=&@]+=/.test(frag)) return `${base}#${maskFragmentParams(frag)}`;
+  return `${base}#${frag.replace(/^([^:@]*:)[^@]*/, `$1${MASK}`)}`;
+}
+
+/** Secret-bearing fragment keys: `s` (room secret) and `k` (`ay share` token). */
+const SECRET_KEYS = new Set(["s", "k"]);
+
+/**
+ * Mask the values of SECRET_KEYS in a key=value fragment. Keys are compared
+ * after the same decoding URLSearchParams applies when the link is USED
+ * (`%73=` is `s=`, `+` is a space), so an encoded spelling can't slip a
+ * working secret past the mask.
+ */
+function maskFragmentParams(frag: string): string {
+  const lead = frag.startsWith("?") ? "?" : "";
+  return (
+    lead +
+    frag
+      .slice(lead.length)
+      .split("&")
+      .map((part) => {
+        const eq = part.indexOf("=");
+        const rawKey = eq >= 0 ? part.slice(0, eq) : part;
+        const key = decodeMaybe(rawKey.replace(/\+/g, " ")).trim().toLowerCase();
+        // `trim`/`toLowerCase` over-match on purpose: masking too much is harmless.
+        return SECRET_KEYS.has(key) ? `${rawKey}=${MASK}` : part;
+      })
+      .join("&")
+  );
 }
 
 /** A bare token for display: MASK, or the token itself with --show-secrets. */

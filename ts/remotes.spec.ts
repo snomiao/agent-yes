@@ -30,6 +30,20 @@ describe("maskRemoteUrl", () => {
       `https://box.example.ts.net/ay/#k=${MASK}`,
     );
   });
+  it("masks percent-encoded secret keys, which URLSearchParams decodes on use", () => {
+    expect(maskRemoteUrl(`https://agent-yes.com/room/#room=room1&%73=${SECRET}`)).toBe(
+      `https://agent-yes.com/room/#room=room1&%73=${MASK}`,
+    );
+    expect(maskRemoteUrl(`https://agent-yes.com/room/#%73=${SECRET}&room=room1`)).toBe(
+      `https://agent-yes.com/room/#%73=${MASK}&room=room1`,
+    );
+    expect(maskRemoteUrl(`https://box.example.ts.net/ay/#?%6B=${TOKEN}`)).toBe(
+      `https://box.example.ts.net/ay/#?%6B=${MASK}`,
+    );
+  });
+  it("masks a malformed webrtc:// link that has no @host", () => {
+    expect(maskRemoteUrl(`webrtc://room1:${SECRET}`)).toBe(`webrtc://room1:${MASK}`);
+  });
   it("masks userinfo credentials", () => {
     expect(maskRemoteUrl(`http://${TOKEN}@192.0.2.5:7432`)).toBe(`http://${MASK}@192.0.2.5:7432`);
   });
