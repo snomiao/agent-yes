@@ -33,11 +33,12 @@ export function shouldForkNested(opts: {
  * Validate where `--detach` was written and return the args with it removed.
  *
  * Accepted in exactly one spelling and place: the bare token `--detach` as the
- * FIRST argument (`ay --detach <cli> …`). That keeps the strip parse-free —
- * the Rust runner would otherwise forward the unknown flag to the target CLI —
- * and every other spelling yargs might read as detach (`--detach=…`,
- * `--detach true`, `--no-detach`, or `--detach` after other flags) is refused
- * with the one form that works, instead of half-working.
+ * FIRST argument (`ay --detach <cli> …`), once. That keeps the strip
+ * parse-free — the Rust runner would otherwise forward the unknown flag to the
+ * target CLI. Any OTHER detach-like token before `--` (`--detach=…`,
+ * `--detach true`, `--no-detach`, a repeat, or `--detach` after other flags —
+ * even after the CLI name) is refused with the one form that works, rather
+ * than half-working. After `--` the words are prompt text and are untouched.
  *
  * `rawArgs` is argv without the runtime + script; `parsedDetach` is what yargs
  * concluded.
@@ -46,16 +47,28 @@ export function stripDetachFlag(
   rawArgs: string[],
   parsedDetach: boolean,
 ): { ok: true; args: string[] } | { ok: false; error: string } {
-  const form = "put it first: ay --detach <cli> [options] -- <prompt>";
-  const first = rawArgs[0];
-  if (/^--(no-)?detach(=|$)/.test(first ?? "")) {
-    if (first !== "--detach" || /^(true|false)$/.test(rawArgs[1] ?? "")) {
-      return { ok: false, error: `unsupported --detach spelling '${first}' — ${form}` };
-    }
-    return { ok: true, args: rawArgs.slice(1) };
+  const form = "use exactly: ay --detach <cli> [options] -- <prompt>";
+  const dash = rawArgs.indexOf("--");
+  const end = dash === -1 ? rawArgs.length : dash;
+  const hits: number[] = [];
+  for (let i = 0; i < end; i++) if (/^--(no-)?detach(=|$)/.test(rawArgs[i]!)) hits.push(i);
+  if (hits.length === 0) {
+    return parsedDetach
+      ? { ok: false, error: `unsupported --detach form — ${form}` }
+      : { ok: true, args: rawArgs };
   }
-  if (parsedDetach) return { ok: false, error: `--detach must be the first argument — ${form}` };
-  return { ok: true, args: rawArgs };
+  const leadingBare =
+    hits.length === 1 &&
+    hits[0] === 0 &&
+    rawArgs[0] === "--detach" &&
+    !/^(true|false)$/.test(rawArgs[1] ?? "");
+  if (!leadingBare) {
+    return {
+      ok: false,
+      error: `unsupported --detach form '${hits.map((i) => rawArgs[i]).join(" ")}' — ${form}`,
+    };
+  }
+  return { ok: true, args: rawArgs.slice(1) };
 }
 
 /** The tutorial printed to the parent agent after a detached spawn, telling it

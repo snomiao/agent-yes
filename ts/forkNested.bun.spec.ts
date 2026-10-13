@@ -44,9 +44,13 @@ describe("stripDetachFlag", () => {
       args: ["claude", "--", "hi"],
     });
   });
-  it("leaves args alone when there is no --detach of ours", () => {
-    const args = ["claude", "--detach", "--", "--detach"]; // claude's flag, prompt text
+  it("leaves args alone without any detach token, and never touches prompt text", () => {
+    const args = ["claude", "--verbose", "--", "--detach"];
     expect(stripDetachFlag(args, false)).toEqual({ ok: true, args });
+    expect(stripDetachFlag(["--detach", "claude", "--", "--detach"], true)).toEqual({
+      ok: true,
+      args: ["claude", "--", "--detach"],
+    });
   });
   it("refuses every other spelling or position yargs could read as detach", () => {
     for (const [args, parsed] of [
@@ -56,6 +60,9 @@ describe("stripDetachFlag", () => {
       [["--no-detach", "claude"], false],
       [["--cli", "claude", "--detach", "--", "hi"], true],
       [["--verbose", "--detach", "claude"], true],
+      [["--detach", "--detach", "claude"], true],
+      [["--verbose", "--detach=false", "claude"], false],
+      [["claude", "--detach"], false], // even after the CLI name: refused, not forwarded
     ] as const) {
       const r = stripDetachFlag([...args], parsed);
       expect(r.ok).toBe(false);
