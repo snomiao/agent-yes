@@ -9,8 +9,8 @@
 //
 // ~/.claude.json is shared, live state that running claude sessions rewrite, so
 // the write is careful: exactly one path is touched, a backup is kept, the new
-// file is written next to the real one and renamed over it only if the original
-// did not change meanwhile (else retried), and the result is re-read to prove
+// file is written next to the real one and renamed over it only if the original's
+// content did not change meanwhile (else retried), and the result is re-read to prove
 // the flag landed.
 //
 // Known limit: claude takes no lock on this file that we could share, so the
@@ -91,10 +91,11 @@ export async function markTrusted(
     try {
       await writeFile(`${real}.ay-trust.bak`, raw, { mode: before.mode & 0o777 });
       await opts.beforeRename?.(); // test hook: simulate a concurrent writer
-      // Compare-and-swap, as tight as the filesystem allows: nothing awaited
-      // between this check and the rename but the rename itself.
-      const now = await stat(real);
-      if (now.mtimeMs !== before.mtimeMs || now.size !== before.size) continue; // changed: retry
+      // Compare-and-swap on CONTENT, as tight as the filesystem allows: nothing
+      // awaited between this check and the rename but the rename itself.
+      // (mtime/size alone miss a same-size rewrite within the clock's
+      // resolution — seen on Windows CI.)
+      if ((await readFile(real, "utf8")) !== raw) continue; // changed: retry
       await rename(tmp, real);
     } finally {
       await unlink(tmp).catch(() => {});
