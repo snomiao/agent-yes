@@ -103,6 +103,7 @@ import { isWithin, resolveWorkDir } from "./workDir.ts";
 import {
   bodyHash,
   classifyComposer,
+  composerBoxed,
   composerPromptRow,
   DUPLICATE_WINDOW_MS,
   findRecentDuplicate,
@@ -4303,27 +4304,114 @@ export async function renderLogTailLines(
 }
 
 /**
- * What the target's composer holds right now, read from the same 32 KB tail
- * `renderLogTailLines` renders, but keeping per-cell attributes (dim/inverse) so
- * ghost text can be told from a real draft. See ts/composerGuard.ts.
+ * Tail windows the composer check renders, smallest first. Rendering a tail
+ * starts mid-stream, and Claude Code's renderer redraws only the rows that
+ * changed: on a lane that has sat idle for hours the last 32 KB can hold
+ * redraws of transcript rows (an old `❯` turn among them) but not the unchanged
+ * rule and empty prompt row of the composer box, so the old turn was read as
+ * the prompt and the transcript under it as a draft. A Claude screen without
+ * its box is therefore re-rendered from further back, last of all from as far
+ * back as `ay read` renders. When even that shows no box, a draft read under
+ * some other prompt row is reported as "hidden" rather than as a draft: the
+ * send still parks, and the drainer waits for the box.
+ *
+ * Logs run to 100+ MB and the drainer re-checks every few seconds, so the
+ * rendered terminal is kept per log and later checks feed it only the bytes
+ * appended since: each window is rendered at most once per process, and a
+ * screen that stays without a box costs only its new output on every poll.
  */
-export async function readComposerState(record: GlobalPidRecord): Promise<ComposerState> {
-  if (!record.log_file) return { kind: "unknown", reason: "no log file recorded" };
-  const buf = await readLogTailBytes(record.log_file);
-  if (!buf) return { kind: "unknown", reason: "log unreadable or empty" };
+export const COMPOSER_WINDOWS = [32 * 1024, 1024 * 1024, 8 * 1024 * 1024, MAX_RENDER_BYTES];
+
+/** A log's rendered terminal: fed up to `offset`, started from `windows[window]`. */
+type ComposerTerm = {
+  term: InstanceType<typeof import("@xterm/headless").Terminal>;
+  key: string;
+  window: number;
+  offset: number;
+  whole: boolean;
+};
+const composerTerms = new Map<string, ComposerTerm>();
+const COMPOSER_TERMS_MAX = 64;
+
+function dropComposerTerm(logPath: string) {
+  composerTerms.get(logPath)?.term.dispose();
+  composerTerms.delete(logPath);
+}
+
+/**
+ * What the target's composer holds right now, read from the same 32 KB tail
+ * `renderLogTailLines` renders (further back when a Claude screen shows no
+ * composer box), keeping per-cell attributes (dim/inverse) so ghost text can be
+ * told from a real draft. See ts/composerGuard.ts.
+ */
+export async function readComposerState(
+  record: GlobalPidRecord,
+  windows = COMPOSER_WINDOWS,
+): Promise<ComposerState> {
+  const logPath = record.log_file;
+  if (!logPath) return { kind: "unknown", reason: "no log file recorded" };
   const geom = (await readAgentPtysize(record)) ?? undefined;
+  const key = `${geom?.cols}x${geom?.rows}:${record.cli}:${windows.join()}`;
+  const claude = record.cli === "claude";
   try {
-    const Terminal = await loadXtermTerminal();
-    const term = new Terminal({
-      cols: geom?.cols && geom.cols > 0 ? geom.cols : 200,
-      rows: geom?.rows && geom.rows > 0 ? geom.rows : 50,
-      scrollback: 5000,
-      allowProposedApi: true,
-    });
-    await new Promise<void>((resolve) => term.write(buf, resolve));
-    return classifyComposer(rowsFromXterm(term as never, 40));
+    const { size } = await stat(logPath);
+    if (size === 0) return { kind: "unknown", reason: "log unreadable or empty" };
+    let ct = composerTerms.get(logPath);
+    if (ct && (ct.key !== key || size < ct.offset)) {
+      dropComposerTerm(logPath); // resized, or the log was truncated
+      ct = undefined;
+    }
+    let rows: ReturnType<typeof rowsFromXterm> | undefined;
+    let next = 0;
+    if (ct) {
+      if (size > ct.offset) {
+        const delta = await readLogRange(logPath, ct.offset, size);
+        await new Promise<void>((resolve) => ct!.term.write(delta, resolve));
+        ct.offset += delta.length;
+      }
+      rows = rowsFromXterm(ct.term as never, 40);
+      next = ct.whole ? windows.length : ct.window + 1;
+      if (!claude || composerBoxed(rows.map((r) => r.text))) next = windows.length;
+    }
+    for (let w = next; w < windows.length; w++) {
+      const from = Math.max(0, size - windows[w]!);
+      const buf = await readLogRange(logPath, from, size);
+      const Terminal = await loadXtermTerminal();
+      const term = new Terminal({
+        cols: geom?.cols && geom.cols > 0 ? geom.cols : 200,
+        rows: geom?.rows && geom.rows > 0 ? geom.rows : 50,
+        scrollback: 1000,
+        allowProposedApi: true,
+      });
+      await new Promise<void>((resolve) => term.write(buf, resolve));
+      dropComposerTerm(logPath);
+      composerTerms.set(logPath, { term, key, window: w, offset: from + buf.length, whole: from === 0 });
+      if (composerTerms.size > COMPOSER_TERMS_MAX)
+        dropComposerTerm(composerTerms.keys().next().value!); // oldest first
+      rows = rowsFromXterm(term as never, 40);
+      if (!claude || from === 0 || composerBoxed(rows.map((r) => r.text))) break;
+    }
+    const state = classifyComposer(rows ?? []);
+    // No window showed the box, so a "draft" was read under some other prompt
+    // row, possibly an old turn: say so instead of reporting it as a draft.
+    if (claude && state.kind === "draft" && !composerBoxed((rows ?? []).map((r) => r.text)))
+      return { kind: "hidden", reason: "its input box is not on screen" };
+    return state;
   } catch (e) {
-    return { kind: "unknown", reason: `render failed: ${(e as Error)?.message ?? e}` };
+    dropComposerTerm(logPath);
+    return { kind: "unknown", reason: `log unreadable or render failed: ${(e as Error)?.message ?? e}` };
+  }
+}
+
+/** Bytes `[from, to)` of a log file. */
+async function readLogRange(logPath: string, from: number, to: number): Promise<Uint8Array> {
+  const fh = await open(logPath, "r");
+  try {
+    const buf = Buffer.alloc(Math.max(0, to - from));
+    const { bytesRead } = await fh.read(buf, 0, buf.length, from);
+    return new Uint8Array(buf.buffer, buf.byteOffset, bytesRead);
+  } finally {
+    await fh.close();
   }
 }
 
@@ -5485,6 +5573,7 @@ async function cmdSend(rest: string[]): Promise<number> {
             const composer = await readComposerState(record);
             if (composer.kind === "draft")
               parkReason = `its input box holds a draft (${composer.chars} chars)`;
+            else if (composer.kind === "hidden") parkReason = composer.reason;
             else if (composer.kind === "unknown")
               process.stderr.write(
                 `warning: ay send could not see pid ${record.pid}'s input box (${composer.reason}) — sending without the draft check.\n`,

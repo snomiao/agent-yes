@@ -49,7 +49,13 @@ export type ComposerState =
   /** Real input is sitting in the composer. `chars` counts the real cells. */
   | { kind: "draft"; chars: number }
   /** No composer is visible (menu, trust dialog, unknown CLI screen). */
-  | { kind: "unknown"; reason: string };
+  | { kind: "unknown"; reason: string }
+  /**
+   * Text was read under a prompt row, but Claude Code's composer box is not on
+   * screen (a dialog, or no box in any window rendered), so it may be an old
+   * turn rather than a draft. Parks like a draft; unlike "unknown", which sends.
+   */
+  | { kind: "hidden"; reason: string };
 
 const PROMPT_RE = /^\s*[❯›]($|\s)/u;
 // Same chrome inspectSubmission stops at: the separator rule under the box and
@@ -83,6 +89,37 @@ export function composerPromptRow(texts: string[]): number {
   }
   return texts.findLastIndex((t) => PROMPT_RE.test(t));
 }
+
+/**
+ * Is Claude Code's composer box the bottom of the screen: a rule directly above a
+ * prompt row, at most a few draft rows (none of them another prompt) up to the
+ * rule or footer that closes the box, and below that nothing but a few footer
+ * rows? A box a partial redraw left open does not count: what is under its
+ * prompt cannot be told from history, so the caller looks further back. When it is not, composerPromptRow either fell back to the last
+ * prompt-looking row (on a Claude screen, possibly an old turn in the transcript)
+ * or found a box that history has since been drawn under, so it is a stale one.
+ * A real draft longer than MAX_DRAFT_ROWS fails too and reads "hidden", which
+ * parks the send just as a draft does.
+ */
+export function composerBoxed(texts: string[]): boolean {
+  const prompt = composerPromptRow(texts);
+  if (prompt < 1 || !SEPARATOR_RE.test(texts[prompt - 1]!)) return false;
+  const nonBlank = (rows: string[]) => rows.filter((t) => t.trim());
+  const close = texts.findIndex((t, i) => i > prompt && isComposerChrome(t));
+  if (close < 0) return false;
+  const inside = nonBlank(texts.slice(prompt + 1, close));
+  const below = nonBlank(texts.slice(close + 1));
+  return (
+    inside.length <= MAX_DRAFT_ROWS &&
+    below.length <= MAX_ROWS_BELOW_BOX &&
+    ![...inside, ...below].some((t) => PROMPT_RE.test(t))
+  );
+}
+
+/** Draft rows under the prompt row, before the box is read as stale (see above). */
+const MAX_DRAFT_ROWS = 8;
+/** Footer rows Claude Code draws under its composer box (mode, hints, agents, notices). */
+const MAX_ROWS_BELOW_BOX = 4;
 
 /**
  * Is this row composer chrome (a rule or a Claude/Codex footer) — the end of the

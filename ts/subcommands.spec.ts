@@ -2070,7 +2070,8 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
           const errs: string[] = [];
           const origErr = process.stderr.write.bind(process.stderr);
           process.stderr.write = ((c: string | Uint8Array) => (
-            errs.push(String(c)), true
+            errs.push(String(c)),
+            true
           )) as typeof process.stderr.write;
           let res: { code: number | null; stdout: string };
           try {
@@ -4702,5 +4703,98 @@ describe("drainerLauncher", () => {
       "/opt/ay/ay",
     ]);
     expect(drainerLauncher("C:\\tools\\ay.exe", undefined, null)).toEqual(["C:\\tools\\ay.exe"]);
+  });
+});
+
+describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () => {
+  // A renderer that addresses rows absolutely and re-emits only the rows that
+  // changed: the full frame (both rules, the empty prompt) is drawn once, then
+  // >32 KB of redraws touch only transcript rows, an old "❯" turn among them.
+  const COLS = 200;
+  const GRAY = "\x1b[38;2;153;153;153m";
+  const at = (row: number, text: string) => `\x1b[${row};1H\x1b[2K${text}`;
+  function idleLog(composer: string, staleBox?: string, bytes = 200 * 1024): string {
+    const screen: string[] = [];
+    for (let i = 0; i < 38; i++) screen.push(`● step ${i}: lorem ipsum dolor sit amet`);
+    screen.push("❯ please summarise the plan");
+    for (let i = 0; i < 7; i++) screen.push(`  answer line ${i}: sed do eiusmod tempor`);
+    screen.push(
+      `${GRAY}${"─".repeat(COLS)}\x1b[0m`,
+      `❯ ${composer}`,
+      `${GRAY}${"─".repeat(COLS)}\x1b[0m`,
+    );
+    screen.push(`${GRAY}  ? for shortcuts\x1b[0m`);
+    let log = "\x1b[2J" + screen.map((t, i) => at(i + 1, t)).join("") + "\x1b[48;3H";
+    for (let k = 0; log.length < bytes; k++) {
+      for (let r = 39; r <= 46; r++) log += at(r, screen[r - 1]! + (r === 46 ? ` ${k % 10}` : ""));
+      // A fragment of an older frame's box, still holding what was typed then.
+      if (staleBox !== undefined)
+        log += at(30, `${GRAY}${"─".repeat(COLS)}\x1b[0m`) + at(31, `❯ ${staleBox}`) + at(32, `${GRAY}${"─".repeat(COLS)}\x1b[0m`);
+      log += "\x1b[48;3H";
+    }
+    return log;
+  }
+  let logs = 0;
+  async function stateOf(log: string, cli = "claude", windows?: number[]) {
+    const { readComposerState } = await loadModule();
+    const file = path.join(testHome, `${1111 + logs++}.raw.log`);
+    await writeFile(file, log);
+    return readComposerState({ pid: 1111, cli, log_file: file } as never, windows);
+  }
+
+  it("reads the empty composer drawn before the last 32 KB, not the transcript", async () => {
+    // The 32 KB tail alone renders the old turn as the prompt and its answer as a draft.
+    expect(await stateOf(idleLog(""))).toEqual({ kind: "empty", ghost: false });
+  });
+
+  it("searches as far back as `ay read` renders before giving up on the box", async () => {
+    const { COMPOSER_WINDOWS, MAX_RENDER_BYTES } = await loadModule();
+    expect(COMPOSER_WINDOWS.at(-1)).toBe(MAX_RENDER_BYTES);
+    // Scaled down: windows that stop short of the box report it hidden, one more
+    // that reaches it reads the empty composer.
+    const log = idleLog("", undefined, 300 * 1024);
+    expect((await stateOf(log, "claude", [32 * 1024, 64 * 1024])).kind).toBe("hidden");
+    expect(await stateOf(log, "claude", [32 * 1024, 64 * 1024, 512 * 1024])).toEqual({
+      kind: "empty",
+      ghost: false,
+    });
+  });
+
+  it("does not stop at an older box that history was drawn under", async () => {
+    expect(await stateOf(idleLog("", "old draft"))).toEqual({ kind: "empty", ghost: false });
+  });
+
+  it("still reads a typed draft in that composer", async () => {
+    expect(await stateOf(idleLog("btw how"))).toEqual({ kind: "draft", chars: 6 });
+  });
+
+  it("reads a Claude screen that never shows its box as hidden, not as a draft", async () => {
+    const turn = "❯ please summarise the plan\r\n  answer: sed do eiusmod tempor\r\n";
+    expect(await stateOf(turn.repeat(3000))).toEqual({
+      kind: "hidden",
+      reason: "its input box is not on screen",
+    });
+    // CLIs without a box keep reading the last prompt row in the 32 KB tail.
+    expect((await stateOf(turn.repeat(3000), "codex")).kind).toBe("draft");
+  });
+
+  it("follows what is appended after the first reading, and a truncated log", async () => {
+    const { readComposerState } = await loadModule();
+    const file = path.join(testHome, "2222.raw.log");
+    const record = { pid: 2222, cli: "claude", log_file: file } as never;
+    await writeFile(file, idleLog(""));
+    expect(await readComposerState(record)).toEqual({ kind: "empty", ghost: false });
+    appendFileSync(file, at(48, "❯ btw how"));
+    expect(await readComposerState(record)).toEqual({ kind: "draft", chars: 6 });
+    appendFileSync(file, at(48, "❯ "));
+    expect(await readComposerState(record)).toEqual({ kind: "empty", ghost: false });
+    const box = `${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n❯ hi\r\n${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n`;
+    await writeFile(file, "x\r\n".repeat(100) + box);
+    expect(await readComposerState(record)).toEqual({ kind: "draft", chars: 2 });
+  });
+
+  it("keeps a typed draft on screen in the 32 KB tail", async () => {
+    const box = `${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n❯ btw how\r\n${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n`;
+    expect(await stateOf("x\r\n".repeat(20000) + box)).toEqual({ kind: "draft", chars: 6 });
   });
 });

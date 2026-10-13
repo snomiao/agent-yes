@@ -6,6 +6,7 @@ import { Terminal } from "@xterm/headless";
 import {
   claimPending,
   classifyComposer,
+  composerBoxed,
   DUPLICATE_WINDOW_MS,
   enqueuePending,
   findRecentDuplicate,
@@ -275,5 +276,38 @@ describe("duplicate suppression at the sink", () => {
     expect(queuedReceipt("parked", "its input box holds a draft (3 chars)")).toContain(
       "Queued, do not resend.",
     );
+  });
+});
+
+describe("composerBoxed", () => {
+  const RULE = "─".repeat(40);
+  const FOOTER = "  ? for shortcuts";
+  it("accepts the box at the bottom, closed by its rule or the footer", () => {
+    expect(composerBoxed(["● done", RULE, "❯ ", RULE, FOOTER])).toBe(true);
+    expect(composerBoxed(["● done", RULE, "❯ btw how", FOOTER])).toBe(true);
+  });
+
+  it("rejects a box a partial redraw left open, however short", () => {
+    expect(composerBoxed(["● done", RULE, "❯ btw how"])).toBe(false);
+    expect(composerBoxed([RULE, "❯ ", "  answer line"])).toBe(false);
+  });
+  it("rejects a screen whose prompt row has no rule above it", () => {
+    expect(composerBoxed(["● done", "❯ please summarise", "  answer"])).toBe(false);
+  });
+  it("rejects a stale box that history has been drawn under", () => {
+    expect(composerBoxed([RULE, "❯ old draft", RULE, "● done", "❯ please summarise", "  answer"])).toBe(false);
+    expect(composerBoxed([RULE, "❯ ", RULE, "  a", "  b", "  c", "  d", "  e"])).toBe(false);
+    // Left open by a partial redraw, with history drawn under it.
+    expect(composerBoxed([RULE, "❯ ", "● done", "❯ please summarise", "  answer"])).toBe(false);
+    expect(composerBoxed([RULE, "❯ ", "  a", "  b", "  c", "  d", "  e", "  f", "  g", "  h", "  i"])).toBe(false);
+    // Transcript drawn under a stale prompt, with chrome further down.
+    expect(composerBoxed([RULE, "❯ ", "● done", "❯ please summarise", "  answer", RULE])).toBe(false);
+    expect(
+      composerBoxed([RULE, "❯ ", ...Array.from({ length: 9 }, (_, i) => `  row ${i}`), FOOTER]),
+    ).toBe(false);
+  });
+
+  it("accepts a short multi-line draft inside the box", () => {
+    expect(composerBoxed([RULE, "❯ first line", "  second line", "  third", RULE, FOOTER])).toBe(true);
   });
 });
