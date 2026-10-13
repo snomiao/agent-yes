@@ -99,6 +99,7 @@ import {
 } from "./remoteHealth.ts";
 import { isWebrtcSpec } from "./webrtcLink.ts";
 import { withIpcLock } from "./ipcLock.ts";
+import { isWithin, resolveWorkDir } from "./workDir.ts";
 
 // ---------------------------------------------------------------------------
 // notes store  (~/.agent-yes/notes.jsonl)
@@ -1394,10 +1395,16 @@ export function matchKeyword(record: GlobalPidRecord, keyword: string): boolean 
   // fragment. Repurposed from the (near-useless) substring behavior — a lone `.`
   // was in almost every path, so it never selected anything meaningful.
   if (kw === "." || kw === "./") {
-    return path.resolve(record.cwd) === path.resolve(process.cwd());
+    const here = path.resolve(process.cwd());
+    return (
+      path.resolve(record.cwd) === here ||
+      (!!record.workdir && path.resolve(record.workdir) === here)
+    );
   }
-  // 2. cwd contains keyword
+  // 2. cwd (spawn dir or effective work dir) contains keyword
   if (record.cwd.toLowerCase().includes(kw)) return true;
+  if (record.workdir && record.workdir.toLowerCase().includes(kw)) return true;
+
   // 3. cli exact (lowercase)
   if (record.cli.toLowerCase() === kw) return true;
   // 4. prompt substring
@@ -1426,14 +1433,43 @@ export async function listRecords(
   if (opts.active) {
     records = records.filter((r) => isPidAlive(r.pid));
   }
+  records = await withWorkDirs(records);
   if (opts.cwdScope) {
     const scope = opts.cwdScope;
-    records = records.filter((r) => r.cwd === scope || r.cwd.startsWith(scope + path.sep));
+    records = records.filter(
+      (r) => isWithin(r.cwd, scope) || (!!r.workdir && isWithin(r.workdir, scope)),
+    );
   }
+
   if (keyword) records = records.filter((r) => matchKeyword(r, keyword));
   // newest first
   records.sort((a, b) => b.started_at - a.started_at);
   return records;
+}
+
+/**
+ * Stamp each live record with its effective work dir (ts/workDir.ts). Exited
+ * agents keep their spawn cwd: their transcript is history, not a location.
+ */
+async function withWorkDirs(records: GlobalPidRecord[]): Promise<GlobalPidRecord[]> {
+  return Promise.all(
+    records.map(async (r) =>
+      r.status === "exited"
+        ? { ...r, workdir: r.cwd, workdir_source: "spawn" as const, workdir_at: null }
+        : { ...r, ...(await resolveWorkDir(r)) },
+    ),
+  );
+}
+
+/**
+ * The CWD column: the effective work dir, with a leading `↪` when it is not the
+ * spawn dir (sampled from its shells) so a reader knows the registry's `cwd`
+ * says otherwise. `ay ls --json` carries both (`cwd` + `workdir`).
+ */
+export function cwdLabel(r: { cwd: string; workdir?: string; workdir_source?: string }): string {
+  if (r.workdir && r.workdir_source && r.workdir_source !== "spawn")
+    return `↪ ${shortenPath(r.workdir)}`;
+  return shortenPath(r.cwd);
 }
 
 export function isPidAlive(pid: number): boolean {
@@ -2215,7 +2251,7 @@ async function runAllRemotesLs(opts: {
           ? await Promise.all([
               r.log_file ? extractTaskCounts(r.log_file) : Promise.resolve(null),
               r.log_file ? extractBadges(r.log_file) : Promise.resolve([]),
-              gitStatusOnce(r.cwd, gitRootCache, gitInfoCache),
+              gitStatusOnce(r.workdir ?? r.cwd, gitRootCache, gitInfoCache),
               isUserTyping(r.pid),
             ])
           : [null, [], null, false];
@@ -2284,7 +2320,7 @@ async function runAllRemotesLs(opts: {
   const cliW = Math.max(3, ...rows.map((r) => String(r.rec.cli).length));
   const statusW = Math.max(6, ...rows.map((r) => String(r.rec.status).length));
   const ageW = Math.max(3, ...rows.map((r) => ageOf(r.rec).length));
-  const cwdW = Math.max(3, ...rows.map((r) => shortenPath(String(r.rec.cwd)).length));
+  const cwdW = Math.max(3, ...rows.map((r) => cwdLabel(r.rec).length));
   const promptBudget = Math.max(
     20,
     termWidth - hostW - pidW - cliW - statusW - ageW - cwdW - 6 * 2 - 1,
@@ -2323,7 +2359,7 @@ async function runAllRemotesLs(opts: {
         String(rec.cli).padEnd(cliW),
         String(rec.status).padEnd(statusW),
         ageOf(rec).padEnd(ageW),
-        shortenPath(String(rec.cwd)).padEnd(cwdW),
+        cwdLabel(rec).padEnd(cwdW),
         label,
       ].join("  ") + "\n",
     );
@@ -2851,7 +2887,7 @@ async function cmdLs(rest: string[]): Promise<number> {
   );
   const ageOf = (r: GlobalPidRecord) => humanizeAge(now - (lastActive.get(r.pid) ?? r.started_at));
 
-  const rawCwds = records.map((r) => shortenPath(r.cwd));
+  const rawCwds = records.map((r) => cwdLabel(r));
   const widths = {
     pid: Math.max(3, ...records.map((r) => String(r.pid).length)),
     cli: Math.max(3, ...records.map((r) => r.cli.length)),
@@ -2887,7 +2923,7 @@ async function cmdLs(rest: string[]): Promise<number> {
         ? await Promise.all([
             r.log_file ? extractTaskCounts(r.log_file) : Promise.resolve(null),
             r.log_file ? extractBadges(r.log_file) : Promise.resolve([]),
-            gitStatusOnce(r.cwd, gitRootCache, gitInfoCache),
+            gitStatusOnce(r.workdir ?? r.cwd, gitRootCache, gitInfoCache),
             isUserTyping(r.pid),
           ])
         : [null, [], null, false];
@@ -2923,7 +2959,7 @@ async function cmdLs(rest: string[]): Promise<number> {
         cli: r.cli,
         status: displayStatus,
         age: ageOf(r),
-        cwd: shortenPath(r.cwd),
+        cwd: cwdLabel(r),
         label,
         hasNote,
         _alive: displayStatus !== "stopped",
@@ -6493,6 +6529,9 @@ export interface StatusSnapshot {
   pid: number;
   cli: string;
   cwd: string;
+  /** Effective work dir (see ts/workDir.ts); equals `cwd` when source is spawn. */
+  workdir: string;
+  workdir_source: "observed" | "spawn";
   // needs_input: alive but blocked on an interactive menu (distinct from idle =
   // alive+quiet/done, and stopped = exited). stuck: alive + busy marker on screen
   // but long-silent (wedged mid-stream). unreachable: alive but its stdin FIFO
@@ -6568,6 +6607,8 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
     pid: record.pid,
     cli: record.cli,
     cwd: record.cwd,
+    workdir: record.workdir ?? record.cwd,
+    workdir_source: record.workdir_source ?? "spawn",
     state,
     activity,
     question,

@@ -27,6 +27,11 @@ const ENTER_IDLE_WAIT_MS: u64 = 50; // Wait for 50ms idle before sending Enter (
 const ENTER_RETRY_1_MS: u64 = 500; // Retry after 500ms if no response
 const ENTER_RETRY_2_MS: u64 = 1500; // Retry after 1500ms if no response
 const IDLE_SCAN_INTERVAL_MS: u64 = 60000; // Re-scan rendered screen every 60s of idle
+                                          // A typingRespond key whose screen hasn't changed after this long was lost
+                                          // (e.g. sent before the dialog listened for input) — send it again, at most
+                                          // TYPING_RESPOND_MAX_RESENDS times per prompt.
+const TYPING_RESPOND_RETRY_MS: u64 = 1000;
+const TYPING_RESPOND_MAX_RESENDS: u8 = 3;
 
 // Auto-retry on recoverable API errors (overload / rate-limit / usage-limit):
 // type "retry" with exponential backoff instead of giving up.
@@ -273,8 +278,17 @@ pub struct AgentContext {
     // CLIs, so re-running all regexes on an unchanged screen is wasteful.
     last_checked_screen_hash: Option<u64>,
 
-    // Enter key scheduling
+    // typingRespond resend: when the key was sent, on which screen, and how
+    // many times it has been resent for that screen (see heartbeat_check).
+    typing_sent_at: Option<Instant>,
+    typing_screen_hash: Option<u64>,
+    typing_resends: u8,
+
+    // Enter key scheduling. `pending_enter_pattern` is the index (in
+    // cli_config.enter) of the pattern that scheduled it — re-checked before
+    // every Enter of the cycle.
     pending_enter: bool,
+    pending_enter_pattern: Option<usize>,
     pending_enter_detected_at: Option<Instant>,
     enter_sent_at: Option<Instant>,
     enter_retry_count: u8,
@@ -403,7 +417,11 @@ impl AgentContext {
             output_buffer: String::new(),
             vterm: VTermProxy::new(term_rows, term_cols),
             start_time: Instant::now(),
+            typing_sent_at: None,
+            typing_screen_hash: None,
+            typing_resends: 0,
             pending_enter: false,
+            pending_enter_pattern: None,
             pending_enter_detected_at: None,
             enter_sent_at: None,
             enter_retry_count: 0,
@@ -1298,6 +1316,28 @@ impl AgentContext {
             }
         }
 
+        // A typingRespond key that changed nothing on screen was lost — e.g. the
+        // trust dialog's Down sent before the dialog listened for input. The
+        // one-shot suppression would otherwise park the session on that screen
+        // forever (the idle rescan only covers `enter`). Re-arm it, bounded.
+        if let Some(sent_at) = self.typing_sent_at {
+            let now_hash = hash_str(&self.vterm.contents());
+            if Some(now_hash) != self.typing_screen_hash {
+                self.typing_sent_at = None; // the key took effect
+            } else if sent_at.elapsed().as_millis() as u64 >= TYPING_RESPOND_RETRY_MS
+                && self.typing_resends < TYPING_RESPOND_MAX_RESENDS
+            {
+                self.typing_resends += 1;
+                debug!(
+                    "typingRespond had no visible effect, resending ({}/{})",
+                    self.typing_resends, TYPING_RESPOND_MAX_RESENDS
+                );
+                self.typing_sent_at = None;
+                self.last_action_screen_hash = None;
+                self.last_checked_screen_hash = None;
+            }
+        }
+
         // Check patterns on heartbeat: always for no-EOL CLIs, and once after a
         // pending-Enter cycle ended (end_pending_enter cleared the checked-hash),
         // since a static dialog may emit no output to trigger the usual path.
@@ -1323,10 +1363,11 @@ impl AgentContext {
                     // prompts can be re-handled after intervening output.
                     if self.last_action_screen_hash != Some(buffer_hash) {
                         self.last_action_screen_hash = None;
-                        for pattern in &self.cli_config.enter {
+                        for (idx, pattern) in self.cli_config.enter.iter().enumerate() {
                             if pattern.is_match(&buffer) {
                                 debug!("Idle scan: enter pattern matched after {}ms idle", idle_ms);
                                 self.pending_enter = true;
+                                self.pending_enter_pattern = Some(idx);
                                 self.pending_enter_detected_at = Some(Instant::now());
                                 self.enter_sent_at = None;
                                 self.enter_retry_count = 0;
@@ -1348,6 +1389,26 @@ impl AgentContext {
                 idle_time,
                 self.enter_sent_at.is_some()
             );
+
+            // Never press Enter on a screen that no longer shows what we
+            // scheduled it for. Claude's trust dialog re-mounts with the cursor
+            // on "No, exit": an Enter there quits the CLI. Drop the cycle and
+            // let check_patterns handle the screen as it is now.
+            let due = match self.enter_sent_at {
+                None => idle_time >= ENTER_IDLE_WAIT_MS,
+                // A retry fires only while the last Enter got no response.
+                Some(sent) => {
+                    let since = now.duration_since(sent).as_millis() as u64;
+                    !self.next_stdout.is_ready().await
+                        && ((self.enter_retry_count == 0 && since >= ENTER_RETRY_1_MS)
+                            || (self.enter_retry_count == 1 && since >= ENTER_RETRY_2_MS))
+                }
+            };
+            if due && !self.enter_target_on_screen() {
+                debug!("Enter target left the screen before Enter was sent; dropping it");
+                self.end_pending_enter();
+                return Ok(());
+            }
 
             // Check if we should send Enter (first time - wait for idle)
             if self.enter_sent_at.is_none() {
@@ -1406,10 +1467,26 @@ impl AgentContext {
     /// leaving "❯ Yes, I trust this folder" on screen, unchecked, for a minute.
     fn end_pending_enter(&mut self) {
         self.pending_enter = false;
+        self.pending_enter_pattern = None;
         self.pending_enter_detected_at = None;
         self.enter_sent_at = None;
         self.enter_retry_count = 0;
         self.last_checked_screen_hash = None;
+    }
+
+    /// Whether the current screen still shows the prompt that scheduled the
+    /// pending Enter (the same `enter` pattern, and nothing in `enterExclude`).
+    fn enter_target_on_screen(&self) -> bool {
+        let screen = self.vterm.contents();
+        let target = self
+            .pending_enter_pattern
+            .and_then(|i| self.cli_config.enter.get(i));
+        !self
+            .cli_config
+            .enter_exclude
+            .iter()
+            .any(|p| p.is_match(&screen))
+            && target.is_some_and(|p| p.is_match(&screen))
     }
 
     /// Actually send the Enter key
@@ -1677,6 +1754,13 @@ impl AgentContext {
             for pattern in patterns {
                 if pattern.is_match(&buffer) {
                     debug!("Typing response pattern matched, sending: {:?}", response);
+                    // A new screen starts a fresh resend budget; the same screen
+                    // again is a resend (heartbeat_check re-armed it).
+                    if self.typing_screen_hash != Some(buffer_hash) {
+                        self.typing_resends = 0;
+                    }
+                    self.typing_screen_hash = Some(buffer_hash);
+                    self.typing_sent_at = Some(Instant::now());
                     send_text(msg_ctx, response).await?;
                     self.mark_stdin_sent();
                     self.output_buffer.clear();
@@ -1692,7 +1776,7 @@ impl AgentContext {
             .enter_exclude
             .iter()
             .any(|pattern| pattern.is_match(&buffer));
-        for pattern in &self.cli_config.enter {
+        for (idx, pattern) in self.cli_config.enter.iter().enumerate() {
             if pattern.is_match(&buffer) {
                 if enter_excluded {
                     debug!("Enter pattern matched but excluded");
@@ -1701,6 +1785,7 @@ impl AgentContext {
                 if !self.pending_enter {
                     debug!("Enter pattern matched, scheduling Enter after idle");
                     self.pending_enter = true;
+                    self.pending_enter_pattern = Some(idx);
                     self.pending_enter_detected_at = Some(Instant::now());
                     self.enter_sent_at = None;
                     self.enter_retry_count = 0;
@@ -1762,6 +1847,166 @@ fn find_char_boundary(s: &str, at: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- trust-dialog auto-accept race -----------------------------------
+    // Claude's folder-trust dialog first draws with the cursor on "Yes", then
+    // re-mounts with it on "No, exit" (seen in real raw logs). The auto-answer
+    // is a typingRespond Down on "❯ No, exit" + an enter on "❯ Yes, I trust".
+    // These drive the real claude config through handle_output/heartbeat_check
+    // with a capture writer standing in for the PTY.
+
+    #[derive(Clone, Default)]
+    struct Capture(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl Write for Capture {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl Capture {
+        fn take(&self) -> String {
+            String::from_utf8_lossy(&std::mem::take(&mut *self.0.lock().unwrap())).into_owned()
+        }
+    }
+
+    const DOWN: &str = "\u{1b}[B";
+
+    fn trust_frame(cursor_on_yes: bool) -> String {
+        let (no, yes) = if cursor_on_yes {
+            (" ", "❯")
+        } else {
+            ("❯", " ")
+        };
+        format!(
+            "\u{1b}[2J\u{1b}[H Do you trust the files in this folder?\r\n\r\n /repo/alpha/tree/feat-x\r\n\r\n {no} No, exit\r\n {yes} Yes, I trust this folder\r\n\r\n Enter to confirm · Esc to cancel"
+        )
+    }
+
+    struct Harness {
+        ctx: AgentContext,
+        msg: MessageContext,
+        out: Capture,
+        tx: mpsc::Sender<String>,
+        _rx: mpsc::Receiver<String>,
+        _dir: tempfile::TempDir,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let ctx = AgentContext::new(
+                "claude".into(),
+                crate::config::get_cli_config("claude").unwrap(),
+                false,
+                false,
+                true,
+                dir.path().to_string_lossy().into_owned(),
+                1111,
+                24,
+                80,
+                true,
+                None,
+            );
+            let out = Capture::default();
+            let writer: std::sync::Arc<std::sync::Mutex<Box<dyn Write + Send>>> =
+                std::sync::Arc::new(std::sync::Mutex::new(Box::new(out.clone())));
+            let msg = MessageContext::new(
+                writer,
+                ctx.idle_waiter.clone(),
+                ctx.stdin_ready.clone(),
+                ctx.next_stdout.clone(),
+            );
+            let (tx, rx) = mpsc::channel(64);
+            Self {
+                ctx,
+                msg,
+                out,
+                tx,
+                _rx: rx,
+                _dir: dir,
+            }
+        }
+        async fn screen(&mut self, frame: &str) {
+            self.ctx
+                .handle_output(frame, &mut self.msg, &self.tx)
+                .await
+                .unwrap();
+        }
+        /// Let `ms` pass, then run one heartbeat (what the main loop does).
+        async fn tick(&mut self, ms: u64) {
+            tokio::time::sleep(Duration::from_millis(ms)).await;
+            self.ctx.heartbeat_check(&mut self.msg).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn trust_dialog_enter_never_lands_on_no_exit() {
+        let mut h = Harness::new();
+        h.screen(&trust_frame(true)).await; // first mount: cursor on Yes → Enter scheduled
+        h.screen(&trust_frame(false)).await; // re-mount: cursor back on "No, exit"
+        assert_eq!(h.out.take(), DOWN, "Down is sent for the re-mounted dialog");
+        // The Down hasn't been rendered yet (or was lost): the screen still says
+        // "❯ No, exit". Pressing Enter now would pick "No, exit" and quit claude.
+        for _ in 0..4 {
+            h.tick(600).await;
+            let sent = h.out.take();
+            assert!(
+                !sent.contains('\r'),
+                "Enter sent while cursor on No: {sent:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn trust_dialog_observed_sequence_is_accepted_once() {
+        // The sequence real raw logs show: mount on Yes, re-mount on No, our
+        // Down renders, cursor back on Yes → exactly one Enter.
+        let mut h = Harness::new();
+        h.screen(&trust_frame(true)).await;
+        h.screen(&trust_frame(false)).await;
+        assert_eq!(h.out.take(), DOWN);
+        h.screen(&trust_frame(true)).await;
+        h.tick(100).await;
+        assert_eq!(h.out.take(), "\r");
+        // the dialog closes; nothing else is typed
+        h.screen("\u{1b}[2J\u{1b}[H> \r\n? for shortcuts").await;
+        h.tick(2000).await;
+        assert_eq!(h.out.take(), "");
+    }
+
+    #[tokio::test]
+    async fn trust_dialog_lost_down_is_resent_then_accepted() {
+        let mut h = Harness::new();
+        // Mounted straight onto "No, exit"; the Down arrives before the dialog
+        // listens and is lost — the screen never changes.
+        h.screen(&trust_frame(false)).await;
+        assert_eq!(h.out.take(), DOWN);
+        h.tick(1200).await;
+        assert_eq!(
+            h.out.take(),
+            DOWN,
+            "a Down with no visible effect is resent"
+        );
+        // This one lands: cursor on Yes → Enter after the idle wait.
+        h.screen(&trust_frame(true)).await;
+        h.tick(100).await;
+        assert_eq!(h.out.take(), "\r");
+    }
+
+    #[tokio::test]
+    async fn typing_respond_resend_is_bounded() {
+        let mut h = Harness::new();
+        h.screen(&trust_frame(false)).await;
+        let mut downs = h.out.take().matches(DOWN).count();
+        for _ in 0..8 {
+            h.tick(1200).await;
+            downs += h.out.take().matches(DOWN).count();
+        }
+        assert_eq!(downs, 1 + TYPING_RESPOND_MAX_RESENDS as usize);
+    }
 
     #[test]
     fn test_is_wedged_trips_only_in_the_no_marker_state() {

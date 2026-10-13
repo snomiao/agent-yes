@@ -40,6 +40,12 @@ clis:
     needsInput:
       - pattern: '❯ ?\d+\.'
         flags: m
+      # Folder-trust dialog (current un-numbered layout or legacy numbered one).
+      # The typingRespond/enter pair below normally answers it; when that loses
+      # its race the session parks here matching neither `ready` nor `working`,
+      # and `ay ls` called it idle — a lane silently stuck on the dialog.
+      - pattern: '(❯|>) ?(\d\. ?)?(Yes, I trust this folder|No, exit)'
+        flags: m
     typingRespond:
       "1\n":
         - '│ Do you want to use this API key\?'
@@ -201,6 +207,12 @@ clis:
     wedgeTimeoutSecs: 1800
     needsInput:
       - pattern: '❯ ?\d+\.'
+        flags: m
+      # Folder-trust dialog (current un-numbered layout or legacy numbered one).
+      # The typingRespond/enter pair below normally answers it; when that loses
+      # its race the session parks here matching neither `ready` nor `working`,
+      # and `ay ls` called it idle — a lane silently stuck on the dialog.
+      - pattern: '(❯|>) ?(\d\. ?)?(Yes, I trust this folder|No, exit)'
         flags: m
     typingRespond:
       "1\n":

@@ -541,6 +541,18 @@ describe("subcommands.matchKeyword", () => {
     expect(matchKeyword(baseRecord, "different-project")).toBe(false);
   });
 
+  it("matches the effective work dir too (lane spawned in one dir, working in another)", async () => {
+    const { matchKeyword } = await loadModule();
+    const r = {
+      ...baseRecord,
+      workdir: "/repo/alpha/tree/feat-x",
+      workdir_source: "observed" as const,
+    };
+    expect(matchKeyword(r, "feat-x")).toBe(true);
+    expect(matchKeyword(r, "agent-yes")).toBe(true); // spawn dir still matches
+    expect(matchKeyword(baseRecord, "feat-x")).toBe(false);
+  });
+
   it("matches by exact cli name", async () => {
     const { matchKeyword } = await loadModule();
     expect(matchKeyword(baseRecord, "claude")).toBe(true);

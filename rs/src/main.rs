@@ -25,6 +25,7 @@ mod title_scanner;
 mod utils;
 mod vterm;
 mod webhook;
+mod workdir_sampler;
 
 use anyhow::Result;
 use cli::CliArgs;
@@ -475,6 +476,14 @@ async fn run_agent(mut args: CliArgs, cwd: &str) -> Result<i32> {
         );
         webhook::notify("RUNNING", args.prompt.as_deref().unwrap_or(""), cwd);
 
+        // Sample where the agent's shells actually work (workdir_sampler.rs);
+        // stops when this iteration's loop ends.
+        let my_pid = std::process::id();
+        let agent_id = pid_store.find_agent(my_pid).and_then(|r| r.agent_id);
+        // A crashed predecessor with our pid may have left a sample behind.
+        workdir_sampler::remove_workdir(my_pid);
+        let _workdir_sampler = workdir_sampler::spawn(my_pid, agent_id);
+
         // Run the main loop
         let exit_code = agent_ctx
             .run_with_fifo(
@@ -499,6 +508,7 @@ async fn run_agent(mut args: CliArgs, cwd: &str) -> Result<i32> {
         // Drop the typing-activity marker so a dead pid's stale timestamp can't
         // linger and mislead `ay ls`/`ay send` after this agent is gone.
         fifo::cleanup_stdin_activity(pid);
+        workdir_sampler::remove_workdir(pid);
 
         // Render the full scrollback to <pid>.log and drop the now-redundant
         // raw byte log (kept only when the session used the alternate screen).
