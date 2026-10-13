@@ -101,6 +101,17 @@ async fn main() -> anyhow::Result<()> {
                 Some(ServeAction::Status) => return serve::service::status(),
                 None => {}
             }
+            // Supervisors hand us a small open-files limit (launchd: 256) that
+            // WebRTC peers — one UDP socket per interface each — chew through;
+            // see serve/service.rs WANTED_NOFILE for what breaks past it.
+            match serve::service::raise_fd_limit() {
+                Some((before, after)) if after != before => {
+                    eprintln!("[ayrs serve] open-files limit raised {before} -> {after}");
+                }
+                Some(_) => {}
+                None => eprintln!("[ayrs serve] could not raise the open-files limit"),
+            }
+
             // Recover the login-shell env in the background now, so the first
             // /api/spawn doesn't pay the shell's rc-file startup cost (see
             // serve/shell_env.rs — launchd hands us a bare PATH).
