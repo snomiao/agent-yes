@@ -31,7 +31,7 @@ afterEach(async () => {
 
 describe("claudeConfigPath", () => {
   it("honours CLAUDE_CONFIG_DIR", () => {
-    expect(claudeConfigPath({ CLAUDE_CONFIG_DIR: "/cfg" })).toBe("/cfg/.claude.json");
+    expect(claudeConfigPath({ CLAUDE_CONFIG_DIR: "/cfg" })).toBe(path.join("/cfg", ".claude.json"));
     expect(claudeConfigPath({})).toMatch(/\.claude\.json$/);
   });
 });
@@ -43,9 +43,10 @@ describe("markTrusted", () => {
     expect(doc.projects[project]).toEqual({ hasTrustDialogAccepted: true });
     expect(doc.projects["/repo/alpha"]).toEqual(seed.projects["/repo/alpha"]);
     expect(doc.numStartups).toBe(3);
-    expect((await stat(file)).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32") expect((await stat(file)).mode & 0o777).toBe(0o600);
     expect(JSON.parse(await readFile(`${file}.ay-trust.bak`, "utf8"))).toEqual(seed);
-    expect((await stat(`${file}.ay-trust.bak`)).mode & 0o777).toBe(0o600);
+    if (process.platform !== "win32")
+      expect((await stat(`${file}.ay-trust.bak`)).mode & 0o777).toBe(0o600);
   });
   it("keeps an existing project entry's other fields", async () => {
     await writeFile(file, JSON.stringify({ projects: { [project]: { lastCost: 1 } } }));
@@ -92,16 +93,20 @@ describe("markTrusted", () => {
     await expect(markTrusted(project, file)).rejects.toThrow(/not valid JSON/);
     expect(await readFile(file, "utf8")).toBe("{oops");
   });
-  it("writes through a symlinked config file instead of replacing the link", async () => {
-    const link = path.join(root, "link.json");
-    await symlink(file, link);
-    await markTrusted(project, link);
-    expect((await read()).projects[project].hasTrustDialogAccepted).toBe(true);
-  });
+  // Symlinks need extra privileges on Windows runners.
+  it.skipIf(process.platform === "win32")(
+    "writes through a symlinked config file instead of replacing the link",
+    async () => {
+      const link = path.join(root, "link.json");
+      await symlink(file, link);
+      await markTrusted(project, link);
+      expect((await read()).projects[project].hasTrustDialogAccepted).toBe(true);
+    },
+  );
 });
 
 describe("trustKey", () => {
-  it("is the real path of an existing directory", async () => {
+  it.skipIf(process.platform === "win32")("is the real path of an existing directory", async () => {
     const via = path.join(root, "via");
     await symlink(project, via);
     expect(await trustKey(via)).toBe(project);
