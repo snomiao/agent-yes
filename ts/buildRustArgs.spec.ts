@@ -349,4 +349,26 @@ describe("buildRustArgs", () => {
       expect(result).toEqual(["--cli=claude", "rebuild", "and", "analyze", "problems"]);
     });
   });
+  describe("--detach is a TS-layer flag", () => {
+    it("is stripped before the CLI name so Rust never forwards it to the target CLI", () => {
+      expect(
+        buildRustArgs(argv("--detach", "claude", "--", "hi"), undefined, SUPPORTED_CLIS),
+      ).toEqual(["--cli=claude", "--", "hi"]);
+      expect(buildRustArgs(argv("--detach=true", "codex"), undefined, SUPPORTED_CLIS)).toEqual([
+        "--cli=codex",
+      ]);
+    });
+    it("is left alone after the CLI name (it is that CLI's flag) and after `--`", () => {
+      expect(buildRustArgs(argv("claude", "--detach"), undefined, SUPPORTED_CLIS)).toEqual([
+        "--cli=claude",
+        "--detach",
+      ]);
+      expect(buildRustArgs(argv("--", "explain", "--detach"), "claude", SUPPORTED_CLIS)).toEqual([
+        "--cli=claude",
+        "--",
+        "explain",
+        "--detach",
+      ]);
+    });
+  });
 });

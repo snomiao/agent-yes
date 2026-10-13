@@ -28,6 +28,12 @@ describe("shouldForkNested", () => {
   it("does NOT fork when attach opts out, regardless of context", () => {
     expect(shouldForkNested({ isTTY: false, ayPid: "1234", attach: true })).toBe(false);
   });
+
+  it("--detach forks in any context — a TTY, not nested (e.g. a human over ssh)", () => {
+    for (const isTTY of [true, false])
+      for (const ayPid of [undefined, "1234"])
+        expect(shouldForkNested({ isTTY, ayPid, attach: false, detach: true })).toBe(true);
+  });
 });
 
 describe("waitForRegistration", () => {

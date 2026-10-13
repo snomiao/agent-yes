@@ -15,8 +15,21 @@ export function buildRustArgs(
   cliFromScript: string | undefined,
   supportedClis: readonly string[],
 ): string[] {
-  // Filter out --rust flag (already handled by TS layer)
-  const rawRustArgs = argv.slice(2).filter((arg) => arg !== "--rust" && !arg.startsWith("--rust="));
+  // Filter out TS-layer flags the Rust parser doesn't know: --rust (runtime
+  // selection) and --detach (the TS layer does the fork). --detach is ours only
+  // where parseCliArgs reads it as ours — before the CLI name and before `--`;
+  // after the CLI name it belongs to that CLI, after `--` it is prompt text.
+  const all = argv.slice(2);
+  const dash = all.indexOf("--");
+  const end = dash === -1 ? all.length : dash;
+  const cliAt = all.findIndex((arg, i) => i < end && supportedClis.includes(arg));
+  const oursUntil = cliAt === -1 ? end : cliAt;
+  const isDetach = (arg: string) =>
+    arg === "--detach" || arg === "--no-detach" || arg.startsWith("--detach=");
+  const rawRustArgs = all.filter(
+    (arg, i) =>
+      !(arg === "--rust" || arg.startsWith("--rust=")) && !(i < oursUntil && isDetach(arg)),
+  );
 
   // Swarm mode runs without a target CLI — leave args untouched.
   const hasSwarmArg = rawRustArgs.some((arg) => arg === "--swarm" || arg.startsWith("--swarm="));

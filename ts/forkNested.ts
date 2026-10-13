@@ -12,13 +12,18 @@ import path from "path";
  * into an agent's environment by its wrapper — a human shell never has it) AND
  * stdout is not a TTY (captured/piped, e.g. a tool's Bash). A human piping output
  * (`ay claude | cat`) has no `AGENT_YES_PID`, so they still block as before.
- * `attach` (the `--attach` flag or `AGENT_YES_ATTACH=1`) forces foreground.
+ * `attach` (the `--attach` flag or `AGENT_YES_ATTACH=1`) forces foreground;
+ * `detach` (the `--detach` flag) forces the fork in any context — e.g. a human
+ * spawning an agent over `ssh host ay claude --detach -- …`, where the session
+ * would otherwise stay open for the agent's whole life.
  */
 export function shouldForkNested(opts: {
   isTTY: boolean;
   ayPid: string | undefined;
   attach: boolean;
+  detach?: boolean;
 }): boolean {
+  if (opts.detach) return true;
   if (opts.attach) return false;
   if (opts.isTTY) return false;
   return Boolean(opts.ayPid && opts.ayPid.trim());

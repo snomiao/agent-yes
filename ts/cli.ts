@@ -131,6 +131,18 @@ if (!config.showVersion && !config.appendPrompt && !config.tray) {
   await warnIfCwdOccupied(process.argv);
 }
 
+// --detach is implemented by the Rust-runtime fork below (same path as a nested
+// agent's fork-by-default). Refuse the contradictions up front rather than
+// silently running in the foreground.
+if (config.detach && (config.attach || process.env.AGENT_YES_ATTACH === "1")) {
+  console.error("--detach and --attach (or AGENT_YES_ATTACH=1) contradict each other.");
+  process.exit(1);
+}
+if (config.detach && !config.useRust) {
+  console.error("--detach needs the Rust runtime (drop --no-rust / AGENT_YES_NO_RUST).");
+  process.exit(1);
+}
+
 // Handle --rust: spawn the Rust binary instead, fall back to TypeScript if unavailable
 if (config.useRust) {
   let rustBinary: string | undefined;
@@ -143,6 +155,13 @@ if (config.useRust) {
       console.error(`[rust] ${err instanceof Error ? err.message : String(err)}`);
       console.error("[rust] Falling back to TypeScript implementation.");
     }
+  }
+
+  if (!rustBinary && config.detach) {
+    console.error(
+      "--detach needs the Rust runtime, and its binary is unavailable (try --verbose).",
+    );
+    process.exit(1);
   }
 
   if (rustBinary) {
@@ -170,6 +189,7 @@ if (config.useRust) {
         isTTY: Boolean(process.stdout.isTTY),
         ayPid: process.env.AGENT_YES_PID,
         attach,
+        detach: config.detach,
       })
     ) {
       const forked = spawn(rustBinary, rustArgs, {
