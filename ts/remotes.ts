@@ -176,6 +176,52 @@ async function resolveWebrtc(
 }
 
 // ---------------------------------------------------------------------------
+// secret masking for display
+// ---------------------------------------------------------------------------
+
+/** What a secret is replaced with in `ay remote ls` / `add` output. */
+export const MASK = "***";
+
+/**
+ * A saved remote URL with every embedded secret replaced by MASK, so listing
+ * remotes doesn't print a usable credential into a terminal, a log, or an
+ * agent's transcript. Covers every form `ay remote add` stores:
+ *   webrtc://<room>:<token>@<host>               → webrtc://<room>:***@<host>
+ *   https://…/w/#<room>:<token>[@<sighost>]      → https://…/w/#<room>:***[@<sighost>]
+ *   https://…/room/#room=<id>&s=<token>[&sig=…]  → …#room=<id>&s=***[&sig=…]
+ *   https://…/#k=<token>                         → https://…/#k=***
+ *   http://<token>@host:port                     → http://***@host:port
+ * The room id is kept: it is shown elsewhere as the remote's label and is not
+ * enough to join without the token.
+ */
+export function maskRemoteUrl(url: string): string {
+  const wr = /^(webrtc:\/\/[^:]+:)[^@]+(@.+)$/.exec(url);
+  if (wr) return `${wr[1]}${MASK}${wr[2]}`;
+  if (!/^https?:\/\//i.test(url)) return url;
+  const hashAt = url.indexOf("#");
+  let base = hashAt >= 0 ? url.slice(0, hashAt) : url;
+  let frag = hashAt >= 0 ? url.slice(hashAt + 1) : null;
+  // userinfo (`http://<token>@host` or `http://user:pass@host`) — before the path.
+  base = base.replace(/^(https?:\/\/)[^/@]+@/i, `$1${MASK}@`);
+  if (frag !== null) {
+    if (/^\??[A-Za-z_]+=/.test(frag)) {
+      // key=value fragment: mask the secret-bearing keys, keep the rest verbatim.
+      frag = frag.replace(/(^|[?&])(s|k)=[^&]*/g, `$1$2=${MASK}`);
+    } else {
+      // positional #<room>:<token>[@<sighost>]
+      frag = frag.replace(/^([^:@]*:)[^@]*/, `$1${MASK}`);
+    }
+    return `${base}#${frag}`;
+  }
+  return base;
+}
+
+/** A bare token for display: MASK, or the token itself with --show-secrets. */
+function displayToken(token: string, showSecrets: boolean): string {
+  return showSecrets ? token : MASK;
+}
+
+// ---------------------------------------------------------------------------
 // ay remote subcommand
 // ---------------------------------------------------------------------------
 
@@ -187,7 +233,8 @@ export async function cmdRemote(rest: string[]): Promise<number> {
       `Usage: ay remote <subcommand>\n\n` +
         `Manage saved remote server aliases.\n\n` +
         `Subcommands:\n` +
-        `  ay remote ls                                           list configured remotes\n` +
+        `  ay remote ls [--show-secrets]                          list configured remotes\n` +
+        `                                                         (tokens are masked unless --show-secrets)\n` +
         `  ay remote add <alias> http://<token>@<host>:<port>    add an http remote\n` +
         `  ay remote add <alias> webrtc://<room>:<token>@<host>  add a WebRTC share remote\n` +
         `  ay remote add <alias> https://agent-yes.com/w/#<room>:<token>   (share link form)\n` +
@@ -201,7 +248,16 @@ export async function cmdRemote(rest: string[]): Promise<number> {
     return 0;
   }
 
-  if (!sub || sub === "ls" || sub === "list") {
+  if (!sub || sub === "ls" || sub === "list" || sub.startsWith("-")) {
+    const flags = sub && !sub.startsWith("-") ? rest.slice(1) : rest;
+    const unknown = flags.filter((f) => f !== "--show-secrets");
+    if (unknown.length) {
+      process.stderr.write(
+        `ay remote ls: unknown argument '${unknown[0]}' (only --show-secrets)\n`,
+      );
+      return 1;
+    }
+    const showSecrets = flags.includes("--show-secrets");
     const remotes = await readRemotes();
     if (remotes.size === 0) {
       process.stdout.write("no remotes configured\n");
@@ -212,10 +268,15 @@ export async function cmdRemote(rest: string[]): Promise<number> {
       );
       return 0;
     }
+    let masked = false;
     for (const [alias, cfg] of remotes) {
-      const preview = cfg.token.length > 8 ? cfg.token.slice(0, 8) + "..." : cfg.token;
-      process.stdout.write(`${alias}\t${cfg.url}\ttoken:${preview}\n`);
+      const url = showSecrets ? cfg.url : maskRemoteUrl(cfg.url);
+      // WebRTC remotes keep their secret inside the link and store no token.
+      const token = cfg.token ? `\ttoken:${displayToken(cfg.token, showSecrets)}` : "";
+      masked ||= url !== cfg.url || (!!cfg.token && !showSecrets);
+      process.stdout.write(`${alias}\t${url}${token}\n`);
     }
+    if (masked) process.stderr.write(`\n  ay remote ls --show-secrets   # reveal tokens\n`);
     return 0;
   }
 
@@ -231,7 +292,7 @@ export async function cmdRemote(rest: string[]): Promise<number> {
     // WebRTC share links carry their own secret — store verbatim (token in the link).
     if (isWebrtcSpec(rawUrl)) {
       await writeRemoteAlias(alias, { url: rawUrl, token: "" });
-      process.stdout.write(`remote '${alias}' added → ${rawUrl} (webrtc)\n`);
+      process.stdout.write(`remote '${alias}' added → ${maskRemoteUrl(rawUrl)} (webrtc)\n`);
       process.stderr.write(`\n  ay ls ${alias}            # list agents on ${alias}\n`);
       return 0;
     }
