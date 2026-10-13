@@ -1399,6 +1399,11 @@ export interface CommonOpts {
   json: boolean;
 }
 
+/** Looks like an agent_id (12 hex, or a longer injected one) rather than a word. */
+export function isAgentIdShaped(keyword: string): boolean {
+  return /^[0-9a-f]{12,32}$/i.test(keyword);
+}
+
 export function matchKeyword(record: GlobalPidRecord, keyword: string): boolean {
   if (!keyword) return true;
   const kw = keyword.toLowerCase();
@@ -1410,6 +1415,14 @@ export function matchKeyword(record: GlobalPidRecord, keyword: string): boolean 
   // those would resolve the wrong agent.
   if (/^\d+$/.test(keyword)) {
     if (record.pid === Number(keyword)) return true;
+    return !!(record.agent_id && record.agent_id.toLowerCase().startsWith(kw));
+  }
+  // 1a. An id-shaped keyword (12+ hex, the agent_id format) is an identity
+  // selector too. When that agent is gone (its wrapper exited or restarted
+  // under a new id), the id still sits in every sublane's prompt ("reply: ay
+  // send <id>"), so falling through to the prompt rule would resolve it to
+  // whichever lane quoted it — one such lane and `ay send` misdelivers.
+  if (isAgentIdShaped(keyword)) {
     return !!(record.agent_id && record.agent_id.toLowerCase().startsWith(kw));
   }
   // 1b. `.` / `./` — shell convention for "the current directory": target the
@@ -1604,6 +1617,14 @@ export async function resolveOne(
   }
   const matches = await listRecords(keyword, opts);
   if (matches.length === 0) {
+    if (isAgentIdShaped(keyword)) {
+      const gone = opts.all ? [] : await listRecords(keyword, { ...opts, all: true });
+      throw new Error(
+        `no live agent has id "${keyword}"${gone.length ? ` (pid ${gone[0]!.pid} exited)` : ""} — ` +
+          `it is unknown or stale: an agent whose wrapper restarted gets a new id. ` +
+          `Find the current one with \`ay ls\`; nothing was sent.`,
+      );
+    }
     throw new Error(`no agent matched "${keyword}"`);
   }
   // Exact identity beats fuzzy. A numeric pid or a full agent_id names exactly
