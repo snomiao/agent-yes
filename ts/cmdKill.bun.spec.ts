@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { cmdKill, killRefusal } from "./cmdKill.ts";
+import { cmdKill, killRefusal, reusedWrapperPid } from "./cmdKill.ts";
 import { appendGlobalPid, readGlobalPids } from "./globalPidIndex.ts";
 import { register } from "./reaper.ts";
 
@@ -20,6 +20,23 @@ describe("killRefusal", () => {
   });
   it("refuses when the recorded group is the caller's own group", () => {
     expect(killRefusal({ pid: 1112 }, { pgid: 2000 }, chain, 2000)).toMatch(/own group/);
+  });
+});
+
+describe("reusedWrapperPid", () => {
+  const NOW = 1_000_000_000_000;
+  const record = { pid: 1112, wrapper_pid: 1111, started_at: NOW - 3_600_000 }; // 1 h ago
+  it("flags a wrapper pid now held by a process younger than the registration", () => {
+    const t = new Map([
+      [1112, { ageSecs: 3_700 }],
+      [1111, { ageSecs: 5 }],
+    ]);
+    expect(reusedWrapperPid(record, t, NOW)).toBe(1111);
+  });
+  it("keeps a wrapper that predates the registration, or that is unknown", () => {
+    expect(reusedWrapperPid(record, new Map([[1111, { ageSecs: 3_700 }]]), NOW)).toBe(null);
+    expect(reusedWrapperPid(record, new Map(), NOW)).toBe(null);
+    expect(reusedWrapperPid({ ...record, wrapper_pid: 1112 }, new Map(), NOW)).toBe(null);
   });
 });
 

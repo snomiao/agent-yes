@@ -9,6 +9,7 @@
 
 import yargs from "yargs";
 import type { GlobalPidRecord } from "./globalPidIndex.ts";
+import { pidOwnershipVerdict } from "./senderAncestry.ts";
 
 /**
  * Why a kill of `record` must not go ahead, or null. Pure, so each refusal is
@@ -36,6 +37,18 @@ export function killRefusal(
     return `process group ${targets.pgid} is the caller's own group — refusing to kill it`;
   }
   return null;
+}
+
+/** The record's wrapper pid if it now belongs to a process younger than the
+ * registration (reused), else null. Same age test as `ay restart`. */
+export function reusedWrapperPid(
+  record: Pick<GlobalPidRecord, "pid" | "wrapper_pid" | "started_at">,
+  table: Map<number, { ageSecs: number }>,
+  now = Date.now(),
+): number | null {
+  const w = record.wrapper_pid;
+  if (!w || w === record.pid) return null;
+  return pidOwnershipVerdict(table.get(w)?.ageSecs, record.started_at, now) === "reused" ? w : null;
 }
 
 async function ownPgid(): Promise<number | null> {
@@ -127,6 +140,14 @@ export async function cmdKill(rest: string[]): Promise<number> {
 
   const { forceKill, forceKillTargets } = await import("./forceKill.ts");
   const targets = await forceKillTargets(record);
+  // The wrapper pid gets the same reuse guard; a reused one is left alone.
+  const reusedWrapper = reusedWrapperPid(record, table);
+  if (reusedWrapper) {
+    targets.pids = targets.pids.filter((p) => p !== reusedWrapper);
+    process.stderr.write(
+      `ay kill: warning: wrapper pid ${reusedWrapper} was reused — not signalling it\n`,
+    );
+  }
   const selfChain = [
     process.pid,
     process.ppid,
