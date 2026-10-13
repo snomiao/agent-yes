@@ -623,6 +623,13 @@ Each supported CLI has its own configuration defining:
 
 This project was inspired by: [Claude Code full auto while I sleep : r/ClaudeAI](https://www.reddit.com/r/ClaudeAI/comments/1klk6aw/claude_code_full_auto_while_i_sleep/)
 
+## Contributing
+
+Contributions from humans and coding agents are welcome. Please read
+[CONTRIBUTING.md](CONTRIBUTING.md) first: everything in this repository (code,
+docs, commits, PRs, issues) is written in English, and only synthetic data may
+be committed.
+
 ## License
 
 MIT
