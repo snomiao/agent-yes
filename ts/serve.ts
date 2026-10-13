@@ -72,7 +72,6 @@ import { updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { spawnRejectionReason } from "./spawnGate.ts";
 import { findSpawnHiddenLauncher } from "./rustBinary.ts";
 import { launchTray } from "./trayApp.ts";
-import { pgidForWrapper } from "./reaper.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
 import { negotiateSize, sanitizeCap, type SizeCap } from "./sizeNego.ts";
@@ -4028,30 +4027,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
         return new Response("force-kill unsupported on a Windows serve", { status: 501 });
       try {
         const record = await resolveOne(keyword, defaultOpts({ all: true }));
-        const killed: string[] = [];
-        const sig = (target: number, label: string) => {
-          if (!target || target <= 1) return;
-          try {
-            process.kill(target, "SIGKILL");
-            killed.push(label);
-          } catch {
-            /* ESRCH: already gone */
-          }
-        };
-        // Whole process group first (kills children too), then the pids directly in
-        // case they aren't group leaders.
-        const pgid = await pgidForWrapper(record.wrapper_pid ?? 0);
-        if (pgid && pgid > 1) {
-          try {
-            process.kill(-pgid, "SIGKILL");
-            killed.push(`group ${pgid}`);
-          } catch {
-            /* group already gone */
-          }
-        }
-        sig(record.pid, `pid ${record.pid}`);
-        if (record.wrapper_pid && record.wrapper_pid !== record.pid)
-          sig(record.wrapper_pid, `wrapper ${record.wrapper_pid}`);
+        const { forceKill, forceKillTargets } = await import("./forceKill.ts");
+        const killed = forceKill(await forceKillTargets(record));
         await updateGlobalPidStatus(record.pid, {
           status: "exited",
           exit_reason: "force-killed via console",

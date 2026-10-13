@@ -670,9 +670,10 @@ const SUBCOMMANDS = new Set([
 //     the machine over WebRTC (#67).
 //   - it is an ordinary English verb people start prompts with: `cy read ts/cli.ts
 //     and explain it` / `cy connect the frontend to the API` must reach claude.
-//     The commands stay reachable on the manager entry (`ay read`, `ay share`,
-//     `ay connect`); `cy cat` / `cy tail` / `cy head` / `cy ls` are unchanged —
-//     nobody opens a prompt with those.
+//     Same for `cy kill the stale dev server`. The commands stay reachable on
+//     the manager entry (`ay read`, `ay share`, `ay connect`, `ay kill`);
+//     `cy cat` / `cy tail` / `cy head` / `cy ls` are unchanged — nobody opens a
+//     prompt with those.
 // Kept one name per line so both runtimes' copies stay easy to keep in sync.
 const MANAGER_SUBCOMMANDS = new Set([
   // manage this host
@@ -682,6 +683,7 @@ const MANAGER_SUBCOMMANDS = new Set([
   "read",
   "share",
   "connect",
+  "kill",
 ]);
 
 const IDLE_THRESHOLD_MS = 60 * 1000;
@@ -1053,6 +1055,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdExit(rest);
       case "restart":
         return await cmdRestart(rest);
+      case "kill":
+        return await (await import("./cmdKill.ts")).cmdKill(rest);
       case "note":
         return await cmdNote(rest);
       case "ask":
@@ -1289,6 +1293,9 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
   const shareAliasNote = managerCommands
     ? ``
     : `                                      (\`ay\` only — \`cy share\`/\`cy connect\` are prompts)\n`;
+  const killAliasNote = managerCommands
+    ? ``
+    : `                                        (\`ay kill\` only — \`cy kill …\` is a prompt)\n`;
   // Only agents carry AGENT_YES_PID — a human shell never sets it — so this
   // section is skipped entirely (no async work at all) for interactive use.
   const self = process.env.AGENT_YES_PID ? await resolveSender() : null;
@@ -1325,6 +1332,9 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay stop <keyword>                   graceful shutdown (/exit for claude/codex)\n` +
       `  ay exit <keyword> [reason]          graceful shutdown, recording who/why (= 'ay send <kw> exit')\n` +
       `  ay restart <keyword> [--fresh]      stop (if live) + relaunch resuming the session; --fresh replays the prompt\n` +
+      `  ay kill <pid> [--dry-run]           SIGKILL an agent + its process group, like the console's\n` +
+      `                                        Kill (exact pid from ay ls; never the calling shell)\n` +
+      killAliasNote +
       `  ay status <keyword>                 agent status snapshot\n` +
       `  ay notify watch --unread            get notified when sub-agents finish/stuck/crash (writes to inbox)\n` +
       `  ay whoami [--json]                  (inside an agent) your own registry identity + reply address\n` +
