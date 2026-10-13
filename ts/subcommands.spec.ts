@@ -1478,6 +1478,80 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
     10_000,
   );
 
+  // Codex review (2ecc427): counting copies in a 40-row window cannot confirm a
+  // repeated raw message: the old "continue" scrolls out as the new one lands,
+  // and the count stays 1. Leaving the visible composer is the evidence.
+  it.skipIf(!itUnix)(
+    "confirms a repeated raw message whose earlier copy scrolls out of the window",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const RULE = "─".repeat(20);
+        await writeFile(log, `❯ continue\r\nok\r\n${RULE}\r\n❯ continue\r\n${RULE}\r\n`);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reacted = onKeystroke().then((got) => {
+            if (got) {
+              const output = Array.from({ length: 50 }, (_, i) => `output line ${i}`).join("\r\n");
+              appendFileSync(
+                log,
+                `\x1b[2J\x1b[H❯ continue\r\n${output}\r\n${RULE}\r\n❯ \r\n${RULE}\r\n`,
+              );
+            }
+            return got;
+          });
+          const { confirmed, submission } = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "continue",
+          );
+          expect(await reacted).toBe(true);
+          expect(submission).toBe("submitted");
+          expect(confirmed).toBe(true);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)(
+    "does not take a vanished composer (a menu took the screen) for delivery",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const RULE = "─".repeat(20);
+        await writeFile(log, `${RULE}\r\n❯ continue\r\n${RULE}\r\n`);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reacted = onKeystroke().then((got) => {
+            if (got)
+              appendFileSync(
+                log,
+                `\x1b[2J\x1b[HDo you trust this folder?\r\n  1. Yes\r\n  2. No\r\n`,
+              );
+            return got;
+          });
+          const { confirmed } = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "continue",
+          );
+          expect(await reacted).toBe(true);
+          expect(confirmed).toBe(false);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+
   it.skipIf(!itUnix)(
     "confirms a cleared composer after a response without a busy marker",
     async () => {
@@ -1583,6 +1657,20 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
     expect(inspectSubmission(["Codex", "› Ask Codex to do anything"], "x")).toMatchObject({
       submission: "not-submitted",
       retry: false,
+    });
+  });
+
+  // Codex review (2ecc427): the last prompt-looking row was taken for the prompt,
+  // so a quoted `› line` inside our unsent message put its nonce in "transcript".
+  it("does not take a quoted prompt glyph inside our unsent message for the prompt", async () => {
+    const { inspectSubmission } = await loadModule();
+    const marker = "<ay-msg abc12345";
+    const screen = ["older history", "────────", `❯ ${marker}`, "  › quoted line", "────────"];
+    expect(inspectSubmission(screen, marker)).toMatchObject({
+      transcriptMatches: 0,
+      retry: true,
+      inComposer: true,
+      composerVisible: true,
     });
   });
 
@@ -1927,9 +2015,22 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
     try {
       await withDrainedFifo(
         async (fifo) => {
-          const { code, stdout } = await send(fifo, log, "queued-receipt-test");
+          const errs: string[] = [];
+          const origErr = process.stderr.write.bind(process.stderr);
+          process.stderr.write = ((c: string | Uint8Array) => (
+            errs.push(String(c)), true
+          )) as typeof process.stderr.write;
+          let res: { code: number | null; stdout: string };
+          try {
+            res = await send(fifo, log, "queued-receipt-test");
+          } finally {
+            process.stderr.write = origErr;
+          }
+          const { code, stdout } = res;
           expect(code).toBe(4);
           expect(stdout).toMatch(/^QUEUED to pid/);
+          // The receipt says so, so a lane does not read rc=4 as a failure and resend.
+          expect(errs.join("")).toContain("Queued, do not resend.");
           const { readMailbox } = await import("./messageLog.ts");
           const receipt = (await readMailbox(process.cwd(), "outbox")).findLast(
             (r) => r.body === "queued-receipt-test",
@@ -4513,4 +4614,41 @@ describe("subcommands.cmdSend unreachable exit status", () => {
       }
     },
   );
+});
+
+// The drainer is spawned detached from `ay send`; a launcher that cannot start
+// is silent (spawn's ENOENT is swallowed), so the parked message simply never
+// moves. Pin the argv shape per runtime so the Windows regression (spawning the
+// .js script bare) cannot come back.
+describe("drainerLauncher", () => {
+  it("re-runs the current script under bun, on every platform", async () => {
+    const { drainerLauncher } = await loadModule();
+    expect(
+      drainerLauncher("/usr/local/bin/bun", "/repo/alpha/dist/cli.js", "/usr/local/bin/ay"),
+    ).toEqual(["/usr/local/bin/bun", "/repo/alpha/dist/cli.js"]);
+    expect(
+      drainerLauncher(
+        "C:\\Users\\alice\\.bun\\bin\\bun.exe",
+        "C:\\repo\\alpha\\dist\\cli.js",
+        null,
+      ),
+    ).toEqual(["C:\\Users\\alice\\.bun\\bin\\bun.exe", "C:\\repo\\alpha\\dist\\cli.js"]);
+  });
+
+  it("falls back to the ay on PATH only when there is no script, and to nothing when there is neither", async () => {
+    const { drainerLauncher } = await loadModule();
+    expect(drainerLauncher("/usr/local/bin/bun", undefined, "/usr/local/bin/ay")).toEqual([
+      "/usr/local/bin/bun",
+      "/usr/local/bin/ay",
+    ]);
+    expect(drainerLauncher("/usr/local/bin/bun", undefined, null)).toBeNull();
+  });
+
+  it("re-runs a compiled single-file binary as itself", async () => {
+    const { drainerLauncher } = await loadModule();
+    expect(drainerLauncher("/opt/ay/ay", "/$bunfs/root/cli", "/usr/local/bin/ay")).toEqual([
+      "/opt/ay/ay",
+    ]);
+    expect(drainerLauncher("C:\\tools\\ay.exe", undefined, null)).toEqual(["C:\\tools\\ay.exe"]);
+  });
 });
