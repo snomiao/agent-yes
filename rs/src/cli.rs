@@ -66,13 +66,13 @@ pub const SUBCOMMANDS: &[&str] = &[
 /// Subcommands recognised only on the generic manager entry (`ay`/`agent-yes`),
 /// not on a cli-bound alias like `cy`. Two reasons a name lands here: it manages
 /// the host (`setup`, `ws`), or it is an ordinary English verb people open prompts
-/// with (`read`, `share`, `connect` — `cy read src/main.rs and explain it` and
+/// with (`read`, `share`, `connect`, `trust` — `cy read src/main.rs and explain it` and
 /// `cy connect the frontend to the API` must reach the agent; the commands stay
 /// on the manager entry). Mirrors `MANAGER_SUBCOMMANDS` in ts/subcommands.ts.
 pub const MANAGER_SUBCOMMANDS: &[&str] = &[
     // manage this host
     "setup", "ws", // prompt-word verbs
-    "read", "share", "connect",
+    "read", "share", "connect", "trust",
 ];
 
 /// Whether `name` is a management subcommand. `manager_commands` (true for the
@@ -562,7 +562,7 @@ mod tests {
         // Same for the prompt-word verbs: `ay read <keyword>` pages a log and
         // `ay connect <url>` saves a remote, while `cy read foo.rs` / `cy connect
         // the frontend to the API` are prompt text and must not be swallowed.
-        for sub in ["read", "share", "connect"] {
+        for sub in ["read", "share", "connect", "trust"] {
             assert!(is_subcommand(sub, true), "ay {sub} is a subcommand");
             assert!(!is_subcommand(sub, false), "cy {sub} is prompt text");
             assert!(should_delegate(sub, "ay"));

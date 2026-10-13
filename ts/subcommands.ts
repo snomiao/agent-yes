@@ -671,7 +671,7 @@ const SUBCOMMANDS = new Set([
 //   - it is an ordinary English verb people start prompts with: `cy read ts/cli.ts
 //     and explain it` / `cy connect the frontend to the API` must reach claude.
 //     The commands stay reachable on the manager entry (`ay read`, `ay share`,
-//     `ay connect`); `cy cat` / `cy tail` / `cy head` / `cy ls` are unchanged —
+//     `ay connect`, `ay trust` — `cy trust the existing tests` is a prompt); `cy cat` / `cy tail` / `cy head` / `cy ls` are unchanged —
 //     nobody opens a prompt with those.
 // Kept one name per line so both runtimes' copies stay easy to keep in sync.
 const MANAGER_SUBCOMMANDS = new Set([
@@ -682,6 +682,7 @@ const MANAGER_SUBCOMMANDS = new Set([
   "read",
   "share",
   "connect",
+  "trust",
 ]);
 
 const IDLE_THRESHOLD_MS = 60 * 1000;
@@ -1133,6 +1134,10 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         const { cmdConnect } = await import("./remotes.ts");
         return cmdConnect(rest);
       }
+      case "trust": {
+        const { cmdTrust } = await import("./claudeTrust.ts");
+        return cmdTrust(rest);
+      }
       case "expose": {
         const { cmdExpose } = await import("./expose.ts");
         return cmdExpose(rest);
@@ -1286,6 +1291,9 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
     : `                                        (\`ay read\` only — \`cy read …\` is a prompt)\n`;
   // Same for `share` / `connect`: prompt words, but `ay share` is how the web
   // console is reached at all, so label the lines rather than hide the feature.
+  const trustAliasNote = managerCommands
+    ? ``
+    : `                                        (\`ay trust\` only — \`cy trust …\` is a prompt)\n`;
   const shareAliasNote = managerCommands
     ? ``
     : `                                      (\`ay\` only — \`cy share\`/\`cy connect\` are prompts)\n`;
@@ -1326,6 +1334,8 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay exit <keyword> [reason]          graceful shutdown, recording who/why (= 'ay send <kw> exit')\n` +
       `  ay restart <keyword> [--fresh]      stop (if live) + relaunch resuming the session; --fresh replays the prompt\n` +
       `  ay status <keyword>                 agent status snapshot\n` +
+      `  ay trust [dir] [--check]            pre-accept claude's folder-trust dialog for dir\n` +
+      trustAliasNote +
       `  ay notify watch --unread            get notified when sub-agents finish/stuck/crash (writes to inbox)\n` +
       `  ay whoami [--json]                  (inside an agent) your own registry identity + reply address\n` +
       `  ay result <keyword> [--wait]        pull an agent's structured result envelope\n` +
