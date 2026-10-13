@@ -1,5 +1,10 @@
 import { describe, expect, test } from "vitest";
-import { RTCClient, sendRtcInput, streamFirstFrameInfo, updateStreamTrace } from "../../lab/ui/rtc.js";
+import {
+  RTCClient,
+  sendRtcInput,
+  streamFirstFrameInfo,
+  updateStreamTrace,
+} from "../../lab/ui/rtc.js";
 
 describe("RTC stream latency telemetry", () => {
   test("tracks sequence gaps and maximum inter-chunk delay", () => {
@@ -124,4 +129,3 @@ describe("stream.first payload telemetry", () => {
     });
   });
 });
-
