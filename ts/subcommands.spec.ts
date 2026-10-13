@@ -4615,3 +4615,40 @@ describe("subcommands.cmdSend unreachable exit status", () => {
     },
   );
 });
+
+// The drainer is spawned detached from `ay send`; a launcher that cannot start
+// is silent (spawn's ENOENT is swallowed), so the parked message simply never
+// moves. Pin the argv shape per runtime so the Windows regression (spawning the
+// .js script bare) cannot come back.
+describe("drainerLauncher", () => {
+  it("re-runs the current script under bun, on every platform", async () => {
+    const { drainerLauncher } = await loadModule();
+    expect(
+      drainerLauncher("/usr/local/bin/bun", "/repo/alpha/dist/cli.js", "/usr/local/bin/ay"),
+    ).toEqual(["/usr/local/bin/bun", "/repo/alpha/dist/cli.js"]);
+    expect(
+      drainerLauncher(
+        "C:\\Users\\alice\\.bun\\bin\\bun.exe",
+        "C:\\repo\\alpha\\dist\\cli.js",
+        null,
+      ),
+    ).toEqual(["C:\\Users\\alice\\.bun\\bin\\bun.exe", "C:\\repo\\alpha\\dist\\cli.js"]);
+  });
+
+  it("falls back to the ay on PATH only when there is no script, and to nothing when there is neither", async () => {
+    const { drainerLauncher } = await loadModule();
+    expect(drainerLauncher("/usr/local/bin/bun", undefined, "/usr/local/bin/ay")).toEqual([
+      "/usr/local/bin/bun",
+      "/usr/local/bin/ay",
+    ]);
+    expect(drainerLauncher("/usr/local/bin/bun", undefined, null)).toBeNull();
+  });
+
+  it("re-runs a compiled single-file binary as itself", async () => {
+    const { drainerLauncher } = await loadModule();
+    expect(drainerLauncher("/opt/ay/ay", "/$bunfs/root/cli", "/usr/local/bin/ay")).toEqual([
+      "/opt/ay/ay",
+    ]);
+    expect(drainerLauncher("C:\\tools\\ay.exe", undefined, null)).toEqual(["C:\\tools\\ay.exe"]);
+  });
+});

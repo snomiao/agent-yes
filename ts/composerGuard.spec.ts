@@ -41,7 +41,7 @@ describe("classifyComposer", () => {
 
   it("reads Claude Code's dim prompt suggestion as ghost, not a draft", async () => {
     // Byte-for-byte the suggestion frame from a live lane's PTY log.
-    expect(await classify(box("\x1b[2mcollect my pills\x1b[22m"))).toEqual({
+    expect(await classify(box("\x1b[2mwater the plants\x1b[22m"))).toEqual({
       kind: "empty",
       ghost: true,
     });
@@ -55,7 +55,7 @@ describe("classifyComposer", () => {
   });
 
   it("ignores an inverse fake cursor painted over the ghost", async () => {
-    expect(await classify(box("\x1b[7mc\x1b[27m\x1b[2mollect my pills\x1b[22m"))).toEqual({
+    expect(await classify(box("\x1b[7mw\x1b[27m\x1b[2mater the plants\x1b[22m"))).toEqual({
       kind: "empty",
       ghost: true,
     });
@@ -143,7 +143,7 @@ describe("classifyComposer", () => {
       "                  (shift+tab to cy le)",
     ];
     it.each(footers)("does not count a dim suggestion over %j", async (footer) => {
-      const frame = `reply\r\n\r\n❯ \x1b[2mbump the lib pin in the parent repo\x1b[22m\r\n\r\n${GRAY(footer)}`;
+      const frame = `reply\r\n\r\n❯ \x1b[2mbump the dependency pin\x1b[22m\r\n\r\n${GRAY(footer)}`;
       expect(await classify(frame, 80)).toEqual({ kind: "empty", ghost: true });
     });
     it.each(footers)("does not count an empty composer over %j", async (footer) => {
@@ -218,7 +218,7 @@ describe("pending queue", () => {
   });
 });
 
-// CTO 2026-10-08: [mitm-compat] sent the same report twice, 6 s apart, after
+// Observed live: a lane sent the same report twice, 6 s apart, after
 // reading rc=4 QUEUED as a failure. The sink drops the resend.
 describe("duplicate suppression at the sink", () => {
   let home: string;
@@ -233,13 +233,13 @@ describe("duplicate suppression at the sink", () => {
     await rm(home, { recursive: true, force: true });
   });
 
-  const lane = senderKey({ agent_id: "mitm-compat-1", pid: 3212601 })!;
-  const other = senderKey({ agent_id: "gtm-1", pid: 3061746 })!;
+  const lane = senderKey({ agent_id: "alice-1", pid: 1111 })!;
+  const other = senderKey({ agent_id: "bob-1", pid: 2222 })!;
   const T = 1_800_000_000_000;
 
   it("an identical body from the same agent within 60 s is a duplicate, and keeps the first outcome", async () => {
-    await noteRecentSend(4242, lane, "[mitm-compat] report", "queued", T);
-    expect(await findRecentDuplicate(4242, lane, "[mitm-compat] report", T + 6_000)).toMatchObject({
+    await noteRecentSend(4242, lane, "[alice] report", "queued", T);
+    expect(await findRecentDuplicate(4242, lane, "[alice] report", T + 6_000)).toMatchObject({
       outcome: "queued",
       at: T,
     });

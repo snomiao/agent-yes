@@ -16,7 +16,7 @@
  * Telling a draft from ghost text: Claude Code renders its prompt suggestion
  * (and the "Press up to edit queued messages" hint) with SGR 2 (dim/faint) in the
  * default colour; typed or pasted input is drawn without SGR 2. Measured on the
- * raw PTY log of a live lane: the suggestion frame is `ESC[2mcollect my pills
+ * raw PTY log of a live lane: the suggestion frame is `ESC[2mwater the plants
  * ESC[22m` on the prompt row, while typed text on the same row is plain. Colour
  * is not used: typed input is drawn in the default colour, exactly like the
  * ghost, and the user's theme changes the palette but not the SGR 2 attribute.
@@ -270,7 +270,7 @@ export async function retirePending(pid: number, name: string, why: string): Pro
 // ---------------------------------------------------------------------------
 // Duplicate suppression at the sink. With the guard, rc=4 QUEUED is common, and
 // a lane that reads it as "failed" resends the same report (observed
-// 2026-10-08: [mitm-compat] → CTO twice, 6 s apart). The target keeps a tiny
+// live: one lane → another twice, 6 s apart). The target keeps a tiny
 // ledger of what agents recently sent it — sender, body HASH, time, outcome;
 // never the body — read and written under the same input lock as the paste,
 // so a resend racing the original still sees it.

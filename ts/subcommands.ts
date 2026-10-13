@@ -4942,16 +4942,33 @@ async function liveDrainer(pid: number): Promise<number | null> {
   }
 }
 
+/**
+ * The argv that re-launches THIS build as the drainer. The drainer must be the
+ * same build that parked the message (an older `ay` on PATH has no
+ * send-drain), so prefer the running script over PATH lookup. Under the bun
+ * runtime that is `bun <script>` on every platform: argv[1] is a .js/.ts file,
+ * never an executable, so spawning it bare (as the first cut did on win32)
+ * ENOENTs and the parked message waits for a manual `ay send-drain`. A
+ * compiled single-file binary has no script to hand over: re-run the binary.
+ */
+export function drainerLauncher(
+  execPath: string,
+  script: string | undefined,
+  onPath: string | null | undefined,
+): string[] | null {
+  const bunRuntime = /(^|[\\/])bun(\.exe)?$/i.test(execPath);
+  if (!bunRuntime) return [execPath];
+  if (script) return [execPath, script];
+  return onPath ? [execPath, onPath] : null;
+}
+
 /** Start the per-target drainer unless one is already running. */
 async function ensureSendDrainer(pid: number): Promise<number | null> {
   const existing = await liveDrainer(pid);
   if (existing) return existing;
   const { spawn } = await import("node:child_process");
-  // The script running THIS send first: the drainer must be the same build that
-  // parked the message (an older `ay` on PATH has no send-drain).
-  const ayBin = process.argv[1] ?? Bun.which("ay");
-  if (!ayBin) return null;
-  const launcher = process.platform === "win32" ? [ayBin] : [process.execPath, ayBin];
+  const launcher = drainerLauncher(process.execPath, process.argv[1], Bun.which("ay"));
+  if (!launcher) return null;
   const [cmd, ...pre] = launcher;
   const child = spawn(cmd!, [...pre, "send-drain", String(pid)], {
     detached: true,
