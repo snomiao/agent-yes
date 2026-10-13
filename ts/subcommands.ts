@@ -44,6 +44,16 @@ import {
 } from "./needsInput.ts";
 import { diffLsStates, type LiveState, type LsAgentState } from "./lsWatch.ts";
 import {
+  compileUntil,
+  linesAfterAnchor,
+  makeJudge,
+  makeTally,
+  untilExitCode,
+  type UntilJudge,
+  type UntilOutcome,
+  type UntilTally,
+} from "./untilMatch.ts";
+import {
   filterSinceSeq,
   filterSinceTs,
   filterUnread,
@@ -617,7 +627,6 @@ const SUBCOMMANDS = new Set([
   "result",
   "notify",
   "notifyd",
-  "read",
   "cat",
   "tail",
   "head",
@@ -653,11 +662,27 @@ const SUBCOMMANDS = new Set([
   "help",
 ]);
 
-// Subcommands reserved for the GENERIC manager (`ay` / `agent-yes`). A cli-bound
-// alias like `cy` (= claude-yes = "agent-yes claude") must NOT treat these as
-// subcommands — `cy setup …` should run claude with that text, not manage the
-// host. Kept separate from SUBCOMMANDS so a runner alias falls straight through.
-const MANAGER_SUBCOMMANDS = new Set(["setup", "ws"]);
+// Subcommands recognised ONLY on the GENERIC manager entry (`ay` / `agent-yes`).
+// A cli-bound alias like `cy` (= claude-yes = "agent-yes claude") must NOT treat
+// these as subcommands — it falls straight through to running the agent with that
+// text. Two reasons a name lands here:
+//   - host management: `cy setup …` / `cy ws …` should prompt claude, not share
+//     the machine over WebRTC (#67).
+//   - it is an ordinary English verb people start prompts with: `cy read ts/cli.ts
+//     and explain it` / `cy connect the frontend to the API` must reach claude.
+//     The commands stay reachable on the manager entry (`ay read`, `ay share`,
+//     `ay connect`); `cy cat` / `cy tail` / `cy head` / `cy ls` are unchanged —
+//     nobody opens a prompt with those.
+// Kept one name per line so both runtimes' copies stay easy to keep in sync.
+const MANAGER_SUBCOMMANDS = new Set([
+  // manage this host
+  "setup",
+  "ws",
+  // prompt-word verbs
+  "read",
+  "share",
+  "connect",
+]);
 
 const IDLE_THRESHOLD_MS = 60 * 1000;
 
@@ -886,8 +911,9 @@ export function isUnreachableWriteErrno(code: string | undefined): boolean {
 /**
  * Whether `name` is a subcommand. `managerCommands` (default true, for the
  * generic `ay`/`agent-yes` entry) additionally admits manager-only commands
- * like `setup`; pass false for a cli-bound alias (cy/claude-yes/…) so those
- * names fall through to running the agent instead.
+ * (`setup`, `ws`, `read`); pass false for a cli-bound alias (cy/claude-yes/…) so
+ * those names fall through to running the agent instead — `cy read <file>` is a
+ * prompt, `ay read <keyword>` is the log pager.
  */
 export function isSubcommand(name: string | undefined, managerCommands = true): boolean {
   if (!name) return false;
@@ -971,9 +997,10 @@ async function writeStdoutFlushed(text: string): Promise<void> {
  */
 export async function runSubcommand(argv: string[]): Promise<number | null> {
   const sub = argv[2];
-  // Manager-only subcommands (setup) aren't subcommands for a cli-bound alias
-  // like `cy` — they fall through to running the agent. Computed once from argv
-  // so it holds regardless of caller, and reused to hide manager-only help.
+  // Manager-only subcommands (setup / ws / read) aren't subcommands for a
+  // cli-bound alias like `cy` — they fall through to running the agent with that
+  // word as prompt text. Computed once from argv so it holds regardless of
+  // caller, and reused to hide manager-only help.
   const managerCommands = !invokedCliName(argv);
   if (!isSubcommand(sub, managerCommands)) return null;
 
@@ -1097,6 +1124,14 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
       case "remote": {
         const { cmdRemote } = await import("./remotes.ts");
         return cmdRemote(rest);
+      }
+      case "share": {
+        const { cmdShare } = await import("./shareCmd.ts");
+        return cmdShare(rest);
+      }
+      case "connect": {
+        const { cmdConnect } = await import("./remotes.ts");
+        return cmdConnect(rest);
       }
       case "expose": {
         const { cmdExpose } = await import("./expose.ts");
@@ -1242,6 +1277,18 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
     ? `  ay ws ls [--status]                 list <owner>/<repo>/tree/<branch> workspaces\n` +
       `  ay ws new <owner>/<repo>[@branch]   clone/refresh a workspace (ay ws help for more)\n`
     : ``;
+  // `read` is manager-entry-only too, but for the opposite reason: it's a word
+  // people open prompts with, so `cy read …` runs the agent. Unlike setup/ws the
+  // line stays visible (pagination is worth knowing about) — just labelled, so
+  // nobody types `cy read <pid>` and gets a claude session instead of a log.
+  const readAliasNote = managerCommands
+    ? ``
+    : `                                        (\`ay read\` only — \`cy read …\` is a prompt)\n`;
+  // Same for `share` / `connect`: prompt words, but `ay share` is how the web
+  // console is reached at all, so label the lines rather than hide the feature.
+  const shareAliasNote = managerCommands
+    ? ``
+    : `                                      (\`ay\` only — \`cy share\`/\`cy connect\` are prompts)\n`;
   // Only agents carry AGENT_YES_PID — a human shell never sets it — so this
   // section is skipped entirely (no async work at all) for interactive use.
   const self = process.env.AGENT_YES_PID ? await resolveSender() : null;
@@ -1255,8 +1302,12 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay ps [keyword]                     per-agent CPU/RSS, rolled up over each\n` +
       `                                        agent's whole process tree, + box vitals\n` +
       `  ay tail [-f] [-n N] <keyword>       last N lines (96), -f to follow\n` +
+      `  ay tail <keyword> --until TEXT      block until TEXT is printed, then exit 0\n` +
+      `      [--timeout 10m] [-q] [--regex]    (1 = agent exited without it, 2 = no match,\n` +
+      `      [--fail-on TEXT] [--count N]       3 = --fail-on hit first)\n` +
       `  ay read <keyword> [page opts]       paginate: --last/--head N, --range A:B,\n` +
       `                                        --before-line L [--limit N]\n` +
+      readAliasNote +
       `  ay cat <keyword>                    full log\n` +
       `  ay head <keyword>                   first N lines\n` +
       `  ay hist [-n 6] [--all] [--json]     past agent conversations (claude/codex\n` +
@@ -1286,6 +1337,9 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `\n` +
       `Remote:\n` +
       setupLine +
+      `  ay share [local|lan|tailscale|webrtc]  share this machine: one URL for web console + CLI\n` +
+      `  ay connect <share-url> [alias]      save another machine's share URL as a remote\n` +
+      shareAliasNote +
       `  ay schedule <when> <cli> -- <msg>   run an agent on a schedule (HH:MM or cron)\n` +
       `  ay serve [--port N]                 start HTTP API server (prints token)\n` +
       `  ay serve status                     show serve daemon/server status\n` +
@@ -1618,6 +1672,7 @@ async function runRemoteRead(
   n: number,
   reconnectTimeoutMs = 120_000,
   _plain = false,
+  until?: UntilWait,
 ): Promise<number> {
   const keyword = remote.keyword ?? "";
   if (!keyword) {
@@ -1629,6 +1684,85 @@ async function runRemoteRead(
 
   if (mode === "tail" && follow) {
     const ac = new AbortController();
+    // --until over the wire. Same judge and exit codes as the local follower; what
+    // differs is the shape of the stream, handled below:
+    //   * the server opens every connection with a rendered ~96-line context
+    //     window, which is BACKLOG — testing it by default would report a hit
+    //     from before the wait began (see --match-backlog);
+    //   * frames are text chunks, not lines, so they're reassembled here;
+    //   * there is no pid to poll, so "agent exited" is inferred from the server
+    //     closing the stream, and a reconnect that never lands is a give-up (2),
+    //     not an exit (1).
+    const judge = until ? makeJudge(until.tally, until.failTally) : null;
+    let outcome: UntilOutcome = "stopped";
+    const settle = (o: UntilOutcome) => {
+      outcome = o;
+      ac.abort();
+    };
+    const untilTimer =
+      until && until.timeoutMs !== null
+        ? setTimeout(() => settle("timeout"), until.timeoutMs)
+        : null;
+    // There is no pid to poll across a network, and the server does NOT close the
+    // SSE stream when the agent exits (its heartbeat keeps pinging an empty log),
+    // so without this a remote wait on a finished agent burns its whole --timeout
+    // and reports 2 where the local follower reports 1. Poll the status endpoint
+    // instead; one tick of grace lets trailing output arrive first, mirroring the
+    // local liveness poll.
+    let remoteDeadSince: number | null = null;
+    // Require having SEEN it live before believing it's gone, so a keyword that
+    // never resolved reads as "still waiting" (and times out saying so) rather
+    // than as an agent that exited on us.
+    let sawRemoteLive = false;
+    const statusPoll = until
+      ? setInterval(() => {
+          void (async () => {
+            const liveness = await remoteAgentLiveness(remote, keyword);
+            if (liveness === null) return; // transient: a failed poll is not a death
+            if (liveness === "live") {
+              sawRemoteLive = true;
+              remoteDeadSince = null;
+              return;
+            }
+            if (!sawRemoteLive) return;
+            if (remoteDeadSince === null) {
+              remoteDeadSince = Date.now();
+              return;
+            }
+            if (!judge?.settled) settle("exited");
+          })();
+        }, UNTIL_REMOTE_STATUS_POLL_MS)
+      : null;
+    statusPoll?.unref?.();
+    /** Reassembles frames into lines; `flush` tests a trailing partial at the end. */
+    let lineBuf = "";
+    const consume = (text: string, test: boolean): void => {
+      if (!until?.quiet) {
+        process.stdout.write(text);
+        if (!text.endsWith("\n")) process.stdout.write("\n");
+      }
+      if (!judge) return;
+      lineBuf += text;
+      const lines = lineBuf.split("\n");
+      lineBuf = lines.pop() ?? "";
+      if (!test) return;
+      if (judge.testAll(lines.map((l) => l.trimEnd()))) settle(judge.outcome ?? "match");
+    };
+    const flushLineBuf = (): void => {
+      if (!judge || lineBuf.length === 0) return;
+      const last = lineBuf.trimEnd();
+      lineBuf = "";
+      // A pattern printed without a trailing newline is still on screen.
+      if (last && judge.test(last)) settle(judge.outcome ?? "match");
+    };
+    const finishUntil = (): number => {
+      if (untilTimer) clearTimeout(untilTimer);
+      if (statusPoll) clearInterval(statusPoll);
+      return reportUntil(outcome, judge?.matched ?? null, until!.quiet, until!.failPattern, {
+        hits: until!.tally.hits,
+        needed: until!.tally.needed,
+      });
+    };
     // SIGINT/SIGTERM/SIGHUP and a closed pipe all abort the stream, so
     // `timeout … ay tail -f` and `kill` terminate promptly (was SIGINT-only,
     // which let `timeout` run the full --reconnect-timeout window). The server
@@ -1640,7 +1774,9 @@ async function runRemoteRead(
     let attempt = 0;
 
     process.stderr.write(
-      `[remote ${remote.label}  ${keyword}]\nfollowing... (Ctrl-C to stop, timeout: ${Math.round(reconnectTimeoutMs / 1000)}s)\n`,
+      until
+        ? `[remote ${remote.label}  ${keyword}]\n${untilBanner(until)}`
+        : `[remote ${remote.label}  ${keyword}]\nfollowing... (Ctrl-C to stop, timeout: ${Math.round(reconnectTimeoutMs / 1000)}s)\n`,
     );
 
     while (!ac.signal.aborted) {
@@ -1658,13 +1794,23 @@ async function runRemoteRead(
           throw new Error(`HTTP ${res.status}`);
         }
 
-        if (attempt > 0) process.stderr.write("remote: reconnected\n");
+        if (attempt > 0) {
+          process.stderr.write("remote: reconnected\n");
+          if (until)
+            // The reconnect brings a fresh context window, so output printed during
+            // the gap is indistinguishable from pre-wait backlog and stays untested.
+            // Say so: a remote wait is at-most-once across a disconnect.
+            process.stderr.write("remote: output during the gap was not tested for --until\n");
+        }
         delay = 1_000; // reset backoff on successful connect
 
         const reader = res.body!.getReader();
         const dec = new TextDecoder();
         let buf = "";
-        while (true) {
+        // Every connection's FIRST frame is the server's context window, not new
+        // output — matched only under --match-backlog, exactly as locally.
+        let firstFrame = true;
+        while (!ac.signal.aborted) {
           const { done, value } = await reader.read();
           if (done) break;
           buf += dec.decode(value, { stream: true });
@@ -1674,20 +1820,47 @@ async function runRemoteRead(
             if (!line.startsWith("data: ")) continue;
             try {
               const text = JSON.parse(line.slice(6)) as string;
-              process.stdout.write(text);
-              if (!text.endsWith("\n")) process.stdout.write("\n");
+              const isContext = firstFrame;
+              firstFrame = false;
+              consume(text, !isContext || Boolean(until?.matchBacklog));
+              if (ac.signal.aborted) break;
             } catch {
               /* skip non-JSON */
             }
           }
+          if (ac.signal.aborted) break;
+        }
+        if (until) {
+          if (judge?.settled) return finishUntil();
+          if (ac.signal.aborted) {
+            flushLineBuf();
+            return finishUntil();
+          }
+          // Server closed the stream: the agent is gone, so the pattern can no
+          // longer arrive. Same verdict as the local liveness poll — exit 1.
+          flushLineBuf();
+          if (!judge?.settled) outcome = "exited";
+          return finishUntil();
         }
         break; // stream ended cleanly
       } catch (e: any) {
-        if (e.name === "AbortError" || ac.signal.aborted) return 0;
+        if (e.name === "AbortError" || ac.signal.aborted) {
+          if (until) {
+            flushLineBuf();
+            return finishUntil();
+          }
+          return 0;
+        }
         if (Date.now() >= deadline) {
           process.stderr.write(
             `remote: timeout after ${Math.round(reconnectTimeoutMs / 1000)}s, giving up\n`,
           );
+          // Under --until this is "gave up waiting" (2), never "the agent finished
+          // without printing it" (1) — we never got to watch it.
+          if (until) {
+            outcome = "timeout";
+            return finishUntil();
+          }
           return 1;
         }
         process.stderr.write(
@@ -1700,10 +1873,20 @@ async function runRemoteRead(
             reject(new Error("abort"));
           });
         }).catch(() => {});
-        if (ac.signal.aborted) return 0;
+        if (ac.signal.aborted) {
+          if (until) {
+            flushLineBuf();
+            return finishUntil();
+          }
+          return 0;
+        }
         delay = Math.min(delay * 2, 30_000);
         attempt++;
       }
+    }
+    if (until) {
+      flushLineBuf();
+      return finishUntil();
     }
     return 0;
   }
@@ -2835,6 +3018,19 @@ interface ReadOpts {
   mode: "cat" | "tail" | "head";
 }
 
+/**
+ * Parse a human duration (`30s`, `10m`) to ms, or null when it isn't one.
+ *
+ * `ms()`'s parse overload is typed to a template-literal `StringValue`, which a
+ * CLI flag (a plain `string`) never satisfies, and it returns `undefined` — not a
+ * number — for unparseable input. Both are handled here once so the call sites
+ * just branch on null.
+ */
+function parseDurationMs(value: string): number | null {
+  const parsed = ms(value as ms.StringValue) as number | undefined;
+  return typeof parsed === "number" && Number.isFinite(parsed) ? parsed : null;
+}
+
 async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
   const y = yargs(rest)
     .usage(
@@ -2842,13 +3038,65 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
         "Pagination (static read; render the log once, window the rendered lines):\n" +
         "  --last N | --head N         last / first N lines\n" +
         "  --range A:B                 lines A..B (1-indexed, inclusive)\n" +
-        "  --before-line L [--limit N] the page of N lines ending just above line L",
+        "  --before-line L [--limit N] the page of N lines ending just above line L\n\n" +
+        "Wait for output (follow with a predicate; exit 0 matched / 1 exited /\n" +
+        "2 no match / 3 --fail-on hit):\n" +
+        "  --until TEXT [--timeout 10m]   return as soon as TEXT is printed\n" +
+        "  --fail-on TEXT                 give up early (exit 3) if TEXT shows up first\n" +
+        "  --count N                      require N hits of --until (default 1)\n" +
+        "  --regex | -i | -q              regex / case-insensitive / only print the match",
     )
     .option("follow", {
       alias: "f",
       type: "boolean",
       default: false,
       description: "Follow log output (Ctrl-C to stop)",
+    })
+    .option("until", {
+      type: "string",
+      description:
+        "Follow until this text appears in the output, then exit. Implies -f. " +
+        "Exit 0 matched, 1 agent exited without it, 2 --timeout/interrupted, " +
+        "3 --fail-on hit first. " +
+        "Literal substring by default; matches only output arriving from now on.",
+    })
+    .option("fail-on", {
+      type: "string",
+      description:
+        "Give up with exit 3 if this text appears before --until does " +
+        "(e.g. --until 'all tests passed' --fail-on 'FAILED')",
+    })
+    .option("count", {
+      type: "number",
+      description: "Require this many --until hits before returning (default 1)",
+    })
+    .option("regex", {
+      type: "boolean",
+      default: false,
+      description: "Treat --until as a regular expression",
+    })
+    .option("ignore-case", {
+      alias: "i",
+      type: "boolean",
+      default: false,
+      description: "Case-insensitive --until match",
+    })
+    .option("timeout", {
+      type: "string",
+      description: "Give up waiting for --until after this long (e.g. 30s, 10m)",
+    })
+    .option("match-backlog", {
+      type: "boolean",
+      default: false,
+      description:
+        "Also test the context window printed before following. Off by default: " +
+        "a hit from a PREVIOUS run would return instantly and wrongly.",
+    })
+    .option("quiet", {
+      alias: "q",
+      type: "boolean",
+      default: false,
+      description: "With --until, print only the matching line (no streamed output)",
     })
     .option("n", { type: "number", description: "Number of lines (default: 96 for tail/head)" })
     .option("last", { type: "number", description: "Show the last N rendered lines" })
@@ -2891,7 +3139,45 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
   ensureEpipeExit();
   // Pipes/scripts get line-buffered plain text by default; an explicit --plain
   // forces it even on a TTY. See followPlainLocal / runRemoteRead.
-  const plain = Boolean(argv.plain) || !process.stdout.isTTY;
+  // `--until` matches FINALIZED RENDERED LINES, so it always takes the plain
+  // (vterm) follower even on a TTY: the raw follower emits ANSI-stripped byte
+  // chunks, where a cursor-addressed redraw can split the pattern across chunks
+  // and a spinner re-emits the same row forever. A caller waiting on a condition
+  // isn't reading a live TUI anyway.
+  const until = typeof argv.until === "string" ? argv.until : null;
+  const plain = Boolean(argv.plain) || until !== null || !process.stdout.isTTY;
+  const failOn = typeof argv["fail-on"] === "string" ? (argv["fail-on"] as string) : null;
+  const untilOnlyFlags: [string, boolean][] = [
+    ["--regex", argv.regex],
+    ["--ignore-case", argv["ignore-case"] as boolean],
+    ["--match-backlog", argv["match-backlog"] as boolean],
+    ["--timeout", typeof argv.timeout === "string" && argv.timeout.length > 0],
+    ["--fail-on", failOn !== null],
+    ["--count", argv.count !== undefined],
+  ];
+  if (until === null) {
+    const stray = untilOnlyFlags.find(([, set]) => set);
+    if (stray) throw new Error(`${stray[0]} requires --until <pattern>`);
+  }
+  // --regex / -i describe how a pattern is read, so they govern --fail-on too:
+  // one flag pair for both keeps `--until 'PASS' --fail-on 'FAIL|ERROR' --regex`
+  // doing the obvious thing instead of silently treating one as a literal.
+  const compileSpec = (pattern: string) =>
+    compileUntil({
+      pattern,
+      regex: argv.regex,
+      ignoreCase: argv["ignore-case"] as boolean,
+    });
+  const untilCount = argv.count === undefined ? 1 : Number(argv.count);
+  if (until !== null && (!Number.isInteger(untilCount) || untilCount < 1))
+    throw new Error(`--count must be a positive integer (got ${argv.count})`);
+  const untilMatch = until !== null ? compileSpec(until) : null;
+  const failMatch = failOn !== null ? compileSpec(failOn) : null;
+  let untilTimeoutMs: number | null = null;
+  if (typeof argv.timeout === "string" && argv.timeout.length > 0) {
+    untilTimeoutMs = parseDurationMs(argv.timeout);
+    if (untilTimeoutMs === null) throw new Error(`invalid --timeout value: ${argv.timeout}`);
+  }
   const opts: CommonOpts = {
     all: argv.all,
     active: false,
@@ -2910,9 +3196,23 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
           ? 0
           : 96;
     const reconnectTimeoutMs = ((argv["reconnect-timeout"] as number) ?? 120) * 1000;
-    if (remote) return runRemoteRead(remote, mode, argv.follow, n2, reconnectTimeoutMs, plain);
+    if (remote) {
+      if (untilMatch === null)
+        return runRemoteRead(remote, mode, argv.follow, n2, reconnectTimeoutMs, plain);
+      // A remote wait follows the server's SSE stream instead of a local log, but
+      // reports the same exit codes. `--until` implies -f here too.
+      return runRemoteRead(remote, mode, true, n2, reconnectTimeoutMs, plain, {
+        tally: makeTally(untilMatch, untilCount),
+        failTally: failMatch ? makeTally(failMatch, 1) : null,
+        pattern: until as string,
+        failPattern: failOn,
+        quiet: Boolean(argv.quiet),
+        timeoutMs: untilTimeoutMs,
+        matchBacklog: Boolean(argv["match-backlog"]),
+      });
+    }
   }
-  const follow = argv.follow;
+  const follow = argv.follow || until !== null;
   const nFlag = argv.n;
   const n =
     nFlag !== undefined && Number.isFinite(nFlag) && nFlag > 0
@@ -2954,8 +3254,29 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
     // Follow mode ignores pagination: print the initial context, then stream deltas.
     const rendered = await renderRawLog(buf, { mode, n, cols: size?.cols, rows: size?.rows });
     process.stderr.write(header + "\n");
-    process.stdout.write(rendered);
-    if (!rendered.endsWith("\n")) process.stdout.write("\n");
+    // `--until -q` is a predicate, not a reader: no context window, no stream —
+    // only the matching line, so a caller can capture it without filtering.
+    const streaming = !(untilMatch && argv.quiet);
+    if (streaming) {
+      process.stdout.write(rendered);
+      if (!rendered.endsWith("\n")) process.stdout.write("\n");
+    }
+    // The tallies outlive the backlog scan: under --match-backlog a `--count 3`
+    // wait that already saw 2 hits in the context window needs only 1 more from
+    // the live stream, so the counts must carry into the follow.
+    const tally = untilMatch ? makeTally(untilMatch, untilCount) : null;
+    const failTally = failMatch ? makeTally(failMatch, 1) : null;
+    // --match-backlog: test the context window we just printed. Off by default,
+    // because a hit left over from a PREVIOUS run of the same task would exit 0
+    // immediately — the silent-wrong-answer failure, versus a loud --timeout.
+    if (tally && argv["match-backlog"]) {
+      const lines = rendered.split("\n");
+      // --fail-on first: if both already sit in the backlog, the failure is the
+      // honest verdict — reporting the success pattern would hide it.
+      if (failTally?.feedAll(lines))
+        return reportUntil("failed", failTally.last, Boolean(argv.quiet), failOn);
+      if (tally.feedAll(lines)) return reportUntil("match", tally.last, Boolean(argv.quiet));
+    }
     // Keep the read marker fresh while actively following, so a long-running
     // `ay tail -f` doesn't "expire" past the send window mid-watch.
     const refresh = setInterval(() => void recordRead(reader.key, record.pid), 30_000);
@@ -2964,7 +3285,27 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
     // `buf.length` — `buf` may be a capped tail window, so its length is not the
     // file offset. `buf` still seeds the terminal render (identical final state).
     return plain
-      ? followPlainLocal(logPath, buf, stats.size)
+      ? followPlainLocal(
+          logPath,
+          buf,
+          stats.size,
+          tally
+            ? {
+                tally,
+                failTally,
+                pattern: until as string,
+                failPattern: failOn,
+                quiet: Boolean(argv.quiet),
+                timeoutMs: untilTimeoutMs,
+                matchBacklog: Boolean(argv["match-backlog"]),
+                pid: record.pid,
+              }
+            : undefined,
+          // Same geometry the static window above was rendered at, so the follow
+          // doesn't reflow mid-stream — and so `--until`'s lines are wrapped the
+          // way the runtime wraps them in the log it leaves behind on exit.
+          { cols: size?.cols, rows: size?.rows },
+        )
       : followRawLocal(logPath, buf, stats.size);
   }
 
@@ -3046,14 +3387,18 @@ function installStreamSignals(stop: () => void): () => void {
  * Coalescing file watcher: re-reads `logPath` on every change, hands each newly
  * appended byte range to `onChunk`, and never overlaps reads (a change that
  * arrives mid-read is serviced once the current read finishes). `startOffset`
- * is where the already-emitted prefix ends. Resolves when `stop` is signalled.
+ * is where the already-emitted prefix ends. Resolves when `stop` is signalled,
+ * or when `signal` aborts (how `--until` stops itself on a match / timeout /
+ * the agent's death), and returns the byte offset it stopped at — so a caller
+ * can drain whatever landed after the last watch event.
  */
 async function watchAppend(
   logPath: string,
   startOffset: number,
   onChunk: (chunk: Uint8Array) => Promise<void> | void,
   onStop: () => void,
-): Promise<void> {
+  signal?: AbortSignal,
+): Promise<number> {
   const { watch } = await import("fs");
   let offset = startOffset;
   let reading = false;
@@ -3067,12 +3412,20 @@ async function watchAppend(
         watcher.close();
       } catch {}
       dispose();
+      signal?.removeEventListener("abort", finish);
       onStop();
       resolve();
     };
     const dispose = installStreamSignals(finish);
+    if (signal) {
+      if (signal.aborted) {
+        // Already aborted before we started watching (e.g. a 0ms timeout): still
+        // run the stop path once so the caller's final flush happens.
+        queueMicrotask(finish);
+      } else signal.addEventListener("abort", finish);
+    }
     const pump = async () => {
-      if (reading) {
+      if (reading || done) {
         pending = true;
         return;
       }
@@ -3085,6 +3438,11 @@ async function watchAppend(
         } catch {
           break;
         }
+        // A pump already awaiting its read when the watch was stopped must emit
+        // NOTHING and leave `offset` alone: it no longer owns the stream, and a
+        // caller draining from the returned offset (`--until`) would otherwise
+        // process those same bytes a second time.
+        if (done) break;
         if (full.length > offset) {
           const chunk = full.slice(offset);
           offset = full.length;
@@ -3097,6 +3455,7 @@ async function watchAppend(
     // The file may have grown between our initial read and the watch starting.
     void pump();
   });
+  return offset;
 }
 
 /**
@@ -3124,6 +3483,26 @@ async function followRawLocal(
     () => {},
   );
   return 0;
+}
+
+/**
+ * `@xterm/headless`'s Terminal constructor, across runtimes.
+ *
+ * The package is CJS, so `await import()` resolves to `{ default: { Terminal } }`
+ * under node while bun hoists the named exports — a plain
+ * `const { Terminal } = await import(…)` is therefore `undefined` on node and
+ * every render throws "Terminal is not a constructor". That is the runtime npm
+ * users get from `dist/`, where it silently degraded the static render to the
+ * ANSI-strip fallback and broke `ay tail -f` into a pipe outright.
+ */
+async function loadXtermTerminal(): Promise<typeof import("@xterm/headless").Terminal> {
+  const mod = (await import("@xterm/headless")) as unknown as {
+    Terminal?: typeof import("@xterm/headless").Terminal;
+    default?: { Terminal: typeof import("@xterm/headless").Terminal };
+  };
+  const Terminal = mod.Terminal ?? mod.default?.Terminal;
+  if (!Terminal) throw new Error("@xterm/headless: no Terminal export");
+  return Terminal;
 }
 
 /**
@@ -3174,10 +3553,21 @@ async function followPlainLocal(
   logPath: string,
   buf: Uint8Array,
   startOffset = buf.length,
+  until?: FollowUntil,
+  geom?: RenderGeom,
 ): Promise<number> {
-  process.stderr.write(`following... (plain; Ctrl-C / SIGTERM to stop)\n`);
-  const { Terminal } = await import("@xterm/headless");
-  const term = new Terminal({ cols: 200, rows: 50, scrollback: 50000, allowProposedApi: true });
+  // Say exactly what would end the wait, so a run that hangs is diagnosable from
+  // its first line instead of from the flags the caller thinks it passed.
+  process.stderr.write(
+    until ? untilBanner(until) : `following... (plain; Ctrl-C / SIGTERM to stop)\n`,
+  );
+  const Terminal = await loadXtermTerminal();
+  const term = new Terminal({
+    cols: geom?.cols ?? 200,
+    rows: geom?.rows ?? 50,
+    scrollback: 50000,
+    allowProposedApi: true,
+  });
   const feed = (b: Uint8Array) => new Promise<void>((r) => term.write(b, () => r()));
   const lineAt = (i: number) => {
     const l = term.buffer.active.getLine(i);
@@ -3189,29 +3579,310 @@ async function followPlainLocal(
   await feed(buf);
   let emitted = cursorAbs(term);
 
+  // Newest line we have already seen — the alignment anchor for the post-exit
+  // drain (see drainFinalLog). Starts at the live frontier, advances with every
+  // line we test.
+  let anchor: string | null = null;
+  for (let i = emitted; i >= Math.max(0, emitted - ANCHOR_LOOKBACK_ROWS); i--) {
+    const line = lineAt(i);
+    if (line) {
+      anchor = line;
+      break;
+    }
+  }
+
+  // --until bookkeeping. `outcome` starts at "stopped" (signalled / EPIPE), and
+  // the timer, the liveness poll and a match each overwrite it before aborting.
+  const ac = new AbortController();
+  let outcome: UntilOutcome = "stopped";
+  const judge: UntilJudge | null = until ? makeJudge(until.tally, until.failTally) : null;
+  const settled = () => judge?.settled === true;
+  const testLine = (line: string): void => {
+    if (judge && !judge.settled && judge.test(line)) {
+      outcome = judge.outcome ?? "match";
+      ac.abort();
+    }
+  };
+
   // `emitted` only advances, so a redraw that moves the cursor back up doesn't
   // re-emit lines it then rewrites.
   const flushCommitted = () => {
-    for (const line of finalizedLines(term, emitted)) process.stdout.write(line + "\n");
+    for (const line of finalizedLines(term, emitted)) {
+      if (!until?.quiet) process.stdout.write(line + "\n");
+      if (!until) continue;
+      if (line) anchor = line;
+      testLine(line);
+    }
     emitted = cursorAbs(term);
   };
 
-  await watchAppend(
+  const timer =
+    until && until.timeoutMs !== null
+      ? setTimeout(() => {
+          outcome = "timeout";
+          ac.abort();
+        }, until.timeoutMs)
+      : null;
+
+  // An exited agent stops appending, so the watcher would otherwise sit there
+  // until --timeout on a pattern that can no longer arrive. Poll the pid and
+  // report `exited` (exit 1) — "it's done and it never printed that" is a
+  // materially different answer from "not yet", exactly as for `ay result`.
+  //
+  // Death is not the abort: the child's last bytes may still be in flight, so we
+  // give the writer one grace interval to land them, and abort on the NEXT tick.
+  // The post-watch drain below is the belt to this braces.
+  let deadSince: number | null = null;
+  const liveness = until
+    ? setInterval(() => {
+        if (isPidAlive(until.pid)) {
+          deadSince = null;
+          return;
+        }
+        if (deadSince === null) {
+          deadSince = Date.now();
+          return;
+        }
+        outcome = "exited";
+        ac.abort();
+      }, UNTIL_LIVENESS_POLL_MS)
+    : null;
+  liveness?.unref?.();
+
+  /**
+   * Emit the cursor's own row — the line still being written — so the last
+   * partial line isn't lost when we stop mid-stream, and so a pattern printed
+   * without a trailing newline still counts (it IS on screen). Self-guarded to
+   * run at most once: a row printed here may finalize later, and emitting it
+   * again would duplicate the agent's last line of output.
+   */
+  let partialFlushed = false;
+  const flushPartial = () => {
+    if (partialFlushed) return;
+    partialFlushed = true;
+    const last = lineAt(cursorAbs(term));
+    if (!last) return;
+    if (!until?.quiet) process.stdout.write(last + "\n");
+    if (!until) return;
+    // Seen, so the post-exit drain resumes after it rather than re-printing it.
+    anchor = last;
+    testLine(last);
+  };
+
+  const stoppedAt = await watchAppend(
     logPath,
     startOffset,
     async (chunk) => {
       await feed(chunk);
       flushCommitted();
     },
-    () => {
-      // Final flush: include the cursor's own row if it has content, so the last
-      // partial line isn't lost when we're killed mid-stream.
-      flushCommitted();
-      const last = lineAt(cursorAbs(term));
-      if (last) process.stdout.write(last + "\n");
-    },
+    flushCommitted,
+    until ? ac.signal : undefined,
   );
-  return 0;
+
+  if (timer) clearTimeout(timer);
+  if (liveness) clearInterval(liveness);
+  if (!until) {
+    flushPartial();
+    return 0;
+  }
+
+  // Drain whatever landed after the watcher's last read. An exiting agent flushes
+  // its last bytes in exactly this window, and they are the ones most likely to
+  // hold the line being waited for ("DONE", then exit).
+  if (!settled()) {
+    const tailBytes = await readFile(logPath).catch(() => null);
+    if (tailBytes === null) {
+      // The followed log is GONE, which is what a clean exit looks like: the
+      // runtime renders the scrollback to `<pid>.log` and unlinks `<pid>.raw.log`
+      // (rs/src/context.rs finalize_log), repointing the pid index at the render.
+      // So the tail we raced for isn't lost — it moved. Go read it there.
+      flushPartial();
+      await drainFinalLog(until.pid, logPath, anchor, until, testLine);
+    } else if (tailBytes.length > stoppedAt) {
+      await feed(tailBytes.slice(stoppedAt));
+      flushCommitted();
+    }
+  }
+
+  flushPartial();
+  return reportUntil(outcome, judge?.matched ?? null, until.quiet, until.failPattern, {
+    hits: until.tally.hits,
+    needed: until.tally.needed,
+  });
+}
+
+/** Cadence of the `--until` liveness poll; two ticks are needed to call it dead. */
+const UNTIL_LIVENESS_POLL_MS = 500;
+
+/**
+ * Cadence of the REMOTE liveness poll; two ticks are needed to call it dead.
+ * Slower than the local one because each tick is an HTTP round trip, and the
+ * stream itself — not this poll — is what a wait normally ends on.
+ */
+const UNTIL_REMOTE_STATUS_POLL_MS = 2_000;
+
+/**
+ * Whether a remote agent is still running: "live", "gone" (the host answered and
+ * the agent is exited or no longer listed), or null when the poll itself failed.
+ *
+ * Asks `/api/ls`, not `/api/status/<kw>`: only the TS server serves the latter,
+ * while the Rust server — the default `ay serve` — has no such route and 404s
+ * every poll, so a status-based probe silently never fires.
+ *
+ * Null is deliberately distinct from "gone": a dropped packet or a restarting
+ * host would otherwise end a wait with "the agent exited", the one verdict a
+ * caller acts on by giving up and reporting the work unfinished.
+ */
+async function remoteAgentLiveness(
+  remote: ResolvedRemote,
+  keyword: string,
+): Promise<"live" | "gone" | null> {
+  const params = new URLSearchParams({ keyword, all: "1" });
+  try {
+    const res = await remoteGet(remote, `/api/ls?${params}`);
+    if (!res.ok) return null;
+    const records = (await res.json()) as { status?: unknown }[];
+    if (!Array.isArray(records)) return null;
+    // `all=1` keeps exited agents in the listing, so an empty result means the
+    // host doesn't know this keyword at all — which, once we've seen it live, is
+    // the reaped-agent case.
+    if (records.length === 0) return "gone";
+    // Only an EXPLICIT "exited" counts as gone (the registry's third status; see
+    // GlobalPidRecord). Treating anything unrecognized as gone would turn a new or
+    // renamed status into a false "the agent exited" — the verdict that makes a
+    // caller stop waiting — so the unknown case stays "live" and lets --timeout,
+    // which claims much less, be the thing that ends the wait.
+    return records.every((r) => r.status === "exited") ? "gone" : "live";
+  } catch {
+    return null;
+  }
+}
+
+/** How far back from the live frontier to look for a non-empty anchor line. */
+const ANCHOR_LOOKBACK_ROWS = 200;
+
+/**
+ * Last-chance `--until` match against the log an exited agent left behind.
+ *
+ * On a clean exit the raw byte log we were following is replaced by a rendered
+ * scrollback dump at a NEW path, and the pid index is repointed at it. A pattern
+ * printed in the agent's last breath can therefore be missing from everything we
+ * saw yet present in that file — so re-resolve the path from the registry and
+ * scan it.
+ *
+ * Only the lines AFTER `anchor` (the newest line we had already seen, matched
+ * from the END of the file) are tested, so the no-backlog-matching promise
+ * survives: a hit from before this command started cannot be reported. When the
+ * anchor can't be located the drain is skipped rather than guessed at — a missed
+ * match surfaces as a loud exit 1, a false one as a silent wrong answer.
+ *
+ * Feeds those lines to `testLine`, which owns the verdict — so a `--count` wait
+ * finishes on hits split across the stream and this drain, and `--fail-on` still
+ * wins over `--until` on the agent's last line.
+ */
+async function drainFinalLog(
+  pid: number,
+  followedPath: string,
+  anchor: string | null,
+  until: FollowUntil,
+  testLine: (line: string) => void,
+): Promise<void> {
+  if (anchor === null) return;
+  // Prefer the path the registry now advertises; fall back to the `.raw.log` →
+  // `.log` convention both runtimes follow (rs/src/context.rs finalize_log,
+  // pid_store's log-sibling pruning), because the index repoint can land a moment
+  // after the file swap and we'd otherwise give up on a match that is right there.
+  const record = (await readGlobalPids()).find((r) => r.pid === pid);
+  const advertised = record?.log_file;
+  const derived = followedPath.endsWith(".raw.log")
+    ? followedPath.slice(0, -".raw.log".length) + ".log"
+    : null;
+  const finalPath = advertised && advertised !== followedPath ? advertised : derived;
+  if (!finalPath) return;
+  const text = await readFile(finalPath, "utf8").catch(() => null);
+  if (text === null) return;
+
+  const fresh = linesAfterAnchor(
+    text.split("\n").map((l) => l.trimEnd()),
+    anchor,
+  );
+  if (fresh === null) return;
+  for (const line of fresh) {
+    if (!until.quiet) process.stdout.write(line + "\n");
+    testLine(line);
+  }
+}
+
+/** Everything an `--until` wait needs, independent of where the output comes from. */
+interface UntilWait {
+  /** The `--until` tally (`--count` hits required). */
+  tally: UntilTally;
+  /** The `--fail-on` tally (always 1 hit), or null. */
+  failTally: UntilTally | null;
+  /** The raw pattern, for the human-facing "waiting for …" / result lines. */
+  pattern: string;
+  /** The raw `--fail-on` pattern, for the same. */
+  failPattern: string | null;
+  /** Suppress the streamed output; print only the matching line. */
+  quiet: boolean;
+  timeoutMs: number | null;
+  /** Also test the context window printed before the follow starts. */
+  matchBacklog: boolean;
+}
+
+/** What `followPlainLocal` needs to run an `--until` predicate over the stream. */
+interface FollowUntil extends UntilWait {
+  /** The agent's pid, polled so an exit ends the wait with exit 1. */
+  pid: number;
+}
+
+/** The "waiting for X | fail on Y | timeout Ns…" banner shared by both followers. */
+function untilBanner(wait: UntilWait): string {
+  const parts = [`waiting for ${JSON.stringify(wait.pattern)}`];
+  if (wait.tally.needed > 1) parts.push(`x${wait.tally.needed}`);
+  if (wait.tally.hits > 0) parts.push(`(${wait.tally.hits} already seen)`);
+  if (wait.failPattern !== null) parts.push(`| fail on ${JSON.stringify(wait.failPattern)}`);
+  if (wait.timeoutMs !== null) parts.push(`| timeout ${Math.round(wait.timeoutMs / 1000)}s`);
+  return `${parts.join(" ")}… (Ctrl-C / SIGTERM to stop)\n`;
+}
+
+/**
+ * Report an `--until` result and return its exit code. In quiet mode the matching
+ * line is the whole of stdout (a caller can capture it); the human-readable
+ * verdict always goes to stderr so it never contaminates that.
+ *
+ * `progress` (hits/needed) is named on the failure paths only when `--count` asked
+ * for more than one: "timed out with 2/3 matches" is the difference between a wait
+ * that was close and one that never started.
+ */
+function reportUntil(
+  outcome: UntilOutcome,
+  matched: string | null,
+  quiet: boolean,
+  failPattern?: string | null,
+  progress?: { hits: number; needed: number },
+): number {
+  const short =
+    progress && progress.needed > 1 ? ` (${progress.hits}/${progress.needed} matches)` : "";
+  if (outcome === "match" && matched !== null) {
+    if (quiet) process.stdout.write(matched + "\n");
+    process.stderr.write(`[until] matched: ${matched}\n`);
+  } else if (outcome === "failed") {
+    // The failing line goes to stdout under -q too: it is the answer the caller
+    // asked for, and exit 3 alone doesn't say which line tripped it.
+    if (quiet && matched !== null) process.stdout.write(matched + "\n");
+    process.stderr.write(
+      `[until] --fail-on ${JSON.stringify(failPattern ?? "")} hit first: ${matched ?? ""}\n`,
+    );
+  } else if (outcome === "exited") {
+    process.stderr.write(`[until] agent exited without printing it${short}\n`);
+  } else if (outcome === "timeout") {
+    process.stderr.write(`[until] timed out with no match${short}\n`);
+  } else {
+    process.stderr.write(`[until] stopped before a match${short}\n`);
+  }
+  return untilExitCode(outcome);
 }
 
 /**
@@ -3336,8 +4007,7 @@ export async function renderRawLogLines(buf: Uint8Array, geom?: RenderGeom): Pro
   const scrollback = 50000;
 
   try {
-    const xtermPkg = await import("@xterm/headless");
-    const { Terminal } = xtermPkg;
+    const Terminal = await loadXtermTerminal();
     const term = new Terminal({ cols, rows, scrollback, allowProposedApi: true });
     await new Promise<void>((resolve) => term.write(buf, resolve));
     const active = term.buffer.active;

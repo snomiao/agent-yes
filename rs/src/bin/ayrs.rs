@@ -6,6 +6,9 @@
 
 #[path = "../agent_permissions.rs"]
 mod agent_permissions;
+// pid_store::wrap_spawn_prompt renders the parent's standardized identity.
+#[path = "../identity.rs"]
+mod identity;
 #[path = "../pid_store.rs"]
 mod pid_store;
 // needs_input classification reuses the CLI `needsInput`/`working` patterns
@@ -21,10 +24,10 @@ mod live_output;
 mod log_files;
 #[path = "../reaper.rs"]
 mod reaper;
-#[path = "../supported_clis.rs"]
-mod supported_clis;
 #[path = "../serve/mod.rs"]
 mod serve;
+#[path = "../supported_clis.rs"]
+mod supported_clis;
 #[path = "../vterm.rs"]
 mod vterm;
 
@@ -59,8 +62,8 @@ enum Command {
         port: Option<u16>,
 
         /// Install/uninstall/inspect the daemon as a native OS service
-        /// (launchd on macOS, systemd --user on Linux) instead of running it
-        /// in the foreground.
+        /// (launchd on macOS, systemd --user on Linux, Task Scheduler on
+        /// Windows) instead of running it in the foreground.
         #[command(subcommand)]
         action: Option<ServeAction>,
     },

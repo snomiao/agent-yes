@@ -940,6 +940,15 @@ async function bootstrapDaemonManager(): Promise<DaemonManager | null> {
 // environment may not have ~/.bun/bin on PATH, so we use an absolute path.
 // On Windows the `ay` bin is a self-contained launcher (ay.exe) we exec
 // directly; on POSIX it's a `#!/usr/bin/env bun` script we run through bun.
+// oxmgr takes its command as ONE string and shell-splits it, treating `\` as an
+// escape — so a bare Windows path arrives with every separator eaten
+// (`C:\Users\…\ay.exe` → `C:Users…ay.exe` → "failed to spawn"). Double-quoting
+// suppresses the escape handling, so quote any arg carrying a backslash or a
+// space. pm2 is unaffected: it gets program + args as separate argv entries.
+export function oxmgrCmd(argv: string[]): string {
+  return argv.map((a) => (/[\\\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(" ");
+}
+
 function ayServeArgv(args: string[]): string[] {
   const ayBin = Bun.which("ay");
   const launcher = ayBin
@@ -1128,6 +1137,28 @@ export async function resolveLocalServeUrl(): Promise<string | null> {
   }
   const port = portFromArgs(daemonArgs);
   return port ? `http://127.0.0.1:${port}` : null;
+}
+
+/**
+ * What `ay share` needs to know about this host's daemon: the args it was
+ * installed with (null = none installed), whether its HTTP API answers, and the token.
+ * `port` is the loopback HTTP port (fixed --port, else the portless backend).
+ */
+export async function inspectServeDaemon(): Promise<{
+  args: string[] | null;
+  port: number | null;
+  httpUp: boolean; // answers /api/version on `port` (a webrtc-only daemon never does)
+  token: string;
+  consoleUrl: string | null;
+}> {
+  const mgr = await resolveActiveManager();
+  const args = mgr ? await readDaemonServeArgs(mgr) : null;
+  const token = await loadOrCreateToken(undefined);
+  const portless = args !== null && argsUsePortless(args);
+  const port = args === null ? null : portless ? await portlessAppPort() : portFromArgs(args);
+  const httpUp = args !== null && (await fetchDaemonVersion(port, token)) !== null;
+  const consoleUrl = portless ? await resolvedPortlessConsoleUrl(token) : null;
+  return { args, port, httpUp, token, consoleUrl };
 }
 
 /**
@@ -1423,7 +1454,8 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     const spawnHidden = findSpawnHiddenLauncher();
     // The command the manager launches: unchanged normally, or the launcher
     // followed by the real argv when interposing. Split into program + args for
-    // pm2 (which takes `<program> … -- <args>`); oxmgr takes the joined string.
+    // pm2 (which takes `<program> … -- <args>`); oxmgr takes it as one quoted
+    // string via oxmgrCmd (see there for why bare backslashes can't be used).
     const managedArgv = spawnHidden ? [spawnHidden, ...serveArgv] : serveArgv;
     // WebRTC daemons get an oxmgr health watchdog: the native WebRTC stack can
     // freeze the JS event loop (host answers nobody, no in-process timer can
@@ -1434,7 +1466,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       webrtcDaemon && mgr.id === "oxmgr"
         ? [
             "--health-cmd",
-            ayServeArgv(["healthcheck"]).join(" "),
+            oxmgrCmd(ayServeArgv(["healthcheck"])),
             "--health-interval",
             "10",
             "--health-timeout",
@@ -1448,7 +1480,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
         ? [
             mgr.bin,
             "start",
-            managedArgv.join(" "),
+            oxmgrCmd(managedArgv),
             "--name",
             DAEMON_NAME,
             "--restart",
@@ -1552,6 +1584,42 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
   return 1;
 }
 
+/**
+ * Content type for a `/vendor/<name>` console asset, or null when `name` is not
+ * one we ship. The set is the exact list index.html loads (see lab/ui/vendor/
+ * and #317): a request for anything else — a traversal attempt, a stray file
+ * in the directory — is a 404, never a read.
+ */
+export function vendorAssetType(name: string): string | null {
+  switch (name) {
+    case "xterm.min.css":
+      return "text/css; charset=utf-8";
+    case "xterm.min.js":
+    case "addon-fit.min.js":
+    case "addon-web-links.min.js":
+    case "addon-clipboard.min.js":
+      return "text/javascript; charset=utf-8";
+    default:
+      return null;
+  }
+}
+
+// How `ay serve status` should report the persisted share link. The link file
+// outlives the daemon config that minted it: `ay serve install` (no --share)
+// over an older --share install leaves ~/.agent-yes/.share-link in place while
+// nothing hosts that room any more. Printing it verbatim then reads as "this
+// link is live" — an operator opens it, sees "rooms offline / 0 agents", and
+// debugs the console instead of the daemon. Only a daemon registered WITH
+// --share/--webrtc can be hosting the room; anything else is `stale`.
+export function shareLinkStatus(
+  shareLink: string | null,
+  installed: boolean,
+  webrtcish: boolean,
+): { link: string | null; stale: boolean } {
+  if (!shareLink) return { link: null, stale: false };
+  return { link: shareLink, stale: installed && !webrtcish };
+}
+
 // ay serve status — report whether the server is installed as a daemon and/or
 // currently reachable, plus its mode, port, version, token, and share link.
 // Read-only: never mints a token or disturbs the daemon. `--json` for scripts.
@@ -1584,6 +1652,7 @@ async function cmdServeStatus(args: string[]): Promise<number> {
     httpish && token ? await probeDaemon(port, token) : { kind: "down" as const };
   const runningVersion = probe.kind === "ok" ? probe.version : null;
   const current = getInstalledPackage().version;
+  const share = shareLinkStatus(shareLink, installed, webrtcish);
 
   if (json) {
     process.stdout.write(
@@ -1606,7 +1675,10 @@ async function cmdServeStatus(args: string[]): Promise<number> {
           upToDate: runningVersion !== null && runningVersion === current,
           args: a,
           hasToken: !!token,
-          shareLink,
+          shareLink: share.link,
+          // true when the link file is left over from an earlier --share install
+          // and the registered daemon no longer hosts that room.
+          shareLinkStale: share.stale,
         },
         null,
         2,
@@ -1645,7 +1717,15 @@ async function cmdServeStatus(args: string[]): Promise<number> {
     );
   }
   w(`token:        ${token ?? "(none yet — created on first serve)"}`);
-  if (shareLink) w(`share link:   ${shareLink}`);
+  if (share.link) {
+    if (share.stale) {
+      w(`share link:   (stale) ${share.link}`);
+      w(`              the daemon runs without --share, so nothing hosts that room —`);
+      w(`              re-enable with:  ay serve install --share`);
+    } else {
+      w(`share link:   ${share.link}`);
+    }
+  }
   if (token && httpish) {
     w();
     if (local) w(`console:  ${localUrl}`);
@@ -1660,6 +1740,34 @@ async function cmdServeStatus(args: string[]): Promise<number> {
 // ---------------------------------------------------------------------------
 // ay serve
 // ---------------------------------------------------------------------------
+
+// Run `ayrs serve …` in the foreground with our stdio, forwarding the signals a
+// terminal sends us so Ctrl-C reaches the daemon (which closes its room peers)
+// and the manager's SIGTERM on `stop` isn't swallowed by the launcher.
+async function runAyrsServe(ayrs: string, argv: string[]): Promise<number> {
+  const child = Bun.spawn([ayrs, ...argv], {
+    stdio: ["inherit", "inherit", "inherit"],
+    env: process.env,
+    cwd: process.cwd(),
+  });
+  const forward = (sig: NodeJS.Signals) => () => {
+    try {
+      child.kill(sig);
+    } catch {
+      /* already gone */
+    }
+  };
+  const onInt = forward("SIGINT");
+  const onTerm = forward("SIGTERM");
+  process.on("SIGINT", onInt);
+  process.on("SIGTERM", onTerm);
+  try {
+    return await child.exited;
+  } finally {
+    process.off("SIGINT", onInt);
+    process.off("SIGTERM", onTerm);
+  }
+}
 
 export async function cmdServe(rest: string[]): Promise<number> {
   if (rest.includes("-h") || rest.includes("--help")) {
@@ -1676,6 +1784,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `                    The minted room persists in ~/.agent-yes/.share-room\n` +
         `                    (stable link across restarts; delete the file to rotate).\n` +
         `  --share [URL]     Legacy alias for --http --webrtc\n\n` +
+        `Runtime: like \`ay <cli>\`, the Rust daemon (ayrs serve) runs by default for\n` +
+        `  the flags it supports — --webrtc [webrtc://url], --port N, --sighost H.\n` +
+        `  Everything else (bare \`ay serve\`, --share/--http/--host/--tls-*, the\n` +
+        `  subcommands) runs the TypeScript server. --no-rust forces TypeScript.\n\n` +
         `Options:\n` +
         `  --port N          Bypass Portless and listen on a fixed HTTP port\n` +
         `  --host HOST       Interface to bind (default: 127.0.0.1; use 0.0.0.0 to expose)\n` +
@@ -1697,6 +1809,25 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  ay remote add <alias> http://<token>@<host>:<port>\n`,
     );
     return 0;
+  }
+
+  // Rust first, like `ay <cli>`: an invocation `ayrs serve` can express runs
+  // the Rust daemon; the rest stays here. See ts/serveRust.ts for the split.
+  // `--no-rust` is stripped for the parsers below either way.
+  {
+    const { planRustServe } = await import("./serveRust.ts");
+    const plan = planRustServe(rest);
+    if (plan.kind === "rust") {
+      const { findAyrsBinary } = await import("./rustBinary.ts");
+      const ayrs = findAyrsBinary();
+      if (ayrs) return runAyrsServe(ayrs, plan.argv);
+      process.stderr.write(
+        `ay serve: ayrs binary not found — running the TypeScript server ` +
+          `(bun run build:rs, or reinstall, to get the Rust daemon)\n`,
+      );
+    } else {
+      rest = plan.rest;
+    }
   }
 
   // Daemon subcommands
@@ -4970,6 +5101,17 @@ export async function cmdServe(rest: string[]): Promise<number> {
     if (req.method === "GET" && p === "/manifest.webmanifest")
       return serveUiFile("manifest.webmanifest", "application/manifest+json");
     if (req.method === "GET" && p === "/icon.svg") return serveUiFile("icon.svg", "image/svg+xml");
+    // Self-hosted xterm (lab/ui/vendor/*, #317). The page loads these
+    // same-origin and render-blocking, so a 401 here — which is what the
+    // token-gated API fallthrough returned — leaves the terminal pane on
+    // "connecting…" forever with `Terminal is not defined`. Allowlisted by
+    // basename (no directory walk): the CSS and the pinned xterm builds only.
+    if (req.method === "GET" && p.startsWith("/vendor/")) {
+      const name = p.slice("/vendor/".length);
+      const type = vendorAssetType(name);
+      if (type) return serveUiFile(`vendor/${name}`, type);
+      return new Response("not found", { status: 404 });
+    }
     if (req.method === "GET" && p === "/favicon.ico") return new Response(null, { status: 204 });
     if (p.startsWith("/cb/")) return handleCallback(req, p);
     // CORS-open the embeddable terminal routes (tail/size/send) so a cross-origin

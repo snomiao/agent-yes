@@ -701,6 +701,7 @@ clis:
             "auggie",
             "amp",
             "opencode",
+            "agy",
             "dsh",
             "dsh-tui",
             "dsh-legacy",

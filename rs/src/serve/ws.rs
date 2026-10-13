@@ -56,6 +56,22 @@ fn read_config() -> Value {
         .unwrap_or_else(|| json!({}))
 }
 
+/// Default for a plain agent spawn, matching the TS console host. This is
+/// separate from `ws_root()`, which controls provisioned repository checkouts.
+pub fn spawn_workspace() -> PathBuf {
+    spawn_workspace_from_config(&read_config())
+}
+
+fn spawn_workspace_from_config(config: &Value) -> PathBuf {
+    config
+        .get("workspace")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(expand_tilde)
+        .unwrap_or_else(home)
+}
+
 /// Workspace root: CODEHOST_WS_ROOT > config provisionRoot > ~/ws (the same
 /// chain ts/workspaceConfig.ts getProvisionRoot + provision's resolveWsRoot use).
 pub fn ws_root() -> PathBuf {
@@ -909,6 +925,37 @@ pub fn fork_worktree(from_cwd: &Path, branch: &str) -> Result<Provisioned, (u16,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_workspace_defaults_to_home() {
+        for config in [
+            json!({}),
+            json!({"workspace": ""}),
+            json!({"workspace": "  "}),
+            json!({"workspace": null}),
+        ] {
+            assert_eq!(spawn_workspace_from_config(&config), home());
+        }
+    }
+
+    #[test]
+    fn spawn_workspace_honors_config_separately_from_provision_root() {
+        assert_eq!(
+            spawn_workspace_from_config(
+                &json!({"workspace": " ~/projects ", "provisionRoot": "~/repos"})
+            ),
+            home().join("projects")
+        );
+        assert_eq!(
+            spawn_workspace_from_config(&json!({"provisionRoot": "~/repos"})),
+            home()
+        );
+        let absolute = std::env::temp_dir().join("spawn-workspace");
+        assert_eq!(
+            spawn_workspace_from_config(&json!({"workspace": absolute})),
+            absolute
+        );
+    }
 
     #[test]
     fn parse_source_github_first() {

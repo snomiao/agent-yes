@@ -32,6 +32,8 @@ shortcut that launches claude with no arguments.
 
 For the local web console, install [Portless](https://portless.sh/) once with `npm install -g portless`, then run `ay serve`. It assigns a free internal port and serves the console at `https://agent-yes.localhost/`. `ay serve --port N` remains available for a fixed-port API listener.
 
+Like `ay <cli>`, `ay serve` runs the Rust daemon (`ayrs serve`) by default for the flags it supports — `--webrtc [webrtc://url]`, `--port N`, `--sighost H`. The bare `ay serve` (Portless), `--share`, and the `install`/`status`/`logs` subcommands still run the TypeScript server; `--no-rust` (or `AGENT_YES_NO_RUST=1`) forces it for everything.
+
 ## Features
 
 - **Multi-CLI Support**: Works with Claude, Codex, Copilot, and Cursor CLI tools
@@ -142,6 +144,10 @@ ZAI_API_KEY=... glm-yes -- help me with this code
 # (https://github.com/earendil-works/pi)
 pi-yes -- refactor this module
 
+# Use Antigravity CLI (Google, Gemini-backed) — no *-yes bin, run it via ay
+# (https://antigravity.google/docs/cli/)
+ay agy -y -- refactor this module
+
 claude-yes "help me with this code"
 claude-yes "optimize performance"
 ```
@@ -158,7 +164,7 @@ claude-yes --exit-on-idle=60s "run all tests and commit current changes"
 claude-code-execute claude-yes "your task here"
 ```
 
-### Inspect and message running agents (`cy ls / read / send`)
+### Inspect and message running agents (`cy ls / tail / send`)
 
 From any terminal you can list and interact with agents that are already
 running on the machine — both TS- and Rust-spawned ones:
@@ -167,7 +173,9 @@ running on the machine — both TS- and Rust-spawned ones:
 cy ls                                  # list all running agents
 cy ls codex                            # filter (matches pid, cwd, cli, or prompt)
 cy tail <keyword>                      # render last 96 lines via @xterm/headless
-cy read <keyword>                      # full rendered log
+cy cat <keyword>                       # full rendered log
+ay read <keyword>                      # same, with pagination (--last/--range/…)
+                                       #   `read` is `ay`-only: `cy read foo.ts` is a prompt
 cy send <keyword> "next: run tests"    # append a prompt to that agent's stdin
 cy send <keyword> "" --code=ctrl-c     # send a Ctrl+C
 cy attach <keyword>                    # interactive attach (detach: Ctrl-\)
@@ -374,6 +382,7 @@ For deploying to cloud platforms like Google Cloud Run, AWS, Azure, see [Cloud D
 | Qwen             | `qwen`       | Alibaba's Qwen Code CLI            | `npm install -g @qwen-code/qwen-code@latest`        |
 | Auggie           | `auggie`     | Augment Code's Auggie CLI          | `npm install -g @augmentcode-inc/auggie-cli@latest` |
 | DeepSeek Harness | `dsh-legacy` | DeepSeek Harness (interactive TUI) | `npm install -g @deepseek-ai/dsh@latest`            |
+| Antigravity      | `agy`        | Google Antigravity CLI (Gemini)    | See https://antigravity.google/docs/cli/install/    |
 
 The tool will:
 

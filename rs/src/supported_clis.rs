@@ -24,6 +24,7 @@ pub const SUPPORTED_CLIS: &[&str] = &[
     "claude",
     "glm",
     "pi",
+    "agy",
     "codex",
     "codex-ds",
     "codex-ds-direct",

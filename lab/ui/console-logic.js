@@ -170,19 +170,27 @@ export function identContext(entries) {
   return { uniform, anyDevice };
 }
 
+// Per-field clip for the compact identity. Was 3, which turned every row into
+// an unreadable "sno/age/mai" — three-letter stubs distinguish nothing a human
+// can name, and the field-blanking below already removes what is uniform, so
+// what survives is exactly the part worth reading. 12 fits the common repo and
+// branch names whole ("agent-yes", "CapsLockX", "main") and still bounds a
+// long feature-branch name so the title column keeps its room.
+export const IDENT_CAP = 12;
+
 // Build an agent's compact identity against a precomputed identContext. Each
 // field is clipped to `cap` chars (compact one-liner) and BLANKED when uniform
 // across the list — but the separators (@ : / /) are kept so the string stays
-// machine-parseable: e.g. all on one device → "@:age/mai", a mixed-device list →
-// "sno@tak:age/mai". A purely local list (no devices anywhere) falls back to the
-// legacy "own/rep/bra" with no device prefix.
+// machine-parseable: e.g. all on one device → "@:agent-yes/main", a mixed-device
+// list → "sno@taka:agent-yes/main". A purely local list (no devices anywhere)
+// falls back to the legacy "owner/repo/branch" with no device prefix.
 //
 // `parent` is this row's tree parent entry (a subagent's superagent), when it
 // has one. A field that matches the parent's is ALSO blanked: the nesting
 // already conveys it, so a subagent in the same worktree as its parent shows
 // only what differs — often just the submodule leaf (e.g. "//→bot"), or nothing
 // at all (hidden by hasIdent) when it's the very same checkout.
-export function compactIdent(e, ctx, cap = 3, parent = null) {
+export function compactIdent(e, ctx, cap = IDENT_CAP, parent = null) {
   const m = identFields(e);
   const p = parent ? identFields(parent) : null;
   const clip = (s) => (cap && s.length > cap ? s.slice(0, cap) : s);
@@ -375,7 +383,66 @@ export function age(e, now = Date.now()) {
   const s = Math.max(0, (now - at) / 1000);
   if (s < 60) return Math.floor(s) + "s";
   if (s < 3600) return Math.floor(s / 60) + "m";
-  return Math.floor(s / 3600) + "h";
+  // Hours stop being a unit anyone converts in their head after a couple of
+  // days: "2196h" is a row that has been dead for three months, and the column
+  // exists so the eye can rank rows by recency. Days from 48h, weeks from 14d.
+  if (s < 48 * 3600) return Math.floor(s / 3600) + "h";
+  if (s < 14 * 86400) return Math.floor(s / 86400) + "d";
+  return Math.floor(s / (7 * 86400)) + "w";
+}
+
+// The gist of a spawn prompt for a one-line label: the `<ay-msg …>` provenance
+// envelope (which a spawned agent's prompt carries, see rs/src/pid_store.rs
+// wrap_spawn_prompt) is dropped so the header never becomes the title, then
+// the first non-blank line, clipped.
+export function promptGist(prompt, max = 120) {
+  let s = String(prompt || "").trim();
+  const m = /^<ay-msg [^\n]*>\n([\s\S]*?)\n<\/ay-msg [^\n]*>$/.exec(s);
+  if (m) s = m[1];
+  s = (s.split("\n").find((l) => l.trim()) || "").trim();
+  return s.length > max ? s.slice(0, max - 1) + "…" : s;
+}
+
+// One-line label for a row: what the agent is ABOUT, not what its footer says
+// this second. The CLI's own terminal title first (Claude Code sets it to the
+// conversation topic); then the operator's `ay note`; then the spawn prompt's
+// gist; and only then the transient status line. That last one used to be the
+// SECOND choice, so every agent without a title was labelled by whatever its
+// footer said when the list was drawn — "Cogitated for 1m 15s · done 9:15 PM",
+// "Remote Control not started here · …" — which says nothing about the task and
+// changes under the reader's eyes.
+//
+// `remembered` is the last non-transient title this page saw for the agent
+// (Claude alternates topic ↔ status in the title, so the topic was on screen a
+// moment ago); it outranks the prompt gist because it is the CLI's own, newer
+// summary of the conversation, and a human-launched session has no prompt.
+export function rowTitle(e, remembered = "") {
+  const title = (e.title || "").trim();
+  return (
+    (isTransientTitle(title) ? "" : title) ||
+    (e.note || "").trim() ||
+    String(remembered || "").trim() ||
+    promptGist(e.prompt) ||
+    title ||
+    (e.status_text || "").trim()
+  );
+}
+
+// Claude Code writes its terminal title from two different things: the
+// conversation topic ("✳ Agy install") and, while it works or right after, its
+// own status line — a spinner with a timer ("✽ Fiddle-faddling… (6m 50s · ↓
+// 11.8k token)"), a completion stamp ("✻ Cogitated for 1m 15s · done 9:15 PM"),
+// or the last assistant message ("● Remote Control not started here · …").
+// The latter say nothing about the task and change under the reader's eyes, so
+// rowTitle only lets them win when nothing better exists. Recognised by shape,
+// not by verb list — the verbs are random.
+export function isTransientTitle(t) {
+  const s = String(t || "");
+  return (
+    /·\s*done\b/.test(s) || // "… for 1m 15s · done 9:15 PM"
+    /…\s*\(\d+[smh]/.test(s) || // "Verb… (6m 50s · …)"
+    /^[✳✻✽]?\s*●\s/.test(s) // "● <assistant message>"
+  );
 }
 
 // Filter predicate: every space-separated token must match. A `key:value` token
@@ -642,8 +709,7 @@ export function layeredRows(entries) {
     for (const [src, pe] of peerGroups) {
       const agentNodes = agentForestNodes(pe).map(toAgentNode);
       const host = pe[0]?._host || "";
-      const label =
-        host && labelCounts.get(host) > 1 ? `${host} (${String(src).slice(-6)})` : host;
+      const label = host && labelCounts.get(host) > 1 ? `${host} (${String(src).slice(-6)})` : host;
       if (multiPeer && label)
         underRoom.push({ kind: "peer", label, room: rid, host, src, children: agentNodes });
       else underRoom.push(...agentNodes); // single/unlabelled peer hidden

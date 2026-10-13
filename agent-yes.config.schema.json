@@ -33,6 +33,7 @@
         "auggie": { "$ref": "#/definitions/AgentCliConfig" },
         "amp": { "$ref": "#/definitions/AgentCliConfig" },
         "opencode": { "$ref": "#/definitions/AgentCliConfig" },
+        "agy": { "$ref": "#/definitions/AgentCliConfig" },
         "dsh": { "$ref": "#/definitions/AgentCliConfig" },
         "dsh-tui": { "$ref": "#/definitions/AgentCliConfig" },
         "dsh-legacy": { "$ref": "#/definitions/AgentCliConfig" }

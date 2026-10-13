@@ -6,6 +6,15 @@ set -e
 # enforces runs locally before the push leaves your machine. Use
 # `git push --no-verify` only as a deliberate escape hatch (e.g. a host too
 # CPU-oversubscribed to finish the suite) — CI is still authoritative.
+
+# Run from a linked worktree, git hands this hook GIT_DIR pointing at the REAL
+# repo. Specs that build scratch repos (`git init`/`commit`/`worktree add` in a
+# temp dir) inherit it and mutate the real repo instead: stray commits on the
+# branch being pushed, stray branches/worktrees, even core.bare=true. Nothing
+# below needs them — git resolves the repo from the hook's cwd — so drop every
+# repo-local git variable (`git rev-parse --local-env-vars`).
+unset $(git rev-parse --local-env-vars)
+
 echo "[pre-push] running full test + coverage gate"
 bun run test:coverage
 

@@ -235,6 +235,28 @@ export function findTrayLauncher(): string | undefined {
 }
 
 /**
+ * Locate the `ayrs` binary (the Rust `serve` daemon). Same install shapes as
+ * the agent runtime — a dev `rs/target` build, the downloaded release bin dir
+ * (CI ships ayrs in every platform bundle since #473), or `~/.cargo/bin` on
+ * PATH after `bun run build:rs`. Undefined when absent (an older release, or a
+ * platform whose bundle predates it) — callers fall back to the TS server.
+ */
+export function findAyrsBinary(): string | undefined {
+  const exe = process.platform === "win32" ? "ayrs.exe" : "ayrs";
+  const dir = import.meta.dirname ?? import.meta.dir;
+  const searchPaths = [
+    path.resolve(dir, `../rs/target/release/${exe}`),
+    path.resolve(dir, `../rs/target/debug/${exe}`),
+    path.join(getBinDir(), exe),
+    Bun.which("ayrs") ?? "",
+  ];
+  for (const p of searchPaths) {
+    if (p && existsSync(p)) return p;
+  }
+  return undefined;
+}
+
+/**
  * Get GitHub release download URL for the binary
  */
 export function getDownloadUrl(version = "latest"): string {
@@ -359,12 +381,28 @@ function getRustBinaryVersion(binaryPath: string): string | null {
 }
 
 /**
+ * Locate a local dev build from its binary path: `<rsDir>/target/{release,debug}/agent-yes[.exe]`.
+ * Accepts both `/` and `\` separators — `path.resolve` yields backslashes on
+ * Windows, and a `/`-only match silently disabled the auto-rebuild there (the
+ * stale `target/release` exe then kept shipping bugs already fixed on main).
+ * Returns undefined for a downloaded/cached (non-dev) binary.
+ */
+export function devBuildInfo(
+  binaryPath: string,
+): { rsDir: string; isRelease: boolean } | undefined {
+  const m = binaryPath.match(/^(.*)[\\/]target[\\/](release|debug)[\\/]agent-yes(?:\.exe)?$/);
+  if (!m) return undefined;
+  return { rsDir: m[1]!, isRelease: m[2] === "release" };
+}
+
+/**
  * Check if a binary path is inside a git repo (dev build), and rebuild if outdated.
  * Returns the same path if up-to-date or rebuilt, undefined if rebuild failed.
  */
 function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
   // Only auto-rebuild for local dev builds (target/release or target/debug)
-  if (!binaryPath.includes("/target/release") && !binaryPath.includes("/target/debug")) {
+  const dev = devBuildInfo(binaryPath);
+  if (!dev) {
     return true; // not a dev build, skip
   }
 
@@ -379,7 +417,7 @@ function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
   }
 
   // Find the rs/ directory relative to the binary (binary is at rs/target/release/agent-yes)
-  const rsDir = binaryPath.replace(/\/target\/(release|debug)\/agent-yes.*$/, "");
+  const { rsDir, isRelease } = dev;
   if (!existsSync(path.join(rsDir, "Cargo.toml"))) {
     if (verbose) console.log(`[rust] Cannot find Cargo.toml at ${rsDir}, skipping rebuild`);
     return true; // can't rebuild, use as-is
@@ -390,7 +428,6 @@ function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
   );
 
   try {
-    const isRelease = binaryPath.includes("/target/release");
     const args = ["build", ...(isRelease ? ["--release"] : [])];
     execFileSync("cargo", args, {
       cwd: rsDir,
@@ -406,6 +443,27 @@ function autoRebuildIfOutdated(binaryPath: string, verbose: boolean): boolean {
   } catch {
     process.stderr.write(`\x1b[31m[rust] Auto-rebuild failed, using outdated binary\x1b[0m\n`);
     return true; // still usable, just old
+  }
+}
+
+/**
+ * macOS only: does `binaryPath` carry a code signature the kernel will accept?
+ *
+ * On Apple Silicon an arm64 Mach-O with no (or a broken) signature is SIGKILLed
+ * at exec — no stderr, just exit 137 — so a cached download damaged on disk
+ * makes every `ay <cli>` die silently right after the version banner. Release
+ * binaries are linker-signed (ad-hoc), so `codesign --verify` passing is the
+ * cheap "will this even start" check. Off macOS, or when `codesign` itself is
+ * unavailable, report valid: never block a run on the probe.
+ */
+export function hasValidMacSignature(binaryPath: string): boolean {
+  if (process.platform !== "darwin") return true;
+  try {
+    execFileSync("codesign", ["--verify", binaryPath], { timeout: 10_000, stdio: "ignore" });
+    return true;
+  } catch (err) {
+    // ENOENT → no codesign on this machine; can't tell, so don't block.
+    return (err as NodeJS.ErrnoException)?.code === "ENOENT";
   }
 }
 
@@ -439,7 +497,16 @@ export async function getRustBinary(
   // First try to find existing binary
   if (!forceDownload) {
     const existing = findRustBinary(verbose);
-    if (existing) {
+    if (existing && !devBuildInfo(existing) && !hasValidMacSignature(existing)) {
+      // A downloaded binary macOS would SIGKILL on exec: drop it and fall
+      // through to a fresh download instead of dying silently.
+      process.stderr.write(
+        `\x1b[33m[rust] Cached binary has an invalid code signature, re-downloading: ${existing}\x1b[0m\n`,
+      );
+      try {
+        unlinkSync(existing);
+      } catch {}
+    } else if (existing) {
       if (verbose) {
         console.log(`[rust] Using existing binary: ${existing}`);
       }

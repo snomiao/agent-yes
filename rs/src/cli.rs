@@ -28,7 +28,6 @@ pub const SUBCOMMANDS: &[&str] = &[
     "result",
     "notify",
     "notifyd",
-    "read",
     "cat",
     "tail",
     "head",
@@ -64,14 +63,22 @@ pub const SUBCOMMANDS: &[&str] = &[
     "help",
 ];
 
-/// Subcommands reserved for the generic manager entry (`ay`/`agent-yes`), not a
-/// cli-bound alias like `cy`. Mirrors `MANAGER_SUBCOMMANDS` in ts/subcommands.ts.
-pub const MANAGER_SUBCOMMANDS: &[&str] = &["setup", "ws"];
+/// Subcommands recognised only on the generic manager entry (`ay`/`agent-yes`),
+/// not on a cli-bound alias like `cy`. Two reasons a name lands here: it manages
+/// the host (`setup`, `ws`), or it is an ordinary English verb people open prompts
+/// with (`read`, `share`, `connect` — `cy read src/main.rs and explain it` and
+/// `cy connect the frontend to the API` must reach the agent; the commands stay
+/// on the manager entry). Mirrors `MANAGER_SUBCOMMANDS` in ts/subcommands.ts.
+pub const MANAGER_SUBCOMMANDS: &[&str] = &[
+    // manage this host
+    "setup", "ws", // prompt-word verbs
+    "read", "share", "connect",
+];
 
 /// Whether `name` is a management subcommand. `manager_commands` (true for the
 /// generic `ay`/`agent-yes` entry) additionally admits manager-only commands
-/// like `setup`; false for a cli-bound alias (cy/claude-yes/…) so those names
-/// fall through to running the agent. Mirrors `isSubcommand` in ts/subcommands.ts.
+/// (`setup`, `ws`, `read`); false for a cli-bound alias (cy/claude-yes/…) so those
+/// names fall through to running the agent. Mirrors `isSubcommand` in ts/subcommands.ts.
 pub fn is_subcommand(name: &str, manager_commands: bool) -> bool {
     SUBCOMMANDS.contains(&name) || (manager_commands && MANAGER_SUBCOMMANDS.contains(&name))
 }
@@ -552,6 +559,19 @@ mod tests {
         // cli-bound alias like `cy` (there it's a prompt word).
         assert!(is_subcommand("setup", true));
         assert!(!is_subcommand("setup", false));
+        // Same for the prompt-word verbs: `ay read <keyword>` pages a log and
+        // `ay connect <url>` saves a remote, while `cy read foo.rs` / `cy connect
+        // the frontend to the API` are prompt text and must not be swallowed.
+        for sub in ["read", "share", "connect"] {
+            assert!(is_subcommand(sub, true), "ay {sub} is a subcommand");
+            assert!(!is_subcommand(sub, false), "cy {sub} is prompt text");
+            assert!(should_delegate(sub, "ay"));
+            assert!(!should_delegate(sub, "cy"));
+            assert!(!should_delegate(sub, "claude-yes"));
+        }
+        // Their siblings stay universal — nobody opens a prompt with `cat`/`tail`.
+        assert!(is_subcommand("cat", false));
+        assert!(is_subcommand("tail", false));
     }
 
     #[test]
@@ -757,10 +777,10 @@ mod tests {
 
     #[test]
     fn test_supported_clis_count() {
-        assert_eq!(SUPPORTED_CLIS.len(), 19);
+        assert_eq!(SUPPORTED_CLIS.len(), 20);
         // The claude-compatible providers (run the `claude` binary via env) must
         // be present, else their `*-yes` bins fail validation in the Rust runtime.
-        for cli in ["glm", "pi"] {
+        for cli in ["glm", "pi", "agy"] {
             assert!(SUPPORTED_CLIS.contains(&cli), "missing {cli}");
         }
         // Each listed CLI must resolve to a real config (catches a name in this

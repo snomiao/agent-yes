@@ -4,9 +4,12 @@ import {
   installerArgv,
   probeDaemon,
   isNoNodeExecError,
+  oxmgrCmd,
   oxmgrVersionHasWindowsFix,
   parseGitUrl,
   portlessConsoleUrl,
+  shareLinkStatus,
+  vendorAssetType,
 } from "./serve.ts";
 
 describe("portlessConsoleUrl", () => {
@@ -204,7 +207,10 @@ describe("probeDaemon", () => {
     });
     const port = await listen(srv);
     try {
-      expect(await probeDaemon(port, "tok", 5000)).toEqual({ kind: "ok", version: "9.9.9" });
+      expect(await probeDaemon(port, "tok", 5000)).toEqual({
+        kind: "ok",
+        version: "9.9.9",
+      });
     } finally {
       srv.close();
     }
@@ -212,5 +218,69 @@ describe("probeDaemon", () => {
 
   it("treats a null port as down without dialling", async () => {
     expect((await probeDaemon(null, "tok", 1)).kind).toBe("down");
+  });
+});
+
+// `ay serve status` reads ~/.agent-yes/.share-link, which outlives the daemon
+// config that minted it: reinstalling without --share leaves the file behind
+// while nothing hosts the room. The link must then be flagged stale, not shown
+// as if it were live.
+describe("shareLinkStatus", () => {
+  const link = "https://agent-yes.com/w/#r111111:e1.aaaa";
+  it("reports a link as live when the registered daemon shares", () => {
+    expect(shareLinkStatus(link, true, true)).toEqual({ link, stale: false });
+  });
+  it("flags the link stale when the daemon is installed without --share/--webrtc", () => {
+    expect(shareLinkStatus(link, true, false)).toEqual({ link, stale: true });
+  });
+  it("does not call it stale when no daemon is registered (a foreground serve may host it)", () => {
+    expect(shareLinkStatus(link, false, false)).toEqual({ link, stale: false });
+  });
+  it("returns no link when the file is absent", () => {
+    expect(shareLinkStatus(null, true, false)).toEqual({
+      link: null,
+      stale: false,
+    });
+  });
+});
+
+// oxmgr takes its command as ONE string and shell-splits it, treating `\` as
+// an escape: an unquoted Windows path lost every separator on the way in
+// (`C:\Users\…\ay.exe` → `C:Users…ay.exe` → "failed to spawn"). Quoting is what
+// suppresses that, so every arg carrying a backslash, whitespace or a quote
+// must be double-quoted; plain args stay bare.
+describe("oxmgrCmd", () => {
+  it("quotes args with backslashes or spaces and leaves plain ones bare", () => {
+    expect(oxmgrCmd([String.raw`C:\x\ay.exe`, "serve", "--share"])).toBe(
+      String.raw`"C:\x\ay.exe" serve --share`,
+    );
+    expect(oxmgrCmd(["/usr/bin/bun", "/x/a b/ay", "serve"])).toBe('/usr/bin/bun "/x/a b/ay" serve');
+  });
+  it("escapes an embedded double quote inside a quoted arg", () => {
+    expect(oxmgrCmd(['say "hi"'])).toBe(String.raw`"say \"hi\""`);
+  });
+});
+
+// The console self-hosts xterm from ./vendor/ (#317), but the TS daemon's
+// static allowlist never routed /vendor/*, so those render-blocking scripts
+// fell through to the token-gated API and came back 401 — the terminal pane
+// sat on "connecting…" with `Terminal is not defined`. Exactly the shipped
+// files are served; anything else (a traversal, a stray file) is a 404.
+describe("vendorAssetType", () => {
+  it("types the pinned xterm builds the page loads", () => {
+    expect(vendorAssetType("xterm.min.css")).toBe("text/css; charset=utf-8");
+    for (const js of [
+      "xterm.min.js",
+      "addon-fit.min.js",
+      "addon-web-links.min.js",
+      "addon-clipboard.min.js",
+    ]) {
+      expect(vendorAssetType(js)).toBe("text/javascript; charset=utf-8");
+    }
+  });
+  it("refuses anything that is not a shipped vendor asset", () => {
+    expect(vendorAssetType("../index.html")).toBeNull();
+    expect(vendorAssetType("xterm.min.js.map")).toBeNull();
+    expect(vendorAssetType("")).toBeNull();
   });
 });

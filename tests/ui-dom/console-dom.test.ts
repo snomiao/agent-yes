@@ -80,15 +80,16 @@ describe("console DOM behaviour", () => {
     close?.();
   });
 
-  it("renders one compact row per agent; identity capped to 3, default claude omitted", async () => {
+  it("renders one compact row per agent; identity readable in full, default claude omitted", async () => {
     const { ctx, page } = await openConsole(browser, url);
     try {
       // Since #268 the compact list is the ONLY view — every row is a .crow.
       expect(await page.locator(".list .row.crow").count()).toBe(3);
-      // All local (no devices) → path-only identity owner/repo/branch, each ≤3 chars.
+      // All local (no devices) → path-only identity owner/repo/branch. Fields are
+      // shown whole (IDENT_CAP, not the old 3-char stubs that read "sno/age/mai").
       const idents = await page.locator(".crow .cident").allInnerTexts();
-      expect(idents).toContain("sno/age/mai"); // snomiao/agent-yes/main
-      expect(idents).toContain("acm/wid/dev"); // acme/widgets/dev
+      expect(idents).toContain("snomiao/agent-yes/main");
+      expect(idents).toContain("acme/widgets/dev");
       // codex row shows its cli; default-claude rows never say "claude"
       const names = await page.locator(".crow .cname").allInnerTexts();
       expect(names).toEqual(["codex"]);

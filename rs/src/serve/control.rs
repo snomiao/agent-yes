@@ -17,8 +17,9 @@ pub use crate::supported_clis::SUPPORTED_CLIS;
 ///
 /// A detached daemon (launchd/systemd) has a PATH WITHOUT ~/.bun/bin and
 /// ~/.cargo/bin, so a bare "ay" fails with "Executable not found" — the exact
-/// error the console used to surface on restart. Prefer this process's own
-/// binary (always present, since the daemon IS agent-yes), then PATH.
+/// error the console used to surface on restart. Prefer the sibling wrapper,
+/// then the same recovered shell PATH used to launch children. Cache installs
+/// may contain only `ayrs`, so the sibling is not guaranteed to exist.
 fn ay_bin() -> Option<std::path::PathBuf> {
     if let Ok(exe) = std::env::current_exe() {
         // `ayrs` and `agent-yes` are installed side by side by `cargo install`.
@@ -33,14 +34,19 @@ fn ay_bin() -> Option<std::path::PathBuf> {
             }
         }
     }
-    which_in_path("ay").or_else(|| which_in_path("agent-yes"))
+    super::shell_env::login_shell_env()
+        .and_then(|env| env.get("PATH"))
+        .and_then(|path| ay_on_path(std::ffi::OsStr::new(path)))
+        .or_else(|| std::env::var_os("PATH").and_then(|path| ay_on_path(&path)))
 }
 
-fn which_in_path(name: &str) -> Option<std::path::PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|d| d.join(name))
-        .find(|p| p.is_file())
+fn ay_on_path(path: &std::ffi::OsStr) -> Option<std::path::PathBuf> {
+    ["ay", "agent-yes"].into_iter().find_map(|name| {
+        let name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+        std::env::split_paths(path)
+            .map(|d| d.join(&name))
+            .find(|p| p.is_file())
+    })
 }
 
 /// Launch a detached, fully orphaned child that outlives this request AND is
@@ -272,6 +278,8 @@ pub fn kill(body: &str) -> super::api::ApiResponse {
         Ok(r) => r,
         Err(e) => return bad(404, e),
     };
+    // Only the unix block below pushes into it (Windows 501s above).
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut killed: Vec<String> = Vec::new();
     #[cfg(unix)]
     {
@@ -496,15 +504,12 @@ pub fn spawn(body: &str) -> super::api::ApiResponse {
             Err((code, msg)) => return bad(code, msg),
         }
     } else {
-        let plain = b
-            .get("cwd")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim()
-            .to_string();
-        if plain.is_empty() {
-            return bad(400, "missing cwd");
-        }
+        let requested = b.get("cwd").and_then(|v| v.as_str()).unwrap_or("").trim();
+        let plain = if requested.is_empty() {
+            super::ws::spawn_workspace().to_string_lossy().into_owned()
+        } else {
+            requested.to_string()
+        };
         // mkdir -p so a not-yet-created workspace folder doesn't ENOENT the spawn.
         if let Err(e) = std::fs::create_dir_all(&plain) {
             return bad(400, format!("cannot create cwd {plain}: {e}"));
@@ -557,9 +562,8 @@ mod tests {
     }
 
     #[test]
-    fn spawn_rejects_unknown_cli_and_missing_cwd() {
+    fn spawn_rejects_unknown_cli() {
         assert_eq!(spawn(r#"{"cli":"nope","cwd":"/tmp"}"#).status, 400);
-        assert_eq!(spawn(r#"{"cli":"claude"}"#).status, 400);
     }
 
     #[test]

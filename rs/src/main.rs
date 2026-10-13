@@ -214,13 +214,27 @@ async fn main() -> Result<()> {
     std::process::exit(exit_code);
 }
 
-async fn run_agent(args: CliArgs, cwd: &str) -> Result<i32> {
+async fn run_agent(mut args: CliArgs, cwd: &str) -> Result<i32> {
     use crate::config::get_runtime_cli_config;
     use crate::context::AgentContext;
     use crate::pid_store::PidStore;
     use crate::pty_spawner::spawn_agent;
 
     let cli_config = get_runtime_cli_config(&args.cli)?;
+
+    // Wrap the initial spawn prompt in the same nonce-tagged `<ay-msg …>`
+    // provenance envelope that `ay send` applies, when this agent was spawned BY
+    // another agent — so a child can authenticate its bootstrap prompt, the one
+    // message that establishes its threat model for the parent. No-op for a
+    // top-level (human-launched) agent or a slash command; see
+    // pid_store::wrap_spawn_prompt. Skipped for shell CLIs ("typed"): their prompt
+    // is a command typed into an interactive shell, and `<ay-msg …>` tags would be
+    // executed as a command rather than read as provenance.
+    if cli_config.prompt_arg != "typed" {
+        if let Some(prompt) = args.prompt.take() {
+            args.prompt = Some(crate::pid_store::wrap_spawn_prompt(&prompt));
+        }
+    }
 
     // Pre-flight: make sure the wrapped CLI is actually installed before we
     // enter the spawn/restart loop. A missing CLI otherwise produces an endless

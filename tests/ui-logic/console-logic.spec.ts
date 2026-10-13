@@ -44,6 +44,9 @@ import {
   createInputSender,
   createFrameScheduler,
   createSettledFrameScheduler,
+  isTransientTitle,
+  promptGist,
+  rowTitle,
 } from "../../lab/ui/console-logic.js";
 
 describe("createFrameScheduler", () => {
@@ -243,8 +246,8 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
     const list = [agent(), agent({ cwd: "/x/me/widgets/tree/dev" })];
     const ctx = identContext(list);
     expect(ctx.anyDevice).toBe(false);
-    expect(compactIdent(list[0], ctx)).toBe("sno/age/mai");
-    expect(compactIdent(list[1], ctx)).toBe("me/wid/dev");
+    expect(compactIdent(list[0], ctx)).toBe("snomiao/agent-yes/main");
+    expect(compactIdent(list[1], ctx)).toBe("me/widgets/dev");
   });
   it("all on one device: device blanked but @ : kept", () => {
     const list = [
@@ -252,8 +255,8 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
       agent({ _host: "sno@taka", cwd: "/x/me/widgets/tree/dev" }),
     ];
     const ctx = identContext(list);
-    expect(compactIdent(list[0], ctx)).toBe("@:sno/age/mai");
-    expect(compactIdent(list[1], ctx)).toBe("@:me/wid/dev");
+    expect(compactIdent(list[0], ctx)).toBe("@:snomiao/agent-yes/main");
+    expect(compactIdent(list[1], ctx)).toBe("@:me/widgets/dev");
   });
   it("mixed devices: device shown and capped; uniform user blanked", () => {
     const list = [
@@ -261,16 +264,16 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
       agent({ _host: "sno@beelink", cwd: "/x/me/widgets/tree/dev" }),
     ];
     const ctx = identContext(list);
-    // user "sno" is uniform → blanked; host differs → shown, capped to 3.
-    expect(compactIdent(list[0], ctx)).toBe("@tak:sno/age/mai");
-    expect(compactIdent(list[1], ctx)).toBe("@bee:me/wid/dev");
+    // user "sno" is uniform → blanked; host differs → shown.
+    expect(compactIdent(list[0], ctx)).toBe("@taka:snomiao/agent-yes/main");
+    expect(compactIdent(list[1], ctx)).toBe("@beelink:me/widgets/dev");
   });
   it("uniform owner blanked in a local list (separators kept)", () => {
     const list = [agent(), agent({ cwd: "/home/u/ws/snomiao/widgets/tree/dev" })];
     const ctx = identContext(list);
     // same owner snomiao → blanked; repo/branch differ.
-    expect(compactIdent(list[0], ctx)).toBe("/age/mai");
-    expect(compactIdent(list[1], ctx)).toBe("/wid/dev");
+    expect(compactIdent(list[0], ctx)).toBe("/agent-yes/main");
+    expect(compactIdent(list[1], ctx)).toBe("/widgets/dev");
   });
   it("uniform repo blanked while branch differs (separators preserved)", () => {
     const list = [
@@ -279,8 +282,19 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
     ];
     const ctx = identContext(list);
     // owner+repo uniform → blanked; user+host+branch differ.
-    expect(compactIdent(list[0], ctx)).toBe("a@h1://mai");
+    expect(compactIdent(list[0], ctx)).toBe("a@h1://main");
     expect(compactIdent(list[1], ctx)).toBe("b@h2://dev");
+  });
+  it("clips a field longer than the cap, so a long branch name cannot crowd the title", () => {
+    const list = [
+      agent({ cwd: "/x/me/repo/tree/feature-very-long-branch-name" }),
+      agent({ cwd: "/x/me/repo/tree/main" }),
+    ];
+    const ctx = identContext(list);
+    expect(compactIdent(list[0], ctx)).toBe("//feature-very");
+    expect(compactIdent(list[1], ctx)).toBe("//main");
+    // The legacy 3-char stub is still reachable for callers that ask for it.
+    expect(compactIdent(list[0], ctx, 3)).toBe("//fea");
   });
   it("appends a submodule leaf with → when the cwd is nested", () => {
     const list = [
@@ -344,8 +358,18 @@ describe("layeredRows parentEntry", () => {
 // Identity is the source; the label is only for reading.
 describe("layeredRows peer grouping with duplicate device labels", () => {
   const onEach = () => [
-    { ...agent({ pid: 100, wrapper_pid: 100 }), _room: "r1", _src: "r1/peerAAA111", _host: "u@box" },
-    { ...agent({ pid: 200, wrapper_pid: 200 }), _room: "r1", _src: "r1/peerBBB222", _host: "u@box" },
+    {
+      ...agent({ pid: 100, wrapper_pid: 100 }),
+      _room: "r1",
+      _src: "r1/peerAAA111",
+      _host: "u@box",
+    },
+    {
+      ...agent({ pid: 200, wrapper_pid: 200 }),
+      _room: "r1",
+      _src: "r1/peerBBB222",
+      _host: "u@box",
+    },
   ];
 
   it("keeps two same-labelled machines as separate peer groups", () => {
@@ -495,6 +519,63 @@ describe("gitLabel", () => {
   });
 });
 
+// The row label must say what the agent is ABOUT. The transient status line
+// ("Cogitated for 1m 15s · done 9:15 PM") used to win over the spawn prompt for
+// every agent without a terminal title, so the list was full of footers.
+describe("rowTitle", () => {
+  it("prefers title, then note, then the prompt gist, then the status line", () => {
+    const base = {
+      title: "",
+      note: "",
+      prompt: "install the antigravity for me in cli",
+      status_text: "Cogitated for 1m 15s · done 9:15 PM",
+    };
+    expect(rowTitle(agent({ ...base, title: "Agy install" }))).toBe("Agy install");
+    expect(rowTitle(agent({ ...base, note: "left lane" }))).toBe("left lane");
+    expect(rowTitle(agent(base))).toBe("install the antigravity for me in cli");
+    expect(rowTitle(agent({ ...base, prompt: "" }))).toBe("Cogitated for 1m 15s · done 9:15 PM");
+    expect(rowTitle(agent({ ...base, prompt: "", status_text: "  " }))).toBe("");
+  });
+  it("demotes a title that is really Claude's status line, keeping it as last resort", () => {
+    // Claude Code writes its own spinner / completion stamp / last message into
+    // the terminal title; those must not outrank the prompt.
+    for (const t of [
+      "✻ Cogitated for 1m 15s · done 9:15 PM",
+      "✽ Fiddle-faddling… (6m 50s · ↓ 11.8k token )",
+      "● Remote Control not started here · another Claude Code on this machine",
+    ]) {
+      expect(isTransientTitle(t)).toBe(true);
+      expect(rowTitle(agent({ title: t, prompt: "do the supervised swap now" }))).toBe(
+        "do the supervised swap now",
+      );
+      expect(rowTitle(agent({ title: t, prompt: "", status_text: "" }))).toBe(t);
+      // The topic the page saw a moment ago beats both the prompt and the status.
+      expect(rowTitle(agent({ title: t, prompt: "do the swap" }), "✳ Agy install")).toBe(
+        "✳ Agy install",
+      );
+    }
+    for (const t of ["✳ Agy install", "Webcode service", "fix the done handler · v2"]) {
+      expect(isTransientTitle(t)).toBe(false);
+      expect(rowTitle(agent({ title: t, prompt: "ignored" }))).toBe(t);
+    }
+  });
+});
+
+describe("promptGist", () => {
+  it("drops the ay-msg envelope a spawned agent's prompt carries", () => {
+    const p =
+      '<ay-msg 0a1b2c3d from claude alice@box:~/repo/alpha:main#1111 — reply: ay send ab12 "...">\n' +
+      "build the thing\n" +
+      "</ay-msg 0a1b2c3d>";
+    expect(promptGist(p)).toBe("build the thing");
+  });
+  it("takes the first non-blank line and clips long ones", () => {
+    expect(promptGist("\n\n  second para first line\nmore")).toBe("second para first line");
+    expect(promptGist("x".repeat(200), 20)).toBe("x".repeat(19) + "…");
+    expect(promptGist(null)).toBe("");
+  });
+});
+
 describe("age", () => {
   const now = 1_000_000_000_000;
   it("returns empty without a start time", () => {
@@ -504,6 +585,13 @@ describe("age", () => {
     expect(age(agent({ started_at: now - 5_000 }), now)).toBe("5s");
     expect(age(agent({ started_at: now - 5 * 60_000 }), now)).toBe("5m");
     expect(age(agent({ started_at: now - 3 * 3_600_000 }), now)).toBe("3h");
+  });
+  it("switches to days after 48h and weeks after 14d instead of piling up hours", () => {
+    expect(age(agent({ started_at: now - 47 * 3_600_000 }), now)).toBe("47h");
+    expect(age(agent({ started_at: now - 48 * 3_600_000 }), now)).toBe("2d");
+    expect(age(agent({ started_at: now - 13 * 86_400_000 }), now)).toBe("13d");
+    expect(age(agent({ started_at: now - 14 * 86_400_000 }), now)).toBe("2w");
+    expect(age(agent({ started_at: now - 2196 * 3_600_000 }), now)).toBe("13w"); // was "2196h"
   });
   it("clamps a future start time to 0s instead of going negative", () => {
     expect(age(agent({ started_at: now + 10_000 }), now)).toBe("0s");

@@ -75,6 +75,9 @@ export default defineConfig({
         // `ay callback` CLI + store IO — thin shell over callbackCore.ts (which
         // IS covered); the mint path needs a live agent record and daemon URL.
         "ts/callback.ts",
+        // `ay share` CLI shell — TTY prompts, daemon install and spawning
+        // tailscale/portless; its logic lives in shareCore.ts (covered).
+        "ts/shareCmd.ts",
         // `ay ch` CLI shell — a thin dispatcher over the fully-covered channels
         // core (ts/channels/*, unit-tested in ts/channels/*.spec.ts) plus a
         // signal-driven `tail -f` follow loop and TTY/stderr branches that are

@@ -6,6 +6,7 @@ const SUPPORTED_CLIS = [
   "claude",
   "glm",
   "pi",
+  "agy",
   "codex",
   "copilot",
   "cursor",

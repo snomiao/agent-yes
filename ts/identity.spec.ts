@@ -94,14 +94,17 @@ describe("formatIdentity", () => {
   it("renders user@host:path:branch#pid", async () => {
     const repo = await gitFixture("fmt", "ref: refs/heads/main\n");
     const id = formatIdentity({ user: "sno", host: "Mac", cwd: repo, pid: 30402 });
-    expect(id).toBe(`sno@Mac:${repo}:main#30402`);
+    // formatIdentity tildifies the cwd, so expect the same abbreviation the
+    // production path applies — on Windows %TEMP% lives under the home dir, so
+    // the fixture path itself comes out as `~\AppData\…`.
+    expect(id).toBe(`sno@Mac:${tildify(repo)}:main#30402`);
   });
 
   it("omits the branch segment outside a repo", async () => {
     const plain = path.join(root, "nofmt");
     await mkdir(plain, { recursive: true });
     const id = formatIdentity({ user: "sno", host: "Mac", cwd: plain, pid: 7 });
-    expect(id).toBe(`sno@Mac:${plain}#7`);
+    expect(id).toBe(`sno@Mac:${tildify(plain)}#7`);
   });
 
   it("accepts an explicit branch (and null to suppress detection)", () => {

@@ -77,3 +77,9 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
         run: npx --yes wrangler@4 deploy
+      # The guard for this workflow's own worst failure: both prod incidents so
+      # far deployed the WRONG (older) commit and reported success, so a green
+      # run here has never meant the site is current. Now it does.
+      - name: Assert prod serves this commit
+        working-directory: lab/ui/cf
+        run: sh ./assert-deployed.sh https://agent-yes.com "$(git rev-parse HEAD)"

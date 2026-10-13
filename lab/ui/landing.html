@@ -187,6 +187,79 @@
         font-size: 13px;
         margin-top: 10px;
       }
+      /* ── Connect Now panel ────────────────────────────────────────────────
+         Revealed in place when the visitor asks to connect: the paste-able
+         commands for a freshly minted room, plus the console hand-off. Hidden
+         until then so the hero stays two decisions wide. */
+      #pair[hidden] {
+        display: none;
+      }
+      #pair {
+        margin: 20px 0 0;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 16px 18px;
+      }
+      #pair h3 {
+        margin: 0 0 4px;
+        font-size: 15px;
+      }
+      #pair .step {
+        color: var(--muted);
+        font-size: 13px;
+        margin: 0 0 10px;
+      }
+      .cmd {
+        position: relative;
+      }
+      .cmd pre {
+        margin: 4px 0 0;
+        padding-right: 68px;
+      }
+      /* Wrap rather than scroll: the room link makes these ~180 chars, and a
+         command you must scroll sideways to read looks truncated/untrustworthy.
+         The copy button does the actual copying, so no selection is harmed. */
+      .cmd pre code {
+        white-space: pre-wrap;
+        word-break: break-all;
+      }
+      .cmd .lbl {
+        font-size: 11px;
+        color: var(--muted);
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+      }
+      .cmd button {
+        position: absolute;
+        top: 10px;
+        right: 8px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--muted);
+        border-radius: 6px;
+        padding: 5px 9px;
+        font: inherit;
+        font-size: 11px;
+        cursor: pointer;
+      }
+      .cmd button:hover {
+        border-color: var(--accent);
+        color: var(--accent);
+      }
+      .cmd button.ok {
+        border-color: var(--green);
+        color: var(--green);
+      }
+      #pair .go {
+        display: inline-block;
+        margin-top: 14px;
+        font-weight: 600;
+      }
+      #pair .room {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        color: var(--fg);
+      }
       .clis b {
         color: var(--fg);
         font-weight: 600;
@@ -214,10 +287,40 @@
           spawn agents from anywhere.
         </p>
         <div class="cta">
-          <a class="btn" href="/w/" autofocus>Open the console →</a>
-          <a class="btn ghost" href="https://github.com/snomiao/agent-yes">Star on GitHub</a>
+          <button class="btn" id="connect" type="button" autofocus>Connect Now</button>
+          <a class="btn ghost" href="https://github.com/snomiao/agent-yes"
+            >Self Host from Source →</a
+          >
         </div>
+
+        <!-- Connect Now output. Built by the module script below from a room it
+             mints in the browser; empty (and hidden) until then, so a visitor
+             with JS off still sees the plain installers underneath rather than
+             a dead panel. -->
+        <section id="pair" hidden aria-live="polite">
+          <h3>Run this on the machine you want to connect</h3>
+          <p class="step">
+            It installs agent-yes and attaches that machine to room
+            <span class="room" id="pair-room"></span>. The room's key stays in this page's URL
+            fragment — it is never sent to our servers.
+          </p>
+          <div class="cmd">
+            <span class="lbl">macOS / Linux</span>
+            <pre><code id="pair-sh"></code></pre>
+            <button type="button" data-copy="pair-sh">copy</button>
+          </div>
+          <div class="cmd">
+            <span class="lbl">Windows · PowerShell</span>
+            <pre><code id="pair-ps"></code></pre>
+            <button type="button" data-copy="pair-ps">copy</button>
+          </div>
+          <a class="go" id="pair-go" href="/w/">Open the console to watch it join →</a>
+        </section>
+
         <div class="install">
+          <div class="clis" style="margin: 0 0 6px">
+            Or just install the CLI and mint a room yourself with <b>ay serve --webrtc</b>:
+          </div>
           <pre><code># macOS / Linux
 <span id="setup-sh">curl -fsSL https://agent-yes.com/setup.sh | sh</span>
 
@@ -287,9 +390,67 @@
           'powershell -c "irm ' + location.origin + '/setup.ps1 | iex"';
         document.getElementById("setup-ps").title = "installs " + pkg;
         if (matchMedia("(hover: none)").matches) return;
-        var cta = document.querySelector(".hero .cta a.btn");
+        var cta = document.querySelector(".hero .cta .btn");
         if (cta) cta.focus({ preventScroll: true });
       })();
+    </script>
+    <!-- Connect Now. A SEPARATE module script: the classic script above must keep
+         rewriting the plain install commands even on a browser (or a blocked
+         CDN-less CSP) where this module never runs, so the manual path can't be
+         taken down by a failure in the pairing path. -->
+    <script type="module">
+      // The same module the rgui console bundles as ../pairing.js — one
+      // implementation, so the landing page and the console can never hand out
+      // different commands. Served from /w/ because build-assets.sh copies
+      // lab/ui/*.js there.
+      import { mintPairing } from "/w/pairing.js";
+
+      const btn = document.getElementById("connect");
+      const panel = document.getElementById("pair");
+
+      // A star room can only be OPENED by its host (worker.ts closes a client
+      // that arrives first with "room not open"), so this page cannot passively
+      // watch for the machine — it would have to reconnect-loop against
+      // signaling until the paste lands. The console already does exactly that,
+      // with backoff, so we mint here and hand off there rather than duplicating
+      // a retry loop onto the marketing page. room.html works the same way.
+      btn.addEventListener("click", () => {
+        let p;
+        try {
+          p = mintPairing({ origin: location.origin });
+        } catch {
+          // Minting needs WebCrypto (getRandomValues); on a browser without it
+          // say so instead of showing a half-built command.
+          btn.textContent = "Connect Now — unavailable in this browser";
+          btn.disabled = true;
+          return;
+        }
+        document.getElementById("pair-room").textContent = p.room;
+        document.getElementById("pair-sh").textContent = p.sh;
+        document.getElementById("pair-ps").textContent = p.ps;
+        document.getElementById("pair-go").href = p.consoleUrl;
+        panel.hidden = false;
+        btn.textContent = "New room";
+        panel.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+
+      panel.addEventListener("click", async (e) => {
+        const b = e.target.closest("button[data-copy]");
+        if (!b) return;
+        const text = document.getElementById(b.dataset.copy).textContent;
+        try {
+          await navigator.clipboard.writeText(text);
+          const prev = b.textContent;
+          b.textContent = "copied";
+          b.classList.add("ok");
+          setTimeout(() => {
+            b.textContent = prev;
+            b.classList.remove("ok");
+          }, 1200);
+        } catch {
+          /* clipboard blocked — the command is still selectable by hand */
+        }
+      });
     </script>
   </body>
 </html>

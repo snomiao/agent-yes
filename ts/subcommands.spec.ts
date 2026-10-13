@@ -199,6 +199,21 @@ describe("subcommands.isSubcommand", () => {
     expect(isSubcommand("ls", false)).toBe(true);
     expect(isSubcommand("send", false)).toBe(true);
   });
+
+  it("gates the prompt-word verbs so `cy read …` / `cy connect …` are prompt text", async () => {
+    const { isSubcommand } = await loadModule();
+    // `read` / `share` / `connect` are ordinary English verbs: `cy read ts/cli.ts
+    // and explain it` and `cy connect the frontend to the API` must reach claude.
+    // The commands live on the manager entry (`ay read`, `ay share`, `ay connect`).
+    for (const sub of ["read", "share", "connect"]) {
+      expect(isSubcommand(sub, true)).toBe(true);
+      expect(isSubcommand(sub, false)).toBe(false);
+    }
+    // Their siblings are not prompt openers, so they stay universal.
+    expect(isSubcommand("cat", false)).toBe(true);
+    expect(isSubcommand("tail", false)).toBe(true);
+    expect(isSubcommand("head", false)).toBe(true);
+  });
 });
 
 describe("subcommands ↔ rs/src/cli.rs subcommand mirror", () => {
@@ -293,6 +308,20 @@ describe("subcommands.cmdHelp", () => {
     expect(await capture(false)).not.toContain("ay setup"); // cli-bound alias (cy)
     expect(await capture(false)).toContain("ay ls"); // universal commands still shown
     expect(await capture()).toContain("ay notify watch --unread"); // Management entry
+  });
+
+  it("labels the ay-only lines for cli-bound aliases", async () => {
+    // `read` / `share` / `connect` stay listed (pagination flags are worth
+    // knowing; `ay share` is how the console is reached at all) but must not read
+    // as invokable through `cy`, where those words are prompt text.
+    const alias = await capture(false);
+    expect(alias).toContain("ay read <keyword>");
+    expect(alias).toContain("`cy read …` is a prompt");
+    expect(alias).toContain("ay share");
+    expect(alias).toContain("`cy share`/`cy connect` are prompts");
+    const manager = await capture(true);
+    expect(manager).not.toContain("is a prompt");
+    expect(manager).not.toContain("are prompts");
   });
 
   it("stays plain for a human shell (no AGENT_YES_PID)", async () => {
@@ -1633,11 +1662,12 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
       const log = path.join(dir, "a.log");
       await writeFile(log, "❯ \r\n"); // would fail to confirm if checked — but we opt out
       await withDrainedFifo(async (fifo) => {
-        const start = Date.now();
+        // The log never grows, so the confirm path — had it run — would report
+        // "NOT confirmed" and exit non-zero; these two asserts prove it was
+        // skipped. (No wall-clock bound: a <1s limit flaked on a loaded host.)
         const { code, stdout } = await send(fifo, log, "hello", ["--no-wait"]);
         expect(code).toBe(0);
         expect(stdout).not.toMatch(/NOT confirmed/);
-        expect(Date.now() - start).toBeLessThan(1000); // fast — no settle/confirm polling
       });
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => null);
