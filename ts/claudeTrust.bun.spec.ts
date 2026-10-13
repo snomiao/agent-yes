@@ -21,8 +21,11 @@ beforeEach(async () => {
   await mkdir(project);
   await writeFile(file, JSON.stringify(seed, null, 2), { mode: 0o600 });
 });
+const prevConfigDir = process.env.CLAUDE_CONFIG_DIR;
 afterEach(async () => {
   vi.restoreAllMocks();
+  if (prevConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+  else process.env.CLAUDE_CONFIG_DIR = prevConfigDir;
   await rm(root, { recursive: true, force: true });
 });
 
@@ -42,6 +45,7 @@ describe("markTrusted", () => {
     expect(doc.numStartups).toBe(3);
     expect((await stat(file)).mode & 0o777).toBe(0o600);
     expect(JSON.parse(await readFile(`${file}.ay-trust.bak`, "utf8"))).toEqual(seed);
+    expect((await stat(`${file}.ay-trust.bak`)).mode & 0o777).toBe(0o600);
   });
   it("keeps an existing project entry's other fields", async () => {
     await writeFile(file, JSON.stringify({ projects: { [project]: { lastCost: 1 } } }));
@@ -120,6 +124,15 @@ describe("ay trust", () => {
     expect(await cmdTrust([project, "--config", file])).toBe(0);
     expect(out).toMatch(/already trusted/);
     expect(await cmdTrust([project, "--check", "--config", file])).toBe(0);
+  });
+  it("rejects --config without a value instead of falling back to the default file", async () => {
+    // If the value were dropped, the default file would be used: point that at
+    // our synthetic config so a regression shows up here, never in ~/.claude.json.
+    process.env.CLAUDE_CONFIG_DIR = root;
+    expect(await cmdTrust([project, "--config"])).toBe(1);
+    expect(await cmdTrust([project, "--config", "--check"])).toBe(1);
+    expect(err).toMatch(/--config needs a file path/);
+    expect((await read()).projects[project]).toBeUndefined();
   });
   it("rejects unknown options and extra args", async () => {
     expect(await cmdTrust(["--yes"])).toBe(1);

@@ -12,8 +12,13 @@
 // file is written next to the real one and renamed over it only if the original
 // did not change meanwhile (else retried), and the result is re-read to prove
 // the flag landed.
+//
+// Known limit: claude takes no lock on this file that we could share, so the
+// compare-and-swap is check-then-rename, not atomic — a write landing in the
+// instant between the two is lost. The window is one stat + one rename; the
+// backup holds the version we replaced.
 
-import { copyFile, readFile, realpath, rename, stat, unlink, writeFile } from "fs/promises";
+import { readFile, realpath, rename, stat, unlink, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
 
@@ -74,21 +79,25 @@ export async function markTrusted(
     const projects = (doc.projects ??= {});
     projects[key] = { ...projects[key], hasTrustDialogAccepted: true };
     const tmp = `${real}.ay-trust-${process.pid}.tmp`;
-    // claude writes this file as 2-space JSON; keep that so diffs stay readable.
-    await writeFile(tmp, JSON.stringify(doc, null, 2), { mode: before.mode & 0o777 });
+    const body = JSON.stringify(doc, null, 2); // claude writes 2-space JSON too
+    await writeFile(tmp, body, { mode: before.mode & 0o777 });
     try {
+      await writeFile(`${real}.ay-trust.bak`, raw, { mode: before.mode & 0o777 });
       await opts.beforeRename?.(); // test hook: simulate a concurrent writer
+      // Compare-and-swap, as tight as the filesystem allows: nothing awaited
+      // between this check and the rename but the rename itself.
       const now = await stat(real);
       if (now.mtimeMs !== before.mtimeMs || now.size !== before.size) continue; // changed: retry
-      await copyFile(real, `${real}.ay-trust.bak`);
       await rename(tmp, real);
     } finally {
       await unlink(tmp).catch(() => {});
     }
-    if (!isTrusted(parseConfig(await readFile(real, "utf8"), real), key)) {
+    // Read back the WHOLE file, not just the flag: if it is not byte-for-byte
+    // what we wrote, someone wrote after us and the outcome is theirs to own.
+    const after = await readFile(real, "utf8");
+    if (after !== body && !isTrusted(parseConfig(after, real), key)) {
       throw new Error(
-        `wrote ${real}, but a concurrent writer replaced it before the flag could be read back ` +
-          `— re-run ay trust`,
+        `wrote ${real}, but a concurrent writer replaced it without the flag — re-run ay trust`,
       );
     }
     return "trusted";
@@ -111,8 +120,13 @@ export async function cmdTrust(rest: string[]): Promise<number> {
       process.stdout.write(usage);
       return 0;
     } else if (a === "--check") check = true;
-    else if (a === "--config") file = rest[++i];
-    else if (a.startsWith("--config=")) file = a.slice("--config=".length);
+    else if (a === "--config") {
+      file = rest[++i];
+      if (file === undefined || file.startsWith("-")) {
+        process.stderr.write(`ay trust: --config needs a file path\n${usage}`);
+        return 1;
+      }
+    } else if (a.startsWith("--config=")) file = a.slice("--config=".length);
     else if (a.startsWith("-")) {
       process.stderr.write(`ay trust: unknown option '${a}'\n${usage}`);
       return 1;
