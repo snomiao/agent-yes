@@ -14,7 +14,7 @@ import path from "path";
  * (`ay claude | cat`) has no `AGENT_YES_PID`, so they still block as before.
  * `attach` (the `--attach` flag or `AGENT_YES_ATTACH=1`) forces foreground;
  * `detach` (the `--detach` flag) forces the fork in any context — e.g. a human
- * spawning an agent over `ssh host ay claude --detach -- …`, where the session
+ * spawning an agent over `ssh host ay --detach claude -- …`, where the session
  * would otherwise stay open for the agent's whole life.
  */
 export function shouldForkNested(opts: {
@@ -27,6 +27,35 @@ export function shouldForkNested(opts: {
   if (opts.attach) return false;
   if (opts.isTTY) return false;
   return Boolean(opts.ayPid && opts.ayPid.trim());
+}
+
+/**
+ * Validate where `--detach` was written and return the args with it removed.
+ *
+ * Accepted in exactly one spelling and place: the bare token `--detach` as the
+ * FIRST argument (`ay --detach <cli> …`). That keeps the strip parse-free —
+ * the Rust runner would otherwise forward the unknown flag to the target CLI —
+ * and every other spelling yargs might read as detach (`--detach=…`,
+ * `--detach true`, `--no-detach`, or `--detach` after other flags) is refused
+ * with the one form that works, instead of half-working.
+ *
+ * `rawArgs` is argv without the runtime + script; `parsedDetach` is what yargs
+ * concluded.
+ */
+export function stripDetachFlag(
+  rawArgs: string[],
+  parsedDetach: boolean,
+): { ok: true; args: string[] } | { ok: false; error: string } {
+  const form = "put it first: ay --detach <cli> [options] -- <prompt>";
+  const first = rawArgs[0];
+  if (/^--(no-)?detach(=|$)/.test(first ?? "")) {
+    if (first !== "--detach" || /^(true|false)$/.test(rawArgs[1] ?? "")) {
+      return { ok: false, error: `unsupported --detach spelling '${first}' — ${form}` };
+    }
+    return { ok: true, args: rawArgs.slice(1) };
+  }
+  if (parsedDetach) return { ok: false, error: `--detach must be the first argument — ${form}` };
+  return { ok: true, args: rawArgs };
 }
 
 /** The tutorial printed to the parent agent after a detached spawn, telling it

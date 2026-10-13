@@ -134,6 +134,16 @@ if (!config.showVersion && !config.appendPrompt && !config.tray) {
 // --detach is implemented by the Rust-runtime fork below (same path as a nested
 // agent's fork-by-default). Refuse the contradictions up front rather than
 // silently running in the foreground.
+{
+  const { stripDetachFlag } = await import("./forkNested.ts");
+  const res = stripDetachFlag(process.argv.slice(2), Boolean(config.detach));
+  if (!res.ok) {
+    console.error(res.error);
+    process.exit(1);
+  }
+  // The Rust runner is handed process.argv below; drop the flag it doesn't know.
+  process.argv.splice(2, process.argv.length - 2, ...res.args);
+}
 if (config.detach && (config.attach || process.env.AGENT_YES_ATTACH === "1")) {
   console.error("--detach and --attach (or AGENT_YES_ATTACH=1) contradict each other.");
   process.exit(1);

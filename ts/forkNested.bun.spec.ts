@@ -7,6 +7,7 @@ import {
   confirmAgentStarted,
   predictedLogPath,
   shouldForkNested,
+  stripDetachFlag,
   waitForRegistration,
 } from "./forkNested";
 
@@ -33,6 +34,33 @@ describe("shouldForkNested", () => {
     for (const isTTY of [true, false])
       for (const ayPid of [undefined, "1234"])
         expect(shouldForkNested({ isTTY, ayPid, attach: false, detach: true })).toBe(true);
+  });
+});
+
+describe("stripDetachFlag", () => {
+  it("strips a leading bare --detach", () => {
+    expect(stripDetachFlag(["--detach", "claude", "--", "hi"], true)).toEqual({
+      ok: true,
+      args: ["claude", "--", "hi"],
+    });
+  });
+  it("leaves args alone when there is no --detach of ours", () => {
+    const args = ["claude", "--detach", "--", "--detach"]; // claude's flag, prompt text
+    expect(stripDetachFlag(args, false)).toEqual({ ok: true, args });
+  });
+  it("refuses every other spelling or position yargs could read as detach", () => {
+    for (const [args, parsed] of [
+      [["--detach=true", "claude"], true],
+      [["--detach", "true", "claude"], true],
+      [["--detach", "false", "claude"], false],
+      [["--no-detach", "claude"], false],
+      [["--cli", "claude", "--detach", "--", "hi"], true],
+      [["--verbose", "--detach", "claude"], true],
+    ] as const) {
+      const r = stripDetachFlag([...args], parsed);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toMatch(/ay --detach <cli>/);
+    }
   });
 });
 
