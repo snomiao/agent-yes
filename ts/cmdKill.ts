@@ -94,12 +94,45 @@ export async function cmdKill(rest: string[]): Promise<number> {
     return 1;
   }
   const record = matches[0]!;
+  if (record.status === "exited") {
+    process.stderr.write(
+      `ay kill: pid ${pid} is registered as exited — refusing: the number may belong to ` +
+        `another process by now\n`,
+    );
+    return 1;
+  }
+
+  // Everything below needs the process table; without it we can neither protect
+  // the caller nor detect a reused pid, so refuse rather than guess.
+  const { ancestorPids, pidOwnershipVerdict, readAncestryTable } =
+    await import("./senderAncestry.ts");
+  const table = await readAncestryTable();
+  const selfPgid = await ownPgid();
+  if (!table || !selfPgid) {
+    process.stderr.write(
+      `ay kill: could not read the process table (ps) — refusing, since it is unknown ` +
+        `whether pid ${pid} is still this agent or an ancestor of this shell\n`,
+    );
+    return 1;
+  }
+  // Same pid-reuse guard as \`ay restart\`'s force-kill: a process younger than
+  // its registration cannot be the agent that registered.
+  if (pidOwnershipVerdict(table.get(pid)?.ageSecs, record.started_at) === "reused") {
+    process.stderr.write(
+      `ay kill: pid ${pid} is alive but is NOT the agent that registered it (the number ` +
+        `was reused) — refusing. Retire the stale row with: ay stop ${pid}\n`,
+    );
+    return 1;
+  }
 
   const { forceKill, forceKillTargets } = await import("./forceKill.ts");
-  const { ancestorPids } = await import("./senderAncestry.ts");
   const targets = await forceKillTargets(record);
-  const selfChain = [process.pid, process.ppid, ...(await ancestorPids(process.pid))];
-  const refusal = killRefusal(record, targets, selfChain, await ownPgid());
+  const selfChain = [
+    process.pid,
+    process.ppid,
+    ...(await ancestorPids(process.pid, { readTable: async () => table })),
+  ];
+  const refusal = killRefusal(record, targets, selfChain, selfPgid);
   if (refusal) {
     process.stderr.write(`ay kill: ${refusal}\n`);
     return 1;
@@ -111,7 +144,13 @@ export async function cmdKill(rest: string[]): Promise<number> {
     process.stdout.write(`would SIGKILL ${list.join(", ")} — ${what}\n`);
     return 0;
   }
-  const killed = forceKill(targets);
+  const { killed, failed } = forceKill(targets);
+  if (failed.length) {
+    process.stderr.write(
+      `ay kill: could not signal ${failed.join(", ")} — ${what} not marked exited\n`,
+    );
+    return 1;
+  }
   await updateGlobalPidStatus(pid, {
     status: "exited",
     exit_reason: "force-killed via ay kill",

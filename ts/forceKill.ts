@@ -23,25 +23,30 @@ export async function forceKillTargets(record: ForceKillTarget): Promise<{
   return { pgid: g && g > 1 ? g : null, pids: pids.filter((p) => p > 1) };
 }
 
-/** SIGKILL the targets; returns labels of what was actually signalled. */
-export function forceKill(targets: { pgid: number | null; pids: number[] }): string[] {
+/**
+ * SIGKILL the targets. Returns labels of what was signalled, and of what could
+ * NOT be signalled for a reason other than "already gone" (ESRCH) — e.g. EPERM,
+ * a process owned by another user.
+ */
+export function forceKill(targets: { pgid: number | null; pids: number[] }): {
+  killed: string[];
+  failed: string[];
+} {
   const killed: string[] = [];
-  if (targets.pgid && targets.pgid > 1) {
+  const failed: string[] = [];
+  const sig = (target: number, label: string) => {
     try {
-      process.kill(-targets.pgid, "SIGKILL");
-      killed.push(`group ${targets.pgid}`);
-    } catch {
-      /* group already gone */
+      process.kill(target, "SIGKILL");
+      killed.push(label);
+    } catch (e) {
+      const code = (e as NodeJS.ErrnoException).code;
+      if (code !== "ESRCH") failed.push(`${label} (${code ?? "error"})`);
     }
-  }
+  };
+  if (targets.pgid && targets.pgid > 1) sig(-targets.pgid, `group ${targets.pgid}`);
   for (const pid of targets.pids) {
     if (pid <= 1) continue;
-    try {
-      process.kill(pid, "SIGKILL");
-      killed.push(pid === targets.pids[0] ? `pid ${pid}` : `wrapper ${pid}`);
-    } catch {
-      /* ESRCH: already gone */
-    }
+    sig(pid, pid === targets.pids[0] ? `pid ${pid}` : `wrapper ${pid}`);
   }
-  return killed;
+  return { killed, failed };
 }

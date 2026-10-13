@@ -102,6 +102,29 @@ describe.skipIf(process.platform === "win32")("ay kill <pid>", () => {
     }
   });
 
+  it("refuses a row already marked exited (its pid may have been reused)", async () => {
+    await appendGlobalPid({ ...row(4242), status: "exited" });
+    expect(await cmdKill(["4242"])).toBe(1);
+    expect(err).toMatch(/registered as exited/);
+  });
+
+  it("a signal that fails (EPERM) is reported, and the row is not marked exited", async () => {
+    const pid = await fakeAgent();
+    const real = process.kill.bind(process);
+    const spy = vi.spyOn(process, "kill").mockImplementation(((p: number, sig?: any) => {
+      if (sig === "SIGKILL") throw Object.assign(new Error("EPERM"), { code: "EPERM" });
+      return real(p, sig);
+    }) as typeof process.kill);
+    try {
+      expect(await cmdKill([String(pid)])).toBe(1);
+      expect(err).toMatch(/could not signal group \d+ \(EPERM\)/);
+      expect((await readGlobalPids()).find((r) => r.pid === pid)?.status).toBe("active");
+    } finally {
+      spy.mockRestore();
+      process.kill(-pid, "SIGKILL");
+    }
+  });
+
   it("refuses an unregistered pid", async () => {
     expect(await cmdKill(["99999999"])).toBe(1);
     expect(err).toMatch(/no registered agent has pid 99999999/);

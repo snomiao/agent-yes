@@ -4028,7 +4028,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       try {
         const record = await resolveOne(keyword, defaultOpts({ all: true }));
         const { forceKill, forceKillTargets } = await import("./forceKill.ts");
-        const killed = forceKill(await forceKillTargets(record));
+        const { killed } = forceKill(await forceKillTargets(record));
         await updateGlobalPidStatus(record.pid, {
           status: "exited",
           exit_reason: "force-killed via console",
