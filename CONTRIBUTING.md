@@ -30,11 +30,11 @@ PR/issue bodies must use **synthetic data only**. Never paste real pids, agent
 ids, paths, hostnames, share URLs, tokens, names of private projects, people's
 names, prompts, or terminal transcripts from your own machines. Use neutral
 stand-ins (`pid 1111`, `/repo/alpha`, `alice`) and describe the _mechanism_ of a
-bug with a minimal repro instead. See [`AGENTS.md`](AGENTS.md) for details.
+bug with a minimal repro instead. See [`CLAUDE.md`](CLAUDE.md) for details.
 
 ## Getting started
 
-Prerequisites: [Bun](https://bun.sh) (latest), Node.js 20+, and — only for
+Prerequisites: [Bun](https://bun.sh) (latest), Node.js 22+, and — only for
 changes under `rs/` — a stable Rust toolchain (`cargo`).
 
 ```bash
