@@ -1521,6 +1521,12 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     // oxmgr takes the command as one string; pm2 takes the binary plus its
     // args after `--`. Both auto-restart on crash by default (pm2) / via the
     // explicit flag (oxmgr).
+    // Start the new daemon from a clean liveness slate. The watchdog registered
+    // below (`ay serve healthcheck`) treats a MISSING .serve-heartbeat as healthy
+    // and a stale one as wedged; a stamp left by a daemon that died — or by a
+    // TypeScript daemon replaced by ayrs before ayrs wrote its own — would trip
+    // the very first checks and put the fresh daemon into a restart loop.
+    await unlink(heartbeatPath()).catch(() => {});
     const serveArgv = ayServeArgv(effArgs);
     // On Windows, interpose the window-less launcher so the manager (pm2/oxmgr)
     // doesn't flash a console window on each (re)start. `ay-spawn-hidden` is a

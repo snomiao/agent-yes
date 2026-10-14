@@ -112,6 +112,11 @@ async fn main() -> anyhow::Result<()> {
                 None => eprintln!("[ayrs serve] could not raise the open-files limit"),
             }
 
+            // Liveness stamp for the supervisor's `ay serve healthcheck`
+            // (serve/heartbeat.rs) — without it a stale stamp from an earlier
+            // TypeScript daemon read as "wedged" and restarted us every ~45 s.
+            let _heartbeat = serve::heartbeat::spawn();
+
             // Recover the login-shell env in the background now, so the first
             // /api/spawn doesn't pay the shell's rc-file startup cost (see
             // serve/shell_env.rs — launchd hands us a bare PATH).

@@ -551,9 +551,12 @@ fn oxmgr_command(exe: &str, args: &[String]) -> String {
 }
 
 /// Register (or re-register) `ayrs serve` under oxmgr with restart-on-crash.
-/// No `--health-cmd`: ayrs has no serve-liveness heartbeat, and unlike the Bun
-/// daemon (which could freeze its JS loop while alive) has no "alive-but-wedged"
-/// failure mode, so restart-always is sufficient supervision.
+/// No `--health-cmd` here: unlike the Bun daemon (which could freeze its JS
+/// loop while alive) ayrs has no "alive-but-wedged" failure mode, so
+/// restart-always is sufficient supervision. ayrs does stamp the shared
+/// `.serve-heartbeat` (serve/heartbeat.rs) so a daemon installed by the
+/// TypeScript `ay serve install` — which registers `ay serve healthcheck` and
+/// then delegates to this binary — is seen as alive rather than wedged.
 fn oxmgr_install(oxmgr: &str, exe: &str, args: &[String]) -> Result<()> {
     let _ = Command::new(oxmgr).args(["delete", OXMGR_NAME]).output(); // idempotent
     let cmd = oxmgr_command(exe, args);

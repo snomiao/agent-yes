@@ -10,6 +10,7 @@ pub mod discover;
 pub mod e2e;
 pub mod expose;
 pub mod graph;
+pub mod heartbeat;
 pub mod host_stats;
 pub mod http;
 pub mod log_gc;
