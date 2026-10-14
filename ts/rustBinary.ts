@@ -3,7 +3,17 @@
  */
 
 import { execFileSync } from "child_process";
-import { existsSync, mkdirSync, readdirSync, rmSync, statSync, unlinkSync } from "fs";
+import {
+  accessSync,
+  chmodSync,
+  constants as fsConstants,
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  unlinkSync,
+} from "fs";
 import { chmod, copyFile } from "fs/promises";
 import path from "path";
 import { compareVersions, getInstalledPackage } from "./versionChecker.ts";
@@ -251,9 +261,55 @@ export function findAyrsBinary(): string | undefined {
     Bun.which("ayrs") ?? "",
   ];
   for (const p of searchPaths) {
-    if (p && existsSync(p)) return p;
+    if (p && existsSync(p)) return ensureExecutable(p);
   }
   return undefined;
+}
+
+/**
+ * Repair a binary that is present but not executable (POSIX only; Windows has
+ * no exec bit). A release bundle that lost its modes in transit, or a cache
+ * written by an older fetcher that only chmod'ed the main binary, leaves
+ * `ayrs` as a plain file: the daemon then dies with EACCES on every restart
+ * and the supervisor loops forever. Best effort — a read-only cache keeps
+ * failing, and the caller's spawn reports that.
+ */
+export function ensureExecutable(p: string): string {
+  if (process.platform === "win32") return p;
+  try {
+    accessSync(p, fsConstants.X_OK);
+  } catch {
+    try {
+      chmodSync(p, 0o755);
+    } catch {
+      /* read-only cache — leave the spawn to report it */
+    }
+  }
+  return p;
+}
+
+/**
+ * Mark every regular file a release bundle extracted into `dir` executable.
+ * The tarball carries ayrs (and friends) next to the main binary; the modes
+ * they arrive with are whatever the packaging pipeline preserved, which has
+ * been "none" (CI artifacts drop Unix permissions). Chmod'ing the main binary
+ * alone (the old behaviour) left ayrs non-executable — see ensureExecutable.
+ */
+export async function chmodExtractedBinaries(dir: string): Promise<string[]> {
+  const fixed: string[] = [];
+  for (const name of readdirSync(dir)) {
+    const p = path.join(dir, name);
+    let isFile = false;
+    try {
+      isFile = statSync(p).isFile();
+    } catch {
+      continue;
+    }
+    if (!isFile || /\.(tar\.gz|zip|json|txt|md)$/i.test(name)) continue;
+    await chmod(p, 0o755);
+    fixed.push(name);
+  }
+  return fixed;
 }
 
 /**
@@ -351,7 +407,9 @@ export async function downloadBinary(verbose = false): Promise<string> {
       unlinkSync(tarPath);
     } catch {}
 
-    // Make executable
+    // Make everything the bundle shipped executable — ayrs and the other
+    // helpers alongside the main binary, not just binaryPath.
+    await chmodExtractedBinaries(binDir);
     await chmod(binaryPath, 0o755);
   }
 

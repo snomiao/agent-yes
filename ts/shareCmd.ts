@@ -132,6 +132,27 @@ const HELP =
   `The URL carries this host's serve token: whoever holds it can read and steer\n` +
   `every agent here. Rotate: rm ~/.agent-yes/.serve-token && ay serve install\n`;
 
+// Which runtime hosts the room for a daemon registered with `args` — the Rust
+// daemon (ayrs) whenever the args delegate and the binary exists, else TS.
+async function shareRuntimeOf(args: string[] | null): Promise<"ts" | "rust"> {
+  const { daemonShareRuntime } = await import("./serveRust.ts");
+  const { findAyrsBinary } = await import("./rustBinary.ts");
+  return daemonShareRuntime(args ?? [], () => !!findAyrsBinary());
+}
+
+// The console link for the room a `--webrtc` daemon hosts, derived read-only
+// from the persisted room file of its runtime; null when nothing is minted yet.
+export async function daemonShareLink(args: string[] | null): Promise<string | null> {
+  const { readShareRoom, shareLinkFromRoomUrl } = await import("./share.ts");
+  const room = await readShareRoom(await shareRuntimeOf(args));
+  if (!room) return null;
+  try {
+    return shareLinkFromRoomUrl(room);
+  } catch {
+    return null; // legacy unencrypted room — the host itself rotates it on start
+  }
+}
+
 // ay share status — end-to-end health of each way this machine is shared.
 async function cmdShareStatus(mount: string): Promise<number> {
   const { inspectServeDaemon } = await import("./serve.ts");
@@ -148,7 +169,12 @@ async function cmdShareStatus(mount: string): Promise<number> {
     d.port ? (d.httpUp ? `up on 127.0.0.1:${d.port}` : `DOWN (127.0.0.1:${d.port})`) : "off",
   );
   if (d.consoleUrl) line("portless:", d.httpUp ? d.consoleUrl.replace(/#.*/, "") : "DOWN");
-  line("webrtc:", webrtc ? "on (agent-yes.com room)" : "off");
+  if (webrtc) {
+    // Print the link the RUNNING host serves — from the room file of the
+    // runtime that hosts it (Rust by default), read-only: status never mints.
+    const link = await daemonShareLink(d.args);
+    line("webrtc:", link ? `on — ${link}` : "on (room not minted yet — run `ay share webrtc`)");
+  } else line("webrtc:", "off");
   if (!ts) {
     line("tailscale:", Bun.which("tailscale") ? "not running" : "not installed");
     return d.httpUp || webrtc ? 0 : 1;
@@ -306,8 +332,13 @@ export async function cmdShare(rest: string[]): Promise<number> {
   let url: string;
   const port = state.port ?? (portArg ? Number(portArg) : DEFAULT_SHARE_PORT);
   if (mode === "webrtc") {
+    // The daemon just (re)installed runs `ay serve --webrtc`, which is the Rust
+    // host whenever ayrs exists — read ITS room file, not the TS one, or the
+    // link points at a room nobody hosts.
     const { loadOrCreateShareRoom, shareLinkFromRoomUrl } = await import("./share.ts");
-    url = shareLinkFromRoomUrl(await loadOrCreateShareRoom());
+    url = shareLinkFromRoomUrl(
+      await loadOrCreateShareRoom(undefined, await shareRuntimeOf(state.args)),
+    );
   } else if (mode === "portless") {
     url = state.consoleUrl ?? httpShareUrl("https://agent-yes.localhost", state.token);
   } else if (mode === "local") {

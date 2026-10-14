@@ -10,7 +10,7 @@ import {
   unlink,
   writeFile,
 } from "fs/promises";
-import { existsSync, renameSync, watch, writeFileSync } from "node:fs";
+import { existsSync, realpathSync, renameSync, watch, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { createHash, randomBytes, timingSafeEqual } from "crypto";
@@ -949,14 +949,70 @@ export function oxmgrCmd(argv: string[]): string {
   return argv.map((a) => (/[\\\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(" ");
 }
 
+/**
+ * The argv a daemon manager runs for `ay serve …`. Pure so the contract is
+ * testable: `which` is the `ay` on PATH (or null), `script` is THIS process's
+ * own entry (`process.argv[1]`, always present), `realpath` resolves symlinks.
+ *
+ * Never bake in the `~/.bun/bin/ay` symlink: `bun add -g` removes and recreates
+ * it on every upgrade, and some images ship without it until the first update
+ * — a manager that stored it then restarts into ENOENT thousands of times.
+ * Resolve to the real file instead, and when nothing is on PATH fall back to
+ * the script running this very install (never a bare `ay`, which a manager's
+ * minimal PATH cannot resolve). On POSIX the entry is a `#!/usr/bin/env bun`
+ * script run via bun; on Windows it is a self-contained exe.
+ */
+export function serveLauncher(opts: {
+  which: string | null;
+  script: string | undefined;
+  execPath: string;
+  platform: NodeJS.Platform;
+  realpath: (p: string) => string;
+}): string[] {
+  const resolve = (p: string) => {
+    try {
+      return opts.realpath(p);
+    } catch {
+      return p;
+    }
+  };
+  const entry = opts.which ? resolve(opts.which) : opts.script ? resolve(opts.script) : null;
+  if (!entry) return ["ay"];
+  if (opts.platform === "win32")
+    return /\.(exe|cmd|bat)$/i.test(entry) ? [entry] : [opts.execPath, entry];
+  return [opts.execPath, entry];
+}
+
 function ayServeArgv(args: string[]): string[] {
-  const ayBin = Bun.which("ay");
-  const launcher = ayBin
-    ? process.platform === "win32"
-      ? [ayBin]
-      : [process.execPath, ayBin]
-    : ["ay"];
+  const launcher = serveLauncher({
+    which: Bun.which("ay"),
+    script: process.argv[1],
+    execPath: process.execPath,
+    platform: process.platform,
+    realpath: realpathSync,
+  });
   return [...launcher, "serve", ...args];
+}
+
+// The Task Scheduler entry `ayrs serve install` registered before the daemon
+// moved under oxmgr. A leftover one keeps hosting the WebRTC room, and the new
+// daemon then waits forever on "another ayrs host is already serving room …".
+// Mirrors rs/src/serve/service.rs LABEL / uninstall_quiet.
+export const LEGACY_AYRS_TASK = "com.snomiao.ayrs-serve";
+
+export function legacyAyrsTaskArgv(step: "query" | "end" | "delete"): string[] {
+  const base = ["schtasks", `/${step}`, "/tn", LEGACY_AYRS_TASK];
+  return step === "query" ? [...base, "/fo", "LIST"] : step === "delete" ? [...base, "/f"] : base;
+}
+
+async function stopLegacyAyrsTask(): Promise<void> {
+  if (process.platform !== "win32") return;
+  if ((await spawnExit(legacyAyrsTaskArgv("query"))) !== 0) return; // not registered
+  process.stdout.write(
+    `stopping legacy scheduled task '${LEGACY_AYRS_TASK}' (it would keep hosting the WebRTC room)\n`,
+  );
+  await spawnExit(legacyAyrsTaskArgv("end"));
+  await spawnExit(legacyAyrsTaskArgv("delete"));
 }
 
 // Per-user login auto-start entry on Windows. pm2 core has no Windows startup
@@ -1197,6 +1253,14 @@ async function warnStrayServeProcesses(): Promise<void> {
 // mints a persisted room instead). Mirrors how cmdServe resolves argv.webrtc/argv.share,
 // but over the raw arg list install holds (oxmgr splits the command on whitespace →
 // `--webrtc url`; pm2/`=` → `--webrtc=url`).
+// Which runtime a daemon registered with `args` hosts its room under — see
+// serveRust.ts daemonShareRuntime; the binary check is the live one cmdServe makes.
+async function daemonShareRuntime(args: string[]): Promise<"ts" | "rust"> {
+  const { daemonShareRuntime: decide } = await import("./serveRust.ts");
+  const { findAyrsBinary } = await import("./rustBinary.ts");
+  return decide(args, () => !!findAyrsBinary());
+}
+
 function explicitWebrtcUrl(args: string[]): string | undefined {
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -1329,6 +1393,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     }
     if (removed === 0 && failed === 0)
       process.stdout.write(`no '${DAEMON_NAME}' daemon registered with any manager\n`);
+    await stopLegacyAyrsTask();
     await warnStrayServeProcesses();
     return failed ? 1 : 0;
   }
@@ -1380,11 +1445,20 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     const webrtcDaemon = effArgs.some((a) => a.startsWith("--webrtc") || a.startsWith("--share"));
     let shareLink: string | null = null;
     let shareLinkMinted = false; // auto-minted (persisted/rotatable) vs explicit URL
+    // The daemon's `ay serve …` delegates to ayrs whenever it can (serveRust.ts),
+    // and ayrs persists its room in a DIFFERENT file (.share-room-ayrs) — mint
+    // and print from the file of the runtime that will actually host.
+    let roomFile = ".share-room";
     if (webrtcDaemon) {
       try {
-        const { loadOrCreateShareRoom, shareLinkFromRoomUrl } = await import("./share.ts");
+        const { loadOrCreateShareRoom, shareLinkFromRoomUrl, shareRoomFileName } =
+          await import("./share.ts");
+        const runtime = await daemonShareRuntime(effArgs);
+        roomFile = shareRoomFileName(runtime);
         const explicit = explicitWebrtcUrl(effArgs);
-        shareLink = shareLinkFromRoomUrl(explicit ?? (await loadOrCreateShareRoom()));
+        shareLink = shareLinkFromRoomUrl(
+          explicit ?? (await loadOrCreateShareRoom(undefined, runtime)),
+        );
         shareLinkMinted = !explicit;
       } catch {
         /* best effort — fall back to the .share-link file hint in emitShareLink */
@@ -1397,7 +1471,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
           `\nshared over WebRTC — open this link (the token is eaten from the URL on open):\n` +
             `  ${shareLink}\n` +
             (shareLinkMinted
-              ? `  (persistent room — same link across restarts; delete ~/.agent-yes/.share-room to rotate)\n`
+              ? `  (persistent room — same link across restarts; delete ~/.agent-yes/${roomFile} to rotate)\n`
               : ``),
         );
         // Offer to jump straight into the console (default yes); no-ops on a
@@ -1407,8 +1481,8 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       } else
         process.stdout.write(
           `\nthe WebRTC share link carries a secret, so the daemon does NOT log it —\n` +
-            `read it from ~/.agent-yes/.share-link (mode 0600). The room persists in\n` +
-            `~/.agent-yes/.share-room, so the link survives restarts.\n`,
+            `read it with \`ay share status\`. The room persists in\n` +
+            `~/.agent-yes/${roomFile}, so the link survives restarts.\n`,
         );
     };
 
@@ -1439,6 +1513,9 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       await spawnExit([mgr.bin, "stop", DAEMON_NAME]);
       await spawnExit([mgr.bin, "delete", DAEMON_NAME]);
     }
+    // A pre-oxmgr scheduled-task host left behind would keep the WebRTC room
+    // and the new daemon would wait on it forever.
+    await stopLegacyAyrsTask();
     await warnStrayServeProcesses();
 
     // oxmgr takes the command as one string; pm2 takes the binary plus its
@@ -1627,11 +1704,18 @@ async function cmdServeStatus(args: string[]): Promise<number> {
   const json = args.includes("--json");
   const mgr = await resolveActiveManager();
   const token = await loadTokenReadOnly();
-  const shareLink = await readShareLink();
 
   // A non-null arg list means the daemon is registered with the manager.
   const daemonArgs = mgr ? await readDaemonServeArgs(mgr) : null;
   const installed = daemonArgs !== null;
+  // The link of the room the registered daemon HOSTS: derived read-only from
+  // the room file of its runtime (ayrs by default — a different file from the
+  // TS host's). `.share-link` is only ever written by the TS host, so for a
+  // Rust daemon it is stale or absent; keep it as the fallback for TS daemons
+  // and for the uninstalled-but-left-over case shareLinkStatus flags.
+  const { daemonShareLink } = await import("./shareCmd.ts");
+  const shareLink =
+    (installed ? await daemonShareLink(daemonArgs) : null) ?? (await readShareLink());
   // Manager-reported process state — the only up/down signal for webrtc daemons.
   const running = installed ? await readDaemonRunning(mgr!) : false;
   const a = daemonArgs ?? [];
@@ -1781,8 +1865,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `                    agent-yes.com, or pass a room link to join that room:\n` +
         `                    https://agent-yes.com/room/#room=<id>&s=e1.<secret>).\n` +
         `                    Alone it needs NO port — combine with --http for both.\n` +
-        `                    The minted room persists in ~/.agent-yes/.share-room\n` +
-        `                    (stable link across restarts; delete the file to rotate).\n` +
+        `                    The minted room persists in ~/.agent-yes/.share-room-ayrs\n` +
+        `                    (.share-room under --no-rust); stable link across restarts,\n` +
+        `                    delete the file to rotate.\n` +
         `  --share [URL]     Legacy alias for --http --webrtc\n\n` +
         `Runtime: like \`ay <cli>\`, the Rust daemon (ayrs serve) runs by default for\n` +
         `  the flags it supports — --webrtc [webrtc://url], --port N, --sighost H.\n` +

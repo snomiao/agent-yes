@@ -1,8 +1,22 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { devBuildInfo, gcOldBinaryDirs, hasValidMacSignature } from "./rustBinary.ts";
+import {
+  chmodExtractedBinaries,
+  devBuildInfo,
+  ensureExecutable,
+  gcOldBinaryDirs,
+  hasValidMacSignature,
+} from "./rustBinary.ts";
 import { _setInstalledPackageForTesting } from "./versionChecker.ts";
 
 // Startup GC for the versioned binary download cache (PERFORMANCE-EVENT
@@ -133,5 +147,42 @@ describe("hasValidMacSignature", () => {
 
   it.skipIf(process.platform === "darwin")("always reports valid off macOS", () => {
     expect(hasValidMacSignature(path.join(root, "does-not-exist"))).toBe(true);
+  });
+});
+
+// A release bundle arrives with whatever modes the packaging pipeline kept —
+// in practice none. Only the main binary used to be chmod'ed, so ayrs was left
+// non-executable and the daemon died with EACCES on every supervisor restart.
+describe("chmodExtractedBinaries", () => {
+  it("marks every extracted regular file executable and skips archives and dirs", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "ay-bin-"));
+    try {
+      writeFileSync(path.join(dir, "agent-yes-linux-x64"), "#!/bin/sh\n", { mode: 0o644 });
+      writeFileSync(path.join(dir, "ayrs"), "#!/bin/sh\n", { mode: 0o644 });
+      writeFileSync(path.join(dir, "temp.tar.gz"), "x");
+      mkdirSync(path.join(dir, "sub"));
+      const fixed = await chmodExtractedBinaries(dir);
+      expect(fixed.sort()).toEqual(["agent-yes-linux-x64", "ayrs"]);
+      if (process.platform !== "win32") {
+        expect(statSync(path.join(dir, "ayrs")).mode & 0o111).toBe(0o111);
+        expect(statSync(path.join(dir, "temp.tar.gz")).mode & 0o111).toBe(0);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("ensureExecutable", () => {
+  it("repairs a present-but-not-executable binary and returns its path", () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "ay-bin-"));
+    try {
+      const p = path.join(dir, "ayrs");
+      writeFileSync(p, "#!/bin/sh\n", { mode: 0o644 });
+      expect(ensureExecutable(p)).toBe(p);
+      if (process.platform !== "win32") expect(statSync(p).mode & 0o111).toBe(0o111);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

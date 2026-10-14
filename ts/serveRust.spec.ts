@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { planRustServe } from "./serveRust.ts";
+import { daemonShareRuntime, planRustServe } from "./serveRust.ts";
 
 // `ay serve` runs the Rust daemon (`ayrs serve`) by default, like `ay <cli>`
 // runs the Rust agent runtime — but only for invocations ayrs can express.
@@ -81,5 +81,28 @@ describe("planRustServe", () => {
       kind: "ts",
       reason: "--port (missing)",
     });
+  });
+});
+
+// Every printed share link must come from the room file of the runtime that
+// hosts the room: ayrs persists its room in .share-room-ayrs, TS in .share-room.
+// A link derived from the wrong file points at a room nobody serves.
+describe("daemonShareRuntime", () => {
+  const env = {};
+  const ayrs = () => true;
+  const noAyrs = () => false;
+
+  it("is rust for the args ayrs serve accepts, when the binary exists", () => {
+    expect(daemonShareRuntime(["--webrtc"], ayrs, env)).toBe("rust");
+    expect(daemonShareRuntime(["--webrtc", "--sighost", "s.example"], ayrs, env)).toBe("rust");
+    expect(daemonShareRuntime(["--webrtc", "--port", "0"], ayrs, env)).toBe("rust");
+  });
+
+  it("is ts whenever cmdServe would fall back to the TypeScript host", () => {
+    expect(daemonShareRuntime(["--webrtc"], noAyrs, env)).toBe("ts");
+    expect(daemonShareRuntime(["--webrtc", "--no-rust"], ayrs, env)).toBe("ts");
+    expect(daemonShareRuntime(["--webrtc"], ayrs, { AGENT_YES_NO_RUST: "1" })).toBe("ts");
+    expect(daemonShareRuntime(["--share"], ayrs, env)).toBe("ts");
+    expect(daemonShareRuntime([], ayrs, env)).toBe("ts");
   });
 });

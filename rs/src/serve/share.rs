@@ -265,7 +265,8 @@ fn held_by_error(pid: i32, room: &str) -> anyhow::Error {
     anyhow!(
         "another ayrs host (pid {pid}) is already serving room {room}\n\
          running two hosts in one room breaks WebRTC answering for every viewer.\n\
-         stop it first (`ayrs serve uninstall`, or kill {pid}), or host a different room."
+         stop it first (`ay serve uninstall` removes a legacy scheduled-task or\n\
+         service host too; or kill {pid}), or host a different room."
     )
 }
 

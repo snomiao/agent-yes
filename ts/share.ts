@@ -154,30 +154,54 @@ export interface ShareOpts {
 // browser that saved the room) survives restarts — important for daemons,
 // which would otherwise mint a new link on every restart. Delete the file to
 // rotate the room.
-function shareRoomPath(): string {
-  const home = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
-  return path.join(home, ".share-room");
+//
+// Two hosts, two files. The TypeScript server persists its room in
+// `.share-room`; the Rust daemon (`ayrs serve --webrtc`, the default whenever
+// the ayrs binary exists — see serveRust.ts) persists its own in
+// `.share-room-ayrs`, so the two can run side by side without fighting over one
+// room (they hold different host locks). Same on-disk format. Every link we
+// PRINT must therefore come from the file of the runtime that actually hosts,
+// or the operator hands out a link to a room nobody serves.
+export type ShareRuntime = "ts" | "rust";
+
+export function shareRoomFileName(runtime: ShareRuntime): string {
+  return runtime === "rust" ? ".share-room-ayrs" : ".share-room";
 }
 
-export async function loadOrCreateShareRoom(sighost = DEFAULT_SIGHOST): Promise<string> {
+export function shareRoomPath(runtime: ShareRuntime = "ts"): string {
+  const home = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
+  return path.join(home, shareRoomFileName(runtime));
+}
+
+// Read-only: the persisted room url, or null when none (or a legacy markerless
+// one) is on disk. `ay serve status` must never mint.
+export async function readShareRoom(runtime: ShareRuntime = "ts"): Promise<string | null> {
   try {
-    const url = (await readFile(shareRoomPath(), "utf-8")).trim();
-    if (url.startsWith("webrtc://")) {
-      // A v2 (encrypted) room carries the e1. marker on its secret — reuse it.
-      // A legacy markerless room is rotated to a fresh encrypted room below: the
-      // signaling DO has pinned the old room to its plaintext token, so we must
-      // mint a NEW room name. This is a one-time, deliberate security upgrade —
-      // old share links stop working; re-open the new printed link.
-      if (parseShareUrl(url).token.startsWith(MARKER)) return url;
-    }
+    const url = (await readFile(shareRoomPath(runtime), "utf-8")).trim();
+    // A v2 (encrypted) room carries the e1. marker on its secret — reuse it.
+    // A legacy markerless room is rotated to a fresh encrypted room by
+    // loadOrCreateShareRoom: the signaling DO has pinned the old room to its
+    // plaintext token, so we must mint a NEW room name. This is a one-time,
+    // deliberate security upgrade — old share links stop working; re-open the
+    // new printed link.
+    if (url.startsWith("webrtc://") && parseShareUrl(url).token.startsWith(MARKER)) return url;
   } catch {
     /* not yet minted */
   }
+  return null;
+}
+
+export async function loadOrCreateShareRoom(
+  sighost = DEFAULT_SIGHOST,
+  runtime: ShareRuntime = "ts",
+): Promise<string> {
+  const existing = await readShareRoom(runtime);
+  if (existing) return existing;
   const room = "r" + randomBytes(6).toString("hex");
   const s = randomBytes(32).toString("hex");
   const url = `webrtc://${room}:${MARKER}${s}@${sighost}`;
-  await mkdir(path.dirname(shareRoomPath()), { recursive: true });
-  await writeFile(shareRoomPath(), url, { mode: 0o600 });
+  await mkdir(path.dirname(shareRoomPath(runtime)), { recursive: true });
+  await writeFile(shareRoomPath(runtime), url, { mode: 0o600 });
   return url;
 }
 
@@ -236,7 +260,8 @@ export function shareLinkFromRoomUrl(url: string): string {
   const { s, v2 } = parseSecret(token);
   if (!v2)
     throw new Error(
-      "refusing to derive a link for an unencrypted room — delete ~/.agent-yes/.share-room to rotate to an encrypted link",
+      "refusing to derive a link for an unencrypted room — delete the persisted room file " +
+        "(~/.agent-yes/.share-room, or .share-room-ayrs for the Rust daemon) to rotate to an encrypted link",
     );
   return formatShareLink(room, s, host);
 }
