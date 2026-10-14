@@ -241,21 +241,30 @@ pub fn spawn_fifo_reader(
 /// expects a `std::thread::JoinHandle` — wrapping `tokio::spawn` would break
 /// that contract — and because `NamedPipeServer::read` is async-only.
 ///
-/// Uses the **pre-create** pattern: at each iteration the next server
-/// instance is created *before* `current.connect()` is awaited. When the
-/// current client disconnects and `current` is dropped, `next` already holds
-/// an instance bound to the same name, so the kernel namespace stays
-/// continuously populated. Without this, the gap between drop and recreate
-/// leaks: clients arriving in that window get `ERROR_FILE_NOT_FOUND` (which
-/// Node surfaces as `connect ENOENT`). Empirically confirmed on Windows 11
-/// build 26200: the *first* `ay send` worked, the *second* failed with
-/// ENOENT until the next instance was staged ahead of the disconnect.
+/// Two properties the loop must keep, each learned from a field failure:
+///
+/// 1. **Pre-create**: the next server instance is created *before* the
+///    current one is let to accept a client, so the name is never absent from
+///    the Win32 namespace. Without it, clients arriving in the gap between
+///    drop and recreate got `ERROR_FILE_NOT_FOUND` (Node: `connect ENOENT`).
+///    Empirically confirmed on Windows 11 build 26200: the first `ay send`
+///    worked, the second failed until the next instance was staged ahead.
+///
+/// 2. **Concurrent clients**: each accepted connection is drained on its own
+///    task while the loop goes straight back to accepting. The first cut read
+///    one client to EOF before accepting the next, which is fine for the
+///    fire-and-forget `ay send` but not for a client that stays connected:
+///    `ay attach` holds the pipe open for as long as the human is typing, and
+///    every `ay send` / `ay key` issued meanwhile found the only listening
+///    instance busy, spun on `ERROR_PIPE_BUSY`, and surfaced as "named pipe
+///    connect timeout" — detaching was the only workaround. Shared input is
+///    the contract (the attached human and other agents type into the same
+///    PTY; the FIFO on Unix has always interleaved writers), so serve them all.
 #[cfg(windows)]
 pub fn spawn_fifo_reader(
     path: PathBuf,
     tx: tokio::sync::mpsc::Sender<Vec<u8>>,
 ) -> std::io::Result<std::thread::JoinHandle<()>> {
-    use tokio::io::AsyncReadExt;
     use tokio::net::windows::named_pipe::ServerOptions;
 
     let path_str = path
@@ -280,13 +289,6 @@ pub fn spawn_fifo_reader(
             }
         };
         rt.block_on(async move {
-            // Pre-create pattern: always have the NEXT server instance listening
-            // before we let the CURRENT one accept a client. Without this, the
-            // gap between `drop(current)` and `create(next)` removes the pipe
-            // name from the Win32 namespace, so any `ay send` issued in that
-            // window gets ENOENT. Empirically confirmed on Windows 11 build
-            // 26200: the first `ay send` worked, the second (after the gap)
-            // returned `connect ENOENT \\.\pipe\agent-yes-<pid>`.
             let mut current = match ServerOptions::new()
                 .first_pipe_instance(true)
                 .create(&path_str)
@@ -301,11 +303,7 @@ pub fn spawn_fifo_reader(
                 }
             };
             loop {
-                // Stage the next instance *now*, before letting `current`
-                // accept its client. When `current` is dropped at the end of
-                // this iteration, the namespace stays populated because `next`
-                // already holds an instance — so an `ay send` arriving in the
-                // handoff window connects to `next` instead of getting ENOENT.
+                // Stage the next instance *now* (property 1), then accept.
                 let next = match ServerOptions::new().create(&path_str) {
                     Ok(s) => s,
                     Err(e) => {
@@ -322,30 +320,45 @@ pub fn spawn_fifo_reader(
                     return;
                 }
 
-                let mut buf = [0u8; 4096];
-                loop {
-                    match current.read(&mut buf).await {
-                        Ok(0) => break, // client disconnected — promote `next`
-                        Ok(n) => {
-                            if tx.send(buf[..n].to_vec()).await.is_err() {
-                                return; // receiver dropped — main loop ended
-                            }
-                        }
-                        Err(e) => {
-                            warn!("named-pipe read error at {}: {}", path_str, e);
-                            break;
-                        }
-                    }
-                }
-
-                // `current` is dropped here (handle released → instance
-                // closes), but `next` already holds a live instance, so the
-                // pipe name remains continuously present in the namespace.
+                // Hand the connected client to its own task (property 2) and
+                // go back to accepting at once. The task ends when the client
+                // disconnects, or when the receiver is gone — in which case
+                // the main loop has ended and this thread is on its way out.
+                tokio::spawn(drain_pipe_client(current, tx.clone(), path_str.clone()));
                 current = next;
             }
         });
     });
     Ok(handle)
+}
+
+/// Forward one connected client's bytes to the shared input channel until it
+/// disconnects. Runs as a task on the reader's current-thread runtime, so the
+/// accept loop above never waits on a client.
+#[cfg(windows)]
+async fn drain_pipe_client(
+    mut client: tokio::net::windows::named_pipe::NamedPipeServer,
+    tx: tokio::sync::mpsc::Sender<Vec<u8>>,
+    path_str: String,
+) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = [0u8; 4096];
+    loop {
+        match client.read(&mut buf).await {
+            Ok(0) => break, // client disconnected
+            Ok(n) => {
+                if tx.send(buf[..n].to_vec()).await.is_err() {
+                    break; // receiver dropped — main loop ended
+                }
+            }
+            Err(e) => {
+                warn!("named-pipe read error at {}: {}", path_str, e);
+                break;
+            }
+        }
+    }
+    // Dropping `client` releases this instance; the accept loop holds the
+    // next one, so the name stays in the namespace throughout.
 }
 
 #[cfg(all(test, unix))]
@@ -596,5 +609,67 @@ mod tests {
         drop(r2);
         cleanup_fifo(&p1);
         cleanup_fifo(&p2);
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::windows::named_pipe::ClientOptions;
+    use tokio::sync::mpsc;
+    use tokio::time::{sleep, timeout, Duration};
+
+    async fn connect(name: &str) -> tokio::net::windows::named_pipe::NamedPipeClient {
+        // The server stages instances asynchronously on its own thread; give a
+        // fresh name a moment to appear, like `ay send`'s own retry would.
+        for _ in 0..50 {
+            if let Ok(c) = ClientOptions::new().open(name) {
+                return c;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        panic!("could not connect to {name}");
+    }
+
+    /// A client that stays connected (`ay attach`) must not block other
+    /// clients (`ay send`, `ay key`) from being served in the meantime.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn serves_a_second_client_while_the_first_stays_connected() {
+        let name = format!(r"\\.\pipe\agent-yes-test-{}", std::process::id());
+        let (tx, mut rx) = mpsc::channel::<Vec<u8>>(100);
+        let _reader = spawn_fifo_reader(PathBuf::from(&name), tx).unwrap();
+
+        // The long-lived client connects first and writes nothing yet.
+        let mut held = connect(&name).await;
+
+        // Meanwhile two fire-and-forget clients must get through unchanged.
+        for marker in [b"one\n".as_slice(), b"two\n".as_slice()] {
+            let mut c = connect(&name).await;
+            c.write_all(marker).await.unwrap();
+            drop(c);
+        }
+        let mut got = Vec::new();
+        let _ = timeout(Duration::from_secs(5), async {
+            while got.len() < 8 {
+                match rx.recv().await {
+                    Some(chunk) => got.extend_from_slice(&chunk),
+                    None => break,
+                }
+            }
+        })
+        .await;
+        assert_eq!(
+            got, b"one\ntwo\n",
+            "sends must flow while a client holds the pipe"
+        );
+
+        // And the held client still works afterwards.
+        held.write_all(b"typed\n").await.unwrap();
+        let chunk = timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("held client's bytes arrive")
+            .unwrap();
+        assert_eq!(chunk, b"typed\n");
     }
 }
