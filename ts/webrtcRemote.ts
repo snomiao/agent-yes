@@ -22,6 +22,14 @@ import {
   FLAG_CONFIRM,
 } from "../lab/ui/e2e.js";
 import { SIGNAL_SUBPROTOCOL as SUB, parseWebrtcLink, type WebrtcLink } from "./webrtcLink.ts";
+import {
+  closeError,
+  describeConnectFailure,
+  reduceSignal,
+  socketError,
+  timeoutError,
+  type SignalState,
+} from "./webrtcSignal.ts";
 
 export { isWebrtcSpec, parseWebrtcLink } from "./webrtcLink.ts";
 export type { WebrtcLink } from "./webrtcLink.ts";
@@ -49,6 +57,11 @@ class WebRtcConn {
   private confirmedIn = false;
   private confirmedOut = false;
   private confirmed = false;
+  // Join progress, so a failure names the phase it happened in (webrtcSignal.ts).
+  private readonly sig: SignalState = { opened: false, offered: false, confirmed: false };
+  // Host candidates that trickled in before the offer; applied once the peer exists.
+  private earlyCandidates: any[] = [];
+  private warnedDuplicateHost = false;
   private sendChain: Promise<void> = Promise.resolve();
   private recvChain: Promise<void> = Promise.resolve();
   private idCounter = 0;
@@ -64,7 +77,7 @@ class WebRtcConn {
       this.rejectReady = rej;
     });
     const timer = setTimeout(
-      () => this.rejectReady(new Error(`WebRTC connect timeout after ${CONNECT_TIMEOUT_MS}ms`)),
+      () => this.rejectReady(timeoutError(this.sig, CONNECT_TIMEOUT_MS)),
       CONNECT_TIMEOUT_MS,
     );
     this.ready.then(
@@ -78,13 +91,16 @@ class WebRtcConn {
     const { room, host } = this.link;
     const ws = new WebSocket(`wss://${host}/${room}`, [SUB]);
     ws.onopen = async () => {
+      this.sig.opened = true;
       const authToken = await deriveAuthToken(this.link.s, room, host);
       ws.send(JSON.stringify({ type: "hello", role: "client", v: 2, token: authToken }));
     };
-    ws.onerror = (e: any) =>
-      this.rejectReady(new Error(`signaling error: ${String(e?.message ?? e)}`));
-    ws.onclose = () => {
-      if (!this.confirmed) this.rejectReady(new Error("signaling closed before connect"));
+    ws.onerror = (e: any) => this.rejectReady(socketError(this.sig, String(e?.message ?? e)));
+    ws.onclose = (ev: any) => {
+      // The close code and reason are the server's own diagnosis (1008 "forbidden",
+      // "room not open"); dropping them left only "closed before connect".
+      if (!this.confirmed)
+        this.rejectReady(closeError(this.sig, Number(ev?.code ?? 0), String(ev?.reason ?? "")));
     };
     ws.onmessage = (ev: any) => void this.onSignal(ev);
     return ws;
@@ -92,9 +108,32 @@ class WebRtcConn {
 
   private async onSignal(ev: any): Promise<void> {
     const m = JSON.parse(typeof ev.data === "string" ? ev.data : await ev.data.text());
-    if (m.type === "offer") {
-      this.hostPeer = m.from;
-      const pc = new RTCPeerConnection({ iceServers: m.iceServers || [] });
+    const action = reduceSignal(this.sig, m);
+    if (action.kind === "fail") {
+      this.rejectReady(action.error);
+      return;
+    }
+    if (action.kind === "duplicate-offer") {
+      // Two hosts in one room: our answer would go to both and neither
+      // handshake completes. Stay with the first; say so once.
+      if (!this.warnedDuplicateHost) {
+        this.warnedDuplicateHost = true;
+        process.stderr.write(
+          `[webrtc] a second host offered in room ${this.link.room} — two hosts serve this room; ` +
+            `on the host, stop the stray one (\`ay serve status\`)\n`,
+        );
+      }
+      return;
+    }
+    if (action.kind === "candidate") {
+      if (action.queue) this.earlyCandidates.push(action.candidate);
+      else if (this.pc) await this.pc.addIceCandidate(action.candidate).catch(() => {});
+      return;
+    }
+    if (action.kind === "offer") {
+      this.sig.offered = true;
+      this.hostPeer = action.from ?? null;
+      const pc = new RTCPeerConnection({ iceServers: action.iceServers || [] });
       this.pc = pc;
       pc.onicecandidate = (e: any) => {
         if (e.candidate)
@@ -111,18 +150,22 @@ class WebRtcConn {
           this.recvChain = this.recvChain.then(() => this.onFrame(ev2.data)).catch(() => {});
         };
       };
-      await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
+      await pc.setRemoteDescription({ type: "offer", sdp: action.sdp });
+      // Candidates the host trickled before its offer (the Rust host does) are
+      // only valid once the remote description is set — flush them now, or the
+      // host's LAN routes are lost and the handshake limps to a timeout.
+      const early = this.earlyCandidates;
+      this.earlyCandidates = [];
+      for (const c of early) await pc.addIceCandidate(c).catch(() => {});
       const answer = await pc.createAnswer();
       await pc.setLocalDescription(answer);
-      this.th = await computeTranscriptHash(m.sdp, pc.localDescription.sdp);
+      this.th = await computeTranscriptHash(action.sdp, pc.localDescription.sdp);
       const keys = await deriveDirKeys(this.link.s, this.th);
       this.keyC2H = keys.keyC2H;
       this.keyH2C = keys.keyH2C;
       this.ws.send(
         JSON.stringify({ type: "answer", to: this.hostPeer, sdp: pc.localDescription.sdp }),
       );
-    } else if (m.type === "candidate" && this.pc) {
-      await this.pc.addIceCandidate(m.candidate).catch(() => {});
     }
   }
 
@@ -159,6 +202,7 @@ class WebRtcConn {
       if (env.echo && env.echo === this.myNonce) this.confirmedIn = true;
       if (this.confirmedIn && this.confirmedOut) {
         this.confirmed = true;
+        this.sig.confirmed = true;
         this.resolveReady();
       }
       return;
@@ -258,14 +302,16 @@ export async function startWebrtcBridge(link: string): Promise<WebrtcBridge> {
     await conn.ready;
   } catch (e) {
     // Every remote command routes through here, so this is the one place a
-    // signaling failure has to become actionable. The raw error names the URL
-    // and says "failed to connect" — all true, none of it pointing at the cause
-    // when the cause is the local environment rather than the network. Probe
-    // and say which; see ts/signalingHint.ts for why it is derived rather than
-    // guessed.
-    const cause = String((e as Error)?.message ?? e);
-    const probe = await probeSignalingHost(parsed.host);
-    throw new Error(signalingFailureHint(cause, probe, parsed.host));
+    // signaling failure has to become actionable. The failure names its phase
+    // (webrtcSignal.ts); only a socket that never opened gets the HTTPS-probe
+    // sandbox/proxy hint (signalingHint.ts) — every later phase proves the
+    // WebSocket upgrade worked, so that hint would be a misdiagnosis there.
+    const err = e instanceof Error ? e : new Error(String(e));
+    throw new Error(
+      await describeConnectFailure(err, parsed.host, async (cause) =>
+        signalingFailureHint(cause, await probeSignalingHost(parsed.host), parsed.host),
+      ),
+    );
   }
 
   const server = Bun.serve({
