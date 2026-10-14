@@ -4385,7 +4385,13 @@ export async function readComposerState(
       });
       await new Promise<void>((resolve) => term.write(buf, resolve));
       dropComposerTerm(logPath);
-      composerTerms.set(logPath, { term, key, window: w, offset: from + buf.length, whole: from === 0 });
+      composerTerms.set(logPath, {
+        term,
+        key,
+        window: w,
+        offset: from + buf.length,
+        whole: from === 0,
+      });
       if (composerTerms.size > COMPOSER_TERMS_MAX)
         dropComposerTerm(composerTerms.keys().next().value!); // oldest first
       rows = rowsFromXterm(term as never, 40);
@@ -4399,7 +4405,10 @@ export async function readComposerState(
     return state;
   } catch (e) {
     dropComposerTerm(logPath);
-    return { kind: "unknown", reason: `log unreadable or render failed: ${(e as Error)?.message ?? e}` };
+    return {
+      kind: "unknown",
+      reason: `log unreadable or render failed: ${(e as Error)?.message ?? e}`,
+    };
   }
 }
 
@@ -6633,6 +6642,22 @@ async function cmdAttach(rest: string[]): Promise<number> {
   // untouched). Poll briefly for a real size before the first report.
   for (let i = 0; i < 15 && (!process.stdout.columns || !process.stdout.rows); i++)
     await new Promise((r) => setTimeout(r, 100));
+  // Windows: ConPTY only ever emits DIFFS against its own model of the screen,
+  // so our terminal must hold exactly that screen before we start relaying
+  // bytes — the text snapshot printed above is not it. A size CHANGE makes
+  // ConPTY repaint the whole viewport with absolute addressing, which is the
+  // one way to get in sync; a same-size report repaints nothing. So nudge the
+  // PTY one row short, let the 250 ms poll apply it, then report the real
+  // size. (Observed without this: typed characters doubled, the remote prompt
+  // repeated down the screen.)
+  if (process.platform === "win32" && !capMode) {
+    const cols = process.stdout.columns ?? 0;
+    const rows = process.stdout.rows ?? 0;
+    if (cols > 0 && rows > 1) {
+      await writeWinsizeDirect(cols, rows - 1);
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
   await sendResize();
   // A one-shot cap fades on the daemon's ~12s TTL, so renew it while attached (cap
   // mode only — a direct winsize write persists and needs no heartbeat).
@@ -6641,10 +6666,37 @@ async function cmdAttach(rest: string[]): Promise<number> {
         if (capMode) void sendResize();
       }, 5000)
     : null;
+  // The direct winsize file is ignored by the agent once it is 30 s old
+  // (rs/src/pty_spawner.rs WINSIZE_STALE_MS — so a dead attach cannot pin the
+  // size forever). On Windows the agent polls that file every 250 ms, so a
+  // one-shot write meant the PTY silently snapped back to the agent's own
+  // console size 30 s into every session: the remote shell got a resize, redrew
+  // its prompt, and from then on every ConPTY diff targeted a geometry this
+  // terminal did not have. Keep the file fresh while attached — timestamp only,
+  // no SIGWINCH, so an unchanged size never triggers a redraw.
+  const directHeartbeat = !capMode
+    ? setInterval(() => {
+        const cols = process.stdout.columns ?? 0;
+        const rows = process.stdout.rows ?? 0;
+        if (cols > 0 && rows > 0)
+          void writeFile(winsizePath, `${cols} ${rows} ${Date.now()}\n`).catch(() => {});
+      }, 10_000)
+    : null;
   // Release the cap promptly on detach (don't wait out the TTL) so the agent
   // re-negotiates back to the remaining viewers / its real tty immediately.
   const withdrawAttachCap = async () => {
     if (capHeartbeat) clearInterval(capHeartbeat);
+    if (directHeartbeat) clearInterval(directHeartbeat);
+    // Direct mode: drop our size override now rather than letting it age out,
+    // so the agent returns to its own console size at once.
+    if (!capMode) {
+      await rm(winsizePath, { force: true }).catch(() => {});
+      try {
+        process.kill(record.pid, "SIGWINCH");
+      } catch {
+        /* agent gone, or no SIGWINCH on this platform — the poll/TTL handles it */
+      }
+    }
     if (!daemonBase) return; // "" token is valid — gate on the base, not the token
     try {
       // Withdraw by reporting presence for THIS pid with NO cap: the daemon then
