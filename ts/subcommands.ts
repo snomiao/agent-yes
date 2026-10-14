@@ -4833,15 +4833,41 @@ export function inspectSubmission(
     composerVisible: false,
     inComposer: false,
   };
-  // The same boundary the draft check uses: a quoted `› line` inside our own
-  // unsent message must not be taken for the prompt (that would count the
-  // message's nonce as transcript evidence — codex review).
-  const prompt = composerPromptRow(screen);
-  if (prompt < 0 || !identity.trim()) return unknown;
+  if (!identity.trim()) return unknown;
   // Strip whitespace to tolerate terminal wrapping of the nonce/header or body.
   const compact = (text: string) => text.replace(/\s+/gu, "");
   const needle = compact(identity);
   const wrapped = identity.startsWith("<ay-msg ");
+  // The same boundary the draft check uses: a quoted `› line` inside our own
+  // unsent message must not be taken for the prompt (that would count the
+  // message's nonce as transcript evidence — codex review).
+  const prompt = composerPromptRow(screen);
+  if (prompt < 0) {
+    // No composer on screen: a plain shell (cmd, bash, an ssh session) has no
+    // `❯` row to inspect. It echoes the submitted line after its prompt and
+    // then prints a NEW prompt below, so a line ending in our raw message that
+    // is not the last line on screen is the evidence. The same line as the
+    // last one is the command still sitting typed-but-unsent. A wrapped
+    // (<ay-msg …>) identity never renders that way, so it stays unknown; so
+    // does a raw send whose text is still only on the final line. Without
+    // this, every `ay send --raw` to a shell reported NOT SUBMITTED (exit 1)
+    // after the command had visibly run.
+    if (wrapped) return unknown;
+    let last = screen.length - 1;
+    while (last >= 0 && !screen[last]!.trim()) last--;
+    const echoed = screen
+      .slice(0, Math.max(0, last))
+      .filter((line) => compact(line).endsWith(needle)).length;
+    return echoed
+      ? {
+          submission: "submitted",
+          retry: false,
+          transcriptMatches: echoed,
+          composerVisible: false,
+          inComposer: false,
+        }
+      : unknown;
+  }
   const transcriptLines = screen.slice(0, prompt);
   const transcript = compact(transcriptLines.join("\n"));
   // For raw sends, a short body such as "x" must not match "Codex" or a
