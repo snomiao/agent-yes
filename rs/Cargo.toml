@@ -103,6 +103,7 @@ hex = "0.4.3"
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+ureq = { version = "3", features = ["json"] }
 
 # Unix-specific
 [target.'cfg(unix)'.dependencies]
