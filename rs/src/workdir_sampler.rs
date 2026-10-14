@@ -225,6 +225,9 @@ fn snapshot() -> Vec<Proc> {
 
 /// `/proc/<pid>/stat`: "pid (comm) state ppid …" — comm may contain spaces
 /// and parens, so split on the LAST ')'.
+// Only the Linux sampler calls this; keep it warning-free under -D warnings on
+// a Windows/macOS checkout (its unit test still exercises it there).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub fn parse_proc_stat(pid: u32, stat: &str) -> Option<Proc> {
     let open = stat.find('(')?;
     let close = stat.rfind(')')?;

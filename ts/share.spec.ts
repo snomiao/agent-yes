@@ -1,5 +1,15 @@
-import { describe, it, expect } from "vitest";
-import { formatRoomLink, shareLinkFromRoomUrl } from "./share.ts";
+import { afterEach, beforeEach, describe, it, expect } from "vitest";
+import {
+  formatRoomLink,
+  loadOrCreateShareRoom,
+  readShareRoom,
+  shareLinkFromRoomUrl,
+  shareRoomFileName,
+  shareRoomPath,
+} from "./share.ts";
+import { mkdtemp, readFile, rm, writeFile } from "fs/promises";
+import { tmpdir } from "os";
+import path from "path";
 import { parseWebrtcLink, toWebrtcUrl } from "./webrtcLink.ts";
 import { MARKER } from "../lab/ui/e2e.js";
 
@@ -54,5 +64,47 @@ describe("formatRoomLink \u2194 the CLI parser", () => {
     const link = formatRoomLink("r1a2b3c", S, "localhost:7778");
     expect(link).toContain("sig=localhost%3A7778");
     expect(parseWebrtcLink(link)).toMatchObject({ room: "r1a2b3c", host: "localhost:7778" });
+  });
+});
+
+// The two hosts persist their rooms in different files (same format). Minting
+// and reading must target the file of the runtime that hosts, and a read must
+// never mint — `ay serve status` is read-only.
+describe("share room files per runtime", () => {
+  let home: string;
+  const prev = process.env.AGENT_YES_HOME;
+  beforeEach(async () => {
+    home = await mkdtemp(path.join(tmpdir(), "ay-share-room-"));
+    process.env.AGENT_YES_HOME = home;
+  });
+  afterEach(async () => {
+    if (prev === undefined) delete process.env.AGENT_YES_HOME;
+    else process.env.AGENT_YES_HOME = prev;
+    await rm(home, { recursive: true, force: true });
+  });
+
+  it("maps each runtime to its own file", () => {
+    expect(shareRoomFileName("ts")).toBe(".share-room");
+    expect(shareRoomFileName("rust")).toBe(".share-room-ayrs");
+    expect(shareRoomPath("rust")).toBe(path.join(home, ".share-room-ayrs"));
+    expect(shareRoomPath()).toBe(path.join(home, ".share-room"));
+  });
+
+  it("mints into the rust file and leaves the ts file alone", async () => {
+    const url = await loadOrCreateShareRoom("s.example", "rust");
+    expect(url).toMatch(/^webrtc:\/\/r[0-9a-f]{12}:e1\.[0-9a-f]{64}@s\.example$/);
+    expect((await readFile(path.join(home, ".share-room-ayrs"), "utf-8")).trim()).toBe(url);
+    await expect(readFile(path.join(home, ".share-room"))).rejects.toThrow();
+    // Stable: a second load returns the persisted room, no re-mint.
+    expect(await loadOrCreateShareRoom("s.example", "rust")).toBe(url);
+  });
+
+  it("reads without minting, and ignores a legacy unencrypted room", async () => {
+    expect(await readShareRoom("rust")).toBeNull();
+    await expect(readFile(path.join(home, ".share-room-ayrs"))).rejects.toThrow();
+    await writeFile(path.join(home, ".share-room"), `webrtc://room0:${S}@s.example`);
+    expect(await readShareRoom("ts")).toBeNull();
+    await writeFile(path.join(home, ".share-room"), `webrtc://room0:${TOK}@s.example`);
+    expect(await readShareRoom("ts")).toBe(`webrtc://room0:${TOK}@s.example`);
   });
 });

@@ -112,3 +112,22 @@ export function planRustServe(
   }
   return { kind: "rust", argv };
 }
+
+/**
+ * Which runtime a daemon registered with these `ay serve` args actually runs —
+ * and therefore which persisted room file holds the room it hosts
+ * (`.share-room` for TypeScript, `.share-room-ayrs` for ayrs; see share.ts).
+ *
+ * Mirrors cmdServe exactly: an argv that planRustServe delegates runs under
+ * ayrs whenever the binary exists, and falls back to TypeScript otherwise. Any
+ * link we print for a daemon must be derived through this, or `ay share` hands
+ * out a link to a room nobody serves. `hasAyrs` is injected so the decision
+ * stays a pure function for tests.
+ */
+export function daemonShareRuntime(
+  args: string[],
+  hasAyrs: () => boolean,
+  env: Record<string, string | undefined> = process.env,
+): "ts" | "rust" {
+  return planRustServe(args, env).kind === "rust" && hasAyrs() ? "rust" : "ts";
+}

@@ -2,6 +2,9 @@ import { readFile } from "fs/promises";
 import { describe, expect, it } from "vitest";
 import {
   installerArgv,
+  LEGACY_AYRS_TASK,
+  legacyAyrsTaskArgv,
+  serveLauncher,
   probeDaemon,
   isNoNodeExecError,
   oxmgrCmd,
@@ -282,5 +285,105 @@ describe("vendorAssetType", () => {
     expect(vendorAssetType("../index.html")).toBeNull();
     expect(vendorAssetType("xterm.min.js.map")).toBeNull();
     expect(vendorAssetType("")).toBeNull();
+  });
+});
+
+// The daemon manager stores this argv verbatim and re-runs it on every
+// restart: a baked-in `~/.bun/bin/ay` symlink (recreated on each global
+// upgrade, absent on some images until the first one) or a bare `ay` that a
+// manager's minimal PATH cannot resolve both turn into an ENOENT restart loop.
+describe("serveLauncher", () => {
+  const realpath = (p: string) =>
+    p.replace(
+      "/home/alice/.bun/bin/ay",
+      "/home/alice/.bun/install/global/node_modules/agent-yes/dist/cli.js",
+    );
+
+  it("resolves the PATH symlink to the real script and runs it under bun", () => {
+    expect(
+      serveLauncher({
+        which: "/home/alice/.bun/bin/ay",
+        script: "/x/cli.js",
+        execPath: "/usr/bin/bun",
+        platform: "linux",
+        realpath,
+      }),
+    ).toEqual([
+      "/usr/bin/bun",
+      "/home/alice/.bun/install/global/node_modules/agent-yes/dist/cli.js",
+    ]);
+  });
+
+  it("falls back to the running script, never to a bare `ay`, when nothing is on PATH", () => {
+    expect(
+      serveLauncher({
+        which: null,
+        script: "/repo/alpha/dist/cli.js",
+        execPath: "/usr/bin/bun",
+        platform: "linux",
+        realpath,
+      }),
+    ).toEqual(["/usr/bin/bun", "/repo/alpha/dist/cli.js"]);
+  });
+
+  it("survives a realpath failure by keeping the path it was given", () => {
+    const boom = () => {
+      throw new Error("ENOENT");
+    };
+    expect(
+      serveLauncher({
+        which: "/opt/ay",
+        script: undefined,
+        execPath: "/usr/bin/bun",
+        platform: "linux",
+        realpath: boom,
+      }),
+    ).toEqual(["/usr/bin/bun", "/opt/ay"]);
+  });
+
+  it("runs a Windows exe shim directly and a script under bun", () => {
+    const id = (p: string) => p;
+    expect(
+      serveLauncher({
+        which: "C:/Users/alice/.bun/bin/ay.exe",
+        script: undefined,
+        execPath: "C:/bun.exe",
+        platform: "win32",
+        realpath: id,
+      }),
+    ).toEqual(["C:/Users/alice/.bun/bin/ay.exe"]);
+    expect(
+      serveLauncher({
+        which: null,
+        script: "C:/repo/alpha/dist/cli.js",
+        execPath: "C:/bun.exe",
+        platform: "win32",
+        realpath: id,
+      }),
+    ).toEqual(["C:/bun.exe", "C:/repo/alpha/dist/cli.js"]);
+  });
+});
+
+// A scheduled-task host from before the oxmgr move keeps the WebRTC room; the
+// new daemon then waits on it forever. Install and uninstall both clear it.
+describe("legacyAyrsTaskArgv", () => {
+  it("names the task ayrs serve install registered, with the right schtasks verbs", () => {
+    expect(LEGACY_AYRS_TASK).toBe("com.snomiao.ayrs-serve");
+    expect(legacyAyrsTaskArgv("query")).toEqual([
+      "schtasks",
+      "/query",
+      "/tn",
+      LEGACY_AYRS_TASK,
+      "/fo",
+      "LIST",
+    ]);
+    expect(legacyAyrsTaskArgv("end")).toEqual(["schtasks", "/end", "/tn", LEGACY_AYRS_TASK]);
+    expect(legacyAyrsTaskArgv("delete")).toEqual([
+      "schtasks",
+      "/delete",
+      "/tn",
+      LEGACY_AYRS_TASK,
+      "/f",
+    ]);
   });
 });
