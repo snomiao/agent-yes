@@ -21,6 +21,7 @@ use std::env;
 /// MUST mirror `SUBCOMMANDS` in ts/subcommands.ts — keep the two in sync.
 pub const SUBCOMMANDS: &[&str] = &[
     "ls",
+    "ls-refresh",
     "list",
     "ps",
     "status",
@@ -548,7 +549,16 @@ mod tests {
     #[test]
     fn test_is_subcommand() {
         // Management subcommands are recognised for both manager and alias.
-        for sub in ["restart", "ls", "send", "stop", "serve", "tail", "reap"] {
+        for sub in [
+            "restart",
+            "ls",
+            "ls-refresh",
+            "send",
+            "stop",
+            "serve",
+            "tail",
+            "reap",
+        ] {
             assert!(is_subcommand(sub, true), "{sub} should be a subcommand");
             assert!(is_subcommand(sub, false), "{sub} should be a subcommand");
         }

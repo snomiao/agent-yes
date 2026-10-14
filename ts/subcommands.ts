@@ -13,7 +13,7 @@
 
 import { randomBytes } from "crypto";
 import { closeSync, constants as fsConstants, openSync, realpathSync } from "fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn as spawnChild } from "node:child_process";
 import { appendFile, mkdir, open, readFile, rm, stat, writeFile } from "fs/promises";
 import ms from "ms";
 import { homedir } from "os";
@@ -88,12 +88,29 @@ import {
   type SenderVia,
 } from "./senderAncestry.ts";
 import yargs from "yargs";
-import { type ResolvedRemote, readRemotes, resolveRemoteSpec } from "./remotes.ts";
+import {
+  type RemoteConfig,
+  type ResolvedRemote,
+  readRemotes,
+  resolveRemoteSpec,
+} from "./remotes.ts";
+import {
+  cacheAgeLabel,
+  hhmm,
+  humanizeAge,
+  isStale,
+  jsonRemote,
+  noteSnapshotResult,
+  parseWaitFor,
+  readRemoteSnapshot,
+  type RemoteSnapshot,
+  type WaitFor,
+  writeRemoteSnapshot,
+} from "./remoteCache.ts";
 import {
   noteRemoteResult,
   pruneRemoteHealth,
   readRemoteHealth,
-  remoteBackoffMs,
   shouldSkipRemote,
   writeRemoteHealth,
 } from "./remoteHealth.ts";
@@ -642,6 +659,7 @@ function mergeRecords(...buckets: GlobalPidRecord[][]): GlobalPidRecord[] {
 // this JS layer; keep the two lists in sync.
 const SUBCOMMANDS = new Set([
   "ls",
+  "ls-refresh",
   "list",
   "ps",
   "status",
@@ -1061,6 +1079,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdSend(rest);
       case "send-drain":
         return await cmdSendDrain(rest);
+      case "ls-refresh":
+        return await cmdLsRefresh(rest);
       case "msgs":
         return await cmdMsgs(rest);
       case "key":
@@ -1322,7 +1342,8 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `ay - agent-yes CLI\n` +
       `\n` +
       `Management:\n` +
-      `  ay ls [keyword]                     list running agents\n` +
+      `  ay ls [keyword]                     list running agents (remotes from cache, refreshed\n` +
+      `      [--waitFor=all|local|<alias>]     in the background; --waitFor blocks for fresh rows)\n` +
       `  ay ps [keyword]                     per-agent CPU/RSS, rolled up over each\n` +
       `                                        agent's whole process tree, + box vitals\n` +
       `  ay tail [-f] [-n N] <keyword>       last N lines (96), -f to follow\n` +
@@ -1703,6 +1724,16 @@ async function runRemoteLs(
     return 1;
   }
   const records = (await res.json()) as any[];
+  // A direct `ay ls <alias>` is the freshest data there is — fold it into the
+  // cached-first fleet listing's snapshot for that alias (no keyword filter,
+  // or the cache would hold a subset and print it as the whole machine).
+  if (!remote.keyword && (await readRemotes()).has(remote.label)) {
+    const now = Date.now();
+    const prev = await readRemoteSnapshot(remote.label);
+    await writeRemoteSnapshot(
+      noteSnapshotResult(prev, remote.label, { ok: true, records }, now),
+    ).catch(() => {});
+  }
   if (records.length === 0) {
     process.stderr.write(
       remote.keyword
@@ -2185,7 +2216,7 @@ async function fetchRemoteRecordsRaw(
    * would mark a live-but-empty host failed and hide it for up to 32 minutes,
    * which is the failure this whole change exists to avoid.
    */
-  onReachable?: (ok: boolean) => void,
+  onReachable?: (ok: boolean, why?: string) => void,
 ): Promise<any[]> {
   const params = new URLSearchParams();
   if (opts.all) params.set("all", "1");
@@ -2211,18 +2242,109 @@ async function fetchRemoteRecordsRaw(
     onReachable?.(true);
     if (!res.ok) return [];
     return (await res.json()) as any[];
-  } catch {
-    onReachable?.(false);
+  } catch (e) {
+    // First line only: the WebRTC viewer's error is a multi-line explanation
+    // (ts/webrtcSignal.ts); the snapshot keeps the headline for the age tag.
+    onReachable?.(false, String((e as Error)?.message ?? e).split("\n")[0]);
     return [];
   } finally {
     bridge?.close();
   }
 }
 
+/** Probe one remote and fold the outcome into its snapshot. Never throws. */
+async function refreshRemoteSnapshot(
+  alias: string,
+  cfg: RemoteConfig,
+  opts: { all: boolean; active: boolean; keyword?: string },
+  now: number,
+): Promise<{ snap: RemoteSnapshot; ok: boolean }> {
+  let ok = false;
+  let why = "did not answer";
+  const records = await fetchRemoteRecordsRaw(cfg.url, cfg.token, opts, (r, w) => {
+    ok = r;
+    if (w) why = w;
+  });
+  const prev = await readRemoteSnapshot(alias);
+  const snap = noteSnapshotResult(
+    prev,
+    alias,
+    ok ? { ok: true, records } : { ok: false, message: why },
+    now,
+  );
+  await writeRemoteSnapshot(snap).catch(() => {});
+  return { snap, ok };
+}
+
+/** Run `ay <args…>` detached from this process (same launcher as the send drainer). */
+function spawnDetachedAy(args: string[]): number | null {
+  const launcher = drainerLauncher(process.execPath, process.argv[1], Bun.which("ay"));
+  if (!launcher) return null;
+  const [cmd, ...pre] = launcher;
+  try {
+    const child = spawnChild(cmd!, [...pre, ...args], { detached: true, stdio: "ignore" });
+    child.on("error", () => {});
+    child.unref();
+    return child.pid ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `ay ls-refresh <alias…> [--all] [--active] [--keyword k]` — hidden: the
+ * background half of cached-first `ay ls`. Probes each alias once, writes its
+ * snapshot and health, and exits. One refresher per alias at a time (pid
+ * lock), so a burst of listings does not fan out into a burst of probes.
+ */
+async function cmdLsRefresh(rest: string[]): Promise<number> {
+  const aliases: string[] = [];
+  const opts = { all: false, active: false, keyword: undefined as string | undefined };
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]!;
+    if (a === "--all") opts.all = true;
+    else if (a === "--active") opts.active = true;
+    else if (a === "--keyword") opts.keyword = rest[++i];
+    else if (a.startsWith("--keyword=")) opts.keyword = a.slice("--keyword=".length);
+    else if (!a.startsWith("-")) aliases.push(a);
+  }
+  const remotes = await readRemotes();
+  const now = Date.now();
+  await Promise.all(
+    aliases.map(async (alias) => {
+      const cfg = remotes.get(alias);
+      if (!cfg) return;
+      const lock = path.join(
+        agentYesHome(),
+        "remotes",
+        `${encodeURIComponent(alias)}.refresh.lock`,
+      );
+      const owner = Number((await readFile(lock, "utf-8").catch(() => "")).trim());
+      if (owner > 0 && owner !== process.pid && pidAlive(owner)) return;
+      await mkdir(path.dirname(lock), { recursive: true }).catch(() => {});
+      await writeFile(lock, String(process.pid)).catch(() => {});
+      try {
+        const { ok } = await refreshRemoteSnapshot(alias, cfg, opts, now);
+        const health = await readRemoteHealth();
+        health[alias] = noteRemoteResult(health[alias], ok, now);
+        await writeRemoteHealth(health).catch(() => {});
+      } finally {
+        await rm(lock, { force: true }).catch(() => {});
+      }
+    }),
+  );
+  return 0;
+}
+
 async function runAllRemotesLs(opts: {
   all: boolean;
   active: boolean;
   keyword?: string;
+  /** Aliases to refresh in the foreground before printing; null = cached-first. */
+  waitFor: WaitFor | null;
+  /** Per-remote budget for a foreground refresh. */
+  timeoutMs: number;
+  json: boolean;
 }): Promise<number> {
   const remotes = await readRemotes();
   const localOpts: CommonOpts = {
@@ -2233,50 +2355,96 @@ async function runAllRemotesLs(opts: {
     cwdScope: null,
   };
 
-  // A remote that is not answering costs a full connect timeout (25s for a
-  // WebRTC spec) and returns nothing, and this gathers them together — so two
-  // dead entries made every `ay ls` here take 27s instead of 5s. Skip a host
-  // that has been failing, on a doubling backoff, and keep LISTING it as
-  // unreachable so the config stays honest and the operator can see it is being
-  // skipped rather than silently dropped. See ts/remoteHealth.ts.
+  // Cached-first. Remote rows come from each alias's last snapshot
+  // (ts/remoteCache.ts) and print at once; a stale one is refreshed by a
+  // detached `ay ls-refresh` so the NEXT listing is fresh. Only the aliases
+  // named by --waitFor are fetched in the foreground, each on its own budget,
+  // so one dead machine cannot hold the fleet view hostage (a WebRTC remote
+  // takes 25 s to give up; two of them made every `ay ls` here take 27 s).
+  // The backoff in ts/remoteHealth.ts still governs the background refreshers,
+  // so a host that keeps failing is not re-probed on every listing. --waitFor
+  // forces the probe — that is what it is for.
   const health = await readRemoteHealth();
   const healthNow = Date.now();
-  const skipped = new Set(
-    [...remotes.keys()].filter((alias) => shouldSkipRemote(health[alias], healthNow)),
-  );
-  const probed = [...remotes.entries()].filter(([alias]) => !skipped.has(alias));
+  const waiting = new Set(opts.waitFor?.remotes ?? []);
+  const fetchOpts = { all: opts.all, active: opts.active, keyword: opts.keyword };
+  type Section = {
+    alias: string;
+    snap: RemoteSnapshot | null;
+    live: boolean;
+    refreshing: boolean;
+    failure: string | null;
+  };
 
-  const [localResult, ...remoteResults] = await Promise.allSettled([
+  const [localResult, ...waited] = await Promise.allSettled([
     listRecords(opts.keyword, localOpts).then((recs) => ({
       host: "local",
       records: recs as any[],
     })),
-    ...probed.map(([alias, cfg]) => {
-      let reachable = false;
-      return fetchRemoteRecordsRaw(cfg.url, cfg.token, opts, (ok) => {
-        reachable = ok;
-      }).then((records) => ({ host: alias, records, ok: reachable }));
-    }),
+    ...[...remotes.entries()]
+      .filter(([alias]) => waiting.has(alias))
+      .map(async ([alias, cfg]) => {
+        const budget = new Promise<"timeout">((resolve) => {
+          const t = setTimeout(() => resolve("timeout"), opts.timeoutMs);
+          (t as any).unref?.();
+        });
+        const res = await Promise.race([
+          refreshRemoteSnapshot(alias, cfg, fetchOpts, healthNow),
+          budget,
+        ]);
+        if (res === "timeout")
+          return {
+            alias,
+            snap: await readRemoteSnapshot(alias),
+            ok: false,
+            failure: `timed out after ${Math.round(opts.timeoutMs / 1000)}s`,
+          };
+        const failure = res.ok
+          ? null
+          : res.snap.error
+            ? `unreachable since ${hhmm(res.snap.error.since)} (${res.snap.error.message})`
+            : "unreachable";
+        return { alias, snap: res.snap, ok: res.ok, failure };
+      }),
   ]);
 
-  // Record what we learned, then persist once. A host that answered clears its
-  // streak; one that did not extends it. Best-effort: a health file we cannot
-  // write must never break `ay ls`.
-  {
-    // Prune first, so an alias removed from remotes.yaml stops being carried
-    // forever. `remotes` is the live configured set.
-    const next = pruneRemoteHealth({ ...health }, remotes.keys());
-    for (const [i, [alias]] of probed.entries()) {
-      const res = remoteResults[i];
-      const ok = res?.status === "fulfilled" && (res.value as any).ok === true;
-      next[alias] = noteRemoteResult(health[alias], ok, healthNow);
+  // Record what the foreground probes learned, then persist once (pruned, so
+  // an alias removed from remotes.yaml stops being carried forever). A health
+  // file we cannot write must never break `ay ls`.
+  const nextHealth = pruneRemoteHealth({ ...health }, remotes.keys());
+  const waitedByAlias = new Map<
+    string,
+    { snap: RemoteSnapshot | null; ok: boolean; failure: string | null }
+  >();
+  for (const r of waited) if (r.status === "fulfilled") waitedByAlias.set(r.value.alias, r.value);
+  const sections: Section[] = [];
+  const background: string[] = [];
+  for (const [alias] of remotes) {
+    const w = waitedByAlias.get(alias);
+    if (w) {
+      nextHealth[alias] = noteRemoteResult(health[alias], w.ok, healthNow);
+      sections.push({ alias, snap: w.snap, live: w.ok, refreshing: false, failure: w.failure });
+      continue;
     }
-    await writeRemoteHealth(next).catch(() => {});
+    const snap = await readRemoteSnapshot(alias);
+    const refreshing = isStale(snap, healthNow) && !shouldSkipRemote(health[alias], healthNow);
+    if (refreshing) background.push(alias);
+    sections.push({ alias, snap, live: false, refreshing, failure: null });
   }
+  await writeRemoteHealth(nextHealth).catch(() => {});
+  if (background.length)
+    spawnDetachedAy([
+      "ls-refresh",
+      ...background,
+      ...(opts.all ? ["--all"] : []),
+      ...(opts.active ? ["--active"] : []),
+      ...(opts.keyword ? ["--keyword", opts.keyword] : []),
+    ]);
+  const failed = sections.some((s) => waiting.has(s.alias) && s.failure);
 
   // Group by host in a stable order (local first, then each remote alias in
   // config order), so the aggregated table reads top-down per machine.
-  const byHost: { host: string; records: any[] }[] = [];
+  const byHost: { host: string; records: any[]; cached?: boolean }[] = [];
   // Shared per-invocation caches so local agents in the same repo spawn
   // `git status` once (see gitStatusOnce).
   const gitRootCache = new Map<string, string>();
@@ -2313,47 +2481,67 @@ async function runAllRemotesLs(opts: {
     );
     byHost.push({ host: "local", records: enriched });
   }
-  // A skipped host is REPORTED, not dropped. Silently omitting it would make a
-  // machine that can come back disappear from the fleet view with nothing to
-  // notice — the same failure as deleting it from the config, which is why we
-  // did not do that. One line to stderr per skipped host, so `--json` and any
-  // parser downstream stay unaffected.
-  for (const alias of skipped) {
-    const h = health[alias];
-    // Time REMAINING, not the window length: a host with one second left would
-    // otherwise report "retrying in up to 32m", which is true of the window and
-    // false of the wait, and the operator is reading this to decide whether to
-    // wait or force a probe.
-    const leftMs = Math.max(
-      0,
-      remoteBackoffMs(h?.streak ?? 1) - (healthNow - (h?.lastFailedAt ?? healthNow)),
-    );
-    const left =
-      leftMs >= 60_000 ? `${Math.round(leftMs / 60_000)}m` : `${Math.ceil(leftMs / 1000)}s`;
-    process.stderr.write(
-      `${alias}: unreachable — skipped after ${h?.streak ?? 0} failed attempt(s), ` +
-        `retrying in ${left} (ay ls ${alias} to force a probe now)\n`,
-    );
+  for (const s of sections)
+    byHost.push({ host: s.alias, records: s.snap?.records ?? [], cached: !s.live });
+
+  if (opts.json) {
+    // Aggregated shape (only when remotes are asked for — plain `ay ls --json`
+    // stays this box's flat array): per remote, where the rows came from and
+    // how old they are, so an orchestrator can decide instead of guessing.
+    const out = {
+      local: byHost.find((h) => h.host === "local")?.records ?? [],
+      remotes: Object.fromEntries(
+        sections.map((s) => [
+          s.alias,
+          {
+            ...jsonRemote(s.snap, healthNow),
+            live: s.live,
+            refreshing: s.refreshing,
+            failure: s.failure,
+          },
+        ]),
+      ),
+    };
+    await writeStdoutFlushed(JSON.stringify(out, null, 2) + "\n");
+    return failed ? 1 : 0;
   }
-  for (const res of remoteResults) {
-    if (res.status === "fulfilled")
-      byHost.push({ host: res.value.host, records: res.value.records });
+
+  // One line per remote FIRST — where its rows came from, how old they are, and
+  // (under --waitFor) what went wrong — so nothing cached can pass for live.
+  if (sections.length) {
+    const aliasW = Math.max(...sections.map((s) => s.alias.length));
+    for (const s of sections)
+      process.stdout.write(
+        `${s.alias.padEnd(aliasW)}  ${s.failure ?? (s.live ? "live" : cacheAgeLabel(s.snap, healthNow, s.refreshing))}\n`,
+      );
+    process.stdout.write("\n");
   }
 
   // Flatten each host's records into its agent>subagent forest (parent_pid links),
   // carrying the box-drawing tree prefix — the same nesting the console's left
   // panel shows. Degrades to a flat newest-first list when there are no links.
-  type HostedRow = { host: string; rec: any; prefix: string };
+  type HostedRow = { host: string; rec: any; prefix: string; cached: boolean };
   const rows: HostedRow[] = [];
-  for (const { host, records } of byHost) {
+  for (const { host, records, cached } of byHost) {
     for (const { record, prefix } of flattenForest(buildAgentForest(records))) {
-      rows.push({ host, rec: record, prefix });
+      rows.push({ host, rec: record, prefix, cached: cached === true });
     }
   }
 
+  const anyCached = sections.some((s) => !s.live);
+  const footer = () => {
+    if (rows.some((r) => r.cached))
+      process.stderr.write(`* = from cache (AGE is real; STATUS may have changed since)\n`);
+    if (anyCached)
+      process.stderr.write(
+        `ay ls --waitFor=all   # block until fresh data from every local+remote machine\n`,
+      );
+  };
+
   if (rows.length === 0) {
     process.stderr.write("no running agents\n");
-    return 0;
+    footer();
+    return failed ? 1 : 0;
   }
 
   const termWidth = (process.stdout as any).columns ?? 120;
@@ -2363,7 +2551,8 @@ async function runAllRemotesLs(opts: {
   const hostW = Math.max(4, ...rows.map((r) => r.host.length));
   const pidW = Math.max(3, ...rows.map((r) => String(r.rec.pid).length));
   const cliW = Math.max(3, ...rows.map((r) => String(r.rec.cli).length));
-  const statusW = Math.max(6, ...rows.map((r) => String(r.rec.status).length));
+  const statusOf = (r: HostedRow) => String(r.rec.status) + (r.cached ? "*" : "");
+  const statusW = Math.max(6, ...rows.map((r) => statusOf(r).length));
   const ageW = Math.max(3, ...rows.map((r) => ageOf(r.rec).length));
   const cwdW = Math.max(3, ...rows.map((r) => cwdLabel(r.rec).length));
   const promptBudget = Math.max(
@@ -2382,7 +2571,8 @@ async function runAllRemotesLs(opts: {
       "PROMPT",
     ].join("  ") + "\n",
   );
-  for (const { host, rec, prefix } of rows) {
+  for (const row of rows) {
+    const { host, rec, prefix } = row;
     // The tree prefix + task badge + flag chips + git tag live inside the PROMPT
     // column, so they eat into this row's text budget — same as the single-host
     // table. Both local (enriched above) and remote (/api/ls) records carry
@@ -2402,14 +2592,15 @@ async function runAllRemotesLs(opts: {
         host.padEnd(hostW),
         String(rec.pid).padEnd(pidW),
         String(rec.cli).padEnd(cliW),
-        String(rec.status).padEnd(statusW),
+        statusOf(row).padEnd(statusW),
         ageOf(rec).padEnd(ageW),
         cwdLabel(rec).padEnd(cwdW),
         label,
       ].join("  ") + "\n",
     );
   }
-  return 0;
+  footer();
+  return failed ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -2815,8 +3006,21 @@ async function cmdLs(rest: string[]): Promise<number> {
       description:
         "Only this machine's agents — skip configured remotes (the pre-default behaviour)",
     })
+    .option("waitFor", {
+      type: "string",
+      description:
+        "Block until fresh rows from this set instead of printing cached remote rows: " +
+        "all | local | <alias>[,<alias>…]. Each remote gets --timeout; a failure is reported per remote",
+    })
+    .option("timeout", {
+      type: "number",
+      default: 30,
+      description: "Seconds to wait per remote with --waitFor",
+    })
     .option("help", { alias: "h", type: "boolean", default: false, description: "Show this help" })
-    .example("ay ls", "list local + all configured remotes")
+    .example("ay ls", "local live + remotes from their last snapshot (refreshed in the background)")
+    .example("ay ls --waitFor=all", "block until every machine answered (or timed out)")
+    .example("ay ls --json --all-remotes", "{local, remotes:{alias:{fetchedAt, stale, records…}}}")
     .example("ay ls --local", "only this machine's agents")
     .example("ay ls --all", "include exited agents")
     .example("ay ls --json", "machine-readable output")
@@ -2886,14 +3090,30 @@ async function cmdLs(rest: string[]): Promise<number> {
   // The human table now spans local + every configured remote by DEFAULT (one
   // fleet view across machines). `--local` opts back to this machine only, and
   // a single-machine box (no remotes configured) keeps the richer local-only
-  // table automatically. The programmatic paths above (--watch) and the --json
-  // path below stay LOCAL-only on purpose: orchestrators parse them and expect
-  // this box's pids, and the aggregated view is a flat human table without the
-  // forest/notes/badges those consumers don't need.
-  if (!argv.local && !opts.json && !argv.latest) {
-    const remotes = await readRemotes();
-    if (argv["all-remotes"] || remotes.size > 0) {
-      return runAllRemotesLs({ all: argv.all, active: argv.active, keyword });
+  // table automatically. The programmatic paths (--watch, plain --json) stay
+  // LOCAL-only on purpose: orchestrators parse them and expect this box's
+  // pids. `--json` opts into the aggregated shape with --all-remotes or
+  // --waitFor, where every remote carries fetchedAt/stale for the parser.
+  const remotesCfg = await readRemotes();
+  let waitFor: WaitFor | null = null;
+  if (typeof argv.waitFor === "string") {
+    const parsed = parseWaitFor(argv.waitFor, [...remotesCfg.keys()]);
+    if ("error" in parsed) {
+      process.stderr.write(parsed.error + "\n");
+      return 2;
+    }
+    waitFor = parsed;
+  }
+  if (!argv.local && !argv.latest && (!opts.json || argv["all-remotes"] || waitFor)) {
+    if (argv["all-remotes"] || waitFor || remotesCfg.size > 0) {
+      return runAllRemotesLs({
+        all: argv.all,
+        active: argv.active,
+        keyword,
+        waitFor,
+        timeoutMs: Math.max(1, Number(argv.timeout) || 30) * 1000,
+        json: opts.json,
+      });
     }
   }
 
@@ -3066,18 +3286,6 @@ async function cmdLs(rest: string[]): Promise<number> {
   }
 
   return 0;
-}
-
-function humanizeAge(ms: number): string {
-  if (ms < 1000) return "0s";
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  const d = Math.floor(h / 24);
-  return `${d}d`;
 }
 
 function shortenPath(p: string): string {
@@ -4385,7 +4593,13 @@ export async function readComposerState(
       });
       await new Promise<void>((resolve) => term.write(buf, resolve));
       dropComposerTerm(logPath);
-      composerTerms.set(logPath, { term, key, window: w, offset: from + buf.length, whole: from === 0 });
+      composerTerms.set(logPath, {
+        term,
+        key,
+        window: w,
+        offset: from + buf.length,
+        whole: from === 0,
+      });
       if (composerTerms.size > COMPOSER_TERMS_MAX)
         dropComposerTerm(composerTerms.keys().next().value!); // oldest first
       rows = rowsFromXterm(term as never, 40);
@@ -4399,7 +4613,10 @@ export async function readComposerState(
     return state;
   } catch (e) {
     dropComposerTerm(logPath);
-    return { kind: "unknown", reason: `log unreadable or render failed: ${(e as Error)?.message ?? e}` };
+    return {
+      kind: "unknown",
+      reason: `log unreadable or render failed: ${(e as Error)?.message ?? e}`,
+    };
   }
 }
 
