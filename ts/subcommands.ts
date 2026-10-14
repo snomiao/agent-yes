@@ -5041,15 +5041,41 @@ export function inspectSubmission(
     composerVisible: false,
     inComposer: false,
   };
-  // The same boundary the draft check uses: a quoted `› line` inside our own
-  // unsent message must not be taken for the prompt (that would count the
-  // message's nonce as transcript evidence — codex review).
-  const prompt = composerPromptRow(screen);
-  if (prompt < 0 || !identity.trim()) return unknown;
+  if (!identity.trim()) return unknown;
   // Strip whitespace to tolerate terminal wrapping of the nonce/header or body.
   const compact = (text: string) => text.replace(/\s+/gu, "");
   const needle = compact(identity);
   const wrapped = identity.startsWith("<ay-msg ");
+  // The same boundary the draft check uses: a quoted `› line` inside our own
+  // unsent message must not be taken for the prompt (that would count the
+  // message's nonce as transcript evidence — codex review).
+  const prompt = composerPromptRow(screen);
+  if (prompt < 0) {
+    // No composer on screen: a plain shell (cmd, bash, an ssh session) has no
+    // `❯` row to inspect. It echoes the submitted line after its prompt and
+    // then prints a NEW prompt below, so a line ending in our raw message that
+    // is not the last line on screen is the evidence. The same line as the
+    // last one is the command still sitting typed-but-unsent. A wrapped
+    // (<ay-msg …>) identity never renders that way, so it stays unknown; so
+    // does a raw send whose text is still only on the final line. Without
+    // this, every `ay send --raw` to a shell reported NOT SUBMITTED (exit 1)
+    // after the command had visibly run.
+    if (wrapped) return unknown;
+    let last = screen.length - 1;
+    while (last >= 0 && !screen[last]!.trim()) last--;
+    const echoed = screen
+      .slice(0, Math.max(0, last))
+      .filter((line) => compact(line).endsWith(needle)).length;
+    return echoed
+      ? {
+          submission: "submitted",
+          retry: false,
+          transcriptMatches: echoed,
+          composerVisible: false,
+          inComposer: false,
+        }
+      : unknown;
+  }
   const transcriptLines = screen.slice(0, prompt);
   const transcript = compact(transcriptLines.join("\n"));
   // For raw sends, a short body such as "x" must not match "Codex" or a
@@ -6850,6 +6876,22 @@ async function cmdAttach(rest: string[]): Promise<number> {
   // untouched). Poll briefly for a real size before the first report.
   for (let i = 0; i < 15 && (!process.stdout.columns || !process.stdout.rows); i++)
     await new Promise((r) => setTimeout(r, 100));
+  // Windows: ConPTY only ever emits DIFFS against its own model of the screen,
+  // so our terminal must hold exactly that screen before we start relaying
+  // bytes — the text snapshot printed above is not it. A size CHANGE makes
+  // ConPTY repaint the whole viewport with absolute addressing, which is the
+  // one way to get in sync; a same-size report repaints nothing. So nudge the
+  // PTY one row short, let the 250 ms poll apply it, then report the real
+  // size. (Observed without this: typed characters doubled, the remote prompt
+  // repeated down the screen.)
+  if (process.platform === "win32" && !capMode) {
+    const cols = process.stdout.columns ?? 0;
+    const rows = process.stdout.rows ?? 0;
+    if (cols > 0 && rows > 1) {
+      await writeWinsizeDirect(cols, rows - 1);
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
   await sendResize();
   // A one-shot cap fades on the daemon's ~12s TTL, so renew it while attached (cap
   // mode only — a direct winsize write persists and needs no heartbeat).
@@ -6858,10 +6900,37 @@ async function cmdAttach(rest: string[]): Promise<number> {
         if (capMode) void sendResize();
       }, 5000)
     : null;
+  // The direct winsize file is ignored by the agent once it is 30 s old
+  // (rs/src/pty_spawner.rs WINSIZE_STALE_MS — so a dead attach cannot pin the
+  // size forever). On Windows the agent polls that file every 250 ms, so a
+  // one-shot write meant the PTY silently snapped back to the agent's own
+  // console size 30 s into every session: the remote shell got a resize, redrew
+  // its prompt, and from then on every ConPTY diff targeted a geometry this
+  // terminal did not have. Keep the file fresh while attached — timestamp only,
+  // no SIGWINCH, so an unchanged size never triggers a redraw.
+  const directHeartbeat = !capMode
+    ? setInterval(() => {
+        const cols = process.stdout.columns ?? 0;
+        const rows = process.stdout.rows ?? 0;
+        if (cols > 0 && rows > 0)
+          void writeFile(winsizePath, `${cols} ${rows} ${Date.now()}\n`).catch(() => {});
+      }, 10_000)
+    : null;
   // Release the cap promptly on detach (don't wait out the TTL) so the agent
   // re-negotiates back to the remaining viewers / its real tty immediately.
   const withdrawAttachCap = async () => {
     if (capHeartbeat) clearInterval(capHeartbeat);
+    if (directHeartbeat) clearInterval(directHeartbeat);
+    // Direct mode: drop our size override now rather than letting it age out,
+    // so the agent returns to its own console size at once.
+    if (!capMode) {
+      await rm(winsizePath, { force: true }).catch(() => {});
+      try {
+        process.kill(record.pid, "SIGWINCH");
+      } catch {
+        /* agent gone, or no SIGWINCH on this platform — the poll/TTL handles it */
+      }
+    }
     if (!daemonBase) return; // "" token is valid — gate on the base, not the token
     try {
       // Withdraw by reporting presence for THIS pid with NO cap: the daemon then

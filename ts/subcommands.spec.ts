@@ -2070,8 +2070,7 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
           const errs: string[] = [];
           const origErr = process.stderr.write.bind(process.stderr);
           process.stderr.write = ((c: string | Uint8Array) => (
-            errs.push(String(c)),
-            true
+            errs.push(String(c)), true
           )) as typeof process.stderr.write;
           let res: { code: number | null; stdout: string };
           try {
@@ -4729,7 +4728,10 @@ describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () =
       for (let r = 39; r <= 46; r++) log += at(r, screen[r - 1]! + (r === 46 ? ` ${k % 10}` : ""));
       // A fragment of an older frame's box, still holding what was typed then.
       if (staleBox !== undefined)
-        log += at(30, `${GRAY}${"─".repeat(COLS)}\x1b[0m`) + at(31, `❯ ${staleBox}`) + at(32, `${GRAY}${"─".repeat(COLS)}\x1b[0m`);
+        log +=
+          at(30, `${GRAY}${"─".repeat(COLS)}\x1b[0m`) +
+          at(31, `❯ ${staleBox}`) +
+          at(32, `${GRAY}${"─".repeat(COLS)}\x1b[0m`);
       log += "\x1b[48;3H";
     }
     return log;
@@ -4796,5 +4798,36 @@ describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () =
   it("keeps a typed draft on screen in the 32 KB tail", async () => {
     const box = `${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n❯ btw how\r\n${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n`;
     expect(await stateOf("x\r\n".repeat(20000) + box)).toEqual({ kind: "draft", chars: 6 });
+  });
+});
+
+// A plain shell (cmd, bash, an ssh session) has no composer row. Its evidence
+// of a submitted raw send is the echoed command line followed by a NEW prompt;
+// the same text on the final line is the command typed but not yet entered.
+// Without this every `ay send --raw` to a shell reported NOT SUBMITTED (exit 1)
+// after the command had visibly run.
+describe("inspectSubmission: shells without a composer", () => {
+  it("counts an echoed command above a fresh prompt as submitted", async () => {
+    const { inspectSubmission } = await loadModule();
+    const ran = ["alice@box:~/repo$ echo PIPE_OK_1", "PIPE_OK_1", "", "alice@box:~/repo$ "];
+    expect(inspectSubmission(ran, "echo PIPE_OK_1")).toMatchObject({
+      submission: "submitted",
+      retry: false,
+      transcriptMatches: 1,
+      composerVisible: false,
+      inComposer: false,
+    });
+  });
+
+  it("does not count the command while it is still on the last line, nor a wrapped message", async () => {
+    const { inspectSubmission } = await loadModule();
+    const typed = ["alice@box:~/repo$ ls", "a  b", "alice@box:~/repo$ echo PIPE_OK_1"];
+    expect(inspectSubmission(typed, "echo PIPE_OK_1").submission).toBe("not-submitted");
+    expect(inspectSubmission(typed, "echo PIPE_OK_1").retry).toBe(false);
+    const wrapped = ["alice@box:~/repo$ <ay-msg abc12345 from x>", "hi", "alice@box:~/repo$ "];
+    expect(inspectSubmission(wrapped, "<ay-msg abc12345 from x>").submission).toBe("not-submitted");
+    expect(inspectSubmission(["alice@box:~/repo$ "], "echo PIPE_OK_1").submission).toBe(
+      "not-submitted",
+    );
   });
 });
