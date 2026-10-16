@@ -221,7 +221,22 @@ export default {
   },
 };
 
-type Attach = { authed: boolean; role?: "host" | "client"; peer?: string; mesh?: boolean };
+type Attach = {
+  authed: boolean;
+  role?: "host" | "client";
+  peer?: string;
+  mesh?: boolean;
+  /** Host: a human-readable machine label from its hello (`meta.label`). */
+  label?: string;
+  /** Client: the one host it wants to talk to (hello `host`); unset = legacy
+   *  single-host behaviour where every host answers the join. */
+  bound?: string;
+  /** Client: roster watcher only (hello `watch:true`) — never offered to. */
+  watch?: boolean;
+};
+
+/** A star room's host roster entry, as sent to clients. */
+type HostInfo = { peer: string; label?: string };
 
 export class Room {
   constructor(private state: DurableObjectState) {
@@ -296,25 +311,81 @@ export class Room {
         if (storedProto !== proto) return ws.close(1008, "protocol mismatch");
         if (storedMesh !== mesh) return ws.close(1008, "room mode mismatch");
       }
-      const peer = mesh || role === "client" ? crypto.randomUUID().slice(0, 8) : "host";
+      // Every peer gets a unique id — hosts too. A star room may hold SEVERAL
+      // hosts (one per machine; `ay share --room` joins an existing room), and
+      // a client must be able to address the host that offered to it, so the
+      // fixed "host" id of the single-host days is gone. Hosts are prefixed so
+      // a reader of a trace can tell the roles apart.
+      const peer = (mesh || role === "client" ? "" : "h-") + crypto.randomUUID().slice(0, 8);
       // In a mesh, tell the newcomer who is already here (roster) and announce it
       // to everyone else, so both sides can open a direct DataChannel. Who sends
       // the offer (initiator = lower peer id) is decided client-side to avoid glare.
       const roster = mesh ? this.peers(ws) : undefined;
-      // hostPresent lets a client FAST-FAIL a previously-opened star room whose
-      // host has since left: the room's token is still stored (so we don't close
-      // it as "room not open" above), but no live host socket remains to answer
-      // with an offer — without this the client waits the full 8s connect timeout
-      // (rtc.js) for an offer that never comes, and a viewer with N dead saved
-      // rooms pays N×8s of reconnect churn on every open. Only meaningful for a
-      // non-mesh client; omitted (undefined → dropped by JSON) for host/mesh.
-      const hostPresent = mesh || role === "host" ? undefined : this.hasHost();
-      ws.serializeAttachment({ authed: true, role, peer, mesh } satisfies Attach);
+      // Star client options (both optional, both ignored for hosts and meshes):
+      //  • `host`: bind to ONE host — only it is told about this join and only
+      //    it receives this client's un-addressed frames. A multi-host console
+      //    opens one such client per host so each machine is its own source.
+      //  • `watch`: roster watcher — receives `hosts` + host-join/host-leave and
+      //    is never offered to. The console uses one to discover and track hosts.
+      const bound =
+        !mesh && role === "client" && typeof msg.host === "string" && msg.host
+          ? String(msg.host)
+          : undefined;
+      const watch = !mesh && role === "client" && msg.watch === true;
+      // A host may name its machine (`meta.label`, e.g. "alice@box"); the
+      // roster carries it so a console can label sources before any API call.
+      const meta = msg.meta as { label?: unknown } | undefined;
+      const label =
+        role === "host" && meta && typeof meta.label === "string"
+          ? meta.label.slice(0, 64)
+          : undefined;
+      // The star roster: every live host. `hostPresent` keeps letting an older
+      // client FAST-FAIL a previously-opened room whose hosts have all left (the
+      // token is still stored, so it isn't "room not open"), instead of waiting
+      // out the 8s offer timeout; `hosts` is the same fact with the ids a newer
+      // client needs to bind to. Omitted (undefined → dropped) for host/mesh.
+      const hosts = mesh || role === "host" ? undefined : this.hosts();
+      const hostPresent = hosts ? hosts.length > 0 : undefined;
+      ws.serializeAttachment({
+        authed: true,
+        role,
+        peer,
+        mesh,
+        label,
+        bound,
+        watch,
+      } satisfies Attach);
       ws.send(
-        JSON.stringify({ type: "welcome", peer, role, v: proto, mesh, peers: roster, hostPresent }),
+        JSON.stringify({
+          type: "welcome",
+          peer,
+          role,
+          v: proto,
+          mesh,
+          peers: roster,
+          hostPresent,
+          hosts,
+        }),
       );
       if (mesh) this.broadcast(ws, { type: "peer-join", peer });
-      else if (role === "client") this.toHost({ type: "peer-join", peer });
+      else if (role === "client") {
+        // A watcher is never offered to; a bound client is announced only to
+        // its host; a legacy client to every host (each will offer — a legacy
+        // viewer answers the first and the others close their attempt).
+        if (!watch) {
+          const join = { type: "peer-join", peer };
+          if (bound) this.toPeer(bound, join);
+          else this.toHost(join);
+        }
+      } else {
+        // A new host: tell the clients so a console can connect to it without
+        // re-opening the room, and re-announce the clients already waiting for
+        // THIS host (bound ones — a reconnecting machine's viewers) so it offers
+        // to them. Unbound (legacy) clients are left alone: a second offer would
+        // only confuse a single-host viewer.
+        this.toClients({ type: "host-join", peer, label });
+        for (const c of this.boundClients(peer)) this.toPeer(peer, { type: "peer-join", peer: c });
+      }
       return;
     }
 
@@ -333,8 +404,17 @@ export class Room {
     }
     if (self.role === "client") {
       msg.from = self.peer; // tag so the host can route the reply back
-      this.toHost(msg);
+      // Addressed (`to` = the host whose offer this answers) → that host only.
+      // Un-addressed → the bound host, else every host (legacy single-host
+      // clients never set `to`; with one host both routes are the same socket).
+      const to = typeof msg.to === "string" ? msg.to : "";
+      if (to) this.toPeer(to, msg);
+      else if (self.bound) this.toPeer(self.bound, msg);
+      else this.toHost(msg);
     } else {
+      // Tag host → client frames too, so a client can address its answer and
+      // candidates back to THIS host when several share the room.
+      msg.from = self.peer;
       const to = typeof msg.to === "string" ? msg.to : "";
       if (to) this.toPeer(to, msg);
     }
@@ -344,20 +424,50 @@ export class Room {
     const self = ws.deserializeAttachment() as Attach;
     if (!self.authed) return;
     if (self.mesh) this.broadcast(ws, { type: "peer-leave", peer: self.peer });
-    else if (self.role === "client") this.toHost({ type: "peer-leave", peer: self.peer });
+    else if (self.role === "client") {
+      if (self.watch) return;
+      const leave = { type: "peer-leave", peer: self.peer };
+      if (self.bound) this.toPeer(self.bound, leave);
+      else this.toHost(leave);
+    } else {
+      // Keep the room's clients informed: a console greys the machine out and
+      // reconnects when the same host comes back (a new id, announced by
+      // host-join).
+      this.toClients({ type: "host-leave", peer: self.peer });
+    }
   }
 
-  // Is a live host peer currently attached? (star rooms only.) Used to tell a
-  // joining client to fast-fail a room whose host has left, instead of waiting
-  // for an offer that will never arrive. A dead host that dropped uncleanly may
-  // linger briefly until the runtime reaps its socket — a transient false
-  // "present" just means one more 8s wait + backoff, never a wrong connection.
-  private hasHost(): boolean {
+  // The live hosts of a star room, with their labels. Empty → a joining client
+  // fast-fails instead of waiting for an offer that will never arrive. A dead
+  // host that dropped uncleanly may linger briefly until the runtime reaps its
+  // socket — a transient ghost entry means one more 8s wait + backoff, never a
+  // wrong connection.
+  private hosts(): HostInfo[] {
+    const out: HostInfo[] = [];
     for (const s of this.state.getWebSockets()) {
       const a = s.deserializeAttachment() as Attach | null;
-      if (a?.authed && a.role === "host") return true;
+      if (a?.authed && a.role === "host" && a.peer)
+        out.push(a.label ? { peer: a.peer, label: a.label } : { peer: a.peer });
     }
-    return false;
+    return out;
+  }
+  // Every authed star client (watchers included): roster events go to all of them.
+  private toClients(obj: unknown): void {
+    const data = JSON.stringify(obj);
+    for (const s of this.state.getWebSockets()) {
+      const a = s.deserializeAttachment() as Attach | null;
+      if (a?.authed && !a.mesh && a.role === "client") s.send(data);
+    }
+  }
+  // Clients that asked for `host` specifically — re-announced to it when it joins.
+  private boundClients(host: string): string[] {
+    const out: string[] = [];
+    for (const s of this.state.getWebSockets()) {
+      const a = s.deserializeAttachment() as Attach | null;
+      if (a?.authed && a.role === "client" && !a.watch && a.bound === host && a.peer)
+        out.push(a.peer);
+    }
+    return out;
   }
 
   // Role isn't a hibernation tag (it's only known after the hello), so route by
