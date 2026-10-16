@@ -141,13 +141,20 @@ export async function sendRtcInput(rtc, pid, msg) {
 // Tunnels request/response + streaming over one DataChannel. Mirrors the
 // envelope in lab/ui/share-host.ts: {t:"req"|"abort"} out, {t:"res"|"data"|"end"} in.
 export class RTCClient {
-  constructor(host, room, token) {
+  // `bindHost`: the id of the ONE host in the room this client talks to. A
+  // room may be hosted by several machines (`ay share room`); the console
+  // opens one RTCClient per host, each bound, so every machine is its own
+  // source and no host's offer is ever answered by a client meant for
+  // another. Unset = legacy single-host behaviour.
+  constructor(host, room, token, { bindHost = null } = {}) {
     let resolveKeys;
     const keysReady = new Promise((r) => (resolveKeys = r));
     Object.assign(this, {
       host,
       room,
       token,
+      bindHost,
+      hostPeer: null, // id of the host whose offer we answered (from `from`)
       dc: null,
       calls: new Map(),
       streams: new Map(),
@@ -219,7 +226,15 @@ export class RTCClient {
       };
       ws.onopen = () => (
         mark("signal.open"),
-        ws.send(JSON.stringify({ type: "hello", role: "client", v: 2, token: authToken }))
+        ws.send(
+          JSON.stringify({
+            type: "hello",
+            role: "client",
+            v: 2,
+            token: authToken,
+            ...(this.bindHost ? { host: this.bindHost } : {}),
+          }),
+        )
       );
       ws.onmessage = async (ev) => {
         const m = JSON.parse(ev.data);
@@ -230,11 +245,25 @@ export class RTCClient {
           // Distinct error so telemetry separates "dead room" from a real
           // timeout, and so the reconnect layer can evict it fast (see below).
           if (m.hostPresent === false) return fail(new Error("no host in room"));
+          // Bound to a host that is not (or no longer) in the roster: same
+          // fast-fail — the room's watcher re-creates this client when the
+          // machine comes back under its new id.
+          if (
+            this.bindHost &&
+            Array.isArray(m.hosts) &&
+            !m.hosts.some((h) => h && h.peer === this.bindHost)
+          )
+            return fail(new Error("host not in room"));
           if (this._v2 && m.v !== 2)
             return fail(new Error("host is running an old agent-yes — ask it to upgrade"));
           // pc is created on the offer below so it can use the host-supplied
           // iceServers (incl. short-lived TURN creds for relaying behind NAT).
         } else if (m.type === "offer") {
+          // Several hosts may offer to a legacy (unbound) client; answer only the
+          // first. A bound client ignores any offer that is not from its host.
+          if (this.bindHost && m.from && m.from !== this.bindHost) return;
+          if (pc) return;
+          this.hostPeer = m.from || null;
           mark("signal.offer", {
             iceServers: Array.isArray(m.iceServers) ? m.iceServers.length : 0,
           });
@@ -246,9 +275,14 @@ export class RTCClient {
                   : [{ urls: "stun:stun.l.google.com:19302" }],
             });
             this.pc = pc;
+            // Address candidates and the answer to the host that offered (`to`),
+            // so the room can route them when several hosts share it; an older
+            // room ignores `to` and routes to its only host as before.
             pc.onicecandidate = (e) => {
               if (e.candidate)
-                ws.send(JSON.stringify({ type: "candidate", candidate: e.candidate }));
+                ws.send(
+                  JSON.stringify({ type: "candidate", to: this.hostPeer, candidate: e.candidate }),
+                );
             };
             pc.onconnectionstatechange = () => {
               mark("pc.state", { state: pc.connectionState });
@@ -280,7 +314,9 @@ export class RTCClient {
           }
           await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
           await pc.setLocalDescription(await pc.createAnswer());
-          ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription.sdp }));
+          ws.send(
+            JSON.stringify({ type: "answer", to: this.hostPeer, sdp: pc.localDescription.sdp }),
+          );
           // Derive per-connection keys now both descriptions are stable, before
           // the DataChannel opens. Client: remote=host offer, local=our answer.
           try {
@@ -297,6 +333,7 @@ export class RTCClient {
             fail(err);
           }
         } else if (m.type === "candidate") {
+          if (this.hostPeer && m.from && m.from !== this.hostPeer) return; // another host's
           if (pc) await pc.addIceCandidate(m.candidate).catch(() => {});
         }
       };
@@ -568,12 +605,86 @@ export class RTCClient {
   }
 }
 
-// Parse a room hash / share link into {room, token, host}. Accepts both the
-// console hash form  #<room>:<token>[@<sighost>]  and the share-link URL form
+// Follows a room's host roster without ever being offered to: hello with
+// `watch:true`. The console opens one per shared room (`ay share room`) and
+// creates a bound RTCClient per host it reports, so each machine is its own
+// source; `host-join` / `host-leave` keep that set current while a machine
+// restarts or a new one joins. Reconnects with backoff until closed.
+export class RoomWatcher {
+  constructor(host, room, token, { onHosts, onHostJoin, onHostLeave, onState } = {}) {
+    Object.assign(this, {
+      host,
+      room,
+      token,
+      ws: null,
+      closed: false,
+      delay: 1000,
+      onHosts: onHosts || (() => {}),
+      onHostJoin: onHostJoin || (() => {}),
+      onHostLeave: onHostLeave || (() => {}),
+      onState: onState || (() => {}),
+    });
+  }
+  async connect() {
+    const { s, v2 } = parseSecret(this.token);
+    if (!v2 && !ALLOW_LEGACY_PLAINTEXT)
+      throw new Error("this link uses the old unencrypted protocol — ask the host to upgrade");
+    const authToken = v2 ? await deriveAuthToken(s, this.room, this.host) : this.token;
+    return new Promise((resolve, reject) => {
+      if (this.closed) return reject(new Error("closed"));
+      const ws = new WebSocket(`wss://${this.host}/${this.room}`, [SUB]);
+      this.ws = ws;
+      let settled = false;
+      ws.onopen = () =>
+        ws.send(
+          JSON.stringify({ type: "hello", role: "client", v: 2, token: authToken, watch: true }),
+        );
+      ws.onmessage = (ev) => {
+        let m;
+        try {
+          m = JSON.parse(ev.data);
+        } catch {
+          return;
+        }
+        if (m.type === "welcome") {
+          settled = true;
+          this.delay = 1000;
+          this.onState("open");
+          this.onHosts(Array.isArray(m.hosts) ? m.hosts : []);
+          resolve();
+        } else if (m.type === "host-join") this.onHostJoin({ peer: m.peer, label: m.label });
+        else if (m.type === "host-leave") this.onHostLeave({ peer: m.peer });
+      };
+      ws.onerror = () => {};
+      ws.onclose = (ev) => {
+        this.onState("closed");
+        // 1008 = forbidden / room not open: the link is wrong, don't spin.
+        if (!settled) reject(new Error(ev?.reason || "signaling closed"));
+        if (this.closed || ev?.code === 1008) return;
+        setTimeout(() => {
+          if (!this.closed) this.connect().catch(() => {});
+        }, this.delay);
+        this.delay = Math.min(30000, this.delay * 2);
+      };
+    });
+  }
+  close() {
+    this.closed = true;
+    try {
+      this.ws?.close();
+    } catch {}
+  }
+}
+
+// Parse a room hash / share link into {room, token, host[, shared]}. Accepts the
+// console hash form  #<room>:<token>[@<sighost>],  the share-link URL form
 // webrtc://<room>:<token>@<host>  (what `ay serve --share` writes to
-// ~/.agent-yes/.share-link). host defaults to SIG_DEFAULT. Returns null when
-// the input isn't a room reference (e.g. an empty hash, a bare "#room", or the
-// local  #k=<token>  auth hash) so the caller falls back to the HTTP wire.
+// ~/.agent-yes/.share-link), and the key=value room form
+// #room=<id>&s=<token>[&sig=<host>]  that `ay share room` prints — marked
+// `shared:true` so the console opens it as a multi-host room. host defaults
+// to SIG_DEFAULT. Returns null when the input isn't a room reference (e.g. an
+// empty hash, a bare "#room", or the local  #k=<token>  auth hash) so the
+// caller falls back to the HTTP wire.
 export function parseRoomHash(hash) {
   if (!hash) return null;
   const raw = String(hash).trim();
@@ -583,6 +694,15 @@ export function parseRoomHash(hash) {
   // #<room>:<token>[@<host>] — the console hash form. Strip a leading '#' and
   // percent-decode (a token may be URL-encoded in the hash).
   let h = raw.replace(/^#/, "");
+  // #room=<id>&s=<token>[&sig=<host>] — the shared-room form (URLSearchParams
+  // percent-decodes each value itself, so parse BEFORE the decode below).
+  if (/^\??room=/.test(h)) {
+    const q = new URLSearchParams(h.replace(/^\?/, ""));
+    const room = q.get("room");
+    const token = q.get("s");
+    if (!room || !token || !/^[A-Za-z0-9_-]+$/.test(room)) return null;
+    return { room, token, host: q.get("sig") || SIG_DEFAULT, shared: true };
+  }
   try {
     h = decodeURIComponent(h);
   } catch {}

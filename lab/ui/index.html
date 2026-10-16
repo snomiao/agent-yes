@@ -2610,7 +2610,7 @@
       // The ay-share (rtc) remote-room transport lives in a shared module so the
       // /r/ rgui viewer reuses the exact same WebRTC + e2e wire (rtc.js imports
       // e2e.js internally). The console only needs the client class.
-      import { RTCClient, sendRtcInput } from "./rtc.js";
+      import { RTCClient, RoomWatcher, parseRoomHash, sendRtcInput } from "./rtc.js";
 
       let entries = [];
       let sel = null; // selected agent's composite key (room#pid)
@@ -3059,6 +3059,7 @@
         }
       }
       const chRooms = new Map(); // room name -> CodehostRoom
+      const rtcRooms = new Map(); // room name -> RtcRoom (shared rooms: several hosts)
 
       // `ay serve --http` serves this page itself and prints a #k=<token> link;
       // boot() stores the token and local /api calls carry it as ?token= (query,
@@ -3388,7 +3389,11 @@
       // Every machine belonging to a room (for an ay-share room, the room itself).
       const roomSources = (name) => [...sources.values()].filter((s) => (s.room || s.id) === name);
       const roomLive = (name) =>
-        chRooms.has(name) ? chRooms.get(name).live : !!sources.get(name)?.live;
+        rtcRooms.has(name)
+          ? rtcRooms.get(name).live
+          : chRooms.has(name)
+            ? chRooms.get(name).live
+            : !!sources.get(name)?.live;
       // How a machine names itself in a picker: "room · user@host", or just the
       // room when its device label hasn't arrived yet.
       const sourceLabel = (s) => {
@@ -8161,9 +8166,11 @@ my.translate = async (text, lang) => {
           return {};
         }
       };
-      const saveRoom = (room, token, host) => {
+      const saveRoom = (room, token, host, shared = false) => {
         const r = loadRooms();
-        r[room] = { token, host: host || SIG_DEFAULT, ts: Date.now() };
+        // `shared` marks a multi-host room (`ay share room`): reopened through a
+        // roster watcher with one source per machine, not as a single machine.
+        r[room] = { token, host: host || SIG_DEFAULT, ts: Date.now(), ...(shared ? { shared: true } : {}) };
         // Bound at write time too: loadRooms() trims on read, but a fresh add can
         // push to MAX_ROOMS+1 until the next read. The just-added room has the
         // newest ts, so the trim drops the oldest OTHER room, never this one.
@@ -8223,6 +8230,15 @@ my.translate = async (text, lang) => {
           } catch {}
           return;
         }
+        const rr = rtcRooms.get(name);
+        if (rr) {
+          rtcRooms.delete(name);
+          for (const s of roomSources(name)) removeSource(s.id);
+          try {
+            rr.close();
+          } catch {}
+          return;
+        }
         removeSource(name); // an ay-share room IS its single machine
       }
 
@@ -8257,7 +8273,11 @@ my.translate = async (text, lang) => {
           try {
             s.client?.close?.(); // drop the stale peer AND its signaling socket
           } catch {}
-          const c = new RTCClient(s.host, s.id, s.token);
+          // A shared room's source is one HOST of the room (`<room>/<hostId>`):
+          // join the room by its name, bound to that host (see RtcRoom).
+          const c = new RTCClient(s.host, s.room || s.id, s.token, {
+            bindHost: s.bindHost || null,
+          });
           c.onstate = (st) => {
             if (st === "failed" || st === "closed") {
               s.live = false;
@@ -8367,7 +8387,126 @@ my.translate = async (text, lang) => {
       // every saved room streams its agents at once. Idempotent: a room already
       // in the fleet just refreshes. The connection runs in the background; the
       // next poll picks up its agents once the tunnel is open.
-      async function addRoomSource(room, token, host) {
+      // A shared room (`ay share room`): several machines host ONE room. A
+      // RoomWatcher follows the room's host roster, and every host becomes its
+      // own source `<room>/<hostId>` with an RTCClient bound to it, so the tree
+      // groups by machine exactly like a codehost room. A host that leaves stays
+      // listed with its source offline (grey) and is reconnected when the same
+      // machine (same label) comes back under a new id, so its rows and the
+      // operator's selection survive a restart.
+      class RtcRoom {
+        constructor(name, token, host) {
+          Object.assign(this, { name, token, host, watcher: null, live: false, tried: false });
+          this.hosts = new Map(); // hostId -> label
+        }
+        srcId(hostId) {
+          return this.name + "/" + hostId;
+        }
+        orphaned() {
+          return rtcRooms.get(this.name) !== this;
+        }
+        async connect() {
+          this.watcher = new RoomWatcher(this.host, this.name, this.token, {
+            onState: (st) => {
+              if (this.orphaned()) return;
+              this.live = st === "open";
+              renderRoomsIfOpen();
+            },
+            onHosts: (hosts) => {
+              if (this.orphaned()) return;
+              const seen = new Set();
+              for (const h of hosts) {
+                if (!h?.peer) continue;
+                seen.add(h.peer);
+                this.ensureHost(h.peer, h.label);
+              }
+              for (const id of [...this.hosts.keys()]) if (!seen.has(id)) this.hostLeft(id);
+            },
+            onHostJoin: (h) => h?.peer && this.ensureHost(h.peer, h.label),
+            onHostLeave: (h) => h?.peer && this.hostLeft(h.peer),
+          });
+          await this.watcher.connect();
+        }
+        // A host appeared: connect a bound source for it. The same machine back
+        // under a new id (same label, its old source offline) re-points the
+        // existing source instead of adding a second row for the same box.
+        ensureHost(hostId, label) {
+          if (this.orphaned() || this.hosts.has(hostId)) return;
+          let s = null;
+          if (label)
+            s =
+              roomSources(this.name).find(
+                (x) => x.kind === "rtc" && !x.live && x.bindHost !== hostId && x.deviceLabel === label,
+              ) || null;
+          if (s) {
+            this.hosts.delete(s.bindHost);
+            s.bindHost = hostId;
+            s.removed = false;
+          } else {
+            s = sources.get(this.srcId(hostId));
+            if (!s) {
+              s = {
+                id: this.srcId(hostId),
+                room: this.name,
+                host: this.host,
+                token: this.token,
+                kind: "rtc",
+                bindHost: hostId,
+                tx: null,
+                client: null,
+                live: false,
+                tried: false,
+                devices: new Set(),
+                serverCount: 0,
+                deviceLabel: label || "",
+              };
+              sources.set(s.id, s);
+            }
+          }
+          this.hosts.set(hostId, label || "");
+          renderRoomsIfOpen();
+          void this.connectSource(s);
+        }
+        async connectSource(s) {
+          try {
+            await connectRtcSource(s);
+            s.live = true;
+          } catch {
+            s.live = false;
+            s.failCount = (s.failCount || 0) + 1;
+            scheduleRtcReconnect(s);
+          }
+          s.tried = true;
+          renderRoomsIfOpen();
+          if (s.live) subscribeSource(s);
+          loadList();
+        }
+        // A host left: keep its source listed, offline. No reconnect storm — a
+        // bound client would only fast-fail ("host not in room") until the
+        // machine is back, and host-join re-points it then.
+        hostLeft(hostId) {
+          this.hosts.delete(hostId);
+          const s = roomSources(this.name).find((x) => x.bindHost === hostId);
+          if (!s) return;
+          s.live = false;
+          clearTimeout(s.reconnectTimer);
+          s.reconnectTimer = null;
+          unsubscribeSource(s);
+          if (s.client) s.client.onstate = () => {};
+          try {
+            s.client?.close?.();
+          } catch {}
+          renderRoomsIfOpen();
+          loadList();
+        }
+        close() {
+          try {
+            this.watcher?.close();
+          } catch {}
+        }
+      }
+
+      async function addRoomSource(room, token, host, shared = false) {
         host = host || SIG_DEFAULT;
         // A codehost room is identified by its TOKEN; the name is a local label
         // someone typed. Saved rooms are keyed by name (see saveRoom), so honouring
@@ -8388,7 +8527,24 @@ my.translate = async (text, lang) => {
           const saved = loadRooms()[room];
           if (saved && saved.token !== token) room = chName(token);
         }
-        saveRoom(room, token, host); // cache so the badge can list & reconnect later
+        saveRoom(room, token, host, shared); // cache so the badge can list & reconnect later
+        // A shared ay room is a connection too: one source per host, from the
+        // roster its watcher follows (RtcRoom). Never a single-machine source.
+        if (shared) {
+          if (rtcRooms.has(room)) return;
+          const rr = new RtcRoom(room, token, host);
+          rtcRooms.set(room, rr);
+          renderRoomsIfOpen();
+          try {
+            await rr.connect();
+          } catch {
+            rr.live = false;
+          }
+          rr.tried = true;
+          renderRoomsIfOpen();
+          loadList();
+          return;
+        }
         // A codehost room is a connection, not a machine: it contributes one source
         // per machine as peers announce themselves (CodehostRoom.syncPeers).
         if (host === CH_HOST) {
@@ -8453,18 +8609,25 @@ my.translate = async (text, lang) => {
             // forgotten this room (removeRoom + dropRoom) — don't let a stale
             // closure resurrect and re-persist it.
             const cur = loadRooms()[name];
-            if (cur) addRoomSource(name, cur.token, cur.host);
+            if (cur) addRoomSource(name, cur.token, cur.host, !!cur.shared);
           }, i * RTC_FANOUT_STAGGER_MS);
         });
       }
 
       // Back-compat alias: a freshly pasted/linked room is added like any other.
-      const connectRoom = (room, token, host) => addRoomSource(room, token, host);
+      const connectRoom = (room, token, host, shared = false) =>
+        addRoomSource(room, token, host, shared);
 
       function parseRoomInput(s) {
         s = s.trim();
         const hash = s.indexOf("#");
         if (hash >= 0) s = s.slice(hash + 1);
+        // #room=<id>&s=<secret> — a shared room link (`ay share room`); parsed
+        // before the decode below since URLSearchParams decodes its own values.
+        if (/^\??room=/.test(s)) {
+          const p = parseRoomHash(s);
+          return p ? { room: p.room, token: p.token, host: p.host, shared: true } : null;
+        }
         s = decodeURIComponent(s);
         // codehost rooms: "ch:<room-token>" or a codehost.dev share link ("…#t=<token>").
         if (s.startsWith("ch:") || s.startsWith("t=")) {
@@ -8486,7 +8649,8 @@ my.translate = async (text, lang) => {
       // in it right now". The signaling layer can't tell us the count until we've
       // connected, so we show the source's last-known serverCount.
       function roomStatus(n) {
-        if (!sources.has(n) && !chRooms.has(n)) return `<span class="rstat off">○</span>`;
+        if (!sources.has(n) && !chRooms.has(n) && !rtcRooms.has(n))
+          return `<span class="rstat off">○</span>`;
         if (!roomLive(n)) return `<span class="rstat off" title="offline">○</span>`;
         const c = roomSources(n).filter((s) => s.live).length;
         return `<span class="rstat on" title="${c} live ${c === 1 ? "server" : "servers"}">● ${c}</span>`;
@@ -8602,7 +8766,7 @@ my.translate = async (text, lang) => {
           // it (and re-adds it if it was forgotten/offline), rather than switching.
           const r = loadRooms()[name.dataset.room];
           if (r) {
-            connectRoom(name.dataset.room, r.token, r.host);
+            connectRoom(name.dataset.room, r.token, r.host, !!r.shared);
             $("q").value = "room:" + name.dataset.room;
             try {
               localStorage.setItem("ay.filter", $("q").value);
@@ -8623,7 +8787,7 @@ my.translate = async (text, lang) => {
         if (ev.target.id === "roomadd") {
           const p = parseRoomInput($("roomin").value);
           if (p) {
-            connectRoom(p.room, p.token, p.host);
+            connectRoom(p.room, p.token, p.host, !!p.shared);
             $("rooms").style.display = "none";
           } else alert("expected  room:token  or a share link");
         }
@@ -9246,6 +9410,24 @@ my.translate = async (text, lang) => {
           connectAllRooms();
           return;
         }
+        // #room=<id>&s=<secret> — a shared room (`ay share room`): several
+        // machines host it; opened through a roster watcher, one source per
+        // host. Parsed on the RAW hash (URLSearchParams decodes its values).
+        if (/^\??room=/.test(raw)) {
+          const p = parseRoomHash(raw);
+          if (p) {
+            // SECURITY: strip the secret from the URL immediately; keep the id.
+            history.replaceState(
+              null,
+              document.title,
+              location.pathname + location.search + "#" + p.room,
+            );
+            startPolling();
+            connectRoom(p.room, p.token, p.host, true);
+            setTimeout(() => connectAllRooms(p.room), 150);
+            return;
+          }
+        }
         const h = decodeURIComponent(raw);
         let pending = null;
         // codehost rooms first — the generic room:token regex below would
@@ -9318,7 +9500,7 @@ my.translate = async (text, lang) => {
         // and they all stream their agents into one list at once.
         startPolling();
         if (pending) {
-          connectRoom(pending.room, pending.token, pending.host);
+          connectRoom(pending.room, pending.token, pending.host, !!pending.shared);
           // On a returning console, several simultaneous WebRTC handshakes compete
           // with the selected room for CPU and network setup. Let that room start
           // first, then fan out quickly enough that the fleet still feels instant.
