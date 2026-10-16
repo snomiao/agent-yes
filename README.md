@@ -270,6 +270,23 @@ its own question answered. Targets are agents on this machine (same registry
 skip it; `ay answer` replies without it, since its recipient comes off the task
 record rather than from a typed keyword.
 
+### Pre-trust a folder for Claude Code (`ay trust`)
+
+A fresh, untrusted folder makes `claude` open its "Do you trust the files in this folder?" dialog before anything else. agent-yes answers it automatically, but marking the folder trusted ahead of time removes the dialog entirely. This is handy before spawning a lane into a new worktree:
+
+```bash
+ay trust /path/to/new-worktree           # mark it trusted, then re-check after 15 s
+ay trust /path/to/new-worktree --check   # only report (exit 0 = trusted)
+```
+
+It sets the same flag `claude` writes when you choose "Yes" (`projects[<dir>].hasTrustDialogAccepted` in `~/.claude.json`, or `$CLAUDE_CONFIG_DIR/.claude.json`). Only that one entry changes:
+
+- The previous file is kept as `.claude.json.ay-trust.bak`.
+- The new file replaces the old one atomically, and only if the old one did not change in the meantime.
+- The result is read back immediately, and again after `--settle` seconds (default 15), to report whether the change stuck.
+
+**Known limitation:** Claude Code takes no lock on `~/.claude.json`, and running sessions rewrite the whole file from memory. A session that saves at the same instant can overwrite the change. There is an unavoidable lost-update window between the final check and the rename. Run `ay trust` when the target folder has no live `claude` session; if the delayed re-check reports a revert, just run it again.
+
 ### Docker Usage
 
 You can run `agent-yes` in a Docker container with all AI CLI tools pre-installed.

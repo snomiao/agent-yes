@@ -205,7 +205,8 @@ describe("subcommands.isSubcommand", () => {
     // `read` / `share` / `connect` are ordinary English verbs: `cy read ts/cli.ts
     // and explain it` and `cy connect the frontend to the API` must reach claude.
     // The commands live on the manager entry (`ay read`, `ay share`, `ay connect`).
-    for (const sub of ["read", "share", "connect"]) {
+    // `trust` likewise: `cy trust the existing tests and refactor` is a prompt.
+    for (const sub of ["read", "share", "connect", "trust"]) {
       expect(isSubcommand(sub, true)).toBe(true);
       expect(isSubcommand(sub, false)).toBe(false);
     }
