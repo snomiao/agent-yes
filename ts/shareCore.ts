@@ -4,9 +4,23 @@ import type { networkInterfaces } from "node:os";
 // daemon args a mode needs, LAN/tailscale detection parsing, the exact
 // third-party commands the [y/N] prompts show, and the share URL format.
 
-export type ShareMode = "local" | "portless" | "lan" | "tailscale" | "webrtc";
-export const SHARE_MODES: ShareMode[] = ["local", "portless", "lan", "tailscale", "webrtc"];
+export type ShareMode = "local" | "portless" | "lan" | "tailscale" | "webrtc" | "room";
+export const SHARE_MODES: ShareMode[] = ["local", "portless", "lan", "tailscale", "webrtc", "room"];
 export const DEFAULT_SHARE_PORT = 7432;
+
+/**
+ * Does a daemon registered with `args` already host exactly `url`
+ * (`--webrtc <url>` or `--webrtc=<url>`)? Used by `ay share room` to skip a
+ * needless reinstall when this machine is already in the room.
+ */
+export function argsHostRoom(args: readonly string[], url: string): boolean {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    if (a === "--webrtc" && args[i + 1] === url) return true;
+    if (a === `--webrtc=${url}`) return true;
+  }
+  return false;
+}
 export const DEFAULT_TS_PATH = "/ay";
 
 export function flagValue(args: string[], flag: string): string | undefined {

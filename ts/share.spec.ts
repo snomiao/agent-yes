@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, it, expect } from "vitest";
 import {
+  formatConsoleRoomLink,
   formatRoomLink,
   loadOrCreateShareRoom,
+  mintRoomUrl,
   readShareRoom,
   shareLinkFromRoomUrl,
   shareRoomFileName,
@@ -106,5 +108,37 @@ describe("share room files per runtime", () => {
     expect(await readShareRoom("ts")).toBeNull();
     await writeFile(path.join(home, ".share-room"), `webrtc://room0:${TOK}@s.example`);
     expect(await readShareRoom("ts")).toBe(`webrtc://room0:${TOK}@s.example`);
+  });
+});
+
+// A shared room: id derived from the secret, key=value console link, minted url.
+describe("room links", () => {
+  it("derives a stable, secret-bound room id with the classic grammar", async () => {
+    const { deriveRoomId } = await import("../lab/ui/e2e.js");
+    const id = await deriveRoomId(S);
+    expect(id).toMatch(/^r[0-9a-f]{12}$/);
+    expect(await deriveRoomId(S)).toBe(id);
+    expect(await deriveRoomId("b".repeat(64))).not.toBe(id);
+    await expect(deriveRoomId("not-hex")).rejects.toThrow(/invalid share token/);
+  });
+
+  it("formats the console room link as key=value, dev hosts carrying sig=", () => {
+    expect(formatConsoleRoomLink("r0123456789ab", S, "s.agent-yes.com")).toBe(
+      `https://agent-yes.com/w/#room=r0123456789ab&s=${TOK}`,
+    );
+    expect(formatConsoleRoomLink("r0123456789ab", S, "localhost:7778")).toBe(
+      `http://localhost:7778/w/#room=r0123456789ab&s=${TOK}&sig=localhost%3A7778`,
+    );
+    // Round-trips through the link parser the hosts and viewers use.
+    const p = parseWebrtcLink(formatConsoleRoomLink("r0123456789ab", S, "s.agent-yes.com"));
+    expect(p).toEqual({ room: "r0123456789ab", s: S, host: "s.agent-yes.com" });
+  });
+
+  it("mints a room whose id matches its secret", async () => {
+    const { deriveRoomId } = await import("../lab/ui/e2e.js");
+    const url = await mintRoomUrl("s.example");
+    const m = /^webrtc:\/\/(r[0-9a-f]{12}):e1\.([0-9a-f]{64})@s\.example$/.exec(url);
+    expect(m).not.toBeNull();
+    expect(await deriveRoomId(m![2]!)).toBe(m![1]);
   });
 });

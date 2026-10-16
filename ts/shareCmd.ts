@@ -6,6 +6,7 @@ import {
   DEFAULT_TS_PATH,
   SHARE_MODES,
   type ShareMode,
+  argsHostRoom,
   dropFlagWithValue,
   findTailscaleRoute,
   flagValue,
@@ -110,6 +111,7 @@ async function probe(base: string, token: string): Promise<string | null> {
 
 const HELP =
   `Usage: ay share [local|portless|lan|tailscale|webrtc] [options]\n` +
+  `       ay share room [<room-link>]\n` +
   `       ay share status\n\n` +
   `Make this machine's agents reachable and print ONE share URL: open it in a\n` +
   `browser for the web console, or pass it to \`ay connect\` on another machine.\n` +
@@ -121,7 +123,10 @@ const HELP =
   `  tailscale   https://<machine>.<tailnet>.ts.net/ay/ — your tailnet devices,\n` +
   `              via \`tailscale serve\` (3rd-party)\n` +
   `  webrtc      https://agent-yes.com/w/#… — anywhere, end-to-end encrypted\n` +
-  `              through the agent-yes.com signaling server\n\n` +
+  `              through the agent-yes.com signaling server\n` +
+  `  room        like webrtc, but SEVERAL machines host one room behind one URL:\n` +
+  `              \`ay share room\` mints it here, \`ay share room <link>\` adds this\n` +
+  `              machine to an existing one; the URL never changes\n\n` +
   `Every command ay would run for you (daemon install, tailscale, portless) is\n` +
   `shown first and needs a y at a [y/N] prompt.\n\n` +
   `Options:\n` +
@@ -140,17 +145,105 @@ async function shareRuntimeOf(args: string[] | null): Promise<"ts" | "rust"> {
   return daemonShareRuntime(args ?? [], () => !!findAyrsBinary());
 }
 
-// The console link for the room a `--webrtc` daemon hosts, derived read-only
-// from the persisted room file of its runtime; null when nothing is minted yet.
+// The console link for the room a `--webrtc` daemon hosts, derived read-only:
+// an explicit `--webrtc <url>` in the daemon's args wins (that is how a machine
+// joins a shared room), else the persisted room file of its runtime; null when
+// nothing is minted yet.
 export async function daemonShareLink(args: string[] | null): Promise<string | null> {
   const { readShareRoom, shareLinkFromRoomUrl } = await import("./share.ts");
-  const room = await readShareRoom(await shareRuntimeOf(args));
+  const room = explicitRoomUrl(args ?? []) ?? (await readShareRoom(await shareRuntimeOf(args)));
   if (!room) return null;
   try {
-    return shareLinkFromRoomUrl(room);
+    return await consoleLinkFor(room);
   } catch {
     return null; // legacy unencrypted room — the host itself rotates it on start
   }
+  async function consoleLinkFor(url: string): Promise<string> {
+    const { parseWebrtcLink } = await import("./webrtcLink.ts");
+    const { deriveRoomId } = await import("../lab/ui/e2e.js");
+    const { formatConsoleRoomLink } = await import("./share.ts");
+    const p = parseWebrtcLink(url);
+    // A room whose id is derived from its secret is a shared room: print the
+    // key=value room link; anything else is a classic single-host link.
+    if (p && p.room === (await deriveRoomId(p.s)))
+      return formatConsoleRoomLink(p.room, p.s, p.host);
+    return shareLinkFromRoomUrl(url);
+  }
+}
+
+/** The `webrtc://` url a daemon was explicitly given (`--webrtc <url>` / `--webrtc=<url>`). */
+function explicitRoomUrl(args: readonly string[]): string | null {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    const v = a === "--webrtc" ? args[i + 1] : a.startsWith("--webrtc=") ? a.slice(9) : undefined;
+    if (v && v.startsWith("webrtc://")) return v;
+  }
+  return null;
+}
+
+// ay share room [<link>] — host a ROOM: a star room that several machines host
+// together behind one URL that never changes (docs/multi-swarm-room.md). With
+// no link, mint a fresh room whose id is derived from its secret; with a link,
+// join that room as one more host. Either way this machine's daemon runs
+// `ay serve --webrtc <url>` for exactly that room.
+async function cmdShareRoom(
+  link: string | null,
+  ctx: {
+    yes: boolean;
+    json: boolean;
+    say: (s: string) => void;
+    daemon: { args: string[] | null };
+    cmdServe: (args: string[]) => Promise<number>;
+    inspectServeDaemon: () => Promise<{ args: string[] | null }>;
+  },
+): Promise<number> {
+  const { mintRoomUrl, formatConsoleRoomLink, hostLabel } = await import("./share.ts");
+  const { parseWebrtcLink, toWebrtcUrl } = await import("./webrtcLink.ts");
+  let url: string;
+  if (link) {
+    const u = toWebrtcUrl(link);
+    if (!u || !parseWebrtcLink(link)) {
+      process.stderr.write(
+        `ay share room: not a room link — want https://agent-yes.com/w/#room=<id>&s=e1.<secret>\n`,
+      );
+      return 1;
+    }
+    url = u;
+  } else {
+    url = await mintRoomUrl();
+  }
+  const parsed = parseWebrtcLink(url)!;
+  const want = ["--webrtc", url];
+  let state = ctx.daemon;
+  if (!argsHostRoom(state.args ?? [], url)) {
+    const why =
+      state.args === null
+        ? `no serve daemon yet — hosting a room needs one:`
+        : `the serve daemon runs \`ay serve ${state.args.join(" ") || "(defaults)"}\`; the room needs:`;
+    if (!(await confirmRun(why, [["ay", "serve", "install", ...want]], ctx.yes))) {
+      process.stderr.write(`not changed — run the command above, then \`ay share room\` again\n`);
+      return 1;
+    }
+    const code = await ctx.cmdServe(["install", ...want]);
+    if (code !== 0) return code;
+    state = await ctx.inspectServeDaemon();
+  }
+  const consoleLink = formatConsoleRoomLink(parsed.room, parsed.s, parsed.host);
+  if (ctx.json) {
+    process.stdout.write(
+      JSON.stringify({ mode: "room", room: parsed.room, url: consoleLink, host: hostLabel() }) +
+        "\n",
+    );
+    return 0;
+  }
+  ctx.say(
+    `\nroom ${parsed.room} — this machine (${hostLabel()}) hosts it. Open:\n` +
+      `  ${consoleLink}\n\n` +
+      `Add another machine to the SAME room (same secret, same URL — it never changes):\n` +
+      `  ay share room '${consoleLink}'\n\n` +
+      `The secret in that link grants read, tail and send on EVERY host in the room.\n`,
+  );
+  return 0;
 }
 
 // ay share status — end-to-end health of each way this machine is shared.
@@ -272,6 +365,18 @@ export async function cmdShare(rest: string[]): Promise<number> {
         `  https://tailscale.com/download\n`,
     );
     return 1;
+  }
+
+  // Room: several machines host ONE room behind one URL (docs/multi-swarm-room.md).
+  if (mode === "room") {
+    return cmdShareRoom(positional[1] ?? flagValue(rest, "--room") ?? null, {
+      yes,
+      json,
+      say,
+      daemon,
+      cmdServe,
+      inspectServeDaemon,
+    });
   }
 
   // 0. portless is a third-party dependency: offer to install it, never silently.
