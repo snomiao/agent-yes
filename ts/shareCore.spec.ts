@@ -234,3 +234,17 @@ describe("ay connect", () => {
     expect(err.read()).toContain("not a share URL");
   });
 });
+
+// `ay share room` reinstalls the daemon only when it does not already host
+// exactly this room url; both `--webrtc <url>` spellings count.
+describe("argsHostRoom", () => {
+  it("recognises both spellings of an explicit room url and nothing else", async () => {
+    const { argsHostRoom } = await import("./shareCore.ts");
+    const url = "webrtc://r0123456789ab:e1.ab@s.example";
+    expect(argsHostRoom(["--webrtc", url], url)).toBe(true);
+    expect(argsHostRoom([`--webrtc=${url}`, "--port", "0"], url)).toBe(true);
+    expect(argsHostRoom(["--webrtc"], url)).toBe(false);
+    expect(argsHostRoom(["--webrtc", "webrtc://other:e1.ab@s.example"], url)).toBe(false);
+    expect(argsHostRoom([], url)).toBe(false);
+  });
+});

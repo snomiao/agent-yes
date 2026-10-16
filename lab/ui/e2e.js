@@ -98,6 +98,17 @@ export async function deriveAuthToken(s, room, sighost) {
   return bytesToHex(await hkdf32(ikmFromS(s), salt, INFO_AUTH));
 }
 
+// A room's id derived from its secret — "r" + sha256("ay/room/v1\n" + S)[:12]
+// — so a share link is self-certifying: whoever holds S computes the same
+// rendezvous name, a guessed or stale room name cannot be joined without S,
+// and several machines can host ONE room (`ay share room <link>`) without
+// anyone coordinating a name. Same idea as channels' `room = f(S)`. Legacy
+// rooms keep their random `r<12hex>` ids; the grammar is identical on purpose.
+export async function deriveRoomId(s) {
+  const h = await sha256(enc.encode(`ay/room/v1\n${validateS(s)}`));
+  return "r" + bytesToHex(h).slice(0, 12);
+}
+
 async function importAesKey(raw) {
   return subtle.importKey("raw", raw, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
 }

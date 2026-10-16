@@ -15,6 +15,7 @@ import {
   MAX_CHUNK,
   computeTranscriptHash,
   deriveAuthToken,
+  deriveRoomId,
   deriveDirKeys,
   open as e2eOpen,
   seal as e2eSeal,
@@ -23,6 +24,7 @@ import {
   randomHex,
   unpackEnvelope,
 } from "../lab/ui/e2e.js";
+import { localHost, localUser } from "./identity.ts";
 
 const SUB = "ay-signal-1";
 // MAX_CHUNK is imported from e2e.js; ICE is replaced by STUN + getIceServers (TURN) below.
@@ -249,6 +251,31 @@ export function formatRoomLink(room: string, S: string, host: string): string {
   // anyway — URLSearchParams decodes on the way out and reads "+" as a space.
   const q = `room=${encodeURIComponent(room)}&s=${encodeURIComponent(MARKER + S)}`;
   return `${ui}/#${q}${prod ? "" : `&sig=${encodeURIComponent(host)}`}`;
+}
+
+/** How this machine names itself in a room's host roster: `user@host`. */
+export function hostLabel(): string {
+  return `${localUser()}@${localHost()}`;
+}
+
+// The console link for a ROOM — a star room any number of machines host
+// together (`ay share room`). Key=value fragment, the same grammar the /room/
+// guide link uses (see formatRoomLink), so the secret survives URL handling and
+// the /w/ parser can tell it from #k=, #ch= and #launch= without a blocklist.
+// The room id is derived from the secret (deriveRoomId), which is what makes
+// the link self-certifying; it never changes when a host joins or leaves.
+export function formatConsoleRoomLink(room: string, S: string, host: string): string {
+  const prod = host === DEFAULT_SIGHOST;
+  const ui = prod ? "https://agent-yes.com/w" : "http://localhost:7778/w";
+  const q = `room=${encodeURIComponent(room)}&s=${encodeURIComponent(MARKER + S)}`;
+  return `${ui}/#${q}${prod ? "" : `&sig=${encodeURIComponent(host)}`}`;
+}
+
+/** Mint a fresh room whose id is derived from its secret: `webrtc://<id>:e1.<S>@<host>`. */
+export async function mintRoomUrl(sighost = DEFAULT_SIGHOST): Promise<string> {
+  const s = randomBytes(32).toString("hex");
+  const room = await deriveRoomId(s);
+  return `webrtc://${room}:${MARKER}${s}@${sighost}`;
 }
 
 // Derive the shareable console link from a persisted/explicit webrtc://room:token@host
@@ -524,7 +551,18 @@ export async function startShare(
     };
     ws.onopen = () => {
       maybeSlow("signal.open", signalStartedAt, { room, host });
-      ws.send(JSON.stringify({ type: "hello", role: "host", v: 2, token: authToken }));
+      // `meta.label` names this machine in the room's host roster, so a console
+      // can label the source before its first API call (several hosts may
+      // share one room — `ay share room`).
+      ws.send(
+        JSON.stringify({
+          type: "hello",
+          role: "host",
+          v: 2,
+          token: authToken,
+          meta: { label: hostLabel() },
+        }),
+      );
       ready = true;
       lastRecv = Date.now();
       // Keepalive + dead-link detection: ping the rendezvous and expect a pong.

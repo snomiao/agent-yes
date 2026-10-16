@@ -23,6 +23,9 @@ export interface OpenResult {
 
 export function validateS(s: string): string;
 export function deriveAuthToken(s: string, room: string, sighost: string): Promise<string>;
+/** "r" + sha256("ay/room/v1
+" + S)[:12] — a room id bound to its secret (shared rooms). */
+export function deriveRoomId(s: string): Promise<string>;
 export function deriveDirKeys(
   s: string,
   transcriptHash: Uint8Array,

@@ -650,10 +650,20 @@ async fn connect_once(
     let (mut sink, mut stream) = ws.split();
 
     let auth_token = e2e::derive_auth_token(secret, &room.room, &room.host)?;
+    // `meta.label` names this machine in the room's host roster (several
+    // machines may host one room — `ay share room`); mirrors ts/share.ts hostLabel.
+    let label = format!(
+        "{}@{}",
+        crate::identity::local_user(),
+        crate::identity::local_host()
+    );
     sink.send(Message::Text(
-        json!({"type": "hello", "role": "host", "v": 2, "token": auth_token})
-            .to_string()
-            .into(),
+        json!({
+            "type": "hello", "role": "host", "v": 2, "token": auth_token,
+            "meta": { "label": label }
+        })
+        .to_string()
+        .into(),
     ))
     .await?;
 
