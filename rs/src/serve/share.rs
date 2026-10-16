@@ -54,6 +54,125 @@ const PEER_CLOSE_TIMEOUT_MS: u64 = 10_000;
 /// A real handshake completes in a few seconds; this is a crash barrier.
 const PEER_SETUP_DEADLINE_MS: u64 = 60_000;
 const STUN_URL: &str = "stun:stun.l.google.com:19302";
+
+/// Credential lifetime requested from Cloudflare, seconds. Short on purpose:
+/// the servers ride in every offer, so any holder of a share link can relay
+/// for this long. Keep it short; do not widen it.
+const TURN_TTL_SECS: u64 = 3600;
+
+/// Short-lived Cloudflare TURN credentials, minted from a long-term TURN key,
+/// so a viewer can RELAY when no direct path exists (symmetric NAT / CGNAT —
+/// an office NAT in front of this host is exactly that). Mirrors ts/share.ts
+/// `getIceServers`: enabled by `CF_TURN_KEY_ID` + `CF_TURN_API_TOKEN`
+/// (Cloudflare dashboard: Realtime → TURN), STUN-only otherwise and on any
+/// error, cached until shortly before expiry. Without this the Rust host
+/// offered STUN only, so a viewer on another network could reach the
+/// signaling server, get the offer, and then time out on ICE.
+///
+/// Returned as the JSON the offer carries (`[{urls, username, credential}]`);
+/// `rtc_ice_servers` turns the same value into the peer-connection config so
+/// both sides gather against the same servers.
+async fn ice_servers_json() -> Value {
+    static CACHE: Mutex<Option<(Value, std::time::Instant)>> = Mutex::const_new(None);
+    let key_id = std::env::var("CF_TURN_KEY_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let token = std::env::var("CF_TURN_API_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let (Some(key_id), Some(token)) = (key_id, token) else {
+        return json!([{ "urls": STUN_URL }]);
+    };
+    {
+        let cache = CACHE.lock().await;
+        if let Some((v, exp)) = cache.as_ref() {
+            if *exp > std::time::Instant::now() {
+                return v.clone();
+            }
+        }
+    }
+    let fetched = tokio::task::spawn_blocking(move || fetch_cloudflare_ice(&key_id, &token))
+        .await
+        .unwrap_or_else(|e| Err(anyhow!("join: {e}")));
+    match fetched {
+        Ok(servers) => {
+            let exp =
+                std::time::Instant::now() + Duration::from_secs(TURN_TTL_SECS.saturating_sub(300)); // refresh ~5 min early
+            *CACHE.lock().await = Some((servers.clone(), exp));
+            servers
+        }
+        Err(e) => {
+            eprintln!("[ayrs share] Cloudflare TURN credential fetch failed; using STUN only: {e}");
+            json!([{ "urls": STUN_URL }])
+        }
+    }
+}
+
+/// POST https://rtc.live.cloudflare.com/v1/turn/keys/<key>/credentials/generate-ice-servers
+/// → `{ "iceServers": [ {urls, username, credential}, … ] }`. Blocking (ureq);
+/// the caller runs it on the blocking pool.
+fn fetch_cloudflare_ice(key_id: &str, token: &str) -> Result<Value> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build()
+        .into();
+    let url = format!(
+        "https://rtc.live.cloudflare.com/v1/turn/keys/{key_id}/credentials/generate-ice-servers"
+    );
+    let mut resp = agent
+        .post(&url)
+        .header("Authorization", &format!("Bearer {token}"))
+        .send_json(json!({ "ttl": TURN_TTL_SECS }))
+        .context("Cloudflare TURN request")?;
+    let body: Value = resp
+        .body_mut()
+        .read_json()
+        .context("Cloudflare TURN response")?;
+    match body.get("iceServers") {
+        Some(Value::Array(a)) if !a.is_empty() => Ok(Value::Array(a.clone())),
+        _ => bail!("Cloudflare TURN response carried no iceServers"),
+    }
+}
+
+/// The peer-connection form of `ice_servers_json`. Tolerates `urls` as a
+/// string or an array (Cloudflare sends an array); drops entries without urls.
+fn rtc_ice_servers(v: &Value) -> Vec<RTCIceServer> {
+    let mut out = Vec::new();
+    for s in v.as_array().into_iter().flatten() {
+        let urls: Vec<String> = match s.get("urls") {
+            Some(Value::String(u)) => vec![u.clone()],
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(|u| u.as_str().map(String::from))
+                .collect(),
+            _ => Vec::new(),
+        };
+        if urls.is_empty() {
+            continue;
+        }
+        out.push(RTCIceServer {
+            urls,
+            username: s
+                .get("username")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            credential: s
+                .get("credential")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            ..Default::default()
+        });
+    }
+    if out.is_empty() {
+        out.push(RTCIceServer {
+            urls: vec![STUN_URL.to_string()],
+            ..Default::default()
+        });
+    }
+    out
+}
 const MAX_ROTATES: u32 = 5;
 /// How long to wait between re-checks while parked behind a live room holder.
 ///
@@ -1308,11 +1427,11 @@ async fn start_peer(
     scope: Arc<Scope>,
 ) -> Result<()> {
     let api = APIBuilder::new().build();
+    // STUN, plus Cloudflare TURN relay when configured — the same servers the
+    // offer hands the viewer below, so both ends gather against one set.
+    let ice_servers = ice_servers_json().await;
     let config = RTCConfiguration {
-        ice_servers: vec![RTCIceServer {
-            urls: vec![STUN_URL.to_string()],
-            ..Default::default()
-        }],
+        ice_servers: rtc_ice_servers(&ice_servers),
         ..Default::default()
     };
     let pc = Arc::new(api.new_peer_connection(config).await?);
@@ -1475,11 +1594,51 @@ async fn start_peer(
         None => return Ok(()),
     }
 
-    let ice_servers = json!([{ "urls": STUN_URL }]);
     let _ = sig_tx.send(SigOut::Send(
         json!({"type":"offer","to":peer_id,"sdp":offer_sdp,"iceServers":ice_servers}).to_string(),
     ));
     Ok(())
+}
+
+#[cfg(test)]
+mod ice_tests {
+    use super::*;
+
+    #[test]
+    fn rtc_ice_servers_accepts_cloudflare_shape_and_falls_back_to_stun() {
+        let cf = json!([
+            { "urls": ["stun:stun.cloudflare.com:3478", "turn:turn.cloudflare.com:3478?transport=udp"],
+              "username": "u1", "credential": "c1" },
+            { "urls": "stun:stun.l.google.com:19302" },
+            { "username": "no-urls" }
+        ]);
+        let servers = rtc_ice_servers(&cf);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].urls.len(), 2);
+        assert_eq!(servers[0].username, "u1");
+        assert_eq!(servers[0].credential, "c1");
+        assert_eq!(
+            servers[1].urls,
+            vec!["stun:stun.l.google.com:19302".to_string()]
+        );
+        assert!(servers[1].username.is_empty());
+
+        let empty = rtc_ice_servers(&json!([]));
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].urls, vec![STUN_URL.to_string()]);
+        let garbage = rtc_ice_servers(&json!({"not": "an array"}));
+        assert_eq!(garbage[0].urls, vec![STUN_URL.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn without_turn_env_the_offer_carries_stun_only() {
+        // The cache is keyed on nothing env-specific, so clear the vars first;
+        // this test must not depend on the developer's shell.
+        std::env::remove_var("CF_TURN_KEY_ID");
+        std::env::remove_var("CF_TURN_API_TOKEN");
+        let v = ice_servers_json().await;
+        assert_eq!(v, json!([{ "urls": STUN_URL }]));
+    }
 }
 
 async fn on_answer(peer_id: &str, sdp: String, secret: &str, peers: &Peers) -> Result<()> {
