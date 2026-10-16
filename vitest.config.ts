@@ -139,6 +139,9 @@ export default defineConfig({
         // assert the degrade-to-empty contract); this only takes the file out of
         // the coverage denominator, where it is measured on the POSIX runners.
         ...(process.platform === "win32" ? ["ts/procStats.ts"] : []),
+        // `ay kill` refuses on win32 (no process table), so its real-process
+        // specs are skipped there; the console's /api/kill 501s likewise.
+        ...(process.platform === "win32" ? ["ts/cmdKill.ts", "ts/forceKill.ts"] : []),
         // Guided onboarding — the workspace-setting path is unit-tested
         // (setup.spec.ts); the TTY prompt and the daemon install it delegates to
         // are integration-only.
