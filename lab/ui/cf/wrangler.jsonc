@@ -64,13 +64,19 @@
     { "pattern": "*.agent-yes.com/*", "zone_name": "agent-yes.com" },
   ],
   "observability": { "enabled": true },
-  // Optional room sync (auth.ts): Google sign-in via better-auth on D1. Off until
-  // the database exists, so this stays commented out; a binding with a made-up
-  // database_id would fail every deploy. To enable:
-  //   wrangler d1 create agent-yes-auth   → paste the printed id below, uncomment
-  //   wrangler d1 migrations apply agent-yes-auth --remote   (./migrations)
-  //   wrangler secret put BETTER_AUTH_SECRET / GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
-  // "d1_databases": [
-  //   { "binding": "AUTH_DB", "database_name": "agent-yes-auth", "database_id": "<id>" },
-  // ],
+  // Optional room sync (auth.ts): Google sign-in via better-auth on D1. The
+  // schema lives in ./migrations; apply it before the first deploy that carries
+  // this binding:
+  //   wrangler d1 migrations apply agent-yes-auth --remote
+  // Secrets (wrangler secret put): BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID,
+  // GOOGLE_CLIENT_SECRET. Without all three the auth routes answer 503 and the
+  // console hides the sync panel.
+  "d1_databases": [
+    {
+      "binding": "AUTH_DB",
+      "database_name": "agent-yes-auth",
+      "database_id": "51cfa97c-8728-4705-baf0-f3f38f8dba03",
+      "migrations_dir": "migrations",
+    },
+  ],
 }
