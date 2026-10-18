@@ -6,6 +6,9 @@
   "account_id": "0beef4cd2d2da6befa47d8d149d6e157",
   "main": "worker.ts",
   "compatibility_date": "2025-05-01",
+  // better-auth (auth.ts, optional room sync) imports node:async_hooks and
+  // node:crypto; without this flag the whole Worker would fail to load.
+  "compatibility_flags": ["nodejs_compat"],
   // Sync the canonical UI (lab/ui/*) into ./public before EVERY deploy/dev, so
   // the deployed assets can never drift from source again (the old manual-copy
   // workflow is how agent-yes.com ended up serving a stale console). public/ is
@@ -61,4 +64,13 @@
     { "pattern": "*.agent-yes.com/*", "zone_name": "agent-yes.com" },
   ],
   "observability": { "enabled": true },
+  // Optional room sync (auth.ts): Google sign-in via better-auth on D1. Off until
+  // the database exists, so this stays commented out; a binding with a made-up
+  // database_id would fail every deploy. To enable:
+  //   wrangler d1 create agent-yes-auth   → paste the printed id below, uncomment
+  //   wrangler d1 migrations apply agent-yes-auth --remote   (./migrations)
+  //   wrangler secret put BETTER_AUTH_SECRET / GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET
+  // "d1_databases": [
+  //   { "binding": "AUTH_DB", "database_name": "agent-yes-auth", "database_id": "<id>" },
+  // ],
 }
