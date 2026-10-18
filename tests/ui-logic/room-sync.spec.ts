@@ -18,7 +18,13 @@ import {
 
 const NOW = 1_800_000_000_000;
 const DAY = 24 * 60 * 60 * 1000;
-const room = (token: string, ts: number, host = "s.agent-yes.com") => ({ token, host, ts });
+// A room last used at `ts` and added at `added` (default: added when last used).
+const room = (token: string, ts: number, added = ts, host = "s.agent-yes.com") => ({
+  token,
+  host,
+  ts,
+  added,
+});
 // Few iterations keep the tests fast; the real default is KDF_ITERATIONS.
 const ITER = 1000;
 
@@ -46,6 +52,30 @@ describe("mergeRooms", () => {
     const local = { rooms: { alpha: room("a", NOW - 10) }, removed: {} };
     const remote = { rooms: {}, removed: { alpha: NOW - 2 } };
     expect(mergeRooms(local, remote, NOW)).toEqual({ rooms: {}, removed: { alpha: NOW - 2 } });
+  });
+
+  it("a forget beats another device's later reconnect of the same room", () => {
+    // The phone reloaded after the laptop's forget: its boot reconnect moved ts
+    // past the removal, but the room was added long before it.
+    const phone = { rooms: { alpha: room("a", NOW - 1, NOW - 50) }, removed: {} };
+    const laptop = { rooms: {}, removed: { alpha: NOW - 10 } };
+    expect(mergeRooms(phone, laptop, NOW)).toEqual({ rooms: {}, removed: { alpha: NOW - 10 } });
+  });
+
+  it("a forget beats a room saved before sync existed (no added time)", () => {
+    const legacy = {
+      rooms: { alpha: { token: "a", host: "s.agent-yes.com", ts: NOW - 1 } },
+      removed: {},
+    };
+    expect(mergeRooms(legacy, { rooms: {}, removed: { alpha: NOW - 10 } }, NOW).rooms).toEqual({});
+  });
+
+  it("between two tokens for one name the newer add wins, keeping the latest use", () => {
+    const local = { rooms: { alpha: room("old-token", NOW - 1, NOW - 100) }, removed: {} };
+    const remote = { rooms: { alpha: room("new-token", NOW - 20, NOW - 20) }, removed: {} };
+    expect(mergeRooms(local, remote, NOW).rooms.alpha).toEqual(
+      room("new-token", NOW - 1, NOW - 20),
+    );
   });
 
   it("a room saved after the forget comes back, and wins a tie", () => {

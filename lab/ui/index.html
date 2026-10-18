@@ -8206,11 +8206,17 @@ my.translate = async (text, lang) => {
       const saveRoom = (room, token, host) => {
         const r = loadRooms();
         const prev = r[room];
-        r[room] = { token, host: host || SIG_DEFAULT, ts: Date.now() };
+        host = host || SIG_DEFAULT;
+        const now = Date.now();
+        // ts = last used (every connect). added = when this room/token landed
+        // here; only that may outrank a "Forget" from another device (see
+        // room-sync.js), so a reconnect must keep the old value.
+        const fresh = !prev || prev.token !== token || prev.host !== host;
+        r[room] = { token, host, ts: now, added: fresh ? now : prev.added || 0 };
         localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
         // Only a new room or a new token is worth a sync round; a reconnect just
         // refreshes ts, which the next round carries anyway.
-        if (!prev || prev.token !== token || prev.host !== r[room].host) roomSync?.schedule();
+        if (fresh) roomSync?.schedule();
       };
       // An explicit "Forget": also recorded as a removal so it syncs as a delete.
       const dropRoom = (room) => {
@@ -8614,9 +8620,11 @@ my.translate = async (text, lang) => {
           : `<div class="empty2">no saved rooms — paste a share link below</div>`;
         const sync = roomSync?.state();
         // The panel re-renders on every live-count update; keep a half-typed
-        // passphrase and its focus across that.
-        const pw = $("syncpw");
-        const pwKeep = pw ? { value: pw.value, focus: document.activeElement === pw } : null;
+        // passphrase (and its confirmation) and focus across that.
+        const pwKeep = ["syncpw", "syncpw2"]
+          .map((id) => $(id))
+          .filter(Boolean)
+          .map((el) => ({ id: el.id, value: el.value, focus: document.activeElement === el }));
         $("rooms").innerHTML = `<div class="rtitle">rooms · ${
           sync?.user && !sync.needs && sync.last
             ? "synced with your Google Drive"
@@ -8631,10 +8639,11 @@ my.translate = async (text, lang) => {
         <code id="cmd" class="copy" title="click to copy">ay serve --share</code></div>
       <div class="rconnect">or view a <b>codehost</b> room — paste <code>ch:&lt;room-token&gt;</code> (or a
         codehost.dev share link) above; every machine in the room shows its agents here.</div>`;
-        const pwNew = $("syncpw");
-        if (pwNew && pwKeep) {
-          pwNew.value = pwKeep.value;
-          if (pwKeep.focus) pwNew.focus();
+        for (const k of pwKeep) {
+          const el = $(k.id);
+          if (!el) continue;
+          el.value = k.value;
+          if (k.focus) el.focus();
         }
       }
 
@@ -8659,6 +8668,7 @@ my.translate = async (text, lang) => {
         }" placeholder="sync passphrase" /><button id="syncgo" data-mode="${first ? "new" : "unlock"}">${
           first ? "start syncing" : "unlock"
         }</button></div>
+        ${first ? `<div class="rsyncrow"><input id="syncpw2" type="password" autocomplete="new-password" placeholder="same passphrase again" /></div>` : ""}
         ${first ? "" : `<div class="rsynchint"><a href="#" id="syncreset">Forgot it? Replace the synced list with this device's rooms</a></div>`}
         ${err}<div class="rsynchint"><a href="#" id="syncout">sign out</a></div></div>`;
         }
@@ -8692,7 +8702,7 @@ my.translate = async (text, lang) => {
               return true;
             await roomSync.reset(pw);
           } else if (ev.target.dataset.mode === "new") {
-            if (prompt("Type the passphrase again to confirm.") !== pw)
+            if (($("syncpw2")?.value || "") !== pw)
               return (alert("The passphrases did not match."), true);
             await roomSync.run(pw);
           } else await roomSync.run(pw);
@@ -8740,7 +8750,7 @@ my.translate = async (text, lang) => {
         }
       });
       $("rooms").addEventListener("keydown", (ev) => {
-        if (ev.key === "Enter" && ev.target.id === "syncpw") $("syncgo")?.click();
+        if (ev.key === "Enter" && ev.target.id?.startsWith("syncpw")) $("syncgo")?.click();
       });
       $("rooms").addEventListener("click", (ev) => {
         if (ev.target.id?.startsWith("sync")) {

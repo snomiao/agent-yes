@@ -14,10 +14,14 @@
 // Whoever holds Drive access can delete the file or put back an older copy, but
 // cannot read it: the worst case is forgotten rooms reappearing, not a leak.
 //
-// Merge. Rooms merge by name across devices; the newer timestamp wins. "Forget"
-// records a removal time (localStorage "ay.roomsRemoved"), which beats any copy
-// of the room saved before it, so the room disappears everywhere. Rooms older
-// than ROOM_TTL_MS are dropped on every device WITHOUT a removal record: the
+// Merge. A saved room carries two times: `ts`, refreshed on every connect (last
+// used; drives the 90-day expiry and the panel's order), and `added`, set only
+// when the room or its token first lands on a device. Rooms merge by name;
+// between two different tokens the newer `added` wins. "Forget" records a
+// removal time (localStorage "ay.roomsRemoved") that beats any copy ADDED before
+// it. Comparing against `ts` instead would let any other device that merely
+// reconnected the room (every page load does) undo the forget. Rooms older than
+// ROOM_TTL_MS are dropped on every device WITHOUT a removal record: the
 // per-device 90-day expiry must never wipe a room from other devices that still
 // use it. codehost rooms are local-only and never leave the device.
 
@@ -35,14 +39,15 @@ export const isSyncable = (r) =>
   !!r && typeof r.token === "string" && !!r.token && r.host !== CODEHOST_HOST;
 
 /**
- * Merge two room states. A state is { rooms: {name: {token, host, ts}},
+ * Merge two room states. A state is { rooms: {name: {token, host, ts, added}},
  * removed: {name: ts} }. Pure; returns a new state.
  *
- * For each name the newest event wins: a saved room at ts, or a removal at ts.
- * A removal at the same ts as a save keeps the room (an explicit re-add right
- * after a forget should not be lost to clock ties). Rooms and removals older than
- * the TTL are dropped. Non-syncable local rooms (codehost) pass through from
- * `local` untouched.
+ * Per name: of two copies, the newer `added` wins (newer `ts` on a tie), keeping
+ * the later `ts` of the two. The room survives a removal only if it was added at
+ * or after it (a re-add right after a forget should not lose to a clock tie). An
+ * entry with no `added` (saved before sync existed) counts as added at 0, so an
+ * explicit forget always beats it. Rooms and removals older than the TTL are
+ * dropped. Non-syncable local rooms (codehost) pass through from `local`.
  */
 export function mergeRooms(local, remote, now) {
   const rooms = {};
@@ -64,10 +69,11 @@ export function mergeRooms(local, remote, now) {
       continue;
     }
     const r = isSyncable(rr[name]) ? rr[name] : undefined;
-    const room = !l ? r : !r ? l : (r.ts || 0) > (l.ts || 0) ? r : l;
+    const room = !l || !r ? l || r : pick(l, r);
+    const ts = Math.max(l?.ts || 0, r?.ts || 0);
     const gone = Math.max(local?.removed?.[name] || 0, remote?.removed?.[name] || 0);
-    if (room && fresh(room.ts) && (room.ts || 0) >= gone) {
-      rooms[name] = { token: room.token, host: room.host, ts: room.ts };
+    if (room && fresh(ts) && added(room) >= gone) {
+      rooms[name] = { token: room.token, host: room.host, ts, added: added(room) };
     } else if (gone && fresh(gone)) {
       removed[name] = gone;
     }
@@ -75,15 +81,24 @@ export function mergeRooms(local, remote, now) {
   return { rooms, removed };
 }
 
+const added = (x) => x?.added || 0;
+
+/** Of two copies of one room: the newer `added`, else the newer `ts`. */
+function pick(a, b) {
+  if (added(a) !== added(b)) return added(a) > added(b) ? a : b;
+  return (b.ts || 0) > (a.ts || 0) ? b : a;
+}
+
 /** The part of a state that is uploaded: syncable rooms plus removals. */
 export function syncPayload(state) {
   const rooms = {};
   for (const [name, r] of Object.entries(state.rooms || {}))
-    if (isSyncable(r)) rooms[name] = { token: r.token, host: r.host, ts: r.ts };
+    if (isSyncable(r))
+      rooms[name] = { token: r.token, host: r.host, ts: r.ts, added: r.added || 0 };
   return { rooms, removed: { ...state.removed } };
 }
 
-/** Same rooms (name, token, host, ts) and removals in both states. */
+/** Same rooms (name, token, host, ts, added) and removals in both states. */
 export function sameState(a, b) {
   return JSON.stringify(canon(a)) === JSON.stringify(canon(b));
 }

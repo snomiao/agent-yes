@@ -166,9 +166,12 @@ function saveRoom(name: string, token: string, host: string) {
   try {
     const r = JSON.parse(localStorage.getItem(ROOMS_KEY) || "{}");
     const prev = r[name];
-    r[name] = { token, host, ts: Date.now() };
+    const now = Date.now();
+    // added only moves for a new room/token: see saveRoom in index.html.
+    const fresh = !prev || prev.token !== token || prev.host !== host;
+    r[name] = { token, host, ts: now, added: fresh ? now : prev.added || 0 };
     localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
-    if (!prev || prev.token !== token) roomSync?.schedule();
+    if (fresh) roomSync?.schedule();
   } catch {
     /* private mode / quota — the session still works, just not cached */
   }
