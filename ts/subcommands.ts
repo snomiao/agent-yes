@@ -4547,23 +4547,23 @@ function dropComposerTerm(logPath: string) {
 }
 
 /**
- * What the target's composer holds right now, read from the same 32 KB tail
- * `renderLogTailLines` renders (further back when a Claude screen shows no
- * composer box), keeping per-cell attributes (dim/inverse) so ghost text can be
- * told from a real draft. See ts/composerGuard.ts.
+ * The bottom 40 rows of a log as the composer check sees them: rendered from
+ * the 32 KB tail and, for Claude, from further back until its composer box is
+ * on screen (see COMPOSER_WINDOWS). Keeps per-cell attributes. Null for an
+ * empty log; throws when the log cannot be read or rendered.
  */
-export async function readComposerState(
-  record: GlobalPidRecord,
+async function renderComposerRows(
+  record: GlobalPidRecord & { log_file: string },
   windows = COMPOSER_WINDOWS,
-): Promise<ComposerState> {
+  fromContent = false,
+): Promise<ReturnType<typeof rowsFromXterm> | null> {
   const logPath = record.log_file;
-  if (!logPath) return { kind: "unknown", reason: "no log file recorded" };
   const geom = (await readAgentPtysize(record)) ?? undefined;
   const key = `${geom?.cols}x${geom?.rows}:${record.cli}:${windows.join()}`;
   const claude = record.cli === "claude";
   try {
     const { size } = await stat(logPath);
-    if (size === 0) return { kind: "unknown", reason: "log unreadable or empty" };
+    if (size === 0) return null;
     let ct = composerTerms.get(logPath);
     if (ct && (ct.key !== key || size < ct.offset)) {
       dropComposerTerm(logPath); // resized, or the log was truncated
@@ -4577,7 +4577,7 @@ export async function readComposerState(
         await new Promise<void>((resolve) => ct!.term.write(delta, resolve));
         ct.offset += delta.length;
       }
-      rows = rowsFromXterm(ct.term as never, 40);
+      rows = rowsFromXterm(ct.term as never, 40, fromContent);
       next = ct.whole ? windows.length : ct.window + 1;
       if (!claude || composerBoxed(rows.map((r) => r.text))) next = windows.length;
     }
@@ -4602,17 +4602,39 @@ export async function readComposerState(
       });
       if (composerTerms.size > COMPOSER_TERMS_MAX)
         dropComposerTerm(composerTerms.keys().next().value!); // oldest first
-      rows = rowsFromXterm(term as never, 40);
+      rows = rowsFromXterm(term as never, 40, fromContent);
       if (!claude || from === 0 || composerBoxed(rows.map((r) => r.text))) break;
     }
-    const state = classifyComposer(rows ?? []);
+    return rows ?? [];
+  } catch (e) {
+    dropComposerTerm(logPath);
+    throw e;
+  }
+}
+
+/**
+ * What the target's composer holds right now, read from the same 32 KB tail
+ * `renderLogTailLines` renders (further back when a Claude screen shows no
+ * composer box), keeping per-cell attributes (dim/inverse) so ghost text can be
+ * told from a real draft. See ts/composerGuard.ts.
+ */
+export async function readComposerState(
+  record: GlobalPidRecord,
+  windows = COMPOSER_WINDOWS,
+): Promise<ComposerState> {
+  const logPath = record.log_file;
+  if (!logPath) return { kind: "unknown", reason: "no log file recorded" };
+  const claude = record.cli === "claude";
+  try {
+    const rows = await renderComposerRows({ ...record, log_file: logPath }, windows);
+    if (!rows) return { kind: "unknown", reason: "log unreadable or empty" };
+    const state = classifyComposer(rows);
     // No window showed the box, so a "draft" was read under some other prompt
     // row, possibly an old turn: say so instead of reporting it as a draft.
-    if (claude && state.kind === "draft" && !composerBoxed((rows ?? []).map((r) => r.text)))
+    if (claude && state.kind === "draft" && !composerBoxed(rows.map((r) => r.text)))
       return { kind: "hidden", reason: "its input box is not on screen" };
     return state;
   } catch (e) {
-    dropComposerTerm(logPath);
     return {
       kind: "unknown",
       reason: `log unreadable or render failed: ${(e as Error)?.message ?? e}`,
@@ -5046,6 +5068,13 @@ export function inspectSubmission(
   const compact = (text: string) => text.replace(/\s+/gu, "");
   const needle = compact(identity);
   const wrapped = identity.startsWith("<ay-msg ");
+  // A wrapped message also ends with `</ay-msg NONCE>`. A long body pushes its
+  // header out of the rendered window (Claude echoes a queued message in full
+  // above the composer), so the closing tag, which sits right above the
+  // composer, is often the only copy of the nonce left on screen.
+  const closer = wrapped ? compact(`</ay-msg ${identity.slice("<ay-msg ".length)}>`) : null;
+  const occurrences = (text: string) =>
+    Math.max(text.split(needle).length - 1, closer ? text.split(closer).length - 1 : 0);
   // The same boundary the draft check uses: a quoted `› line` inside our own
   // unsent message must not be taken for the prompt (that would count the
   // message's nonce as transcript evidence — codex review).
@@ -5080,7 +5109,7 @@ export function inspectSubmission(
   const transcript = compact(transcriptLines.join("\n"));
   // For raw sends, a short body such as "x" must not match "Codex" or a
   // suggestion containing that character. Match whole rendered message lines.
-  let transcriptMatches = wrapped ? transcript.split(needle).length - 1 : 0;
+  let transcriptMatches = wrapped ? occurrences(transcript) : 0;
   if (!wrapped) {
     const lines = transcriptLines.map((line) => compact(line.replace(/^\s*[❯›]\s*/u, "")));
     for (let start = 0; start < lines.length; start++) {
@@ -5101,7 +5130,7 @@ export function inspectSubmission(
     input.push(line);
   }
   const composer = compact(input.join("\n"));
-  if (wrapped ? composer.includes(needle) : composer === needle) {
+  if (wrapped ? occurrences(composer) > 0 : composer === needle) {
     return {
       submission: "not-submitted",
       retry: true,
@@ -5151,6 +5180,24 @@ export function ownedCollapsedPaste(
   return token && !beforePaste.join("\n").includes(token) ? token : null;
 }
 
+/**
+ * The target's screen as submit-confirm reads it. For Claude this is the
+ * composer check's render, which goes further back than the 32 KB tail when the
+ * tail lacks the composer box: Claude redraws only changed rows, so while it is
+ * busy the tail can hold spinner redraws but neither the box nor a message
+ * queued above it, and nothing on such a screen can be attributed to our send.
+ */
+async function renderSendScreen(
+  record: GlobalPidRecord & { log_file: string },
+  geometry?: RenderGeom,
+): Promise<string[]> {
+  if (record.cli === "claude") {
+    const rows = await renderComposerRows(record, COMPOSER_WINDOWS, true).catch(() => undefined);
+    if (rows !== undefined) return (rows ?? []).map((r) => r.text);
+  }
+  return (await renderLogTailLines(record.log_file, 40, geometry)) ?? [];
+}
+
 export const SEND_EXIT_QUEUED = 4;
 
 /** Retry only Enter, never the body. Three attempts, phi delay capped at 400ms. */
@@ -5162,9 +5209,10 @@ export async function submitAndConfirm(
   beforePaste?: string[] | null,
 ): Promise<{ confirmed: boolean; screen: string[]; submission: SubmissionState }> {
   const logFile = record.log_file!;
+  const target = { ...record, log_file: logFile };
   const geometry = (await readAgentPtysize(record)) ?? undefined;
   const cfg = (await cliDefaults())[record.cli];
-  let screen = (await renderLogTailLines(logFile, 40, geometry)) ?? [];
+  let screen = await renderSendScreen(target, geometry);
   const before = inspectSubmission(screen, identity);
   const baseline = before.transcriptMatches;
   // Delivered = a NEW copy in the transcript, or — what a count in a rolling
@@ -5191,7 +5239,7 @@ export async function submitAndConfirm(
     if (attempt) {
       await new Promise((r) => setTimeout(r, Math.min(400, 150 * 1.618 ** (attempt - 1))));
       // Recheck after the delay: the target could have accepted the earlier Enter.
-      screen = (await renderLogTailLines(logFile, 40, geometry)) ?? [];
+      screen = await renderSendScreen(target, geometry);
       const settled = inspectSubmission(screen, identity);
       if (delivered(settled)) return outcome(settled, screen);
       if (
@@ -5203,7 +5251,7 @@ export async function submitAndConfirm(
     }
     await writeToIpc(fifoPath, trailing);
     await waitForLogQuiet(logFile, SEND_CONFIRM_QUIET_MS, SEND_CONFIRM_MAX_MS);
-    screen = (await renderLogTailLines(logFile, 40, geometry)) ?? [];
+    screen = await renderSendScreen(target, geometry);
     const evidence = inspectSubmission(screen, identity);
     if (delivered(evidence)) return outcome(evidence, screen);
     if (!canRetry(evidence, screen)) break;
@@ -5246,9 +5294,8 @@ async function deliverBody(
   if (fullBody && trailing) {
     const beforePaste =
       canConfirm && record.log_file
-        ? await renderLogTailLines(
-            record.log_file,
-            40,
+        ? await renderSendScreen(
+            { ...record, log_file: record.log_file },
             (await readAgentPtysize(record)) ?? undefined,
           )
         : null;

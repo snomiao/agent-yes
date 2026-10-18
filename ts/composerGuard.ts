@@ -200,11 +200,18 @@ type XtermLike = {
   };
 };
 
-/** Read the bottom `n` rows of an xterm buffer as ComposerRows. */
-export function rowsFromXterm(term: XtermLike, n: number): ComposerRow[] {
+/**
+ * Read the bottom `n` rows of an xterm buffer as ComposerRows. With
+ * `fromContent`, count them up from the last non-blank row (as `ay tail`
+ * does), so a screen that has not filled the viewport yet keeps its top rows.
+ */
+export function rowsFromXterm(term: XtermLike, n: number, fromContent = false): ComposerRow[] {
   const active = term.buffer.active;
+  const blank = (i: number) => !active.getLine(i)?.translateToString(true).trim();
+  let end = active.length;
+  if (fromContent) while (end > 0 && blank(end - 1)) end--;
   const rows: ComposerRow[] = [];
-  for (let i = Math.max(0, active.length - n); i < active.length; i++) {
+  for (let i = Math.max(0, end - n); i < end; i++) {
     const line = active.getLine(i);
     if (!line) {
       rows.push({ text: "", cells: [] });
