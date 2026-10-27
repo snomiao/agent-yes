@@ -1,0 +1,89 @@
+name: Docker Release Image
+
+# docker.io/snomiao/agent-yes:<version> and :latest, built from
+# docker/Dockerfile.release: the published npm package of one release plus that
+# release's Rust binaries (ayrs), so `ay serve --webrtc` starts with no
+# first-run downloads. release.yml dispatches this after it publishes to npm;
+# dispatch it by hand to (re)build an existing release.
+#
+# docker.yml keeps publishing the per-commit source image (main, main-<sha>,
+# pr-*), but no longer `latest`: that tag now always means the newest release.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Released version to package, without the v (e.g. 1.301.0)"
+        required: true
+        type: string
+      latest:
+        description: "Also tag it latest"
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: docker-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - name: Check the version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "not a release version: $VERSION"; exit 1; }
+          # The Dockerfile installs this version from npm: wait until it is there.
+          for i in $(seq 1 30); do
+            npm view "agent-yes@$VERSION" version >/dev/null 2>&1 && exit 0
+            sleep 10
+          done
+          echo "agent-yes@$VERSION is not on npm"; exit 1
+
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Tags
+        id: tags
+        env:
+          VERSION: ${{ inputs.version }}
+          USER: ${{ secrets.DOCKERHUB_USERNAME }}
+          LATEST: ${{ inputs.latest }}
+        run: |
+          tags="docker.io/$USER/agent-yes:$VERSION"
+          [ "$LATEST" = "true" ] && tags="$tags,docker.io/$USER/agent-yes:latest"
+          echo "tags=$tags" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/build-push-action@v5
+        with:
+          context: docker
+          file: docker/Dockerfile.release
+          platforms: linux/amd64,linux/arm64
+          build-args: AY_VERSION=${{ inputs.version }}
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+
+      - name: Smoke test
+        env:
+          IMAGE: docker.io/${{ secrets.DOCKERHUB_USERNAME }}/agent-yes:${{ inputs.version }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          for p in linux/amd64 linux/arm64; do
+            out=$(docker run --rm --platform "$p" "$IMAGE" ay --version)
+            echo "$p: $out"
+            [[ "$out" == *"v$VERSION"* ]] || exit 1
+          done
