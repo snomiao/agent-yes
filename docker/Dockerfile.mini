@@ -22,7 +22,7 @@ RUN apk add --no-cache \
 WORKDIR /src/agent-yes
 COPY package.json bun.lock ./
 # Install all dependencies (including dev deps needed for build)
-RUN HUSKY=0 bun install && bun pm cache clean
+RUN HUSKY=0 bun install && bun pm cache rm
 
 # Copy source and build
 COPY . .
@@ -71,7 +71,7 @@ RUN bun install --production --ignore-scripts \
          sleep $((i * 10)); \
        done \
     && node -e "require('node-pty')" \
-    && bun pm cache clean
+    && bun pm cache rm
 
 # Remove build tools to save space
 RUN apk del build-base python3
