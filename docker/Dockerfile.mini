@@ -63,7 +63,13 @@ COPY --from=builder /src/agent-yes/bun.lock ./
 # i.e. npm's bundled undici crashing mid-body on a response it already got a 200
 # for — transient, and only on the slower emulated arm64 leg. Retry instead of
 # failing the build: the same commit passed on a re-run with no changes.
+#
+# node-pty is only an optional PEER (and dev) dependency, and newer bun no
+# longer installs optional peers on `--production`, so add it explicitly, at the
+# version devDependencies pins. Without this the rebuild below finds nothing
+# and `require('node-pty')` fails.
 RUN bun install --production --ignore-scripts \
+    && bun add --ignore-scripts "node-pty@$(node -p "require('./package.json').devDependencies['node-pty']")" \
     && for i in 1 2 3; do \
          npm rebuild node-pty && break; \
          echo "node-pty rebuild failed (attempt $i/3), retrying in $((i * 10))s"; \
