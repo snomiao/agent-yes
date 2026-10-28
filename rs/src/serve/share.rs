@@ -614,6 +614,24 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     let link = format_share_link(&room.room, &secret, &room.host);
     eprintln!("[ayrs share] room {} via {}", room.room, room.host);
     println!("{link}");
+    if let Some(line) = super::ice_net::init().await? {
+        eprintln!("[ayrs share] {line}");
+    }
+    // Say once, up front, when only a relay or a published port can reach
+    // this host; otherwise every viewer just times out on ICE with nothing in
+    // this log.
+    tokio::spawn(async {
+        match tokio::task::spawn_blocking(super::nat_probe::probe).await {
+            Ok(Ok(kind)) => {
+                let configured = super::ice_net::is_configured();
+                if let Some(w) = super::nat_probe::startup_warning(&kind, configured) {
+                    eprintln!("[ayrs share] WARNING: {w}");
+                }
+            }
+            Ok(Err(e)) => eprintln!("[ayrs share] NAT check skipped: {e:#}"),
+            Err(_) => {}
+        }
+    });
 
     // The master room never cancels; the dummy sender stays alive for the loop.
     let (_cancel_tx, cancel_rx) = watch::channel(false);
@@ -1511,7 +1529,7 @@ async fn start_peer(
     sig_tx: &mpsc::UnboundedSender<SigOut>,
     scope: Arc<Scope>,
 ) -> Result<()> {
-    let api = webrtc::api::APIBuilder::new().build();
+    let api = super::ice_net::api().await?;
     // STUN, plus Cloudflare TURN relay when configured — the same servers the
     // offer hands the viewer below, so both ends gather against one set.
     let ice_servers = ice_servers_json().await;

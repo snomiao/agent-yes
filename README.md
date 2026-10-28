@@ -363,6 +363,30 @@ services:
     command: ["--", "help me solve all todos"]
 ```
 
+**Sharing from a container (`ay serve --webrtc`):**
+
+`docker.io/snomiao/agent-yes:<version>` (and `:latest`) runs `ay serve --webrtc` by default.
+Docker Desktop on macOS puts containers behind a symmetric NAT: each
+destination gets a new public port, so viewers cannot reach the container
+directly, and the share host logs a `symmetric NAT` warning at startup.
+Publish one UDP port and advertise an address viewers can reach (the Rust
+host only):
+
+```bash
+docker run --rm -it -v ay-home:/home/agent -p 47000:47000/udp \
+  -e AGENT_YES_ICE_UDP_PORT=47000 \
+  -e AGENT_YES_ICE_PUBLIC_IPS=192.0.2.10 \
+  snomiao/agent-yes
+```
+
+`AGENT_YES_ICE_UDP_PORT` puts every peer connection on that one UDP port;
+`AGENT_YES_ICE_PUBLIC_IPS` (comma-separated, or `auto` for the STUN-reported
+public IP) replaces the container's own address in its candidates, e.g. with
+the Docker host's LAN IP for viewers on the same network. Viewers elsewhere
+need that port forwarded to the host, or a TURN relay (`CF_TURN_KEY_ID` +
+`CF_TURN_API_TOKEN`). On a Linux host, `--network host` gives the container
+the host's own network and skips Docker's NAT.
+
 **Available platforms:**
 
 - `linux/amd64` (x86_64)
