@@ -12,7 +12,11 @@ jobs:
     # beta channel. Repository variable HOLD_PROD=1 is the operator kill switch.
     if: vars.HOLD_PROD != '1'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # This job waits for rust-build.yml before it publishes to npm. That build
+    # usually takes ~10 min, but one target has taken 32, and a timeout here
+    # leaves a tagged GitHub release that never reaches npm or Docker. Same
+    # budget as publish-beta below.
+    timeout-minutes: 75
     permissions:
       contents: write # to be able to publish a GitHub release
       issues: write # to be able to comment on released issues
