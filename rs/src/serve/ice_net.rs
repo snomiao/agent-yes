@@ -105,9 +105,42 @@ async fn ice_net() -> Result<&'static IceNet> {
                     vec![super::nat_probe::public_addr(&kind).ip().to_string()]
                 }
             };
+            let public_ips = pin_to_local(public_ips, primary_local_ipv4());
             Ok(IceNet { mux, public_ips })
         })
         .await
+}
+
+/// The address this host sends from by default (the interface of its default
+/// route). `connect` on a UDP socket only picks the route; nothing is sent.
+fn primary_local_ipv4() -> Option<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("192.0.2.1:9").ok()?;
+    Some(s.local_addr().ok()?.ip())
+}
+
+/// Pin each bare external IP to one local address (`external/local`).
+///
+/// A bare IP is applied to EVERY local interface, so a host with two (eth0
+/// plus tailscale0 in a container) gathers two identical candidates. webrtc-rs
+/// then closes the duplicate, and on a muxed port that closes the socket the
+/// whole session shares: the session is gone before the viewer's first
+/// check arrives. Pinning to the default-route address yields one candidate.
+/// Pairs the user wrote (`ext/local`) are kept as they are.
+fn pin_to_local(ips: Vec<String>, local: Option<std::net::IpAddr>) -> Vec<String> {
+    let Some(local) = local else { return ips };
+    ips.into_iter()
+        .map(|ip| {
+            let same_family = ip
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|e| e.is_ipv4() == local.is_ipv4());
+            if same_family {
+                format!("{ip}/{local}")
+            } else {
+                ip
+            }
+        })
+        .collect()
 }
 
 /// Called once at share startup so a bad value or a busy port shows up in
@@ -177,6 +210,27 @@ mod tests {
         assert_eq!(
             parse(None, Some("AUTO")).unwrap().public_ips,
             Some(PublicIps::Auto)
+        );
+    }
+
+    #[test]
+    fn bare_external_ips_are_pinned_to_the_default_route_address() {
+        let local = Some("172.18.0.2".parse().unwrap());
+        assert_eq!(
+            pin_to_local(vec!["192.0.2.10".into()], local),
+            vec!["192.0.2.10/172.18.0.2".to_string()]
+        );
+        // Explicit pairs and other families are left alone.
+        assert_eq!(
+            pin_to_local(
+                vec!["192.0.2.10/10.0.0.5".into(), "2001:db8::1".into()],
+                local
+            ),
+            vec!["192.0.2.10/10.0.0.5".to_string(), "2001:db8::1".to_string()]
+        );
+        assert_eq!(
+            pin_to_local(vec!["192.0.2.10".into()], None),
+            vec!["192.0.2.10".to_string()]
         );
     }
 
