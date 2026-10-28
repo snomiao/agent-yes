@@ -1719,9 +1719,10 @@ async function cmdServeStatus(args: string[]): Promise<number> {
   // TS host's). `.share-link` is only ever written by the TS host, so for a
   // Rust daemon it is stale or absent; keep it as the fallback for TS daemons
   // and for the uninstalled-but-left-over case shareLinkStatus flags.
-  const { daemonShareLink } = await import("./shareCmd.ts");
+  const { daemonShareLink, foregroundAyrsShareLink } = await import("./shareCmd.ts");
   const shareLink =
-    (installed ? await daemonShareLink(daemonArgs) : null) ?? (await readShareLink());
+    (installed ? await daemonShareLink(daemonArgs) : await foregroundAyrsShareLink()) ??
+    (await readShareLink());
   // Manager-reported process state — the only up/down signal for webrtc daemons.
   const running = installed ? await readDaemonRunning(mgr!) : false;
   const a = daemonArgs ?? [];

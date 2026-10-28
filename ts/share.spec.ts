@@ -99,6 +99,19 @@ describe("share room files per runtime", () => {
     expect(await loadOrCreateShareRoom("s.example", "rust")).toBe(url);
   });
 
+  it("reports the ayrs room only while a live pid holds it", async () => {
+    const { foregroundAyrsShareLink } = await import("./shareCmd.ts");
+    expect(await foregroundAyrsShareLink()).toBeNull();
+    const url = await loadOrCreateShareRoom("s.example", "rust");
+    const room = url.slice("webrtc://".length).split(":")[0];
+    const lock = path.join(home, `.share-host-${room}.pid`);
+    expect(await foregroundAyrsShareLink()).toBeNull(); // nobody hosts it
+    await writeFile(lock, String(process.pid));
+    expect(await foregroundAyrsShareLink()).toBe(shareLinkFromRoomUrl(url));
+    await writeFile(lock, "2147483646"); // a pid that is not running
+    expect(await foregroundAyrsShareLink()).toBeNull();
+  });
+
   it("reads without minting, and ignores a legacy unencrypted room", async () => {
     expect(await readShareRoom("rust")).toBeNull();
     await expect(readFile(path.join(home, ".share-room-ayrs"))).rejects.toThrow();
