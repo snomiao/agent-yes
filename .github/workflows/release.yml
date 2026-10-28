@@ -68,13 +68,22 @@ jobs:
           # stale bins when rs/Cargo.toml was just bumped.
           HUSKY: "0"
 
+      # The tag of the release semantic-release just made, or empty when it
+      # made none. Its commit (@semantic-release/git) is the local HEAD, tagged
+      # v<the version it wrote into package.json>. Anything else is not this
+      # run's release: `git describe` used to return the nearest tag, which
+      # after a no-release push (ci:, docs:, chore:) is an older tag, or the
+      # beta tag publish-beta puts on this same commit. Every step below then
+      # ran for it, and npm publish pushed package.json's version as latest:
+      # harmless while that version was already on npm, but it published
+      # 1.302.0 over 1.302.1 after 1.302.0's own release had timed out.
       - name: Get new release tag
         id: get_tag
         run: |
-          git fetch --tags
-          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          WANT="v$(node -p "require('./package.json').version")"
+          if git tag --points-at HEAD | grep -qxF "$WANT"; then TAG="$WANT"; else TAG=""; fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "New release tag: $TAG"
+          echo "New release tag: ${TAG:-none (no release this run)}"
 
       # Explicitly dispatch rust-build.yml so we can track the exact run ID.
       # (The release: published event on rust-build.yml is a backup; the dispatch here
