@@ -13,6 +13,7 @@ pub mod graph;
 pub mod heartbeat;
 pub mod host_stats;
 pub mod http;
+pub mod ice_mux;
 pub mod ice_net;
 pub mod log_gc;
 pub mod meta;

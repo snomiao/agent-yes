@@ -15,7 +15,7 @@
 //!   `auto` asks a STUN server for this host's public IP, which only helps
 //!   when that port is forwarded on the router too.
 //!
-//! A muxed socket gathers host candidates only (no server-reflexive ones);
+//! The socket is shared through ice_mux.rs. A muxed socket gathers host candidates only (no server-reflexive ones);
 //! TURN relay candidates are unaffected.
 
 use anyhow::{bail, Context, Result};
@@ -24,7 +24,6 @@ use tokio::sync::OnceCell;
 use webrtc::api::setting_engine::SettingEngine;
 use webrtc::api::{APIBuilder, API};
 use webrtc::ice::network_type::NetworkType;
-use webrtc::ice::udp_mux::{UDPMuxDefault, UDPMuxParams};
 use webrtc::ice::udp_network::UDPNetwork;
 use webrtc::ice_transport::ice_candidate_type::RTCIceCandidateType;
 
@@ -74,7 +73,7 @@ pub fn parse(udp_port: Option<&str>, public_ips: Option<&str>) -> Result<IceNetC
 
 /// The settings every share peer connection is built with, read once.
 struct IceNet {
-    mux: Option<Arc<UDPMuxDefault>>,
+    mux: Option<Arc<super::ice_mux::IceMux>>,
     public_ips: Vec<String>,
 }
 
@@ -93,7 +92,7 @@ async fn ice_net() -> Result<&'static IceNet> {
                     let sock = tokio::net::UdpSocket::bind(("0.0.0.0", port))
                         .await
                         .with_context(|| format!("bind ICE UDP port {port}"))?;
-                    Some(UDPMuxDefault::new(UDPMuxParams::new(sock)))
+                    Some(super::ice_mux::IceMux::new(sock)?)
                 }
             };
             let public_ips = match cfg.public_ips {
