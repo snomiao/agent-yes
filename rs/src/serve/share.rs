@@ -18,7 +18,6 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
-use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
@@ -1116,6 +1115,84 @@ mod dispatch_tests {
         drop(tx);
     }
 
+    /// A viewer candidate that arrives before the viewer's answer is held and
+    /// added once the answer is set, instead of failing the peer ("remote
+    /// description is not set"), which is what the CLI viewer up to 1.302.x
+    /// always sent first.
+    #[tokio::test]
+    async fn a_candidate_before_the_answer_waits_for_it() {
+        let peers = empty_peers();
+        let mailboxes: Mailboxes = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        mailboxes
+            .lock()
+            .await
+            .insert("early".to_string(), tx.clone());
+        let (sig_tx, mut sig_rx) = mpsc::unbounded_channel();
+        spawn_peer_task_with_deadline(
+            "early".to_string(),
+            rx,
+            peers.clone(),
+            mailboxes.clone(),
+            "ab".repeat(32), // a well-formed share secret (synthetic)
+            "token".to_string(),
+            sig_tx,
+            Arc::new(Scope::Full),
+            Duration::from_secs(60),
+        );
+        tx.send(PeerCmd::Start).unwrap();
+        let offer = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(SigOut::Send(text)) = sig_rx.recv().await {
+                    let m: Value = serde_json::from_str(&text).unwrap();
+                    if m["type"] == "offer" {
+                        return m["sdp"].as_str().unwrap().to_string();
+                    }
+                }
+            }
+        })
+        .await
+        .expect("no offer");
+
+        tx.send(PeerCmd::Candidate(Box::new(RTCIceCandidateInit {
+            candidate: "candidate:1 1 udp 2130706431 192.0.2.1 50000 typ host".into(),
+            sdp_mid: Some("0".into()),
+            sdp_mline_index: Some(0),
+            ..Default::default()
+        })))
+        .unwrap();
+
+        let viewer = webrtc::api::APIBuilder::new()
+            .build()
+            .new_peer_connection(RTCConfiguration::default())
+            .await
+            .unwrap();
+        viewer
+            .set_remote_description(RTCSessionDescription::offer(offer).unwrap())
+            .await
+            .unwrap();
+        let answer = viewer.create_answer(None).await.unwrap();
+        tx.send(PeerCmd::Answer(answer.sdp)).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let pc = peers.lock().await.get("early").map(|p| p.pc.clone());
+            let pc = pc.expect("the early candidate killed the peer");
+            if pc.remote_description().await.is_some() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "answer never applied");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            mailboxes.lock().await.contains_key("early"),
+            "the held candidate failed the peer once the answer was set"
+        );
+        viewer.close().await.ok();
+        close_peer(&peers, "early").await;
+    }
+
     /// The control: the deadline is a check, not a kill switch. A peer that
     /// HAS confirmed by the time it fires keeps its task and its mailbox.
     #[tokio::test]
@@ -1129,7 +1206,7 @@ mod dispatch_tests {
             .insert("live".to_string(), tx.clone());
         let (sig_tx, _sig_rx) = mpsc::unbounded_channel();
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let pc = APIBuilder::new()
+        let pc = webrtc::api::APIBuilder::new()
             .build()
             .new_peer_connection(RTCConfiguration::default())
             .await
@@ -1289,6 +1366,12 @@ fn spawn_peer_task_with_deadline(
         let deadline = tokio::time::sleep(setup_deadline);
         tokio::pin!(deadline);
         let mut deadline_armed = true;
+        // Viewer candidates that arrived before its answer. The CLI viewer
+        // (ts/webrtcRemote.ts, up to 1.302.x) sent them first: its
+        // setLocalDescription fires onicecandidate before the answer goes
+        // out. Adding one then fails with "remote description is not set",
+        // which used to kill the peer, so every CLI viewer timed out.
+        let mut early: Vec<RTCIceCandidateInit> = Vec::new();
         loop {
             let cmd = tokio::select! {
                 cmd = rx.recv() => match cmd {
@@ -1339,23 +1422,25 @@ fn spawn_peer_task_with_deadline(
                     match tokio::time::timeout(timeout, on_answer(&peer_id, sdp, &secret, &peers))
                         .await
                     {
+                        Ok(Ok(())) => {
+                            add_candidates(&peers, &peer_id, std::mem::take(&mut early), timeout)
+                                .await
+                        }
                         Ok(r) => r,
                         Err(_) => Err(anyhow!("answer timed out after {PEER_OP_TIMEOUT_MS}ms")),
                     }
                 }
                 PeerCmd::Candidate(init) => {
-                    let pc = {
-                        let map = peers.lock().await;
-                        map.get(&peer_id).map(|p| p.pc.clone())
+                    let pc = peers.lock().await.get(&peer_id).map(|p| p.pc.clone());
+                    let answered = match pc {
+                        Some(pc) => pc.remote_description().await.is_some(),
+                        None => true, // gone: add_candidates skips it
                     };
-                    match pc {
-                        Some(pc) => {
-                            match tokio::time::timeout(timeout, pc.add_ice_candidate(*init)).await {
-                                Ok(r) => r.map_err(|e| anyhow!(e)),
-                                Err(_) => Err(anyhow!("add_ice_candidate timed out")),
-                            }
-                        }
-                        None => Ok(()), // candidate for a peer that already went away
+                    if answered {
+                        add_candidates(&peers, &peer_id, vec![*init], timeout).await
+                    } else {
+                        early.push(*init);
+                        Ok(())
                     }
                 }
             };
@@ -1426,7 +1511,7 @@ async fn start_peer(
     sig_tx: &mpsc::UnboundedSender<SigOut>,
     scope: Arc<Scope>,
 ) -> Result<()> {
-    let api = APIBuilder::new().build();
+    let api = webrtc::api::APIBuilder::new().build();
     // STUN, plus Cloudflare TURN relay when configured — the same servers the
     // offer hands the viewer below, so both ends gather against one set.
     let ice_servers = ice_servers_json().await;
@@ -1639,6 +1724,25 @@ mod ice_tests {
         let v = ice_servers_json().await;
         assert_eq!(v, json!([{ "urls": STUN_URL }]));
     }
+}
+
+/// Adds viewer candidates to a peer; none for a peer that already went away.
+async fn add_candidates(
+    peers: &Peers,
+    peer_id: &str,
+    inits: Vec<RTCIceCandidateInit>,
+    timeout: Duration,
+) -> Result<()> {
+    let Some(pc) = peers.lock().await.get(peer_id).map(|p| p.pc.clone()) else {
+        return Ok(());
+    };
+    for init in inits {
+        match tokio::time::timeout(timeout, pc.add_ice_candidate(init)).await {
+            Ok(r) => r.map_err(|e| anyhow!(e))?,
+            Err(_) => bail!("add_ice_candidate timed out"),
+        }
+    }
+    Ok(())
 }
 
 async fn on_answer(peer_id: &str, sdp: String, secret: &str, peers: &Peers) -> Result<()> {
