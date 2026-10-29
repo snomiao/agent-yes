@@ -141,7 +141,8 @@ pub fn startup_warning(kind: &NatKind, ice_configured: bool) -> Option<String> {
             "this host is behind a symmetric NAT (two STUN servers saw {a} and {b}), \
              e.g. Docker Desktop's network: viewers cannot reach it directly. \
              Either publish one UDP port and set AGENT_YES_ICE_UDP_PORT + AGENT_YES_ICE_PUBLIC_IPS, \
-             or give it a TURN relay (CF_TURN_KEY_ID + CF_TURN_API_TOKEN)."
+             give it a TURN relay (CF_TURN_KEY_ID + CF_TURN_API_TOKEN), \
+             or set AGENT_YES_SIGNAL_RELAY=1 here and on the viewers to relay through signaling."
         )),
     }
 }

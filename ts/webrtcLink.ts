@@ -11,6 +11,8 @@ export interface WebrtcLink {
   room: string;
   s: string;
   host: string;
+  /** The room's join secret (`j1.<64hex>`), on a HOST link only. */
+  join?: string;
 }
 
 /** room + RAW token (marker and all), before parseSecret strips the `e1.`. */
@@ -18,6 +20,18 @@ interface RawLink {
   room: string;
   token: string;
   host: string;
+  join?: string;
+}
+
+// A HOST link is a view link that also carries the room's join secret, for the
+// machines that host in the room as its members (`ay serve --webrtc <host link>
+// --join`): `#<room>:e1.<view>:j1.<join>[@<sighost>]`, `&j=j1.<join>` in the
+// key=value form, `webrtc://<room>:e1.<view>:j1.<join>@<host>`. Viewers ignore
+// the join part; it lets a machine host in the room, so keep host links private.
+function splitJoin(raw: RawLink): RawLink {
+  const i = raw.token.indexOf(":j1.");
+  if (i < 0) return raw;
+  return { ...raw, token: raw.token.slice(0, i), join: raw.token.slice(i + 1) };
 }
 
 // The fragment of a /room/ link is a key=value set, parsed with URLSearchParams:
@@ -40,19 +54,24 @@ function parseFragment(frag: string): RawLink | null {
     const room = q.get("room");
     const token = q.get("s");
     if (!room || !token) return null;
-    return { room, token, host: q.get("sig") || DEFAULT_SIGHOST };
+    const join = q.get("j") || undefined;
+    return { room, token, host: q.get("sig") || DEFAULT_SIGHOST, ...(join ? { join } : {}) };
   }
   const at = frag.split("@");
   const seg = at[0]!;
   const i = seg.indexOf(":");
   if (i < 0) return null;
-  return { room: seg.slice(0, i), token: seg.slice(i + 1), host: at[1] || DEFAULT_SIGHOST };
+  return splitJoin({
+    room: seg.slice(0, i),
+    token: seg.slice(i + 1),
+    host: at[1] || DEFAULT_SIGHOST,
+  });
 }
 
 /** Parse a share link WITHOUT validating/stripping the secret's version marker. */
 function parseRaw(link: string): RawLink | null {
   const wr = /^webrtc:\/\/([^:]+):([^@]+)@(.+)$/.exec(link);
-  if (wr) return { room: wr[1]!, token: wr[2]!, host: wr[3]! };
+  if (wr) return splitJoin({ room: wr[1]!, token: wr[2]!, host: wr[3]! });
   if (/^https?:\/\//.test(link) && link.includes("#"))
     return parseFragment(link.split("#")[1] ?? "");
   return null;
@@ -78,9 +97,17 @@ export function parseWebrtcLink(link: string): WebrtcLink | null {
  * Returns the RAW token, so a legacy markerless room round-trips unchanged
  * instead of being handed a marker it never had.
  */
-export function toWebrtcUrl(link: string): string | null {
+export function toWebrtcUrl(link: string, opts: { join?: boolean } = {}): string | null {
   const raw = parseRaw(link);
-  return raw ? `webrtc://${raw.room}:${raw.token}@${raw.host}` : null;
+  if (!raw) return null;
+  // The join secret goes on only where a member host needs it (ayrs --join).
+  const join = opts.join && raw.join ? `:${raw.join}` : "";
+  return `webrtc://${raw.room}:${raw.token}${join}@${raw.host}`;
+}
+
+/** True when the link is a HOST link (carries the room's join secret). */
+export function hasJoinSecret(link: string): boolean {
+  return !!parseRaw(link)?.join;
 }
 
 /** True if `spec` looks like a WebRTC share link (vs. an http remote or alias). */

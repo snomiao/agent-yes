@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
 import yaml from "yaml";
-import { isWebrtcSpec, parseWebrtcLink } from "./webrtcLink.ts";
+import { hasJoinSecret, isWebrtcSpec, parseWebrtcLink, toWebrtcUrl } from "./webrtcLink.ts";
 
 function remotesPath(): string {
   const dir = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
@@ -171,8 +171,10 @@ async function resolveWebrtc(
   label: string,
 ): Promise<ResolvedRemote> {
   const { startWebrtcBridge } = await import("./webrtcRemote.ts");
-  const bridge = await startWebrtcBridge(link);
-  return { url: bridge.baseUrl, token: bridge.token, keyword, label };
+  // In a room with several hosts the keyword also picks the host
+  // (`<alias>:<host>:<agent>`, or the one host with a matching agent).
+  const bridge = await startWebrtcBridge(link, { keyword });
+  return { url: bridge.baseUrl, token: bridge.token, keyword: bridge.keyword, label };
 }
 
 // ---------------------------------------------------------------------------
@@ -414,7 +416,12 @@ export async function cmdConnect(rest: string[]): Promise<number> {
   const alias = aliasArg ?? defaultConnectAlias(link);
 
   if (!parsed) {
-    await writeRemoteAlias(alias, { url: link, token: "" });
+    // A host link carries the room's join secret, which a viewer never needs:
+    // save the view part only.
+    await writeRemoteAlias(alias, {
+      url: hasJoinSecret(link) ? (toWebrtcUrl(link) ?? link) : link,
+      token: "",
+    });
   } else {
     try {
       const r = await fetch(`${parsed.url}/api/version`, {

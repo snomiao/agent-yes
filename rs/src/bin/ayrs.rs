@@ -52,6 +52,11 @@ enum Command {
         /// explicit room; omit the value to load/mint the persisted one)
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         webrtc: Option<String>,
+        /// Host the --webrtc room as one more member next to its other hosts.
+        /// Needs the room's join secret in AY_JOIN_SECRET; AY_NAME names this
+        /// member (default: the hostname).
+        #[arg(long, requires = "webrtc")]
+        join: bool,
         /// Signaling host when minting a room
         #[arg(long, default_value = serve::share::DEFAULT_SIGHOST)]
         sighost: String,
@@ -80,6 +85,10 @@ enum ServeAction {
     Restart,
     /// Show whether the service is installed and running
     Status,
+    /// Print what another host needs to join this room as a member: the
+    /// room link and its join secret (minted on first use; the room requires
+    /// it from the next hello on)
+    JoinSecret,
 }
 
 #[tokio::main]
@@ -88,6 +97,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Serve {
             webrtc,
+            join,
             sighost,
             action,
             port,
@@ -99,6 +109,9 @@ async fn main() -> anyhow::Result<()> {
                 Some(ServeAction::Uninstall) => return serve::service::uninstall(),
                 Some(ServeAction::Restart) => return serve::service::restart(),
                 Some(ServeAction::Status) => return serve::service::status(),
+                Some(ServeAction::JoinSecret) => {
+                    return serve::share::print_join_secret(webrtc.as_deref(), &sighost)
+                }
                 None => {}
             }
             // Supervisors hand us a small open-files limit (launchd: 256) that
@@ -152,7 +165,7 @@ async fn main() -> anyhow::Result<()> {
                     } else {
                         Some(webrtc)
                     };
-                    serve::share::run_share(serve::share::ShareConfig { url, sighost }).await
+                    serve::share::run_share(serve::share::ShareConfig { url, sighost, join }).await
                 }
                 None => match http {
                     Some(h) => h.await?,

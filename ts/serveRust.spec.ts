@@ -65,13 +65,30 @@ describe("planRustServe", () => {
       kind: "ts",
       reason: "--host",
     });
-    // ayrs pins a room by webrtc:// url only; an https room link stays on TS,
-    // which knows how to normalise it.
-    expect(
-      planRustServe(["--webrtc", "https://agent-yes.com/room/#room=r1&s=e1.ab"], env),
-    ).toMatchObject({
+    // Any room link spelling reaches ayrs as webrtc://; a non-link stays on TS.
+    expect(planRustServe(["--webrtc", "https://agent-yes.com/room/#room=r1&s=e1.ab"], env)).toEqual(
+      { kind: "rust", argv: ["serve", "--webrtc", "webrtc://r1:e1.ab@s.agent-yes.com"] },
+    );
+    expect(planRustServe(["--webrtc", "nonsense"], env)).toMatchObject({
       kind: "ts",
-      reason: expect.stringContaining("webrtc:// urls only"),
+      reason: expect.stringContaining("not a room link"),
+    });
+    // Joining a room as a member is ayrs-only, and needs the room.
+    expect(planRustServe(["--webrtc", "webrtc://r1:e1.ab@s.example", "--join"], env)).toEqual({
+      kind: "rust-only",
+      argv: ["serve", "--webrtc", "webrtc://r1:e1.ab@s.example", "--join"],
+      feature: "--join",
+    });
+    expect(planRustServe(["--webrtc", "--join"], env)).toMatchObject({ kind: "ts" });
+    expect(planRustServe(["join-secret"], env)).toEqual({
+      kind: "rust-only",
+      argv: ["serve", "join-secret"],
+      feature: "join-secret",
+    });
+    expect(planRustServe(["join-secret", "--webrtc", "webrtc://r1:e1.ab@s.example"], env)).toEqual({
+      kind: "rust-only",
+      argv: ["serve", "--webrtc", "webrtc://r1:e1.ab@s.example", "join-secret"],
+      feature: "join-secret",
     });
     expect(planRustServe(["--port", "abc"], env)).toMatchObject({
       kind: "ts",

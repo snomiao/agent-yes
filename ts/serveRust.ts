@@ -10,7 +10,10 @@
  *
  * What delegates today — exactly the flags `ayrs serve` accepts:
  *   --webrtc            (bare: load/mint the persisted room)
- *   --webrtc <url>      / --webrtc=<url>   (a webrtc:// room url)
+ *   --webrtc <link>     / --webrtc=<link>  (a room link, any spelling; passed on
+ *                                          as webrtc://)
+ *   --join              (host that room as one of its members; ayrs only)
+ *   join-secret         (print the link + join secret members need; ayrs only)
  *   --port <n>          / --port=<n>       (loopback HTTP console; 0 = free port)
  *   --sighost <host>    / --sighost=<host>
  *
@@ -22,10 +25,12 @@
  *     healthcheck) and -d/--daemon: ayrs has its own OS-supervisor install and
  *     the two must not manage each other's registration
  *   - --share (http+webrtc over Portless), --http, --host, --token, --tls-*,
- *     --local, https room links (ayrs pins rooms by webrtc:// url only)
+ *     --local
  */
 
 /** Subcommands `ay serve` dispatches before flag parsing — never delegated. */
+import { toWebrtcUrl } from "./webrtcLink.ts";
+
 const SERVE_SUBCOMMANDS = new Set([
   "install",
   "uninstall",
@@ -38,7 +43,9 @@ const SERVE_SUBCOMMANDS = new Set([
 
 export type RustServePlan =
   | { kind: "rust"; argv: string[] }
-  | { kind: "ts"; reason: string; rest: string[] };
+  | { kind: "ts"; reason: string; rest: string[] }
+  /** Only ayrs can do this; there is no TypeScript fallback. */
+  | { kind: "rust-only"; argv: string[]; feature: string };
 
 /**
  * Decide whether `rest` (the argv after `serve`) can run as `ayrs serve`.
@@ -60,6 +67,15 @@ export function planRustServe(
     return { kind: "ts", reason: "bare `ay serve` (Portless HTTPS console)", rest };
   }
   const first = rest[0]!;
+  if (first === "join-secret") {
+    const flags = rest.slice(1);
+    const plan = flags.length
+      ? planRustServe(flags, env)
+      : ({ kind: "rust", argv: ["serve"] } as const);
+    if (plan.kind !== "rust" || plan.argv.some((a) => a === "--port" || a === "--join"))
+      return { kind: "ts", reason: `\`ay serve join-secret\` takes only --webrtc/--sighost`, rest };
+    return { kind: "rust-only", argv: [...plan.argv, "join-secret"], feature: first };
+  }
   if (SERVE_SUBCOMMANDS.has(first)) {
     return { kind: "ts", reason: `\`ay serve ${first}\``, rest };
   }
@@ -83,13 +99,19 @@ export function planRustServe(
     switch (name) {
       case "--webrtc": {
         const v = takeNext();
+        const url = v === undefined ? undefined : toWebrtcUrl(v, { join: true });
         if (v === undefined) {
           argv.push("--webrtc");
-        } else if (v.startsWith("webrtc://")) {
-          argv.push("--webrtc", v);
+        } else if (url) {
+          argv.push("--webrtc", url);
         } else {
-          return { kind: "ts", reason: `--webrtc ${v} (ayrs takes webrtc:// urls only)`, rest };
+          return { kind: "ts", reason: `--webrtc ${v} (not a room link)`, rest };
         }
+        break;
+      }
+      case "--join": {
+        if (inline !== undefined) return { kind: "ts", reason: a, rest };
+        argv.push("--join");
         break;
       }
       case "--port": {
@@ -110,6 +132,11 @@ export function planRustServe(
         return { kind: "ts", reason: a, rest };
     }
   }
+  if (argv.includes("--join")) {
+    if (!argv.some((x) => x.startsWith("webrtc://")))
+      return { kind: "ts", reason: "--join needs --webrtc <room link>", rest };
+    return { kind: "rust-only", argv, feature: "--join" };
+  }
   return { kind: "rust", argv };
 }
 
@@ -129,5 +156,5 @@ export function daemonShareRuntime(
   hasAyrs: () => boolean,
   env: Record<string, string | undefined> = process.env,
 ): "ts" | "rust" {
-  return planRustServe(args, env).kind === "rust" && hasAyrs() ? "rust" : "ts";
+  return planRustServe(args, env).kind !== "ts" && hasAyrs() ? "rust" : "ts";
 }

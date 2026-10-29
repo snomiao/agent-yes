@@ -53,6 +53,7 @@ humantime = "2"
 # Error handling
 anyhow = "1"
 async-trait = "0.1"
+base64 = "0.22"
 thiserror = "1"
 
 # Serialization

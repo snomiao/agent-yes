@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { DEFAULT_SIGHOST, isWebrtcSpec, parseWebrtcLink, toWebrtcUrl } from "./webrtcLink.ts";
+import {
+  DEFAULT_SIGHOST,
+  hasJoinSecret,
+  isWebrtcSpec,
+  parseWebrtcLink,
+  toWebrtcUrl,
+} from "./webrtcLink.ts";
 
 // A representative v2 share secret (e1.<64 hex>); parseSecret keeps the hex `s`.
 const SECRET = "e1.982610a3034f065bfe9700037b306a6afeb7dc48567064058e6c4bbc09e502c2";
@@ -85,5 +91,24 @@ describe("toWebrtcUrl", () => {
 
   it("returns null for a non-link", () => {
     expect(toWebrtcUrl("just-an-alias")).toBeNull();
+  });
+});
+
+describe("host links (view link + join secret)", () => {
+  const v = `e1.${"ab".repeat(32)}`;
+  const j = `j1.${"cd".repeat(32)}`;
+
+  it("keeps the join secret apart from the view secret, in every spelling", () => {
+    for (const link of [
+      `https://agent-yes.com/w/#r1:${v}:${j}`,
+      `https://agent-yes.com/room/#room=r1&s=${v}&j=${j}`,
+      `webrtc://r1:${v}:${j}@s.agent-yes.com`,
+    ]) {
+      expect(hasJoinSecret(link)).toBe(true);
+      expect(parseWebrtcLink(link)).toMatchObject({ room: "r1", s: "ab".repeat(32) });
+      expect(toWebrtcUrl(link)).toBe(`webrtc://r1:${v}@s.agent-yes.com`);
+      expect(toWebrtcUrl(link, { join: true })).toBe(`webrtc://r1:${v}:${j}@s.agent-yes.com`);
+    }
+    expect(hasJoinSecret(`https://agent-yes.com/w/#r1:${v}`)).toBe(false);
   });
 });

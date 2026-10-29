@@ -204,6 +204,9 @@ pub struct RoomUrl {
     pub room: String,
     pub token: String, // "e1.<64hex>"
     pub host: String,
+    /// The room's join secret, when the URL is a HOST link
+    /// (`webrtc://room:e1.<view>:j1.<join>@host`); see room_member.rs.
+    pub join: Option<String>,
 }
 
 pub fn format_room_url(room: &RoomUrl) -> String {
@@ -224,10 +227,15 @@ pub fn parse_share_url(s: &str) -> Result<RoomUrl> {
     if room.is_empty() || token.is_empty() || host.is_empty() {
         bail!("bad --webrtc url: {s}");
     }
+    let (token, join) = match token.split_once(":j1.") {
+        Some((t, j)) => (t, Some(format!("j1.{j}"))),
+        None => (token, None),
+    };
     Ok(RoomUrl {
         room: room.into(),
         token: token.into(),
         host: host.into(),
+        join,
     })
 }
 
@@ -236,6 +244,7 @@ pub(super) fn mint_room(host: &str) -> RoomUrl {
         room: format!("r{}", e2e::random_hex(6)),
         token: format!("{}{}", e2e::MARKER, e2e::random_hex(32)),
         host: host.to_string(),
+        join: None,
     }
 }
 
@@ -286,6 +295,34 @@ pub fn resolve_share_urls(url: Option<&str>, sighost: &str) -> Result<(String, S
     Ok((format_room_url(&room), browser_url))
 }
 
+/// `ayrs serve join-secret`: what a worker needs to join this host's room
+/// (or the `--webrtc` one) as a member. Minting the secret is what makes the
+/// room require it: the running host starts sending it at its next re-hello.
+pub fn print_join_secret(url: Option<&str>, sighost: &str) -> Result<()> {
+    let room = match url {
+        Some(u) if !u.is_empty() => parse_share_url(u)?,
+        _ => load_or_create_room(sighost),
+    };
+    let (secret, encrypted) = e2e::parse_secret(&room.token)?;
+    if !encrypted {
+        bail!("refusing to share an unencrypted room");
+    }
+    let j = super::room_member::join_secret_or_mint(&room.room)?;
+    // One value for members: the view link with the join secret appended
+    // (`…#<room>:e1.<view>:j1.<join>`). Viewers get the plain view link.
+    println!(
+        "AY_ROOM={}",
+        format_share_link(&room.room, &format!("{secret}:{j}"), &room.host)
+    );
+    eprintln!(
+        "Run each member with: AY_NAME=<name> ay serve --webrtc \"$AY_ROOM\" --join\n\
+         AY_ROOM above is the HOST link: it lets a machine host in this room, so keep it private.\n\
+         Viewers use the view link: {}",
+        format_share_link(&room.room, &secret, &room.host)
+    );
+    Ok(())
+}
+
 // ---- per-peer state ----------------------------------------------------------
 
 struct Peer {
@@ -303,6 +340,32 @@ struct Peer {
     confirmed_in: bool,
     confirmed_out: bool,
     confirmed: bool,
+    relay: RelayState,
+}
+
+/// The signaling relay (AGENT_YES_SIGNAL_RELAY=1 on both ends; off by
+/// default): when no data channel comes up, the viewer sends the same sealed
+/// frames over the signaling socket as `{type:"relay", to, data}`, and once
+/// one arrives this peer answers the same way. The signaling server only sees
+/// ciphertext, but every frame passes through it (and wakes its Durable
+/// Object), so it is the last resort for hosts no direct path reaches.
+#[derive(Default)]
+struct RelayState {
+    /// Frames go over signaling instead of the data channel.
+    on: Arc<std::sync::atomic::AtomicBool>,
+    /// Our confirm nonce went out (on data-channel open, or first relay frame).
+    nonce_sent: Arc<std::sync::atomic::AtomicBool>,
+    /// The peer's inbound frame queue, for relayed frames.
+    in_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+}
+
+pub fn signal_relay_enabled() -> bool {
+    matches!(
+        std::env::var("AGENT_YES_SIGNAL_RELAY")
+            .as_deref()
+            .map(str::trim),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
 }
 
 struct PeerCrypto {
@@ -339,6 +402,9 @@ enum SigOut {
 pub struct ShareConfig {
     pub url: Option<String>,
     pub sighost: String,
+    /// Host `url`'s room as one more member next to its other hosts, which
+    /// takes the room's join secret (see room_member.rs).
+    pub join: bool,
 }
 
 /// Path of the advisory lock recording which pid is hosting a given room.
@@ -649,6 +715,19 @@ mod claim_tests {
     }
 
     #[test]
+    fn a_host_link_carries_the_join_secret_apart_from_the_view_token() {
+        let v = format!("e1.{}", "ab".repeat(32));
+        let j = format!("j1.{}", "cd".repeat(32));
+        let r = parse_share_url(&format!("webrtc://r1:{v}:{j}@s.example")).unwrap();
+        assert_eq!(
+            (r.token.as_str(), r.join.as_deref()),
+            (v.as_str(), Some(j.as_str()))
+        );
+        let r = parse_share_url(&format!("webrtc://r1:{v}@s.example")).unwrap();
+        assert_eq!((r.token.as_str(), r.join), (v.as_str(), None));
+    }
+
+    #[test]
     fn claims_a_free_room_and_records_our_pid() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("lock.pid");
@@ -768,6 +847,9 @@ mod claim_tests {
 
 pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     let explicit = cfg.url.is_some();
+    if cfg.join && !explicit {
+        bail!("--join needs the room's link (--webrtc <link> --join)");
+    }
     let mut room = match &cfg.url {
         Some(u) => parse_share_url(u)?,
         None => load_or_create_room(&cfg.sighost),
@@ -795,6 +877,18 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     let link = format_share_link(&room.room, &secret, &room.host);
     eprintln!("[ayrs share] room {} via {}", room.room, room.host);
     println!("{link}");
+    // Fails here, before any signaling, when --join has no join secret.
+    let me = super::room_member::for_room(&room.room, &room.host, cfg.join, room.join.as_deref())?;
+    eprintln!(
+        "[ayrs share] hosting as member h-{} ({}){}",
+        me.host_id,
+        me.name,
+        if me.host_token.is_some() {
+            ", with a join secret"
+        } else {
+            ""
+        }
+    );
     if let Some(line) = super::ice_net::init().await? {
         eprintln!("[ayrs share] {line}");
     }
@@ -818,10 +912,15 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     let (_cancel_tx, cancel_rx) = watch::channel(false);
     let scope = Arc::new(Scope::Full);
     loop {
+        // Re-read every time: `ayrs serve join-secret` may have just minted
+        // the secret, and a rotated room has none.
+        let member =
+            super::room_member::for_room(&room.room, &room.host, cfg.join, room.join.as_deref())?;
         match connect_once(
             &room,
             &secret,
             &api_token,
+            Some(&member),
             peers.clone(),
             mailboxes.clone(),
             scope.clone(),
@@ -834,6 +933,13 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
                 continue;
             }
             Ok(SessionEnd::Rejected) => {
+                if cfg.join {
+                    bail!(
+                        "room {} rejected this host (1008): the join secret does not match the room's, \
+                         or the view link is wrong",
+                        room.room
+                    );
+                }
                 if explicit || rotates >= MAX_ROTATES {
                     bail!("room rejected by signaling server (1008) — delete ~/.agent-yes/.share-room-ayrs to rotate");
                 }
@@ -885,6 +991,7 @@ pub async fn run_scoped_session(
         room,
         token: String::new(), // auth derives from the secret; token is unused here
         host: sighost,
+        join: None,
     };
     let peers: Peers = Arc::new(Mutex::new(HashMap::new()));
     let mailboxes: Mailboxes = Arc::new(Mutex::new(HashMap::new()));
@@ -896,6 +1003,7 @@ pub async fn run_scoped_session(
             &room,
             &secret,
             "",
+            None,
             peers.clone(),
             mailboxes.clone(),
             scope.clone(),
@@ -945,6 +1053,7 @@ async fn connect_once(
     room: &RoomUrl,
     secret: &str,
     api_token: &str,
+    member: Option<&super::room_member::Member>,
     peers: Peers,
     mailboxes: Mailboxes,
     scope: Arc<Scope>,
@@ -967,12 +1076,18 @@ async fn connect_once(
     let (mut sink, mut stream) = ws.split();
 
     let auth_token = e2e::derive_auth_token(secret, &room.room, &room.host)?;
-    sink.send(Message::Text(
-        json!({"type": "hello", "role": "host", "v": 2, "token": auth_token})
-            .to_string()
-            .into(),
-    ))
-    .await?;
+    let mut hello = json!({"type": "hello", "role": "host", "v": 2, "token": auth_token});
+    if let Some(m) = member {
+        // One member of a room that may have several hosts. A signaling
+        // server without multi-host rooms ignores these fields.
+        hello["multi"] = json!(true);
+        hello["hostId"] = json!(m.host_id);
+        hello["name"] = json!(m.name);
+        if let Some(t) = &m.host_token {
+            hello["hostToken"] = json!(t);
+        }
+    }
+    sink.send(Message::Text(hello.to_string().into())).await?;
 
     // signaling writer fan-in: peer tasks (ICE candidates, offers) → socket
     let (sig_tx, mut sig_rx) = mpsc::unbounded_channel::<SigOut>();
@@ -1016,8 +1131,13 @@ async fn connect_once(
                 last_recv = std::time::Instant::now();
                 match msg {
                     Message::Close(frame) => {
-                        if frame.map(|f| u16::from(f.code) == 1008).unwrap_or(false) {
+                        let code = frame.as_ref().map(|f| u16::from(f.code));
+                        if code == Some(1008) {
                             return Ok(SessionEnd::Rejected);
+                        }
+                        if code == Some(4000) {
+                            // Another process said hello with our host id.
+                            eprintln!("[ayrs share] signaling: replaced by a newer connection of this host id");
                         }
                         return Ok(SessionEnd::Dropped);
                     }
@@ -1121,7 +1241,43 @@ async fn dispatch_signal(
                 request_close(mailboxes, &peer).await;
             }
         }
+        Some("relay") if signal_relay_enabled() => {
+            let Some(from) = m.get("from").map(value_to_id) else {
+                return;
+            };
+            use base64::Engine;
+            let Some(frame) = m
+                .get("data")
+                .and_then(|d| d.as_str())
+                .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
+            else {
+                return;
+            };
+            on_relay_frame(peers, &from, frame).await;
+        }
         _ => {}
+    }
+}
+
+/// A sealed frame the viewer relayed over signaling: switch the peer to the
+/// relay (replies go the same way) and feed it to the peer's receiver.
+async fn on_relay_frame(peers: &Peers, peer_id: &str, frame: Vec<u8>) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut map = peers.lock().await;
+    let Some(p) = map.get_mut(peer_id) else {
+        return;
+    };
+    if !p.relay.on.swap(true, SeqCst) {
+        eprintln!("[ayrs share] peer {peer_id}: no direct path, using the signaling relay");
+    }
+    if !p.relay.nonce_sent.swap(true, SeqCst) {
+        let nonce = p.my_nonce.clone();
+        let _ = p
+            .out_tx
+            .send((e2e::FLAG_CONFIRM, json!({"t":"confirm","nonce":nonce})));
+    }
+    if let Some(tx) = &p.relay.in_tx {
+        let _ = tx.send(frame);
     }
 }
 
@@ -1423,6 +1579,7 @@ mod dispatch_tests {
                 confirmed_in: true,
                 confirmed_out: true,
                 confirmed: true,
+                relay: RelayState::default(),
             },
         );
         spawn_peer_task_with_deadline(
@@ -1722,6 +1879,14 @@ async fn start_peer(
 
     // sealed-frame sender task input: (flags, envelope) → seal in order → dc.send
     let (out_tx, out_rx) = mpsc::unbounded_channel::<(u8, Value)>();
+    // inbound frames (data channel, or the signaling relay) → per-peer handler
+    let (in_tx, in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let relay = RelayState {
+        in_tx: Some(in_tx.clone()),
+        ..Default::default()
+    };
+    let relay_on = relay.on.clone();
+    let nonce_sent = relay.nonce_sent.clone();
 
     // Register the connection BEFORE any further webrtc-rs await. The caller
     // bounds this whole function with PEER_OP_TIMEOUT and tears the peer down
@@ -1744,6 +1909,7 @@ async fn start_peer(
             confirmed_in: false,
             confirmed_out: false,
             confirmed: false,
+            relay,
         },
     );
 
@@ -1777,10 +1943,16 @@ async fn start_peer(
     {
         let mailboxes2 = mailboxes.clone();
         let peer_id = peer_id.clone();
+        let relay_on = relay_on.clone();
         pc.on_peer_connection_state_change(Box::new(move |st| {
             let mailboxes2 = mailboxes2.clone();
             let peer_id = peer_id.clone();
+            let relayed = relay_on.load(std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move {
+                // A relayed peer never had (or no longer needs) the ICE path.
+                if relayed {
+                    return;
+                }
                 if matches!(
                     st,
                     RTCPeerConnectionState::Failed
@@ -1802,10 +1974,10 @@ async fn start_peer(
         peers.clone(),
         mailboxes.clone(),
         peer_id.clone(),
+        relay_on.clone(),
+        sig_tx.clone(),
     );
 
-    // inbound frames → per-peer handler (serialized by the channel)
-    let (in_tx, in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     {
         let in_tx = in_tx.clone();
         dc.on_message(Box::new(move |msg: DataChannelMessage| {
@@ -1837,11 +2009,17 @@ async fn start_peer(
         let peers2 = peers.clone();
         let mailboxes2 = mailboxes.clone();
         let peer_id2 = peer_id.clone();
+        let nonce_sent = nonce_sent.clone();
         dc.on_open(Box::new(move || {
             let peers2 = peers2.clone();
             let mailboxes2 = mailboxes2.clone();
             let peer_id2 = peer_id2.clone();
+            let first = !nonce_sent.swap(true, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move {
+                // Already confirming over the signaling relay.
+                if !first {
+                    return;
+                }
                 {
                     let mut map = peers2.lock().await;
                     if let Some(p) = map.get_mut(&peer_id2) {
@@ -1878,9 +2056,11 @@ async fn start_peer(
         None => return Ok(()),
     }
 
-    let _ = sig_tx.send(SigOut::Send(
-        json!({"type":"offer","to":peer_id,"sdp":offer_sdp,"iceServers":ice_servers}).to_string(),
-    ));
+    let mut offer = json!({"type":"offer","to":peer_id,"sdp":offer_sdp,"iceServers":ice_servers});
+    if signal_relay_enabled() {
+        offer["relay"] = json!(true);
+    }
+    let _ = sig_tx.send(SigOut::Send(offer.to_string()));
     Ok(())
 }
 
@@ -1972,6 +2152,8 @@ fn spawn_sender(
     peers: Peers,
     mailboxes: Mailboxes,
     peer_id: String,
+    relay_on: Arc<std::sync::atomic::AtomicBool>,
+    sig_tx: mpsc::UnboundedSender<SigOut>,
 ) {
     tokio::spawn(async move {
         let mut send = e2e::SendState { send_ctr: 0 };
@@ -1992,7 +2174,13 @@ fn spawn_sender(
                     return;
                 }
             };
-            if dc.send(&frame.into()).await.is_err() {
+            if relay_on.load(std::sync::atomic::Ordering::SeqCst) {
+                use base64::Engine;
+                let data = base64::engine::general_purpose::STANDARD.encode(&frame);
+                let _ = sig_tx.send(SigOut::Send(
+                    json!({"type":"relay","to":peer_id,"data":data}).to_string(),
+                ));
+            } else if dc.send(&frame.into()).await.is_err() {
                 // peer vanished mid-send; dropping the frame is correct
             }
         }

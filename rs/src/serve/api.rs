@@ -1264,6 +1264,15 @@ fn hostname() -> String {
 }
 
 fn whoami_host() -> String {
+    // A room member's chosen name (AY_NAME, see serve/room_member.rs) is how
+    // viewers tell the room's hosts apart; containers' hostnames are random.
+    if let Some(n) = std::env::var("AY_NAME")
+        .ok()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+    {
+        return n;
+    }
     let user = std::env::var("USER")
         .or_else(|_| std::env::var("USERNAME"))
         .ok();

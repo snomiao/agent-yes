@@ -8223,7 +8223,8 @@ my.translate = async (text, lang) => {
           } catch {}
           return;
         }
-        removeSource(name); // an ay-share room IS its single machine
+        // An ay-share room: its own source plus one per further member.
+        for (const s of roomSources(name)) removeSource(s.id);
       }
 
       // Exponential-backoff reconnect for an agent-yes share room (the RTCClient
@@ -8257,7 +8258,10 @@ my.translate = async (text, lang) => {
           try {
             s.client?.close?.(); // drop the stale peer AND its signaling socket
           } catch {}
-          const c = new RTCClient(s.host, s.id, s.token);
+          // One client per room member: a member source names its member; the
+          // room's own source sticks to the member it first got (see syncRtcMembers).
+          const c = new RTCClient(s.host, s.room || s.id, s.token, { member: s.member });
+          if (!s.parent) c.onroster = () => syncRtcMembers(s);
           c.onstate = (st) => {
             if (st === "failed" || st === "closed") {
               s.live = false;
@@ -8269,6 +8273,12 @@ my.translate = async (text, lang) => {
             await c.connect();
           } catch (e) {
             c.close(); // connect() already opened the signaling socket — don't
+            // A member that left: its own source goes away; the room's source
+            // takes whichever member the room lists first next time.
+            if (String(e?.message) === "that host left the room") {
+              if (s.parent) removeSource(s.id);
+              else s.member = null;
+            }
             throw e; //  leak it on every failed retry of an offline room
           }
           if (s.removed) {
@@ -8277,6 +8287,10 @@ my.translate = async (text, lang) => {
           }
           s.client = c;
           s.tx = rtcTx(c);
+          if (!s.parent) {
+            s.member = c.member;
+            syncRtcMembers(s);
+          }
           // Negotiate the stdin fast path explicitly. A new page can connect to
           // an older host during a rolling upgrade; sending an unknown envelope
           // there would look successful while silently dropping every key. Keep
@@ -8361,6 +8375,59 @@ my.translate = async (text, lang) => {
             scheduleRtcReconnect(s); // keep trying
           }
         }, delay);
+      }
+
+      // A share room with several hosts (`ay serve --webrtc <link> --join`):
+      // the room's own source talks to one member, and every other member the
+      // room lists gets a source of its own, "<room>/<member>", so its agents
+      // show under the room like a codehost room's machines do.
+      function syncRtcMembers(s) {
+        const roster = s.client?.roster;
+        if (!roster || s.removed) return;
+        const want = new Set(roster.map((h) => h.peer).filter((p) => p !== s.client.member));
+        let changed = false;
+        for (const peer of want) {
+          const id = s.id + "/" + peer;
+          if (sources.has(id)) continue;
+          const m = {
+            id,
+            room: s.id,
+            parent: s.id,
+            member: peer,
+            host: s.host,
+            token: s.token,
+            kind: "rtc",
+            tx: null,
+            client: null,
+            live: false,
+            tried: false,
+            devices: new Set(),
+            serverCount: 0,
+          };
+          sources.set(id, m);
+          changed = true;
+          connectRtcSource(m)
+            .then(() => {
+              m.live = true;
+              subscribeSource(m);
+            })
+            .catch(() => {
+              m.live = false;
+              m.failCount = (m.failCount || 0) + 1;
+              scheduleRtcReconnect(m);
+            })
+            .finally(() => {
+              m.tried = true;
+              renderRoomsIfOpen();
+              loadList();
+            });
+        }
+        for (const x of [...sources.values()])
+          if (x.parent === s.id && !want.has(x.member)) {
+            removeSource(x.id);
+            changed = true;
+          }
+        if (changed) renderRoomsIfOpen();
       }
 
       // Add a room to the fleet and connect it — WITHOUT dropping the others, so
@@ -8472,7 +8539,8 @@ my.translate = async (text, lang) => {
           return token ? { room: chName(token), token, host: CH_HOST } : null;
         }
         const m = /^([A-Za-z0-9_-]+):([^@\s]+)(?:@(.+))?$/.exec(s);
-        return m ? { room: m[1], token: m[2], host: m[3] } : null;
+        // A host link's join secret (":j1.…") is for member hosts only.
+        return m ? { room: m[1], token: m[2].replace(/:j1\..*$/, ""), host: m[3] } : null;
       }
 
       // Re-render the rooms panel only if it's currently open (so live-count

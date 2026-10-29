@@ -6,6 +6,10 @@ import {
   reduceSignal,
   socketError,
   timeoutError,
+  memberOf,
+  mergeMemberLs,
+  otherMembers,
+  splitMemberKeyword,
   type SignalState,
 } from "./webrtcSignal.ts";
 
@@ -116,5 +120,41 @@ describe("describeConnectFailure", () => {
     expect(
       await describeConnectFailure(new ConnectError("ice-timeout", "c"), host, sandbox),
     ).toContain("not a sandbox");
+  });
+});
+
+describe("rooms with several hosts", () => {
+  const a = { peer: "h-aaaa", name: "alpha" };
+  const b = { peer: "h-bbbb", name: "beta" };
+
+  it("names the sender of a host frame, defaulting to the one host of an older server", () => {
+    expect(memberOf({ type: "offer", from: "h-aaaa" })).toBe("h-aaaa");
+    expect(memberOf({ type: "offer" })).toBe("host");
+  });
+
+  it("reads a leading member name off a keyword", () => {
+    expect(splitMemberKeyword("beta:1111", [a, b])).toEqual({ member: b, keyword: "1111" });
+    expect(splitMemberKeyword("h-aaaa:repo", [a, b])).toEqual({ member: a, keyword: "repo" });
+    expect(splitMemberKeyword("alpha", [a, b])).toEqual({ member: a, keyword: undefined });
+    expect(splitMemberKeyword("gamma:1111", [a, b])).toBeNull();
+    expect(splitMemberKeyword("1111", [a, b])).toBeNull();
+  });
+
+  it("leaves out this machine's own member unless it is the only one", () => {
+    expect(otherMembers([a, b], "alpha")).toEqual([b]);
+    expect(otherMembers([a], "alpha")).toEqual([a]);
+  });
+
+  it("tags every merged row with its member", () => {
+    expect(
+      mergeMemberLs([
+        { member: a, rows: [{ pid: 1111 }] },
+        { member: b, rows: [{ pid: 2222 }] },
+        { member: { peer: "h-cccc", name: "" }, rows: "not a list" },
+      ]),
+    ).toEqual([
+      { pid: 1111, member: "alpha" },
+      { pid: 2222, member: "beta" },
+    ]);
   });
 });

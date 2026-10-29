@@ -10,6 +10,10 @@ use sha2::{Digest, Sha256};
 pub const PROTO: &str = "ay-e2e-1";
 pub const MARKER: &str = "e1.";
 const INFO_AUTH: &str = "ay/ay-e2e-1/auth";
+const INFO_HOST: &str = "ay/ay-e2e-1/host";
+/// Marker of a room's join secret J (`j1.<64hex>`): what a host needs, on top
+/// of the view link, to join a room as one of its members.
+pub const JOIN_MARKER: &str = "j1.";
 const INFO_H2C: &str = "ay/ay-e2e-1/key/host->client";
 const INFO_C2H: &str = "ay/ay-e2e-1/key/client->host";
 pub const MAX_CHUNK: usize = 12_000; // plaintext bytes per sealed frame
@@ -58,6 +62,22 @@ fn sha256(bytes: &[u8]) -> [u8; 32] {
 pub fn derive_auth_token(s: &str, room: &str, sighost: &str) -> Result<String> {
     let salt = sha256(format!("{room}\n{sighost}").as_bytes());
     Ok(hex::encode(hkdf32(&ikm_from_s(s)?, &salt, INFO_AUTH)))
+}
+
+/// What a member host shows the signaling server so it may host in the room.
+/// Derived from the join secret J alone: the view secret S, which every viewer
+/// holds, cannot produce it.
+pub fn derive_host_token(join: &str, room: &str, sighost: &str) -> Result<String> {
+    let hex64 = join
+        .strip_prefix(JOIN_MARKER)
+        .filter(|h| is_hex64(h))
+        .ok_or_else(|| anyhow!("invalid join secret (want j1.<64 hex>)"))?;
+    let salt = sha256(format!("{room}\n{sighost}").as_bytes());
+    Ok(hex::encode(hkdf32(&hex::decode(hex64)?, &salt, INFO_HOST)))
+}
+
+pub fn mint_join_secret() -> String {
+    format!("{JOIN_MARKER}{}", random_hex(32))
 }
 
 pub struct DirKeys {
@@ -256,6 +276,18 @@ pub fn random_hex(n_bytes: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_host_token_needs_the_join_secret() {
+        let j = format!("{JOIN_MARKER}{S}");
+        let t = derive_host_token(&j, "r1", "s.example").unwrap();
+        assert_eq!(t.len(), 64);
+        assert_ne!(t, derive_auth_token(S, "r1", "s.example").unwrap());
+        assert_ne!(t, derive_host_token(&j, "r2", "s.example").unwrap());
+        assert!(derive_host_token(S, "r1", "s.example").is_err());
+        assert!(derive_host_token("j1.abc", "r1", "s.example").is_err());
+        assert!(mint_join_secret().starts_with(JOIN_MARKER));
+    }
 
     const S: &str = "8b7df143d91c716ecfa5fc1730022f6b421b05cedee8fd52b1fc65a96030ad52";
 
