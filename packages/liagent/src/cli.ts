@@ -46,10 +46,11 @@
  * in ~/.config/liagent/grants.json (mode 600; $LIAGENT_GRANTS overrides), one
  * per hub and scope. "End" in the box revokes a grant; the CLI then forgets it.
  */
-import { appendFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
 import { dirname, join } from "node:path";
 import { deliveryText } from "./deliver.ts";
+import { type Scope, grantStore, spillTo } from "./grants.ts";
 import { PENDING_MS, type ChatMessage } from "./protocol.ts";
 
 type Msg = Record<string, unknown> & { type?: string };
@@ -91,37 +92,10 @@ function takeHub(): string {
 
 // ---- grants -----------------------------------------------------------------
 
-type Scope = "chat" | "eval";
-type Grants = Record<string, { token: string; until: string }>;
-/** One grant per hub and scope: chat keys are the hub URL alone (as before), eval ones "<hub> eval". */
-const grantKey = (hub: string, scope: Scope) => (scope === "chat" ? hub : `${hub} eval`);
-const readGrants = (): Grants => {
-  try {
-    return JSON.parse(readFileSync(GRANTS, "utf8")) as Grants;
-  } catch {
-    return {};
-  }
-};
-const loadToken = (hub: string, scope: Scope) => readGrants()[grantKey(hub, scope)]?.token;
-const saveToken = (hub: string, scope: Scope, token: string, until: number) => {
-  mkdirSync(dirname(GRANTS), { recursive: true });
-  writeFileSync(
-    GRANTS,
-    JSON.stringify(
-      { ...readGrants(), [grantKey(hub, scope)]: { token, until: new Date(until).toISOString() } },
-      null,
-      2,
-    ),
-  );
-  chmodSync(GRANTS, 0o600);
-};
-const forgetToken = (hub: string, scope: Scope) => {
-  const g = readGrants();
-  const k = grantKey(hub, scope);
-  if (!(k in g)) return;
-  delete g[k];
-  writeFileSync(GRANTS, JSON.stringify(g, null, 2));
-};
+const grants = grantStore(GRANTS);
+const loadToken = grants.load;
+const saveToken = grants.save;
+const forgetToken = grants.forget;
 
 // ---- sockets ----------------------------------------------------------------
 
@@ -311,12 +285,7 @@ function agentStatus(to: string): string | undefined {
 
 const INBOX = join(dirname(GRANTS), "inbox");
 
-const spillToInbox = (id: string, text: string) => {
-  mkdirSync(INBOX, { recursive: true });
-  const path = join(INBOX, `${id.replace(/[^A-Za-z0-9_-]/g, "_")}.txt`);
-  writeFileSync(path, text);
-  return path;
-};
+const spillToInbox = (id: string, text: string) => spillTo(INBOX, id, text);
 
 /**
  * Deliver one message into an agent-yes agent. --force: the owner named the
