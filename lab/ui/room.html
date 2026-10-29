@@ -126,7 +126,8 @@
         <h1>No room in this link</h1>
         <p>
           A room link looks like
-          <span class="room">https://agent-yes.com/room/#room=&lt;id&gt;&amp;s=e1.&lt;secret&gt;</span
+          <span class="room"
+            >https://agent-yes.com/room/#room=&lt;id&gt;&amp;s=e1.&lt;secret&gt;</span
           >. Mint one with <span class="room">ay serve --webrtc</span> on the machine you want to
           reach.
         </p>
@@ -154,8 +155,7 @@
         <div class="warn">
           <strong>One machine per link.</strong> A room has a single host: point two servers at the
           same link and they compete to answer, rather than sharing the room. Mint a separate link
-          per machine.
-          <br /><br />
+          per machine. <br /><br />
           This link is a credential — anyone holding it can reach the agents on that machine.
         </div>
 
@@ -207,7 +207,12 @@
         // The console shows the room's agents; it reads the older positional
         // fragment (#<room>:<token>[@<sighost>]) that /w/ has always used.
         document.getElementById("console").href =
-          origin + "/w/#" + encodeURIComponent(room) + ":" + encodeURIComponent(s) + (sig ? "@" + sig : "");
+          origin +
+          "/w/#" +
+          encodeURIComponent(room) +
+          ":" +
+          encodeURIComponent(s) +
+          (sig ? "@" + sig : "");
 
         function wire(btnId, srcId) {
           var btn = document.getElementById(btnId);

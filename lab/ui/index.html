@@ -5973,7 +5973,7 @@ my.translate = async (text, lang) => {
       function pruneStale(list) {
         if (showStale) return list;
         const keep = new Set(list.filter((e) => !isStaleStopped(e) || e._key === sel));
-        for (let grew = true; grew; ) {
+        for (let grew = true; grew;) {
           grew = false;
           const wanted = new Set();
           for (const e of keep)

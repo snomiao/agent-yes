@@ -1,7 +1,7 @@
 import { exec } from "child_process";
 import { fromStdio } from "from-node-stream";
 import sflow from "sflow";
-import { describe, it } from "vitest";
+import { describe, expect, it } from "vitest";
 import { sleepms } from "./utils";
 
 describe("CLI idle tests", () => {

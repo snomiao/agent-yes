@@ -166,7 +166,7 @@ The affordances that only make sense when the operator is a machine:
   renderer hides entire conversations. Marking them means a reader is never misled into thinking it
   has read everything.
 - **stdout is data, stderr is commentary** in the streaming path, so `slack tail "#general" | grep
-deploy` sees messages and not chrome.
+  deploy` sees messages and not chrome.
 - **Output is valid input** — a printed permalink or ISO stamp can be pasted straight back as a
   target, with strict parsers that throw rather than guess.
 - **`SKILL.md` ships in the npm tarball** with agent-skill frontmatter, so it triggers on how a user

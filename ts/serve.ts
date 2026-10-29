@@ -13,7 +13,7 @@ import {
 import { existsSync, realpathSync, renameSync, watch, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { createHash, randomBytes, timingSafeEqual } from "crypto";
+import { randomBytes, timingSafeEqual } from "crypto";
 import {
   arch,
   cpus,
@@ -2160,7 +2160,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         // eslint-disable-next-line no-control-regex
         const oscTitleRe = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
         let title: string | null = null;
-        for (let m; (m = oscTitleRe.exec(text)); ) if (m[1]!.trim()) title = m[1]!.trim();
+        for (let m; (m = oscTitleRe.exec(text));) if (m[1]!.trim()) title = m[1]!.trim();
         // Defense-in-depth: this title is remote-controlled text (an agent sets its
         // own terminal title) that the web console renders. The console escapes it,
         // but strip C0/C1 control bytes and cap the length at the SOURCE too, so a

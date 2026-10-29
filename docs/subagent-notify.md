@@ -94,7 +94,7 @@ parent addresses its own inbox with no argument.
 
 - **Singleton lock with liveness-based steal; ownership proven only by mkdir.**
   The daemon holds an mkdir lock whose `owner.json` records `{pid, started_at,
-ts}`. A stale lock (owner pid dead / torn) is **stolen** — but the steal only
+  ts}`. A stale lock (owner pid dead / torn) is **stolen** — but the steal only
   removes the dir; ownership is then re-proven by the next `mkdir(recursive:false)`
   (the atomic, exclusive create), so two would-be stealers can never both enter.
   A lock held by a **live** owner is respected. The parent `notify/` dir is
@@ -282,7 +282,7 @@ What remains:
   inbox is GC'd automatically once that parent is dead and unreferenced.
 
 - **Postmortem reads are read-only and single-incarnation.** `ay notify read
---postmortem` inspects a finished parent's inbox without registering a watcher
+  --postmortem` inspects a finished parent's inbox without registering a watcher
   or starting the daemon, filtering to one incarnation taken from the inbox's own
   `parent_started_at` stamps. If the pid was reused across sessions the inbox
   holds more than one agent's edges and the command refuses, listing the

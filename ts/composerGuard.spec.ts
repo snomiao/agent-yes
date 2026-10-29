@@ -295,19 +295,27 @@ describe("composerBoxed", () => {
     expect(composerBoxed(["● done", "❯ please summarise", "  answer"])).toBe(false);
   });
   it("rejects a stale box that history has been drawn under", () => {
-    expect(composerBoxed([RULE, "❯ old draft", RULE, "● done", "❯ please summarise", "  answer"])).toBe(false);
+    expect(
+      composerBoxed([RULE, "❯ old draft", RULE, "● done", "❯ please summarise", "  answer"]),
+    ).toBe(false);
     expect(composerBoxed([RULE, "❯ ", RULE, "  a", "  b", "  c", "  d", "  e"])).toBe(false);
     // Left open by a partial redraw, with history drawn under it.
     expect(composerBoxed([RULE, "❯ ", "● done", "❯ please summarise", "  answer"])).toBe(false);
-    expect(composerBoxed([RULE, "❯ ", "  a", "  b", "  c", "  d", "  e", "  f", "  g", "  h", "  i"])).toBe(false);
+    expect(
+      composerBoxed([RULE, "❯ ", "  a", "  b", "  c", "  d", "  e", "  f", "  g", "  h", "  i"]),
+    ).toBe(false);
     // Transcript drawn under a stale prompt, with chrome further down.
-    expect(composerBoxed([RULE, "❯ ", "● done", "❯ please summarise", "  answer", RULE])).toBe(false);
+    expect(composerBoxed([RULE, "❯ ", "● done", "❯ please summarise", "  answer", RULE])).toBe(
+      false,
+    );
     expect(
       composerBoxed([RULE, "❯ ", ...Array.from({ length: 9 }, (_, i) => `  row ${i}`), FOOTER]),
     ).toBe(false);
   });
 
   it("accepts a short multi-line draft inside the box", () => {
-    expect(composerBoxed([RULE, "❯ first line", "  second line", "  third", RULE, FOOTER])).toBe(true);
+    expect(composerBoxed([RULE, "❯ first line", "  second line", "  third", RULE, FOOTER])).toBe(
+      true,
+    );
   });
 });

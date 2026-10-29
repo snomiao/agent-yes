@@ -2070,7 +2070,8 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
           const errs: string[] = [];
           const origErr = process.stderr.write.bind(process.stderr);
           process.stderr.write = ((c: string | Uint8Array) => (
-            errs.push(String(c)), true
+            errs.push(String(c)),
+            true
           )) as typeof process.stderr.write;
           let res: { code: number | null; stdout: string };
           try {

@@ -55,14 +55,14 @@ clis:
       # then confirms it once the screen has moved. Single-line on purpose —
       # the TS runtime matches typingRespond per rendered line.
       "\u001b[B":
-        - pattern: '❯ ?No, exit'
+        - pattern: "❯ ?No, exit"
           flags: m
     enter:
       # Trust dialog, legacy numbered layout (cursor already on Yes).
       - pattern: ' > 1\. Yes, I trust this folder'
         flags: m
       # Trust dialog, current layout — after the Down above moved the cursor.
-      - pattern: '❯ ?Yes, I trust this folder'
+      - pattern: "❯ ?Yes, I trust this folder"
         flags: m
       - pattern: '❯ ?1\. ?Dark mode ?✔'
         flags: m
@@ -223,14 +223,14 @@ clis:
       # then confirms it once the screen has moved. Single-line on purpose —
       # the TS runtime matches typingRespond per rendered line.
       "\u001b[B":
-        - pattern: '❯ ?No, exit'
+        - pattern: "❯ ?No, exit"
           flags: m
     enter:
       # Trust dialog, legacy numbered layout (cursor already on Yes).
       - pattern: ' > 1\. Yes, I trust this folder'
         flags: m
       # Trust dialog, current layout — after the Down above moved the cursor.
-      - pattern: '❯ ?Yes, I trust this folder'
+      - pattern: "❯ ?Yes, I trust this folder"
         flags: m
       - pattern: '❯ ?1\. ?Dark mode ?✔'
         flags: m
@@ -367,7 +367,7 @@ clis:
         flags: m
     enter:
       # First-launch trust dialog; cursor starts on "Yes, I trust this folder".
-      - pattern: '^ {0,4}> ?Yes, I trust this folder'
+      - pattern: "^ {0,4}> ?Yes, I trust this folder"
         flags: m
       # Tool permission menu ("1. Yes, run command" / "1. Yes, ..."); the
       # cursor starts on option 1.
