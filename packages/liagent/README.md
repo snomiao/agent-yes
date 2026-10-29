@@ -5,17 +5,25 @@ custom element), the hub it talks to, and the agent's CLI.
 
 The CLI and the dev server need [Bun](https://bun.sh).
 
-Status: early. It lives in the [agent-yes](https://github.com/snomiao/agent-yes)
-repository under `packages/liagent` and is published to npm as
-`@agent-yes/liagent`.
+Status: early. It ships inside the [agent-yes](https://github.com/snomiao/agent-yes)
+npm package, released with it; this directory (`packages/liagent`) is its
+source and is not published on its own.
 
 ```bash
-bun add @agent-yes/liagent        # the box, the hub, the protocol; and the `liagent` CLI
+bun add agent-yes
 ```
 
-The browser entry is also available as `agent-yes/liagent` for projects that
-already depend on `agent-yes`. Prefer `@agent-yes/liagent` otherwise: it has
-no dependencies, while `agent-yes` brings its CLI's native ones.
+| Import                                          | What                                                     |
+| ----------------------------------------------- | -------------------------------------------------------- |
+| `agent-yes/liagent`                             | the box, `connectHub`, and the protocol (browser)        |
+| `agent-yes/liagent/box`, `/client`, `/protocol` | each part on its own                                     |
+| `agent-yes/liagent/hub`                         | the hub (a Cloudflare Durable Object) and `routeChat`    |
+| `agent-yes/liagent/liagent.js`                  | the standalone browser bundle, for `import()` from a URL |
+| `liagent` (bin)                                 | the agent's CLI                                          |
+
+These entries import nothing from the rest of agent-yes, so a bundler that
+imports `agent-yes/liagent` never reaches the agent-yes CLI or its native
+dependencies.
 
 ## The box
 
@@ -52,7 +60,7 @@ A Cloudflare Durable Object your site hosts in its own Worker, because only
 your site can say who a page belongs to:
 
 ```ts
-import { chatHub, routeChat } from "@agent-yes/liagent/hub";
+import { chatHub, routeChat } from "agent-yes/liagent/hub";
 export const ChatHub = chatHub({ eval: false }); // bind it as CHAT in wrangler config
 
 export default {

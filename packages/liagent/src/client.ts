@@ -2,8 +2,8 @@
 // hub speaking src/protocol.ts). Framework-free; the box can be used without
 // it, with any transport, through box.onSend / box.push.
 //
-//   import { defineChatBox } from "@agent-yes/liagent/box";
-//   import { connectHub } from "@agent-yes/liagent/client";
+//   import { defineChatBox } from "agent-yes/liagent/box";
+//   import { connectHub } from "agent-yes/liagent/client";
 //   defineChatBox();
 //   const box = document.body.appendChild(document.createElement("liagent-chat"));
 //   const hub = connectHub(box, { url: "wss://example.com/api/chat" });

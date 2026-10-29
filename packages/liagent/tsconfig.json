@@ -12,8 +12,8 @@
     "skipLibCheck": true,
     "jsx": "react-jsx",
     "paths": {
-      "@agent-yes/liagent": ["./src/browser.ts"],
-      "@agent-yes/liagent/*": ["./src/*.ts"]
+      "agent-yes/liagent": ["./src/browser.ts"],
+      "agent-yes/liagent/*": ["./src/*.ts"]
     }
   },
   "include": ["src", "test", "scripts", "examples", "demo"]

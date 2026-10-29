@@ -7,7 +7,7 @@
 //   const chat = useRef<LiagentChatHandle>(null);
 //   <LiagentChat
 //     ref={chat}
-//     load={() => import("@agent-yes/liagent")}       // or a URL; see `load` below
+//     load={() => import("agent-yes/liagent")}       // or a URL; see `load` below
 //     live={live} listeners={n} messages={messages} onSend={send} … />
 //   chat.current?.speak(reply.text);       // a reply that arrived live
 //
@@ -17,9 +17,9 @@
 // callbacks pass through as they are.
 
 import { useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type Ref } from "react";
-import type { ChatBox } from "@agent-yes/liagent/box";
-import type { Answer } from "@agent-yes/liagent/box";
-import type { ChatMessage, PageInfo, PairInfo } from "@agent-yes/liagent/protocol";
+import type { ChatBox } from "agent-yes/liagent/box";
+import type { Answer } from "agent-yes/liagent/box";
+import type { ChatMessage, PageInfo, PairInfo } from "agent-yes/liagent/protocol";
 
 type LiagentModule = { defineChatBox: (tag?: string) => unknown };
 
@@ -34,7 +34,7 @@ export type LiagentChatHandle = {
 
 export type LiagentChatProps = {
   /**
-   * Load the bundle: `() => import("@agent-yes/liagent")` when it is a dependency, or
+   * Load the bundle: `() => import("agent-yes/liagent")` when it is a dependency, or
    * `() => import(/* webpackIgnore: true *\/ url)` for a hosted liagent.js.
    */
   load: () => Promise<LiagentModule>;

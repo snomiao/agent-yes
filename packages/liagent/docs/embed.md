@@ -18,10 +18,10 @@ The module defines nothing until you call `defineChatBox()`, and it is safe
 to import during server rendering: the element class only extends
 `HTMLElement` when one exists.
 
-**As a dependency** (once it is published):
+**As a dependency** (`bun add agent-yes`; the hub is `agent-yes/liagent/hub`):
 
 ```ts
-const { defineChatBox, connectHub } = await import("@agent-yes/liagent");
+const { defineChatBox, connectHub } = await import("agent-yes/liagent");
 ```
 
 **From a hosted `liagent.js`** (a dev server, or your own static copy): import
@@ -42,7 +42,7 @@ up your edits.
 
 ## 2. Plain HTML, with a hub
 
-If your site runs the hub (`@agent-yes/liagent/hub`, see the README), `connectHub` does
+If your site runs the hub (`agent-yes/liagent/hub`, see the README), `connectHub` does
 everything else. It holds the socket while the page is visible, and it shows
 history, live messages, pairing requests, sessions and the busy spinner. It
 also reads replies aloud.
@@ -113,7 +113,7 @@ so where you mount it doesn't matter.
 import { useRef } from "react";
 import { LiagentChat, type LiagentChatHandle } from "./LiagentChat";
 
-const src = process.env.NEXT_PUBLIC_LIAGENT_URL!; // or use () => import("@agent-yes/liagent")
+const src = process.env.NEXT_PUBLIC_LIAGENT_URL!; // or use () => import("agent-yes/liagent")
 
 export function Chat(props: {
   live: boolean;
@@ -201,7 +201,7 @@ vue({ template: { compilerOptions: { isCustomElement: (tag) => tag.startsWith("l
 ```vue
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
-import { connectHub } from "@agent-yes/liagent";
+import { connectHub } from "agent-yes/liagent";
 const messages = ref([]);
 const send = (text: string) => mySend(text); // true if it went out
 const box = ref<HTMLElement>();

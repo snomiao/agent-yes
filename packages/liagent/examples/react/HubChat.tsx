@@ -5,7 +5,7 @@
 // skip this and call connectHub(element, {url}) from liagent instead.
 
 import { useEffect, useRef, useState } from "react";
-import type { ChatMessage, HubState } from "@agent-yes/liagent/protocol";
+import type { ChatMessage, HubState } from "agent-yes/liagent/protocol";
 import { LiagentChat, type LiagentChatHandle, type LiagentChatProps } from "./LiagentChat";
 
 const trim = (list: ChatMessage[]) => list.slice(-200);

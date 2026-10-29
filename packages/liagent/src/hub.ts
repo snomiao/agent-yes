@@ -2,7 +2,7 @@
 // because only the site can say who a page belongs to.
 //
 //   // worker.ts
-//   import { chatHub, routeChat } from "@agent-yes/liagent/hub";
+//   import { chatHub, routeChat } from "agent-yes/liagent/hub";
 //   export const ChatHub = chatHub({ eval: false });
 //   export default {
 //     async fetch(req, env) {

@@ -1,6 +1,6 @@
 // <liagent-chat>: the owner ⇄ agent chat box, a framework-free custom element.
 //
-//   import { defineChatBox } from "@agent-yes/liagent/box";
+//   import { defineChatBox } from "agent-yes/liagent/box";
 //   defineChatBox();                          // registers <liagent-chat>
 //   const box = document.createElement("liagent-chat");
 //   box.onSend = (text) => socketSend(text);  // true if it went out

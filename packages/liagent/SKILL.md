@@ -16,7 +16,7 @@ each in their own thread.
 The CLI needs [Bun](https://bun.sh).
 
 ```bash
-bun add -g @agent-yes/liagent   # puts `liagent` on PATH
+bun add -g agent-yes   # puts `liagent` (and `ay`) on PATH
 export LIAGENT_HUB=https://dev.example.com/api/chat   # the hub's page-socket URL
 ```
 

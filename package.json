@@ -44,6 +44,7 @@
     "dsh-yes": "./dist/dsh-yes.js",
     "glm-yes": "./dist/glm-yes.js",
     "grok-yes": "./dist/grok-yes.js",
+    "liagent": "./packages/liagent/dist/cli.js",
     "opencode-yes": "./dist/opencode-yes.js",
     "pi-yes": "./dist/pi-yes.js",
     "powershell-yes": "./dist/powershell-yes.js",
@@ -76,7 +77,9 @@
     "ts/channels/*.ts",
     "ts/terminal/*.ts",
     "lab/ui/lab/**",
-    "packages/liagent/src/*.ts"
+    "packages/liagent/dist/**/*.js",
+    "packages/liagent/dist/**/*.d.ts",
+    "!packages/liagent/dist/**/*.map"
   ],
   "type": "module",
   "module": "ts/index.ts",
@@ -103,17 +106,37 @@
       "import": "./dist/widgets.js"
     },
     "./liagent": {
-      "types": "./packages/liagent/src/browser.ts",
-      "browser": "./dist/liagent.js",
-      "import": "./dist/liagent.js"
-    }
+      "types": "./packages/liagent/dist/index.d.ts",
+      "browser": "./packages/liagent/dist/index.js",
+      "import": "./packages/liagent/dist/index.js"
+    },
+    "./liagent/box": {
+      "types": "./packages/liagent/dist/box.d.ts",
+      "browser": "./packages/liagent/dist/box.js",
+      "import": "./packages/liagent/dist/box.js"
+    },
+    "./liagent/client": {
+      "types": "./packages/liagent/dist/client.d.ts",
+      "browser": "./packages/liagent/dist/client.js",
+      "import": "./packages/liagent/dist/client.js"
+    },
+    "./liagent/protocol": {
+      "types": "./packages/liagent/dist/protocol.d.ts",
+      "browser": "./packages/liagent/dist/protocol.js",
+      "import": "./packages/liagent/dist/protocol.js"
+    },
+    "./liagent/hub": {
+      "types": "./packages/liagent/dist/hub.d.ts",
+      "import": "./packages/liagent/dist/hub.js"
+    },
+    "./liagent/liagent.js": "./packages/liagent/dist/liagent.js"
   },
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && bun run --cwd packages/liagent build",
     "check:e2e": "bun scripts/check-e2e.ts",
     "cf": "bun scripts/cf.ts",
     "build:rgui": "bun scripts/build-rgui.ts",
