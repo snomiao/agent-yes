@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>liagent demo</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --background: Canvas;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        font:
+          15px/1.5 system-ui,
+          sans-serif;
+        background: Canvas;
+        color: CanvasText;
+      }
+      main {
+        max-width: 40rem;
+      }
+      button {
+        font: inherit;
+      }
+      liagent-chat {
+        --liagent-bg: var(--background);
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>liagent</h1>
+      <p>
+        The chat box sits at the bottom right. The "agent" here is fake: it echoes what you send
+        after a second, with the spinner up while it "works".
+      </p>
+      <p>
+        <button id="ask">Simulate a pairing request</button>
+        <button id="eval">Simulate an eval session</button>
+        <button id="ran">Simulate "code ran"</button>
+        <button id="live">Toggle connected</button>
+      </p>
+      <p>
+        Lorem ipsum dolor sit amet — the page under the log stays clickable:
+        <a href="#x">a link</a>.
+      </p>
+    </main>
+    <script type="module">
+      const { defineChatBox } = await import("./liagent.js");
+      defineChatBox();
+      const box = document.createElement("liagent-chat");
+      document.body.append(box);
+      const now = Date.now();
+      if (location.search.includes("hub")) {
+        const { connectHub } = await import("./liagent.js");
+        for (const id of ["ask", "eval", "ran", "live"])
+          document.getElementById(id).disabled = true;
+        const as = new URLSearchParams(location.search).get("as");
+        connectHub(box, {
+          url: `./api/chat${as ? `?as=${encodeURIComponent(as)}` : ""}`,
+          evalCode: true,
+        });
+      } else {
+        box.messages = [
+          {
+            id: "h1",
+            from: "owner",
+            label: "",
+            text: "Earlier message (history, not read aloud)",
+            at: now - 90_000,
+          },
+          {
+            id: "h2",
+            from: "agent",
+            label: "agent",
+            text: "Earlier reply.",
+            at: now - 60_000,
+          },
+        ];
+        box.live = true;
+        box.listeners = 1;
+        let n = 0;
+        box.onSend = (text) => {
+          if (!box.live) return false;
+          const k = ++n;
+          box.push({
+            id: `o${k}`,
+            from: "owner",
+            label: "",
+            text,
+            at: Date.now(),
+          });
+          box.busy = true;
+          setTimeout(() => {
+            box.busy = false;
+            box.push({
+              id: `a${k}`,
+              from: "agent",
+              label: "fake agent",
+              text: `echo: ${text}`,
+              at: Date.now(),
+            });
+          }, 1200);
+          return true;
+        };
+        let sessions = [];
+        const p = {
+          pair: "p1",
+          code: "a1b2",
+          label: "agent on a laptop",
+          at: Date.now(),
+        };
+        box.onAnswer = (type, pair, scope) => {
+          box.pending = null;
+          if (type === "allow")
+            sessions = [
+              ...sessions,
+              { ...pair, until: Date.now() + 3600e3, scope: scope ?? "eval" },
+            ];
+          box.sessions = sessions;
+        };
+        box.onEnd = (s) => (box.sessions = sessions = sessions.filter((x) => x.pair !== s.pair));
+        document.getElementById("ask").onclick = () =>
+          (box.pending = { ...p, pair: `p${Date.now()}` });
+        document.getElementById("eval").onclick = () =>
+          (box.sessions = sessions =
+            [
+              ...sessions,
+              {
+                pair: `e${Date.now()}`,
+                code: "c3d4",
+                label: "eval agent",
+                at: Date.now(),
+                until: Date.now() + 3600e3,
+                scope: "eval",
+              },
+            ]);
+        document.getElementById("ran").onclick = () => {
+          box.evalRan = true;
+          setTimeout(() => (box.evalRan = false), 4000);
+        };
+        document.getElementById("live").onclick = () => (box.live = !box.live);
+      }
+    </script>
+  </body>
+</html>

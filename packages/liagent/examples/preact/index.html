@@ -1,0 +1,128 @@
+<!doctype html>
+<!--
+  liagent in Preact (htm, no build). Run `bun run dev` and open
+  /liagent/examples/preact/ (a fake agent) or /liagent/examples/preact/?hub.
+
+  Preact notes:
+  - Data props (messages, live, pending…) are set as properties, because the
+    element has them; define it before rendering.
+  - Props named on* (onSend, onAnswer, onEnd) are taken as DOM event
+    listeners, so set the callbacks on the element through a ref instead.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>liagent: Preact</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        font:
+          15px/1.5 system-ui,
+          sans-serif;
+        background: Canvas;
+        color: CanvasText;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "preact": "https://esm.sh/preact@11.1.0",
+          "preact/": "https://esm.sh/preact@11.1.0/",
+          "htm/preact": "https://esm.sh/htm@3.1.1/preact?external=preact"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { render } from "preact";
+      import { useEffect, useRef, useState } from "preact/hooks";
+      import { html } from "htm/preact";
+      const { defineChatBox, connectHub } = await import("../../liagent.js");
+      defineChatBox();
+      const useHub = location.search.includes("hub");
+
+      function App() {
+        const box = useRef(null);
+        const [messages, setMessages] = useState([]);
+        const [pending, setPending] = useState(null);
+        const [sessions, setSessions] = useState([]);
+        const [busy, setBusy] = useState(false);
+        const [out, setOut] = useState("callbacks show up here");
+
+        useEffect(() => {
+          const el = box.current;
+          if (useHub) return void connectHub(el, { url: "../../api/chat" });
+          let n = 0;
+          el.onSend = (text) => {
+            const id = ++n;
+            setMessages((m) => [
+              ...m,
+              { id: `u${id}`, from: "owner", label: "", text, at: Date.now() },
+            ]);
+            setBusy(true);
+            setTimeout(() => {
+              setBusy(false);
+              setMessages((m) => [
+                ...m,
+                {
+                  id: `a${id}`,
+                  from: "agent",
+                  label: "fake agent",
+                  text: `echo: ${text}`,
+                  at: Date.now(),
+                },
+              ]);
+            }, 800);
+            return true;
+          };
+          el.onAnswer = (type, pair, ans) => {
+            setOut(`onAnswer: ${type} ${pair.code} ${JSON.stringify(ans)}`);
+            setPending(null);
+            if (type === "allow")
+              setSessions([{ ...pair, until: Date.now() + 3600e3, pages: "all" }]);
+          };
+          el.onEnd = (pair) => {
+            setOut(`onEnd: ${pair.code}`);
+            setSessions([]);
+          };
+        }, []);
+
+        const ask = () =>
+          setPending({
+            pair: `p${Date.now()}`,
+            code: "a1b2",
+            label: "an agent",
+            at: Date.now(),
+            scope: "chat",
+          });
+        return html`
+          <h1>liagent: Preact</h1>
+          <p><button id="ask" onClick=${ask}>Simulate a pairing request</button></p>
+          <p id="out">${out}</p>
+          ${
+            useHub
+              ? html`<liagent-chat ref=${box} storage-key="example-preact" />`
+              : html`<liagent-chat
+                  ref=${box}
+                  storage-key="example-preact"
+                  live=${true}
+                  listeners=${1}
+                  messages=${messages}
+                  pending=${pending}
+                  sessions=${sessions}
+                  busy=${busy}
+                />`
+          }
+        `;
+      }
+      render(html`<${App} />`, document.getElementById("app"));
+    </script>
+  </body>
+</html>

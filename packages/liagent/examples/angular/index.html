@@ -1,0 +1,160 @@
+<!doctype html>
+<!--
+  liagent in Angular (standalone component, zoneless, signals). Run
+  `bun run dev` and open /liagent/examples/angular/ (a fake agent) or
+  /liagent/examples/angular/?hub (the dev hub).
+
+  This page compiles the component in the browser (JIT) so it needs no build;
+  in an app, write the same component with the @Component decorator.
+
+  Angular notes:
+  - Add CUSTOM_ELEMENTS_SCHEMA to the component's schemas, or the template
+    compiler rejects <liagent-chat> and its bindings.
+  - [prop]="value" sets a property, so arrays and objects pass as they are:
+    [messages]="messages()".
+  - Angular refuses to bind any on* property (NG0306: "Binding to event
+    property 'onSend' is disallowed"), so set the callbacks on the element
+    from a @ViewChild. Make them arrow-function fields so `this` stays the
+    component.
+  - Define the element before bootstrapping.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>liagent: Angular</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        font:
+          15px/1.5 system-ui,
+          sans-serif;
+        background: Canvas;
+        color: CanvasText;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "@angular/core": "https://esm.sh/*@angular/core@22.2.3",
+          "@angular/core/": "https://esm.sh/*@angular/core@22.2.3/",
+          "@angular/compiler": "https://esm.sh/*@angular/compiler@22.2.3",
+          "@angular/common": "https://esm.sh/*@angular/common@22.2.3",
+          "@angular/common/": "https://esm.sh/*@angular/common@22.2.3/",
+          "@angular/platform-browser": "https://esm.sh/*@angular/platform-browser@22.2.3",
+          "rxjs": "https://esm.sh/rxjs@7.8.2",
+          "rxjs/operators": "https://esm.sh/rxjs@7.8.2/operators",
+          "tslib": "https://esm.sh/tslib@2.8.1"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <app-root></app-root>
+    <script type="module">
+      import "@angular/compiler"; // JIT: compile the template in the browser
+      import {
+        Component,
+        CUSTOM_ELEMENTS_SCHEMA,
+        ElementRef,
+        ViewChild,
+        provideZonelessChangeDetection,
+        signal,
+      } from "@angular/core";
+      import { bootstrapApplication } from "@angular/platform-browser";
+      const { defineChatBox, connectHub } = await import("../../liagent.js");
+      defineChatBox();
+      const useHub = location.search.includes("hub");
+
+      class App {
+        useHub = useHub;
+        messages = signal([]);
+        pending = signal(null);
+        sessions = signal([]);
+        busy = signal(false);
+        out = signal("callbacks show up here");
+        n = 0;
+        box;
+        send = (text) => {
+          const id = ++this.n;
+          this.messages.update((m) => [
+            ...m,
+            { id: `u${id}`, from: "owner", label: "", text, at: Date.now() },
+          ]);
+          this.busy.set(true);
+          setTimeout(() => {
+            this.busy.set(false);
+            this.messages.update((m) => [
+              ...m,
+              {
+                id: `a${id}`,
+                from: "agent",
+                label: "fake agent",
+                text: `echo: ${text}`,
+                at: Date.now(),
+              },
+            ]);
+          }, 800);
+          return true;
+        };
+        answer = (type, pair, ans) => {
+          this.out.set(`onAnswer: ${type} ${pair.code} ${JSON.stringify(ans)}`);
+          this.pending.set(null);
+          if (type === "allow")
+            this.sessions.set([{ ...pair, until: Date.now() + 3600e3, pages: "all" }]);
+        };
+        end = (pair) => {
+          this.out.set(`onEnd: ${pair.code}`);
+          this.sessions.set([]);
+        };
+        ask = () =>
+          this.pending.set({
+            pair: `p${Date.now()}`,
+            code: "a1b2",
+            label: "an agent",
+            at: Date.now(),
+            scope: "chat",
+          });
+        ngAfterViewInit() {
+          const el = this.box.nativeElement;
+          // With a hub, connectHub drives the element itself.
+          if (this.useHub) return void connectHub(el, { url: "../../api/chat" });
+          el.onSend = this.send;
+          el.onAnswer = this.answer;
+          el.onEnd = this.end;
+        }
+      }
+      // What @ViewChild("box") box and @Component({...}) do in a build.
+      ViewChild("box")(App.prototype, "box");
+      Component({
+        selector: "app-root",
+        standalone: true,
+        schemas: [CUSTOM_ELEMENTS_SCHEMA],
+        template: `
+          <h1>liagent: Angular</h1>
+          <p><button id="ask" (click)="ask()">Simulate a pairing request</button></p>
+          <p id="out">{{ out() }}</p>
+          @if (useHub) {
+            <liagent-chat #box storage-key="example-angular"></liagent-chat>
+          } @else {
+            <liagent-chat
+              #box
+              storage-key="example-angular"
+              [live]="true"
+              [listeners]="1"
+              [messages]="messages()"
+              [pending]="pending()"
+              [sessions]="sessions()"
+              [busy]="busy()"
+            ></liagent-chat>
+          }
+        `,
+      })(App);
+      await bootstrapApplication(App, { providers: [provideZonelessChangeDetection()] });
+    </script>
+  </body>
+</html>

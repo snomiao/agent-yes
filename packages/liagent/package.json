@@ -1,0 +1,30 @@
+{
+  "name": "liagent",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Source of agent-yes/liagent: user ⇄ agent chat for any web page. Ships inside the agent-yes npm package; not published on its own.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "build": "tsdown && bun build src/browser.ts --outdir dist --entry-naming liagent.js --format esm --target browser --minify",
+    "dev": "bun run scripts/dev.ts",
+    "test": "bun test",
+    "typecheck": "tsrs --noEmit",
+    "lint": "oxlint",
+    "fmt": "oxlint --fix && oxfmt",
+    "fmt:check": "oxfmt --check",
+    "check": "bun run lint && bun run fmt:check && bun run typecheck && bun run test"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "19",
+    "@types/react-dom": "19",
+    "oxfmt": "0.75.0",
+    "oxlint": "1.90.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "tsdown": "^0.20.3",
+    "tsrs": "0.20.1-ts7.1.0-beta",
+    "typescript": "^5.9.3"
+  }
+}

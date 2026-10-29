@@ -44,6 +44,7 @@
     "dsh-yes": "./dist/dsh-yes.js",
     "glm-yes": "./dist/glm-yes.js",
     "grok-yes": "./dist/grok-yes.js",
+    "liagent": "./packages/liagent/dist/cli.js",
     "opencode-yes": "./dist/opencode-yes.js",
     "pi-yes": "./dist/pi-yes.js",
     "powershell-yes": "./dist/powershell-yes.js",
@@ -75,7 +76,10 @@
     "lab/ui/sw.js",
     "ts/channels/*.ts",
     "ts/terminal/*.ts",
-    "lab/ui/lab/**"
+    "lab/ui/lab/**",
+    "packages/liagent/dist/**/*.js",
+    "packages/liagent/dist/**/*.d.ts",
+    "!packages/liagent/dist/**/*.map"
   ],
   "type": "module",
   "module": "ts/index.ts",
@@ -100,14 +104,44 @@
     "./widgets": {
       "types": "./ts/widgets.ts",
       "import": "./dist/widgets.js"
-    }
+    },
+    "./liagent": {
+      "types": "./packages/liagent/dist/index.d.ts",
+      "browser": "./packages/liagent/dist/index.js",
+      "import": "./packages/liagent/dist/index.js",
+      "default": "./packages/liagent/dist/index.js"
+    },
+    "./liagent/box": {
+      "types": "./packages/liagent/dist/box.d.ts",
+      "browser": "./packages/liagent/dist/box.js",
+      "import": "./packages/liagent/dist/box.js",
+      "default": "./packages/liagent/dist/box.js"
+    },
+    "./liagent/client": {
+      "types": "./packages/liagent/dist/client.d.ts",
+      "browser": "./packages/liagent/dist/client.js",
+      "import": "./packages/liagent/dist/client.js",
+      "default": "./packages/liagent/dist/client.js"
+    },
+    "./liagent/protocol": {
+      "types": "./packages/liagent/dist/protocol.d.ts",
+      "browser": "./packages/liagent/dist/protocol.js",
+      "import": "./packages/liagent/dist/protocol.js",
+      "default": "./packages/liagent/dist/protocol.js"
+    },
+    "./liagent/hub": {
+      "types": "./packages/liagent/dist/hub.d.ts",
+      "import": "./packages/liagent/dist/hub.js",
+      "default": "./packages/liagent/dist/hub.js"
+    },
+    "./liagent/liagent.js": "./packages/liagent/dist/liagent.js"
   },
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && bun run --cwd packages/liagent build",
     "check:e2e": "bun scripts/check-e2e.ts",
     "cf": "bun scripts/cf.ts",
     "build:rgui": "bun scripts/build-rgui.ts",
@@ -131,7 +165,8 @@
     "test:coverage": "vitest run --coverage",
     "test:ui": "vitest run --config tests/ui-test/vitest.config.ts",
     "test:ui-dom": "vitest run --config tests/ui-dom/vitest.config.ts",
-    "test:theme": "node tests/ui-test/theme.e2e.mjs"
+    "test:theme": "node tests/ui-test/theme.e2e.mjs",
+    "test:liagent": "bun run --cwd packages/liagent check"
   },
   "dependencies": {
     "@snomiao/bun-pty": "^0.3.4",
@@ -199,5 +234,8 @@
   "trustedDependencies": [
     "node-datachannel",
     "node-pty"
+  ],
+  "workspaces": [
+    "packages/*"
   ]
 }

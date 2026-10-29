@@ -1,0 +1,128 @@
+<!doctype html>
+<!--
+  liagent in Solid (solid-js/html, no build). Run `bun run dev` and open
+  /liagent/examples/solid/ (a fake agent) or /liagent/examples/solid/?hub.
+
+  Solid notes:
+  - Use `prop:` for everything the element takes, so it is set as a property
+    (prop:messages, prop:onSend…). In JSX: <liagent-chat prop:messages={…} />,
+    with a `declare module "solid-js"` entry for the tag's types.
+  - In solid-js/html (not JSX) a function value is read as a reactive getter:
+    pass a callback as () => fn, and a signal as the signal itself.
+  - Define the element before rendering.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>liagent: Solid</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        font:
+          15px/1.5 system-ui,
+          sans-serif;
+        background: Canvas;
+        color: CanvasText;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "solid-js": "https://esm.sh/solid-js@1.9.17",
+          "solid-js/web": "https://esm.sh/solid-js@1.9.17/web?external=solid-js",
+          "solid-js/html": "https://esm.sh/solid-js@1.9.17/html?external=solid-js,solid-js/web"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      import { createSignal, onMount } from "solid-js";
+      import { render } from "solid-js/web";
+      import html from "solid-js/html";
+      const { defineChatBox, connectHub } = await import("../../liagent.js");
+      defineChatBox();
+      const useHub = location.search.includes("hub");
+
+      function App() {
+        const [messages, setMessages] = createSignal([]);
+        const [pending, setPending] = createSignal(null);
+        const [sessions, setSessions] = createSignal([]);
+        const [busy, setBusy] = createSignal(false);
+        const [out, setOut] = createSignal("callbacks show up here");
+        let n = 0;
+        const send = (text) => {
+          const id = ++n;
+          setMessages((m) => [
+            ...m,
+            { id: `u${id}`, from: "owner", label: "", text, at: Date.now() },
+          ]);
+          setBusy(true);
+          setTimeout(() => {
+            setBusy(false);
+            setMessages((m) => [
+              ...m,
+              {
+                id: `a${id}`,
+                from: "agent",
+                label: "fake agent",
+                text: `echo: ${text}`,
+                at: Date.now(),
+              },
+            ]);
+          }, 800);
+          return true;
+        };
+        const answer = (type, pair, ans) => {
+          setOut(`onAnswer: ${type} ${pair.code} ${JSON.stringify(ans)}`);
+          setPending(null);
+          if (type === "allow")
+            setSessions([{ ...pair, until: Date.now() + 3600e3, pages: "all" }]);
+        };
+        const end = (pair) => {
+          setOut(`onEnd: ${pair.code}`);
+          setSessions([]);
+        };
+        const ask = () =>
+          setPending({
+            pair: `p${Date.now()}`,
+            code: "a1b2",
+            label: "an agent",
+            at: Date.now(),
+            scope: "chat",
+          });
+
+        let hubBox;
+        onMount(() => useHub && connectHub(hubBox, { url: "../../api/chat" }));
+        return html`
+          <h1>liagent: Solid</h1>
+          <p><button id="ask" onClick=${ask}>Simulate a pairing request</button></p>
+          <p id="out">${out}</p>
+          ${
+            useHub
+              ? html`<liagent-chat ref=${(el) => (hubBox = el)} storage-key="example-solid" />`
+              : html`<liagent-chat
+                  storage-key="example-solid"
+                  prop:live=${true}
+                  prop:listeners=${1}
+                  prop:messages=${messages}
+                  prop:pending=${pending}
+                  prop:sessions=${sessions}
+                  prop:busy=${busy}
+                  prop:onSend=${() => send}
+                  prop:onAnswer=${() => answer}
+                  prop:onEnd=${() => end}
+                />`
+          }
+        `;
+      }
+      render(App, document.getElementById("app"));
+    </script>
+  </body>
+</html>

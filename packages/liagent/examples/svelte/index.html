@@ -1,0 +1,123 @@
+<!doctype html>
+<!--
+  liagent in Svelte 5. Run `bun run dev` and open /liagent/examples/svelte/
+  (a fake agent) or /liagent/examples/svelte/?hub (the dev hub).
+
+  The component source is the <script type="text/svelte"> below (its inner
+  closing tag is written <\/script> so the page's parser does not end the
+  outer one); this page compiles it in the browser, so the example needs no
+  build. In an app, put it in a .svelte file.
+
+  Svelte notes:
+  - Data props are set as properties, because the element has them: define
+    it before the component mounts.
+  - Attributes named on* are event listeners in Svelte 5, so set the
+    callbacks on the element through bind:this instead.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>liagent: Svelte</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        font:
+          15px/1.5 system-ui,
+          sans-serif;
+        background: Canvas;
+        color: CanvasText;
+      }
+    </style>
+    <script type="importmap">
+      {
+        "imports": {
+          "svelte": "https://esm.sh/svelte@5.57.3",
+          "svelte/": "https://esm.sh/svelte@5.57.3/"
+        }
+      }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+
+    <script type="text/svelte" id="App">
+      <script>
+        import { onMount } from "svelte";
+        let { connectHub, useHub } = $props();
+        let box = $state();
+        let messages = $state([]);
+        let pending = $state(null);
+        let sessions = $state([]);
+        let busy = $state(false);
+        let out = $state("callbacks show up here");
+        let n = 0;
+
+        onMount(() => {
+          if (useHub) return void connectHub(box, { url: "../../api/chat" });
+          box.onSend = (text) => {
+            const id = ++n;
+            messages = [...messages, { id: `u${id}`, from: "owner", label: "", text, at: Date.now() }];
+            busy = true;
+            setTimeout(() => {
+              busy = false;
+              messages = [...messages, { id: `a${id}`, from: "agent", label: "fake agent", text: `echo: ${text}`, at: Date.now() }];
+            }, 800);
+            return true;
+          };
+          box.onAnswer = (type, pair, ans) => {
+            out = `onAnswer: ${type} ${pair.code} ${JSON.stringify(ans)}`;
+            pending = null;
+            if (type === "allow") sessions = [{ ...pair, until: Date.now() + 3600e3, pages: "all" }];
+          };
+          box.onEnd = (pair) => {
+            out = `onEnd: ${pair.code}`;
+            sessions = [];
+          };
+        });
+        const ask = () =>
+          (pending = { pair: `p${Date.now()}`, code: "a1b2", label: "an agent", at: Date.now(), scope: "chat" });
+      <\/script>
+
+      <h1>liagent: Svelte</h1>
+      <p><button id="ask" onclick={ask}>Simulate a pairing request</button></p>
+      <p id="out">{out}</p>
+      {#if useHub}
+        <liagent-chat bind:this={box} storage-key="example-svelte"></liagent-chat>
+      {:else}
+        <liagent-chat
+          bind:this={box}
+          storage-key="example-svelte"
+          live={true}
+          listeners={1}
+          {messages}
+          {pending}
+          {sessions}
+          {busy}
+        ></liagent-chat>
+      {/if}
+    </script>
+
+    <script type="module">
+      import { compile } from "svelte/compiler";
+      import { mount } from "svelte";
+      const { defineChatBox, connectHub } = await import("../../liagent.js");
+      defineChatBox();
+      // Compile the component above (an app does this at build time).
+      const source = document
+        .getElementById("App")
+        .textContent.replaceAll("<\\/script>", "<" + "/script>");
+      const { js } = compile(source, { generate: "client", name: "App" });
+      const url = URL.createObjectURL(new Blob([js.code], { type: "text/javascript" }));
+      const { default: App } = await import(url);
+      mount(App, {
+        target: document.getElementById("app"),
+        props: { connectHub, useHub: location.search.includes("hub") },
+      });
+    </script>
+  </body>
+</html>
