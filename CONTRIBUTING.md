@@ -75,6 +75,23 @@ On a busy or shared host, keep the test run light, e.g.
 Git hooks (husky) run lint-staged and a build on commit, and the full
 `test:coverage` gate on push. CI on the pull request is the authoritative gate.
 
+## liagent (`agent-yes/liagent`)
+
+The chat box, its hub and the `liagent` CLI live in their own repository,
+[snolab/liagent](https://github.com/snolab/liagent). agent-yes ships them as
+`agent-yes/liagent` (and `/box`, `/client`, `/protocol`, `/hub`,
+`/liagent.js`) plus the `liagent` bin. It pins a liagent release tag as a
+devDependency, and `bun run build` copies that release's built files into
+`dist/liagent/` (`ts/copyLiagent.ts`).
+
+Change liagent itself in snolab/liagent. To ship a new liagent release here,
+bump the one pin in a small PR:
+
+```bash
+bun add -d github:snolab/liagent#v0.2.0   # the new release tag
+bun run build                             # dist/liagent/ from that release
+```
+
 ## Pull requests
 
 - One focused change per PR. Open an issue first for large or design-level

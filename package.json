@@ -44,6 +44,7 @@
     "dsh-yes": "./dist/dsh-yes.js",
     "glm-yes": "./dist/glm-yes.js",
     "grok-yes": "./dist/grok-yes.js",
+    "liagent": "./dist/liagent/cli.js",
     "opencode-yes": "./dist/opencode-yes.js",
     "pi-yes": "./dist/pi-yes.js",
     "powershell-yes": "./dist/powershell-yes.js",
@@ -75,7 +76,8 @@
     "lab/ui/sw.js",
     "ts/channels/*.ts",
     "ts/terminal/*.ts",
-    "lab/ui/lab/**"
+    "lab/ui/lab/**",
+    "dist/liagent/*.d.ts"
   ],
   "type": "module",
   "module": "ts/index.ts",
@@ -100,14 +102,44 @@
     "./widgets": {
       "types": "./ts/widgets.ts",
       "import": "./dist/widgets.js"
-    }
+    },
+    "./liagent": {
+      "types": "./dist/liagent/index.d.ts",
+      "browser": "./dist/liagent/index.js",
+      "import": "./dist/liagent/index.js",
+      "default": "./dist/liagent/index.js"
+    },
+    "./liagent/box": {
+      "types": "./dist/liagent/box.d.ts",
+      "browser": "./dist/liagent/box.js",
+      "import": "./dist/liagent/box.js",
+      "default": "./dist/liagent/box.js"
+    },
+    "./liagent/client": {
+      "types": "./dist/liagent/client.d.ts",
+      "browser": "./dist/liagent/client.js",
+      "import": "./dist/liagent/client.js",
+      "default": "./dist/liagent/client.js"
+    },
+    "./liagent/protocol": {
+      "types": "./dist/liagent/protocol.d.ts",
+      "browser": "./dist/liagent/protocol.js",
+      "import": "./dist/liagent/protocol.js",
+      "default": "./dist/liagent/protocol.js"
+    },
+    "./liagent/hub": {
+      "types": "./dist/liagent/hub.d.ts",
+      "import": "./dist/liagent/hub.js",
+      "default": "./dist/liagent/hub.js"
+    },
+    "./liagent/liagent.js": "./dist/liagent/liagent.js"
   },
   "publishConfig": {
     "access": "public",
     "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
-    "build": "tsdown",
+    "build": "tsdown && bun ./ts/copyLiagent.ts",
     "check:e2e": "bun scripts/check-e2e.ts",
     "cf": "bun scripts/cf.ts",
     "build:rgui": "bun scripts/build-rgui.ts",
@@ -168,6 +200,7 @@
     "codehost": "^0.39.0",
     "html2canvas-pro": "^2.3.1",
     "husky": "^9.1.7",
+    "liagent": "github:snolab/liagent#v0.1.0",
     "lint-staged": "^16.2.7",
     "node-pty": "^1.1.0",
     "oxfmt": "^0.75.0",
