@@ -454,6 +454,25 @@ export function devBuildInfo(
 }
 
 /**
+ * findAyrsBinary, downloading this version's release bundle (which carries
+ * ayrs) when it is missing. The bundle used to arrive only with the first
+ * `ay <cli>` run, so on a fresh install `ay serve` either fell back to the
+ * TypeScript server without saying why it had no ayrs, or — for what only
+ * ayrs can do (`--join`, `join-secret`) — failed outright.
+ */
+export async function ensureAyrsBinary(verbose = false): Promise<string | undefined> {
+  const found = findAyrsBinary();
+  if (found) return found;
+  try {
+    process.stderr.write(`ay serve: fetching the Rust daemon (ayrs) for this version…\n`);
+    await getRustBinary({ verbose, forceDownload: !!findRustBinary() });
+  } catch (err) {
+    if (verbose) console.error(`[rust] ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return findAyrsBinary();
+}
+
+/**
  * Check if a binary path is inside a git repo (dev build), and rebuild if outdated.
  * Returns the same path if up-to-date or rebuilt, undefined if rebuild failed.
  */
