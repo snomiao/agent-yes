@@ -1917,8 +1917,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
     const { planRustServe } = await import("./serveRust.ts");
     const plan = planRustServe(rest);
     if (plan.kind === "rust-only") {
-      const { findAyrsBinary } = await import("./rustBinary.ts");
-      const ayrs = findAyrsBinary();
+      const { ensureAyrsBinary } = await import("./rustBinary.ts");
+      const ayrs = await ensureAyrsBinary();
       if (ayrs) return runAyrsServe(ayrs, plan.argv);
       process.stderr.write(
         `ay serve: ${plan.feature} needs the Rust daemon (ayrs), which was not found ` +
@@ -1927,8 +1927,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return 1;
     }
     if (plan.kind === "rust") {
-      const { findAyrsBinary } = await import("./rustBinary.ts");
-      const ayrs = findAyrsBinary();
+      const { ensureAyrsBinary } = await import("./rustBinary.ts");
+      const ayrs = await ensureAyrsBinary();
       if (ayrs) return runAyrsServe(ayrs, plan.argv);
       process.stderr.write(
         `ay serve: ayrs binary not found — running the TypeScript server ` +
