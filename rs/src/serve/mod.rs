@@ -20,6 +20,7 @@ pub mod meta;
 pub mod nat_probe;
 pub mod nego;
 pub mod procstats;
+pub mod reply_alias;
 pub mod room_member;
 pub mod sampler;
 pub mod service;

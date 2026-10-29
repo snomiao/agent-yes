@@ -1184,11 +1184,17 @@ async fn handle_send(body: &str) -> ApiResponse {
     if kw.is_empty() {
         return text(400, "missing keyword");
     }
-    let msg = req
+    let mut msg = req
         .get("msg")
         .and_then(|v| v.as_str())
         .unwrap_or("")
         .to_string();
+    // A message from a shared room names the room, not our alias for it, in
+    // its reply hint; fill ours in (serve/reply_alias.rs).
+    if msg.starts_with("<ay-msg ") && msg.contains("<alias-for-room-") {
+        let aliases = super::reply_alias::room_aliases();
+        msg = super::reply_alias::fill_room_alias(&msg, |room| aliases.get(room).cloned());
+    }
     let code = req
         .get("code")
         .and_then(|v| v.as_str())
