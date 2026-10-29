@@ -69,6 +69,10 @@ bun build ../../../ts/terminal/browser.ts --outfile ./public/w/terminal.js --for
 # an in-page agent sensor (selection/dom/screenshot) an agent reads via `ay widget`.
 bun build ../../../ts/widget/browser.ts --outfile ./public/w/widget.js --format esm --target browser --minify
 
+# liagent's chat box for the console's debug mode (debug.js imports ./liagent.js):
+# the prebuilt standalone bundle from the pinned liagent release.
+cp ../../../node_modules/liagent/dist/liagent.js ./public/w/liagent.js
+
 cp _headers ./public/_headers
 bun ../../../scripts/build-rgui.ts ./public/r
 rm -rf ./public/rgui
