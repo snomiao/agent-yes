@@ -18,7 +18,6 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
-use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
@@ -367,17 +366,128 @@ enum ClaimOutcome {
 /// only differ in what happens *after* a refusal (bail vs. park and retry).
 fn try_claim_room_at(path: &std::path::Path) -> ClaimOutcome {
     if let Ok(txt) = std::fs::read_to_string(path) {
-        if let Ok(pid) = txt.trim().parse::<i32>() {
-            if pid != std::process::id() as i32 && crate::pid_store::is_process_alive(pid as u32) {
-                return ClaimOutcome::HeldBy(pid);
+        if let Some(holder) = LockHolder::parse(&txt) {
+            if holder.pid != std::process::id() as i32 && holder.is_running() {
+                return ClaimOutcome::HeldBy(holder.pid);
             }
         }
     }
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p).ok();
     }
-    std::fs::write(path, std::process::id().to_string()).ok();
+    std::fs::write(path, LockHolder::me().render()).ok();
     ClaimOutcome::Claimed
+}
+
+/// Who wrote a room lock file. The pid stays alone on the first line (the TS
+/// `ay serve status` reads just that); the lines after it say which process it
+/// was, because a bare pid outlives its meaning when ~/.agent-yes is a volume
+/// that a recreated container mounts again. The new container numbers its
+/// processes from 1, so the old holder's pid is often some unrelated process
+/// there, or a thread of the new host itself, which `kill(pid, 0)` also
+/// accepts. Either way the new host waited on a holder that was long gone.
+#[derive(Debug, PartialEq, Eq)]
+struct LockHolder {
+    pid: i32,
+    /// gethostname(); a container's is its own.
+    host: Option<String>,
+    /// Linux: boot id + start time of the process, which no later process
+    /// with the same pid shares.
+    start: Option<String>,
+}
+
+impl LockHolder {
+    fn me() -> Self {
+        let pid = std::process::id() as i32;
+        LockHolder {
+            pid,
+            host: Some(crate::identity::raw_hostname()).filter(|h| !h.is_empty()),
+            start: process_start(pid),
+        }
+    }
+
+    fn render(&self) -> String {
+        let mut s = self.pid.to_string();
+        if let Some(h) = &self.host {
+            s += &format!("\nhost={h}");
+        }
+        if let Some(t) = &self.start {
+            s += &format!("\nstart={t}");
+        }
+        s + "\n"
+    }
+
+    /// Also reads the old format, a bare pid.
+    fn parse(txt: &str) -> Option<Self> {
+        let mut lines = txt.lines();
+        let pid = lines
+            .next()?
+            .trim()
+            .parse::<i32>()
+            .ok()
+            .filter(|p| *p > 0)?;
+        let mut h = LockHolder {
+            pid,
+            host: None,
+            start: None,
+        };
+        for l in lines {
+            match l.split_once('=') {
+                Some(("host", v)) => h.host = Some(v.to_string()),
+                Some(("start", v)) => h.start = Some(v.to_string()),
+                _ => {}
+            }
+        }
+        Some(h)
+    }
+
+    /// Whether the process that wrote the lock still runs. A lock from another
+    /// host name was written in another container or machine, whose pids mean
+    /// nothing here.
+    fn is_running(&self) -> bool {
+        if self
+            .host
+            .as_ref()
+            .is_some_and(|h| *h != crate::identity::raw_hostname())
+        {
+            return false;
+        }
+        if cfg!(target_os = "linux") {
+            // A pid that is not a process (thread group leader) here, or one
+            // that started at another time, is not the holder.
+            let Some(now) = process_start(self.pid) else {
+                return false;
+            };
+            if self.start.as_ref().is_some_and(|t| *t != now) {
+                return false;
+            }
+        }
+        crate::pid_store::is_process_alive(self.pid as u32)
+    }
+}
+
+/// Linux: "<boot id>:<start time in clock ticks>" for a running process, None
+/// when `pid` is not one (gone, or a thread of some process). Elsewhere None.
+fn process_start(pid: i32) -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let tgid = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Tgid:"))?
+        .trim()
+        .parse::<i32>()
+        .ok()?;
+    if tgid != pid {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Field 22 (starttime); the command name in field 2 may hold spaces, so
+    // count from the closing parenthesis.
+    let start = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?;
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();
+    Some(format!("{}:{start}", boot.trim()))
 }
 
 fn held_by_error(pid: i32, room: &str) -> anyhow::Error {
@@ -456,15 +566,94 @@ async fn claim_room_blocking(room: &str) -> Result<()> {
 mod claim_tests {
     use super::*;
 
+    fn held_pid(p: &std::path::Path) -> i32 {
+        LockHolder::parse(&std::fs::read_to_string(p).unwrap())
+            .unwrap()
+            .pid
+    }
+
+    #[test]
+    fn the_lock_names_its_process_and_reads_the_old_format() {
+        let me = LockHolder::me();
+        assert_eq!(LockHolder::parse(&me.render()), Some(me));
+        assert_eq!(
+            LockHolder::parse("1111\n"),
+            Some(LockHolder {
+                pid: 1111,
+                host: None,
+                start: None
+            })
+        );
+        assert_eq!(LockHolder::parse("not a pid"), None);
+    }
+
+    /// A recreated container that mounts the same ~/.agent-yes: the pid in
+    /// the lock is alive here, but it is not the process that wrote it.
+    #[test]
+    fn a_live_pid_from_another_container_does_not_hold_the_room() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let elsewhere = LockHolder {
+            pid,
+            host: Some("old-container-1111".into()),
+            start: None,
+        };
+        let here = LockHolder {
+            pid,
+            host: Some(crate::identity::raw_hostname()),
+            start: process_start(pid),
+        };
+        let restarted = LockHolder {
+            pid,
+            host: here.host.clone(),
+            start: Some("boot:1".into()),
+        };
+        let results = (
+            elsewhere.is_running(),
+            here.is_running(),
+            restarted.is_running(),
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(results.0, false);
+        assert_eq!(results.1, true);
+        // Start times are only known on Linux.
+        assert_eq!(results.2, !cfg!(target_os = "linux"));
+    }
+
+    /// The case that kept a fresh container's host waiting: the old pid is
+    /// now one of this process's own threads.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_thread_id_is_not_a_holder() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let t = std::thread::spawn(move || {
+            tx.send(unsafe { libc::gettid() }).unwrap();
+            let _ = done_rx.recv();
+        });
+        let tid = rx.recv().unwrap();
+        assert!(crate::pid_store::is_process_alive(tid as u32));
+        let holder = LockHolder {
+            pid: tid,
+            host: None,
+            start: None,
+        };
+        let running = holder.is_running();
+        done_tx.send(()).unwrap();
+        t.join().unwrap();
+        assert!(!running);
+    }
+
     #[test]
     fn claims_a_free_room_and_records_our_pid() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("lock.pid");
         claim_room_at(&p, "r1").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            std::process::id().to_string()
-        );
+        assert_eq!(held_pid(&p), std::process::id() as i32);
     }
 
     #[test]
@@ -474,10 +663,7 @@ mod claim_tests {
         // pid 1 is alive but is not us; use an implausibly high dead pid instead.
         std::fs::write(&p, "4194303").unwrap();
         claim_room_at(&p, "r1").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            std::process::id().to_string()
-        );
+        assert_eq!(held_pid(&p), std::process::id() as i32);
     }
 
     #[test]
@@ -517,10 +703,7 @@ mod claim_tests {
         .await
         .expect("free room must not park")
         .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            std::process::id().to_string()
-        );
+        assert_eq!(held_pid(&p), std::process::id() as i32);
     }
 
     #[tokio::test]
@@ -556,10 +739,7 @@ mod claim_tests {
         .unwrap();
 
         holder.join().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            std::process::id().to_string()
-        );
+        assert_eq!(held_pid(&p), std::process::id() as i32);
     }
 
     #[test]
@@ -615,6 +795,24 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     let link = format_share_link(&room.room, &secret, &room.host);
     eprintln!("[ayrs share] room {} via {}", room.room, room.host);
     println!("{link}");
+    if let Some(line) = super::ice_net::init().await? {
+        eprintln!("[ayrs share] {line}");
+    }
+    // Say once, up front, when only a relay or a published port can reach
+    // this host; otherwise every viewer just times out on ICE with nothing in
+    // this log.
+    tokio::spawn(async {
+        match tokio::task::spawn_blocking(super::nat_probe::probe).await {
+            Ok(Ok(kind)) => {
+                let configured = super::ice_net::is_configured();
+                if let Some(w) = super::nat_probe::startup_warning(&kind, configured) {
+                    eprintln!("[ayrs share] WARNING: {w}");
+                }
+            }
+            Ok(Err(e)) => eprintln!("[ayrs share] NAT check skipped: {e:#}"),
+            Err(_) => {}
+        }
+    });
 
     // The master room never cancels; the dummy sender stays alive for the loop.
     let (_cancel_tx, cancel_rx) = watch::channel(false);
@@ -1116,6 +1314,84 @@ mod dispatch_tests {
         drop(tx);
     }
 
+    /// A viewer candidate that arrives before the viewer's answer is held and
+    /// added once the answer is set, instead of failing the peer ("remote
+    /// description is not set"), which is what the CLI viewer up to 1.302.x
+    /// always sent first.
+    #[tokio::test]
+    async fn a_candidate_before_the_answer_waits_for_it() {
+        let peers = empty_peers();
+        let mailboxes: Mailboxes = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        mailboxes
+            .lock()
+            .await
+            .insert("early".to_string(), tx.clone());
+        let (sig_tx, mut sig_rx) = mpsc::unbounded_channel();
+        spawn_peer_task_with_deadline(
+            "early".to_string(),
+            rx,
+            peers.clone(),
+            mailboxes.clone(),
+            "ab".repeat(32), // a well-formed share secret (synthetic)
+            "token".to_string(),
+            sig_tx,
+            Arc::new(Scope::Full),
+            Duration::from_secs(60),
+        );
+        tx.send(PeerCmd::Start).unwrap();
+        let offer = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(SigOut::Send(text)) = sig_rx.recv().await {
+                    let m: Value = serde_json::from_str(&text).unwrap();
+                    if m["type"] == "offer" {
+                        return m["sdp"].as_str().unwrap().to_string();
+                    }
+                }
+            }
+        })
+        .await
+        .expect("no offer");
+
+        tx.send(PeerCmd::Candidate(Box::new(RTCIceCandidateInit {
+            candidate: "candidate:1 1 udp 2130706431 192.0.2.1 50000 typ host".into(),
+            sdp_mid: Some("0".into()),
+            sdp_mline_index: Some(0),
+            ..Default::default()
+        })))
+        .unwrap();
+
+        let viewer = webrtc::api::APIBuilder::new()
+            .build()
+            .new_peer_connection(RTCConfiguration::default())
+            .await
+            .unwrap();
+        viewer
+            .set_remote_description(RTCSessionDescription::offer(offer).unwrap())
+            .await
+            .unwrap();
+        let answer = viewer.create_answer(None).await.unwrap();
+        tx.send(PeerCmd::Answer(answer.sdp)).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let pc = peers.lock().await.get("early").map(|p| p.pc.clone());
+            let pc = pc.expect("the early candidate killed the peer");
+            if pc.remote_description().await.is_some() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "answer never applied");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            mailboxes.lock().await.contains_key("early"),
+            "the held candidate failed the peer once the answer was set"
+        );
+        viewer.close().await.ok();
+        close_peer(&peers, "early").await;
+    }
+
     /// The control: the deadline is a check, not a kill switch. A peer that
     /// HAS confirmed by the time it fires keeps its task and its mailbox.
     #[tokio::test]
@@ -1129,7 +1405,7 @@ mod dispatch_tests {
             .insert("live".to_string(), tx.clone());
         let (sig_tx, _sig_rx) = mpsc::unbounded_channel();
         let (out_tx, _out_rx) = mpsc::unbounded_channel();
-        let pc = APIBuilder::new()
+        let pc = webrtc::api::APIBuilder::new()
             .build()
             .new_peer_connection(RTCConfiguration::default())
             .await
@@ -1289,6 +1565,12 @@ fn spawn_peer_task_with_deadline(
         let deadline = tokio::time::sleep(setup_deadline);
         tokio::pin!(deadline);
         let mut deadline_armed = true;
+        // Viewer candidates that arrived before its answer. The CLI viewer
+        // (ts/webrtcRemote.ts, up to 1.302.x) sent them first: its
+        // setLocalDescription fires onicecandidate before the answer goes
+        // out. Adding one then fails with "remote description is not set",
+        // which used to kill the peer, so every CLI viewer timed out.
+        let mut early: Vec<RTCIceCandidateInit> = Vec::new();
         loop {
             let cmd = tokio::select! {
                 cmd = rx.recv() => match cmd {
@@ -1339,23 +1621,25 @@ fn spawn_peer_task_with_deadline(
                     match tokio::time::timeout(timeout, on_answer(&peer_id, sdp, &secret, &peers))
                         .await
                     {
+                        Ok(Ok(())) => {
+                            add_candidates(&peers, &peer_id, std::mem::take(&mut early), timeout)
+                                .await
+                        }
                         Ok(r) => r,
                         Err(_) => Err(anyhow!("answer timed out after {PEER_OP_TIMEOUT_MS}ms")),
                     }
                 }
                 PeerCmd::Candidate(init) => {
-                    let pc = {
-                        let map = peers.lock().await;
-                        map.get(&peer_id).map(|p| p.pc.clone())
+                    let pc = peers.lock().await.get(&peer_id).map(|p| p.pc.clone());
+                    let answered = match pc {
+                        Some(pc) => pc.remote_description().await.is_some(),
+                        None => true, // gone: add_candidates skips it
                     };
-                    match pc {
-                        Some(pc) => {
-                            match tokio::time::timeout(timeout, pc.add_ice_candidate(*init)).await {
-                                Ok(r) => r.map_err(|e| anyhow!(e)),
-                                Err(_) => Err(anyhow!("add_ice_candidate timed out")),
-                            }
-                        }
-                        None => Ok(()), // candidate for a peer that already went away
+                    if answered {
+                        add_candidates(&peers, &peer_id, vec![*init], timeout).await
+                    } else {
+                        early.push(*init);
+                        Ok(())
                     }
                 }
             };
@@ -1426,7 +1710,7 @@ async fn start_peer(
     sig_tx: &mpsc::UnboundedSender<SigOut>,
     scope: Arc<Scope>,
 ) -> Result<()> {
-    let api = APIBuilder::new().build();
+    let api = super::ice_net::api().await?;
     // STUN, plus Cloudflare TURN relay when configured — the same servers the
     // offer hands the viewer below, so both ends gather against one set.
     let ice_servers = ice_servers_json().await;
@@ -1639,6 +1923,25 @@ mod ice_tests {
         let v = ice_servers_json().await;
         assert_eq!(v, json!([{ "urls": STUN_URL }]));
     }
+}
+
+/// Adds viewer candidates to a peer; none for a peer that already went away.
+async fn add_candidates(
+    peers: &Peers,
+    peer_id: &str,
+    inits: Vec<RTCIceCandidateInit>,
+    timeout: Duration,
+) -> Result<()> {
+    let Some(pc) = peers.lock().await.get(peer_id).map(|p| p.pc.clone()) else {
+        return Ok(());
+    };
+    for init in inits {
+        match tokio::time::timeout(timeout, pc.add_ice_candidate(init)).await {
+            Ok(r) => r.map_err(|e| anyhow!(e))?,
+            Err(_) => bail!("add_ice_candidate timed out"),
+        }
+    }
+    Ok(())
 }
 
 async fn on_answer(peer_id: &str, sdp: String, secret: &str, peers: &Peers) -> Result<()> {

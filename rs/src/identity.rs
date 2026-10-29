@@ -112,7 +112,7 @@ pub fn local_host() -> String {
 }
 
 #[cfg(unix)]
-fn raw_hostname() -> String {
+pub(crate) fn raw_hostname() -> String {
     let mut buf = [0u8; 256];
     // SAFETY: gethostname writes at most buf.len() bytes into buf.
     let ok = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) == 0 };
@@ -124,7 +124,7 @@ fn raw_hostname() -> String {
 }
 
 #[cfg(not(unix))]
-fn raw_hostname() -> String {
+pub(crate) fn raw_hostname() -> String {
     std::env::var("COMPUTERNAME").unwrap_or_default()
 }
 

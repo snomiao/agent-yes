@@ -153,6 +153,31 @@ export async function daemonShareLink(args: string[] | null): Promise<string | n
   }
 }
 
+// The console link of the room a FOREGROUND `ayrs serve --webrtc` is hosting
+// right now (no daemon manager: a container's CMD, a terminal), or null. ayrs
+// records its pid in ~/.agent-yes/.share-host-<room>.pid while it holds the
+// room (rs/src/serve/share.rs room_lock_path); a dead pid means nobody does.
+// Without this, status fell back to .share-link, which only the TypeScript
+// host writes, and printed an old room the running host had never served.
+export async function foregroundAyrsShareLink(): Promise<string | null> {
+  const { readShareRoom, shareLinkFromRoomUrl } = await import("./share.ts");
+  const { parseWebrtcLink } = await import("./webrtcLink.ts");
+  const { isPidAlive } = await import("./subcommands.ts");
+  const { agentYesHome } = await import("./agentYesHome.ts");
+  const { readFile } = await import("fs/promises");
+  const path = await import("path");
+  const url = await readShareRoom("rust");
+  const room = url && parseWebrtcLink(url)?.room;
+  if (!room) return null;
+  try {
+    const lock = path.join(agentYesHome(), `.share-host-${room}.pid`);
+    const pid = parseInt(await readFile(lock, "utf-8"), 10);
+    return pid > 0 && isPidAlive(pid) ? shareLinkFromRoomUrl(url) : null;
+  } catch {
+    return null; // no lock file, or a legacy unencrypted room
+  }
+}
+
 // ay share status — end-to-end health of each way this machine is shared.
 async function cmdShareStatus(mount: string): Promise<number> {
   const { inspectServeDaemon } = await import("./serve.ts");

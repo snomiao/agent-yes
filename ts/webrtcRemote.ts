@@ -135,11 +135,17 @@ class WebRtcConn {
       this.hostPeer = action.from ?? null;
       const pc = new RTCPeerConnection({ iceServers: action.iceServers || [] });
       this.pc = pc;
+      // Our candidates go out only after the answer: setLocalDescription below
+      // fires onicecandidate before the answer is sent, and a host that gets a
+      // candidate before the answer cannot add it (ayrs up to 1.302.x dropped
+      // the whole peer over it).
+      let held: any[] | null = [];
+      const sendCandidate = (candidate: any) =>
+        this.ws.send(JSON.stringify({ type: "candidate", to: this.hostPeer, candidate }));
       pc.onicecandidate = (e: any) => {
-        if (e.candidate)
-          this.ws.send(
-            JSON.stringify({ type: "candidate", to: this.hostPeer, candidate: e.candidate }),
-          );
+        if (!e.candidate) return;
+        if (held) held.push(e.candidate);
+        else sendCandidate(e.candidate);
       };
       pc.ondatachannel = (e: any) => {
         const dc = e.channel;
@@ -166,6 +172,9 @@ class WebRtcConn {
       this.ws.send(
         JSON.stringify({ type: "answer", to: this.hostPeer, sdp: pc.localDescription.sdp }),
       );
+      const queued = held;
+      held = null;
+      for (const c of queued) sendCandidate(c);
     }
   }
 
