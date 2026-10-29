@@ -6,6 +6,9 @@
   "account_id": "0beef4cd2d2da6befa47d8d149d6e157",
   "main": "worker.ts",
   "compatibility_date": "2025-05-01",
+  // better-auth (auth.ts) imports node:async_hooks and node:crypto; without this
+  // flag the whole Worker would fail to load.
+  "compatibility_flags": ["nodejs_compat"],
   // Sync the canonical UI (lab/ui/*) into ./public before EVERY deploy/dev, so
   // the deployed assets can never drift from source again (the old manual-copy
   // workflow is how agent-yes.com ended up serving a stale console). public/ is
@@ -41,12 +44,15 @@
     "bindings": [
       { "name": "ROOMS", "class_name": "Room" },
       { "name": "EXPOSURES", "class_name": "Exposure" },
+      // The owner's debug chat hub (liagent.ts).
+      { "name": "CHAT", "class_name": "ChatHub" },
     ],
   },
   // SQLite-backed DO classes (required on the free plan, fine on paid).
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Room"] },
     { "tag": "v2", "new_sqlite_classes": ["Exposure"] },
+    { "tag": "v3", "new_sqlite_classes": ["ChatHub"] },
   ],
   // One Worker, two custom domains: the UI on agent-yes.com, signaling on
   // s.agent-yes.com. Custom domains auto-provision DNS in the zone.
@@ -61,4 +67,18 @@
     { "pattern": "*.agent-yes.com/*", "zone_name": "agent-yes.com" },
   ],
   "observability": { "enabled": true },
+  // Sign-in (auth.ts): GitHub via better-auth on D1. The schema lives in
+  // ./migrations; apply it before the first deploy that carries this binding:
+  //   wrangler d1 migrations apply agent-yes-auth --remote
+  // Secrets (wrangler secret put): BETTER_AUTH_SECRET, GITHUB_CLIENT_ID,
+  // GITHUB_CLIENT_SECRET. Without all three the auth routes answer 503 and the
+  // console's debug mode offers no sign-in.
+  "d1_databases": [
+    {
+      "binding": "AUTH_DB",
+      "database_name": "agent-yes-auth",
+      "database_id": "51cfa97c-8728-4705-baf0-f3f38f8dba03",
+      "migrations_dir": "migrations",
+    },
+  ],
 }

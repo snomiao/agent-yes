@@ -17,13 +17,16 @@
 // HONEST server fails a cross-generation join closed; that pin is a UX/migration
 // aid only — the real confidentiality/integrity guarantees are client-enforced.
 
-export interface Env {
+export interface Env extends ChatEnv {
   ROOMS: DurableObjectNamespace;
   EXPOSURES: DurableObjectNamespace;
   ASSETS: Fetcher;
 }
 
 export { Exposure } from "./exposure";
+export { ChatHub } from "./liagent";
+import { AUTH_PATH, authOrigin, handleAuth } from "./auth";
+import { CHAT_PATH, handleChat, type ChatEnv } from "./liagent";
 import {
   onClose,
   onFrame,
@@ -190,6 +193,17 @@ export default {
     if (host === LAB_HOST) return labFetch(url, req, env);
 
     if (url.pathname === "/health") return new Response("ok\n");
+
+    // Sign-in (auth.ts) and the owner's debug chat (liagent.ts). Apex only: the
+    // session cookie must not reach the signaling or exposure hosts.
+    const underAuth = url.pathname === AUTH_PATH || url.pathname.startsWith(`${AUTH_PATH}/`);
+    const underChat = url.pathname === CHAT_PATH || url.pathname.startsWith(`${CHAT_PATH}/`);
+    if (underAuth || underChat) {
+      const origin = authOrigin(env, host);
+      if (!origin) return new Response("not found\n", { status: 404 });
+      if (underAuth) return handleAuth(req, env, origin);
+      return (await handleChat(req, env, origin)) ?? new Response("not found\n", { status: 404 });
+    }
 
     // Daemon leg of a port exposure: `ay expose` dials this on the apex (the id
     // rides the path). Reachable ONLY here — the DO trusts the /_daemon path,
