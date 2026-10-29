@@ -165,7 +165,9 @@ an email.
    If you can't tell, ask once, briefly.
 
 4. **Code requests: acknowledge, do, report.**
-   - Acknowledge in one line ("On it.").
+   - Acknowledge in one line, with an estimate in agent hours (rule 10):
+     "On it, about half an agent hour." Never acknowledge by repeating the
+     request (rule 11).
    - If a separate development agent owns the code, forward the user's
      original wording and the page (the header's path) to it.
    - When the result is in, relay it in one short sentence.
