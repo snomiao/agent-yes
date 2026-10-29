@@ -1311,3 +1311,44 @@ describe("ChatHub eval guard", () => {
     expect(p.last("eval")).toBeUndefined();
   });
 });
+
+describe("ChatHub logs", () => {
+  const capture = async (fn: () => Promise<void>) => {
+    const lines: string[] = [];
+    const orig = console.log;
+    console.log = (x: unknown) => void lines.push(String(x));
+    try {
+      await fn();
+    } finally {
+      console.log = orig;
+    }
+    return lines.join("\n");
+  };
+
+  it("keep no message content unless logContent is on", async () => {
+    const plain = await capture(async () => {
+      const s = setup();
+      const p = s.page();
+      await s.msg(p, { type: "chat", id: "m1", text: "a private note" });
+    });
+    expect(plain).toContain('"len":14');
+    expect(plain).not.toContain("private note");
+    const sockets: FakeSocket[] = [];
+    const hub = new ChatHub(
+      { acceptWebSocket: () => {}, getWebSockets: () => sockets, storage: fakeStorage() },
+      undefined,
+      Date.now,
+      { logContent: true },
+    );
+    const p = new FakeSocket();
+    sockets.push(p);
+    await hub.connectPage(p, new URL("https://example.com/api/chat"));
+    const verbose = await capture(async () => {
+      await hub.webSocketMessage(
+        p,
+        JSON.stringify({ type: "chat", id: "m2", text: "a private note" }),
+      );
+    });
+    expect(verbose).toContain("a private note");
+  });
+});

@@ -120,6 +120,12 @@ export type HubOptions = {
   friendChatMax?: number;
   /** That window. Default 10 minutes. */
   friendWindowMs?: number;
+  /**
+   * Put the start of each message (80 chars) and of eval code (200) in the
+   * Worker logs. Default false: logs keep only lengths, since they hold what
+   * the user and their friends wrote.
+   */
+  logContent?: boolean;
 };
 
 export type Socket = {
@@ -217,7 +223,6 @@ const hex = (b: ArrayBuffer | Uint8Array) =>
   Array.from(new Uint8Array(b), (x) => x.toString(16).padStart(2, "0")).join("");
 export const hashToken = async (token: string) =>
   hex(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(token)));
-const head = (text: string) => text.slice(0, 80);
 const log = (o: Record<string, unknown>) => console.log(JSON.stringify(o));
 /** Whose a socket is: a page's thread, or the audience a controller was paired for. */
 const audience = (a: Att) => (a.role === "page" ? a.thread : (a.forUser ?? OWNER_THREAD));
@@ -247,7 +252,13 @@ export class ChatHub {
     eval: false,
     friendChatMax: 30,
     friendWindowMs: 10 * 60_000,
+    logContent: false,
   };
+
+  /** `{head}` for a log line, only when the hub logs content. */
+  private head(text: string, n = 80): { head?: string } {
+    return this.opts.logContent ? { head: text.slice(0, n) } : {};
+  }
 
   constructor(
     private ctx: DOState,
@@ -706,7 +717,7 @@ export class ChatHub {
         page: page.label,
         thread: page.thread,
         len: m.text.length,
-        head: head(m.text),
+        ...this.head(m.text),
       });
       if (page.thread !== OWNER_THREAD) return this.friendChat(ws, page, m.id, m.text);
       return this.post({
@@ -1044,7 +1055,7 @@ export class ChatHub {
           agent: c.label,
           thread: said.thread,
           len: text.length,
-          head: head(text),
+          ...this.head(text),
         });
         // Live, the owner's thread hears it only on the grant's pages.
         await this.post(said, said.thread === OWNER_THREAD ? c.pages : undefined);
@@ -1073,7 +1084,7 @@ export class ChatHub {
       for: c.forUser,
       len: m.value.code.length,
       target: m.value.target,
-      head: m.value.code.slice(0, 200),
+      ...this.head(m.value.code, 200),
       delivered: labels.length,
     });
     send(ws, { type: "sent", id, delivered: labels.length, labels });

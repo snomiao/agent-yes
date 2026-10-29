@@ -411,6 +411,9 @@ draft is sent is in [`src/input.ts`](../src/input.ts):
   a constructed stylesheet (`adoptedStyleSheets`), which `style-src` does not
   block, so it needs no `'unsafe-inline'`. Only browsers without constructed
   stylesheets fall back to a `<style>` element.
+- **Logs:** the hub logs one JSON line per event (pairings, messages,
+  evals) with lengths and labels, but no message text or code, unless you
+  make it with `chatHub({ logContent: true })`.
 - **Prompt injection:** with `liagent listen --to <agent>`, every message is
   typed into a coding agent, and friends' messages too: any signed-in user
   can put text in front of the user's agent. Nothing reaches a shell
