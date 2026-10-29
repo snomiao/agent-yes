@@ -27,8 +27,14 @@ export const MAX_RESULT = 4000;
 export const MAX_LABEL = 300;
 /** How long the owner has to answer a pairing prompt. */
 export const PENDING_MS = 2 * 60_000;
-/** How long an "Allow for 1 hour" (eval) approval lasts. */
+/** How long a friend's preview approval (eval on their pages, one socket) lasts. */
 export const APPROVAL_MS = 60 * 60_000;
+/**
+ * How long the user's eval approval lasts — and its resumable grant token: the
+ * agent reconnects with it (x-liagent-token) without a new prompt until then,
+ * or until End revokes it.
+ */
+export const EVAL_GRANT_MS = 8 * 60 * 60_000;
 /** How long "Allow chat" lasts — and its resumable grant token. */
 export const CHAT_MS = 30 * 24 * 60 * 60_000;
 /** Largest chat message (owner's or agent's), in characters. */
@@ -52,7 +58,7 @@ export const isPageId = (v: unknown): v is string =>
 export const PAGE_DEBOUNCE_MS = 300;
 
 /**
- * What an approval lets an agent do: "eval" (Allow for 1 hour) runs code on
+ * What an approval lets an agent do: "eval" (8 hours, resumable) runs code on
  * the owner's pages and chats; "chat" (Allow chat for 30 days) only chats.
  */
 export type Scope = "eval" | "chat";

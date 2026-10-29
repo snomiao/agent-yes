@@ -21,7 +21,7 @@
 //     whole box is faint until touched or focused.
 //   - A row of icons at the top: a spinner while the agent is working, one
 //     icon per eval session, and a pairing request as one compact line
-//     (code · 1h · chat · ✕).
+//     (code · what it asks for · Allow · ✕).
 //   - Sending: see src/input.ts (debounce, Enter, IME, Android, dictation).
 //   - Agent replies that arrive live are read aloud with speechSynthesis, in
 //     a language picked from their script; typing cancels it, the menu turns
@@ -753,15 +753,16 @@ export class ChatBox extends Base {
    * A pairing request, compact: its code, what it asks for, Allow and ✕ —
    * and, for code on a user with more than one page open, a checkbox per
    * page (this one ticked) plus "all pages". Chat is always every page. An agent that did not say what
-   * it wants (an older client) gets the two old answers, 1h and chat.
+   * it wants (an older client) gets the two old answers: code (8h) and chat.
    */
   private renderAsk(p: PairInfo) {
     const ask = document.createElement("span");
     ask.className = "ask";
     ask.setAttribute("role", "alertdialog");
-    const what =
-      this._friend || p.scope === "eval"
-        ? "to run code on the chosen pages and chat, for 1 hour"
+    const what = this._friend
+      ? "to run code on the chosen pages, for 1 hour"
+      : p.scope === "eval"
+        ? "to run code on the chosen pages and chat, for 8 hours"
         : p.scope === "chat"
           ? "to chat with you, for 30 days"
           : "to run code on your pages, or to chat";
@@ -775,7 +776,11 @@ export class ChatBox extends Base {
     if (p.scope) {
       const tag = document.createElement("span");
       tag.className = "tag";
-      tag.textContent = this._friend || p.scope === "eval" ? "code · 1h" : "chat · 30d";
+      tag.textContent = this._friend
+        ? "code · 1h"
+        : p.scope === "eval"
+          ? "code · 8h"
+          : "chat · 30d";
       ask.append(tag);
     }
     if (!this.picked.has(p.pair)) this.picked.set(p.pair, new Set(this._self ? [this._self] : []));
@@ -800,7 +805,7 @@ export class ChatBox extends Base {
         this.onAnswer?.("allow", p, { pages: pages() }),
       );
     else {
-      btn("y", "1h", "Allow code and chat for 1 hour", () =>
+      btn("y", "8h", "Allow code and chat for 8 hours", () =>
         this.onAnswer?.("allow", p, { pages: pages() }),
       );
       btn("c", "chat", "Chat only, for 30 days", () =>

@@ -32,14 +32,17 @@
 // grants 30 days of chat, always on all of the user's pages (it must
 // survive app switches), with a random grant token the agent resumes with
 // (header x-liagent-token); only its SHA-256 is stored. "eval" (only on a
-// hub made with {eval: true}) grants an hour of eval and chat on that
-// socket, for the pages the user ticks (by id: the page they answer on by
+// hub made with {eval: true}) grants 8 hours of eval and chat, with a
+// resumable token too, for the pages the user ticks (by id: the page they answer on by
 // default) or "all" (including pages that connect later); eval, busy beats
 // and live replies reach only those pages, while history stays shared.
 // Allowing it again from another page adds that page. A tab keeps its page
-// id across reconnects (?page=), so an app switch keeps the grant; only
-// when every page of it has stayed closed for PAGES_GONE_MS is the agent
-// told to pair again (close 4409) — checked at the next event, no timers.
+// id across reconnects (?page=), so an app switch keeps the grant. When
+// every page of a grant has stayed closed for PAGES_GONE_MS, the agent's
+// socket is closed (4409, checked at the next event, no timers), but the
+// stored grant stays: it resumes with its token once a page is back. A
+// stored eval grant that no socket holds is listed to the user's pages as a
+// session with code "idle", so End still reaches it.
 // An agent that names no scope (an older client) gets what the owner's answer
 // says: {scope:"chat"} is the 30-day chat grant, anything else the hour.
 // End revokes a grant, on every socket using it.
@@ -75,6 +78,7 @@
 import {
   APPROVAL_MS,
   CHAT_HISTORY,
+  EVAL_GRANT_MS,
   CHAT_MS,
   type ChatMessage,
   type HubState,
@@ -110,7 +114,7 @@ export type FriendRecord = {
 };
 
 export type HubOptions = {
-  /** Let "Allow for 1 hour" run code on the approving pages. Default false. */
+  /** Let an eval approval run code on the approved pages (8 hours). Default false. */
   eval?: boolean;
   /** Messages a friend may send per window. Default 30. */
   friendChatMax?: number;
@@ -167,7 +171,15 @@ type ControllerAtt = {
   /** When the last page of its grant closed (pages it may reopen with the same id). */
   goneSince?: number;
 } & PairInfo;
-type Grant = { label: string; until: number; pages?: string[] | "all" };
+/**
+ * A stored grant (`grant:<sha256 of its token>`). `scope` absent = "chat"
+ * (older grants). `pages`: the page ids an eval grant covers. `at`: when it
+ * was allowed.
+ */
+type Grant = { label: string; until: number; pages?: string[] | "all"; scope?: Scope; at?: number };
+/** A sleeping eval grant's pair id in the pages' state: "g:" + the start of its hash. */
+const DORMANT = "g:";
+const dormantPair = (hash: string) => `${DORMANT}${hash.slice(0, 40)}`;
 type Rate = { start: number; count: number };
 type Att = PageAtt | ControllerAtt;
 declare const WebSocketPair: { new (): { 0: Socket; 1: Socket } };
@@ -231,6 +243,35 @@ export class ChatHub {
     this.opts = { ...this.opts, ...stripUndefined(opts) };
   }
 
+  /**
+   * Every stored grant by hash: read once per instance (an evicted hub reads
+   * it again), then kept in step with each write. Only the listing of
+   * sleeping eval grants uses it; a resume always asks storage itself.
+   */
+  private grants?: Map<string, Grant>;
+  private loadingGrants?: Promise<void>;
+
+  private loadGrants(): Promise<void> {
+    if (this.grants) return Promise.resolve();
+    this.loadingGrants ??= this.ctx.storage.list<Grant>({ prefix: "grant:" }).then((m) => {
+      this.grants = new Map([...m].map(([k, g]) => [k.slice("grant:".length), g]));
+      this.loadingGrants = undefined;
+    });
+    return this.loadingGrants;
+  }
+
+  private async putGrant(hash: string, g: Grant) {
+    await this.loadGrants();
+    await this.ctx.storage.put(`grant:${hash}`, g);
+    this.grants?.set(hash, g);
+  }
+
+  private async dropGrant(hash: string) {
+    await this.loadGrants();
+    await this.ctx.storage.delete(`grant:${hash}`);
+    this.grants?.delete(hash);
+  }
+
   /** Open sockets of one role, optionally leaving one out (the one closing). */
   private sockets<R extends Att["role"]>(role: R, except?: Socket) {
     const out: { ws: Socket; a: Extract<Att, { role: R }> }[] = [];
@@ -262,12 +303,27 @@ export class ChatHub {
     const t = this.now();
     let pending: PairInfo | null = null;
     const sessions: PairInfo[] = [];
+    const held = new Set<string>();
     for (const { a } of this.sockets("controller", except)) {
+      if (a.grant) held.add(a.grant);
       if (audience(a) !== who) continue;
       if (a.until) {
         if (a.until > t) sessions.push(info(a));
       } else if (t - a.at < PENDING_MS) pending = info(a);
     }
+    // The user's eval grants that no socket holds now: asleep, but End reaches them.
+    if (who === OWNER_THREAD)
+      for (const [hash, g] of this.grants ?? [])
+        if (g.scope === "eval" && g.until > t && !held.has(hash))
+          sessions.push({
+            pair: dormantPair(hash),
+            code: "idle",
+            label: g.label,
+            at: g.at ?? 0,
+            until: g.until,
+            scope: "eval",
+            pages: g.pages ?? "all",
+          });
     const pages: PageInfo[] = this.pages(who, except).map(({ a }) => ({
       id: a.id,
       label: a.label,
@@ -450,6 +506,9 @@ export class ChatHub {
         thread: OWNER_THREAD,
       } satisfies PageAtt);
     const a = att(ws) as PageAtt;
+    // First page since the hub woke: list the sleeping eval grants too, once loaded.
+    if (a.thread === OWNER_THREAD && !this.grants)
+      void this.loadGrants().then(() => this.grants?.size && this.broadcast());
     void this.sweep();
     // Everyone else sees the new page in their list.
     this.broadcast(undefined, ws);
@@ -520,7 +579,7 @@ export class ChatHub {
     const hash = await hashToken(token.slice(0, 256));
     const g = await this.ctx.storage.get<Grant>(`grant:${hash}`);
     if (g && g.until > this.now()) return { hash, g };
-    if (g) await this.ctx.storage.delete(`grant:${hash}`);
+    if (g) await this.dropGrant(hash);
     return null;
   }
 
@@ -557,18 +616,14 @@ export class ChatHub {
   private async resume(ws: Socket, url: URL, token: string) {
     const live = await this.liveGrant(token);
     if (!live) {
-      send(ws, { type: "error", error: "chat grant is not valid (expired or ended)" });
+      send(ws, { type: "error", error: "grant is not valid (expired or ended)" });
       return close(ws, 4498, "grant invalid");
     }
     const { hash, g } = live;
-    if (!this.anyCovered(OWNER_THREAD, g.pages)) {
-      await this.ctx.storage.delete(`grant:${hash}`);
-      send(ws, {
-        type: "error",
-        error: "every page this agent was allowed on has closed: pair again",
-      });
-      return close(ws, 4409, "pages gone");
-    }
+    // Its scope and pages again, with no prompt, even with no page open. An
+    // eval grant on a hub that no longer allows eval comes back as chat.
+    const scope: Scope = g.scope === "eval" && this.opts.eval ? "eval" : "chat";
+    const pages = scope === "eval" ? (g.pages ?? "all") : "all";
     const a: ControllerAtt = {
       role: "controller",
       pair: crypto.randomUUID(),
@@ -576,14 +631,14 @@ export class ChatHub {
       label: cleanLabel(url.searchParams.get("label"), 80) || g.label,
       at: this.now(),
       until: g.until,
-      scope: "chat",
+      scope,
       grant: hash,
-      pages: g.pages ?? "all",
+      pages,
     };
     ws.serializeAttachment(a);
-    send(ws, { type: "approved", until: g.until, scope: "chat", pages: a.pages, resumed: true });
+    send(ws, { type: "approved", until: g.until, scope, pages, resumed: true });
     send(ws, { type: "history", messages: await this.history() });
-    log({ msg: "chat.resume", pair: a.pair, label: a.label });
+    log({ msg: "chat.resume", pair: a.pair, label: a.label, scope });
     this.broadcast();
   }
 
@@ -623,6 +678,12 @@ export class ChatHub {
       log({ msg: "chat.end-page", id: m.id, label: target.a.label });
       close(target.ws, 4410, "page ended");
       return this.pageClosed(target.ws, target.a);
+    }
+    // A sleeping eval grant (listed to the user's pages only): End it, or add a page.
+    if ((m.type === "revoke" || m.type === "allow") && m.pair.startsWith(DORMANT)) {
+      if (page.thread !== OWNER_THREAD)
+        return send(ws, this.state(page.thread, undefined, page.id));
+      return this.dormant(ws, page, m);
     }
     // Only a pairing made for this page's own audience can be answered or sent results.
     const c = this.controller(m.type === "result" ? m.to : m.pair);
@@ -714,7 +775,7 @@ export class ChatHub {
       }
     if (a.grant) {
       const g = await this.ctx.storage.get<Grant>(`grant:${a.grant}`);
-      if (g) await this.ctx.storage.put(`grant:${a.grant}`, { ...g, pages } satisfies Grant);
+      if (g) await this.putGrant(a.grant, { ...g, pages } satisfies Grant);
     }
     log({ msg: "chat.add-pages", pair: a.pair, pages });
     this.broadcast();
@@ -744,9 +805,8 @@ export class ChatHub {
    * a page of theirs is back, and after PAGES_GONE_MS tell the agent to pair
    * again (4409) and drop the grant. Run on every event (no timers).
    */
-  private sweep(except?: Socket): void | Promise<void> {
+  private sweep(except?: Socket): void {
     const t = this.now();
-    const dropped: string[] = [];
     for (const c of this.sockets("controller", except)) {
       const { pages } = c.a;
       if (!c.a.until || c.a.until <= t || pages === undefined || pages === "all") continue;
@@ -762,31 +822,81 @@ export class ChatHub {
       if (t - c.a.goneSince < PAGES_GONE_MS) continue;
       send(c.ws, {
         type: "error",
-        error: "every page this agent was allowed on has closed: pair again",
+        error: c.a.grant
+          ? "the pages this agent was allowed on are gone: this socket closes, but the grant stays; reconnect with its token when a page is back"
+          : "the pages this agent was allowed on are gone: pair again",
       });
       close(c.ws, 4409, "pages gone");
-      if (c.a.grant) dropped.push(c.a.grant);
     }
-    if (dropped.length)
-      return Promise.all(dropped.map((g) => this.ctx.storage.delete(`grant:${g}`))).then(
-        () => undefined,
-      );
+  }
+
+  /** End (revoke) a sleeping eval grant, or add the answering page to it. */
+  private async dormant(
+    ws: Socket,
+    page: PageAtt,
+    m: { type: string; pair: string; pages?: string[] | "all" },
+  ) {
+    await this.loadGrants();
+    const prefix = m.pair.slice(DORMANT.length);
+    const found =
+      prefix.length === 40 ? [...(this.grants ?? [])].find(([h]) => h.startsWith(prefix)) : null;
+    if (!found || found[1].scope !== "eval")
+      return send(ws, this.state(page.thread, undefined, page.id));
+    const [hash, g] = found;
+    if (m.type === "revoke") {
+      await this.dropGrant(hash);
+      // Nothing should hold it (it was listed as asleep), but close any that does.
+      for (const c of this.sockets("controller"))
+        if (c.a.grant === hash) {
+          send(c.ws, { type: "revoked" });
+          close(c.ws, 4401, "revoke");
+        }
+      log({ msg: "chat.revoke", grant: "idle", label: g.label });
+      return this.broadcast();
+    }
+    const more = this.choosePages(page, m.pages);
+    const cur = g.pages ?? "all";
+    const pages: string[] | "all" =
+      more === "all" || cur === "all" ? "all" : [...new Set([...cur, ...more])];
+    await this.putGrant(hash, { ...g, pages });
+    log({ msg: "chat.add-pages", grant: "idle", pages });
+    this.broadcast();
   }
 
   /**
-   * "Allow for 1 hour", for this socket only: eval and chat on an eval hub
-   * (eval only, for a friend's pairing); chat alone on a hub without eval.
+   * Allow for code. The user's: eval and chat for EVAL_GRANT_MS, with a grant
+   * token the agent resumes with (pages and all). A friend's preview: eval
+   * only, for APPROVAL_MS, on this socket only — no token. On a hub without
+   * eval, an older agent's "8h" answer is an hour of chat on this socket.
    */
-  private allowHour(ws: Socket, a: ControllerAtt, pages: string[] | "all") {
-    const until = this.now() + APPROVAL_MS;
-    const scope = this.opts.eval ? "eval" : "chat";
-    ws.serializeAttachment({ ...a, until, scope, pages } satisfies ControllerAtt);
-    send(ws, { type: "approved", until, scope, pages, for: a.forEmail });
-    log({ msg: "chat.allow", pair: a.pair, label: a.label, until, scope, for: a.forUser });
+  private async allowHour(ws: Socket, a: ControllerAtt, pages: string[] | "all") {
+    const t = this.now();
+    if (a.forUser || !this.opts.eval) {
+      const until = t + APPROVAL_MS;
+      const scope: Scope = this.opts.eval ? "eval" : "chat";
+      ws.serializeAttachment({ ...a, until, scope, pages } satisfies ControllerAtt);
+      send(ws, { type: "approved", until, scope, pages, for: a.forEmail });
+      log({ msg: "chat.allow", pair: a.pair, label: a.label, until, scope, for: a.forUser });
+      this.broadcast();
+      // A pairing for a friend is eval only: it is handed no chat.
+      if (a.forUser) return;
+      return send(ws, { type: "history", messages: await this.history() });
+    }
+    const until = t + EVAL_GRANT_MS;
+    const token = hex(crypto.getRandomValues(new Uint8Array(32)));
+    const grant = await hashToken(token);
+    await this.putGrant(grant, {
+      label: a.label,
+      until,
+      scope: "eval",
+      pages,
+      at: t,
+    } satisfies Grant);
+    ws.serializeAttachment({ ...a, until, scope: "eval", pages, grant } satisfies ControllerAtt);
+    send(ws, { type: "approved", until, scope: "eval", pages, token });
+    log({ msg: "chat.allow", pair: a.pair, label: a.label, until, scope: "eval" });
     this.broadcast();
-    // A pairing for a friend is eval only: it is handed no chat.
-    if (a.forUser) return;
-    return this.history().then((messages) => send(ws, { type: "history", messages }));
+    send(ws, { type: "history", messages: await this.history() });
   }
 
   /** "Allow chat for 30 days": chat only, with a grant token the agent can resume with. */
@@ -794,7 +904,13 @@ export class ChatHub {
     const until = this.now() + CHAT_MS;
     const token = hex(crypto.getRandomValues(new Uint8Array(32)));
     const grant = await hashToken(token);
-    await this.ctx.storage.put(`grant:${grant}`, { label: a.label, until, pages } satisfies Grant);
+    await this.putGrant(grant, {
+      label: a.label,
+      until,
+      pages,
+      scope: "chat",
+      at: this.now(),
+    } satisfies Grant);
     ws.serializeAttachment({ ...a, until, scope: "chat", grant, pages } satisfies ControllerAtt);
     send(ws, { type: "approved", until, scope: "chat", pages, token });
     log({ msg: "chat.allow", pair: a.pair, label: a.label, until, scope: "chat" });
@@ -812,8 +928,8 @@ export class ChatHub {
       close(c.ws, kind === "deny" ? 4403 : 4401, kind);
     }
     log({ msg: `chat.${kind}`, pair: a.pair, label: a.label });
-    this.broadcast(ws);
-    if (a.grant) return this.ctx.storage.delete(`grant:${a.grant}`).then(() => undefined);
+    if (!a.grant) return this.broadcast(ws);
+    return this.dropGrant(a.grant).then(() => this.broadcast(ws));
   }
 
   /** Where an agent's `say` goes: the owner's thread, or a friend's by user id or email. */

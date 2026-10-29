@@ -28,14 +28,30 @@ Every command takes the hub URL as an optional first argument instead of
 An agent can do nothing until the user allows it **in the box**. You ask for
 one of two scopes:
 
-| You run                                       | You ask for                               | Lasts                                                                                                     |
-| --------------------------------------------- | ----------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `liagent pair` (and `listen`, the first time) | **chat**: hear messages, reply, show busy | 30 days. A token is saved in `~/.config/liagent/grants.json`, and later commands reuse it without asking. |
-| `liagent eval …`                              | **eval**: run code on pages, plus chat    | 1 hour, for that one command                                                                              |
+| You run                                                     | You ask for                               | Lasts                                |
+| ----------------------------------------------------------- | ----------------------------------------- | ------------------------------------ |
+| `liagent pair` (and `listen`, `say`… the first time)        | **chat**: hear messages, reply, show busy | 30 days, on all of the user's pages  |
+| `liagent pair --eval` (or `liagent eval …`, the first time) | **eval**: run code on pages, plus chat    | 8 hours, on the pages the user ticks |
+
+Either way the grant's token is saved in `~/.config/liagent/grants.json`,
+one per hub and scope, and later commands resume it without asking.
 
 The command prints a 4-character code. Tell the user it in words they can
 match. The box shows one compact line: the code, what you asked for
-(`chat · 30d` or `code · 1h`), **Allow** and **✕**.
+(`chat · 30d` or `code · 8h`), **Allow** and **✕**.
+
+**Pairing prompts the user, so ration it.** The CLI already does:
+
+- it resumes a saved grant whenever it has one;
+- it pairs at most once per process, and never from a reconnect loop;
+- if the hub rejects a saved token, it forgets it and pairs once; if that
+  fails too, it stops (`listen` stays idle rather than asking again);
+- a pairing that failed (denied, expired, another request waiting, no page
+  open, no answer) is never retried.
+
+Don't work around this by restarting commands in a loop. Use `--no-pair` on
+any command that must never prompt, for example in a supervisor or a
+scheduled job: it only resumes a saved grant, and fails otherwise.
 
 What a grant covers:
 
@@ -50,8 +66,10 @@ What a grant covers:
   page, that page is added.
 - **Closed pages:** a tab keeps its page id across reconnects, so an app
   switch or a reload keeps an eval grant. If every page of the grant stays
-  closed for 5 minutes, you are told to pair again: `listen` does so by
-  itself (tell the user the new code), and `eval` runs again from scratch.
+  closed for 5 minutes, your socket is closed, but the grant stays: the
+  next command resumes it once a page is back. While no command of yours
+  holds an eval grant, the box lists it as "idle", so the user can still
+  end it.
 - **End:** the user can end your session from the box's menu. `listen` then
   exits and the token is forgotten. Do not pair again unless they ask.
 - **One request at a time:** a pairing request waits at most 2 minutes.
@@ -118,7 +136,8 @@ status is "active". A single `liagent busy` is one 12-second beat.
 ## Eval (opt-in): run code on the user's pages
 
 This works only on a hub built with eval enabled, and only on the pages the
-user ticks for that command:
+user ticked when allowing it. The first `eval` asks the user (8 hours);
+later ones resume that grant without asking:
 
 ```bash
 liagent eval 'document.title'
@@ -210,6 +229,10 @@ an email.
     want the bigger button on every page?"), never their literal words.
     Repetition is noise, and with read-aloud on, the microphone picks it up
     as an echo.
+12. **Calibrate your estimates.** Keep a running record of each estimate and
+    the actual time it took, in your own notes. Scale new estimates by the
+    observed ratio: if things have taken 1.5× your estimates, say "about 3
+    agent hours" for what looks like 2.
 
 ### Example: site conventions
 

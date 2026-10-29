@@ -2,11 +2,12 @@
 /**
  * liagent — the agent's side of the user ⇄ agent chat (src/hub.ts).
  *
- *   liagent pair   [hub] [--label "…"]
- *       Ask the user to let this agent chat: prints a short code, which the
- *       box shows too. The user allows it for some of their open pages (the
- *       one they answer on, by default) or all of them; that grant lasts 30
- *       days and is saved, so the commands below reconnect without asking.
+ *   liagent pair   [hub] [--eval] [--label "…"]
+ *       Ask the user to approve this agent: prints a short code, which the
+ *       box shows too. Chat (the default) lasts 30 days on all of the user's
+ *       pages; --eval asks to run code (and chat) for 8 hours on the pages
+ *       the user ticks. Either way the grant token is saved, so later
+ *       commands resume it without asking.
  *
  *   liagent listen [hub] [--to <agent>] [--out <file>] [--label "…"]
  *       Hold the chat. Each new message from the user (or a friend) is one
@@ -15,9 +16,9 @@
  *       the user's pages navigates (all also appended to --out). With --to,
  *       each message is also delivered into that agent-yes agent with
  *       `ay send`, with the reply command in it, and while the agent works
- *       (its `ay ls` status is "active") the box shows a spinner. Pairs first
- *       if there is no grant, and pairs again if every page of the grant has
- *       closed. Reconnects on close, backing off from 1 s to a minute.
+ *       (its `ay ls` status is "active") the box shows a spinner. It resumes
+ *       the saved grant and reconnects on network drops (backing off from 1 s
+ *       to a minute) without ever asking the user again; see "Pairing".
  *
  *   liagent say    [hub] "text" | -   [--to <email|user id>]
  *       Reply in the box (the user's thread, or a friend's), then exit.
@@ -28,14 +29,22 @@
  *       until your next reply in that thread, and then exits (30 min at most).
  *
  *   liagent eval   [hub] [--target <text>] '<code>' | -
- *       Run code on the user's open pages (a hub with eval only): asks for
- *       an hour of eval for this command — the user allows it on the pages
- *       it may touch — and prints each page's result.
+ *       Run code on the pages the user allowed (a hub with eval only),
+ *       resuming the saved eval grant, and print each page's result.
+ *
+ * Pairing prompts the user, so it is rationed:
+ *   - A command resumes the saved grant for its scope (x-liagent-token).
+ *   - It pairs at most once per process, and never from a reconnect loop.
+ *   - A saved grant the hub rejects (4498) is forgotten, and the command
+ *     pairs once; if that fails too, it stops (listen stays idle).
+ *   - A pairing that fails is never retried: denied, expired (4408),
+ *     another request waiting (4429), no page open (4404), or no answer.
+ *   - --no-pair (any command): only ever resume; never ask.
  *
  * [hub] is the hub's page-socket URL, e.g. https://dev.example.com/api/chat
  * (its agent socket is <hub>/control). Default: $LIAGENT_HUB. Grants are kept
  * in ~/.config/liagent/grants.json (mode 600; $LIAGENT_GRANTS overrides), one
- * per hub. "End" in the box revokes a grant; the CLI then forgets it.
+ * per hub and scope. "End" in the box revokes a grant; the CLI then forgets it.
  */
 import { appendFileSync, chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, hostname } from "node:os";
@@ -82,7 +91,10 @@ function takeHub(): string {
 
 // ---- grants -----------------------------------------------------------------
 
+type Scope = "chat" | "eval";
 type Grants = Record<string, { token: string; until: string }>;
+/** One grant per hub and scope: chat keys are the hub URL alone (as before), eval ones "<hub> eval". */
+const grantKey = (hub: string, scope: Scope) => (scope === "chat" ? hub : `${hub} eval`);
 const readGrants = (): Grants => {
   try {
     return JSON.parse(readFileSync(GRANTS, "utf8")) as Grants;
@@ -90,23 +102,24 @@ const readGrants = (): Grants => {
     return {};
   }
 };
-const loadToken = (hub: string) => readGrants()[hub]?.token;
-const saveToken = (hub: string, token: string, until: number) => {
+const loadToken = (hub: string, scope: Scope) => readGrants()[grantKey(hub, scope)]?.token;
+const saveToken = (hub: string, scope: Scope, token: string, until: number) => {
   mkdirSync(dirname(GRANTS), { recursive: true });
   writeFileSync(
     GRANTS,
     JSON.stringify(
-      { ...readGrants(), [hub]: { token, until: new Date(until).toISOString() } },
+      { ...readGrants(), [grantKey(hub, scope)]: { token, until: new Date(until).toISOString() } },
       null,
       2,
     ),
   );
   chmodSync(GRANTS, 0o600);
 };
-const forgetToken = (hub: string) => {
+const forgetToken = (hub: string, scope: Scope) => {
   const g = readGrants();
-  if (!(hub in g)) return;
-  delete g[hub];
+  const k = grantKey(hub, scope);
+  if (!(k in g)) return;
+  delete g[k];
   writeFileSync(GRANTS, JSON.stringify(g, null, 2));
 };
 
@@ -125,9 +138,9 @@ function controlUrl(hub: string, extra: Record<string, string> = {}) {
 
 /**
  * Bun's WebSocket takes headers, so the grant goes in one, never in the URL.
- * Without a grant, the knock says what it asks for: chat (30 days) or eval (1 hour).
+ * Without a grant, the knock says what it asks for: chat (30 days) or eval (8 hours).
  */
-function open(hub: string, scope: "chat" | "eval", token?: string): WebSocket {
+function open(hub: string, scope: Scope, token?: string): WebSocket {
   return token
     ? new WebSocket(controlUrl(hub, { token }), {
         headers: { "x-liagent-token": token },
@@ -136,19 +149,32 @@ function open(hub: string, scope: "chat" | "eval", token?: string): WebSocket {
 }
 
 /**
- * An approved socket: resume the saved grant, or pair (printing the code).
- * Eval always pairs afresh: it is an hour on one socket, never a saved grant.
+ * Why a connection attempt failed. `code` is the close code (or 0); `fatal`
+ * means asking again would only prompt the user again: stop instead.
  */
-function connect(
-  hub: string,
-  opts: { scope?: "chat" | "eval"; fresh?: boolean } = {},
-): Promise<WebSocket> {
-  const scope = opts.scope ?? "chat";
-  const token = opts.fresh || scope === "eval" ? undefined : loadToken(hub);
+class ConnectError extends Error {
+  constructor(
+    message: string,
+    readonly code: number,
+    readonly fatal: boolean,
+  ) {
+    super(message);
+  }
+}
+
+/** --no-pair: only ever resume a saved grant; never ask the user. */
+const noPair = args.includes("--no-pair");
+if (noPair) args.splice(args.indexOf("--no-pair"), 1);
+/** Pairing prompts the user, so a process asks at most once — never from a reconnect loop. */
+let pairedOnce = false;
+
+/** One socket: resume with `token`, or knock without one. Resolves once approved. */
+function attempt(hub: string, scope: Scope, token?: string): Promise<WebSocket> {
   return new Promise((resolve, reject) => {
     const ws = open(hub, scope, token);
     let settled = false;
-    const done = (err?: Error) => {
+    let reason = "";
+    const done = (err?: ConnectError) => {
       if (settled) return;
       settled = true;
       clearTimeout(give);
@@ -158,32 +184,83 @@ function connect(
       } else resolve(ws);
     };
     const give = setTimeout(
-      () => done(new Error("no answer on the page within 2 minutes")),
-      PENDING_MS,
+      () => done(new ConnectError("no answer in the box within 2 minutes", 0, true)),
+      PENDING_MS + 5_000,
     );
     ws.onmessage = (e) => {
       const m = JSON.parse(String(e.data)) as Msg;
       if (m.type === "pending")
-        console.error(`Pairing as "${label}". On the page, allow code  ${m.code}`);
+        console.error(
+          `Pairing as "${label}" (${scope === "eval" ? "run code and chat, 8 hours" : "chat, 30 days"}). In the box, allow code  ${m.code}`,
+        );
       else if (m.type === "approved") {
-        if (typeof m.token === "string") saveToken(hub, m.token, Number(m.until));
+        // Every approval of the user's own carries a token (chat 30 days, eval 8 hours).
+        if (typeof m.token === "string") saveToken(hub, scope, m.token, Number(m.until));
         if (!m.resumed)
           console.error(
             `Approved (${m.scope}${m.pages === "all" ? ", all pages" : Array.isArray(m.pages) ? `, ${m.pages.length} page(s)` : ""}) until ${new Date(Number(m.until)).toLocaleString()}.`,
           );
         ws.onmessage = null;
+        ws.onclose = null;
         done();
-      } else if (m.type === "error" || m.type === "denied" || m.type === "expired") {
-        done(new Error(String(m.error ?? m.type)));
-      }
+      } else if (m.type === "error" || m.type === "denied" || m.type === "expired")
+        reason = String(m.error ?? m.type);
     };
-    ws.onclose = (e) => {
-      // A grant that lapsed or was ended: forget it, so the next run pairs.
-      // A grant that lapsed, was ended, or lost all its pages: forget it, so the next run pairs.
-      if ((e.code === 4498 || e.code === 4409) && token) forgetToken(hub);
-      done(new Error(`socket closed (${e.code}${e.reason ? ` ${e.reason}` : ""})`));
-    };
+    ws.onclose = (e) =>
+      done(
+        new ConnectError(
+          reason || `socket closed (${e.code}${e.reason ? ` ${e.reason}` : ""})`,
+          e.code,
+          false,
+        ),
+      );
   });
+}
+
+/**
+ * An approved socket for `scope`: resume the saved grant, or — once per
+ * process, and never with --no-pair — pair, which prompts the user. A
+ * rejected token (4498) is forgotten and leads to that one pairing. Any
+ * failure of the pairing itself (denied, 4408 expired, 4429 another request
+ * waiting, 4404 no page open, no answer) is fatal: it is not retried.
+ * A network failure while resuming is not fatal: the caller retries later.
+ */
+async function connect(hub: string, scope: Scope = "chat"): Promise<WebSocket> {
+  const token = loadToken(hub, scope);
+  if (token) {
+    try {
+      return await attempt(hub, scope, token);
+    } catch (e) {
+      const err = e as ConnectError;
+      if (err.code !== 4498) throw err;
+      forgetToken(hub, scope);
+      console.error(`liagent: the saved ${scope} grant is no longer valid (${err.message}).`);
+    }
+  }
+  if (noPair) throw new ConnectError(`no valid ${scope} grant, and --no-pair was given`, 0, true);
+  if (pairedOnce)
+    throw new ConnectError(
+      "already asked the user once in this process; not asking again",
+      0,
+      true,
+    );
+  pairedOnce = true;
+  try {
+    return await attempt(hub, scope);
+  } catch (e) {
+    const err = e as ConnectError;
+    throw new ConnectError(`pairing failed: ${err.message}`, err.code, true);
+  }
+}
+
+/** One-shot commands: an approved socket, or the error and exit 1. */
+async function connectOrExit(hub: string, scope: Scope = "chat"): Promise<WebSocket> {
+  try {
+    return await connect(hub, scope);
+  } catch (e) {
+    console.error(`liagent: ${(e as Error).message}`);
+    process.exit(1);
+  }
 }
 
 /** Send one message and wait for the reply of `type` (or an error). */
@@ -259,6 +336,16 @@ function deliver(to: string, text: string): boolean {
 
 // ---- commands ----------------------------------------------------------------
 
+/** Stay up without reconnecting or prompting: a supervisor restarting us would only ask again. */
+function idle(): Promise<never> {
+  console.error(
+    "liagent: idle. Fix the grant (or restart with `liagent pair`) and run listen again.",
+  );
+  // A pending promise alone does not keep the process up: a timer does.
+  setInterval(() => {}, 1 << 30);
+  return new Promise<never>(() => {});
+}
+
 async function cmdListen(hub: string) {
   const to = flag("--to");
   const out = flag("--out");
@@ -274,12 +361,9 @@ async function cmdListen(hub: string) {
     try {
       ws = await connect(hub);
     } catch (e) {
-      const msg = (e as Error).message;
-      console.error(`liagent: ${msg}`);
-      // Every page of the grant closed: the token is forgotten; pair again now.
-      if (/pair again/.test(msg)) continue;
-      // Denied, ended or never answered: stop rather than prompt forever.
-      if (/denied|grant is not valid|no answer|revoke/.test(msg)) process.exit(1);
+      const err = e as ConnectError;
+      console.error(`liagent: ${err.message}`);
+      if (err.fatal) return idle();
       await Bun.sleep(backoff);
       backoff = Math.min(backoff * 2, 60_000);
       continue;
@@ -315,11 +399,10 @@ async function cmdListen(hub: string) {
           const line = JSON.stringify(m);
           console.log(line);
           if (out) appendFileSync(out, `${line}\n`);
-        } else if (m.type === "error" && /pair again/.test(String(m.error)))
-          console.error(`liagent: ${m.error}`);
+        } else if (m.type === "error") console.error(`liagent: ${m.error}`);
         else if (m.type === "revoked") {
           console.error("liagent: the user ended this session.");
-          forgetToken(hub);
+          forgetToken(hub, "chat");
           process.exit(0);
         }
       };
@@ -327,16 +410,13 @@ async function cmdListen(hub: string) {
     });
     const code = await closed;
     clearInterval(beat);
-    if (code === 4409) {
-      forgetToken(hub);
-      console.error("liagent: every page of this grant has closed; pairing again.");
-      continue;
-    }
-    if (code === 4401 || code === 4498) {
-      forgetToken(hub);
-      console.error("liagent: the grant was ended.");
+    if (code === 4401) {
+      forgetToken(hub, "chat");
+      console.error("liagent: the user ended this session.");
       process.exit(0);
     }
+    // 4409 (its pages were away): the grant stays; the reconnect below resumes it.
+    // 4498 (the grant lapsed): the next connect forgets it and pairs at most once.
     console.error(`liagent: socket closed (${code}); reconnecting in ${backoff / 1000}s`);
     await Bun.sleep(backoff);
     backoff = Math.min(backoff * 2, 60_000);
@@ -346,7 +426,8 @@ async function cmdListen(hub: string) {
 async function main() {
   const hub = takeHub();
   if (cmd === "pair") {
-    const ws = await connect(hub, { fresh: true });
+    const scope: Scope = args.includes("--eval") ? "eval" : "chat";
+    const ws = await connectOrExit(hub, scope);
     ws.close();
     return;
   }
@@ -355,7 +436,7 @@ async function main() {
     const to = flag("--to");
     const text = await readText();
     if (!text) usage(2);
-    const ws = await connect(hub);
+    const ws = await connectOrExit(hub);
     const r = await request(ws, to ? { type: "say", text, to } : { type: "say", text }, "said");
     console.error(`said ${r.id}`);
     ws.close();
@@ -364,7 +445,7 @@ async function main() {
   if (cmd === "busy") {
     const to = flag("--to");
     const every = Number(flag("--every") ?? 0);
-    const ws = await connect(hub);
+    const ws = await connectOrExit(hub);
     const beat = () => ws.send(JSON.stringify(to ? { type: "busy", to } : { type: "busy" }));
     beat();
     if (every > 0) {
@@ -393,7 +474,7 @@ async function main() {
     const target = flag("--target");
     const code = await readText();
     if (!code) usage(2);
-    const ws = await connect(hub, { scope: "eval" });
+    const ws = await connectOrExit(hub, "eval");
     const results: Msg[] = [];
     await new Promise<void>((resolve, reject) => {
       let id = "";
