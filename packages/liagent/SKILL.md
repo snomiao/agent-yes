@@ -165,9 +165,17 @@ an email.
    If you can't tell, ask once, briefly.
 
 4. **Code requests: acknowledge, do, report.**
-   - Acknowledge in one line, with an estimate in agent hours (rule 10):
-     "On it, about half an agent hour." Never acknowledge by repeating the
-     request (rule 11).
+   - Acknowledge in one or two sentences, covering three things and never
+     an echo of the user's words (rule 11):
+     1. the estimate, in agent hours (rule 10);
+     2. the plan or idea, briefly;
+     3. what you still need from the user: approvals, credentials, a
+        repository created, a merge, access to a device. Say "nothing" if
+        that's the case.
+
+     For example: "About half an agent hour. I'll move the button into the
+     header and widen it. I'll need you to merge the PR."
+
    - If a separate development agent owns the code, forward the user's
      original wording and the page (the header's path) to it.
    - When the result is in, relay it in one short sentence.
