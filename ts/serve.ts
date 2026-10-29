@@ -1875,7 +1875,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `                    The minted room persists in ~/.agent-yes/.share-room-ayrs\n` +
         `                    (.share-room under --no-rust); stable link across restarts,\n` +
         `                    delete the file to rotate.\n` +
-        `  --share [URL]     Legacy alias for --http --webrtc\n\n` +
+        `  --share [URL]     Legacy alias for --http --webrtc\n` +
+        `  --webrtc URL --join\n` +
+        `                    Host URL's room as one more member next to its other\n` +
+        `                    hosts (all members' agents show up for every viewer).\n` +
+        `                    Needs AY_JOIN_SECRET; AY_NAME names this member.\n\n` +
         `Runtime: like \`ay <cli>\`, the Rust daemon (ayrs serve) runs by default for\n` +
         `  the flags it supports — --webrtc [webrtc://url], --port N, --sighost H.\n` +
         `  Everything else (bare \`ay serve\`, --share/--http/--host/--tls-*, the\n` +
@@ -1895,7 +1899,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  ay serve install    install as background daemon (oxmgr; pm2 fallback on Windows without the winfix build)\n` +
         `  ay serve status     show daemon/server status (add --json for scripts)\n` +
         `  ay serve uninstall  remove daemon\n` +
-        `  ay serve logs       view daemon logs\n\n` +
+        `  ay serve logs       view daemon logs\n` +
+        `  ay serve join-secret [--webrtc URL]\n` +
+        `                      print AY_ROOM + AY_JOIN_SECRET for members of this\n` +
+        `                      host's room (mints the secret; the room then requires it)\n\n` +
         `Once running, connect from another machine:\n` +
         `  ay ls   <token>@<host>:<port>\n` +
         `  ay remote add <alias> http://<token>@<host>:<port>\n`,
@@ -1909,6 +1916,16 @@ export async function cmdServe(rest: string[]): Promise<number> {
   {
     const { planRustServe } = await import("./serveRust.ts");
     const plan = planRustServe(rest);
+    if (plan.kind === "rust-only") {
+      const { findAyrsBinary } = await import("./rustBinary.ts");
+      const ayrs = findAyrsBinary();
+      if (ayrs) return runAyrsServe(ayrs, plan.argv);
+      process.stderr.write(
+        `ay serve: ${plan.feature} needs the Rust daemon (ayrs), which was not found ` +
+          `(bun run build:rs, or reinstall)\n`,
+      );
+      return 1;
+    }
     if (plan.kind === "rust") {
       const { findAyrsBinary } = await import("./rustBinary.ts");
       const ayrs = findAyrsBinary();
@@ -1919,6 +1936,11 @@ export async function cmdServe(rest: string[]): Promise<number> {
       );
     } else {
       rest = plan.rest;
+      // Never let the TypeScript server quietly host its own room instead.
+      if (rest[0] === "join-secret" || rest.includes("--join")) {
+        process.stderr.write(`ay serve: ${plan.reason}: joining rooms needs the Rust daemon\n`);
+        return 1;
+      }
     }
   }
 

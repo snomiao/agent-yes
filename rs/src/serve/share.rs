@@ -286,6 +286,31 @@ pub fn resolve_share_urls(url: Option<&str>, sighost: &str) -> Result<(String, S
     Ok((format_room_url(&room), browser_url))
 }
 
+/// `ayrs serve join-secret`: what a worker needs to join this host's room
+/// (or the `--webrtc` one) as a member. Minting the secret is what makes the
+/// room require it: the running host starts sending it at its next re-hello.
+pub fn print_join_secret(url: Option<&str>, sighost: &str) -> Result<()> {
+    let room = match url {
+        Some(u) if !u.is_empty() => parse_share_url(u)?,
+        _ => load_or_create_room(sighost),
+    };
+    let (secret, encrypted) = e2e::parse_secret(&room.token)?;
+    if !encrypted {
+        bail!("refusing to share an unencrypted room");
+    }
+    let j = super::room_member::join_secret_or_mint(&room.room)?;
+    println!(
+        "AY_ROOM={}",
+        format_share_link(&room.room, &secret, &room.host)
+    );
+    println!("AY_JOIN_SECRET={j}");
+    eprintln!(
+        "Run each member with: ay serve --webrtc \"$AY_ROOM\" --join (AY_JOIN_SECRET set, \
+         AY_NAME optional). Keep AY_JOIN_SECRET private: it lets a machine host in this room."
+    );
+    Ok(())
+}
+
 // ---- per-peer state ----------------------------------------------------------
 
 struct Peer {
@@ -339,6 +364,9 @@ enum SigOut {
 pub struct ShareConfig {
     pub url: Option<String>,
     pub sighost: String,
+    /// Host `url`'s room as one more member next to its other hosts, which
+    /// takes the room's join secret (see room_member.rs).
+    pub join: bool,
 }
 
 /// Path of the advisory lock recording which pid is hosting a given room.
@@ -768,6 +796,9 @@ mod claim_tests {
 
 pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     let explicit = cfg.url.is_some();
+    if cfg.join && !explicit {
+        bail!("--join needs the room's link (--webrtc <link> --join)");
+    }
     let mut room = match &cfg.url {
         Some(u) => parse_share_url(u)?,
         None => load_or_create_room(&cfg.sighost),
@@ -795,6 +826,18 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     let link = format_share_link(&room.room, &secret, &room.host);
     eprintln!("[ayrs share] room {} via {}", room.room, room.host);
     println!("{link}");
+    // Fails here, before any signaling, when --join has no join secret.
+    let me = super::room_member::for_room(&room.room, &room.host, cfg.join)?;
+    eprintln!(
+        "[ayrs share] hosting as member h-{} ({}){}",
+        me.host_id,
+        me.name,
+        if me.host_token.is_some() {
+            ", with the room's join secret"
+        } else {
+            ""
+        }
+    );
     if let Some(line) = super::ice_net::init().await? {
         eprintln!("[ayrs share] {line}");
     }
@@ -818,10 +861,14 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     let (_cancel_tx, cancel_rx) = watch::channel(false);
     let scope = Arc::new(Scope::Full);
     loop {
+        // Re-read every time: `ayrs serve join-secret` may have just minted
+        // the secret, and a rotated room has none.
+        let member = super::room_member::for_room(&room.room, &room.host, cfg.join)?;
         match connect_once(
             &room,
             &secret,
             &api_token,
+            Some(&member),
             peers.clone(),
             mailboxes.clone(),
             scope.clone(),
@@ -834,6 +881,13 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
                 continue;
             }
             Ok(SessionEnd::Rejected) => {
+                if cfg.join {
+                    bail!(
+                        "room {} rejected this host (1008): the join secret does not match the room's, \
+                         or the view link is wrong",
+                        room.room
+                    );
+                }
                 if explicit || rotates >= MAX_ROTATES {
                     bail!("room rejected by signaling server (1008) — delete ~/.agent-yes/.share-room-ayrs to rotate");
                 }
@@ -896,6 +950,7 @@ pub async fn run_scoped_session(
             &room,
             &secret,
             "",
+            None,
             peers.clone(),
             mailboxes.clone(),
             scope.clone(),
@@ -945,6 +1000,7 @@ async fn connect_once(
     room: &RoomUrl,
     secret: &str,
     api_token: &str,
+    member: Option<&super::room_member::Member>,
     peers: Peers,
     mailboxes: Mailboxes,
     scope: Arc<Scope>,
@@ -967,12 +1023,18 @@ async fn connect_once(
     let (mut sink, mut stream) = ws.split();
 
     let auth_token = e2e::derive_auth_token(secret, &room.room, &room.host)?;
-    sink.send(Message::Text(
-        json!({"type": "hello", "role": "host", "v": 2, "token": auth_token})
-            .to_string()
-            .into(),
-    ))
-    .await?;
+    let mut hello = json!({"type": "hello", "role": "host", "v": 2, "token": auth_token});
+    if let Some(m) = member {
+        // One member of a room that may have several hosts. A signaling
+        // server without multi-host rooms ignores these fields.
+        hello["multi"] = json!(true);
+        hello["hostId"] = json!(m.host_id);
+        hello["name"] = json!(m.name);
+        if let Some(t) = &m.host_token {
+            hello["hostToken"] = json!(t);
+        }
+    }
+    sink.send(Message::Text(hello.to_string().into())).await?;
 
     // signaling writer fan-in: peer tasks (ICE candidates, offers) → socket
     let (sig_tx, mut sig_rx) = mpsc::unbounded_channel::<SigOut>();
@@ -1016,8 +1078,13 @@ async fn connect_once(
                 last_recv = std::time::Instant::now();
                 match msg {
                     Message::Close(frame) => {
-                        if frame.map(|f| u16::from(f.code) == 1008).unwrap_or(false) {
+                        let code = frame.as_ref().map(|f| u16::from(f.code));
+                        if code == Some(1008) {
                             return Ok(SessionEnd::Rejected);
+                        }
+                        if code == Some(4000) {
+                            // Another process said hello with our host id.
+                            eprintln!("[ayrs share] signaling: replaced by a newer connection of this host id");
                         }
                         return Ok(SessionEnd::Dropped);
                     }
