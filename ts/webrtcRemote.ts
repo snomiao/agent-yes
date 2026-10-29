@@ -42,6 +42,12 @@ export { isWebrtcSpec, parseWebrtcLink } from "./webrtcLink.ts";
 export type { WebrtcLink } from "./webrtcLink.ts";
 
 const CONNECT_TIMEOUT_MS = 25_000;
+// How long to wait for a direct data channel before using the signaling relay
+// (only when both ends opted in with AGENT_YES_SIGNAL_RELAY=1).
+const RELAY_AFTER_MS = 8_000;
+
+const signalRelayEnabled = () =>
+  ["1", "true", "yes"].includes((process.env.AGENT_YES_SIGNAL_RELAY ?? "").trim());
 
 interface PendingReq {
   onRes: (status: number, ct: string) => void;
@@ -108,6 +114,16 @@ class HostConn {
     return this.confirmed;
   }
 
+  /** Frames go over the signaling socket (see RelayState in rs/src/serve/share.rs). */
+  private relayed = false;
+
+  /** A sealed frame the host relayed over signaling. */
+  onRelay(data: string): void {
+    if (!this.relayed) return;
+    const bytes = Buffer.from(data, "base64");
+    this.recvChain = this.recvChain.then(() => this.onFrame(bytes)).catch(() => {});
+  }
+
   state: "pending" | "ok" | "failed" = "pending";
   error: Error | null = null;
 
@@ -116,7 +132,7 @@ class HostConn {
     else await this.pc.addIceCandidate(candidate).catch(() => {});
   }
 
-  async onOffer(sdp: string, iceServers: any[]): Promise<void> {
+  async onOffer(sdp: string, iceServers: any[], relay = false): Promise<void> {
     if (this.sig.offered) return; // a repeat offer from the same host
     this.sig.offered = true;
     const pc = new RTCPeerConnection({ iceServers: iceServers || [] });
@@ -136,7 +152,10 @@ class HostConn {
       const dc = e.channel;
       this.dc = dc;
       dc.binaryType = "arraybuffer";
-      dc.onopen = () => this.enqueueSeal(FLAG_CONFIRM, { t: "confirm", nonce: this.myNonce });
+      dc.onopen = () => {
+        if (!this.relayed)
+          void this.enqueueSeal(FLAG_CONFIRM, { t: "confirm", nonce: this.myNonce });
+      };
       dc.onmessage = (ev2: any) => {
         this.recvChain = this.recvChain.then(() => this.onFrame(ev2.data)).catch(() => {});
       };
@@ -158,12 +177,27 @@ class HostConn {
     const queued = held;
     held = null;
     for (const c of queued) sendCandidate(c);
+    // No direct path yet: fall back to the signaling relay, when both ends allow it.
+    if (relay && signalRelayEnabled())
+      setTimeout(() => {
+        if (this.confirmed || this.dc?.readyState === "open") return;
+        process.stderr.write(
+          `[webrtc] no direct path to ${this.member.name || this.member.peer}; using the signaling relay\n`,
+        );
+        this.relayed = true;
+        void this.enqueueSeal(FLAG_CONFIRM, { t: "confirm", nonce: this.myNonce });
+      }, RELAY_AFTER_MS).unref?.();
   }
 
   private enqueueSeal(flags: number, obj: object): Promise<void> {
     this.sendChain = this.sendChain.then(async () => {
-      if (!this.dc || this.dc.readyState !== "open" || !this.keyC2H || !this.th) return;
+      if (!this.keyC2H || !this.th) return;
+      if (!this.relayed && (!this.dc || this.dc.readyState !== "open")) return;
       const frame = await e2eSeal(this.keyC2H, this.send, flags, this.th, packEnvelope(obj));
+      if (this.relayed) {
+        this.signal({ type: "relay", data: Buffer.from(frame).toString("base64") });
+        return;
+      }
       try {
         this.dc.send(frame);
       } catch {}
@@ -412,9 +446,11 @@ class RoomSignal {
     }
     if (m?.type === "offer") {
       this.sig.offered = true;
-      await this.memberConn(memberOf(m))?.onOffer(m.sdp, m.iceServers || []);
+      await this.memberConn(memberOf(m))?.onOffer(m.sdp, m.iceServers || [], m.relay === true);
     } else if (m?.type === "candidate") {
       await this.memberConn(memberOf(m))?.onCandidate(m.candidate);
+    } else if (m?.type === "relay" && typeof m.data === "string") {
+      this.conns.get(memberOf(m))?.onRelay(m.data);
     }
   }
 

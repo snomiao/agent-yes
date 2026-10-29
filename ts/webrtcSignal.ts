@@ -133,9 +133,10 @@ export function describeConnectFailure(
       return Promise.resolve(
         `WebRTC handshake with the host behind ${host} failed: ${cause}\n` +
           `  Signaling worked and the host answered, so this is not a sandbox or proxy\n` +
-          `  problem — the two machines could not open a data channel. Usual causes: a\n` +
-          `  second host answering in the same room (on the host: \`ay serve status\`,\n` +
-          `  and kill any stray \`ayrs serve\`), or ICE blocked between the networks.`,
+          `  problem — the two machines could not open a data channel. Usual cause: a\n` +
+          `  host behind Docker Desktop or another symmetric NAT. There, publish one UDP\n` +
+          `  port and set AGENT_YES_ICE_UDP_PORT + AGENT_YES_ICE_PUBLIC_IPS, or set\n` +
+          `  AGENT_YES_SIGNAL_RELAY=1 on both ends to relay through the signaling server.`,
       );
     default:
       return sandboxHint(cause);
