@@ -4,6 +4,8 @@ import {
   type Socket,
   type Storage,
   hashToken,
+  FRIEND_MAX_PAGES,
+  FRIEND_RELABEL_MS,
   PAIR_COOLDOWN_MS,
   PAIR_MAX,
   PAIR_WINDOW_MS,
@@ -1262,5 +1264,35 @@ describe("ChatHub pairing rate limit", () => {
     const token = c.last("approved")?.token as string;
     for (let i = 0; i < PAIR_MAX + 2; i++)
       expect((await s.resume(token)).last("approved")).toBeTruthy();
+  });
+});
+
+describe("ChatHub friend page limits", () => {
+  it("a friend's page relabels at most once per FRIEND_RELABEL_MS; the user's are not limited", async () => {
+    const s = setup();
+    const owner = s.page("/o");
+    const c = s.controller("a", "chat");
+    await s.msg(owner, { type: "allow", pair: s.pairOf(owner) });
+    const f = await s.friend("f1", "f1@x.com", "/one");
+    const heard = () => c.sent.filter((m) => m.type === "page-changed").length;
+    for (let i = 0; i < 5; i++) await s.msg(f, { type: "page", label: `/f${i}` });
+    expect(heard()).toBe(1);
+    s.tick(FRIEND_RELABEL_MS);
+    await s.msg(f, { type: "page", label: "/later" });
+    expect(heard()).toBe(2);
+    for (let i = 0; i < 5; i++) await s.msg(owner, { type: "page", label: `/o${i}` });
+    expect(heard()).toBe(7);
+  });
+
+  it("a friend holds at most FRIEND_MAX_PAGES page sockets", async () => {
+    const s = setup();
+    const pages: FakeSocket[] = [];
+    for (let i = 0; i < FRIEND_MAX_PAGES; i++)
+      pages.push(await s.friend("f1", "f1@x.com", `/p${i}`));
+    expect(pages.every((p) => p.closed === undefined)).toBe(true);
+    const over = await s.friend("f1", "f1@x.com", "/over");
+    expect(over.closed).toBe(4429);
+    // Another friend, and the user, are unaffected.
+    expect((await s.friend("f2", "f2@x.com")).closed).toBeUndefined();
   });
 });

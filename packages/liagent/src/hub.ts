@@ -157,6 +157,8 @@ type PageAtt = {
   at: number;
   thread: string;
   email?: string;
+  /** When a friend's page last relabelled (they are limited; the user's pages are not). */
+  relabelAt?: number;
 };
 /**
  * `grant`: the hash of the token this socket resumed or got. `forUser`: the
@@ -235,6 +237,10 @@ export const PAIR_COOLDOWN_MS = 60_000;
  */
 export const PAIR_MAX = 3;
 export const PAIR_WINDOW_MS = 15 * 60_000;
+/** A friend's page may relabel at most once per this long; faster ones are dropped. */
+export const FRIEND_RELABEL_MS = 1_000;
+/** A friend may hold at most this many page sockets at once. */
+export const FRIEND_MAX_PAGES = 8;
 
 export class ChatHub {
   protected opts: Required<HubOptions> = {
@@ -522,6 +528,10 @@ export class ChatHub {
       if (rec?.blocked) {
         send(ws, { type: "friend-status", status: "blocked" });
         return close(ws, 4403, "blocked");
+      }
+      if (this.pages(who.userId, ws).length >= FRIEND_MAX_PAGES) {
+        send(ws, { type: "error", error: "too many open pages" });
+        return close(ws, 4429, "too many pages");
       }
       ws.serializeAttachment({
         role: "page",
@@ -822,8 +832,16 @@ export class ChatHub {
   private relabel(ws: Socket, page: PageAtt, raw: string) {
     const label = cleanLabel(raw, MAX_LABEL);
     if (!label || label === page.label) return;
-    ws.serializeAttachment({ ...page, label } satisfies PageAtt);
-    const ev = { type: "page-changed", label, thread: page.thread, at: this.now() };
+    const t = this.now();
+    // A friend cannot flood the agents with page-changed (the user's pages are trusted).
+    const friend = page.thread !== OWNER_THREAD;
+    if (friend && page.relabelAt !== undefined && t - page.relabelAt < FRIEND_RELABEL_MS) return;
+    ws.serializeAttachment({
+      ...page,
+      label,
+      ...(friend ? { relabelAt: t } : {}),
+    } satisfies PageAtt);
+    const ev = { type: "page-changed", label, thread: page.thread, at: t };
     for (const l of this.listeners()) send(l.ws, ev);
     for (const c of this.sockets("controller"))
       if (c.a.forUser === page.thread && c.a.until) send(c.ws, ev);
