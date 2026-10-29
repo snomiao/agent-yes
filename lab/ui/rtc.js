@@ -263,7 +263,8 @@ export class RTCClient {
         } else if (m.type === "host-join" || m.type === "host-leave") {
           if (!this.roster || typeof m.peer !== "string") return;
           this.roster = this.roster.filter((h) => h.peer !== m.peer);
-          if (m.type === "host-join") this.roster.push({ peer: m.peer, name: String(m.name ?? "") });
+          if (m.type === "host-join")
+            this.roster.push({ peer: m.peer, name: String(m.name ?? "") });
           this.onroster(this.roster);
           // pc is created on the offer below so it can use the host-supplied
           // iceServers (incl. short-lived TURN creds for relaying behind NAT).
@@ -318,7 +319,9 @@ export class RTCClient {
           }
           await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
           await pc.setLocalDescription(await pc.createAnswer());
-          ws.send(JSON.stringify({ type: "answer", to: this.member, sdp: pc.localDescription.sdp }));
+          ws.send(
+            JSON.stringify({ type: "answer", to: this.member, sdp: pc.localDescription.sdp }),
+          );
           // Derive per-connection keys now both descriptions are stable, before
           // the DataChannel opens. Client: remote=host offer, local=our answer.
           try {
@@ -617,7 +620,7 @@ export function parseRoomHash(hash) {
   const raw = String(hash).trim();
   // webrtc://<room>:<token>@<host> — the .share-link URL form (host is explicit).
   const wm = /^webrtc:\/\/([A-Za-z0-9_-]+):([^@\s]+)@([^\s]+)$/.exec(raw);
-  if (wm) return { room: wm[1], token: wm[2], host: wm[3] };
+  if (wm) return { room: wm[1], token: wm[2].replace(/:j1\..*$/, ""), host: wm[3] };
   // #<room>:<token>[@<host>] — the console hash form. Strip a leading '#' and
   // percent-decode (a token may be URL-encoded in the hash).
   let h = raw.replace(/^#/, "");
@@ -632,7 +635,9 @@ export function parseRoomHash(hash) {
   // A bare  #room:<pid>  deep link (numeric id, no @host) is a selection, not a
   // token — it can't connect a fresh room without a cached secret, so ignore it.
   if (!m[3] && !/^e\d/i.test(m[2]) && /^\d{1,7}$/.test(m[2])) return null;
-  return { room: m[1], token: m[2], host: m[3] || SIG_DEFAULT };
+  // A HOST link (`…:e1.<view>:j1.<join>`) also carries the room's join
+  // secret, which only member hosts use; a viewer drops it.
+  return { room: m[1], token: m[2].replace(/:j1\..*$/, ""), host: m[3] || SIG_DEFAULT };
 }
 
 // Convenience: connect and return an open RTCClient for a parsed room.

@@ -10,8 +10,9 @@
 //! - host id: random, kept in ~/.agent-yes/.share-host-id so a restart (and
 //!   the periodic signaling re-hello) keeps the same peer id.
 //! - name: `AY_NAME`, else the hostname.
-//! - J: `AY_JOIN_SECRET`, else ~/.agent-yes/.share-join-<room>, written by
-//!   `ayrs serve join-secret` on the machine that hands the room out.
+//! - J: `AY_JOIN_SECRET`, else the one in a HOST link
+//!   (`…#<room>:e1.<view>:j1.<join>`), else ~/.agent-yes/.share-join-<room>,
+//!   written by `ayrs serve join-secret` on the machine that hands the room out.
 
 use anyhow::{bail, Result};
 use std::path::PathBuf;
@@ -93,12 +94,21 @@ pub fn join_secret_or_mint(room: &str) -> Result<String> {
 }
 
 /// `join`: this host was asked to join someone else's room, which needs J.
-pub fn for_room(room: &str, sighost: &str, join: bool) -> Result<Member> {
-    let host_token = match join_secret(room) {
+/// `from_link`: the join secret a host link carried.
+pub fn for_room(room: &str, sighost: &str, join: bool, from_link: Option<&str>) -> Result<Member> {
+    let env = std::env::var("AY_JOIN_SECRET")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let secret = env
+        .or_else(|| from_link.map(str::to_string))
+        .or_else(|| join_secret(room));
+    let host_token = match secret {
         Some(j) => Some(e2e::derive_host_token(&j, room, sighost)?),
         None if join => bail!(
-            "joining room {room} as a host needs its join secret: set AY_JOIN_SECRET=j1.<…> \
-             (the room's owner prints it with `ay serve join-secret`)"
+            "joining room {room} as a host needs its join secret: use the room's HOST link \
+             (…:j1.<…>) or set AY_JOIN_SECRET (the room's owner prints both with \
+             `ay serve join-secret`)"
         ),
         None => None,
     };

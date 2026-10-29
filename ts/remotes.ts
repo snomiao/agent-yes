@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
 import yaml from "yaml";
-import { isWebrtcSpec, parseWebrtcLink } from "./webrtcLink.ts";
+import { hasJoinSecret, isWebrtcSpec, parseWebrtcLink, toWebrtcUrl } from "./webrtcLink.ts";
 
 function remotesPath(): string {
   const dir = process.env.AGENT_YES_HOME ?? path.join(homedir(), ".agent-yes");
@@ -416,7 +416,12 @@ export async function cmdConnect(rest: string[]): Promise<number> {
   const alias = aliasArg ?? defaultConnectAlias(link);
 
   if (!parsed) {
-    await writeRemoteAlias(alias, { url: link, token: "" });
+    // A host link carries the room's join secret, which a viewer never needs:
+    // save the view part only.
+    await writeRemoteAlias(alias, {
+      url: hasJoinSecret(link) ? (toWebrtcUrl(link) ?? link) : link,
+      token: "",
+    });
   } else {
     try {
       const r = await fetch(`${parsed.url}/api/version`, {

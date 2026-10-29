@@ -204,6 +204,9 @@ pub struct RoomUrl {
     pub room: String,
     pub token: String, // "e1.<64hex>"
     pub host: String,
+    /// The room's join secret, when the URL is a HOST link
+    /// (`webrtc://room:e1.<view>:j1.<join>@host`); see room_member.rs.
+    pub join: Option<String>,
 }
 
 pub fn format_room_url(room: &RoomUrl) -> String {
@@ -224,10 +227,15 @@ pub fn parse_share_url(s: &str) -> Result<RoomUrl> {
     if room.is_empty() || token.is_empty() || host.is_empty() {
         bail!("bad --webrtc url: {s}");
     }
+    let (token, join) = match token.split_once(":j1.") {
+        Some((t, j)) => (t, Some(format!("j1.{j}"))),
+        None => (token, None),
+    };
     Ok(RoomUrl {
         room: room.into(),
         token: token.into(),
         host: host.into(),
+        join,
     })
 }
 
@@ -236,6 +244,7 @@ pub(super) fn mint_room(host: &str) -> RoomUrl {
         room: format!("r{}", e2e::random_hex(6)),
         token: format!("{}{}", e2e::MARKER, e2e::random_hex(32)),
         host: host.to_string(),
+        join: None,
     }
 }
 
@@ -299,14 +308,17 @@ pub fn print_join_secret(url: Option<&str>, sighost: &str) -> Result<()> {
         bail!("refusing to share an unencrypted room");
     }
     let j = super::room_member::join_secret_or_mint(&room.room)?;
+    // One value for members: the view link with the join secret appended
+    // (`…#<room>:e1.<view>:j1.<join>`). Viewers get the plain view link.
     println!(
         "AY_ROOM={}",
-        format_share_link(&room.room, &secret, &room.host)
+        format_share_link(&room.room, &format!("{secret}:{j}"), &room.host)
     );
-    println!("AY_JOIN_SECRET={j}");
     eprintln!(
-        "Run each member with: ay serve --webrtc \"$AY_ROOM\" --join (AY_JOIN_SECRET set, \
-         AY_NAME optional). Keep AY_JOIN_SECRET private: it lets a machine host in this room."
+        "Run each member with: AY_NAME=<name> ay serve --webrtc \"$AY_ROOM\" --join\n\
+         AY_ROOM above is the HOST link: it lets a machine host in this room, so keep it private.\n\
+         Viewers use the view link: {}",
+        format_share_link(&room.room, &secret, &room.host)
     );
     Ok(())
 }
@@ -703,6 +715,19 @@ mod claim_tests {
     }
 
     #[test]
+    fn a_host_link_carries_the_join_secret_apart_from_the_view_token() {
+        let v = format!("e1.{}", "ab".repeat(32));
+        let j = format!("j1.{}", "cd".repeat(32));
+        let r = parse_share_url(&format!("webrtc://r1:{v}:{j}@s.example")).unwrap();
+        assert_eq!(
+            (r.token.as_str(), r.join.as_deref()),
+            (v.as_str(), Some(j.as_str()))
+        );
+        let r = parse_share_url(&format!("webrtc://r1:{v}@s.example")).unwrap();
+        assert_eq!((r.token.as_str(), r.join), (v.as_str(), None));
+    }
+
+    #[test]
     fn claims_a_free_room_and_records_our_pid() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("lock.pid");
@@ -853,7 +878,7 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     eprintln!("[ayrs share] room {} via {}", room.room, room.host);
     println!("{link}");
     // Fails here, before any signaling, when --join has no join secret.
-    let me = super::room_member::for_room(&room.room, &room.host, cfg.join)?;
+    let me = super::room_member::for_room(&room.room, &room.host, cfg.join, room.join.as_deref())?;
     eprintln!(
         "[ayrs share] hosting as member h-{} ({}){}",
         me.host_id,
@@ -889,7 +914,8 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     loop {
         // Re-read every time: `ayrs serve join-secret` may have just minted
         // the secret, and a rotated room has none.
-        let member = super::room_member::for_room(&room.room, &room.host, cfg.join)?;
+        let member =
+            super::room_member::for_room(&room.room, &room.host, cfg.join, room.join.as_deref())?;
         match connect_once(
             &room,
             &secret,
@@ -965,6 +991,7 @@ pub async fn run_scoped_session(
         room,
         token: String::new(), // auth derives from the secret; token is unused here
         host: sighost,
+        join: None,
     };
     let peers: Peers = Arc::new(Mutex::new(HashMap::new()));
     let mailboxes: Mailboxes = Arc::new(Mutex::new(HashMap::new()));

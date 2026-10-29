@@ -8539,7 +8539,8 @@ my.translate = async (text, lang) => {
           return token ? { room: chName(token), token, host: CH_HOST } : null;
         }
         const m = /^([A-Za-z0-9_-]+):([^@\s]+)(?:@(.+))?$/.exec(s);
-        return m ? { room: m[1], token: m[2], host: m[3] } : null;
+        // A host link's join secret (":j1.…") is for member hosts only.
+        return m ? { room: m[1], token: m[2].replace(/:j1\..*$/, ""), host: m[3] } : null;
       }
 
       // Re-render the rooms panel only if it's currently open (so live-count

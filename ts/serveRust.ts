@@ -99,7 +99,7 @@ export function planRustServe(
     switch (name) {
       case "--webrtc": {
         const v = takeNext();
-        const url = v === undefined ? undefined : toWebrtcUrl(v);
+        const url = v === undefined ? undefined : toWebrtcUrl(v, { join: true });
         if (v === undefined) {
           argv.push("--webrtc");
         } else if (url) {
