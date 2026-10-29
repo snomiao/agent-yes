@@ -411,5 +411,14 @@ draft is sent is in [`src/input.ts`](../src/input.ts):
   a constructed stylesheet (`adoptedStyleSheets`), which `style-src` does not
   block, so it needs no `'unsafe-inline'`. Only browsers without constructed
   stylesheets fall back to a `<style>` element.
+- **Prompt injection:** with `liagent listen --to <agent>`, every message is
+  typed into a coding agent, and friends' messages too: any signed-in user
+  can put text in front of the user's agent. Nothing reaches a shell
+  (delivery goes through `ay send` with no shell in between), but the text
+  is a prompt. The agent's skill (SKILL.md) treats friends' messages as
+  untrusted and never acts on them beyond replying. If your site lets
+  strangers sign in, consider not delivering friends' threads to an agent
+  at all (run `listen` without `--to` and read the JSON lines), or keep
+  the friends feature off by not identifying non-owners in `identify`.
 - **Text only:** the box sets message text with `textContent`, so a message
   can never inject markup.
