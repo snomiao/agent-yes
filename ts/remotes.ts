@@ -20,6 +20,8 @@ export interface ResolvedRemote {
   keyword?: string;
   /** Stable, human-readable name for display — never the loopback bridge URL. */
   label: string;
+  /** The share room, when this remote is one (a WebRTC link). */
+  room?: string;
 }
 
 /** A display label for a WebRTC share link: the room id, never the local bridge. */
@@ -174,7 +176,13 @@ async function resolveWebrtc(
   // In a room with several hosts the keyword also picks the host
   // (`<alias>:<host>:<agent>`, or the one host with a matching agent).
   const bridge = await startWebrtcBridge(link, { keyword });
-  return { url: bridge.baseUrl, token: bridge.token, keyword: bridge.keyword, label };
+  return {
+    url: bridge.baseUrl,
+    token: bridge.token,
+    keyword: bridge.keyword,
+    label,
+    room: parseWebrtcLink(link)?.room,
+  };
 }
 
 // ---------------------------------------------------------------------------

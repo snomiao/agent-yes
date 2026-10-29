@@ -20,6 +20,7 @@ import { homedir } from "os";
 import path from "path";
 import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { formatIdentity, localHost, localUser } from "./identity.ts";
+import { hostedRoomMember, roomAliasPlaceholder } from "./roomReplyAlias.ts";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
 import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
 import { agentYesHome } from "./agentYesHome.ts";
@@ -837,14 +838,19 @@ export function buildEnvelope(opts: {
   replyTarget: string | number;
   via: SenderVia;
   /** Set when the message crossed a host boundary; the sender's own label for
-   * the far side is deliberately NOT used — it is meaningless to the receiver. */
-  remote?: { senderHost: string } | null;
+   * the far side is deliberately NOT used — it is meaningless to the receiver.
+   * `room`: the message went through a shared room this machine hosts in, as
+   * `member`; the receiver fills in its alias for the room (roomReplyAlias.ts). */
+  remote?: { senderHost: string; room?: { id: string; member: string } } | null;
 }): { prefix: string; suffix: string } {
   const attrib = envelopeAttribution(opts.via);
   const via = opts.remote ? " via remote" : "";
-  const reply = opts.remote
-    ? `reply: ay send <your-remote-alias-for-${opts.remote.senderHost}>:${opts.replyTarget} "..."`
-    : `reply: ay send ${opts.replyTarget} "..."`;
+  const room = opts.remote?.room;
+  const reply = room
+    ? `reply: ay send ${roomAliasPlaceholder(room.id)}:${room.member}:${opts.replyTarget} "..."`
+    : opts.remote
+      ? `reply: ay send <your-remote-alias-for-${opts.remote.senderHost}>:${opts.replyTarget} "..."`
+      : `reply: ay send ${opts.replyTarget} "..."`;
   return {
     prefix: `<ay-msg ${opts.nonce} from ${opts.cli}${attrib}${via} ${opts.identity} — ${reply}>\n`,
     suffix: `\n</ay-msg ${opts.nonce}>`,
@@ -2060,7 +2066,7 @@ async function runRemoteSend(
       replyTarget: sender.agent.agent_id || sender.agent.pid,
       via: sender.via,
       // The receiver needs a route back to OUR host, not our label for theirs.
-      remote: { senderHost: localHost() },
+      remote: { senderHost: localHost(), room: await hostedRoomMember(remote.room) },
     });
     wire = prefix + msg + suffix;
   }

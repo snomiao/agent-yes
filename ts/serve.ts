@@ -4057,7 +4057,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
       } catch {
         return new Response("invalid JSON body", { status: 400 });
       }
-      const { keyword, msg = "", code = "enter", from = null, raw = false } = body;
+      const { keyword, code = "enter", from = null, raw = false } = body;
+      let msg = body.msg ?? "";
+      // A message from a shared room names the room, not our alias for it, in
+      // its reply hint; fill ours in (ts/roomReplyAlias.ts).
+      if (!raw && msg.startsWith("<ay-msg ") && msg.includes("<alias-for-room-")) {
+        const { fillRoomAlias, roomAliases } = await import("./roomReplyAlias.ts");
+        const aliases = await roomAliases();
+        msg = fillRoomAlias(msg, (room) => aliases.get(room));
+      }
       if (!keyword || typeof keyword !== "string") {
         return new Response("missing keyword", { status: 400 });
       }
