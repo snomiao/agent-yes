@@ -887,7 +887,9 @@ describe("subcommands.cmdLs human table", () => {
       pid: process.pid,
       cli: "claude",
       prompt: "table format test",
-      cwd: process.cwd(),
+      // Not a git checkout: a repo cwd adds its branch label to the row, which
+      // eats the prompt's budget (a long branch name truncated the prompt).
+      cwd: testHome,
       log_file: null,
       status: "active",
       exit_code: null,
