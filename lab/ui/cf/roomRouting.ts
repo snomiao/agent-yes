@@ -12,7 +12,9 @@
 // - joining requires the room's host token, a second secret that viewers do not
 //   hold (see deriveHostToken in lab/ui/e2e.js), once a member has pinned one;
 // - a client that also says `multi: true` gets the member roster in its welcome
-//   and host-join / host-leave afterwards, and addresses each member with `to`;
+//   and host-join / host-leave afterwards. It asks each member it wants for a
+//   connection with `{type:"join", to}` (the member then gets the usual
+//   peer-join and offers), and addresses that member with `to` from then on;
 // - a client that does not (an older console or CLI) talks to one host only,
 //   the longest-present one, exactly as before.
 //
@@ -156,14 +158,12 @@ export function onHello<S>(
   if (role === "host") {
     effects.push({ kind: "send", to: self, msg: { type: "welcome", peer, role, v: proto, mesh } });
     if (multi) {
-      for (const o of others) {
-        if (!isClient(o.a) || !o.a.multi) continue;
-        // Tell every multi-host viewer about the member, and have the member
-        // offer to each of them (a viewer that is already connected to it
-        // ignores the repeat; the host ignores peers it already has).
-        effects.push({ kind: "send", to: o.s, msg: { type: "host-join", peer, name } });
-        effects.push({ kind: "send", to: self, msg: { type: "peer-join", peer: o.a.peer } });
-      }
+      // Tell every multi-host viewer about the member; each one that wants it
+      // asks with a join. A member re-saying hello is announced again, which a
+      // viewer already connected to it ignores.
+      for (const o of others)
+        if (isClient(o.a) && o.a.multi)
+          effects.push({ kind: "send", to: o.s, msg: { type: "host-join", peer, name } });
     }
     return { effects, store };
   }
@@ -181,11 +181,12 @@ export function onHello<S>(
   };
   if (multi) welcome.hosts = hostRoster(others);
   effects.push({ kind: "send", to: self, msg: welcome });
-  for (const o of others) {
-    if (!isHost(o.a)) continue;
-    if (multi || o.a.peer === attach.host)
-      effects.push({ kind: "send", to: o.s, msg: { type: "peer-join", peer } });
-  }
+  // An older client is joined to its one host right away; a multi-host one
+  // picks its members from the roster and sends a join to each.
+  if (!multi)
+    for (const o of others)
+      if (isHost(o.a) && o.a.peer === attach.host)
+        effects.push({ kind: "send", to: o.s, msg: { type: "peer-join", peer } });
   return { effects, store };
 }
 
@@ -205,7 +206,12 @@ export function onFrame<S>(
     if (to) send((a) => a.peer === to);
   } else if (self.role === "client") {
     // A client reaches hosts only, never another viewer.
-    if (to) send((a) => a.role === "host" && a.peer === to);
+    if (msg.type === "join") {
+      // A multi-host viewer asking one member for a connection.
+      for (const o of socks)
+        if (isHost(o.a) && o.a.peer === to)
+          out.push({ kind: "send", to: o.s, msg: { type: "peer-join", peer: self.peer } });
+    } else if (to) send((a) => a.role === "host" && a.peer === to);
     else if (self.host) send((a) => a.role === "host" && a.peer === self.host);
     else send((a) => a.role === "host");
   } else if (to) {

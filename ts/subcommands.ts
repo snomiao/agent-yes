@@ -2524,7 +2524,10 @@ async function runAllRemotesLs(opts: {
   const rows: HostedRow[] = [];
   for (const { host, records, cached } of byHost) {
     for (const { record, prefix } of flattenForest(buildAgentForest(records))) {
-      rows.push({ host, rec: record, prefix, cached: cached === true });
+      // A room with several hosts tags each row with its member: `alias/member`
+      // is also how `ay send alias:member:<agent>` addresses it.
+      const where = typeof record.member === "string" ? `${host}/${record.member}` : host;
+      rows.push({ host: where, rec: record, prefix, cached: cached === true });
     }
   }
 

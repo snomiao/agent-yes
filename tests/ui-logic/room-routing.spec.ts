@@ -93,7 +93,11 @@ describe("signaling room routing", () => {
       { peer: "h-aaaa", name: "box-aaaa" },
       { peer: "h-bbbb", name: "box-bbbb" },
     ]);
-    expect(sent.filter((s) => s.msg.type === "peer-join").map((s) => s.to)).toEqual(["A", "B"]);
+    // Nobody offers until the viewer asks a member to.
+    expect(sent.filter((s) => s.msg.type === "peer-join")).toEqual([]);
+    expect(r.frame("C", { type: "join", to: "h-bbbb" })).toEqual([
+      { to: "B", msg: { type: "peer-join", peer: c } },
+    ]);
     // Each member's frames say who sent them; the answer goes to one member only.
     expect(r.frame("B", { type: "offer", to: c })[0]!.msg.from).toBe("h-bbbb");
     expect(r.frame("C", { type: "answer", to: "h-bbbb" }).map((s) => s.to)).toEqual(["B"]);
@@ -158,8 +162,8 @@ describe("signaling room routing", () => {
       to: "C",
       msg: { type: "host-join", peer: "h-bbbb", name: "box-bbbb" },
     });
-    expect(sent).toContainEqual({ to: "B", msg: { type: "peer-join", peer: r.peer("C") } });
-    expect(sent.some((s) => s.to === "old" || s.msg.peer === r.peer("old"))).toBe(false);
+    expect(sent.some((s) => s.msg.type === "peer-join")).toBe(false);
+    expect(sent.some((s) => s.to === "old")).toBe(false);
   });
 
   it("still opens and relays mesh rooms symmetrically", () => {

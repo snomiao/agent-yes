@@ -140,14 +140,24 @@ export async function sendRtcInput(rtc, pid, msg) {
 
 // Tunnels request/response + streaming over one DataChannel. Mirrors the
 // envelope in lab/ui/share-host.ts: {t:"req"|"abort"} out, {t:"res"|"data"|"end"} in.
+//
+// A room can have several hosts (lab/ui/cf/roomRouting.ts). One RTCClient
+// talks to ONE of them, its `member`: the one given, else the first the room
+// lists. `roster` holds every member the room has, and `onroster` fires when
+// it changes, so the console can open one RTCClient per member. Against a
+// signaling server without such rooms there is no roster and the client takes
+// the room's one host, as before.
 export class RTCClient {
-  constructor(host, room, token) {
+  constructor(host, room, token, opts = {}) {
     let resolveKeys;
     const keysReady = new Promise((r) => (resolveKeys = r));
     Object.assign(this, {
       host,
       room,
       token,
+      member: opts.member || null,
+      roster: null,
+      onroster: () => {},
       dc: null,
       calls: new Map(),
       streams: new Map(),
@@ -187,7 +197,9 @@ export class RTCClient {
       throw new Error("this link uses the old unencrypted protocol — ask the host to upgrade");
     const authToken = v2 ? await deriveAuthToken(s, this.room, this.host) : this.token;
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(`wss://${this.host}/${this.room}`, [SUB]);
+      // A local signaling server (wrangler dev) speaks plain ws, like ayrs's.
+      const scheme = /^(localhost|127\.)/.test(this.host) ? "ws" : "wss";
+      const ws = new WebSocket(`${scheme}://${this.host}/${this.room}`, [SUB]);
       this.ws = ws; // kept so close() can drop the signaling registration too
       mark("connect.start");
       let pc,
@@ -219,8 +231,13 @@ export class RTCClient {
       };
       ws.onopen = () => (
         mark("signal.open"),
-        ws.send(JSON.stringify({ type: "hello", role: "client", v: 2, token: authToken }))
+        ws.send(
+          JSON.stringify({ type: "hello", role: "client", v: 2, token: authToken, multi: true }),
+        )
       );
+      // The member a host frame comes from; an older server's one host is "host".
+      const fromOf = (m) => (typeof m.from === "string" && m.from ? m.from : "host");
+      const ours = (m) => !this.member || fromOf(m) === this.member;
       ws.onmessage = async (ev) => {
         const m = JSON.parse(ev.data);
         if (m.type === "welcome") {
@@ -232,9 +249,28 @@ export class RTCClient {
           if (m.hostPresent === false) return fail(new Error("no host in room"));
           if (this._v2 && m.v !== 2)
             return fail(new Error("host is running an old agent-yes — ask it to upgrade"));
+          if (Array.isArray(m.hosts)) {
+            this.roster = m.hosts
+              .filter((h) => h && typeof h.peer === "string")
+              .map((h) => ({ peer: h.peer, name: String(h.name ?? "") }));
+            if (this.member && !this.roster.some((h) => h.peer === this.member))
+              return fail(new Error("that host left the room"));
+            this.member = this.member || this.roster[0]?.peer || null;
+            if (!this.member) return fail(new Error("no host in room"));
+            ws.send(JSON.stringify({ type: "join", to: this.member }));
+            this.onroster(this.roster);
+          }
+        } else if (m.type === "host-join" || m.type === "host-leave") {
+          if (!this.roster || typeof m.peer !== "string") return;
+          this.roster = this.roster.filter((h) => h.peer !== m.peer);
+          if (m.type === "host-join") this.roster.push({ peer: m.peer, name: String(m.name ?? "") });
+          this.onroster(this.roster);
           // pc is created on the offer below so it can use the host-supplied
           // iceServers (incl. short-lived TURN creds for relaying behind NAT).
         } else if (m.type === "offer") {
+          // Another member's offer (an older server fans out), or a repeat.
+          if (!ours(m) || pc) return;
+          this.member = this.member || fromOf(m);
           mark("signal.offer", {
             iceServers: Array.isArray(m.iceServers) ? m.iceServers.length : 0,
           });
@@ -248,7 +284,9 @@ export class RTCClient {
             this.pc = pc;
             pc.onicecandidate = (e) => {
               if (e.candidate)
-                ws.send(JSON.stringify({ type: "candidate", candidate: e.candidate }));
+                ws.send(
+                  JSON.stringify({ type: "candidate", to: this.member, candidate: e.candidate }),
+                );
             };
             pc.onconnectionstatechange = () => {
               mark("pc.state", { state: pc.connectionState });
@@ -280,7 +318,7 @@ export class RTCClient {
           }
           await pc.setRemoteDescription({ type: "offer", sdp: m.sdp });
           await pc.setLocalDescription(await pc.createAnswer());
-          ws.send(JSON.stringify({ type: "answer", sdp: pc.localDescription.sdp }));
+          ws.send(JSON.stringify({ type: "answer", to: this.member, sdp: pc.localDescription.sdp }));
           // Derive per-connection keys now both descriptions are stable, before
           // the DataChannel opens. Client: remote=host offer, local=our answer.
           try {
@@ -297,7 +335,7 @@ export class RTCClient {
             fail(err);
           }
         } else if (m.type === "candidate") {
-          if (pc) await pc.addIceCandidate(m.candidate).catch(() => {});
+          if (pc && ours(m)) await pc.addIceCandidate(m.candidate).catch(() => {});
         }
       };
       ws.onerror = () => fail(new Error("signaling error"));

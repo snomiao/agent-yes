@@ -833,7 +833,7 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
         me.host_id,
         me.name,
         if me.host_token.is_some() {
-            ", with the room's join secret"
+            ", with a join secret"
         } else {
             ""
         }

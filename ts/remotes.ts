@@ -171,8 +171,10 @@ async function resolveWebrtc(
   label: string,
 ): Promise<ResolvedRemote> {
   const { startWebrtcBridge } = await import("./webrtcRemote.ts");
-  const bridge = await startWebrtcBridge(link);
-  return { url: bridge.baseUrl, token: bridge.token, keyword, label };
+  // In a room with several hosts the keyword also picks the host
+  // (`<alias>:<host>:<agent>`, or the one host with a matching agent).
+  const bridge = await startWebrtcBridge(link, { keyword });
+  return { url: bridge.baseUrl, token: bridge.token, keyword: bridge.keyword, label };
 }
 
 // ---------------------------------------------------------------------------

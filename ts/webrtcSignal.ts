@@ -141,3 +141,58 @@ export function describeConnectFailure(
       return sandboxHint(cause);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Rooms with several hosts (lab/ui/cf/roomRouting.ts)
+// ---------------------------------------------------------------------------
+
+/** One host serving a room: its signaling peer id and display name. */
+export interface RoomMember {
+  peer: string;
+  name: string;
+}
+
+/**
+ * The sender of a host frame. A signaling server without multi-host rooms
+ * does not tag host frames; its one host is "host".
+ */
+export function memberOf(m: any): string {
+  return typeof m?.from === "string" && m.from ? m.from : "host";
+}
+
+/**
+ * Which members a `<alias>:<keyword>` reference names, when the keyword starts
+ * with a member's name (`<alias>:<member>:<keyword>`). Returns the member and
+ * the rest of the keyword, or null when the first segment names no member.
+ */
+export function splitMemberKeyword(
+  keyword: string,
+  members: RoomMember[],
+): { member: RoomMember; keyword: string | undefined } | null {
+  const i = keyword.indexOf(":");
+  const head = i === -1 ? keyword : keyword.slice(0, i);
+  const member = members.find((m) => m.name === head || m.peer === head);
+  if (!member) return null;
+  const rest = i === -1 ? "" : keyword.slice(i + 1);
+  return { member, keyword: rest || undefined };
+}
+
+/**
+ * The members a viewer should talk to: everyone but the machine it runs on
+ * (a member listing its own room would show its agents twice), unless that
+ * would leave nobody.
+ */
+export function otherMembers(members: RoomMember[], selfName: string): RoomMember[] {
+  const others = members.filter((m) => m.name !== selfName);
+  return others.length ? others : members;
+}
+
+/** `/api/ls` rows from several members, each row tagged with its member. */
+export function mergeMemberLs(parts: { member: RoomMember; rows: unknown }[]): any[] {
+  const out: any[] = [];
+  for (const { member, rows } of parts)
+    if (Array.isArray(rows))
+      for (const r of rows)
+        if (r && typeof r === "object") out.push({ ...r, member: member.name || member.peer });
+  return out;
+}
