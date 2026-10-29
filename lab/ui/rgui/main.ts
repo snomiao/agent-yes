@@ -1505,8 +1505,7 @@ function ensureInfoOverlay(): HTMLElement {
     const pair = (e.target as HTMLElement).closest<HTMLElement>(".ay-info-pair");
     if (pair) {
       e.stopPropagation();
-      if (pairing)
-        location.reload(); // "start over" — drop this load's room
+      if (pairing) location.reload(); // "start over" — drop this load's room
       else startPairing(el);
       return;
     }

@@ -4776,9 +4776,7 @@ function extractActivityFromLines(lines: string[]): string | null {
 
   // ❯ appears after (or without) any spinner → agent is idle/waiting for input
   if (lastPromptIdx > lastSpinnerIdx) {
-    const text = clean[lastPromptIdx]!.trim()
-      .replace(/^❯\s*/, "")
-      .trim();
+    const text = clean[lastPromptIdx]!.trim().replace(/^❯\s*/, "").trim();
     return text ? `» ${text}` : null;
   }
 
