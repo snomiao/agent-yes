@@ -580,7 +580,23 @@ export async function startWebrtcBridge(
   }
 
   let keyword = opts.keyword;
-  if (conns.length > 1 && keyword) {
+  // `<member>:<agent>` names its member even when only one member is
+  // connected (a member skips itself), and naming this machine is a mistake
+  // worth saying so: its agents are local, not in the room bridge.
+  const named = keyword ? splitMemberKeyword(keyword, room.members()) : null;
+  if (named) {
+    const conn = conns.find((c) => c.member.peer === named.member.peer);
+    if (!conn) {
+      room.close();
+      throw new Error(
+        named.member.name === self
+          ? `"${named.member.name}" is this machine — address its agents locally (ay send <agent>)`
+          : `room member "${named.member.name || named.member.peer}" did not connect`,
+      );
+    }
+    conns = [conn];
+    keyword = named.keyword;
+  } else if (conns.length > 1 && keyword) {
     try {
       const pick = await chooseMember(conns, keyword);
       conns = [pick.conn];
