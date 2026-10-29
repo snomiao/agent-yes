@@ -1,0 +1,39 @@
+name: liagent
+
+# packages/liagent: lint, format check, typecheck (tsrs), bun test, and the
+# package build. It is self-contained, so it only runs when it (or this
+# workflow) changes. Not a required check.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/liagent/**"
+      - ".github/workflows/liagent.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "packages/liagent/**"
+      - ".github/workflows/liagent.yml"
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      # Root install: packages/* are workspaces. --ignore-scripts skips the
+      # agent-yes CLI's native postinstalls, which liagent does not need.
+      - run: bun install --frozen-lockfile --ignore-scripts
+      - name: Check (lint, format, typecheck, tests)
+        working-directory: packages/liagent
+        run: bun run check
+      - name: Build
+        working-directory: packages/liagent
+        run: bun run build
+      - name: Package contents
+        working-directory: packages/liagent
+        run: bun pm pack --dry-run --ignore-scripts

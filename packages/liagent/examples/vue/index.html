@@ -1,0 +1,124 @@
+<!doctype html>
+<!--
+  liagent in Vue 3. Run `bun run dev` and open /liagent/examples/vue/
+  (a fake agent) or /liagent/examples/vue/?hub (the dev hub).
+
+  Vue notes:
+  - Tell the compiler the tag is a custom element:
+    app.config.compilerOptions.isCustomElement (here), or in a build,
+    vue({ template: { compilerOptions: { isCustomElement: (t) => t.startsWith("liagent-") } } }).
+  - Bind with `.prop` so arrays, objects and functions are set as properties.
+  - Define the element before mounting.
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>liagent: Vue</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        font:
+          15px/1.5 system-ui,
+          sans-serif;
+        background: Canvas;
+        color: CanvasText;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      // The full build compiles the template below in the browser; with a
+      // bundler, use "vue" and a single-file component instead.
+      import {
+        createApp,
+        ref,
+        onMounted,
+      } from "https://unpkg.com/vue@3.5.44/dist/vue.esm-browser.prod.js";
+      const { defineChatBox, connectHub } = await import("../../liagent.js");
+      defineChatBox();
+      const useHub = location.search.includes("hub");
+
+      const app = createApp({
+        template: `
+          <h1>liagent: Vue</h1>
+          <p><button id="ask" @click="ask">Simulate a pairing request</button></p>
+          <p id="out">{{ out }}</p>
+          <liagent-chat v-if="useHub" ref="box" storage-key="example-vue" />
+          <liagent-chat
+            v-else
+            storage-key="example-vue"
+            style="--liagent-bg: Canvas"
+            :live.prop="true"
+            :listeners.prop="1"
+            :messages.prop="messages"
+            :pending.prop="pending"
+            :sessions.prop="sessions"
+            :busy.prop="busy"
+            :onSend.prop="send"
+            :onAnswer.prop="answer"
+            :onEnd.prop="end"
+          />`,
+        setup() {
+          const messages = ref([]);
+          const pending = ref(null);
+          const sessions = ref([]);
+          const busy = ref(false);
+          const out = ref("callbacks show up here");
+          const box = ref(null);
+          let n = 0;
+          const send = (text) => {
+            const id = ++n;
+            messages.value = [
+              ...messages.value,
+              { id: `u${id}`, from: "owner", label: "", text, at: Date.now() },
+            ];
+            busy.value = true;
+            setTimeout(() => {
+              busy.value = false;
+              messages.value = [
+                ...messages.value,
+                {
+                  id: `a${id}`,
+                  from: "agent",
+                  label: "fake agent",
+                  text: `echo: ${text}`,
+                  at: Date.now(),
+                },
+              ];
+            }, 800);
+            return true;
+          };
+          const answer = (type, pair, ans) => {
+            out.value = `onAnswer: ${type} ${pair.code} ${JSON.stringify(ans)}`;
+            pending.value = null;
+            if (type === "allow")
+              sessions.value = [{ ...pair, until: Date.now() + 3600e3, pages: "all" }];
+          };
+          const end = (pair) => {
+            out.value = `onEnd: ${pair.code}`;
+            sessions.value = [];
+          };
+          const ask = () =>
+            (pending.value = {
+              pair: `p${Date.now()}`,
+              code: "a1b2",
+              label: "an agent",
+              at: Date.now(),
+              scope: "chat",
+            });
+          // With a hub, connectHub drives the element itself.
+          onMounted(() => useHub && connectHub(box.value, { url: "../../api/chat" }));
+          return { useHub, messages, pending, sessions, busy, out, box, send, answer, end, ask };
+        },
+      });
+      app.config.compilerOptions.isCustomElement = (tag) => tag.startsWith("liagent-");
+      app.mount("#app");
+    </script>
+  </body>
+</html>

@@ -1,0 +1,4 @@
+{
+  "printWidth": 100,
+  "ignorePatterns": ["dist", "tmp", "node_modules", "bun.lock"]
+}

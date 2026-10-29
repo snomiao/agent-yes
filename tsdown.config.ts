@@ -10,6 +10,9 @@ export default defineConfig({
     terminal: "./ts/terminal/browser.ts",
     widget: "./ts/widget/browser.ts",
     widgets: "./ts/widgets.ts",
+    // `agent-yes/liagent`: the same code as @agent-yes/liagent's browser
+    // entry, bundled here so agent-yes needs no new dependency.
+    liagent: "./packages/liagent/src/browser.ts",
   },
   outDir: "dist",
   platform: "node",

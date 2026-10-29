@@ -1,0 +1,85 @@
+{
+  "name": "@agent-yes/liagent",
+  "version": "0.1.0",
+  "description": "User ⇄ agent chat for any web page: a floating chat box (a framework-free custom element), its hub (a Cloudflare Durable Object), and the agent's CLI",
+  "keywords": [
+    "agent",
+    "ai-agent",
+    "chat",
+    "cloudflare",
+    "custom-element",
+    "durable-objects",
+    "web-component"
+  ],
+  "homepage": "https://github.com/snomiao/agent-yes/tree/main/packages/liagent#readme",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/snomiao/agent-yes.git",
+    "directory": "packages/liagent"
+  },
+  "bin": {
+    "liagent": "./dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "README.md",
+    "SKILL.md",
+    "docs"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./box": {
+      "types": "./dist/box.d.ts",
+      "import": "./dist/box.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js"
+    },
+    "./hub": {
+      "types": "./dist/hub.d.ts",
+      "import": "./dist/hub.js"
+    },
+    "./protocol": {
+      "types": "./dist/protocol.d.ts",
+      "import": "./dist/protocol.js"
+    },
+    "./liagent.js": "./dist/liagent.js",
+    "./package.json": "./package.json"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "build": "tsdown && bun build src/browser.ts --outdir dist --entry-naming liagent.js --format esm --target browser --minify",
+    "dev": "bun run scripts/dev.ts",
+    "test": "bun test",
+    "typecheck": "tsrs --noEmit",
+    "lint": "oxlint",
+    "fmt": "oxlint --fix && oxfmt",
+    "fmt:check": "oxfmt --check",
+    "check": "bun run lint && bun run fmt:check && bun run typecheck && bun run test",
+    "prepublishOnly": "bun run check && bun run build"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/react": "19",
+    "@types/react-dom": "19",
+    "oxfmt": "0.75.0",
+    "oxlint": "1.90.0",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "tsdown": "^0.20.3",
+    "tsrs": "0.20.1-ts7.1.0-beta",
+    "typescript": "^5.9.3"
+  }
+}

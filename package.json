@@ -75,7 +75,8 @@
     "lab/ui/sw.js",
     "ts/channels/*.ts",
     "ts/terminal/*.ts",
-    "lab/ui/lab/**"
+    "lab/ui/lab/**",
+    "packages/liagent/src/*.ts"
   ],
   "type": "module",
   "module": "ts/index.ts",
@@ -100,6 +101,11 @@
     "./widgets": {
       "types": "./ts/widgets.ts",
       "import": "./dist/widgets.js"
+    },
+    "./liagent": {
+      "types": "./packages/liagent/src/browser.ts",
+      "browser": "./dist/liagent.js",
+      "import": "./dist/liagent.js"
     }
   },
   "publishConfig": {
@@ -131,7 +137,8 @@
     "test:coverage": "vitest run --coverage",
     "test:ui": "vitest run --config tests/ui-test/vitest.config.ts",
     "test:ui-dom": "vitest run --config tests/ui-dom/vitest.config.ts",
-    "test:theme": "node tests/ui-test/theme.e2e.mjs"
+    "test:theme": "node tests/ui-test/theme.e2e.mjs",
+    "test:liagent": "bun run --cwd packages/liagent check"
   },
   "dependencies": {
     "@snomiao/bun-pty": "^0.3.4",
@@ -199,5 +206,8 @@
   "trustedDependencies": [
     "node-datachannel",
     "node-pty"
+  ],
+  "workspaces": [
+    "packages/*"
   ]
 }

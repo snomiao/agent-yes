@@ -1,0 +1,93 @@
+<!doctype html>
+<!--
+  liagent in plain HTML: one module script, no framework.
+  Run `bun run dev` and open /liagent/examples/html/ (a fake agent), or
+  /liagent/examples/html/?hub (the dev hub, via connectHub).
+-->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <title>liagent: plain HTML</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+      }
+      body {
+        margin: 0;
+        padding: 16px;
+        font:
+          15px/1.5 system-ui,
+          sans-serif;
+        background: Canvas;
+        color: CanvasText;
+      }
+      liagent-chat {
+        --liagent-bg: Canvas;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>liagent: plain HTML</h1>
+    <p><button id="ask">Simulate a pairing request</button></p>
+    <p id="out">callbacks show up here</p>
+
+    <!-- 1. Mount: the element can be in the markup before it is defined. -->
+    <liagent-chat storage-key="example-html"></liagent-chat>
+
+    <script type="module">
+      const { defineChatBox, connectHub } = await import("../../liagent.js");
+      defineChatBox();
+      const box = document.querySelector("liagent-chat");
+      const out = document.getElementById("out");
+
+      if (location.search.includes("hub")) {
+        // 2a. With a hub: connectHub sets every property and callback.
+        connectHub(box, { url: "../../api/chat" });
+      } else {
+        // 2b. Your own transport: set properties, take callbacks.
+        let n = 0;
+        box.live = true;
+        box.listeners = 1;
+        box.messages = [];
+        box.onSend = (text) => {
+          const id = ++n;
+          box.push({ id: `u${id}`, from: "owner", label: "", text, at: Date.now() });
+          box.beat(); // the fake agent is working
+          setTimeout(
+            () =>
+              box.push({
+                id: `a${id}`,
+                from: "agent",
+                label: "fake agent",
+                text: `echo: ${text}`,
+                at: Date.now(),
+              }),
+            800,
+          );
+          return true; // false keeps the draft
+        };
+        box.onAnswer = (type, pair, answer) => {
+          out.textContent = `onAnswer: ${type} ${pair.code} ${JSON.stringify(answer)}`;
+          box.pending = null;
+          if (type === "allow")
+            box.sessions = [
+              { ...pair, until: Date.now() + 3600e3, scope: pair.scope, pages: "all" },
+            ];
+        };
+        box.onEnd = (pair) => {
+          out.textContent = `onEnd: ${pair.code}`;
+          box.sessions = [];
+        };
+        document.getElementById("ask").onclick = () =>
+          (box.pending = {
+            pair: `p${Date.now()}`,
+            code: "a1b2",
+            label: "an agent",
+            at: Date.now(),
+            scope: "chat",
+          });
+      }
+    </script>
+  </body>
+</html>
