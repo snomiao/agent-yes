@@ -1053,6 +1053,10 @@ export class ChatHub {
     }
     if (c.scope === "chat")
       return send(ws, { type: "error", error: "this session is chat-only: it cannot eval" });
+    // Eval is off unless this hub was made with {eval: true} — checked here
+    // too, for a socket approved before a deploy turned it off.
+    if (!this.opts.eval)
+      return send(ws, { type: "error", error: "eval is not enabled on this hub" });
     const id = crypto.randomUUID().slice(0, 8);
     const labels: string[] = [];
     // Only the pages of the grant, in the audience that approved it.

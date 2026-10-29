@@ -1296,3 +1296,18 @@ describe("ChatHub friend page limits", () => {
     expect((await s.friend("f2", "f2@x.com")).closed).toBeUndefined();
   });
 });
+
+describe("ChatHub eval guard", () => {
+  it("an eval socket on a hub whose eval was turned off cannot run code", async () => {
+    const s = setup();
+    const p = s.page();
+    const c = s.controller("a", "eval");
+    await s.msg(p, { type: "allow", pair: s.pairOf(p) });
+    expect(c.last("approved")).toMatchObject({ scope: "eval" });
+    // A redeploy with eval off (the same Durable Object, new options).
+    (s.hub as unknown as { opts: { eval: boolean } }).opts.eval = false;
+    await s.msg(c, { type: "eval", code: "1" });
+    expect(c.last("error")?.error).toContain("not enabled");
+    expect(p.last("eval")).toBeUndefined();
+  });
+});
