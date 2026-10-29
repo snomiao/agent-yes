@@ -1051,13 +1051,35 @@ export type RouteOptions = {
   controlPath?: string;
   /** The Durable Object's name in the namespace (one hub per name). Default "chat". */
   name?: string;
+  /**
+   * Origins, besides the request's own, whose pages may open the page socket
+   * (e.g. ["https://app.example.com"] when the hub is on api.example.com).
+   * Any other Origin is refused before `identify` runs, so a site the user
+   * visits cannot ride their cookie into the chat (cross-site WebSocket
+   * hijacking). Exact match: scheme, host and port.
+   */
+  allowedOrigins?: string[];
 };
+
+/**
+ * Whether a page socket's Origin may connect: the request's own origin, or
+ * one listed in `allowed`. A request with no Origin is not from a browser
+ * page (browsers always send one on a WebSocket), so it can only use
+ * credentials it already holds: it goes on to `identify` like any other.
+ */
+export function pageOriginAllowed(req: Request, allowed: readonly string[] = []): boolean {
+  const origin = req.headers.get("origin");
+  if (origin === null) return true;
+  return origin === new URL(req.url).origin || allowed.includes(origin);
+}
 
 /**
  * Route a request to the hub if it is one of its two sockets; null otherwise
  * (so the site's own routes go on). Pages are identified by the site and
  * their identity is passed in IDENTITY_HEADERS (any the client sent are
- * dropped). Agents are refused if they carry an Origin (a web page).
+ * dropped). A page socket from a foreign Origin is refused (see
+ * `allowedOrigins`); an agent socket is refused if it carries any Origin
+ * (a web page).
  */
 export async function routeChat(
   req: Request,
@@ -1080,6 +1102,9 @@ export async function routeChat(
     inner.pathname = "/control";
     return hub.fetch(new Request(inner, { headers }));
   }
+  // Before identify reads the cookie: a foreign site's page is nobody.
+  if (!pageOriginAllowed(req, opts.allowedOrigins))
+    return new Response("forbidden origin", { status: 403 });
   let who: Identity | null = null;
   try {
     who = await opts.identify(req);

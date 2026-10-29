@@ -391,6 +391,14 @@ draft is sent is in [`src/input.ts`](../src/input.ts):
 
 ## 7. Security notes
 
+- **Cross-site WebSocket hijacking:** `routeChat` refuses a page socket
+  whose `Origin` is not the request's own origin, before it calls
+  `identify`. So a site the user visits cannot open your hub's socket with
+  their cookie and act as them. If your pages live on another origin than
+  the hub (`app.example.com` vs `api.example.com`), list it:
+  `routeChat(req, env.CHAT, { identify, allowedOrigins: ["https://app.example.com"] })`.
+  Prefer `SameSite=Lax` or `Strict` session cookies too.
+
 - **The page side is your site's call.** The hub accepts only pages that
   your `identify(req)` vouches for. An agent can do nothing until the user
   approves it in the box, on the pages they choose, after matching the

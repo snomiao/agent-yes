@@ -1,5 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import { ChatHub, type Socket, type Storage, hashToken, routeChat } from "../src/hub.ts";
+import {
+  ChatHub,
+  type Socket,
+  type Storage,
+  hashToken,
+  pageOriginAllowed,
+  routeChat,
+} from "../src/hub.ts";
 import {
   APPROVAL_MS,
   CHAT_HISTORY,
@@ -954,6 +961,46 @@ describe("routeChat", () => {
     expect(new URL(calls[0]!.url).pathname).toBe("/control");
     expect(calls[0]!.headers.get("x-liagent-owner")).toBeNull();
     expect(calls[0]!.headers.get("x-liagent-token")).toBe("t");
+  });
+
+  it("refuses a page socket from a foreign Origin before asking who it is (CSWSH)", async () => {
+    calls.length = 0;
+    let asked = 0;
+    const identify = () => {
+      asked++;
+      return { userId: "u1", email: "o@x.com", owner: true };
+    };
+    const evil = await routeChat(
+      ws("/api/chat", { origin: "https://evil.example", cookie: "session=victim" }),
+      ns,
+      { identify },
+    );
+    expect(evil?.status).toBe(403);
+    expect(asked).toBe(0);
+    expect(calls).toHaveLength(0);
+    // Its own origin, and one the site allows, go through.
+    await routeChat(ws("/api/chat", { origin: "https://example.com" }), ns, { identify });
+    await routeChat(ws("/api/chat", { origin: "https://app.example.net" }), ns, {
+      identify,
+      allowedOrigins: ["https://app.example.net"],
+    });
+    expect(calls).toHaveLength(2);
+    // A sibling subdomain is a different origin unless listed.
+    const sibling = await routeChat(ws("/api/chat", { origin: "https://sub.example.com" }), ns, {
+      identify,
+    });
+    expect(sibling?.status).toBe(403);
+  });
+
+  it("pageOriginAllowed: own origin, listed origins, and no Origin (not a browser page)", () => {
+    const r = (origin?: string) =>
+      new Request("https://example.com/api/chat", origin ? { headers: { origin } } : {});
+    expect(pageOriginAllowed(r("https://example.com"))).toBe(true);
+    expect(pageOriginAllowed(r("http://example.com"))).toBe(false);
+    expect(pageOriginAllowed(r("https://example.com:8443"))).toBe(false);
+    expect(pageOriginAllowed(r("https://a.test"), ["https://a.test"])).toBe(true);
+    expect(pageOriginAllowed(r("null"))).toBe(false);
+    expect(pageOriginAllowed(r())).toBe(true);
   });
 
   it("custom paths", async () => {
