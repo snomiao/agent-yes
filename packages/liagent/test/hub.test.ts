@@ -4,6 +4,9 @@ import {
   type Socket,
   type Storage,
   hashToken,
+  PAIR_COOLDOWN_MS,
+  PAIR_MAX,
+  PAIR_WINDOW_MS,
   pageOriginAllowed,
   routeChat,
 } from "../src/hub.ts";
@@ -1218,5 +1221,46 @@ describe("ChatHub busy relay", () => {
     expect(other.last("error")).toEqual({ type: "error", error: "not approved yet" });
     await s.msg(c, { type: "busy", on: false });
     expect(p1.last("busy")).toBeUndefined();
+  });
+});
+
+describe("ChatHub pairing rate limit", () => {
+  it("after a deny, that audience takes no new request for PAIR_COOLDOWN_MS", async () => {
+    const s = setup();
+    const p = s.page();
+    s.controller("a");
+    await s.msg(p, { type: "deny", pair: s.pairOf(p) });
+    const again = s.controller("a");
+    expect(again.closed).toBe(4429);
+    expect(again.last("error")?.error).toContain("denied");
+    expect((p.last("state") as { pending: unknown }).pending).toBeNull();
+    s.tick(PAIR_COOLDOWN_MS);
+    const later = s.controller("a");
+    expect(later.closed).toBeUndefined();
+    expect(later.last("pending")).toBeTruthy();
+  });
+
+  it("at most PAIR_MAX requests per window, then 4429 until it passes", () => {
+    const s = setup();
+    s.page();
+    for (let i = 0; i < PAIR_MAX; i++) {
+      const c = s.controller(`a${i}`);
+      expect(c.last("pending")).toBeTruthy();
+      s.tick(PENDING_MS); // each lapses, making room for the next
+    }
+    const over = s.controller("one too many");
+    expect(over.closed).toBe(4429);
+    s.tick(PAIR_WINDOW_MS);
+    expect(s.controller("next window").last("pending")).toBeTruthy();
+  });
+
+  it("a resume with a grant token is not a pairing request", async () => {
+    const s = setup();
+    const p = s.page();
+    const c = s.controller("a", "chat");
+    await s.msg(p, { type: "allow", pair: s.pairOf(p) });
+    const token = c.last("approved")?.token as string;
+    for (let i = 0; i < PAIR_MAX + 2; i++)
+      expect((await s.resume(token)).last("approved")).toBeTruthy();
   });
 });

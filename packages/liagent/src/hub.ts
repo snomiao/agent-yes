@@ -226,6 +226,15 @@ const threadKeys = (thread: string) =>
 const msgKey = (thread: string, seq: number) =>
   `${threadKeys(thread).prefix}${String(seq).padStart(12, "0")}`;
 const friendKey = (userId: string) => `friend:${userId}`;
+/** After the user denies a pairing, that audience takes no new request for this long. */
+export const PAIR_COOLDOWN_MS = 60_000;
+/**
+ * At most PAIR_MAX pairing requests per audience per PAIR_WINDOW_MS. A
+ * request waits up to PENDING_MS (2 min), so the window must be longer than
+ * PAIR_MAX of those, or re-knocking as each lapses would never hit the cap.
+ */
+export const PAIR_MAX = 3;
+export const PAIR_WINDOW_MS = 15 * 60_000;
 
 export class ChatHub {
   protected opts: Required<HubOptions> = {
@@ -249,6 +258,32 @@ export class ChatHub {
    * sleeping eval grants uses it; a resume always asks storage itself.
    */
   private grants?: Map<string, Grant>;
+  /**
+   * Pairing requests per audience, to bound the prompts anyone can raise:
+   * the window's start and count, and when the user last denied one. Kept in
+   * memory (a hub woken from hibernation starts afresh): it only has to stop
+   * a stream of prompts, and the knock stays synchronous.
+   */
+  private knocks = new Map<string, { start: number; count: number; deniedAt?: number }>();
+
+  /** Room for one more pairing request for `who`: false (and `ws` closed with 4429) if not. */
+  private knockAllowed(ws: Socket, who: string) {
+    const t = this.now();
+    let k = this.knocks.get(who) ?? { start: t, count: 0 };
+    if (k.deniedAt && t - k.deniedAt < PAIR_COOLDOWN_MS) {
+      send(ws, { type: "error", error: "a pairing was just denied: try again in a minute" });
+      close(ws, 4429, "pairing cooling down");
+      return false;
+    }
+    if (t - k.start >= PAIR_WINDOW_MS) k = { start: t, count: 0, deniedAt: k.deniedAt };
+    if (k.count >= PAIR_MAX) {
+      send(ws, { type: "error", error: "too many pairing requests: try again later" });
+      close(ws, 4429, "pairing rate limit");
+      return false;
+    }
+    this.knocks.set(who, { ...k, count: k.count + 1 });
+    return true;
+  }
   private loadingGrants?: Promise<void>;
 
   private loadGrants(): Promise<void> {
@@ -538,6 +573,7 @@ export class ChatHub {
       send(ws, { type: "error", error: "no owner page is open to approve this" });
       return close(ws, 4404, "no page");
     }
+    if (!this.knockAllowed(ws, OWNER_THREAD)) return;
     this.knock(ws, want ? { label, want } : { label });
   }
 
@@ -604,6 +640,7 @@ export class ChatHub {
       send(ws, { type: "error", error: `no page of ${f.email} is open` });
       return close(ws, 4404, "no page");
     }
+    if (!this.knockAllowed(ws, f.userId)) return;
     this.knock(ws, {
       label: cleanLabel(url.searchParams.get("label"), 80) || live.g.label,
       forUser: f.userId,
@@ -920,6 +957,11 @@ export class ChatHub {
 
   /** Deny a pairing, or End a session — and with it the grant behind it, on every socket using it. */
   private end(kind: "deny" | "revoke", ws: Socket, a: ControllerAtt): void | Promise<void> {
+    if (kind === "deny") {
+      const who = audience(a);
+      const t = this.now();
+      this.knocks.set(who, { ...(this.knocks.get(who) ?? { start: t, count: 0 }), deniedAt: t });
+    }
     const targets = a.grant
       ? this.sockets("controller").filter((c) => c.a.grant === a.grant)
       : [{ ws, a }];
