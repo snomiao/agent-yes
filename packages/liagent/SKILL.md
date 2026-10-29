@@ -234,7 +234,9 @@ an email.
     want the bigger button on every page?"), never their literal words. If
     you have nothing new to add — no answer, opinion or improvement — reply
     with a short acknowledgement only ("OK", or its equivalent in the
-    user's language), never a restatement. Repetition is noise, and with
+    user's language), never a restatement. When the acknowledgement is for
+    work still to do, add its rough duration, calibrated as in rule 12:
+    "OK, about 5 min" rather than a bare "OK". Repetition is noise, and with
     read-aloud on, the microphone picks it up as an echo.
 12. **Calibrate your estimates.** Keep a running record of each estimate and
     the actual time it took, in your own notes. Scale new estimates by the
