@@ -1,8 +1,10 @@
 name: liagent
 
-# packages/liagent: lint, format check, typecheck (tsrs), bun test, and the
-# package build. It is self-contained, so it only runs when it (or this
-# workflow) changes. Not a required check.
+# packages/liagent (shipped inside agent-yes as agent-yes/liagent): lint,
+# format check, typecheck (tsrs), bun test, then the root build and a check
+# of what the agent-yes package would ship. Runs when liagent, this workflow,
+# or the root files that build and ship it change. Not a required check;
+# release.yml also runs `bun run test:liagent` before publishing.
 
 on:
   push:
@@ -10,11 +12,19 @@ on:
     paths:
       - "packages/liagent/**"
       - ".github/workflows/liagent.yml"
+      # Root files that decide how liagent is built and shipped.
+      - "package.json"
+      - "bun.lock"
+      - "tsdown.config.ts"
   pull_request:
     branches: [main]
     paths:
       - "packages/liagent/**"
       - ".github/workflows/liagent.yml"
+      # Root files that decide how liagent is built and shipped.
+      - "package.json"
+      - "bun.lock"
+      - "tsdown.config.ts"
 
 jobs:
   check:
@@ -31,9 +41,18 @@ jobs:
       - name: Check (lint, format, typecheck, tests)
         working-directory: packages/liagent
         run: bun run check
-      - name: Build
-        working-directory: packages/liagent
+      # The root build is what release.yml runs before npm publish; it builds
+      # packages/liagent/dist too.
+      - name: Build (root)
         run: bun run build
-      - name: Package contents
-        working-directory: packages/liagent
-        run: bun pm pack --dry-run --ignore-scripts
+      # What agent-yes ships: liagent's built entries, and no source maps.
+      - name: agent-yes package contents
+        run: |
+          bun pm pack --dry-run --ignore-scripts > /tmp/pack.txt 2>&1
+          for f in index.js index.d.ts box.js client.js protocol.js hub.js hub.d.ts cli.js liagent.js; do
+            grep -q "packages/liagent/dist/$f" /tmp/pack.txt || { echo "missing from the package: packages/liagent/dist/$f" >&2; cat /tmp/pack.txt; exit 1; }
+          done
+          if grep -E "packages/liagent/(src|test)/|packages/liagent/dist/.*\.map" /tmp/pack.txt; then
+            echo "liagent sources or source maps would ship" >&2; exit 1
+          fi
+          grep "packages/liagent/" /tmp/pack.txt
