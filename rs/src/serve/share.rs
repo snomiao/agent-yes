@@ -366,17 +366,128 @@ enum ClaimOutcome {
 /// only differ in what happens *after* a refusal (bail vs. park and retry).
 fn try_claim_room_at(path: &std::path::Path) -> ClaimOutcome {
     if let Ok(txt) = std::fs::read_to_string(path) {
-        if let Ok(pid) = txt.trim().parse::<i32>() {
-            if pid != std::process::id() as i32 && crate::pid_store::is_process_alive(pid as u32) {
-                return ClaimOutcome::HeldBy(pid);
+        if let Some(holder) = LockHolder::parse(&txt) {
+            if holder.pid != std::process::id() as i32 && holder.is_running() {
+                return ClaimOutcome::HeldBy(holder.pid);
             }
         }
     }
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p).ok();
     }
-    std::fs::write(path, std::process::id().to_string()).ok();
+    std::fs::write(path, LockHolder::me().render()).ok();
     ClaimOutcome::Claimed
+}
+
+/// Who wrote a room lock file. The pid stays alone on the first line (the TS
+/// `ay serve status` reads just that); the lines after it say which process it
+/// was, because a bare pid outlives its meaning when ~/.agent-yes is a volume
+/// that a recreated container mounts again. The new container numbers its
+/// processes from 1, so the old holder's pid is often some unrelated process
+/// there, or a thread of the new host itself, which `kill(pid, 0)` also
+/// accepts. Either way the new host waited on a holder that was long gone.
+#[derive(Debug, PartialEq, Eq)]
+struct LockHolder {
+    pid: i32,
+    /// gethostname(); a container's is its own.
+    host: Option<String>,
+    /// Linux: boot id + start time of the process, which no later process
+    /// with the same pid shares.
+    start: Option<String>,
+}
+
+impl LockHolder {
+    fn me() -> Self {
+        let pid = std::process::id() as i32;
+        LockHolder {
+            pid,
+            host: Some(crate::identity::raw_hostname()).filter(|h| !h.is_empty()),
+            start: process_start(pid),
+        }
+    }
+
+    fn render(&self) -> String {
+        let mut s = self.pid.to_string();
+        if let Some(h) = &self.host {
+            s += &format!("\nhost={h}");
+        }
+        if let Some(t) = &self.start {
+            s += &format!("\nstart={t}");
+        }
+        s + "\n"
+    }
+
+    /// Also reads the old format, a bare pid.
+    fn parse(txt: &str) -> Option<Self> {
+        let mut lines = txt.lines();
+        let pid = lines
+            .next()?
+            .trim()
+            .parse::<i32>()
+            .ok()
+            .filter(|p| *p > 0)?;
+        let mut h = LockHolder {
+            pid,
+            host: None,
+            start: None,
+        };
+        for l in lines {
+            match l.split_once('=') {
+                Some(("host", v)) => h.host = Some(v.to_string()),
+                Some(("start", v)) => h.start = Some(v.to_string()),
+                _ => {}
+            }
+        }
+        Some(h)
+    }
+
+    /// Whether the process that wrote the lock still runs. A lock from another
+    /// host name was written in another container or machine, whose pids mean
+    /// nothing here.
+    fn is_running(&self) -> bool {
+        if self
+            .host
+            .as_ref()
+            .is_some_and(|h| *h != crate::identity::raw_hostname())
+        {
+            return false;
+        }
+        if cfg!(target_os = "linux") {
+            // A pid that is not a process (thread group leader) here, or one
+            // that started at another time, is not the holder.
+            let Some(now) = process_start(self.pid) else {
+                return false;
+            };
+            if self.start.as_ref().is_some_and(|t| *t != now) {
+                return false;
+            }
+        }
+        crate::pid_store::is_process_alive(self.pid as u32)
+    }
+}
+
+/// Linux: "<boot id>:<start time in clock ticks>" for a running process, None
+/// when `pid` is not one (gone, or a thread of some process). Elsewhere None.
+fn process_start(pid: i32) -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let tgid = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Tgid:"))?
+        .trim()
+        .parse::<i32>()
+        .ok()?;
+    if tgid != pid {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Field 22 (starttime); the command name in field 2 may hold spaces, so
+    // count from the closing parenthesis.
+    let start = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?;
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();
+    Some(format!("{}:{start}", boot.trim()))
 }
 
 fn held_by_error(pid: i32, room: &str) -> anyhow::Error {
@@ -455,15 +566,94 @@ async fn claim_room_blocking(room: &str) -> Result<()> {
 mod claim_tests {
     use super::*;
 
+    fn held_pid(p: &std::path::Path) -> i32 {
+        LockHolder::parse(&std::fs::read_to_string(p).unwrap())
+            .unwrap()
+            .pid
+    }
+
+    #[test]
+    fn the_lock_names_its_process_and_reads_the_old_format() {
+        let me = LockHolder::me();
+        assert_eq!(LockHolder::parse(&me.render()), Some(me));
+        assert_eq!(
+            LockHolder::parse("1111\n"),
+            Some(LockHolder {
+                pid: 1111,
+                host: None,
+                start: None
+            })
+        );
+        assert_eq!(LockHolder::parse("not a pid"), None);
+    }
+
+    /// A recreated container that mounts the same ~/.agent-yes: the pid in
+    /// the lock is alive here, but it is not the process that wrote it.
+    #[test]
+    fn a_live_pid_from_another_container_does_not_hold_the_room() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let elsewhere = LockHolder {
+            pid,
+            host: Some("old-container-1111".into()),
+            start: None,
+        };
+        let here = LockHolder {
+            pid,
+            host: Some(crate::identity::raw_hostname()),
+            start: process_start(pid),
+        };
+        let restarted = LockHolder {
+            pid,
+            host: here.host.clone(),
+            start: Some("boot:1".into()),
+        };
+        let results = (
+            elsewhere.is_running(),
+            here.is_running(),
+            restarted.is_running(),
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(results.0, false);
+        assert_eq!(results.1, true);
+        // Start times are only known on Linux.
+        assert_eq!(results.2, !cfg!(target_os = "linux"));
+    }
+
+    /// The case that kept a fresh container's host waiting: the old pid is
+    /// now one of this process's own threads.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_thread_id_is_not_a_holder() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let t = std::thread::spawn(move || {
+            tx.send(unsafe { libc::gettid() }).unwrap();
+            let _ = done_rx.recv();
+        });
+        let tid = rx.recv().unwrap();
+        assert!(crate::pid_store::is_process_alive(tid as u32));
+        let holder = LockHolder {
+            pid: tid,
+            host: None,
+            start: None,
+        };
+        let running = holder.is_running();
+        done_tx.send(()).unwrap();
+        t.join().unwrap();
+        assert!(!running);
+    }
+
     #[test]
     fn claims_a_free_room_and_records_our_pid() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("lock.pid");
         claim_room_at(&p, "r1").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            std::process::id().to_string()
-        );
+        assert_eq!(held_pid(&p), std::process::id() as i32);
     }
 
     #[test]
@@ -473,10 +663,7 @@ mod claim_tests {
         // pid 1 is alive but is not us; use an implausibly high dead pid instead.
         std::fs::write(&p, "4194303").unwrap();
         claim_room_at(&p, "r1").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            std::process::id().to_string()
-        );
+        assert_eq!(held_pid(&p), std::process::id() as i32);
     }
 
     #[test]
@@ -516,10 +703,7 @@ mod claim_tests {
         .await
         .expect("free room must not park")
         .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            std::process::id().to_string()
-        );
+        assert_eq!(held_pid(&p), std::process::id() as i32);
     }
 
     #[tokio::test]
@@ -555,10 +739,7 @@ mod claim_tests {
         .unwrap();
 
         holder.join().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            std::process::id().to_string()
-        );
+        assert_eq!(held_pid(&p), std::process::id() as i32);
     }
 
     #[test]
