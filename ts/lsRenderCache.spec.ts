@@ -40,7 +40,8 @@ describe("ls render disk cache", () => {
     expect(await renderLogTailLines(log, 40)).toEqual(["first line", "second line"]);
     expect(await extractTaskCounts(log)).toBeNull();
     saveRenderDisk();
-    expect(statSync(file).mode & 0o777).toBe(0o600);
+    // Windows reports 0o666 for any writable file (no owner/group/other bits), so the mode is checked elsewhere
+    if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
 
     // a marker planted in the saved file comes back: the next run read the disk, it did not re-render
     plant((k) => !k.startsWith("tasks"), ["from disk"]);
