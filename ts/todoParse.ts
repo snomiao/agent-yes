@@ -58,6 +58,22 @@ function markerOf(line: string): Marker | null {
 // output!) from self-anchoring into a phantom badge, while the todo shapes — the
 // anchor ON the first marker line ("⎿  ☒ Wire up the parser") or a lone "⎿" above
 // them — still qualify.
+/**
+ * Whether raw bytes can render to a todo block at all: a block needs the ⎿ anchor and at least two marker
+ * glyphs, and rendering cannot create glyphs that are not in the bytes. False → `parseTaskCounts` of any
+ * render of them is null, so a caller can skip the (costly) xterm replay. Exact, never a false negative.
+ */
+export function mayHoldTaskBlock(text: string): boolean {
+  if (!text.includes(ANCHOR)) return false;
+  let markers = 0;
+  for (const ch of text) {
+    if (DONE.has(ch) || IN_PROGRESS.has(ch) || PENDING.has(ch)) {
+      if (++markers >= 2) return true;
+    }
+  }
+  return false;
+}
+
 function isBareAnchor(line: string): boolean {
   const s = line.trim();
   return s.startsWith(ANCHOR) && s.slice(ANCHOR.length).trim() === "";
