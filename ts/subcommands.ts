@@ -2974,7 +2974,6 @@ async function gitStatusOnce(
 }
 
 async function cmdLs(rest: string[]): Promise<number> {
-  enableRenderDiskCache(); // `ay ls` only: reuse renders of logs that did not change since the last run
   const y = yargs(rest)
     .usage(
       "Usage: ay ls [keyword] [options]\n" +
@@ -3055,6 +3054,10 @@ async function cmdLs(rest: string[]): Promise<number> {
     process.stdout.write((await y.getHelp()) + "\n");
     return 0;
   }
+
+  // one-shot `ay ls` only: reuse renders of logs that did not change since the last run (not --watch, which
+  // polls changing logs for as long as it runs and would keep every version)
+  if (!argv.watch) enableRenderDiskCache();
 
   const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
   // A keyword naming a specific remote (alias or token@host:port) → just that
@@ -4553,19 +4556,31 @@ const TAIL_RENDER_CACHE_MAX = 256;
 // as above (path + size + mtime + …). Only the entries this run used are written back, so the file stays
 // small and entries of changed or gone logs drop out. Not for serve (long-running: nothing would be flushed).
 let renderDiskEnabled = false;
+let renderDiskPath = ""; // fixed when enabled, so a later AGENT_YES_HOME change cannot redirect the write
 let renderDisk: Record<string, unknown> | null = null;
 const renderDiskUsed = new Map<string, unknown>();
-const renderDiskFile = (): string => path.join(agentYesHome(), "cache", "ls-render.json");
+const RENDER_DISK_MAX = 1024; // a safety bound: one `ay ls` run uses about 2 entries per agent
 
 export function enableRenderDiskCache(): void {
   renderDiskEnabled = true;
+  renderDiskPath = path.join(agentYesHome(), "cache", "ls-render.json");
+}
+
+/** Turn the cross-run cache off and forget it in this process, without writing (tests). */
+export function resetRenderDiskCache(): void {
+  if (renderDiskUsed.size > 0) process.removeListener("exit", saveRenderDisk);
+  renderDiskEnabled = false;
+  renderDiskPath = "";
+  renderDisk = null;
+  renderDiskUsed.clear();
+  tailRenderCache.clear();
 }
 
 function renderDiskGet(key: string): unknown {
   if (!renderDiskEnabled) return undefined;
   if (renderDisk === null) {
     try {
-      const v: unknown = JSON.parse(readFileSync(renderDiskFile(), "utf8"));
+      const v: unknown = JSON.parse(readFileSync(renderDiskPath, "utf8"));
       renderDisk = v && typeof v === "object" ? (v as Record<string, unknown>) : {};
     } catch {
       renderDisk = {};
@@ -4576,14 +4591,16 @@ function renderDiskGet(key: string): unknown {
 
 function renderDiskPut(key: string, value: unknown): void {
   if (!renderDiskEnabled) return;
+  if (renderDiskUsed.size >= RENDER_DISK_MAX && !renderDiskUsed.has(key)) return;
   if (renderDiskUsed.size === 0) process.once("exit", saveRenderDisk);
   renderDiskUsed.set(key, value);
 }
 
 /** Write the entries this run used (runs at exit; exported for tests). */
 export function saveRenderDisk(): void {
+  if (!renderDiskPath) return;
   try {
-    const file = renderDiskFile();
+    const file = renderDiskPath;
     mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
     const tmp = `${file}.${process.pid}.tmp`;
     writeFileSync(tmp, JSON.stringify(Object.fromEntries(renderDiskUsed)), { mode: 0o600 });
