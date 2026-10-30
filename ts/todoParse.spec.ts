@@ -103,6 +103,14 @@ describe("mayHoldTaskBlock", () => {
     expect(mayHoldTaskBlock("⎿ one ◻ marker only")).toBe(false);
     expect(mayHoldTaskBlock("")).toBe(false);
   });
+  it("is true with one marker when a REP sequence can repeat it (codex agent-yes#529)", async () => {
+    const raw = "⎿\r\n✓\x1b[200b\x1b[2;2H\x1b[Kfirst\x1b[3;2Hsecond";
+    const { renderRawLogLines } = await import("./subcommands.ts");
+    const lines = await renderRawLogLines(new TextEncoder().encode(raw));
+    expect(parseTaskCounts(lines)).toEqual({ done: 2, total: 2 }); // xterm renders two ✓ rows from one
+    expect(mayHoldTaskBlock(raw)).toBe(true);
+    expect(mayHoldTaskBlock("⎿ ✓ one marker, no repeat")).toBe(false);
+  });
   it("is true whenever parseTaskCounts could find a block (markers anywhere, escapes in between)", () => {
     const raw = "\x1b[2m⎿\x1b[0m\x1b[3;5H☒ write tests\r\n\x1b[4;5H◻ ship it";
     expect(mayHoldTaskBlock(raw)).toBe(true);

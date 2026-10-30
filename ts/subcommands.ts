@@ -4495,11 +4495,16 @@ export async function renderLogTailLines(
   }
   let hit = tailRenderCache.get(key);
   if (!hit) {
-    hit = renderLogTailLinesUncached(logPath, n, geom);
+    const p = renderLogTailLinesUncached(logPath, n, geom);
+    hit = p;
     if (tailRenderCache.size >= TAIL_RENDER_CACHE_MAX) {
       tailRenderCache.delete(tailRenderCache.keys().next().value as string);
     }
-    tailRenderCache.set(key, hit);
+    tailRenderCache.set(key, p);
+    // a failed read/render is not remembered: the next call retries (concurrent callers still share this one)
+    void p.then((r) => {
+      if (r === null && tailRenderCache.get(key) === p) tailRenderCache.delete(key);
+    });
   }
   const lines = await hit;
   return lines ? lines.slice() : null; // a copy: callers may change their array
