@@ -887,7 +887,9 @@ describe("subcommands.cmdLs human table", () => {
       pid: process.pid,
       cli: "claude",
       prompt: "table format test",
-      cwd: process.cwd(),
+      // A non-repo cwd: in a repo the NOTE column leads with the branch, and a
+      // long branch name truncates the prompt this test looks for.
+      cwd: testHome,
       log_file: null,
       status: "active",
       exit_code: null,
@@ -897,7 +899,7 @@ describe("subcommands.cmdLs human table", () => {
 
     const cap = captureStdout();
     try {
-      const code = await runSubcommand(["bun", "cli.js", "ls"]);
+      const code = await runSubcommand(["bun", "cli.js", "ls", "--cwd", testHome]);
       expect(code).toBe(0);
     } finally {
       cap.restore();
