@@ -12,7 +12,16 @@
  */
 
 import { randomBytes } from "crypto";
-import { closeSync, constants as fsConstants, openSync, realpathSync } from "fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  writeFileSync,
+} from "fs";
 import { execFileSync, spawn as spawnChild } from "node:child_process";
 import { appendFile, mkdir, open, readFile, rm, stat, writeFile } from "fs/promises";
 import ms from "ms";
@@ -2965,6 +2974,7 @@ async function gitStatusOnce(
 }
 
 async function cmdLs(rest: string[]): Promise<number> {
+  enableRenderDiskCache(); // `ay ls` only: reuse renders of logs that did not change since the last run
   const y = yargs(rest)
     .usage(
       "Usage: ay ls [keyword] [options]\n" +
@@ -4414,11 +4424,20 @@ export async function extractTaskCounts(logPath: string): Promise<TaskCounts | n
   // Larger window than activity: a todo block is often pushed up by later output.
   const TAIL_BYTES = 256 * 1024;
   let buf: Uint8Array;
+  let key: string;
   try {
     const fh = await open(logPath, "r");
     try {
-      const { size } = await fh.stat();
+      const st = await fh.stat();
+      const { size } = st;
       if (size === 0) return null;
+      // the same log state gives the same counts: reuse the last `ay ls` run's answer (none included)
+      key = `tasks\0${logPath}\0${size}\0${st.mtimeMs}`;
+      const kept = renderDiskGet(key);
+      if (kept !== undefined && (kept === "none" || isTaskCounts(kept))) {
+        renderDiskPut(key, kept);
+        return kept === "none" ? null : kept;
+      }
       if (size <= TAIL_BYTES) {
         const data = await fh.readFile();
         buf = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
@@ -4434,17 +4453,27 @@ export async function extractTaskCounts(logPath: string): Promise<TaskCounts | n
     return null;
   }
 
-  // No ⎿ or fewer than two markers in the bytes: no render of them holds a block, so skip the xterm replay
+  // No ⎿ or too few markers in the bytes: no render of them holds a block, so skip the xterm replay
   // (most logs have no todo block; this replay was the biggest cost of `ay ls`).
-  if (!mayHoldTaskBlock(new TextDecoder().decode(buf))) return null;
+  if (!mayHoldTaskBlock(new TextDecoder().decode(buf))) {
+    renderDiskPut(key, "none");
+    return null;
+  }
   try {
     // mode "cat" renders the full window so parseTaskCounts can find the most
     // recent block anywhere in it (not just the last n lines).
     const rendered = await renderRawLog(buf, { mode: "cat", n: 0 });
-    return parseTaskCounts(rendered.split("\n"));
+    const counts = parseTaskCounts(rendered.split("\n"));
+    renderDiskPut(key, counts ?? "none");
+    return counts;
   } catch {
     return null;
   }
+}
+
+function isTaskCounts(v: unknown): v is TaskCounts {
+  const c = v as TaskCounts;
+  return !!c && typeof c === "object" && Number.isInteger(c.done) && Number.isInteger(c.total);
 }
 
 // Shared CLI defaults (ready/working/needsInput patterns), loaded once per
@@ -4493,6 +4522,11 @@ export async function renderLogTailLines(
   } catch {
     return null;
   }
+  const kept = renderDiskGet(key);
+  if (Array.isArray(kept) && kept.every((l) => typeof l === "string")) {
+    renderDiskPut(key, kept);
+    return (kept as string[]).slice();
+  }
   let hit = tailRenderCache.get(key);
   if (!hit) {
     const p = renderLogTailLinesUncached(logPath, n, geom);
@@ -4507,11 +4541,57 @@ export async function renderLogTailLines(
     });
   }
   const lines = await hit;
+  if (lines) renderDiskPut(key, lines);
   return lines ? lines.slice() : null; // a copy: callers may change their array
 }
 
 const tailRenderCache = new Map<string, Promise<string[] | null>>();
 const TAIL_RENDER_CACHE_MAX = 256;
+
+// Cross-run cache, `ay ls` only (enableRenderDiskCache): most agents are idle between two `ay ls` runs, so
+// their logs are unchanged and the rendered tails / task counts can be reused instead of replayed. Same keys
+// as above (path + size + mtime + …). Only the entries this run used are written back, so the file stays
+// small and entries of changed or gone logs drop out. Not for serve (long-running: nothing would be flushed).
+let renderDiskEnabled = false;
+let renderDisk: Record<string, unknown> | null = null;
+const renderDiskUsed = new Map<string, unknown>();
+const renderDiskFile = (): string => path.join(agentYesHome(), "cache", "ls-render.json");
+
+export function enableRenderDiskCache(): void {
+  renderDiskEnabled = true;
+}
+
+function renderDiskGet(key: string): unknown {
+  if (!renderDiskEnabled) return undefined;
+  if (renderDisk === null) {
+    try {
+      const v: unknown = JSON.parse(readFileSync(renderDiskFile(), "utf8"));
+      renderDisk = v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+    } catch {
+      renderDisk = {};
+    }
+  }
+  return Object.prototype.hasOwnProperty.call(renderDisk, key) ? renderDisk[key] : undefined;
+}
+
+function renderDiskPut(key: string, value: unknown): void {
+  if (!renderDiskEnabled) return;
+  if (renderDiskUsed.size === 0) process.once("exit", saveRenderDisk);
+  renderDiskUsed.set(key, value);
+}
+
+/** Write the entries this run used (runs at exit; exported for tests). */
+export function saveRenderDisk(): void {
+  try {
+    const file = renderDiskFile();
+    mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(Object.fromEntries(renderDiskUsed)), { mode: 0o600 });
+    renameSync(tmp, file);
+  } catch {
+    // a cache: losing it only costs the next run a replay
+  }
+}
 
 async function renderLogTailLinesUncached(
   logPath: string,
