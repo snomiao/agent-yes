@@ -22,7 +22,7 @@ import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./g
 import { formatIdentity, localHost, localUser } from "./identity.ts";
 import { hostedRoomMember, roomAliasPlaceholder } from "./roomReplyAlias.ts";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
-import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
+import { mayHoldTaskBlock, parseTaskCounts, type TaskCounts } from "./todoParse.ts";
 import { agentYesHome } from "./agentYesHome.ts";
 import { PidStore } from "./pidStore.ts";
 import {
@@ -4397,34 +4397,9 @@ export function resolveReadWindow(opts: {
  * Reads only the last 32 KB for speed, renders via xterm for clean output.
  */
 async function extractActivity(logPath: string): Promise<string | null> {
-  const TAIL_BYTES = 32 * 1024;
-  let buf: Uint8Array;
-  try {
-    const fh = await open(logPath, "r");
-    try {
-      const { size } = await fh.stat();
-      if (size === 0) return null;
-      if (size <= TAIL_BYTES) {
-        const data = await fh.readFile();
-        buf = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-      } else {
-        const tmp = Buffer.alloc(TAIL_BYTES);
-        const { bytesRead } = await fh.read(tmp, 0, TAIL_BYTES, size - TAIL_BYTES);
-        buf = new Uint8Array(tmp.buffer, 0, bytesRead);
-      }
-    } finally {
-      await fh.close();
-    }
-  } catch {
-    return null;
-  }
-
-  try {
-    const rendered = await renderRawLog(buf, { mode: "tail", n: 40 });
-    return extractActivityFromLines(rendered.split("\n"));
-  } catch {
-    return null;
-  }
+  // the same 32 KB tail, 40 lines and default geometry as the needs_input / stuck checks: rendered once (cached)
+  const lines = await renderLogTailLines(logPath, 40);
+  return lines ? extractActivityFromLines(lines) : null;
 }
 
 /**
@@ -4459,6 +4434,9 @@ export async function extractTaskCounts(logPath: string): Promise<TaskCounts | n
     return null;
   }
 
+  // No ⎿ or fewer than two markers in the bytes: no render of them holds a block, so skip the xterm replay
+  // (most logs have no todo block; this replay was the biggest cost of `ay ls`).
+  if (!mayHoldTaskBlock(new TextDecoder().decode(buf))) return null;
   try {
     // mode "cat" renders the full window so parseTaskCounts can find the most
     // recent block anywhere in it (not just the last n lines).
@@ -4503,6 +4481,41 @@ export function cliDefaults(): Promise<Record<string, AgentCliConfig>> {
 export async function renderLogTailLines(
   logPath: string,
   n = 40,
+  geom?: RenderGeom,
+): Promise<string[] | null> {
+  // One render per log state per process: an `ay ls` row asks for the same tail up to four times (needs_input
+  // twice, stuck, activity), each a fresh xterm replay — that was most of `ay ls`'s time. Keyed by the file's
+  // size + mtime, so a long-running caller (serve) never gets a stale screen; the size cap bounds the memory.
+  let key: string;
+  try {
+    const s = await stat(logPath);
+    key = `${logPath}\0${s.size}\0${s.mtimeMs}\0${n}\0${geom?.cols ?? ""}x${geom?.rows ?? ""}`;
+  } catch {
+    return null;
+  }
+  let hit = tailRenderCache.get(key);
+  if (!hit) {
+    const p = renderLogTailLinesUncached(logPath, n, geom);
+    hit = p;
+    if (tailRenderCache.size >= TAIL_RENDER_CACHE_MAX) {
+      tailRenderCache.delete(tailRenderCache.keys().next().value as string);
+    }
+    tailRenderCache.set(key, p);
+    // a failed read/render is not remembered: the next call retries (concurrent callers still share this one)
+    void p.then((r) => {
+      if (r === null && tailRenderCache.get(key) === p) tailRenderCache.delete(key);
+    });
+  }
+  const lines = await hit;
+  return lines ? lines.slice() : null; // a copy: callers may change their array
+}
+
+const tailRenderCache = new Map<string, Promise<string[] | null>>();
+const TAIL_RENDER_CACHE_MAX = 256;
+
+async function renderLogTailLinesUncached(
+  logPath: string,
+  n: number,
   geom?: RenderGeom,
 ): Promise<string[] | null> {
   const buf = await readLogTailBytes(logPath);
