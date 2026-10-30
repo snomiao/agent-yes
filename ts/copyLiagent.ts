@@ -13,10 +13,19 @@ import path from "path";
 const from = path.join(import.meta.dir, "..", "node_modules", "liagent", "dist");
 const to = path.join(import.meta.dir, "..", "dist", "liagent");
 // What the exports and the bin need; the build fails without any of them.
-const required = ["index", "box", "client", "protocol", "hub", "cli"].flatMap((n) => [
-  `${n}.js`,
-  `${n}.d.ts`,
-]);
+const required = [
+  "index",
+  "box",
+  "ui",
+  "tree",
+  "mic",
+  "voice",
+  "client",
+  "protocol",
+  "progress",
+  "hub",
+  "cli",
+].flatMap((n) => [`${n}.js`, `${n}.d.ts`]);
 
 const files = await readdir(from).catch(() => {
   throw new Error(

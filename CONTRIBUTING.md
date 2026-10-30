@@ -79,8 +79,8 @@ Git hooks (husky) run lint-staged and a build on commit, and the full
 
 The chat box, its hub and the `liagent` CLI live in their own repository,
 [snolab/liagent](https://github.com/snolab/liagent). agent-yes ships them as
-`agent-yes/liagent` (and `/box`, `/client`, `/protocol`, `/hub`,
-`/liagent.js`) plus the `liagent` bin. It pins a liagent release tag as a
+`agent-yes/liagent` (and `/box`, `/ui`, `/tree`, `/mic`, `/voice`, `/client`,
+`/protocol`, `/progress`, `/hub`, `/liagent.js`) plus the `liagent` bin. It pins a liagent release tag as a
 devDependency, and `bun run build` copies that release's built files into
 `dist/liagent/` (`ts/copyLiagent.ts`).
 

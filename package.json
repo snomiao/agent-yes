@@ -115,6 +115,30 @@
       "import": "./dist/liagent/box.js",
       "default": "./dist/liagent/box.js"
     },
+    "./liagent/ui": {
+      "types": "./dist/liagent/ui.d.ts",
+      "browser": "./dist/liagent/ui.js",
+      "import": "./dist/liagent/ui.js",
+      "default": "./dist/liagent/ui.js"
+    },
+    "./liagent/tree": {
+      "types": "./dist/liagent/tree.d.ts",
+      "browser": "./dist/liagent/tree.js",
+      "import": "./dist/liagent/tree.js",
+      "default": "./dist/liagent/tree.js"
+    },
+    "./liagent/mic": {
+      "types": "./dist/liagent/mic.d.ts",
+      "browser": "./dist/liagent/mic.js",
+      "import": "./dist/liagent/mic.js",
+      "default": "./dist/liagent/mic.js"
+    },
+    "./liagent/voice": {
+      "types": "./dist/liagent/voice.d.ts",
+      "browser": "./dist/liagent/voice.js",
+      "import": "./dist/liagent/voice.js",
+      "default": "./dist/liagent/voice.js"
+    },
     "./liagent/client": {
       "types": "./dist/liagent/client.d.ts",
       "browser": "./dist/liagent/client.js",
@@ -126,6 +150,12 @@
       "browser": "./dist/liagent/protocol.js",
       "import": "./dist/liagent/protocol.js",
       "default": "./dist/liagent/protocol.js"
+    },
+    "./liagent/progress": {
+      "types": "./dist/liagent/progress.d.ts",
+      "browser": "./dist/liagent/progress.js",
+      "import": "./dist/liagent/progress.js",
+      "default": "./dist/liagent/progress.js"
     },
     "./liagent/hub": {
       "types": "./dist/liagent/hub.d.ts",
@@ -200,7 +230,7 @@
     "codehost": "^0.39.0",
     "html2canvas-pro": "^2.3.1",
     "husky": "^9.1.7",
-    "liagent": "github:snolab/liagent#v0.1.0",
+    "liagent": "github:snolab/liagent#v0.1.2",
     "lint-staged": "^16.2.7",
     "node-pty": "^1.1.0",
     "oxfmt": "^0.75.0",
