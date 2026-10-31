@@ -170,7 +170,7 @@
     "codehost": "^0.39.0",
     "html2canvas-pro": "^2.3.1",
     "husky": "^9.1.7",
-    "liagent": "github:snolab/liagent#26f2236ee0cc79162948bc148b6b962979dcd4d5",
+    "liagent": "github:snolab/liagent#b9d5d467ac07e1370f3703609b104283dcd1d901",
     "lint-staged": "^16.2.7",
     "node-pty": "^1.1.0",
     "oxfmt": "^0.75.0",

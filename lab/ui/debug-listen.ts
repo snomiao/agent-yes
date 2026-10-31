@@ -56,7 +56,7 @@ export const INLINE_MAX = 800;
 
 /** The text typed into the agent-yes session; the reply command is the hub's. */
 export function forAgent(c: ChatEvent, hub: string): string {
-  return `[liagent ${c.id.slice(0, 8)}] the owner wrote in the console chat — reply: liagent say ${hub} "..."\n${c.text}`;
+  return `[liagent ${c.id.slice(0, 8)}] the owner wrote in the console chat — reply: liagent say ${hub} "..." (--quiet for FYI or progress lines)\n${c.text}`;
 }
 
 /** Resolves with the exit code (1 when the command could not start). */
@@ -71,7 +71,7 @@ export function deliverable(c: ChatEvent, hub: string, dir: string): string {
   if (msg.length <= INLINE_MAX) return msg;
   const file = join(dir, `${c.id.slice(0, 8)}.txt`);
   writeFileSync(file, c.text, { mode: 0o600 });
-  return `[liagent ${c.id.slice(0, 8)}] the owner wrote a long line in the console chat (full text in ${file}) — reply: liagent say ${hub} "..."`;
+  return `[liagent ${c.id.slice(0, 8)}] the owner wrote a long line in the console chat (full text in ${file}) — reply: liagent say ${hub} "..." (--quiet for FYI or progress lines)`;
 }
 
 async function listenOnce(agent: string, hub: string, dir: string, seen: Set<string>) {
