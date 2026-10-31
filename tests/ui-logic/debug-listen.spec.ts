@@ -1,7 +1,10 @@
 // The debug chat listener's decisions (lab/ui/debug-listen.ts): whose lines it
 // acts on, when it stays quiet, what it hands the agent.
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { forAgent, inQuietHours, parseChat, shouldAct } from "../../lab/ui/debug-listen.ts";
+import { deliverable, forAgent, parseChat, shouldAct } from "../../lab/ui/debug-listen.ts";
 
 const line = (o: object) => JSON.stringify({ type: "chat", id: "abcdef0123", text: "hi", ...o });
 
@@ -25,14 +28,28 @@ describe("shouldAct", () => {
   });
 });
 
-describe("inQuietHours", () => {
-  const at = (h: number) => new Date(2026, 0, 1, h);
-  it("wraps midnight and is off when unset", () => {
-    expect(inQuietHours("22-7", at(23))).toBe(true);
-    expect(inQuietHours("22-7", at(3))).toBe(true);
-    expect(inQuietHours("22-7", at(12))).toBe(false);
-    expect(inQuietHours("1-5", at(2))).toBe(true);
-    expect(inQuietHours(undefined, at(3))).toBe(false);
+describe("seen cap", () => {
+  it("forgets the oldest ids past 500", () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 600; i++) shouldAct(parseChat(line({ from: "owner", id: `m${i}` }))!, seen);
+    expect(seen.size).toBe(500);
+    expect(seen.has("m0")).toBe(false);
+    expect(seen.has("m599")).toBe(true);
+  });
+});
+
+describe("deliverable", () => {
+  it("inlines a short line and hands a long one over as a private file", () => {
+    const dir = mkdtempSync(join(tmpdir(), "t-"));
+    const short = parseChat(line({ from: "owner" }))!;
+    expect(deliverable(short, "https://h", dir)).toContain("\nhi");
+    const long = parseChat(line({ from: "owner", text: "x".repeat(2000) }))!;
+    const msg = deliverable(long, "https://h", dir);
+    expect(msg.length).toBeLessThan(1000);
+    const file = /in (\S+\.txt)/.exec(msg)![1];
+    expect(readFileSync(file, "utf8")).toBe("x".repeat(2000));
+    expect(statSync(file).mode & 0o777).toBe(0o600);
+    rmSync(dir, { recursive: true });
   });
 });
 
