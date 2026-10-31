@@ -39,7 +39,7 @@
         "codehost": "^0.39.0",
         "html2canvas-pro": "^2.3.1",
         "husky": "^9.1.7",
-        "liagent": "github:snolab/liagent#fee486bb2123a8cd0d9fafd2fb5269f942b64c10",
+        "liagent": "github:snolab/liagent#26f2236ee0cc79162948bc148b6b962979dcd4d5",
         "lint-staged": "^16.2.7",
         "node-pty": "^1.1.0",
         "oxfmt": "^0.75.0",
@@ -1220,7 +1220,7 @@
 
     "kysely": ["kysely@0.29.7", "", {}, "sha512-fmIq+7kv4WbFm2tcfznRzikqB4cuNpgZ40PSU2fAJ2/OO5XhojqnTPrmgrCjYSRJVwBln03XcRXJGnw9H099IQ=="],
 
-    "liagent": ["liagent@github:snolab/liagent#fee486b", { "bin": { "liagent": "./dist/cli.js" } }, "snolab-liagent-fee486b", "sha512-9jdtN3AJTUqpj6xSwNIVLePaP9qBWdP6luNOZpu9b8y5lEzSdv6jOyp2odg2ob63C8H09DshIMhkVgAefPNaeQ=="],
+    "liagent": ["liagent@github:snolab/liagent#26f2236", { "bin": { "liagent": "./dist/cli.js" } }, "snolab-liagent-26f2236", "sha512-/24kaJb2JqIKM5ufeRaKXyBovLx73uwAXEnbw3PRDAAostGZ9n9OKeV7/vkN+79fu8r+1suIYRufnVd6r459fQ=="],
 
     "lines-and-columns": ["lines-and-columns@1.2.4", "", {}, "sha512-7ylylesZQ/PV29jhEDl3Ufjo6ZX7gCqJr5F7PKrqc93v7fzSymt1BpwEU8nAUXs8qzzvqhbjhK5QZg6Mt/HkBg=="],
 
