@@ -16,9 +16,33 @@ bun run build
 # to eliminate. cargo fmt --check enforces consistent formatting.
 RS_STAGED=$(git diff --cached --name-only --diff-filter=ACMR | grep -E '^rs/' || true)
 if [ -n "$RS_STAGED" ]; then
-  echo "[pre-commit] rs/ changed — running cargo fmt --check + cargo check"
-  (cd rs && cargo fmt --all --check)
-  (cd rs && RUSTFLAGS="-D warnings" cargo check --workspace --all-targets)
+  # rustup puts cargo on PATH by appending to the shell PROFILE, and git runs
+  # hooks with a non-login, non-interactive shell that reads no profile — so a
+  # perfectly working rustup toolchain is invisible here and every commit
+  # touching rs/ died with `cargo: not found` (husky exit 127). Put rustup's bin
+  # dir on PATH ourselves (honouring CARGO_HOME) instead of relying on the
+  # caller's environment.
+  CARGO_BIN="${CARGO_HOME:-$HOME/.cargo}/bin"
+  if [ -d "$CARGO_BIN" ]; then
+    case ":$PATH:" in
+      *":$CARGO_BIN:"*) ;;
+      *) PATH="$CARGO_BIN:$PATH" ; export PATH ;;
+    esac
+  fi
+  if command -v cargo >/dev/null 2>&1; then
+    echo "[pre-commit] rs/ changed — running cargo fmt --check + cargo check"
+    (cd rs && cargo fmt --all --check)
+    (cd rs && RUSTFLAGS="-D warnings" cargo check --workspace --all-targets)
+  else
+    # No toolchain at all (fresh clone, non-Rust contributor). Don't block the
+    # commit over it, but say so loudly: CI builds rs/ but does NOT run
+    # `cargo fmt --check`, so nothing downstream catches formatting.
+    echo "[pre-commit] rs/ changed but cargo is not installed — SKIPPING"
+    echo "             cargo fmt --check + cargo check. Nothing in CI re-checks"
+    echo "             formatting, so install the toolchain before you rely on it:"
+    echo "               curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y"
+    echo "             (already installed somewhere else? set CARGO_HOME.)"
+  fi
 fi
 
 # Rust coverage (only if cargo-tarpaulin is installed)
