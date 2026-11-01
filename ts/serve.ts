@@ -1914,7 +1914,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // the Rust daemon; the rest stays here. See ts/serveRust.ts for the split.
   // `--no-rust` is stripped for the parsers below either way.
   {
-    const { planRustServe } = await import("./serveRust.ts");
+    const { planRustServe, SERVE_SUBCOMMANDS } = await import("./serveRust.ts");
     const plan = planRustServe(rest);
     if (plan.kind === "rust-only") {
       const { ensureAyrsBinary } = await import("./rustBinary.ts");
@@ -1940,6 +1940,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
       if (rest[0] === "join-secret" || rest.includes("--join")) {
         process.stderr.write(`ay serve: ${plan.reason}: joining rooms needs the Rust daemon\n`);
         return 1;
+      }
+      // Say which server runs and why, so a daemon log (and `ay share`'s
+      // choice of room file) never leaves the operator guessing. Subcommands
+      // and the explicit opt-outs are not "fallbacks", so stay quiet there.
+      const optedOut = plan.reason === "--no-rust" || plan.reason === "AGENT_YES_NO_RUST=1";
+      if (!optedOut && !SERVE_SUBCOMMANDS.has(rest[0] ?? "")) {
+        process.stderr.write(`ay serve: running the TypeScript server (${plan.reason})\n`);
       }
     }
   }

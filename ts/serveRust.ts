@@ -16,6 +16,10 @@
  *   join-secret         (print the link + join secret members need; ayrs only)
  *   --port <n>          / --port=<n>       (loopback HTTP console; 0 = free port)
  *   --sighost <host>    / --sighost=<host>
+ *   --http              (with --port: ayrs's --port listener IS the HTTP
+ *                        console, so the flag is implied and dropped)
+ *   --host <loopback>   (with --port: 127.0.0.1 / localhost / ::1 — ayrs
+ *                        binds loopback anyway, so the flag is dropped)
  *
  * What stays on TypeScript, with the reason printed:
  *   - `--no-rust` / AGENT_YES_NO_RUST=1 (explicit opt-out)
@@ -24,14 +28,15 @@
  *   - the daemon subcommands (install/uninstall/status/logs/start/stop/
  *     healthcheck) and -d/--daemon: ayrs has its own OS-supervisor install and
  *     the two must not manage each other's registration
- *   - --share (http+webrtc over Portless), --http, --host, --token, --tls-*,
+ *   - --share (http+webrtc over Portless), --http without --port (Portless),
+ *     a non-loopback --host (ayrs listens on loopback only), --token, --tls-*,
  *     --local
  */
 
 /** Subcommands `ay serve` dispatches before flag parsing — never delegated. */
 import { toWebrtcUrl } from "./webrtcLink.ts";
 
-const SERVE_SUBCOMMANDS = new Set([
+export const SERVE_SUBCOMMANDS = new Set([
   "install",
   "uninstall",
   "status",
@@ -40,6 +45,8 @@ const SERVE_SUBCOMMANDS = new Set([
   "stop",
   "healthcheck",
 ]);
+
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 
 export type RustServePlan =
   | { kind: "rust"; argv: string[] }
@@ -80,6 +87,9 @@ export function planRustServe(
     return { kind: "ts", reason: `\`ay serve ${first}\``, rest };
   }
 
+  // `--http`/`--host` only map onto ayrs next to an explicit port: without
+  // one, TypeScript's HTTP console runs behind Portless, which ayrs lacks.
+  const hasPort = rest.some((a) => a === "--port" || a.startsWith("--port="));
   const argv = ["serve"];
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
@@ -121,6 +131,21 @@ export function planRustServe(
         }
         argv.push("--port", v);
         break;
+      }
+      case "--http": {
+        if (inline !== undefined || !hasPort)
+          return { kind: "ts", reason: `${a} without --port (Portless HTTPS console)`, rest };
+        break; // ayrs's --port listener is the HTTP console
+      }
+      case "--host": {
+        const v = takeNext();
+        if (v === undefined || !LOOPBACK_HOSTS.has(v) || !hasPort)
+          return {
+            kind: "ts",
+            reason: `--host ${v ?? "(missing)"} (ayrs listens on loopback only)`,
+            rest,
+          };
+        break; // ayrs binds 127.0.0.1 already
       }
       case "--sighost": {
         const v = takeNext();
