@@ -7,7 +7,8 @@
 // once with a busy beat, then typed into the agent-yes session with `ay send`;
 // the agent answers with `liagent say`. Never plays audio: read-aloud happens
 // in the owner's browser. The ack is a silent busy beat (a spinner, no chat
-// line, no speech), so it needs no quiet hours.
+// line, no speech). liagent v0.1.5 has no time-based quiet hours: a plain
+// `say` is read aloud, `say --quiet` never is.
 // Pairing is never started here (--no-pair): the owner grants it once with
 // `liagent pair`, and the saved grant is resumed.
 
