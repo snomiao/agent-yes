@@ -40,6 +40,12 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
         "Run the agent in the foreground even when nested inside another agent (disables fork-by-default; also AGENT_YES_ATTACH=1).",
       alias: "foreground",
     })
+    .option("detach", {
+      type: "boolean",
+      default: false,
+      description:
+        "Start the agent in the background and return immediately (prints its pid and how to drive it) — e.g. when spawning over ssh. Rust runtime only.",
+    })
     .option("logFile", {
       type: "string",
       description: "Rendered log file to write to.",
@@ -349,6 +355,7 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
     queue: parsedArgv.queue,
     robust: parsedArgv.robust,
     attach: parsedArgv.attach,
+    detach: parsedArgv.detach,
     logFile: parsedArgv.logFile,
     verbose: parsedArgv.verbose,
     resume: parsedArgv.continue, // Note: intentional use resume here to avoid preserved keyword (continue)
