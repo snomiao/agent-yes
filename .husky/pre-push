@@ -3,9 +3,13 @@ set -e
 
 # Full test + coverage gate. Moved here from pre-commit (see .husky/pre-commit)
 # so commits stay fast — but you still can't push red: the same suite CI
-# enforces runs locally before the push leaves your machine. Use
-# `git push --no-verify` only as a deliberate escape hatch (e.g. a host too
-# CPU-oversubscribed to finish the suite) — CI is still authoritative.
+# enforces runs locally before the push leaves your machine. Scoped to the
+# push's own contents below, so a prose-only push doesn't pay for it.
+#
+# `git push --no-verify` stays a deliberate escape hatch, but reach for it only
+# when the suite cannot finish at all (not merely because it is slow or because
+# the diff looks harmless — that judgement is what the scoping above encodes).
+# CI is authoritative either way.
 
 # Run from a linked worktree, git hands this hook GIT_DIR pointing at the REAL
 # repo. Specs that build scratch repos (`git init`/`commit`/`worktree add` in a
@@ -15,6 +19,61 @@ set -e
 # repo-local git variable (`git rev-parse --local-env-vars`).
 unset $(git rev-parse --local-env-vars)
 
+# Scope the heavy gate to what is actually being pushed. git feeds this hook one
+# line per ref on stdin — "<local ref> <local sha> <remote ref> <remote sha>" —
+# which is the only accurate picture of a push: `@{upstream}` is absent for a
+# brand-new branch and stale after a rebase. Running 2k tests + v8 coverage for
+# a markdown edit is what drives people to `--no-verify`, and that habit then
+# skips the gate on the pushes that DO need it. So: prose-only push → skip,
+# everything else → the full suite, and NO information (empty stdin, e.g. a
+# manual run) → also the full suite, because the safe default is to test.
+#
+# `SKILL.md` is deliberately not prose: ts/ reads it at runtime for --use-skills.
+# No spec reads any .md file (checked), so the rest cannot change a test result.
+ZERO=0000000000000000000000000000000000000000
+REFS=$(cat) # git's ref lines; empty when the hook is run by hand
+
+files_for_refs() {
+  while read -r _local_ref local_sha _remote_ref remote_sha; do
+    [ -z "$local_sha" ] && continue
+    if [ "$remote_sha" = "$ZERO" ] || ! git cat-file -e "$remote_sha" 2>/dev/null; then
+      # New branch (or a remote sha we don't have): compare against the default branch.
+      base=$(git merge-base "$local_sha" refs/remotes/origin/main 2>/dev/null || true)
+    else
+      base="$remote_sha"
+    fi
+    if [ -n "$base" ]; then
+      git diff --name-only "$base" "$local_sha"
+    else
+      git show --name-only --format= "$local_sha" # no common base: just the tip
+    fi
+  done
+}
+
+FILES=""
+if [ -n "$REFS" ]; then
+  # Drop deletions (local sha all zeros) — `git push origin :branch` ships no code.
+  LIVE_REFS=$(printf '%s\n' "$REFS" | awk -v z="$ZERO" '$2 != z && $2 != ""')
+  if [ -z "$LIVE_REFS" ]; then
+    echo "[pre-push] deletion only — nothing to test"
+    exit 0
+  fi
+  FILES=$(printf '%s\n' "$LIVE_REFS" | files_for_refs | sort -u)
+fi
+
+if [ -n "$FILES" ]; then
+  # Line-based, so paths containing spaces are handled.
+  NON_PROSE=$(
+    printf '%s\n' "$FILES" | grep -vE '^docs/|\.md$' || true
+    printf '%s\n' "$FILES" | grep -xF SKILL.md || true
+  )
+  if [ -z "$NON_PROSE" ]; then
+    echo "[pre-push] prose-only push — skipping the test gate:"
+    printf '             %s\n' $FILES
+    exit 0
+  fi
+fi
+
 echo "[pre-push] running full test + coverage gate"
 bun run test:coverage
 
@@ -23,9 +82,14 @@ bun run test:coverage
 # CI deploy job (ui-test.yml) ships lab/ui to agent-yes.com on merge, so this is
 # the last local gate before that. Runs a headless Chrome that emulates the OS
 # color-scheme and asserts the palette + xterm ANSI theme flip live (no reload).
-UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || echo origin/main)
-if git diff --quiet "$UPSTREAM" -- lab/ui/index.html tests/ui-test/theme.e2e.mjs 2>/dev/null; then
-  exit 0
+if [ -n "$FILES" ]; then
+  UI_TOUCHED=$(printf '%s\n' "$FILES" | grep -xE 'lab/ui/index\.html|tests/ui-test/theme\.e2e\.mjs' || true)
+  [ -z "$UI_TOUCHED" ] && exit 0
+else
+  UPSTREAM=$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || echo origin/main)
+  if git diff --quiet "$UPSTREAM" -- lab/ui/index.html tests/ui-test/theme.e2e.mjs 2>/dev/null; then
+    exit 0
+  fi
 fi
 
 echo "[pre-push] lab/ui changed — running console theme e2e"
