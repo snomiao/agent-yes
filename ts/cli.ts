@@ -1,4 +1,9 @@
 #!/usr/bin/env bun
+// MUST stay the first import: a deleted-and-recreated cwd makes process.cwd()
+// throw, and an ES module's imports are evaluated before this file's body, so
+// anything below that touches the cwd (the eager config load, execa, bun-pty)
+// would crash with a raw stack trace first. See ts/cwdGuard.ts.
+import "./cwdGuard.ts";
 import { argv } from "process";
 import { spawn } from "child_process";
 import { parseCliArgs } from "./parseCliArgs.ts";
