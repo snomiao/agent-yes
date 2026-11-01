@@ -12,7 +12,16 @@
  */
 
 import { randomBytes } from "crypto";
-import { closeSync, constants as fsConstants, openSync, realpathSync } from "fs";
+import {
+  closeSync,
+  constants as fsConstants,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  writeFileSync,
+} from "fs";
 import { execFileSync, spawn as spawnChild } from "node:child_process";
 import { appendFile, mkdir, open, readFile, rm, stat, writeFile } from "fs/promises";
 import ms from "ms";
@@ -22,7 +31,7 @@ import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./g
 import { formatIdentity, localHost, localUser } from "./identity.ts";
 import { hostedRoomMember, roomAliasPlaceholder } from "./roomReplyAlias.ts";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
-import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
+import { mayHoldTaskBlock, parseTaskCounts, type TaskCounts } from "./todoParse.ts";
 import { agentYesHome } from "./agentYesHome.ts";
 import { PidStore } from "./pidStore.ts";
 import {
@@ -3046,6 +3055,10 @@ async function cmdLs(rest: string[]): Promise<number> {
     return 0;
   }
 
+  // one-shot `ay ls` only: reuse renders of logs that did not change since the last run (not --watch, which
+  // polls changing logs for as long as it runs and would keep every version)
+  if (!argv.watch) enableRenderDiskCache();
+
   const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
   // A keyword naming a specific remote (alias or token@host:port) → just that
   // remote, regardless of the local/all-remotes default below.
@@ -4397,34 +4410,9 @@ export function resolveReadWindow(opts: {
  * Reads only the last 32 KB for speed, renders via xterm for clean output.
  */
 async function extractActivity(logPath: string): Promise<string | null> {
-  const TAIL_BYTES = 32 * 1024;
-  let buf: Uint8Array;
-  try {
-    const fh = await open(logPath, "r");
-    try {
-      const { size } = await fh.stat();
-      if (size === 0) return null;
-      if (size <= TAIL_BYTES) {
-        const data = await fh.readFile();
-        buf = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-      } else {
-        const tmp = Buffer.alloc(TAIL_BYTES);
-        const { bytesRead } = await fh.read(tmp, 0, TAIL_BYTES, size - TAIL_BYTES);
-        buf = new Uint8Array(tmp.buffer, 0, bytesRead);
-      }
-    } finally {
-      await fh.close();
-    }
-  } catch {
-    return null;
-  }
-
-  try {
-    const rendered = await renderRawLog(buf, { mode: "tail", n: 40 });
-    return extractActivityFromLines(rendered.split("\n"));
-  } catch {
-    return null;
-  }
+  // the same 32 KB tail, 40 lines and default geometry as the needs_input / stuck checks: rendered once (cached)
+  const lines = await renderLogTailLines(logPath, 40);
+  return lines ? extractActivityFromLines(lines) : null;
 }
 
 /**
@@ -4439,11 +4427,20 @@ export async function extractTaskCounts(logPath: string): Promise<TaskCounts | n
   // Larger window than activity: a todo block is often pushed up by later output.
   const TAIL_BYTES = 256 * 1024;
   let buf: Uint8Array;
+  let key: string;
   try {
     const fh = await open(logPath, "r");
     try {
-      const { size } = await fh.stat();
+      const st = await fh.stat();
+      const { size } = st;
       if (size === 0) return null;
+      // the same log state gives the same counts: reuse the last `ay ls` run's answer (none included)
+      key = `tasks\0${logPath}\0${size}\0${st.mtimeMs}`;
+      const kept = renderDiskGet(key);
+      if (kept !== undefined && (kept === "none" || isTaskCounts(kept))) {
+        renderDiskPut(key, kept);
+        return kept === "none" ? null : kept;
+      }
       if (size <= TAIL_BYTES) {
         const data = await fh.readFile();
         buf = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
@@ -4459,14 +4456,27 @@ export async function extractTaskCounts(logPath: string): Promise<TaskCounts | n
     return null;
   }
 
+  // No ⎿ or too few markers in the bytes: no render of them holds a block, so skip the xterm replay
+  // (most logs have no todo block; this replay was the biggest cost of `ay ls`).
+  if (!mayHoldTaskBlock(new TextDecoder().decode(buf))) {
+    renderDiskPut(key, "none");
+    return null;
+  }
   try {
     // mode "cat" renders the full window so parseTaskCounts can find the most
     // recent block anywhere in it (not just the last n lines).
     const rendered = await renderRawLog(buf, { mode: "cat", n: 0 });
-    return parseTaskCounts(rendered.split("\n"));
+    const counts = parseTaskCounts(rendered.split("\n"));
+    renderDiskPut(key, counts ?? "none");
+    return counts;
   } catch {
     return null;
   }
+}
+
+function isTaskCounts(v: unknown): v is TaskCounts {
+  const c = v as TaskCounts;
+  return !!c && typeof c === "object" && Number.isInteger(c.done) && Number.isInteger(c.total);
 }
 
 // Shared CLI defaults (ready/working/needsInput patterns), loaded once per
@@ -4503,6 +4513,106 @@ export function cliDefaults(): Promise<Record<string, AgentCliConfig>> {
 export async function renderLogTailLines(
   logPath: string,
   n = 40,
+  geom?: RenderGeom,
+): Promise<string[] | null> {
+  // One render per log state per process: an `ay ls` row asks for the same tail up to four times (needs_input
+  // twice, stuck, activity), each a fresh xterm replay — that was most of `ay ls`'s time. Keyed by the file's
+  // size + mtime, so a long-running caller (serve) never gets a stale screen; the size cap bounds the memory.
+  let key: string;
+  try {
+    const s = await stat(logPath);
+    key = `${logPath}\0${s.size}\0${s.mtimeMs}\0${n}\0${geom?.cols ?? ""}x${geom?.rows ?? ""}`;
+  } catch {
+    return null;
+  }
+  const kept = renderDiskGet(key);
+  if (Array.isArray(kept) && kept.every((l) => typeof l === "string")) {
+    renderDiskPut(key, kept);
+    return (kept as string[]).slice();
+  }
+  let hit = tailRenderCache.get(key);
+  if (!hit) {
+    const p = renderLogTailLinesUncached(logPath, n, geom);
+    hit = p;
+    if (tailRenderCache.size >= TAIL_RENDER_CACHE_MAX) {
+      tailRenderCache.delete(tailRenderCache.keys().next().value as string);
+    }
+    tailRenderCache.set(key, p);
+    // a failed read/render is not remembered: the next call retries (concurrent callers still share this one)
+    void p.then((r) => {
+      if (r === null && tailRenderCache.get(key) === p) tailRenderCache.delete(key);
+    });
+  }
+  const lines = await hit;
+  if (lines) renderDiskPut(key, lines);
+  return lines ? lines.slice() : null; // a copy: callers may change their array
+}
+
+const tailRenderCache = new Map<string, Promise<string[] | null>>();
+const TAIL_RENDER_CACHE_MAX = 256;
+
+// Cross-run cache, `ay ls` only (enableRenderDiskCache): most agents are idle between two `ay ls` runs, so
+// their logs are unchanged and the rendered tails / task counts can be reused instead of replayed. Same keys
+// as above (path + size + mtime + …). Only the entries this run used are written back, so the file stays
+// small and entries of changed or gone logs drop out. Not for serve (long-running: nothing would be flushed).
+let renderDiskEnabled = false;
+let renderDiskPath = ""; // fixed when enabled, so a later AGENT_YES_HOME change cannot redirect the write
+let renderDisk: Record<string, unknown> | null = null;
+const renderDiskUsed = new Map<string, unknown>();
+const RENDER_DISK_MAX = 1024; // a safety bound: one `ay ls` run uses about 2 entries per agent
+
+export function enableRenderDiskCache(): void {
+  renderDiskEnabled = true;
+  renderDiskPath = path.join(agentYesHome(), "cache", "ls-render.json");
+}
+
+/** Turn the cross-run cache off and forget it in this process, without writing (tests). */
+export function resetRenderDiskCache(): void {
+  if (renderDiskUsed.size > 0) process.removeListener("exit", saveRenderDisk);
+  renderDiskEnabled = false;
+  renderDiskPath = "";
+  renderDisk = null;
+  renderDiskUsed.clear();
+  tailRenderCache.clear();
+}
+
+function renderDiskGet(key: string): unknown {
+  if (!renderDiskEnabled) return undefined;
+  if (renderDisk === null) {
+    try {
+      const v: unknown = JSON.parse(readFileSync(renderDiskPath, "utf8"));
+      renderDisk = v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+    } catch {
+      renderDisk = {};
+    }
+  }
+  return Object.prototype.hasOwnProperty.call(renderDisk, key) ? renderDisk[key] : undefined;
+}
+
+function renderDiskPut(key: string, value: unknown): void {
+  if (!renderDiskEnabled) return;
+  if (renderDiskUsed.size >= RENDER_DISK_MAX && !renderDiskUsed.has(key)) return;
+  if (renderDiskUsed.size === 0) process.once("exit", saveRenderDisk);
+  renderDiskUsed.set(key, value);
+}
+
+/** Write the entries this run used (runs at exit; exported for tests). */
+export function saveRenderDisk(): void {
+  if (!renderDiskPath) return;
+  try {
+    const file = renderDiskPath;
+    mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(Object.fromEntries(renderDiskUsed)), { mode: 0o600 });
+    renameSync(tmp, file);
+  } catch {
+    // a cache: losing it only costs the next run a replay
+  }
+}
+
+async function renderLogTailLinesUncached(
+  logPath: string,
+  n: number,
   geom?: RenderGeom,
 ): Promise<string[] | null> {
   const buf = await readLogTailBytes(logPath);
