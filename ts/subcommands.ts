@@ -1657,6 +1657,53 @@ async function pickInteractive(matches: GlobalPidRecord[]): Promise<GlobalPidRec
   });
 }
 
+/** Edit distance (Levenshtein), small strings only. */
+function editDistance(a: string, b: string): number {
+  const d = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    let prev = d[0]!;
+    d[0] = i;
+    for (let j = 1; j <= b.length; j++) {
+      const tmp = d[j]!;
+      d[j] = Math.min(d[j]! + 1, d[j - 1]! + 1, prev + (a[i - 1] === b[j - 1] ? 0 : 1));
+      prev = tmp;
+    }
+  }
+  return d[b.length]!;
+}
+
+/**
+ * The live agents closest to a keyword that matched nothing, best first (at
+ * most `max`): each agent is scored by its cwd path segments and title words,
+ * so a typo ("symphn") or a stale name still points at the right lane.
+ */
+export function suggestAgents(
+  records: GlobalPidRecord[],
+  keyword: string,
+  max = 3,
+): GlobalPidRecord[] {
+  const kw = keyword.toLowerCase();
+  if (!kw || /^\d+$/.test(kw)) return [];
+  const scored = records
+    .filter((r) => r.status !== "exited")
+    .map((r) => {
+      const tokens = `${r.cwd ?? ""} ${(r as { title?: string }).title ?? ""}`
+        .toLowerCase()
+        .split(/[\s/\\._:@\[\]-]+/)
+        .filter((t) => t.length >= 2);
+      const best = Math.min(
+        Infinity,
+        ...tokens.map((t) =>
+          t.includes(kw) || kw.includes(t) ? 0 : editDistance(kw, t) / Math.max(kw.length, t.length),
+        ),
+      );
+      return { r, best };
+    })
+    .filter((x) => x.best < 0.5)
+    .sort((a, b) => a.best - b.best || b.r.started_at - a.r.started_at);
+  return scored.slice(0, max).map((x) => x.r);
+}
+
 export async function resolveOne(
   keyword: string | undefined,
   opts: CommonOpts,
@@ -1674,7 +1721,14 @@ export async function resolveOne(
           `Find the current one with \`ay ls\`; nothing was sent.`,
       );
     }
-    throw new Error(`no agent matched "${keyword}"`);
+    const near = suggestAgents(await listRecords(undefined, opts), keyword);
+    throw new Error(
+      `no agent matched "${keyword}"` +
+        (near.length
+          ? ` — closest live agents:\n` +
+            near.map((r) => `  ${r.pid}  ${r.agent_id ?? ""}  ${shortenPath(r.cwd)}`).join("\n")
+          : ""),
+    );
   }
   // Exact identity beats fuzzy. A numeric pid or a full agent_id names exactly
   // one agent; without this, that agent gets pooled with prompt-substring
