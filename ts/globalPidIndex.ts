@@ -107,8 +107,12 @@ async function withLock<R>(file: string, fn: () => Promise<R>): Promise<R> {
   await mkdir(dir, { recursive: true });
   let release: (() => Promise<void>) | undefined;
   try {
-    release = await lock(dir, {
-      lockfilePath: file + ".lock",
+    // The registry is keyed by the first argument, so key it by the lockfile's
+    // own path: a shared directory made unrelated locks collide (#516).
+    const lockfilePath = file + ".lock";
+    release = await lock(lockfilePath, {
+      realpath: false,
+      lockfilePath,
       retries: { retries: 5, minTimeout: 50, maxTimeout: 500 },
     });
     return await fn();

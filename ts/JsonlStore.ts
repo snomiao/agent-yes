@@ -190,11 +190,18 @@ export class JsonlStore<T extends Record<string, any> = Record<string, any>> {
   }
 
   private async withLock<R>(fn: () => Promise<R>): Promise<R> {
-    const dir = path.dirname(this.filePath);
     let release: (() => Promise<void>) | undefined;
     try {
-      release = await lock(dir, {
-        lockfilePath: this.filePath + ".lock",
+      // proper-lockfile keys its in-process registry by the FIRST argument, so
+      // that must be unique to this lock: locking the shared directory made two
+      // stores in one directory overwrite each other's entry and crash an
+      // orphaned refresh timer (#516), and the bare file path is already taken
+      // by todoStore's write lock. Key it by the lockfile's own path.
+      // realpath:false because that path never exists up front.
+      const lockfilePath = this.filePath + ".lock";
+      release = await lock(lockfilePath, {
+        realpath: false,
+        lockfilePath,
         retries: { retries: 5, minTimeout: 50, maxTimeout: 500 },
       });
       return await fn();
