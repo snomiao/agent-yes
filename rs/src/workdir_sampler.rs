@@ -33,8 +33,17 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// How often the wrapper samples its process tree.
+/// How often the wrapper samples its process tree while things are changing.
 pub const SAMPLE_EVERY: Duration = Duration::from_secs(2);
+/// An unchanged sample doubles the wait, up to this; any change resets it.
+pub const SAMPLE_MAX_EVERY: Duration = Duration::from_secs(30);
+
+/// Wait before the next sample after `unchanged` identical samples in a row.
+pub fn next_delay(unchanged: u32) -> Duration {
+    SAMPLE_EVERY
+        .saturating_mul(1u32 << unchanged.min(4))
+        .min(SAMPLE_MAX_EVERY)
+}
 /// Votes that take part in the decision.
 pub const WINDOW: usize = 40;
 /// Per-vote decay, newest = 1.0.
@@ -204,7 +213,7 @@ impl Tracker {
 // ---------------------------------------------------------------------------
 
 #[cfg(target_os = "linux")]
-fn snapshot() -> Vec<Proc> {
+fn snapshot(_root: u32) -> Vec<Proc> {
     let mut out = Vec::new();
     let Ok(rd) = std::fs::read_dir("/proc") else {
         return out;
@@ -249,95 +258,114 @@ fn cwds(pids: &[u32]) -> Vec<(u32, PathBuf)> {
         .collect()
 }
 
+// macOS: libproc instead of forking `ps -A` and `lsof` every sample. With dozens
+// of wrappers each forking two helpers every 2 s, the forks cost far more than
+// the data (and much more under memory pressure). `proc_listchildpids` walks
+// only this wrapper's own subtree; `PROC_PIDVNODEPATHINFO` reads a pid's cwd.
 #[cfg(target_os = "macos")]
-fn snapshot() -> Vec<Proc> {
-    let Some(out) = run_capped("ps", &["-A", "-o", "pid=,ppid=,comm="]) else {
-        return Vec::new();
-    };
-    parse_ps(&out)
+fn snapshot(root: u32) -> Vec<Proc> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(parent) = stack.pop() {
+        if !seen.insert(parent) {
+            continue;
+        }
+        for pid in child_pids(parent) {
+            out.push(Proc {
+                pid,
+                ppid: parent,
+                comm: proc_path(pid).unwrap_or_default(),
+            });
+            stack.push(pid);
+        }
+    }
+    out
 }
 
-/// `ps -A -o pid=,ppid=,comm=` rows; comm is the rest of the line (a path on
-/// macOS, may contain spaces).
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn parse_ps(out: &str) -> Vec<Proc> {
-    out.lines()
-        .filter_map(|l| {
-            let mut it = l.split_whitespace();
-            let pid = it.next()?.parse().ok()?;
-            let ppid = it.next()?.parse().ok()?;
-            let comm = it.collect::<Vec<_>>().join(" ");
-            Some(Proc { pid, ppid, comm })
-        })
-        .collect()
+#[cfg(target_os = "macos")]
+fn child_pids(ppid: u32) -> Vec<u32> {
+    let mut buf = vec![0i32; 256];
+    loop {
+        // SAFETY: `buf` is a live, writable allocation of exactly the byte size passed.
+        let count = unsafe {
+            libc::proc_listchildpids(
+                ppid as libc::pid_t,
+                buf.as_mut_ptr().cast(),
+                (buf.len() * std::mem::size_of::<i32>()) as libc::c_int,
+            )
+        };
+        // Unlike proc_listpids, this returns the NUMBER of pids written.
+        if count <= 0 {
+            return Vec::new();
+        }
+        let n = count as usize;
+        if n < buf.len() {
+            return buf[..n]
+                .iter()
+                .filter(|p| **p > 0)
+                .map(|p| *p as u32)
+                .collect();
+        }
+        // Filled the buffer: there may be more children, retry bigger.
+        let len = buf.len() * 2;
+        buf.resize(len, 0);
+    }
+}
+
+/// Executable path of `pid` (what `ps -o comm=` printed), if it is still alive.
+#[cfg(target_os = "macos")]
+fn proc_path(pid: u32) -> Option<String> {
+    let mut buf = [0u8; 4096]; // PROC_PIDPATHINFO_MAXSIZE
+                               // SAFETY: `buf` is writable for the length passed.
+    let n = unsafe {
+        libc::proc_pidpath(
+            pid as libc::c_int,
+            buf.as_mut_ptr().cast(),
+            buf.len() as u32,
+        )
+    };
+    (n > 0).then(|| String::from_utf8_lossy(&buf[..n as usize]).into_owned())
 }
 
 #[cfg(target_os = "macos")]
 fn cwds(pids: &[u32]) -> Vec<(u32, PathBuf)> {
-    if pids.is_empty() {
-        return Vec::new();
-    }
-    let list = pids
-        .iter()
-        .map(|p| p.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    match run_capped("lsof", &["-a", "-d", "cwd", "-Fn", "-p", &list]) {
-        Some(out) => parse_lsof_cwd(&out),
-        None => Vec::new(),
-    }
+    pids.iter()
+        .filter_map(|&pid| proc_cwd(pid).map(|c| (pid, c)))
+        .collect()
 }
 
-/// `lsof -Fn` field output: `p<pid>` starts a process, `n<path>` its name.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
-pub fn parse_lsof_cwd(out: &str) -> Vec<(u32, PathBuf)> {
-    let mut res = Vec::new();
-    let mut cur: Option<u32> = None;
-    for l in out.lines() {
-        if let Some(p) = l.strip_prefix('p') {
-            cur = p.parse().ok();
-        } else if let (Some(n), Some(pid)) = (l.strip_prefix('n'), cur) {
-            res.push((pid, PathBuf::from(n)));
-        }
-    }
-    res
-}
-
-/// Run a helper with a hard deadline. On timeout the child is killed and its
-/// reader abandoned, never joined (see CLAUDE.md: a grandchild can hold the
-/// pipe open after the kill).
 #[cfg(target_os = "macos")]
-fn run_capped(cmd: &str, args: &[&str]) -> Option<String> {
-    use std::io::Read;
-    use std::process::{Command, Stdio};
-    let mut child = Command::new(cmd)
-        .args(args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    let mut stdout = child.stdout.take()?;
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let mut s = String::new();
-        let _ = stdout.read_to_string(&mut s);
-        let _ = tx.send(s);
-    });
-    match rx.recv_timeout(Duration::from_secs(3)) {
-        Ok(s) => {
-            let _ = child.wait();
-            Some(s)
-        }
-        Err(_) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            None
-        }
+fn proc_cwd(pid: u32) -> Option<PathBuf> {
+    // SAFETY: zeroed is a valid bit pattern for this plain-data C struct; the
+    // kernel writes at most `size_of` bytes into it.
+    let mut info: libc::proc_vnodepathinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_vnodepathinfo>() as libc::c_int;
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDVNODEPATHINFO,
+            0,
+            (&mut info as *mut libc::proc_vnodepathinfo).cast(),
+            size,
+        )
+    };
+    if n < size {
+        return None;
     }
+    // vip_path is a MAXPATHLEN C string, declared as 32x32 c_char by libc.
+    let raw: &[u8] = unsafe {
+        std::slice::from_raw_parts(
+            info.pvi_cdir.vip_path.as_ptr().cast::<u8>(),
+            std::mem::size_of_val(&info.pvi_cdir.vip_path),
+        )
+    };
+    let end = raw.iter().position(|b| *b == 0)?;
+    (end > 0).then(|| PathBuf::from(String::from_utf8_lossy(&raw[..end]).into_owned()))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn snapshot() -> Vec<Proc> {
+fn snapshot(_root: u32) -> Vec<Proc> {
     Vec::new()
 }
 
@@ -348,7 +376,7 @@ fn cwds(_pids: &[u32]) -> Vec<(u32, PathBuf)> {
 
 /// One sample: cwd of every process in a shell subtree under `root`.
 pub fn sample(root: u32) -> Vec<(u32, PathBuf)> {
-    let procs = snapshot();
+    let procs = snapshot(root);
     cwds(&shell_subtree_pids(root, &procs))
 }
 
@@ -387,12 +415,19 @@ pub fn remove_workdir(pid: u32) {
 pub fn spawn(pid: u32, agent_id: Option<String>) -> AbortOnDrop {
     let handle = tokio::spawn(async move {
         let mut tracker = Tracker::new();
-        let mut tick = tokio::time::interval(SAMPLE_EVERY);
+        let mut last: Option<Vec<(u32, PathBuf)>> = None;
+        let mut unchanged = 0u32;
         loop {
-            tick.tick().await;
+            tokio::time::sleep(next_delay(unchanged)).await;
             let Ok(sample) = tokio::task::spawn_blocking(move || sample(pid)).await else {
                 continue;
             };
+            if last.as_ref() == Some(&sample) {
+                unchanged = unchanged.saturating_add(1);
+            } else {
+                unchanged = 0;
+                last = Some(sample.clone());
+            }
             let now = chrono::Utc::now().timestamp_millis();
             if let Some(u) = tracker.observe(&sample, now) {
                 // Awaited, so writes for this pid never overlap: the shared temp
@@ -452,29 +487,18 @@ mod tests {
     }
 
     #[test]
-    fn parses_proc_stat_with_spaces_and_parens_in_comm() {
-        let s = "1113 (my (odd) sh) S 1112 1113 1113 0 -1";
-        assert_eq!(parse_proc_stat(1113, s), Some(p(1113, 1112, "my (odd) sh")));
+    fn delay_backs_off_when_unchanged_and_resets() {
+        assert_eq!(next_delay(0), Duration::from_secs(2));
+        assert_eq!(next_delay(1), Duration::from_secs(4));
+        assert_eq!(next_delay(3), Duration::from_secs(16));
+        assert_eq!(next_delay(4), Duration::from_secs(30));
+        assert_eq!(next_delay(u32::MAX), Duration::from_secs(30));
     }
 
     #[test]
-    fn parses_ps_and_lsof() {
-        let ps = "  1112  1111 /usr/local/bin/claude\n 1113 1112 /bin/zsh\n";
-        assert_eq!(
-            parse_ps(ps),
-            vec![
-                p(1112, 1111, "/usr/local/bin/claude"),
-                p(1113, 1112, "/bin/zsh")
-            ]
-        );
-        let lsof = "p1113\nfcwd\nn/repo/alpha\np1114\nfcwd\nn/repo/with space\n";
-        assert_eq!(
-            parse_lsof_cwd(lsof),
-            vec![
-                (1113, PathBuf::from("/repo/alpha")),
-                (1114, PathBuf::from("/repo/with space"))
-            ]
-        );
+    fn parses_proc_stat_with_spaces_and_parens_in_comm() {
+        let s = "1113 (my (odd) sh) S 1112 1113 1113 0 -1";
+        assert_eq!(parse_proc_stat(1113, s), Some(p(1113, 1112, "my (odd) sh")));
     }
 
     fn repo(base: &Path, name: &str) -> PathBuf {
@@ -596,7 +620,7 @@ mod tests {
         );
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]
     fn samples_a_real_child_shell_cwd() {
         let t = tempfile::tempdir().unwrap();
