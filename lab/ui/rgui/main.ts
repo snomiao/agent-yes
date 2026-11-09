@@ -170,6 +170,8 @@ function saveRoom(name: string, token: string, host: string) {
     // added only moves for a new room/token: see saveRoom in index.html.
     const fresh = !prev || prev.token !== token || prev.host !== host;
     r[name] = { token, host, ts: now, added: fresh ? now : prev.added || 0 };
+    // A device-only room stays so across reconnects (see room-sync.js).
+    if (prev?.localOnly && !fresh) r[name].localOnly = true;
     localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
     if (fresh) roomSync?.schedule();
   } catch {

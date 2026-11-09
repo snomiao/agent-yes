@@ -67,13 +67,15 @@
     { "pattern": "*.agent-yes.com/*", "zone_name": "agent-yes.com" },
   ],
   "observability": { "enabled": true },
-  // Sign-in (auth.ts): Google and GitHub via better-auth on D1. The schema lives in
-  // ./migrations; apply it before the first deploy that carries this binding:
+  // Optional sign-in (auth.ts): Google (room sync) and/or GitHub (the owner's
+  // debug chat) via better-auth on D1. The schema lives in ./migrations; apply
+  // it before the first deploy that carries this binding:
   //   wrangler d1 migrations apply agent-yes-auth --remote
-  // Secrets (wrangler secret put): BETTER_AUTH_SECRET, GOOGLE_CLIENT_ID,
-  // GOOGLE_CLIENT_SECRET (room sync) and/or GITHUB_CLIENT_ID,
-  // GITHUB_CLIENT_SECRET. Without all three the auth routes answer 503 and the
-  // console's debug mode offers no sign-in.
+  // Secrets (wrangler secret put): BETTER_AUTH_SECRET, plus each provider's
+  // pair: GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET, GITHUB_CLIENT_ID +
+  // GITHUB_CLIENT_SECRET. A provider with only half its pair is off; with no
+  // provider the auth routes answer 503 and the console shows no sign-in.
+  // Self-hosting: set AUTH_ORIGIN to your own origin and your own secrets.
   "d1_databases": [
     {
       "binding": "AUTH_DB",
