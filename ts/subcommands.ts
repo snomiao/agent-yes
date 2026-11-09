@@ -5643,6 +5643,9 @@ async function cmdSendDrain(rest: string[]): Promise<number> {
       }
       const record = (await readGlobalPids()).find((r) => r.pid === pid);
       let result: Awaited<ReturnType<typeof deliverBody>> | null = null;
+      // A draft nobody touches (unchanged at 1/2/4/8 s) is submitted for its
+      // owner here too, so a message parked behind it is not stuck forever.
+      if (record && !(await isUserTyping(pid))) await submitStableDraft(record);
       if (record && !(await isUserTyping(pid))) {
         await withIpcLock(pid, async () => {
           // Re-check under the lock, right before the write.
