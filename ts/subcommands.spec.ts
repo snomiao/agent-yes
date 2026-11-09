@@ -4901,8 +4901,8 @@ describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () =
       kind: "hidden",
       reason: "its input box is not on screen",
     });
-    // CLIs without a box keep reading the last prompt row in the 32 KB tail.
-    expect((await stateOf(turn.repeat(3000), "codex")).kind).toBe("draft");
+    // Codex has no rule, but a prompt row with no footer under it is history too.
+    expect((await stateOf(turn.repeat(3000), "codex")).kind).toBe("hidden");
   });
 
   it("follows what is appended after the first reading, and a truncated log", async () => {

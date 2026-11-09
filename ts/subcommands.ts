@@ -4710,7 +4710,13 @@ async function renderComposerRows(
       }
       rows = rowsFromXterm(ct.term as never, 40, fromContent);
       next = ct.whole ? windows.length : ct.window + 1;
-      if (!claude || composerBoxed(rows.map((r) => r.text))) next = windows.length;
+      if (
+        composerBoxed(
+          rows.map((r) => r.text),
+          claude,
+        )
+      )
+        next = windows.length;
     }
     for (let w = next; w < windows.length; w++) {
       const from = Math.max(0, size - windows[w]!);
@@ -4734,7 +4740,14 @@ async function renderComposerRows(
       if (composerTerms.size > COMPOSER_TERMS_MAX)
         dropComposerTerm(composerTerms.keys().next().value!); // oldest first
       rows = rowsFromXterm(term as never, 40, fromContent);
-      if (!claude || from === 0 || composerBoxed(rows.map((r) => r.text))) break;
+      if (
+        from === 0 ||
+        composerBoxed(
+          rows.map((r) => r.text),
+          claude,
+        )
+      )
+        break;
     }
     return rows ?? [];
   } catch (e) {
@@ -4762,7 +4775,13 @@ export async function readComposerState(
     const state = classifyComposer(rows);
     // No window showed the box, so a "draft" was read under some other prompt
     // row, possibly an old turn: say so instead of reporting it as a draft.
-    if (claude && state.kind === "draft" && !composerBoxed(rows.map((r) => r.text)))
+    if (
+      state.kind === "draft" &&
+      !composerBoxed(
+        rows.map((r) => r.text),
+        claude,
+      )
+    )
       return { kind: "hidden", reason: "its input box is not on screen" };
     return state;
   } catch (e) {
