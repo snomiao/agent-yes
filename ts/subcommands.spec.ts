@@ -4869,6 +4869,49 @@ describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () =
     return readComposerState({ pid: 1111, cli, log_file: file } as never, windows);
   }
 
+  describe("submitStableDraft", () => {
+    async function setup(draft: string) {
+      const { submitStableDraft } = await loadModule();
+      const n = 2000 + logs++;
+      const log_file = path.join(testHome, `${n}.raw.log`);
+      const fifo_file = path.join(testHome, `${n}.fifo`);
+      await writeFile(log_file, idleLog(draft));
+      await writeFile(fifo_file, "");
+      const record = { pid: n, cli: "claude", log_file, fifo_file } as never;
+      return { submitStableDraft, record, log_file, fifo_file };
+    }
+
+    it("submits a draft that is unchanged at every check, then sees the box clear", async () => {
+      const { submitStableDraft, record, log_file, fifo_file } = await setup("btw how");
+      const waits: number[] = [];
+      const sent = await submitStableDraft(record, [1, 2, 4, 8], async (ms) => {
+        waits.push(ms);
+        // Once Enter has been written, the CLI redraws an empty box.
+        if ((await readFile(fifo_file, "utf-8")).includes("\r"))
+          await writeFile(log_file, idleLog(""));
+      });
+      expect(sent).toBe(true);
+      expect(waits.slice(0, 4)).toEqual([1, 2, 4, 8]);
+      expect(await readFile(fifo_file, "utf-8")).toBe("\r");
+    });
+
+    it("leaves a draft alone when it changes between checks (someone is typing)", async () => {
+      const { submitStableDraft, record, log_file, fifo_file } = await setup("btw how");
+      let n = 0;
+      const sent = await submitStableDraft(record, [1, 2, 4, 8], async () => {
+        if (++n === 2) await writeFile(log_file, idleLog("btw how are you"));
+      });
+      expect(sent).toBe(false);
+      expect(await readFile(fifo_file, "utf-8")).toBe("");
+    });
+
+    it("does nothing for an empty box", async () => {
+      const { submitStableDraft, record, fifo_file } = await setup("");
+      expect(await submitStableDraft(record, [1], async () => {})).toBe(false);
+      expect(await readFile(fifo_file, "utf-8")).toBe("");
+    });
+  });
+
   it("reads the empty composer drawn before the last 32 KB, not the transcript", async () => {
     // The 32 KB tail alone renders the old turn as the prompt and its answer as a draft.
     expect(await stateOf(idleLog(""))).toEqual({ kind: "empty", ghost: false });
