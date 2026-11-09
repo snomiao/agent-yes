@@ -15,13 +15,18 @@ import {
   WrongPassphrase,
   deriveKey,
   driveStore,
+  dropSynced,
+  markDeviceOnly,
+  markSynced,
   mergeRooms,
   newSalt,
   sealRooms,
+  seedLocalOnly,
   syncOnce,
 } from "./room-sync.js";
 
 const AUTH = "/_ay/auth";
+const SEEDED_KEY = "ay.roomsSyncSeeded";
 const IDB_NAME = "ay-room-sync";
 const IDB_STORE = "keys";
 
@@ -156,6 +161,12 @@ export function createRoomSync({ onApply = () => {}, onState = () => {} } = {}) 
     emit();
     try {
       const store = driveStore(await accessToken());
+      // First sign-in on this device: rooms already here stay device-only until
+      // the user ticks them (room-sync.js, "Per-room choice").
+      if (!localStorage.getItem(SEEDED_KEY)) {
+        writeLocal(seedLocalOnly(readLocal()));
+        localStorage.setItem(SEEDED_KEY, "1");
+      }
       const before = readLocal();
       const { state } = await syncOnce({
         store,
@@ -227,12 +238,37 @@ export function createRoomSync({ onApply = () => {}, onState = () => {} } = {}) 
       });
       if (r?.url) location.href = r.url;
     },
+    /** Rooms signing out would remove from this device (the synced ones). */
+    syncedRoomNames() {
+      const { rooms } = readLocal();
+      const kept = dropSynced({ rooms }).rooms;
+      return Object.keys(rooms).filter((n) => !(n in kept));
+    },
+    /**
+     * Sign out. Synced rooms leave this device (they stay in the account);
+     * device-only rooms are untouched. The next sign-in re-seeds, so rooms added
+     * while signed out start device-only too.
+     */
     async signOut() {
       await authJson("/sign-out", { method: "POST", body: "{}" }).catch(() => {});
       await clearKeys();
+      const before = readLocal();
+      const after = dropSynced(before);
+      writeLocal(after);
+      localStorage.removeItem(SEEDED_KEY);
       st.user = null;
       st.needs = null;
       emit();
+      onApply(before, after);
+    },
+    /** Switch one room between synced and device-only, then sync (or forget remotely). */
+    setRoomSynced(name, synced) {
+      const local = readLocal();
+      writeLocal(
+        synced ? markSynced(local, name, Date.now()) : markDeviceOnly(local, name, Date.now()),
+      );
+      emit();
+      this.schedule(500);
     },
     /**
      * Forgotten passphrase: replace the synced list with this device's list,

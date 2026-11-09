@@ -8,10 +8,14 @@ import {
   blobHeader,
   deriveKey,
   driveStore,
+  dropSynced,
+  markDeviceOnly,
+  markSynced,
   mergeRooms,
   newSalt,
   openRooms,
   sealRooms,
+  seedLocalOnly,
   syncOnce,
   syncPayload,
 } from "../../lab/ui/room-sync.js";
@@ -301,5 +305,70 @@ describe("syncOnce", () => {
       }),
     ).rejects.toBeInstanceOf(WrongPassphrase);
     expect(d.files.get("file-1")).toBe(before);
+  });
+});
+
+describe("per-room sync choice", () => {
+  const two = { rooms: { alpha: room("t1", NOW), beta: room("t2", NOW) }, removed: {} };
+
+  it("a first sign-in seeds existing rooms as device-only, and they are never uploaded", () => {
+    const seeded = seedLocalOnly(two);
+    expect(seeded.rooms.alpha.localOnly).toBe(true);
+    expect(syncPayload(seeded).rooms).toEqual({});
+    // and survive a merge with another device's list untouched
+    const merged = mergeRooms(seeded, { rooms: { gamma: room("t3", NOW) }, removed: {} }, NOW);
+    expect(Object.keys(merged.rooms).sort()).toEqual(["alpha", "beta", "gamma"]);
+    expect(merged.rooms.alpha.localOnly).toBe(true);
+  });
+
+  it("seeding leaves codehost rooms alone", () => {
+    const s = seedLocalOnly({ rooms: { c: room("t", NOW, NOW, "codehost") }, removed: {} });
+    expect(s.rooms.c.localOnly).toBeUndefined();
+  });
+
+  it("switching a room to device-only keeps it here and tells the account to forget it", () => {
+    const off = markDeviceOnly(two, "alpha", NOW);
+    expect(off.rooms.alpha.localOnly).toBe(true);
+    expect(off.removed.alpha).toBe(NOW);
+    const merged = mergeRooms(off, two, NOW + 1);
+    expect(merged.rooms.alpha.localOnly).toBe(true); // still here
+    expect(merged.removed.alpha).toBe(NOW); // and the removal is uploaded
+    expect(syncPayload(merged).rooms.alpha).toBeUndefined();
+    expect(syncPayload(merged).removed.alpha).toBe(NOW);
+  });
+
+  it("another device drops a room that was switched to device-only elsewhere", () => {
+    const off = mergeRooms(markDeviceOnly(two, "alpha", NOW + 10), null, NOW + 10);
+    const other = mergeRooms(two, { rooms: {}, removed: off.removed }, NOW + 11);
+    expect(other.rooms.alpha).toBeUndefined();
+    expect(other.rooms.beta).toBeDefined();
+  });
+
+  it("switching it back to synced outranks the earlier removal", () => {
+    const off = markDeviceOnly(two, "alpha", NOW);
+    const on = markSynced(off, "alpha", NOW + 5);
+    expect(on.rooms.alpha.localOnly).toBeUndefined();
+    const merged = mergeRooms(on, { rooms: {}, removed: off.removed }, NOW + 6);
+    expect(merged.rooms.alpha.token).toBe("t1");
+  });
+
+  it("codehost rooms cannot be switched to synced", () => {
+    const c = { rooms: { c: room("t", NOW, NOW, "codehost") }, removed: {} };
+    expect(markSynced(c, "c", NOW + 1)).toBe(c);
+    expect(markDeviceOnly(c, "c", NOW + 1)).toBe(c);
+  });
+
+  it("sign-out drops the synced rooms and keeps device-only and codehost ones", () => {
+    const mixed = {
+      rooms: {
+        synced: room("t1", NOW),
+        local: { ...room("t2", NOW), localOnly: true },
+        ch: room("t3", NOW, NOW, "codehost"),
+      },
+      removed: { old: NOW },
+    };
+    const after = dropSynced(mixed);
+    expect(Object.keys(after.rooms).sort()).toEqual(["ch", "local"]);
+    expect(after.removed).toEqual({});
   });
 });

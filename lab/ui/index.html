@@ -812,6 +812,19 @@
         color: var(--muted);
         opacity: 0.6;
       }
+      .rooms .rsyn {
+        flex: none;
+        font-size: 12px;
+        line-height: 1;
+        cursor: pointer;
+        user-select: none;
+      }
+      .rooms .rsyn.on {
+        color: var(--accent);
+      }
+      .rooms .rsyn.off {
+        color: var(--muted);
+      }
       .rooms .rname {
         font-family: var(--mono);
         color: var(--accent);
@@ -2326,6 +2339,7 @@
                 </div>
               </span>
               <span id="conn" class="connbadge" title="rooms — click to manage">● local</span>
+              <span id="profile"></span>
             </span>
           </div>
           <div class="rooms" id="rooms" style="display: none"></div>
@@ -8213,6 +8227,8 @@ my.translate = async (text, lang) => {
         // room-sync.js), so a reconnect must keep the old value.
         const fresh = !prev || prev.token !== token || prev.host !== host;
         r[room] = { token, host, ts: now, added: fresh ? now : prev.added || 0 };
+        // A device-only room stays so across reconnects, unless its token changed.
+        if (prev?.localOnly && !fresh) r[room].localOnly = true;
         localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
         // Only a new room or a new token is worth a sync round; a reconnect just
         // refreshes ts, which the next round carries anyway.
@@ -8671,14 +8687,34 @@ my.translate = async (text, lang) => {
         return `<span class="res${warn ? " warn" : ""}" title="${esc(tip + multi)}">${esc(label)}</span>`;
       }
 
+      // Which rooms an account is syncing: a cloud for synced, a house for
+      // device-only (click toggles). Shown only while signed in to sync, so a
+      // console without sign-in looks exactly as before. codehost rooms are
+      // always device-only and have no toggle.
+      function syncIconHtml(name, room, sync) {
+        if (!sync?.user) return "";
+        const fixed = room.host === "codehost";
+        const synced = !fixed && !room.localOnly;
+        const tip = fixed
+          ? "this device only (codehost rooms never sync)"
+          : synced
+            ? "synced with your account. Click to keep it on this device only"
+            : "this device only, not synced. Click to sync it with your account";
+        return `<span class="rsyn ${synced ? "on" : "off"}"${
+          fixed ? "" : ` data-sync="${esc(name)}"`
+        } title="${esc(tip)}">${synced ? "☁" : "⌂"}</span>`;
+      }
+
       function renderRooms() {
         const r = loadRooms();
         const names = Object.keys(r).sort((a, b) => r[b].ts - r[a].ts);
+        const sync = roomSync?.state();
         const items = names.length
           ? names
               .map(
                 (n) => `<div class="ritem ${roomLive(n) ? "cur" : ""}">
           ${roomStatus(n)}
+          ${syncIconHtml(n, r[n], sync)}
           <span class="rname" data-room="${esc(n)}">${esc(n)}</span>
           <span class="rhost">${esc(r[n].host)}</span>
           ${resChipHtml(n)}
@@ -8686,7 +8722,6 @@ my.translate = async (text, lang) => {
               )
               .join("")
           : `<div class="empty2">no saved rooms — paste a share link below</div>`;
-        const sync = roomSync?.state();
         // The panel re-renders on every live-count update; keep a half-typed
         // passphrase (and its confirmation) and focus across that.
         const pwKeep = ["syncpw", "syncpw2"]
@@ -8754,8 +8789,17 @@ my.translate = async (text, lang) => {
         ev.preventDefault();
         if (id === "syncin") await roomSync.signIn().catch((e) => alert(String(e?.message || e)));
         else if (id === "syncnow") await roomSync.run();
-        else if (id === "syncout") await roomSync.signOut();
-        else if (id === "synclock") {
+        else if (id === "syncout") {
+          const gone = roomSync.syncedRoomNames();
+          if (
+            gone.length &&
+            !confirm(
+              `Sign out? ${gone.length} synced room${gone.length === 1 ? "" : "s"} will be removed from this device (still in your account). Rooms marked "this device only" stay.`,
+            )
+          )
+            return true;
+          await roomSync.signOut();
+        } else if (id === "synclock") {
           await roomSync.lock();
           await roomSync.run(); // reports that a passphrase is needed
         } else {
@@ -8805,6 +8849,192 @@ my.translate = async (text, lang) => {
         })
         .catch(() => {}); // no sync module here (local console): rooms stay device-local
 
+      // Optional profile menu + "My data" panel (profile.js). Mounts nothing where
+      // the site has no sign-in (local `ay serve`, self-hosted domains), and the
+      // console never waits on it.
+      const PREF_SKIP = new Set([
+        "ay.rooms",
+        "ay.roomsRemoved",
+        "ay.roomsSyncSeeded",
+        "ay.localToken",
+        "ay.quickCmds",
+        "ay.userScripts",
+      ]);
+      const lsKeys = () => {
+        try {
+          return Object.keys(localStorage).filter((k) => k.startsWith("ay."));
+        } catch {
+          return [];
+        }
+      };
+      function dataSections() {
+        const rooms = loadRooms();
+        const sync = roomSync?.state();
+        const quick = (() => {
+          try {
+            const a = JSON.parse(localStorage.getItem(QUICKCMD_KEY) || "[]");
+            return Array.isArray(a) ? a : [];
+          } catch {
+            return [];
+          }
+        })();
+        const hasScripts = !!localStorage.getItem(USER_SCRIPTS_KEY);
+        const prefs = lsKeys().filter((k) => !PREF_SKIP.has(k));
+        const download = (name, obj) => {
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(
+            new Blob([JSON.stringify(obj, null, 2)], { type: "application/json" }),
+          );
+          a.download = name;
+          a.click();
+          setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        };
+        const hosts = new Map();
+        for (const e of entries) {
+          const h = hosts.get(e._host || "?") || { agents: 0, rooms: new Set() };
+          h.agents++;
+          if (e._src) h.rooms.add(String(e._src).split("/")[0]);
+          hosts.set(e._host || "?", h);
+        }
+        return [
+          {
+            title: "Rooms",
+            hint: sync?.user
+              ? "☁ synced with your account · ⌂ this device only. Tick a room to sync it."
+              : "Stored on this device.",
+            rows: Object.keys(rooms)
+              .sort((a, b) => rooms[b].ts - rooms[a].ts)
+              .map((n) => {
+                const fixed = rooms[n].host === "codehost";
+                const synced = !!sync?.user && !fixed && !rooms[n].localOnly;
+                return {
+                  label: n,
+                  sub: rooms[n].host,
+                  badge: !sync?.user ? "" : synced ? "☁ synced" : "⌂ this device only",
+                  actions: [
+                    ...(sync?.user && !fixed
+                      ? [
+                          {
+                            label: synced ? "Keep on this device only" : "Sync",
+                            run: () => roomSync.setRoomSynced(n, !synced),
+                          },
+                        ]
+                      : []),
+                    { label: "Forget", run: () => (dropRoom(n), removeRoom(n), loadList()) },
+                  ],
+                };
+              }),
+            empty: "no saved rooms",
+          },
+          {
+            title: "Quick commands and scripts",
+            hint: "Stored on this device. They run only in this console.",
+            rows: [
+              ...quick.map((q, i) => ({
+                label: q.label || "(untitled)",
+                sub: String(q.template || "").slice(0, 80),
+                actions: [
+                  {
+                    label: "Delete",
+                    run: () => {
+                      const next = quick.filter((_, j) => j !== i);
+                      localStorage.setItem(QUICKCMD_KEY, JSON.stringify(next));
+                    },
+                  },
+                ],
+              })),
+              ...(hasScripts
+                ? [
+                    {
+                      label: "User scripts (my.*)",
+                      sub: "your helper library, e.g. my.translate",
+                      actions: [
+                        {
+                          label: "Reset to default",
+                          run: () =>
+                            confirm("Replace your user scripts with the default?") &&
+                            localStorage.removeItem(USER_SCRIPTS_KEY),
+                        },
+                      ],
+                    },
+                  ]
+                : []),
+            ],
+            empty: "none saved",
+            actions: [
+              {
+                label: "Export",
+                run: () =>
+                  download("agent-yes-scripts.json", {
+                    quickCmds: quick,
+                    userScripts: localStorage.getItem(USER_SCRIPTS_KEY),
+                  }),
+              },
+            ],
+          },
+          {
+            title: "Preferences",
+            hint: "Layout, filters, sort and pinned agents. Never includes room tokens.",
+            rows: prefs.map((k) => ({
+              label: k,
+              sub: String(localStorage.getItem(k)).slice(0, 60),
+            })),
+            empty: "defaults",
+            actions: [
+              {
+                label: "Export",
+                run: () =>
+                  download(
+                    "agent-yes-preferences.json",
+                    Object.fromEntries(prefs.map((k) => [k, localStorage.getItem(k)])),
+                  ),
+              },
+              {
+                label: "Reset",
+                run: () =>
+                  confirm("Reset all console preferences?") &&
+                  prefs.forEach((k) => localStorage.removeItem(k)),
+              },
+            ],
+          },
+          {
+            title: "Hosts, machines and agents",
+            hint: "What your connected rooms show right now. Read-only: it is not stored with your account.",
+            rows: [...hosts].map(([h, v]) => ({
+              label: h,
+              sub: `${v.agents} agent${v.agents === 1 ? "" : "s"}${v.rooms.size ? " · " + [...v.rooms].join(", ") : ""}`,
+            })),
+            empty: "no machines connected",
+          },
+        ];
+      }
+      import("./profile.js")
+        .then((m) =>
+          m.mountProfile($("profile"), {
+            sections: dataSections,
+            rerender: renderRoomsIfOpen,
+            beforeSignOut: () => {
+              const gone = roomSync?.syncedRoomNames() || [];
+              return (
+                !gone.length ||
+                confirm(
+                  `Sign out? ${gone.length} synced room${gone.length === 1 ? "" : "s"} will be removed from this device (still in your account). Rooms marked "this device only" stay.`,
+                )
+              );
+            },
+            signOut: () =>
+              roomSync
+                ? roomSync.signOut()
+                : fetch("/_ay/auth/sign-out", {
+                    method: "POST",
+                    credentials: "same-origin",
+                    headers: { "content-type": "application/json" },
+                    body: "{}",
+                  }),
+          }),
+        )
+        .catch(() => {});
+
       $("conn").addEventListener("click", () => {
         const el = $("rooms");
         if (el.style.display === "none") {
@@ -8823,6 +9053,13 @@ my.translate = async (text, lang) => {
       $("rooms").addEventListener("click", (ev) => {
         if (ev.target.id?.startsWith("sync")) {
           syncPanelClick(ev);
+          return;
+        }
+        const syn = ev.target.closest(".rsyn[data-sync]");
+        if (syn) {
+          const n = syn.dataset.sync;
+          roomSync.setRoomSynced(n, !!loadRooms()[n]?.localOnly);
+          renderRooms();
           return;
         }
         const name = ev.target.closest(".rname");

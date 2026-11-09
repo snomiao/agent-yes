@@ -24,6 +24,13 @@
 // ROOM_TTL_MS are dropped on every device WITHOUT a removal record: the
 // per-device 90-day expiry must never wipe a room from other devices that still
 // use it. codehost rooms are local-only and never leave the device.
+//
+// Per-room choice. A room is either synced or "device only" (`localOnly: true`
+// on its entry), never both. Device-only rooms behave like codehost rooms: they
+// pass through every merge untouched and are never uploaded. Rooms that were
+// already on a device when it first signed in start device-only (seedLocalOnly);
+// the user ticks the ones to sync. Signing out drops the synced rooms from the
+// device (they stay in the account) and keeps the device-only ones (dropSynced).
 
 export const ROOMS_KEY = "ay.rooms";
 export const REMOVED_KEY = "ay.roomsRemoved";
@@ -36,7 +43,7 @@ const BLOB_VERSION = 1;
 
 /** True for a room entry that belongs in the synced list. */
 export const isSyncable = (r) =>
-  !!r && typeof r.token === "string" && !!r.token && r.host !== CODEHOST_HOST;
+  !!r && typeof r.token === "string" && !!r.token && r.host !== CODEHOST_HOST && !r.localOnly;
 
 /**
  * Merge two room states. A state is { rooms: {name: {token, host, ts, added}},
@@ -64,8 +71,12 @@ export function mergeRooms(local, remote, now) {
   for (const name of names) {
     const l = lr[name];
     if (l && !isSyncable(l)) {
-      // codehost and malformed entries are this device's business only.
+      // codehost, device-only and malformed entries are this device's business
+      // only. A room just switched to device-only still carries the removal that
+      // tells the account (and so other devices) to let go of it.
       rooms[name] = l;
+      const left = Math.max(local?.removed?.[name] || 0, remote?.removed?.[name] || 0);
+      if (l.localOnly && left && fresh(left)) removed[name] = left;
       continue;
     }
     const r = isSyncable(rr[name]) ? rr[name] : undefined;
@@ -82,6 +93,39 @@ export function mergeRooms(local, remote, now) {
 }
 
 const added = (x) => x?.added || 0;
+
+/** Stop syncing `name`: keep it here, and let the account (so other devices) forget it. */
+export function markDeviceOnly(state, name, now) {
+  const r = state.rooms?.[name];
+  if (!r || !isSyncable(r)) return state;
+  return {
+    rooms: { ...state.rooms, [name]: { ...r, localOnly: true } },
+    removed: { ...state.removed, [name]: now },
+  };
+}
+
+/** Sync `name` again. `added` is bumped so it outranks the removal made when it was switched off. */
+export function markSynced(state, name, now) {
+  const r = state.rooms?.[name];
+  if (!r || r.host === CODEHOST_HOST || !r.token) return state;
+  const { localOnly: _off, ...rest } = r;
+  return { rooms: { ...state.rooms, [name]: { ...rest, added: now } }, removed: state.removed };
+}
+
+/** First sign-in on a device: what is already here stays here until the user ticks it. */
+export function seedLocalOnly(state) {
+  const rooms = {};
+  for (const [n, r] of Object.entries(state.rooms || {}))
+    rooms[n] = isSyncable(r) ? { ...r, localOnly: true } : r;
+  return { rooms, removed: state.removed || {} };
+}
+
+/** Sign-out: synced rooms leave this device (they stay in the account); the rest stay. */
+export function dropSynced(state) {
+  const rooms = {};
+  for (const [n, r] of Object.entries(state.rooms || {})) if (!isSyncable(r)) rooms[n] = r;
+  return { rooms, removed: {} };
+}
 
 /** Of two copies of one room: the newer `added`, else the newer `ts`. */
 function pick(a, b) {
