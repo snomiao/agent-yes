@@ -4881,19 +4881,23 @@ describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () =
       return { submitStableDraft, record, log_file, fifo_file };
     }
 
-    it("submits a draft that is unchanged at every check, then sees the box clear", async () => {
-      const { submitStableDraft, record, log_file, fifo_file } = await setup("btw how");
-      const waits: number[] = [];
-      const sent = await submitStableDraft(record, [1, 2, 4, 8], async (ms) => {
-        waits.push(ms);
-        // Once Enter has been written, the CLI redraws an empty box.
-        if ((await readFile(fifo_file, "utf-8")).includes("\r"))
-          await writeFile(log_file, idleLog(""));
-      });
-      expect(sent).toBe(true);
-      expect(waits.slice(0, 4)).toEqual([1, 2, 4, 8]);
-      expect(await readFile(fifo_file, "utf-8")).toBe("\r");
-    });
+    // writeToIpc connects to a named pipe on Windows; this fake FIFO is a plain file.
+    it.skipIf(process.platform === "win32")(
+      "submits a draft that is unchanged at every check, then sees the box clear",
+      async () => {
+        const { submitStableDraft, record, log_file, fifo_file } = await setup("btw how");
+        const waits: number[] = [];
+        const sent = await submitStableDraft(record, [1, 2, 4, 8], async (ms) => {
+          waits.push(ms);
+          // Once Enter has been written, the CLI redraws an empty box.
+          if ((await readFile(fifo_file, "utf-8")).includes("\r"))
+            await writeFile(log_file, idleLog(""));
+        });
+        expect(sent).toBe(true);
+        expect(waits.slice(0, 4)).toEqual([1, 2, 4, 8]);
+        expect(await readFile(fifo_file, "utf-8")).toBe("\r");
+      },
+    );
 
     it("leaves a draft alone when it changes between checks (someone is typing)", async () => {
       const { submitStableDraft, record, log_file, fifo_file } = await setup("btw how");
