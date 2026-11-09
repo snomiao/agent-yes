@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isTerminalReply, isUnpromptedTerminalReply } from "./terminalReply.ts";
+import {
+  isRedundantViewerReply,
+  isTerminalReply,
+  isUnpromptedTerminalReply,
+} from "./terminalReply.ts";
 
 describe("isTerminalReply", () => {
   it("matches single auto-replies (CPR, DECXCPR, DA1, DA2, DSR)", () => {
@@ -103,5 +107,17 @@ describe("isUnpromptedTerminalReply", () => {
     expect(isUnpromptedTerminalReply("\x1b[?59;3R done")).toBe(false);
     expect(isUnpromptedTerminalReply("done \x1b[?59;3R")).toBe(false);
     expect(isUnpromptedTerminalReply("")).toBe(false);
+  });
+});
+
+describe("isRedundantViewerReply (nothing reaches the FIFO)", () => {
+  it("drops a raw cursor-position reply", () => {
+    expect(isRedundantViewerReply(true, "\x1b[12;1R")).toBe(true);
+    expect(isRedundantViewerReply(true, "\x1b[?12;1R\x1b[?1;2c")).toBe(true);
+  });
+  it("keeps real keystrokes and non-raw sends", () => {
+    expect(isRedundantViewerReply(true, "R")).toBe(false);
+    expect(isRedundantViewerReply(true, "\x1b[A")).toBe(false);
+    expect(isRedundantViewerReply(false, "\x1b[12;1R")).toBe(false);
   });
 });
