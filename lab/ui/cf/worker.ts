@@ -78,7 +78,9 @@ const SUBPROTO = "ay-signal-1";
 // quick commands (new Function over user-stored localStorage text — their own
 // code in their own browser). connect-src allows any wss: so custom / self-hosted signaling hosts
 // still work, while forbidding arbitrary https fetch exfil. Keep this in sync
-// with the copy in ts/serve.ts (serveUiFile).
+// with the copy in ts/serve.ts (serveUiFile), except www.googleapis.com: room
+// sync (auth.ts) talks to Google Drive and exists only on agent-yes.com, so the
+// local consoles (ts/serve.ts, rs/src/serve/http.rs) deliberately leave it out.
 const CSP = [
   "default-src 'self'",
   "base-uri 'none'",
@@ -89,7 +91,7 @@ const CSP = [
   "font-src 'self' data:",
   "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net",
   "script-src 'self' 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://static.cloudflareinsights.com",
-  "connect-src 'self' https://s.agent-yes.com https://agent-yes.com https://cloudflareinsights.com wss:",
+  "connect-src 'self' https://s.agent-yes.com https://agent-yes.com https://cloudflareinsights.com https://www.googleapis.com wss:",
   "worker-src 'self'",
   "manifest-src 'self'",
 ].join("; ");

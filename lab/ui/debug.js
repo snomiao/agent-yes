@@ -3,7 +3,7 @@
 //
 // Off unless asked for: open the console with ?debug (remembered in this
 // browser; ?debug=0 forgets it). Then:
-//   - not signed in   → a small "Sign in with GitHub" button
+//   - not signed in   → a small sign-in button per configured provider
 //   - the site owner  → the chat box (an agent can only reach it after the
 //                       owner taps Allow in the box)
 //   - anyone else     → a note that debug mode is the owner's, and sign-out
@@ -63,8 +63,8 @@ const authPost = (path, body) =>
     body: JSON.stringify(body ?? {}),
   });
 
-async function signIn() {
-  const res = await authPost("/sign-in/social", { provider: "github", callbackURL: location.href });
+async function signIn(provider) {
+  const res = await authPost("/sign-in/social", { provider, callbackURL: location.href });
   const { url } = await res.json().catch(() => ({}));
   if (url) location.href = url;
 }
@@ -96,7 +96,16 @@ export async function startDebug() {
   const session = await res.json().catch(() => null);
   const role = debugRole(session);
   if (role === "owner") return mountChat(session.user);
-  if (role === "none") return void corner(button("Debug: sign in with GitHub", signIn));
+  if (role === "none") {
+    // Whichever providers this deployment has; the owner may use either.
+    const { providers = [] } = await fetch(`${AUTH}/providers`, { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : {}))
+      .catch(() => ({}));
+    const names = { google: "Google", github: "GitHub" };
+    return void corner(
+      ...providers.map((p) => button(`Debug: sign in with ${names[p] ?? p}`, () => signIn(p))),
+    );
+  }
   const note = document.createElement("span");
   note.textContent = `Debug mode is for the site owner (signed in as ${session.user.email}).`;
   corner(note, button("Sign out", signOut));

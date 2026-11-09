@@ -891,6 +891,52 @@
       .rooms .rconnect code:hover {
         color: var(--accent);
       }
+      .rooms .rsync {
+        margin-top: 6px;
+        padding: 8px 6px 2px;
+        border-top: 1px solid var(--line2);
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .rooms .rsyncrow {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+      }
+      .rooms .rsyncrow .rsynchint {
+        flex: 1;
+      }
+      .rooms .rsync input {
+        flex: 1;
+        background: var(--bg);
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        color: var(--fg);
+        font: 11.5px var(--mono);
+        padding: 6px 8px;
+        outline: 0;
+      }
+      .rooms .rsync button {
+        background: var(--panel2);
+        color: var(--fg);
+        border: 1px solid var(--line);
+        border-radius: 7px;
+        padding: 5px 10px;
+        cursor: pointer;
+      }
+      .rooms .rsynchint {
+        color: var(--muted);
+        font-size: 11px;
+        line-height: 1.5;
+      }
+      .rooms .rsynchint a {
+        color: var(--muted);
+      }
+      .rooms .rsyncerr {
+        color: var(--red);
+        font-size: 11px;
+      }
 
       /* launch overlay (command-only launch URLs: #launch=<json>) */
       .launchoverlay {
@@ -8129,13 +8175,17 @@ my.translate = async (text, lang) => {
 
       // ---- rooms: localStorage cache + a manager you open by clicking the badge ----
       const ROOMS_KEY = "ay.rooms";
+      // Optional "Sync my rooms" (Google sign-in on agent-yes.com, list end-to-end
+      // encrypted in the user's Drive; room-sync-client.js). Loaded with a dynamic
+      // import further down: local `ay serve` consoles do not serve that module,
+      // and a failed static import would stop the whole console from booting.
+      let roomSync = null;
+      let recordRemoval = () => {};
       const ROOM_TTL_MS = 90 * 24 * 60 * 60 * 1000; // evict stale rooms to bound how long a secret lingers in localStorage
-      // Cap the saved-room set so the boot fan-out (and the localStorage secret
-      // footprint) stays bounded no matter how many share links get opened over
-      // time. When over the cap we keep the most-recently-saved rooms and drop the
-      // oldest — a room silently forgotten this way is trivially re-added by
-      // re-opening its share link.
-      const MAX_ROOMS = 16;
+      // No cap on the number of saved rooms: with room sync the list is the
+      // user's whole fleet across devices. The boot fan-out is staggered
+      // (connectAllRooms) and a dead room backs off, so a long list stays cheap.
+      // The TTL eviction is local only and never syncs as a delete (room-sync.js).
       const loadRooms = () => {
         try {
           const r = JSON.parse(localStorage.getItem(ROOMS_KEY) || "{}");
@@ -8143,14 +8193,6 @@ my.translate = async (text, lang) => {
           let changed = false;
           for (const k of Object.keys(r)) {
             if (r[k]?.ts && now - r[k].ts > ROOM_TTL_MS) {
-              delete r[k];
-              changed = true;
-            }
-          }
-          const keys = Object.keys(r);
-          if (keys.length > MAX_ROOMS) {
-            keys.sort((a, b) => (r[b]?.ts || 0) - (r[a]?.ts || 0)); // newest first
-            for (const k of keys.slice(MAX_ROOMS)) {
               delete r[k];
               changed = true;
             }
@@ -8163,21 +8205,26 @@ my.translate = async (text, lang) => {
       };
       const saveRoom = (room, token, host) => {
         const r = loadRooms();
-        r[room] = { token, host: host || SIG_DEFAULT, ts: Date.now() };
-        // Bound at write time too: loadRooms() trims on read, but a fresh add can
-        // push to MAX_ROOMS+1 until the next read. The just-added room has the
-        // newest ts, so the trim drops the oldest OTHER room, never this one.
-        const keys = Object.keys(r);
-        if (keys.length > MAX_ROOMS) {
-          keys.sort((a, b) => (r[b]?.ts || 0) - (r[a]?.ts || 0)); // newest first
-          for (const k of keys.slice(MAX_ROOMS)) delete r[k];
-        }
+        const prev = r[room];
+        host = host || SIG_DEFAULT;
+        const now = Date.now();
+        // ts = last used (every connect). added = when this room/token landed
+        // here; only that may outrank a "Forget" from another device (see
+        // room-sync.js), so a reconnect must keep the old value.
+        const fresh = !prev || prev.token !== token || prev.host !== host;
+        r[room] = { token, host, ts: now, added: fresh ? now : prev.added || 0 };
         localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
+        // Only a new room or a new token is worth a sync round; a reconnect just
+        // refreshes ts, which the next round carries anyway.
+        if (fresh) roomSync?.schedule();
       };
+      // An explicit "Forget": also recorded as a removal so it syncs as a delete.
       const dropRoom = (room) => {
         const r = loadRooms();
+        recordRemoval(room, r[room]?.host);
         delete r[room];
         localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
+        roomSync?.schedule();
       };
       function setConn(text, color) {
         $("conn").textContent = text;
@@ -8448,9 +8495,9 @@ my.translate = async (text, lang) => {
         // bug than the one being fixed.
         //
         // chName is a 4-char base36 FNV-1a, so it is not injective — but 36^4
-        // against MAX_ROOMS=16 puts an accidental clash near 0.007%, versus a
-        // chosen-name clash that is routine ("fleet", "prod"). It is a better
-        // key here, not a collision-free one.
+        // against a few dozen saved rooms puts an accidental clash well under 1%,
+        // versus a chosen-name clash that is routine ("fleet", "prod"). It is a
+        // better key here, not a collision-free one.
         if (host === CH_HOST) {
           const saved = loadRooms()[room];
           if (saved && saved.token !== token) room = chName(token);
@@ -8639,7 +8686,18 @@ my.translate = async (text, lang) => {
               )
               .join("")
           : `<div class="empty2">no saved rooms — paste a share link below</div>`;
-        $("rooms").innerHTML = `<div class="rtitle">rooms · stored on this device</div>${items}
+        const sync = roomSync?.state();
+        // The panel re-renders on every live-count update; keep a half-typed
+        // passphrase (and its confirmation) and focus across that.
+        const pwKeep = ["syncpw", "syncpw2"]
+          .map((id) => $(id))
+          .filter(Boolean)
+          .map((el) => ({ id: el.id, value: el.value, focus: document.activeElement === el }));
+        $("rooms").innerHTML = `<div class="rtitle">rooms · ${
+          sync?.user && !sync.needs && sync.last
+            ? "synced with your Google Drive"
+            : "stored on this device"
+        }</div>${items}${syncHtml(sync)}
       <div class="radd"><input id="roomin" placeholder="room:token  or  https://…/#room:token" /><button id="roomadd">add</button></div>
       <div class="rconnect">new here? install agent-yes (bun or npm, auto):
         <code id="cmdinstall" class="copy" title="click to copy">curl -fsSL https://agent-yes.com/setup.sh | sh</code>
@@ -8649,7 +8707,103 @@ my.translate = async (text, lang) => {
         <code id="cmd" class="copy" title="click to copy">ay serve --share</code></div>
       <div class="rconnect">or view a <b>codehost</b> room — paste <code>ch:&lt;room-token&gt;</code> (or a
         codehost.dev share link) above; every machine in the room shows its agents here.</div>`;
+        for (const k of pwKeep) {
+          const el = $(k.id);
+          if (!el) continue;
+          el.value = k.value;
+          if (k.focus) el.focus();
+        }
       }
+
+      // "Sync my rooms" controls in the rooms panel (see room-sync-client.js).
+      // Hidden entirely where auth is not served (local `ay serve` consoles).
+      function syncHtml(st) {
+        if (!st?.available) return "";
+        const err = st.error ? `<div class="rsyncerr">${esc(st.error)}</div>` : "";
+        if (!st.user)
+          return `<div class="rsync"><button id="syncin">Sync my rooms with Google</button>
+        <div class="rsynchint">Optional. Rooms are encrypted with a passphrase before they
+        leave this browser and are stored in your own Google Drive.</div>${err}</div>`;
+        if (st.needs) {
+          const first = st.needs === "new";
+          return `<div class="rsync"><div class="rsynchint">${
+            first
+              ? "Choose a sync passphrase. Every device asks for it once; nobody else, including agent-yes.com, can read your rooms without it."
+              : `Enter your sync passphrase for ${esc(st.user.email)}.`
+          }</div>
+        <div class="rsyncrow"><input id="syncpw" type="password" autocomplete="${
+          first ? "new-password" : "current-password"
+        }" placeholder="sync passphrase" /><button id="syncgo" data-mode="${first ? "new" : "unlock"}">${
+          first ? "start syncing" : "unlock"
+        }</button></div>
+        ${first ? `<div class="rsyncrow"><input id="syncpw2" type="password" autocomplete="new-password" placeholder="same passphrase again" /></div>` : ""}
+        ${first ? "" : `<div class="rsynchint"><a href="#" id="syncreset">Forgot it? Replace the synced list with this device's rooms</a></div>`}
+        ${err}<div class="rsynchint"><a href="#" id="syncout">sign out</a></div></div>`;
+        }
+        const when = st.last ? new Date(st.last).toLocaleTimeString() : "not yet";
+        return `<div class="rsync"><div class="rsyncrow"><span class="rsynchint">${esc(st.user.email)} · last sync ${
+          st.busy ? "running…" : esc(when)
+        }</span><button id="syncnow"${st.busy ? " disabled" : ""}>sync now</button></div>
+        <div class="rsynchint"><a href="#" id="syncout">sign out</a> · <a href="#" id="synclock">forget passphrase on this device</a></div>${err}</div>`;
+      }
+
+      async function syncPanelClick(ev) {
+        const id = ev.target.id;
+        if (!["syncin", "syncgo", "syncnow", "syncout", "synclock", "syncreset"].includes(id))
+          return false;
+        ev.preventDefault();
+        if (id === "syncin") await roomSync.signIn().catch((e) => alert(String(e?.message || e)));
+        else if (id === "syncnow") await roomSync.run();
+        else if (id === "syncout") await roomSync.signOut();
+        else if (id === "synclock") {
+          await roomSync.lock();
+          await roomSync.run(); // reports that a passphrase is needed
+        } else {
+          const pw = $("syncpw")?.value || "";
+          if (pw.length < 8) return (alert("Use a passphrase of at least 8 characters."), true);
+          if (id === "syncreset") {
+            if (
+              !confirm(
+                "Replace the synced rooms list with this device's rooms, under this new passphrase? Other devices will ask for the new passphrase.",
+              )
+            )
+              return true;
+            await roomSync.reset(pw);
+          } else if (ev.target.dataset.mode === "new") {
+            if (($("syncpw2")?.value || "") !== pw)
+              return (alert("The passphrases did not match."), true);
+            await roomSync.run(pw);
+          } else await roomSync.run(pw);
+        }
+        return true;
+      }
+
+      // Apply a sync round: connect rooms that arrived from other devices, drop
+      // the ones forgotten elsewhere. addRoomSource re-saves with a fresh ts.
+      function applySynced(before, after) {
+        let changed = false;
+        for (const n of Object.keys(before.rooms))
+          if (!after.rooms[n]) {
+            removeRoom(n);
+            changed = true;
+          }
+        for (const [n, r] of Object.entries(after.rooms)) {
+          const old = before.rooms[n];
+          if (old && old.token === r.token && old.host === r.host) continue;
+          if (old) removeRoom(n); // the token changed on another device
+          addRoomSource(n, r.token, r.host);
+          changed = true;
+        }
+        if (changed) loadList();
+        renderRoomsIfOpen();
+      }
+      import("./room-sync-client.js")
+        .then((m) => {
+          recordRemoval = m.recordRemoval;
+          roomSync = m.createRoomSync({ onApply: applySynced, onState: () => renderRoomsIfOpen() });
+          return roomSync.refresh().then((st) => st.user && roomSync.run());
+        })
+        .catch(() => {}); // no sync module here (local console): rooms stay device-local
 
       $("conn").addEventListener("click", () => {
         const el = $("rooms");
@@ -8663,7 +8817,14 @@ my.translate = async (text, lang) => {
           stopHostPoll();
         }
       });
+      $("rooms").addEventListener("keydown", (ev) => {
+        if (ev.key === "Enter" && ev.target.id?.startsWith("syncpw")) $("syncgo")?.click();
+      });
       $("rooms").addEventListener("click", (ev) => {
+        if (ev.target.id?.startsWith("sync")) {
+          syncPanelClick(ev);
+          return;
+        }
         const name = ev.target.closest(".rname");
         if (name) {
           // Rooms are all connected at once now; clicking one filters the list to
