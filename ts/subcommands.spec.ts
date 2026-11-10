@@ -205,7 +205,8 @@ describe("subcommands.isSubcommand", () => {
     // `read` / `share` / `connect` are ordinary English verbs: `cy read ts/cli.ts
     // and explain it` and `cy connect the frontend to the API` must reach claude.
     // The commands live on the manager entry (`ay read`, `ay share`, `ay connect`).
-    for (const sub of ["read", "share", "connect"]) {
+    // `kill` likewise: `cy kill the stale dev server on :3000` is a prompt.
+    for (const sub of ["read", "share", "connect", "kill"]) {
       expect(isSubcommand(sub, true)).toBe(true);
       expect(isSubcommand(sub, false)).toBe(false);
     }
@@ -887,8 +888,8 @@ describe("subcommands.cmdLs human table", () => {
       pid: process.pid,
       cli: "claude",
       prompt: "table format test",
-      // Not a git checkout: a repo cwd adds its branch label to the row, which
-      // eats the prompt's budget (a long branch name truncated the prompt).
+      // A non-repo cwd: in a repo the NOTE column leads with the branch, and a
+      // long branch name truncates the prompt this test looks for.
       cwd: testHome,
       log_file: null,
       status: "active",
@@ -899,7 +900,7 @@ describe("subcommands.cmdLs human table", () => {
 
     const cap = captureStdout();
     try {
-      const code = await runSubcommand(["bun", "cli.js", "ls"]);
+      const code = await runSubcommand(["bun", "cli.js", "ls", "--cwd", testHome]);
       expect(code).toBe(0);
     } finally {
       cap.restore();
@@ -1713,6 +1714,127 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
       retry: false,
     });
   });
+
+  // A long message queued behind a busy Claude is echoed in full above the
+  // composer; its `<ay-msg NONCE` header scrolls out of the rendered window and
+  // only the closing `</ay-msg NONCE>` tag is left to attribute it.
+  it("counts the closing tag as our identity when the header has scrolled away", async () => {
+    const { submissionState, inspectSubmission } = await loadModule();
+    const marker = "<ay-msg abc12345";
+    const queued = [
+      "  line 18: body",
+      "  </ay-msg abc12345>",
+      "  ctrl+x ctrl+s to send now",
+      "✻ Working… (20s)",
+      "────────",
+      "❯ Press up to edit queued messages",
+      "────────",
+      "  paste again to expand",
+    ];
+    expect(submissionState(queued, marker)).toBe("queued");
+    expect(
+      submissionState(["  </ay-msg abc12345>", "❯", "────────", "  ? for shortcuts"], marker),
+    ).toBe("submitted");
+    // Still in the composer: the closing tag below the prompt row is not evidence.
+    expect(
+      inspectSubmission(
+        ["────────", "❯ line 18: body", "  </ay-msg abc12345>", "────────"],
+        marker,
+      ),
+    ).toMatchObject({ submission: "not-submitted", inComposer: true, transcriptMatches: 0 });
+    // Another message's closing tag is not ours.
+    expect(submissionState(["  </ay-msg ffff0000>", "❯", "────────"], marker)).toBe(
+      "not-submitted",
+    );
+  });
+
+  it.skipIf(!itUnix)(
+    "reports a long collapsed paste queued behind a busy Claude as queued, not unsubmitted",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-queued-long-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const marker = "<ay-msg abc12345";
+        const paste = "[Pasted text #1 +60 lines]";
+        await writeFile(log, `✻ Working… (5s)\r\n────────\r\n❯ ${paste}\r\n────────\r\n`);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reaction = onKeystroke().then((got) => {
+            if (got) {
+              const body = Array.from({ length: 60 }, (_, i) => `  line ${i}: body`);
+              appendFileSync(
+                log,
+                "\x1b[2J\x1b[H" +
+                  [
+                    `  ${marker} from alice>`,
+                    ...body,
+                    "  </ay-msg abc12345>",
+                    "  ctrl+x ctrl+s to send now",
+                    "✻ Working… (6s)",
+                    "────────",
+                    "❯ Press up to edit queued messages",
+                    "────────",
+                    "  paste again to expand",
+                  ].join("\r\n") +
+                  "\r\n",
+              );
+            }
+            return got;
+          });
+          const result = await submitAndConfirm(rec({ log_file: log }), fifo, "\r", marker, [
+            "✻ Working… (5s)",
+            "────────",
+            "❯",
+            "────────",
+          ]);
+          expect(await reaction).toBe(true);
+          expect(result.submission).toBe("queued");
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  // While Claude is busy it redraws only the spinner row, so the last 32 KB of
+  // the log can hold neither the composer box nor the message queued above it;
+  // a tail render then shows "Press up to edit queued messages" with no prompt
+  // row, which cannot be attributed. The confirm must render from further back.
+  it.skipIf(!itUnix)(
+    "renders past spinner-only redraws to see the box when confirming a queued send",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-queued-redraw-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const marker = "<ay-msg abc12345";
+        // history / spinner / rule / prompt / rule / footer, cursor parked below.
+        let raw = "history\r\n✻ Working… 0\r\n────────\r\n❯ \r\n────────\r\n  ? for shortcuts\r\n";
+        for (let i = 1; raw.length < 64 * 1024; i++)
+          raw += `\x1b[5A\r\x1b[2K✻ Working… ${i}\x1b[5B\r`;
+        await writeFile(log, raw);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reaction = onKeystroke().then((got) => {
+            // Only the changed cells: the echoed message's last row over the
+            // spinner, and the hint after the (unchanged) `❯ ` of the prompt row.
+            if (got)
+              appendFileSync(
+                log,
+                "\x1b[5A\r\x1b[2K  </ay-msg abc12345>\x1b[2B\r\x1b[2CPress up to edit queued messages\x1b[3B\r",
+              );
+            return got;
+          });
+          const result = await submitAndConfirm(rec({ log_file: log }), fifo, "\r", marker);
+          expect(await reaction).toBe(true);
+          expect(result.submission).toBe("queued");
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
 
   // Codex review (2ecc427): the last prompt-looking row was taken for the prompt,
   // so a quoted `› line` inside our unsent message put its nonce in "transcript".

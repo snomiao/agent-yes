@@ -7,6 +7,7 @@ import {
   confirmAgentStarted,
   predictedLogPath,
   shouldForkNested,
+  stripDetachFlag,
   waitForRegistration,
 } from "./forkNested";
 
@@ -27,6 +28,46 @@ describe("shouldForkNested", () => {
 
   it("does NOT fork when attach opts out, regardless of context", () => {
     expect(shouldForkNested({ isTTY: false, ayPid: "1234", attach: true })).toBe(false);
+  });
+
+  it("--detach forks in any context — a TTY, not nested (e.g. a human over ssh)", () => {
+    for (const isTTY of [true, false])
+      for (const ayPid of [undefined, "1234"])
+        expect(shouldForkNested({ isTTY, ayPid, attach: false, detach: true })).toBe(true);
+  });
+});
+
+describe("stripDetachFlag", () => {
+  it("strips a leading bare --detach", () => {
+    expect(stripDetachFlag(["--detach", "claude", "--", "hi"], true)).toEqual({
+      ok: true,
+      args: ["claude", "--", "hi"],
+    });
+  });
+  it("leaves args alone without any detach token, and never touches prompt text", () => {
+    const args = ["claude", "--verbose", "--", "--detach"];
+    expect(stripDetachFlag(args, false)).toEqual({ ok: true, args });
+    expect(stripDetachFlag(["--detach", "claude", "--", "--detach"], true)).toEqual({
+      ok: true,
+      args: ["claude", "--", "--detach"],
+    });
+  });
+  it("refuses every other spelling or position yargs could read as detach", () => {
+    for (const [args, parsed] of [
+      [["--detach=true", "claude"], true],
+      [["--detach", "true", "claude"], true],
+      [["--detach", "false", "claude"], false],
+      [["--no-detach", "claude"], false],
+      [["--cli", "claude", "--detach", "--", "hi"], true],
+      [["--verbose", "--detach", "claude"], true],
+      [["--detach", "--detach", "claude"], true],
+      [["--verbose", "--detach=false", "claude"], false],
+      [["claude", "--detach"], false], // even after the CLI name: refused, not forwarded
+    ] as const) {
+      const r = stripDetachFlag([...args], parsed);
+      expect(r.ok).toBe(false);
+      if (!r.ok) expect(r.error).toMatch(/ay --detach <cli>/);
+    }
   });
 });
 

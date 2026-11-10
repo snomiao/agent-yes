@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { daemonShareRuntime, planRustServe } from "./serveRust.ts";
+import { planDaemonArgs } from "./shareCore.ts";
 
 // `ay serve` runs the Rust daemon (`ayrs serve`) by default, like `ay <cli>`
 // runs the Rust agent runtime — but only for invocations ayrs can express.
@@ -54,17 +55,38 @@ describe("planRustServe", () => {
     }
   });
 
+  it("drops --http and a loopback --host next to --port: ayrs's port IS that console", () => {
+    // What `ay share webrtc` registers over an HTTP daemon.
+    expect(planRustServe(["--port", "7432", "--http", "--webrtc"], env)).toEqual({
+      kind: "rust",
+      argv: ["serve", "--port", "7432", "--webrtc"],
+    });
+    expect(
+      planRustServe(["--webrtc", "--http", "--host", "127.0.0.1", "--port=7432"], env),
+    ).toEqual({ kind: "rust", argv: ["serve", "--webrtc", "--port", "7432"] });
+    expect(planRustServe(["--host=localhost", "--port", "1"], env)).toEqual({
+      kind: "rust",
+      argv: ["serve", "--port", "1"],
+    });
+  });
+
   it("falls back, naming the flag, on anything ayrs cannot express", () => {
     expect(planRustServe(["--share"], env)).toMatchObject({ kind: "ts", reason: "--share" });
+    // --http without a port is the Portless console, which ayrs lacks.
     expect(planRustServe(["--webrtc", "--http"], env)).toMatchObject({
       kind: "ts",
-      reason: "--http",
+      reason: "--http without --port (Portless HTTPS console)",
     });
     expect(planRustServe(["-d", "--webrtc"], env)).toMatchObject({ kind: "ts", reason: "-d" });
+    // ayrs listens on loopback only.
     expect(planRustServe(["--port", "0", "--host", "0.0.0.0"], env)).toMatchObject({
       kind: "ts",
-      reason: "--host",
+      reason: "--host 0.0.0.0 (ayrs listens on loopback only)",
     });
+    expect(
+      planRustServe(["--webrtc", "--http", "--host", "100.64.0.1", "--port", "7432"], env),
+    ).toMatchObject({ kind: "ts", reason: "--host 100.64.0.1 (ayrs listens on loopback only)" });
+    expect(planRustServe(["--host", "127.0.0.1"], env)).toMatchObject({ kind: "ts" });
     // Any room link spelling reaches ayrs as webrtc://; a non-link stays on TS.
     expect(planRustServe(["--webrtc", "https://agent-yes.com/room/#room=r1&s=e1.ab"], env)).toEqual(
       { kind: "rust", argv: ["serve", "--webrtc", "webrtc://r1:e1.ab@s.agent-yes.com"] },
@@ -113,6 +135,11 @@ describe("daemonShareRuntime", () => {
     expect(daemonShareRuntime(["--webrtc"], ayrs, env)).toBe("rust");
     expect(daemonShareRuntime(["--webrtc", "--sighost", "s.example"], ayrs, env)).toBe("rust");
     expect(daemonShareRuntime(["--webrtc", "--port", "0"], ayrs, env)).toBe("rust");
+    // `ay share webrtc` over an HTTP daemon keeps HTTP with --http; that must
+    // not pin the room to the TypeScript host.
+    expect(daemonShareRuntime(planDaemonArgs(["--port", "9000"], "webrtc"), ayrs, env)).toBe(
+      "rust",
+    );
   });
 
   it("is ts whenever cmdServe would fall back to the TypeScript host", () => {

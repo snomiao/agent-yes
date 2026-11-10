@@ -618,6 +618,21 @@ await claudeYes({
 });
 ```
 
+### Chat with your agent from any web page
+
+`agent-yes/liagent` is [liagent](https://github.com/snolab/liagent): a
+floating chat box for your own web pages (a framework-free custom element),
+the hub it talks to (a Cloudflare Durable Object), and the `liagent` CLI that
+delivers each message into an agent-yes agent. It needs none of agent-yes's
+CLI dependencies, so it bundles cleanly for browsers and Workers.
+
+```typescript
+import { connectHub, defineChatBox } from "agent-yes/liagent";
+import { chatHub, routeChat } from "agent-yes/liagent/hub";
+```
+
+See liagent's README and docs for the hub setup and each framework.
+
 ## Implementation
 
 The tool uses `node-pty` to spawn and manage AI CLI processes, with a sophisticated pattern-matching system that:
