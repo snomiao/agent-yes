@@ -1689,12 +1689,12 @@ export function suggestAgents(
     .map((r) => {
       const tokens = `${r.cwd ?? ""} ${(r as { title?: string }).title ?? ""}`
         .toLowerCase()
-        .split(/[\s/\\._:@\[\]-]+/)
+        .split(/[\s/\\._:@[\]-]+/)
         .filter((t) => t.length >= 2);
       const best = Math.min(
         Infinity,
         ...tokens.map((t) =>
-          t.includes(kw) || kw.includes(t) ? 0 : editDistance(kw, t) / Math.max(kw.length, t.length),
+          t.includes(kw) ? 0 : editDistance(kw, t) / Math.max(kw.length, t.length),
         ),
       );
       return { r, best };

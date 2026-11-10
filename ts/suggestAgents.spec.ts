@@ -21,6 +21,12 @@ describe("suggestAgents", () => {
     expect(suggestAgents(live, "sf")).toEqual([]);
     expect(suggestAgents(live, "zzzzzz")).toEqual([]);
   });
+  it("does not match every agent because the keyword contains a path word", () => {
+    // "ws", "tree", "main" and "home" are in every cwd; a keyword that merely
+    // contains one of them says nothing about which agent was meant.
+    expect(suggestAgents(live, "mainframe")).toEqual([]);
+    expect(suggestAgents(live, "treehouse")).toEqual([]);
+  });
   it("never suggests for numeric keywords (identity selectors)", () => {
     expect(suggestAgents(live, "12345")).toEqual([]);
   });
