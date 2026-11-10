@@ -1,6 +1,6 @@
 [package]
 name = "agent-yes"
-version = "1.299.1"
+version = "1.303.1"
 edition = "2021"
 description = "Automated interaction wrapper for AI coding assistants"
 authors = ["snomiao"]
@@ -52,6 +52,8 @@ humantime = "2"
 
 # Error handling
 anyhow = "1"
+async-trait = "0.1"
+base64 = "0.22"
 thiserror = "1"
 
 # Serialization
@@ -103,6 +105,7 @@ hex = "0.4.3"
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+ureq = { version = "3", features = ["json"] }
 
 # Unix-specific
 [target.'cfg(unix)'.dependencies]

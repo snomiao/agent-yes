@@ -205,7 +205,8 @@ describe("subcommands.isSubcommand", () => {
     // `read` / `share` / `connect` are ordinary English verbs: `cy read ts/cli.ts
     // and explain it` and `cy connect the frontend to the API` must reach claude.
     // The commands live on the manager entry (`ay read`, `ay share`, `ay connect`).
-    for (const sub of ["read", "share", "connect"]) {
+    // `kill` likewise: `cy kill the stale dev server on :3000` is a prompt.
+    for (const sub of ["read", "share", "connect", "kill"]) {
       expect(isSubcommand(sub, true)).toBe(true);
       expect(isSubcommand(sub, false)).toBe(false);
     }
@@ -541,6 +542,18 @@ describe("subcommands.matchKeyword", () => {
     expect(matchKeyword(baseRecord, "different-project")).toBe(false);
   });
 
+  it("matches the effective work dir too (lane spawned in one dir, working in another)", async () => {
+    const { matchKeyword } = await loadModule();
+    const r = {
+      ...baseRecord,
+      workdir: "/repo/alpha/tree/feat-x",
+      workdir_source: "observed" as const,
+    };
+    expect(matchKeyword(r, "feat-x")).toBe(true);
+    expect(matchKeyword(r, "agent-yes")).toBe(true); // spawn dir still matches
+    expect(matchKeyword(baseRecord, "feat-x")).toBe(false);
+  });
+
   it("matches by exact cli name", async () => {
     const { matchKeyword } = await loadModule();
     expect(matchKeyword(baseRecord, "claude")).toBe(true);
@@ -584,6 +597,23 @@ describe("subcommands.matchKeyword", () => {
     expect(matchKeyword(r, "A1B2C3")).toBe(true); // case-insensitive
     expect(matchKeyword(r, "b2c3")).toBe(false); // not a prefix (mid-string)
     expect(matchKeyword({ ...baseRecord, agent_id: null }, "a1b2")).toBe(false);
+  });
+
+  // A vanished agent's id still sits in its sublanes' prompts ("reply: ay send
+  // <id>"); an id-shaped keyword must never fall through to that prompt match.
+  it("treats an id-shaped keyword as an identity selector (no cwd/prompt match)", async () => {
+    const { matchKeyword } = await loadModule();
+    const quoting = {
+      ...baseRecord,
+      agent_id: "0123456789ab",
+      prompt: "you were spawned by d3e4f5a6b7c8 — reply: ay send d3e4f5a6b7c8",
+      cwd: "/repo/alpha/tree/d3e4f5a6b7c8",
+    };
+    expect(matchKeyword(quoting, "d3e4f5a6b7c8")).toBe(false);
+    expect(matchKeyword(quoting, "0123456789ab")).toBe(true); // its own id
+    expect(matchKeyword(quoting, "0123456789AB")).toBe(true);
+    // a short hex word is still an ordinary keyword
+    expect(matchKeyword(quoting, "d3e4f5")).toBe(true);
   });
 });
 
@@ -663,6 +693,41 @@ describe("subcommands.resolveOne exact-identity precedence", () => {
 
     const record = await resolveOne("a1b2c3d4e5f6", opts);
     expect(record.pid).toBe(111);
+  });
+  // 2026-10-09: a parent's wrapper restarted under a new id; sends to the old
+  // id keyword-matched every sublane whose prompt quoted it. With exactly one
+  // such lane left, the send would have gone to that lane.
+  it("refuses a stale id instead of resolving it to a lane that quotes it", async () => {
+    const { resolveOne } = await loadModule();
+    const { appendGlobalPid } = await import("./globalPidIndex.ts");
+    const base = {
+      cwd: process.cwd(),
+      log_file: null,
+      exit_code: null,
+      exit_reason: null,
+      started_at: Date.now() - 1_000,
+    };
+    await appendGlobalPid({
+      ...base,
+      pid: 3333,
+      cli: "claude",
+      status: "active" as const,
+      agent_id: "0123456789ab",
+      prompt: "<ay-msg from parent — reply: ay send d3e4f5a6b7c8>",
+    });
+    await expect(resolveOne("d3e4f5a6b7c8", opts)).rejects.toThrow(/no live agent has id/);
+    // the exited parent is named when its record is still in the index
+    await appendGlobalPid({
+      ...base,
+      pid: 4444,
+      cli: "claude",
+      status: "exited" as const,
+      agent_id: "d3e4f5a6b7c8",
+      prompt: "cto",
+    });
+    await expect(resolveOne("d3e4f5a6b7c8", opts)).rejects.toThrow(/pid 4444 exited/);
+    // the quoting lane is still reachable by its own id
+    expect((await resolveOne("0123456789ab", opts)).pid).toBe(3333);
   });
 });
 
@@ -823,7 +888,9 @@ describe("subcommands.cmdLs human table", () => {
       pid: process.pid,
       cli: "claude",
       prompt: "table format test",
-      cwd: process.cwd(),
+      // A non-repo cwd: in a repo the NOTE column leads with the branch, and a
+      // long branch name truncates the prompt this test looks for.
+      cwd: testHome,
       log_file: null,
       status: "active",
       exit_code: null,
@@ -833,7 +900,7 @@ describe("subcommands.cmdLs human table", () => {
 
     const cap = captureStdout();
     try {
-      const code = await runSubcommand(["bun", "cli.js", "ls"]);
+      const code = await runSubcommand(["bun", "cli.js", "ls", "--cwd", testHome]);
       expect(code).toBe(0);
     } finally {
       cap.restore();
@@ -1108,8 +1175,8 @@ describe("subcommands.cmdSend writes bytes to FIFO", () => {
           "hello-fifo",
           "--force",
         ]);
-        expect(code).toBe(0);
-        expect(stdout.join("")).toMatch(/sent to pid/);
+        expect(code).toBe(1); // Bytes written, but no destination log proves submission.
+        expect(stdout.join("")).toMatch(/NOT SUBMITTED/);
       } finally {
         process.stdout.write = orig;
         if (savedAyPid !== undefined) process.env.AGENT_YES_PID = savedAyPid;
@@ -1419,10 +1486,15 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
           // has actually landed — a genuine idle→busy transition, and one that
           // provably happens AFTER submitAndConfirm's pre-write snapshot.
           const reacted = onKeystroke().then((got) => {
-            if (got) appendFileSync(log, BUSY);
+            if (got) appendFileSync(log, "some leftover unsent text\r\n" + BUSY + "❯ \r\n");
             return got;
           });
-          const { confirmed, screen } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          const { confirmed, screen } = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "some leftover unsent text",
+          );
           expect(await reacted).toBe(true); // the fifo really carried the Enter
           expect(confirmed).toBe(true);
           expect(screen.join("\n")).toContain("esc to interrupt");
@@ -1446,7 +1518,12 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
         await writeFile(log, BUSY);
         const { submitAndConfirm } = await loadModule();
         await withFifo(async (fifo) => {
-          const { confirmed } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          const { confirmed } = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "some leftover unsent text",
+          );
           expect(confirmed).toBe(false);
         });
       } finally {
@@ -1456,25 +1533,491 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
     10_000,
   );
 
-  it.skipIf(!itUnix)("confirms via log growth even without a recognized busy marker", async () => {
-    const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+  // Codex review (2ecc427): counting copies in a 40-row window cannot confirm a
+  // repeated raw message: the old "continue" scrolls out as the new one lands,
+  // and the count stays 1. Leaving the visible composer is the evidence.
+  it.skipIf(!itUnix)(
+    "confirms a repeated raw message whose earlier copy scrolls out of the window",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const RULE = "─".repeat(20);
+        await writeFile(log, `❯ continue\r\nok\r\n${RULE}\r\n❯ continue\r\n${RULE}\r\n`);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reacted = onKeystroke().then((got) => {
+            if (got) {
+              const output = Array.from({ length: 50 }, (_, i) => `output line ${i}`).join("\r\n");
+              appendFileSync(
+                log,
+                `\x1b[2J\x1b[H❯ continue\r\n${output}\r\n${RULE}\r\n❯ \r\n${RULE}\r\n`,
+              );
+            }
+            return got;
+          });
+          const { confirmed, submission } = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "continue",
+          );
+          expect(await reacted).toBe(true);
+          expect(submission).toBe("submitted");
+          expect(confirmed).toBe(true);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)(
+    "does not take a vanished composer (a menu took the screen) for delivery",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const RULE = "─".repeat(20);
+        await writeFile(log, `${RULE}\r\n❯ continue\r\n${RULE}\r\n`);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reacted = onKeystroke().then((got) => {
+            if (got)
+              appendFileSync(
+                log,
+                `\x1b[2J\x1b[HDo you trust this folder?\r\n  1. Yes\r\n  2. No\r\n`,
+              );
+            return got;
+          });
+          const { confirmed } = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "continue",
+          );
+          expect(await reacted).toBe(true);
+          expect(confirmed).toBe(false);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)(
+    "confirms a cleared composer after a response without a busy marker",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-log-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, "❯ \r\n");
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          // The CLI starts responding once the Enter lands. Keyed off the actual
+          // keystroke so the growth cannot be folded into `sizeBefore`.
+          const reacted = onKeystroke().then((got) => {
+            if (got)
+              appendFileSync(
+                log,
+                "some leftover unsent text\r\nsome real response text appears here\r\n❯ \r\n",
+              );
+            return got;
+          });
+          const { confirmed } = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "some leftover unsent text",
+          );
+          expect(await reacted).toBe(true);
+          expect(confirmed).toBe(true);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true }).catch(() => null);
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "rejects growing logs while the message remains in the composer",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-redraw-"));
+      try {
+        const log = path.join(dir, "a.log");
+        await writeFile(log, IDLE);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reaction = onKeystroke().then((got) => {
+            if (got) appendFileSync(log, BUSY + IDLE);
+            return got;
+          });
+          const result = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "some leftover unsent text",
+          );
+          expect(await reaction).toBe(true);
+          expect(result.confirmed).toBe(false);
+          expect(result.submission).toBe("not-submitted");
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)("distinguishes a queued receipt from submission", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-queued-"));
     try {
       const log = path.join(dir, "a.log");
-      await writeFile(log, "❯ \r\n");
+      await writeFile(log, IDLE);
       const { submitAndConfirm } = await loadModule();
       await withFifo(async (fifo, onKeystroke) => {
-        // The CLI starts responding once the Enter lands. Keyed off the actual
-        // keystroke so the growth cannot be folded into `sizeBefore`.
-        const reacted = onKeystroke().then((got) => {
-          if (got) appendFileSync(log, "some real response text appears here\r\n");
+        const reaction = onKeystroke().then((got) => {
+          if (got) appendFileSync(log, "❯ Press up to edit queued messages\r\n");
           return got;
         });
-        const { confirmed } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
-        expect(await reacted).toBe(true);
-        expect(confirmed).toBe(true);
+        const result = await submitAndConfirm(
+          rec({ log_file: log }),
+          fifo,
+          "\r",
+          "some leftover unsent text",
+        );
+        expect(await reaction).toBe(true);
+        expect(result.confirmed).toBe(false);
+        expect(result.submission).toBe("queued");
       });
     } finally {
-      await rm(dir, { recursive: true, force: true }).catch(() => null);
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("requires our identity to move out of the composer into the transcript", async () => {
+    const { submissionState, inspectSubmission } = await loadModule();
+    const marker = "<ay-msg abc12345";
+    expect(submissionState([`❯ ${marker}`, "────────"], marker)).toBe("not-submitted");
+    expect(inspectSubmission(["❯", `  ${marker}`, "────────"], marker).retry).toBe(true);
+    expect(submissionState([marker, "❯", "────────"], marker)).toBe("submitted");
+    expect(
+      submissionState([marker, "❯ Press up to edit queued messages", "────────"], marker),
+    ).toBe("queued");
+    expect(submissionState(["❯", "────────"], marker)).toBe("not-submitted");
+    expect(submissionState([], marker)).toBe("not-submitted");
+    expect(inspectSubmission(["❯ unrelated draft"], marker).retry).toBe(false);
+    expect(inspectSubmission(["Codex", "› Ask Codex to do anything"], "x")).toMatchObject({
+      submission: "not-submitted",
+      retry: false,
+    });
+  });
+
+  // A long message queued behind a busy Claude is echoed in full above the
+  // composer; its `<ay-msg NONCE` header scrolls out of the rendered window and
+  // only the closing `</ay-msg NONCE>` tag is left to attribute it.
+  it("counts the closing tag as our identity when the header has scrolled away", async () => {
+    const { submissionState, inspectSubmission } = await loadModule();
+    const marker = "<ay-msg abc12345";
+    const queued = [
+      "  line 18: body",
+      "  </ay-msg abc12345>",
+      "  ctrl+x ctrl+s to send now",
+      "✻ Working… (20s)",
+      "────────",
+      "❯ Press up to edit queued messages",
+      "────────",
+      "  paste again to expand",
+    ];
+    expect(submissionState(queued, marker)).toBe("queued");
+    expect(
+      submissionState(["  </ay-msg abc12345>", "❯", "────────", "  ? for shortcuts"], marker),
+    ).toBe("submitted");
+    // Still in the composer: the closing tag below the prompt row is not evidence.
+    expect(
+      inspectSubmission(
+        ["────────", "❯ line 18: body", "  </ay-msg abc12345>", "────────"],
+        marker,
+      ),
+    ).toMatchObject({ submission: "not-submitted", inComposer: true, transcriptMatches: 0 });
+    // Another message's closing tag is not ours.
+    expect(submissionState(["  </ay-msg ffff0000>", "❯", "────────"], marker)).toBe(
+      "not-submitted",
+    );
+  });
+
+  it.skipIf(!itUnix)(
+    "reports a long collapsed paste queued behind a busy Claude as queued, not unsubmitted",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-queued-long-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const marker = "<ay-msg abc12345";
+        const paste = "[Pasted text #1 +60 lines]";
+        await writeFile(log, `✻ Working… (5s)\r\n────────\r\n❯ ${paste}\r\n────────\r\n`);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reaction = onKeystroke().then((got) => {
+            if (got) {
+              const body = Array.from({ length: 60 }, (_, i) => `  line ${i}: body`);
+              appendFileSync(
+                log,
+                "\x1b[2J\x1b[H" +
+                  [
+                    `  ${marker} from alice>`,
+                    ...body,
+                    "  </ay-msg abc12345>",
+                    "  ctrl+x ctrl+s to send now",
+                    "✻ Working… (6s)",
+                    "────────",
+                    "❯ Press up to edit queued messages",
+                    "────────",
+                    "  paste again to expand",
+                  ].join("\r\n") +
+                  "\r\n",
+              );
+            }
+            return got;
+          });
+          const result = await submitAndConfirm(rec({ log_file: log }), fifo, "\r", marker, [
+            "✻ Working… (5s)",
+            "────────",
+            "❯",
+            "────────",
+          ]);
+          expect(await reaction).toBe(true);
+          expect(result.submission).toBe("queued");
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  // While Claude is busy it redraws only the spinner row, so the last 32 KB of
+  // the log can hold neither the composer box nor the message queued above it;
+  // a tail render then shows "Press up to edit queued messages" with no prompt
+  // row, which cannot be attributed. The confirm must render from further back.
+  it.skipIf(!itUnix)(
+    "renders past spinner-only redraws to see the box when confirming a queued send",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-queued-redraw-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const marker = "<ay-msg abc12345";
+        // history / spinner / rule / prompt / rule / footer, cursor parked below.
+        let raw = "history\r\n✻ Working… 0\r\n────────\r\n❯ \r\n────────\r\n  ? for shortcuts\r\n";
+        for (let i = 1; raw.length < 64 * 1024; i++)
+          raw += `\x1b[5A\r\x1b[2K✻ Working… ${i}\x1b[5B\r`;
+        await writeFile(log, raw);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reaction = onKeystroke().then((got) => {
+            // Only the changed cells: the echoed message's last row over the
+            // spinner, and the hint after the (unchanged) `❯ ` of the prompt row.
+            if (got)
+              appendFileSync(
+                log,
+                "\x1b[5A\r\x1b[2K  </ay-msg abc12345>\x1b[2B\r\x1b[2CPress up to edit queued messages\x1b[3B\r",
+              );
+            return got;
+          });
+          const result = await submitAndConfirm(rec({ log_file: log }), fifo, "\r", marker);
+          expect(await reaction).toBe(true);
+          expect(result.submission).toBe("queued");
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  // Codex review (2ecc427): the last prompt-looking row was taken for the prompt,
+  // so a quoted `› line` inside our unsent message put its nonce in "transcript".
+  it("does not take a quoted prompt glyph inside our unsent message for the prompt", async () => {
+    const { inspectSubmission } = await loadModule();
+    const marker = "<ay-msg abc12345";
+    const screen = ["older history", "────────", `❯ ${marker}`, "  › quoted line", "────────"];
+    expect(inspectSubmission(screen, marker)).toMatchObject({
+      transcriptMatches: 0,
+      retry: true,
+      inComposer: true,
+      composerVisible: true,
+    });
+  });
+
+  it("recognizes captured Codex idle/working and Claude suggestion layouts only with our transcript identity", async () => {
+    const { submissionState, inspectSubmission } = await loadModule();
+    const marker = "<ay-msg abc12345";
+    // Layouts from the reviewer's captured fleet screens, with synthetic message identity.
+    const screens = [
+      [
+        "• Ran tests",
+        "",
+        "› Ask Codex to do anything",
+        "  GPT-6-Astra low · ~/ws/x · Read brief",
+        "  ? for shortcuts                ⚠ 2 warnings · f2 to view",
+      ],
+      [
+        "• Working (10m 54s • esc to interrupt)",
+        "  └ Tip: Start a fresh idea with /new",
+        "› Ask Codex to do anything",
+        "  GPT-6-Astra low · ~/ws/x · Read brief",
+        "  ? for shortcuts",
+      ],
+      [
+        "✻ Churned for 15s",
+        "────────────",
+        "❯ push it and open the PR",
+        "────────────",
+        "  ⏵⏵ auto mode on",
+      ],
+    ];
+    for (const screen of screens) {
+      expect(submissionState([marker, ...screen], marker)).toBe("submitted");
+      expect(submissionState(screen, marker)).toBe("not-submitted");
+      expect(inspectSubmission(screen, marker).retry).toBe(false);
+    }
+  });
+
+  it.skipIf(!itUnix)(
+    "sends zero extra Enters for unrelated composer text, placeholders and dialogs",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-no-retry-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const { submitAndConfirm } = await loadModule();
+        for (const screen of [
+          "❯ push it and open the PR",
+          "› Ask Codex to do anything",
+          "Allow this command?\r\n❯ 1. Yes",
+        ]) {
+          await writeFile(log, screen + "\r\n");
+          await withFifo(async (fifo) => {
+            const result = await submitAndConfirm(
+              rec({ log_file: log }),
+              fifo,
+              "\r",
+              "<ay-msg abc12345",
+            );
+            expect(result.confirmed).toBe(false);
+            const fs = await import("fs");
+            const fd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+            try {
+              const bytes = Buffer.alloc(16);
+              const count = fs.readSync(fd, bytes, 0, bytes.length, null);
+              expect(bytes.subarray(0, count).toString()).toBe("\r");
+            } finally {
+              fs.closeSync(fd);
+            }
+          });
+        }
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(!itUnix)(
+    "retries a swallowed Enter only for our composer and confirms its transcript",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-own-retry-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const marker = "<ay-msg abc12345";
+        await writeFile(log, `❯ ${marker} hello\r\n`);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reaction = (async () => {
+            expect(await onKeystroke()).toBe(true); // first Enter is swallowed
+            expect(await onKeystroke()).toBe(true); // only our message gets retried
+            appendFileSync(
+              log,
+              `\r\n${marker} hello\r\n❯ push it and open the PR\r\n────────────\r\n`,
+            );
+          })();
+          const result = await submitAndConfirm(rec({ log_file: log }), fifo, "\r", marker);
+          await reaction;
+          expect(result.confirmed).toBe(true);
+          expect(result.submission).toBe("submitted");
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  it("owns only a newly appeared Claude collapsed paste, never an existing or unreadable baseline", async () => {
+    const { ownedCollapsedPaste } = await loadModule();
+    const token = "[Pasted text #2 +12 lines]";
+    const after = [`❯ ${token}`];
+    expect(ownedCollapsedPaste("claude", ["❯"], after)).toBe(token);
+    expect(ownedCollapsedPaste("claude", after, after)).toBeNull();
+    expect(ownedCollapsedPaste("claude", [token, "❯"], after)).toBeNull();
+    expect(ownedCollapsedPaste("claude", null, after)).toBeNull();
+    expect(ownedCollapsedPaste("codex", ["❯"], after)).toBeNull();
+    expect(ownedCollapsedPaste("claude", ["❯"], ["❯ unrelated draft"])).toBeNull();
+  });
+
+  it.skipIf(!itUnix)(
+    "retries our newly collapsed paste until its nonce appears in the transcript",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-collapsed-"));
+      try {
+        const log = path.join(dir, "a.log");
+        const marker = "<ay-msg abc12345";
+        await writeFile(log, "❯ [Pasted text #2 +12 lines]\r\n");
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const reaction = (async () => {
+            expect(await onKeystroke()).toBe(true);
+            expect(await onKeystroke()).toBe(true);
+            appendFileSync(log, `\r\n${marker} hello\r\n❯\r\n────────────\r\n`);
+          })();
+          const result = await submitAndConfirm(rec({ log_file: log }), fifo, "\r", marker, ["❯"]);
+          await reaction;
+          expect(result.confirmed).toBe(true);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+    10_000,
+  );
+
+  it.skipIf(!itUnix)("does not retry a collapsed paste that existed before our write", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-existing-paste-"));
+    try {
+      const log = path.join(dir, "a.log");
+      const screen = ["❯ [Pasted text #2 +12 lines]"];
+      await writeFile(log, screen.join("\r\n"));
+      const { submitAndConfirm } = await loadModule();
+      await withFifo(async (fifo) => {
+        const result = await submitAndConfirm(
+          rec({ log_file: log }),
+          fifo,
+          "\r",
+          "<ay-msg abc12345",
+          screen,
+        );
+        expect(result.confirmed).toBe(false);
+        const fs = await import("fs");
+        const fd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+        try {
+          const bytes = Buffer.alloc(16);
+          const count = fs.readSync(fd, bytes, 0, bytes.length, null);
+          expect(bytes.subarray(0, count).toString()).toBe("\r");
+        } finally {
+          fs.closeSync(fd);
+        }
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
     }
   });
 
@@ -1487,7 +2030,12 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
         await writeFile(log, IDLE); // never touched again — nothing to confirm
         const { submitAndConfirm } = await loadModule();
         await withFifo(async (fifo) => {
-          const { confirmed, screen } = await submitAndConfirm(rec({ log_file: log }), fifo, "\r");
+          const { confirmed, screen } = await submitAndConfirm(
+            rec({ log_file: log }),
+            fifo,
+            "\r",
+            "some leftover unsent text",
+          );
           expect(confirmed).toBe(false);
           expect(screen.join("\n")).toContain("leftover unsent text");
         });
@@ -1505,7 +2053,10 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
 
   // A background drain so cmdSend's writes to the FIFO never block, mirroring
   // the "delivers a message to a real FIFO" setup above.
-  async function withDrainedFifo(fn: (fifo: string) => Promise<void>) {
+  async function withDrainedFifo(
+    fn: (fifo: string) => Promise<void>,
+    onBytes?: (bytes: string) => void,
+  ) {
     const { spawnSync } = await import("child_process");
     const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-"));
     const fifo = path.join(dir, "test.fifo");
@@ -1523,7 +2074,9 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
       const rdwrFd = fs.openSync(fifo, fs.constants.O_RDWR | fs.constants.O_NONBLOCK);
       const drain = setInterval(() => {
         try {
-          fs.readSync(rdwrFd, Buffer.alloc(4096), 0, 4096, null);
+          const bytes = Buffer.alloc(4096);
+          const count = fs.readSync(rdwrFd, bytes, 0, bytes.length, null);
+          if (count) onBytes?.(bytes.subarray(0, count).toString());
         } catch {
           /* EAGAIN or similar — nothing pending, ignore */
         }
@@ -1587,33 +2140,90 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
     "exits 0 and reports 'sent' when a working marker appears after the Enter (genuine confirm)",
     async () => {
       const dir = await mkdtemp(path.join(tmpdir(), "ay-send-e2e-log-"));
-      // A STATIC pre-existing busy marker cannot confirm — that's the #157
-      // wasAlreadyWorking guard (see the "already on screen before sending" test).
-      // Confirmation needs a real idle→working transition (or >=8 bytes of growth)
-      // AFTER the submit. Model that: the log is idle until we send, then a steady
-      // trickle of the working marker lands within submitAndConfirm's window, so it
-      // confirms deterministically without fragile single-shot timing.
       const log = path.join(dir, "a.log");
-      await writeFile(log, "❯ \r\n"); // idle until the submitted Enter lands
-      let working = false;
-      const respond = setInterval(() => {
-        if (working) appendFileSync(log, BUSY);
-      }, 40);
-      respond.unref();
+      await writeFile(log, "❯ hello\r\n");
       try {
-        await withDrainedFifo(async (fifo) => {
-          working = true; // the submitted Enter kicks the agent into working
-          const { code, stdout } = await send(fifo, log, "hello");
-          expect(code).toBe(0);
-          expect(stdout).toMatch(/^sent to pid/);
-          expect(stdout).not.toMatch(/NOT confirmed/);
-        });
+        await withDrainedFifo(
+          async (fifo) => {
+            const { code, stdout } = await send(fifo, log, "hello");
+            expect(code).toBe(0);
+            expect(stdout).toMatch(/^sent to pid/);
+            expect(stdout).not.toMatch(/NOT confirmed/);
+          },
+          (bytes) => {
+            if (bytes.includes("\r")) appendFileSync(log, "\r\nhello\r\n" + BUSY + "❯ \r\n");
+          },
+        );
       } finally {
-        clearInterval(respond);
         await rm(dir, { recursive: true, force: true }).catch(() => null);
       }
     },
   );
+
+  it.skipIf(!itUnix)("captures collapsed-paste ownership before writing the body", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-collapse-wiring-"));
+    const log = path.join(dir, "a.log");
+    await writeFile(log, "❯\r\n");
+    let enters = 0;
+    try {
+      await withDrainedFifo(
+        async (fifo) => {
+          const { code } = await send(fifo, log, "collapsed-message");
+          expect(code).toBe(0);
+          expect(enters).toBe(2);
+        },
+        (bytes) => {
+          if (bytes.includes("collapsed-message"))
+            appendFileSync(log, "\x1b[2J\x1b[H❯ [Pasted text #3 +20 lines]\r\n");
+          if (bytes.includes("\r") && ++enters === 2)
+            appendFileSync(log, "collapsed-message\r\n❯\r\n");
+        },
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!itUnix)("reports QUEUED with its distinct exit 4", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-queue-e2e-"));
+    const log = path.join(dir, "a.log");
+    await writeFile(log, "❯ waiting\r\n");
+    try {
+      await withDrainedFifo(
+        async (fifo) => {
+          const errs: string[] = [];
+          const origErr = process.stderr.write.bind(process.stderr);
+          process.stderr.write = ((c: string | Uint8Array) => (
+            errs.push(String(c)),
+            true
+          )) as typeof process.stderr.write;
+          let res: { code: number | null; stdout: string };
+          try {
+            res = await send(fifo, log, "queued-receipt-test");
+          } finally {
+            process.stderr.write = origErr;
+          }
+          const { code, stdout } = res;
+          expect(code).toBe(4);
+          expect(stdout).toMatch(/^QUEUED to pid/);
+          // The receipt says so, so a lane does not read rc=4 as a failure and resend.
+          expect(errs.join("")).toContain("Queued, do not resend.");
+          const { readMailbox } = await import("./messageLog.ts");
+          const receipt = (await readMailbox(process.cwd(), "outbox")).findLast(
+            (r) => r.body === "queued-receipt-test",
+          );
+          expect(receipt?.confirmed).toBe(false);
+          expect(receipt?.submission).toBe("queued");
+        },
+        (bytes) => {
+          if (bytes.includes("\r"))
+            appendFileSync(log, "queued-receipt-test\r\n❯ Press up to edit queued messages\r\n");
+        },
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
 
   it.skipIf(!itUnix)(
     "exits non-zero and reports the leftover screen when submission can't be confirmed",
@@ -3246,7 +3856,7 @@ describe("subcommands.cmdSend double-envelope warning", () => {
             '<ay-msg deadbeef from claude #900001 @ /repo/beta — reply: ay send 900001 "...">hi</ay-msg deadbeef>',
             "--force",
           ]);
-          expect(code).toBe(0);
+          expect(code).toBe(1); // This FIFO fixture has no destination log.
           expect(stderr.join("")).toMatch(/DOUBLE wrapper/);
         } finally {
           process.stderr.write = origErr;
@@ -3329,7 +3939,7 @@ describe("subcommands.cmdSend double-envelope warning", () => {
           "plain body, quoting <ay-msg deadbeef …> mid-text is fine",
           "--force",
         ]);
-        expect(code).toBe(0);
+        expect(code).toBe(1); // This FIFO fixture has no destination log.
         expect(stderr.join("")).not.toMatch(/DOUBLE wrapper/);
       } finally {
         process.stderr.write = origErr;
@@ -3403,7 +4013,7 @@ describe("subcommands.cmdSend double-envelope warning", () => {
           "hello from crm",
           "--force",
         ]);
-        expect(code).toBe(0);
+        expect(code).toBe(1); // This FIFO fixture has no destination log.
       } finally {
         process.stdout.write = origOut;
         if (savedAyPid === undefined) delete process.env.AGENT_YES_PID;
@@ -4181,4 +4791,168 @@ describe("subcommands.cmdSend unreachable exit status", () => {
       }
     },
   );
+});
+
+// The drainer is spawned detached from `ay send`; a launcher that cannot start
+// is silent (spawn's ENOENT is swallowed), so the parked message simply never
+// moves. Pin the argv shape per runtime so the Windows regression (spawning the
+// .js script bare) cannot come back.
+describe("drainerLauncher", () => {
+  it("re-runs the current script under bun, on every platform", async () => {
+    const { drainerLauncher } = await loadModule();
+    expect(
+      drainerLauncher("/usr/local/bin/bun", "/repo/alpha/dist/cli.js", "/usr/local/bin/ay"),
+    ).toEqual(["/usr/local/bin/bun", "/repo/alpha/dist/cli.js"]);
+    expect(
+      drainerLauncher(
+        "C:\\Users\\alice\\.bun\\bin\\bun.exe",
+        "C:\\repo\\alpha\\dist\\cli.js",
+        null,
+      ),
+    ).toEqual(["C:\\Users\\alice\\.bun\\bin\\bun.exe", "C:\\repo\\alpha\\dist\\cli.js"]);
+  });
+
+  it("falls back to the ay on PATH only when there is no script, and to nothing when there is neither", async () => {
+    const { drainerLauncher } = await loadModule();
+    expect(drainerLauncher("/usr/local/bin/bun", undefined, "/usr/local/bin/ay")).toEqual([
+      "/usr/local/bin/bun",
+      "/usr/local/bin/ay",
+    ]);
+    expect(drainerLauncher("/usr/local/bin/bun", undefined, null)).toBeNull();
+  });
+
+  it("re-runs a compiled single-file binary as itself", async () => {
+    const { drainerLauncher } = await loadModule();
+    expect(drainerLauncher("/opt/ay/ay", "/$bunfs/root/cli", "/usr/local/bin/ay")).toEqual([
+      "/opt/ay/ay",
+    ]);
+    expect(drainerLauncher("C:\\tools\\ay.exe", undefined, null)).toEqual(["C:\\tools\\ay.exe"]);
+  });
+});
+
+describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () => {
+  // A renderer that addresses rows absolutely and re-emits only the rows that
+  // changed: the full frame (both rules, the empty prompt) is drawn once, then
+  // >32 KB of redraws touch only transcript rows, an old "❯" turn among them.
+  const COLS = 200;
+  const GRAY = "\x1b[38;2;153;153;153m";
+  const at = (row: number, text: string) => `\x1b[${row};1H\x1b[2K${text}`;
+  function idleLog(composer: string, staleBox?: string, bytes = 200 * 1024): string {
+    const screen: string[] = [];
+    for (let i = 0; i < 38; i++) screen.push(`● step ${i}: lorem ipsum dolor sit amet`);
+    screen.push("❯ please summarise the plan");
+    for (let i = 0; i < 7; i++) screen.push(`  answer line ${i}: sed do eiusmod tempor`);
+    screen.push(
+      `${GRAY}${"─".repeat(COLS)}\x1b[0m`,
+      `❯ ${composer}`,
+      `${GRAY}${"─".repeat(COLS)}\x1b[0m`,
+    );
+    screen.push(`${GRAY}  ? for shortcuts\x1b[0m`);
+    let log = "\x1b[2J" + screen.map((t, i) => at(i + 1, t)).join("") + "\x1b[48;3H";
+    for (let k = 0; log.length < bytes; k++) {
+      for (let r = 39; r <= 46; r++) log += at(r, screen[r - 1]! + (r === 46 ? ` ${k % 10}` : ""));
+      // A fragment of an older frame's box, still holding what was typed then.
+      if (staleBox !== undefined)
+        log +=
+          at(30, `${GRAY}${"─".repeat(COLS)}\x1b[0m`) +
+          at(31, `❯ ${staleBox}`) +
+          at(32, `${GRAY}${"─".repeat(COLS)}\x1b[0m`);
+      log += "\x1b[48;3H";
+    }
+    return log;
+  }
+  let logs = 0;
+  async function stateOf(log: string, cli = "claude", windows?: number[]) {
+    const { readComposerState } = await loadModule();
+    const file = path.join(testHome, `${1111 + logs++}.raw.log`);
+    await writeFile(file, log);
+    return readComposerState({ pid: 1111, cli, log_file: file } as never, windows);
+  }
+
+  it("reads the empty composer drawn before the last 32 KB, not the transcript", async () => {
+    // The 32 KB tail alone renders the old turn as the prompt and its answer as a draft.
+    expect(await stateOf(idleLog(""))).toEqual({ kind: "empty", ghost: false });
+  });
+
+  it("searches as far back as `ay read` renders before giving up on the box", async () => {
+    const { COMPOSER_WINDOWS, MAX_RENDER_BYTES } = await loadModule();
+    expect(COMPOSER_WINDOWS.at(-1)).toBe(MAX_RENDER_BYTES);
+    // Scaled down: windows that stop short of the box report it hidden, one more
+    // that reaches it reads the empty composer.
+    const log = idleLog("", undefined, 300 * 1024);
+    expect((await stateOf(log, "claude", [32 * 1024, 64 * 1024])).kind).toBe("hidden");
+    expect(await stateOf(log, "claude", [32 * 1024, 64 * 1024, 512 * 1024])).toEqual({
+      kind: "empty",
+      ghost: false,
+    });
+  });
+
+  it("does not stop at an older box that history was drawn under", async () => {
+    expect(await stateOf(idleLog("", "old draft"))).toEqual({ kind: "empty", ghost: false });
+  });
+
+  it("still reads a typed draft in that composer", async () => {
+    expect(await stateOf(idleLog("btw how"))).toEqual({ kind: "draft", chars: 6 });
+  });
+
+  it("reads a Claude screen that never shows its box as hidden, not as a draft", async () => {
+    const turn = "❯ please summarise the plan\r\n  answer: sed do eiusmod tempor\r\n";
+    expect(await stateOf(turn.repeat(3000))).toEqual({
+      kind: "hidden",
+      reason: "its input box is not on screen",
+    });
+    // CLIs without a box keep reading the last prompt row in the 32 KB tail.
+    expect((await stateOf(turn.repeat(3000), "codex")).kind).toBe("draft");
+  });
+
+  it("follows what is appended after the first reading, and a truncated log", async () => {
+    const { readComposerState } = await loadModule();
+    const file = path.join(testHome, "2222.raw.log");
+    const record = { pid: 2222, cli: "claude", log_file: file } as never;
+    await writeFile(file, idleLog(""));
+    expect(await readComposerState(record)).toEqual({ kind: "empty", ghost: false });
+    appendFileSync(file, at(48, "❯ btw how"));
+    expect(await readComposerState(record)).toEqual({ kind: "draft", chars: 6 });
+    appendFileSync(file, at(48, "❯ "));
+    expect(await readComposerState(record)).toEqual({ kind: "empty", ghost: false });
+    const box = `${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n❯ hi\r\n${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n`;
+    await writeFile(file, "x\r\n".repeat(100) + box);
+    expect(await readComposerState(record)).toEqual({ kind: "draft", chars: 2 });
+  });
+
+  it("keeps a typed draft on screen in the 32 KB tail", async () => {
+    const box = `${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n❯ btw how\r\n${GRAY}${"─".repeat(COLS)}\x1b[0m\r\n`;
+    expect(await stateOf("x\r\n".repeat(20000) + box)).toEqual({ kind: "draft", chars: 6 });
+  });
+});
+
+// A plain shell (cmd, bash, an ssh session) has no composer row. Its evidence
+// of a submitted raw send is the echoed command line followed by a NEW prompt;
+// the same text on the final line is the command typed but not yet entered.
+// Without this every `ay send --raw` to a shell reported NOT SUBMITTED (exit 1)
+// after the command had visibly run.
+describe("inspectSubmission: shells without a composer", () => {
+  it("counts an echoed command above a fresh prompt as submitted", async () => {
+    const { inspectSubmission } = await loadModule();
+    const ran = ["alice@box:~/repo$ echo PIPE_OK_1", "PIPE_OK_1", "", "alice@box:~/repo$ "];
+    expect(inspectSubmission(ran, "echo PIPE_OK_1")).toMatchObject({
+      submission: "submitted",
+      retry: false,
+      transcriptMatches: 1,
+      composerVisible: false,
+      inComposer: false,
+    });
+  });
+
+  it("does not count the command while it is still on the last line, nor a wrapped message", async () => {
+    const { inspectSubmission } = await loadModule();
+    const typed = ["alice@box:~/repo$ ls", "a  b", "alice@box:~/repo$ echo PIPE_OK_1"];
+    expect(inspectSubmission(typed, "echo PIPE_OK_1").submission).toBe("not-submitted");
+    expect(inspectSubmission(typed, "echo PIPE_OK_1").retry).toBe(false);
+    const wrapped = ["alice@box:~/repo$ <ay-msg abc12345 from x>", "hi", "alice@box:~/repo$ "];
+    expect(inspectSubmission(wrapped, "<ay-msg abc12345 from x>").submission).toBe("not-submitted");
+    expect(inspectSubmission(["alice@box:~/repo$ "], "echo PIPE_OK_1").submission).toBe(
+      "not-submitted",
+    );
+  });
 });

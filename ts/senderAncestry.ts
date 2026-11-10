@@ -230,9 +230,7 @@ export function pidOwnershipVerdict(
   toleranceSecs = 60,
 ): PidOwnership {
   if (ageSecs === undefined || startedAt === undefined) return "unknown";
-  return ageMatchesRegistration(ageSecs, startedAt, now, toleranceSecs)
-    ? "ours"
-    : "reused";
+  return ageMatchesRegistration(ageSecs, startedAt, now, toleranceSecs) ? "ours" : "reused";
 }
 
 export async function readAncestryTable(

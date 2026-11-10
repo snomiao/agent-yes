@@ -32,7 +32,8 @@ on:
 jobs:
   # Deterministic, hermetic DOM test of the real console — blocking (required).
   ui-dom:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04, where Playwright has no chromium build yet.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
@@ -73,7 +74,8 @@ jobs:
 
   # Heavier xterm render fidelity test (Gemini Vision) — non-blocking.
   ui-render:
-    runs-on: ubuntu-latest
+    # Pinned: ubuntu-latest moved to 26.04, where Playwright has no chromium build yet.
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5

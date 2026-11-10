@@ -18,7 +18,6 @@ use std::time::Duration;
 use tokio::sync::{mpsc, watch, Mutex};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::Message;
-use webrtc::api::APIBuilder;
 use webrtc::data_channel::data_channel_message::DataChannelMessage;
 use webrtc::data_channel::RTCDataChannel;
 use webrtc::ice_transport::ice_candidate::RTCIceCandidateInit;
@@ -39,7 +38,140 @@ const SIG_REFRESH_MS: u64 = 4 * 60_000;
 const PEER_OP_TIMEOUT_MS: u64 = 30_000;
 /// Ceiling on tearing one peer down, for the same reason.
 const PEER_CLOSE_TIMEOUT_MS: u64 = 10_000;
+/// How long a peer may sit between `peer-join` and key-confirmed before it is
+/// torn down. This is the leak the two timeouts above do NOT cover: a browser
+/// that closes its tab mid-handshake, or vanishes across the 4-minute signaling
+/// refresh so no `peer-leave` ever arrives, leaves a peer whose every webrtc-rs
+/// call has returned promptly — and whose task then waits in `rx.recv()` for a
+/// command that never comes. Its RTCPeerConnection never leaves `New`, so the
+/// Failed/Disconnected callback never fires, and `Mailboxes` deliberately
+/// outlives signaling sessions, so nothing prunes it. Each such peer keeps its
+/// ICE UDP sockets for the life of the process. Measured on one host: 501
+/// `peer-join` against 234 `key-confirmed` over the log's lifetime, and a
+/// launchd-supervised `ayrs serve` that ran out of file descriptors (256 soft)
+/// after ~a day, at which point even DNS lookups failed and the share was dead.
+/// A real handshake completes in a few seconds; this is a crash barrier.
+const PEER_SETUP_DEADLINE_MS: u64 = 60_000;
 const STUN_URL: &str = "stun:stun.l.google.com:19302";
+
+/// Credential lifetime requested from Cloudflare, seconds. Short on purpose:
+/// the servers ride in every offer, so any holder of a share link can relay
+/// for this long. Keep it short; do not widen it.
+const TURN_TTL_SECS: u64 = 3600;
+
+/// Short-lived Cloudflare TURN credentials, minted from a long-term TURN key,
+/// so a viewer can RELAY when no direct path exists (symmetric NAT / CGNAT —
+/// an office NAT in front of this host is exactly that). Mirrors ts/share.ts
+/// `getIceServers`: enabled by `CF_TURN_KEY_ID` + `CF_TURN_API_TOKEN`
+/// (Cloudflare dashboard: Realtime → TURN), STUN-only otherwise and on any
+/// error, cached until shortly before expiry. Without this the Rust host
+/// offered STUN only, so a viewer on another network could reach the
+/// signaling server, get the offer, and then time out on ICE.
+///
+/// Returned as the JSON the offer carries (`[{urls, username, credential}]`);
+/// `rtc_ice_servers` turns the same value into the peer-connection config so
+/// both sides gather against the same servers.
+async fn ice_servers_json() -> Value {
+    static CACHE: Mutex<Option<(Value, std::time::Instant)>> = Mutex::const_new(None);
+    let key_id = std::env::var("CF_TURN_KEY_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let token = std::env::var("CF_TURN_API_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
+    let (Some(key_id), Some(token)) = (key_id, token) else {
+        return json!([{ "urls": STUN_URL }]);
+    };
+    {
+        let cache = CACHE.lock().await;
+        if let Some((v, exp)) = cache.as_ref() {
+            if *exp > std::time::Instant::now() {
+                return v.clone();
+            }
+        }
+    }
+    let fetched = tokio::task::spawn_blocking(move || fetch_cloudflare_ice(&key_id, &token))
+        .await
+        .unwrap_or_else(|e| Err(anyhow!("join: {e}")));
+    match fetched {
+        Ok(servers) => {
+            let exp =
+                std::time::Instant::now() + Duration::from_secs(TURN_TTL_SECS.saturating_sub(300)); // refresh ~5 min early
+            *CACHE.lock().await = Some((servers.clone(), exp));
+            servers
+        }
+        Err(e) => {
+            eprintln!("[ayrs share] Cloudflare TURN credential fetch failed; using STUN only: {e}");
+            json!([{ "urls": STUN_URL }])
+        }
+    }
+}
+
+/// POST https://rtc.live.cloudflare.com/v1/turn/keys/<key>/credentials/generate-ice-servers
+/// → `{ "iceServers": [ {urls, username, credential}, … ] }`. Blocking (ureq);
+/// the caller runs it on the blocking pool.
+fn fetch_cloudflare_ice(key_id: &str, token: &str) -> Result<Value> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(5)))
+        .build()
+        .into();
+    let url = format!(
+        "https://rtc.live.cloudflare.com/v1/turn/keys/{key_id}/credentials/generate-ice-servers"
+    );
+    let mut resp = agent
+        .post(&url)
+        .header("Authorization", &format!("Bearer {token}"))
+        .send_json(json!({ "ttl": TURN_TTL_SECS }))
+        .context("Cloudflare TURN request")?;
+    let body: Value = resp
+        .body_mut()
+        .read_json()
+        .context("Cloudflare TURN response")?;
+    match body.get("iceServers") {
+        Some(Value::Array(a)) if !a.is_empty() => Ok(Value::Array(a.clone())),
+        _ => bail!("Cloudflare TURN response carried no iceServers"),
+    }
+}
+
+/// The peer-connection form of `ice_servers_json`. Tolerates `urls` as a
+/// string or an array (Cloudflare sends an array); drops entries without urls.
+fn rtc_ice_servers(v: &Value) -> Vec<RTCIceServer> {
+    let mut out = Vec::new();
+    for s in v.as_array().into_iter().flatten() {
+        let urls: Vec<String> = match s.get("urls") {
+            Some(Value::String(u)) => vec![u.clone()],
+            Some(Value::Array(a)) => a
+                .iter()
+                .filter_map(|u| u.as_str().map(String::from))
+                .collect(),
+            _ => Vec::new(),
+        };
+        if urls.is_empty() {
+            continue;
+        }
+        out.push(RTCIceServer {
+            urls,
+            username: s
+                .get("username")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            credential: s
+                .get("credential")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
+            ..Default::default()
+        });
+    }
+    if out.is_empty() {
+        out.push(RTCIceServer {
+            urls: vec![STUN_URL.to_string()],
+            ..Default::default()
+        });
+    }
+    out
+}
 const MAX_ROTATES: u32 = 5;
 /// How long to wait between re-checks while parked behind a live room holder.
 ///
@@ -72,6 +204,9 @@ pub struct RoomUrl {
     pub room: String,
     pub token: String, // "e1.<64hex>"
     pub host: String,
+    /// The room's join secret, when the URL is a HOST link
+    /// (`webrtc://room:e1.<view>:j1.<join>@host`); see room_member.rs.
+    pub join: Option<String>,
 }
 
 pub fn format_room_url(room: &RoomUrl) -> String {
@@ -92,10 +227,15 @@ pub fn parse_share_url(s: &str) -> Result<RoomUrl> {
     if room.is_empty() || token.is_empty() || host.is_empty() {
         bail!("bad --webrtc url: {s}");
     }
+    let (token, join) = match token.split_once(":j1.") {
+        Some((t, j)) => (t, Some(format!("j1.{j}"))),
+        None => (token, None),
+    };
     Ok(RoomUrl {
         room: room.into(),
         token: token.into(),
         host: host.into(),
+        join,
     })
 }
 
@@ -104,6 +244,7 @@ pub(super) fn mint_room(host: &str) -> RoomUrl {
         room: format!("r{}", e2e::random_hex(6)),
         token: format!("{}{}", e2e::MARKER, e2e::random_hex(32)),
         host: host.to_string(),
+        join: None,
     }
 }
 
@@ -154,6 +295,34 @@ pub fn resolve_share_urls(url: Option<&str>, sighost: &str) -> Result<(String, S
     Ok((format_room_url(&room), browser_url))
 }
 
+/// `ayrs serve join-secret`: what a worker needs to join this host's room
+/// (or the `--webrtc` one) as a member. Minting the secret is what makes the
+/// room require it: the running host starts sending it at its next re-hello.
+pub fn print_join_secret(url: Option<&str>, sighost: &str) -> Result<()> {
+    let room = match url {
+        Some(u) if !u.is_empty() => parse_share_url(u)?,
+        _ => load_or_create_room(sighost),
+    };
+    let (secret, encrypted) = e2e::parse_secret(&room.token)?;
+    if !encrypted {
+        bail!("refusing to share an unencrypted room");
+    }
+    let j = super::room_member::join_secret_or_mint(&room.room)?;
+    // One value for members: the view link with the join secret appended
+    // (`…#<room>:e1.<view>:j1.<join>`). Viewers get the plain view link.
+    println!(
+        "AY_ROOM={}",
+        format_share_link(&room.room, &format!("{secret}:{j}"), &room.host)
+    );
+    eprintln!(
+        "Run each member with: AY_NAME=<name> ay serve --webrtc \"$AY_ROOM\" --join\n\
+         AY_ROOM above is the HOST link: it lets a machine host in this room, so keep it private.\n\
+         Viewers use the view link: {}",
+        format_share_link(&room.room, &secret, &room.host)
+    );
+    Ok(())
+}
+
 // ---- per-peer state ----------------------------------------------------------
 
 struct Peer {
@@ -171,6 +340,32 @@ struct Peer {
     confirmed_in: bool,
     confirmed_out: bool,
     confirmed: bool,
+    relay: RelayState,
+}
+
+/// The signaling relay (AGENT_YES_SIGNAL_RELAY=1 on both ends; off by
+/// default): when no data channel comes up, the viewer sends the same sealed
+/// frames over the signaling socket as `{type:"relay", to, data}`, and once
+/// one arrives this peer answers the same way. The signaling server only sees
+/// ciphertext, but every frame passes through it (and wakes its Durable
+/// Object), so it is the last resort for hosts no direct path reaches.
+#[derive(Default)]
+struct RelayState {
+    /// Frames go over signaling instead of the data channel.
+    on: Arc<std::sync::atomic::AtomicBool>,
+    /// Our confirm nonce went out (on data-channel open, or first relay frame).
+    nonce_sent: Arc<std::sync::atomic::AtomicBool>,
+    /// The peer's inbound frame queue, for relayed frames.
+    in_tx: Option<mpsc::UnboundedSender<Vec<u8>>>,
+}
+
+pub fn signal_relay_enabled() -> bool {
+    matches!(
+        std::env::var("AGENT_YES_SIGNAL_RELAY")
+            .as_deref()
+            .map(str::trim),
+        Ok("1") | Ok("true") | Ok("yes")
+    )
 }
 
 struct PeerCrypto {
@@ -207,6 +402,9 @@ enum SigOut {
 pub struct ShareConfig {
     pub url: Option<String>,
     pub sighost: String,
+    /// Host `url`'s room as one more member next to its other hosts, which
+    /// takes the room's join secret (see room_member.rs).
+    pub join: bool,
 }
 
 /// Path of the advisory lock recording which pid is hosting a given room.
@@ -234,24 +432,136 @@ enum ClaimOutcome {
 /// only differ in what happens *after* a refusal (bail vs. park and retry).
 fn try_claim_room_at(path: &std::path::Path) -> ClaimOutcome {
     if let Ok(txt) = std::fs::read_to_string(path) {
-        if let Ok(pid) = txt.trim().parse::<i32>() {
-            if pid != std::process::id() as i32 && crate::pid_store::is_process_alive(pid as u32) {
-                return ClaimOutcome::HeldBy(pid);
+        if let Some(holder) = LockHolder::parse(&txt) {
+            if holder.pid != std::process::id() as i32 && holder.is_running() {
+                return ClaimOutcome::HeldBy(holder.pid);
             }
         }
     }
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p).ok();
     }
-    std::fs::write(path, std::process::id().to_string()).ok();
+    std::fs::write(path, LockHolder::me().render()).ok();
     ClaimOutcome::Claimed
+}
+
+/// Who wrote a room lock file. The pid stays alone on the first line (the TS
+/// `ay serve status` reads just that); the lines after it say which process it
+/// was, because a bare pid outlives its meaning when ~/.agent-yes is a volume
+/// that a recreated container mounts again. The new container numbers its
+/// processes from 1, so the old holder's pid is often some unrelated process
+/// there, or a thread of the new host itself, which `kill(pid, 0)` also
+/// accepts. Either way the new host waited on a holder that was long gone.
+#[derive(Debug, PartialEq, Eq)]
+struct LockHolder {
+    pid: i32,
+    /// gethostname(); a container's is its own.
+    host: Option<String>,
+    /// Linux: boot id + start time of the process, which no later process
+    /// with the same pid shares.
+    start: Option<String>,
+}
+
+impl LockHolder {
+    fn me() -> Self {
+        let pid = std::process::id() as i32;
+        LockHolder {
+            pid,
+            host: Some(crate::identity::raw_hostname()).filter(|h| !h.is_empty()),
+            start: process_start(pid),
+        }
+    }
+
+    fn render(&self) -> String {
+        let mut s = self.pid.to_string();
+        if let Some(h) = &self.host {
+            s += &format!("\nhost={h}");
+        }
+        if let Some(t) = &self.start {
+            s += &format!("\nstart={t}");
+        }
+        s + "\n"
+    }
+
+    /// Also reads the old format, a bare pid.
+    fn parse(txt: &str) -> Option<Self> {
+        let mut lines = txt.lines();
+        let pid = lines
+            .next()?
+            .trim()
+            .parse::<i32>()
+            .ok()
+            .filter(|p| *p > 0)?;
+        let mut h = LockHolder {
+            pid,
+            host: None,
+            start: None,
+        };
+        for l in lines {
+            match l.split_once('=') {
+                Some(("host", v)) => h.host = Some(v.to_string()),
+                Some(("start", v)) => h.start = Some(v.to_string()),
+                _ => {}
+            }
+        }
+        Some(h)
+    }
+
+    /// Whether the process that wrote the lock still runs. A lock from another
+    /// host name was written in another container or machine, whose pids mean
+    /// nothing here.
+    fn is_running(&self) -> bool {
+        if self
+            .host
+            .as_ref()
+            .is_some_and(|h| *h != crate::identity::raw_hostname())
+        {
+            return false;
+        }
+        if cfg!(target_os = "linux") {
+            // A pid that is not a process (thread group leader) here, or one
+            // that started at another time, is not the holder.
+            let Some(now) = process_start(self.pid) else {
+                return false;
+            };
+            if self.start.as_ref().is_some_and(|t| *t != now) {
+                return false;
+            }
+        }
+        crate::pid_store::is_process_alive(self.pid as u32)
+    }
+}
+
+/// Linux: "<boot id>:<start time in clock ticks>" for a running process, None
+/// when `pid` is not one (gone, or a thread of some process). Elsewhere None.
+fn process_start(pid: i32) -> Option<String> {
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
+    let status = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
+    let tgid = status
+        .lines()
+        .find_map(|l| l.strip_prefix("Tgid:"))?
+        .trim()
+        .parse::<i32>()
+        .ok()?;
+    if tgid != pid {
+        return None;
+    }
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // Field 22 (starttime); the command name in field 2 may hold spaces, so
+    // count from the closing parenthesis.
+    let start = stat.rsplit_once(')')?.1.split_whitespace().nth(19)?;
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").unwrap_or_default();
+    Some(format!("{}:{start}", boot.trim()))
 }
 
 fn held_by_error(pid: i32, room: &str) -> anyhow::Error {
     anyhow!(
         "another ayrs host (pid {pid}) is already serving room {room}\n\
          running two hosts in one room breaks WebRTC answering for every viewer.\n\
-         stop it first (`ayrs serve uninstall`, or kill {pid}), or host a different room."
+         stop it first (`ay serve uninstall` removes a legacy scheduled-task or\n\
+         service host too; or kill {pid}), or host a different room."
     )
 }
 
@@ -322,15 +632,107 @@ async fn claim_room_blocking(room: &str) -> Result<()> {
 mod claim_tests {
     use super::*;
 
+    fn held_pid(p: &std::path::Path) -> i32 {
+        LockHolder::parse(&std::fs::read_to_string(p).unwrap())
+            .unwrap()
+            .pid
+    }
+
+    #[test]
+    fn the_lock_names_its_process_and_reads_the_old_format() {
+        let me = LockHolder::me();
+        assert_eq!(LockHolder::parse(&me.render()), Some(me));
+        assert_eq!(
+            LockHolder::parse("1111\n"),
+            Some(LockHolder {
+                pid: 1111,
+                host: None,
+                start: None
+            })
+        );
+        assert_eq!(LockHolder::parse("not a pid"), None);
+    }
+
+    /// A recreated container that mounts the same ~/.agent-yes: the pid in
+    /// the lock is alive here, but it is not the process that wrote it.
+    #[test]
+    fn a_live_pid_from_another_container_does_not_hold_the_room() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let pid = child.id() as i32;
+        let elsewhere = LockHolder {
+            pid,
+            host: Some("old-container-1111".into()),
+            start: None,
+        };
+        let here = LockHolder {
+            pid,
+            host: Some(crate::identity::raw_hostname()),
+            start: process_start(pid),
+        };
+        let restarted = LockHolder {
+            pid,
+            host: here.host.clone(),
+            start: Some("boot:1".into()),
+        };
+        let results = (
+            elsewhere.is_running(),
+            here.is_running(),
+            restarted.is_running(),
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(results.0, false);
+        assert_eq!(results.1, true);
+        // Start times are only known on Linux.
+        assert_eq!(results.2, !cfg!(target_os = "linux"));
+    }
+
+    /// The case that kept a fresh container's host waiting: the old pid is
+    /// now one of this process's own threads.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_thread_id_is_not_a_holder() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let t = std::thread::spawn(move || {
+            tx.send(unsafe { libc::gettid() }).unwrap();
+            let _ = done_rx.recv();
+        });
+        let tid = rx.recv().unwrap();
+        assert!(crate::pid_store::is_process_alive(tid as u32));
+        let holder = LockHolder {
+            pid: tid,
+            host: None,
+            start: None,
+        };
+        let running = holder.is_running();
+        done_tx.send(()).unwrap();
+        t.join().unwrap();
+        assert!(!running);
+    }
+
+    #[test]
+    fn a_host_link_carries_the_join_secret_apart_from_the_view_token() {
+        let v = format!("e1.{}", "ab".repeat(32));
+        let j = format!("j1.{}", "cd".repeat(32));
+        let r = parse_share_url(&format!("webrtc://r1:{v}:{j}@s.example")).unwrap();
+        assert_eq!(
+            (r.token.as_str(), r.join.as_deref()),
+            (v.as_str(), Some(j.as_str()))
+        );
+        let r = parse_share_url(&format!("webrtc://r1:{v}@s.example")).unwrap();
+        assert_eq!((r.token.as_str(), r.join), (v.as_str(), None));
+    }
+
     #[test]
     fn claims_a_free_room_and_records_our_pid() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("lock.pid");
         claim_room_at(&p, "r1").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            std::process::id().to_string()
-        );
+        assert_eq!(held_pid(&p), std::process::id() as i32);
     }
 
     #[test]
@@ -340,10 +742,7 @@ mod claim_tests {
         // pid 1 is alive but is not us; use an implausibly high dead pid instead.
         std::fs::write(&p, "4194303").unwrap();
         claim_room_at(&p, "r1").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            std::process::id().to_string()
-        );
+        assert_eq!(held_pid(&p), std::process::id() as i32);
     }
 
     #[test]
@@ -383,10 +782,7 @@ mod claim_tests {
         .await
         .expect("free room must not park")
         .unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            std::process::id().to_string()
-        );
+        assert_eq!(held_pid(&p), std::process::id() as i32);
     }
 
     #[tokio::test]
@@ -422,10 +818,7 @@ mod claim_tests {
         .unwrap();
 
         holder.join().unwrap();
-        assert_eq!(
-            std::fs::read_to_string(&p).unwrap(),
-            std::process::id().to_string()
-        );
+        assert_eq!(held_pid(&p), std::process::id() as i32);
     }
 
     #[test]
@@ -454,6 +847,9 @@ mod claim_tests {
 
 pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     let explicit = cfg.url.is_some();
+    if cfg.join && !explicit {
+        bail!("--join needs the room's link (--webrtc <link> --join)");
+    }
     let mut room = match &cfg.url {
         Some(u) => parse_share_url(u)?,
         None => load_or_create_room(&cfg.sighost),
@@ -481,15 +877,50 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
     let link = format_share_link(&room.room, &secret, &room.host);
     eprintln!("[ayrs share] room {} via {}", room.room, room.host);
     println!("{link}");
+    // Fails here, before any signaling, when --join has no join secret.
+    let me = super::room_member::for_room(&room.room, &room.host, cfg.join, room.join.as_deref())?;
+    eprintln!(
+        "[ayrs share] hosting as member h-{} ({}){}",
+        me.host_id,
+        me.name,
+        if me.host_token.is_some() {
+            ", with a join secret"
+        } else {
+            ""
+        }
+    );
+    if let Some(line) = super::ice_net::init().await? {
+        eprintln!("[ayrs share] {line}");
+    }
+    // Say once, up front, when only a relay or a published port can reach
+    // this host; otherwise every viewer just times out on ICE with nothing in
+    // this log.
+    tokio::spawn(async {
+        match tokio::task::spawn_blocking(super::nat_probe::probe).await {
+            Ok(Ok(kind)) => {
+                let configured = super::ice_net::is_configured();
+                if let Some(w) = super::nat_probe::startup_warning(&kind, configured) {
+                    eprintln!("[ayrs share] WARNING: {w}");
+                }
+            }
+            Ok(Err(e)) => eprintln!("[ayrs share] NAT check skipped: {e:#}"),
+            Err(_) => {}
+        }
+    });
 
     // The master room never cancels; the dummy sender stays alive for the loop.
     let (_cancel_tx, cancel_rx) = watch::channel(false);
     let scope = Arc::new(Scope::Full);
     loop {
+        // Re-read every time: `ayrs serve join-secret` may have just minted
+        // the secret, and a rotated room has none.
+        let member =
+            super::room_member::for_room(&room.room, &room.host, cfg.join, room.join.as_deref())?;
         match connect_once(
             &room,
             &secret,
             &api_token,
+            Some(&member),
             peers.clone(),
             mailboxes.clone(),
             scope.clone(),
@@ -502,6 +933,13 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
                 continue;
             }
             Ok(SessionEnd::Rejected) => {
+                if cfg.join {
+                    bail!(
+                        "room {} rejected this host (1008): the join secret does not match the room's, \
+                         or the view link is wrong",
+                        room.room
+                    );
+                }
                 if explicit || rotates >= MAX_ROTATES {
                     bail!("room rejected by signaling server (1008) — delete ~/.agent-yes/.share-room-ayrs to rotate");
                 }
@@ -526,7 +964,11 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
                 tokio::time::sleep(Duration::from_millis(1000)).await;
             }
             Err(e) => {
-                eprintln!("[ayrs share] signaling error: {e:#}");
+                // The held-peer count is the gauge for the fd leak this loop
+                // is most likely to be reporting: a `getaddrinfo` failure with
+                // DNS otherwise fine means the process is out of descriptors.
+                let held = peers.lock().await.len();
+                eprintln!("[ayrs share] signaling error: {e:#} ({held} peers held)");
                 tokio::time::sleep(Duration::from_millis(2000)).await;
             }
         }
@@ -549,6 +991,7 @@ pub async fn run_scoped_session(
         room,
         token: String::new(), // auth derives from the secret; token is unused here
         host: sighost,
+        join: None,
     };
     let peers: Peers = Arc::new(Mutex::new(HashMap::new()));
     let mailboxes: Mailboxes = Arc::new(Mutex::new(HashMap::new()));
@@ -560,6 +1003,7 @@ pub async fn run_scoped_session(
             &room,
             &secret,
             "",
+            None,
             peers.clone(),
             mailboxes.clone(),
             scope.clone(),
@@ -609,6 +1053,7 @@ async fn connect_once(
     room: &RoomUrl,
     secret: &str,
     api_token: &str,
+    member: Option<&super::room_member::Member>,
     peers: Peers,
     mailboxes: Mailboxes,
     scope: Arc<Scope>,
@@ -631,12 +1076,18 @@ async fn connect_once(
     let (mut sink, mut stream) = ws.split();
 
     let auth_token = e2e::derive_auth_token(secret, &room.room, &room.host)?;
-    sink.send(Message::Text(
-        json!({"type": "hello", "role": "host", "v": 2, "token": auth_token})
-            .to_string()
-            .into(),
-    ))
-    .await?;
+    let mut hello = json!({"type": "hello", "role": "host", "v": 2, "token": auth_token});
+    if let Some(m) = member {
+        // One member of a room that may have several hosts. A signaling
+        // server without multi-host rooms ignores these fields.
+        hello["multi"] = json!(true);
+        hello["hostId"] = json!(m.host_id);
+        hello["name"] = json!(m.name);
+        if let Some(t) = &m.host_token {
+            hello["hostToken"] = json!(t);
+        }
+    }
+    sink.send(Message::Text(hello.to_string().into())).await?;
 
     // signaling writer fan-in: peer tasks (ICE candidates, offers) → socket
     let (sig_tx, mut sig_rx) = mpsc::unbounded_channel::<SigOut>();
@@ -680,8 +1131,13 @@ async fn connect_once(
                 last_recv = std::time::Instant::now();
                 match msg {
                     Message::Close(frame) => {
-                        if frame.map(|f| u16::from(f.code) == 1008).unwrap_or(false) {
+                        let code = frame.as_ref().map(|f| u16::from(f.code));
+                        if code == Some(1008) {
                             return Ok(SessionEnd::Rejected);
+                        }
+                        if code == Some(4000) {
+                            // Another process said hello with our host id.
+                            eprintln!("[ayrs share] signaling: replaced by a newer connection of this host id");
                         }
                         return Ok(SessionEnd::Dropped);
                     }
@@ -785,7 +1241,43 @@ async fn dispatch_signal(
                 request_close(mailboxes, &peer).await;
             }
         }
+        Some("relay") if signal_relay_enabled() => {
+            let Some(from) = m.get("from").map(value_to_id) else {
+                return;
+            };
+            use base64::Engine;
+            let Some(frame) = m
+                .get("data")
+                .and_then(|d| d.as_str())
+                .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
+            else {
+                return;
+            };
+            on_relay_frame(peers, &from, frame).await;
+        }
         _ => {}
+    }
+}
+
+/// A sealed frame the viewer relayed over signaling: switch the peer to the
+/// relay (replies go the same way) and feed it to the peer's receiver.
+async fn on_relay_frame(peers: &Peers, peer_id: &str, frame: Vec<u8>) {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut map = peers.lock().await;
+    let Some(p) = map.get_mut(peer_id) else {
+        return;
+    };
+    if !p.relay.on.swap(true, SeqCst) {
+        eprintln!("[ayrs share] peer {peer_id}: no direct path, using the signaling relay");
+    }
+    if !p.relay.nonce_sent.swap(true, SeqCst) {
+        let nonce = p.my_nonce.clone();
+        let _ = p
+            .out_tx
+            .send((e2e::FLAG_CONFIRM, json!({"t":"confirm","nonce":nonce})));
+    }
+    if let Some(tx) = &p.relay.in_tx {
+        let _ = tx.send(frame);
     }
 }
 
@@ -938,6 +1430,246 @@ mod dispatch_tests {
         .await;
         assert_eq!(mailboxes.lock().await.len(), 1);
     }
+
+    /// A peer whose handshake never completes must not live forever. This is
+    /// the browser that closed its tab between `peer-join` and its answer, or
+    /// that vanished across a signaling refresh so no `peer-leave` ever came:
+    /// no command fails, no state-change callback fires, and before the
+    /// deadline the task simply waited in `rx.recv()` holding its ICE sockets.
+    #[tokio::test]
+    async fn an_unconfirmed_peer_is_torn_down_at_the_setup_deadline() {
+        let peers = empty_peers();
+        let mailboxes: Mailboxes = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        mailboxes
+            .lock()
+            .await
+            .insert("ghost".to_string(), tx.clone());
+        let (sig_tx, _sig_rx) = mpsc::unbounded_channel();
+        spawn_peer_task_with_deadline(
+            "ghost".to_string(),
+            rx,
+            peers,
+            mailboxes.clone(),
+            "secret".to_string(),
+            "token".to_string(),
+            sig_tx,
+            Arc::new(Scope::Full),
+            Duration::from_millis(50),
+        );
+        // `tx` is deliberately kept alive: the mailbox must be removed by the
+        // deadline, not by the channel closing.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !mailboxes.lock().await.is_empty() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "unconfirmed peer was not torn down at its setup deadline"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        drop(tx);
+    }
+
+    /// A viewer candidate that arrives before the viewer's answer is held and
+    /// added once the answer is set, instead of failing the peer ("remote
+    /// description is not set"), which is what the CLI viewer up to 1.302.x
+    /// always sent first.
+    #[tokio::test]
+    async fn a_candidate_before_the_answer_waits_for_it() {
+        let peers = empty_peers();
+        let mailboxes: Mailboxes = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        mailboxes
+            .lock()
+            .await
+            .insert("early".to_string(), tx.clone());
+        let (sig_tx, mut sig_rx) = mpsc::unbounded_channel();
+        spawn_peer_task_with_deadline(
+            "early".to_string(),
+            rx,
+            peers.clone(),
+            mailboxes.clone(),
+            "ab".repeat(32), // a well-formed share secret (synthetic)
+            "token".to_string(),
+            sig_tx,
+            Arc::new(Scope::Full),
+            Duration::from_secs(60),
+        );
+        tx.send(PeerCmd::Start).unwrap();
+        let offer = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(SigOut::Send(text)) = sig_rx.recv().await {
+                    let m: Value = serde_json::from_str(&text).unwrap();
+                    if m["type"] == "offer" {
+                        return m["sdp"].as_str().unwrap().to_string();
+                    }
+                }
+            }
+        })
+        .await
+        .expect("no offer");
+
+        tx.send(PeerCmd::Candidate(Box::new(RTCIceCandidateInit {
+            candidate: "candidate:1 1 udp 2130706431 192.0.2.1 50000 typ host".into(),
+            sdp_mid: Some("0".into()),
+            sdp_mline_index: Some(0),
+            ..Default::default()
+        })))
+        .unwrap();
+
+        let viewer = webrtc::api::APIBuilder::new()
+            .build()
+            .new_peer_connection(RTCConfiguration::default())
+            .await
+            .unwrap();
+        viewer
+            .set_remote_description(RTCSessionDescription::offer(offer).unwrap())
+            .await
+            .unwrap();
+        let answer = viewer.create_answer(None).await.unwrap();
+        tx.send(PeerCmd::Answer(answer.sdp)).unwrap();
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let pc = peers.lock().await.get("early").map(|p| p.pc.clone());
+            let pc = pc.expect("the early candidate killed the peer");
+            if pc.remote_description().await.is_some() {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "answer never applied");
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            mailboxes.lock().await.contains_key("early"),
+            "the held candidate failed the peer once the answer was set"
+        );
+        viewer.close().await.ok();
+        close_peer(&peers, "early").await;
+    }
+
+    /// The control: the deadline is a check, not a kill switch. A peer that
+    /// HAS confirmed by the time it fires keeps its task and its mailbox.
+    #[tokio::test]
+    async fn a_confirmed_peer_survives_the_setup_deadline() {
+        let peers = empty_peers();
+        let mailboxes: Mailboxes = Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = mpsc::unbounded_channel();
+        mailboxes
+            .lock()
+            .await
+            .insert("live".to_string(), tx.clone());
+        let (sig_tx, _sig_rx) = mpsc::unbounded_channel();
+        let (out_tx, _out_rx) = mpsc::unbounded_channel();
+        let pc = webrtc::api::APIBuilder::new()
+            .build()
+            .new_peer_connection(RTCConfiguration::default())
+            .await
+            .expect("offline RTCPeerConnection");
+        peers.lock().await.insert(
+            "live".to_string(),
+            Peer {
+                pc: Arc::new(pc),
+                out_tx,
+                offer_sdp: String::new(),
+                reqs: HashMap::new(),
+                crypto: None,
+                recv: e2e::RecvState { last_seen: None },
+                my_nonce: String::new(),
+                confirmed_in: true,
+                confirmed_out: true,
+                confirmed: true,
+                relay: RelayState::default(),
+            },
+        );
+        spawn_peer_task_with_deadline(
+            "live".to_string(),
+            rx,
+            peers.clone(),
+            mailboxes.clone(),
+            "secret".to_string(),
+            "token".to_string(),
+            sig_tx,
+            Arc::new(Scope::Full),
+            Duration::from_millis(50),
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            mailboxes.lock().await.len(),
+            1,
+            "confirmed peer was torn down"
+        );
+        // Ending the channel is what tears it down, as before.
+        drop(tx);
+        mailboxes.lock().await.clear();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        while peers.lock().await.contains_key("live") {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "peer not closed after leave"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// `start_peer` now registers the connection before it builds the offer, so
+    /// a setup that stalls is still reachable by `close_peer`. The normal path
+    /// must be unchanged by that: the registered peer ends up holding the offer
+    /// it sent, and exactly one offer goes out on signaling.
+    #[tokio::test]
+    async fn a_started_peer_is_registered_with_the_offer_it_sent() {
+        let peers = empty_peers();
+        let mailboxes: Mailboxes = Arc::new(Mutex::new(HashMap::new()));
+        let (sig_tx, mut sig_rx) = mpsc::unbounded_channel();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            start_peer(
+                "fresh".to_string(),
+                "token",
+                &peers,
+                &mailboxes,
+                &sig_tx,
+                Arc::new(Scope::Full),
+            ),
+        )
+        .await
+        .expect("start_peer stalled")
+        .expect("offline start_peer");
+
+        // Trickle-ICE candidates share this channel and may land before the
+        // offer, so look at everything that went out, not just the first frame.
+        let mut offers = Vec::new();
+        while let Ok(SigOut::Send(text)) = sig_rx.try_recv() {
+            let m: Value = serde_json::from_str(&text).unwrap();
+            if m["type"] == "offer" {
+                offers.push(m);
+            }
+        }
+        assert_eq!(
+            offers.len(),
+            1,
+            "expected exactly one offer, got {offers:?}"
+        );
+        assert_eq!(offers[0]["to"], "fresh");
+        let offer_sdp = offers[0]["sdp"].as_str().unwrap_or("").to_string();
+        assert!(
+            offer_sdp.contains("v=0"),
+            "offer is not an SDP: {offer_sdp:?}"
+        );
+
+        {
+            let map = peers.lock().await;
+            let p = map.get("fresh").expect("peer not registered");
+            assert_eq!(
+                p.offer_sdp, offer_sdp,
+                "registered peer holds a different offer"
+            );
+            assert!(!p.confirmed);
+        }
+        // And it is closable through the ordinary path.
+        close_peer(&peers, "fresh").await;
+        assert!(!peers.lock().await.contains_key("fresh"));
+    }
 }
 
 /// One peer's serialized worker. Commands are processed strictly in arrival
@@ -947,7 +1679,7 @@ mod dispatch_tests {
 #[allow(clippy::too_many_arguments)]
 fn spawn_peer_task(
     peer_id: String,
-    mut rx: mpsc::UnboundedReceiver<PeerCmd>,
+    rx: mpsc::UnboundedReceiver<PeerCmd>,
     peers: Peers,
     mailboxes: Mailboxes,
     secret: String,
@@ -955,8 +1687,71 @@ fn spawn_peer_task(
     sig_tx: mpsc::UnboundedSender<SigOut>,
     scope: Arc<Scope>,
 ) {
+    spawn_peer_task_with_deadline(
+        peer_id,
+        rx,
+        peers,
+        mailboxes,
+        secret,
+        api_token,
+        sig_tx,
+        scope,
+        Duration::from_millis(PEER_SETUP_DEADLINE_MS),
+    );
+}
+
+/// `spawn_peer_task` with the setup deadline injectable, so a test can watch a
+/// peer that never completes its handshake get torn down without waiting a
+/// minute for it.
+#[allow(clippy::too_many_arguments)]
+fn spawn_peer_task_with_deadline(
+    peer_id: String,
+    mut rx: mpsc::UnboundedReceiver<PeerCmd>,
+    peers: Peers,
+    mailboxes: Mailboxes,
+    secret: String,
+    api_token: String,
+    sig_tx: mpsc::UnboundedSender<SigOut>,
+    scope: Arc<Scope>,
+    setup_deadline: Duration,
+) {
     tokio::spawn(async move {
-        while let Some(cmd) = rx.recv().await {
+        // Armed from the moment the peer joins; checked, not tracked — when it
+        // fires, a peer that has key-confirmed is left alone and the timer is
+        // disarmed, anything else is torn down. See PEER_SETUP_DEADLINE_MS.
+        let deadline = tokio::time::sleep(setup_deadline);
+        tokio::pin!(deadline);
+        let mut deadline_armed = true;
+        // Viewer candidates that arrived before its answer. The CLI viewer
+        // (ts/webrtcRemote.ts, up to 1.302.x) sent them first: its
+        // setLocalDescription fires onicecandidate before the answer goes
+        // out. Adding one then fails with "remote description is not set",
+        // which used to kill the peer, so every CLI viewer timed out.
+        let mut early: Vec<RTCIceCandidateInit> = Vec::new();
+        loop {
+            let cmd = tokio::select! {
+                cmd = rx.recv() => match cmd {
+                    Some(cmd) => cmd,
+                    None => break, // peer-leave / connection died
+                },
+                _ = &mut deadline, if deadline_armed => {
+                    deadline_armed = false;
+                    let confirmed = peers
+                        .lock()
+                        .await
+                        .get(&peer_id)
+                        .map(|p| p.confirmed)
+                        .unwrap_or(false);
+                    if confirmed {
+                        continue;
+                    }
+                    eprintln!(
+                        "[ayrs share] peer {peer_id} never completed its handshake within {}ms — closing it",
+                        setup_deadline.as_millis()
+                    );
+                    break;
+                }
+            };
             // Every webrtc-rs call gets a ceiling: a stuck one must kill its own
             // peer, not linger holding sockets and a task forever.
             let timeout = Duration::from_millis(PEER_OP_TIMEOUT_MS);
@@ -983,23 +1778,25 @@ fn spawn_peer_task(
                     match tokio::time::timeout(timeout, on_answer(&peer_id, sdp, &secret, &peers))
                         .await
                     {
+                        Ok(Ok(())) => {
+                            add_candidates(&peers, &peer_id, std::mem::take(&mut early), timeout)
+                                .await
+                        }
                         Ok(r) => r,
                         Err(_) => Err(anyhow!("answer timed out after {PEER_OP_TIMEOUT_MS}ms")),
                     }
                 }
                 PeerCmd::Candidate(init) => {
-                    let pc = {
-                        let map = peers.lock().await;
-                        map.get(&peer_id).map(|p| p.pc.clone())
+                    let pc = peers.lock().await.get(&peer_id).map(|p| p.pc.clone());
+                    let answered = match pc {
+                        Some(pc) => pc.remote_description().await.is_some(),
+                        None => true, // gone: add_candidates skips it
                     };
-                    match pc {
-                        Some(pc) => {
-                            match tokio::time::timeout(timeout, pc.add_ice_candidate(*init)).await {
-                                Ok(r) => r.map_err(|e| anyhow!(e)),
-                                Err(_) => Err(anyhow!("add_ice_candidate timed out")),
-                            }
-                        }
-                        None => Ok(()), // candidate for a peer that already went away
+                    if answered {
+                        add_candidates(&peers, &peer_id, vec![*init], timeout).await
+                    } else {
+                        early.push(*init);
+                        Ok(())
                     }
                 }
             };
@@ -1008,7 +1805,8 @@ fn spawn_peer_task(
                 break;
             }
         }
-        // Channel closed (peer-leave / connection died) or a command failed.
+        // Channel closed (peer-leave / connection died), a command failed, or
+        // the setup deadline passed without a confirmed handshake.
         close_peer(&peers, &peer_id).await;
         mailboxes.lock().await.remove(&peer_id);
     });
@@ -1037,12 +1835,26 @@ async fn close_peer(peers: &Peers, peer_id: &str) {
         for (_, h) in p.reqs {
             h.abort();
         }
-        // Bounded: a wedged close must not strand this task either.
-        if tokio::time::timeout(Duration::from_millis(PEER_CLOSE_TIMEOUT_MS), p.pc.close())
+        // Bounded wait, but the close itself is detached. Dropping a slow
+        // `close()` future mid-way used to be how a wedged close was handled —
+        // and it freed nothing: webrtc-rs's internal tasks hold their own Arcs
+        // to the connection, so an abandoned RTCPeerConnection kept its ICE UDP
+        // sockets for the life of the process. Let the close run to completion
+        // on its own task; only this caller stops waiting for it.
+        let pc = p.pc;
+        let id = peer_id.to_string();
+        let close = tokio::spawn(async move {
+            if let Err(e) = pc.close().await {
+                eprintln!("[ayrs share] peer {id} close failed: {e}");
+            }
+        });
+        if tokio::time::timeout(Duration::from_millis(PEER_CLOSE_TIMEOUT_MS), close)
             .await
             .is_err()
         {
-            eprintln!("[ayrs share] peer {peer_id} close timed out — abandoning it");
+            eprintln!(
+                "[ayrs share] peer {peer_id} close still running after {PEER_CLOSE_TIMEOUT_MS}ms — left to finish in the background"
+            );
         }
     }
 }
@@ -1055,15 +1867,51 @@ async fn start_peer(
     sig_tx: &mpsc::UnboundedSender<SigOut>,
     scope: Arc<Scope>,
 ) -> Result<()> {
-    let api = APIBuilder::new().build();
+    let api = super::ice_net::api().await?;
+    // STUN, plus Cloudflare TURN relay when configured — the same servers the
+    // offer hands the viewer below, so both ends gather against one set.
+    let ice_servers = ice_servers_json().await;
     let config = RTCConfiguration {
-        ice_servers: vec![RTCIceServer {
-            urls: vec![STUN_URL.to_string()],
-            ..Default::default()
-        }],
+        ice_servers: rtc_ice_servers(&ice_servers),
         ..Default::default()
     };
     let pc = Arc::new(api.new_peer_connection(config).await?);
+
+    // sealed-frame sender task input: (flags, envelope) → seal in order → dc.send
+    let (out_tx, out_rx) = mpsc::unbounded_channel::<(u8, Value)>();
+    // inbound frames (data channel, or the signaling relay) → per-peer handler
+    let (in_tx, in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+    let relay = RelayState {
+        in_tx: Some(in_tx.clone()),
+        ..Default::default()
+    };
+    let relay_on = relay.on.clone();
+    let nonce_sent = relay.nonce_sent.clone();
+
+    // Register the connection BEFORE any further webrtc-rs await. The caller
+    // bounds this whole function with PEER_OP_TIMEOUT and tears the peer down
+    // via `close_peer` afterwards — which can only close what it finds in
+    // `peers`. With the insert at the end (after create_offer /
+    // set_local_description), a setup that timed out or errored part-way had
+    // already bound its ICE sockets but was never registered, so nothing ever
+    // closed it. `offer_sdp` is filled in once the offer exists; nothing reads
+    // it before the browser's answer, which can only follow the offer.
+    peers.lock().await.insert(
+        peer_id.clone(),
+        Peer {
+            pc: pc.clone(),
+            out_tx,
+            offer_sdp: String::new(),
+            reqs: HashMap::new(),
+            crypto: None,
+            recv: e2e::RecvState { last_seen: None },
+            my_nonce: e2e::random_hex(16),
+            confirmed_in: false,
+            confirmed_out: false,
+            confirmed: false,
+            relay,
+        },
+    );
 
     // trickle ICE → signaling writer
     {
@@ -1095,10 +1943,16 @@ async fn start_peer(
     {
         let mailboxes2 = mailboxes.clone();
         let peer_id = peer_id.clone();
+        let relay_on = relay_on.clone();
         pc.on_peer_connection_state_change(Box::new(move |st| {
             let mailboxes2 = mailboxes2.clone();
             let peer_id = peer_id.clone();
+            let relayed = relay_on.load(std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move {
+                // A relayed peer never had (or no longer needs) the ICE path.
+                if relayed {
+                    return;
+                }
                 if matches!(
                     st,
                     RTCPeerConnectionState::Failed
@@ -1113,18 +1967,17 @@ async fn start_peer(
 
     let dc = pc.create_data_channel("api", None).await?;
 
-    // sealed-frame sender task: (flags, envelope) → seal in order → dc.send
-    let (out_tx, out_rx) = mpsc::unbounded_channel::<(u8, Value)>();
+    // sealed-frame sender task (its input channel was created with the peer)
     spawn_sender(
         dc.clone(),
         out_rx,
         peers.clone(),
         mailboxes.clone(),
         peer_id.clone(),
+        relay_on.clone(),
+        sig_tx.clone(),
     );
 
-    // inbound frames → per-peer handler (serialized by the channel)
-    let (in_tx, in_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     {
         let in_tx = in_tx.clone();
         dc.on_message(Box::new(move |msg: DataChannelMessage| {
@@ -1156,11 +2009,17 @@ async fn start_peer(
         let peers2 = peers.clone();
         let mailboxes2 = mailboxes.clone();
         let peer_id2 = peer_id.clone();
+        let nonce_sent = nonce_sent.clone();
         dc.on_open(Box::new(move || {
             let peers2 = peers2.clone();
             let mailboxes2 = mailboxes2.clone();
             let peer_id2 = peer_id2.clone();
+            let first = !nonce_sent.swap(true, std::sync::atomic::Ordering::SeqCst);
             Box::pin(async move {
+                // Already confirming over the signaling relay.
+                if !first {
+                    return;
+                }
                 {
                     let mut map = peers2.lock().await;
                     if let Some(p) = map.get_mut(&peer_id2) {
@@ -1190,26 +2049,78 @@ async fn start_peer(
     let offer_sdp = offer.sdp.clone();
     pc.set_local_description(offer).await?;
 
-    peers.lock().await.insert(
-        peer_id.clone(),
-        Peer {
-            pc: pc.clone(),
-            out_tx,
-            offer_sdp: offer_sdp.clone(),
-            reqs: HashMap::new(),
-            crypto: None,
-            recv: e2e::RecvState { last_seen: None },
-            my_nonce: e2e::random_hex(16),
-            confirmed_in: false,
-            confirmed_out: false,
-            confirmed: false,
-        },
-    );
+    // The peer was torn down while we were setting up (leave / deadline).
+    // Don't send an offer for a connection that is already being closed.
+    match peers.lock().await.get_mut(&peer_id) {
+        Some(p) => p.offer_sdp = offer_sdp.clone(),
+        None => return Ok(()),
+    }
 
-    let ice_servers = json!([{ "urls": STUN_URL }]);
-    let _ = sig_tx.send(SigOut::Send(
-        json!({"type":"offer","to":peer_id,"sdp":offer_sdp,"iceServers":ice_servers}).to_string(),
-    ));
+    let mut offer = json!({"type":"offer","to":peer_id,"sdp":offer_sdp,"iceServers":ice_servers});
+    if signal_relay_enabled() {
+        offer["relay"] = json!(true);
+    }
+    let _ = sig_tx.send(SigOut::Send(offer.to_string()));
+    Ok(())
+}
+
+#[cfg(test)]
+mod ice_tests {
+    use super::*;
+
+    #[test]
+    fn rtc_ice_servers_accepts_cloudflare_shape_and_falls_back_to_stun() {
+        let cf = json!([
+            { "urls": ["stun:stun.cloudflare.com:3478", "turn:turn.cloudflare.com:3478?transport=udp"],
+              "username": "u1", "credential": "c1" },
+            { "urls": "stun:stun.l.google.com:19302" },
+            { "username": "no-urls" }
+        ]);
+        let servers = rtc_ice_servers(&cf);
+        assert_eq!(servers.len(), 2);
+        assert_eq!(servers[0].urls.len(), 2);
+        assert_eq!(servers[0].username, "u1");
+        assert_eq!(servers[0].credential, "c1");
+        assert_eq!(
+            servers[1].urls,
+            vec!["stun:stun.l.google.com:19302".to_string()]
+        );
+        assert!(servers[1].username.is_empty());
+
+        let empty = rtc_ice_servers(&json!([]));
+        assert_eq!(empty.len(), 1);
+        assert_eq!(empty[0].urls, vec![STUN_URL.to_string()]);
+        let garbage = rtc_ice_servers(&json!({"not": "an array"}));
+        assert_eq!(garbage[0].urls, vec![STUN_URL.to_string()]);
+    }
+
+    #[tokio::test]
+    async fn without_turn_env_the_offer_carries_stun_only() {
+        // The cache is keyed on nothing env-specific, so clear the vars first;
+        // this test must not depend on the developer's shell.
+        std::env::remove_var("CF_TURN_KEY_ID");
+        std::env::remove_var("CF_TURN_API_TOKEN");
+        let v = ice_servers_json().await;
+        assert_eq!(v, json!([{ "urls": STUN_URL }]));
+    }
+}
+
+/// Adds viewer candidates to a peer; none for a peer that already went away.
+async fn add_candidates(
+    peers: &Peers,
+    peer_id: &str,
+    inits: Vec<RTCIceCandidateInit>,
+    timeout: Duration,
+) -> Result<()> {
+    let Some(pc) = peers.lock().await.get(peer_id).map(|p| p.pc.clone()) else {
+        return Ok(());
+    };
+    for init in inits {
+        match tokio::time::timeout(timeout, pc.add_ice_candidate(init)).await {
+            Ok(r) => r.map_err(|e| anyhow!(e))?,
+            Err(_) => bail!("add_ice_candidate timed out"),
+        }
+    }
     Ok(())
 }
 
@@ -1217,6 +2128,9 @@ async fn on_answer(peer_id: &str, sdp: String, secret: &str, peers: &Peers) -> R
     let (pc, offer_sdp) = {
         let map = peers.lock().await;
         let p = map.get(peer_id).ok_or_else(|| anyhow!("unknown peer"))?;
+        if p.offer_sdp.is_empty() {
+            bail!("answer arrived before the offer was sent");
+        }
         (p.pc.clone(), p.offer_sdp.clone())
     };
     let answer = RTCSessionDescription::answer(sdp.clone())?;
@@ -1238,6 +2152,8 @@ fn spawn_sender(
     peers: Peers,
     mailboxes: Mailboxes,
     peer_id: String,
+    relay_on: Arc<std::sync::atomic::AtomicBool>,
+    sig_tx: mpsc::UnboundedSender<SigOut>,
 ) {
     tokio::spawn(async move {
         let mut send = e2e::SendState { send_ctr: 0 };
@@ -1258,7 +2174,13 @@ fn spawn_sender(
                     return;
                 }
             };
-            if dc.send(&frame.into()).await.is_err() {
+            if relay_on.load(std::sync::atomic::Ordering::SeqCst) {
+                use base64::Engine;
+                let data = base64::engine::general_purpose::STANDARD.encode(&frame);
+                let _ = sig_tx.send(SigOut::Send(
+                    json!({"type":"relay","to":peer_id,"data":data}).to_string(),
+                ));
+            } else if dc.send(&frame.into()).await.is_err() {
                 // peer vanished mid-send; dropping the frame is correct
             }
         }

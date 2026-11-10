@@ -1,6 +1,19 @@
 # agent-yes
 
-## After making changes, always rebuild and relink
+Read [CONTRIBUTING.md](CONTRIBUTING.md) first. Write everything in English —
+code, comments, docs, commit messages, PR titles/bodies, and issues — even when
+your operator talks to you in another language.
+
+## After making changes, rebuild; relink only on a personal dev machine
+
+On a shared host, never run a global `bun link` / `bun add -g` / `cargo install`:
+every lane's executable would switch to an unreviewed worktree, and deleting that
+worktree would break startup for everyone. Verify TypeScript changes with
+`bun run build` and `bun ./dist/agent-yes.js ...`, and Rust changes with
+`cargo build --manifest-path rs/Cargo.toml` plus running the built binary
+directly. Ship to shared environments only through a reviewed merge and release.
+
+The relink / install steps below are for personal development environments only.
 
 **TypeScript changes:**
 

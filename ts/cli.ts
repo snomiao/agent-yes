@@ -1,4 +1,9 @@
 #!/usr/bin/env bun
+// MUST stay the first import: a deleted-and-recreated cwd makes process.cwd()
+// throw, and an ES module's imports are evaluated before this file's body, so
+// anything below that touches the cwd (the eager config load, execa, bun-pty)
+// would crash with a raw stack trace first. See ts/cwdGuard.ts.
+import "./cwdGuard.ts";
 import { argv } from "process";
 import { spawn } from "child_process";
 import { parseCliArgs } from "./parseCliArgs.ts";
@@ -87,6 +92,28 @@ logger.info(versionString());
 // Parse CLI arguments (no choices validation — SUPPORTED_CLIS loaded lazily below)
 const config = parseCliArgs(process.argv);
 
+// --detach is implemented by the Rust-runtime fork below (same path as a nested
+// agent's fork-by-default). Refuse the contradictions up front rather than
+// silently running in the foreground.
+{
+  const { stripDetachFlag } = await import("./forkNested.ts");
+  const res = stripDetachFlag(process.argv.slice(2), Boolean(config.detach));
+  if (!res.ok) {
+    console.error(res.error);
+    process.exit(1);
+  }
+  // The Rust runner is handed process.argv below; drop the flag it doesn't know.
+  process.argv.splice(2, process.argv.length - 2, ...res.args);
+}
+if (config.detach && (config.attach || process.env.AGENT_YES_ATTACH === "1")) {
+  console.error("--detach and --attach (or AGENT_YES_ATTACH=1) contradict each other.");
+  process.exit(1);
+}
+if (config.detach && !config.useRust) {
+  console.error("--detach needs the Rust runtime (drop --no-rust / AGENT_YES_NO_RUST).");
+  process.exit(1);
+}
+
 // Handle --tray: show system tray icon and block
 if (config.tray) {
   const { startTray } = await import("./tray.ts");
@@ -145,6 +172,13 @@ if (config.useRust) {
     }
   }
 
+  if (!rustBinary && config.detach) {
+    console.error(
+      "--detach needs the Rust runtime, and its binary is unavailable (try --verbose).",
+    );
+    process.exit(1);
+  }
+
   if (rustBinary) {
     const { SUPPORTED_CLIS } = await import("./SUPPORTED_CLIS.ts");
     const rustArgs = buildRustArgs(process.argv, config.cli, SUPPORTED_CLIS);
@@ -170,6 +204,7 @@ if (config.useRust) {
         isTTY: Boolean(process.stdout.isTTY),
         ayPid: process.env.AGENT_YES_PID,
         attach,
+        detach: config.detach,
       })
     ) {
       const forked = spawn(rustBinary, rustArgs, {

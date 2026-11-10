@@ -1,0 +1,3 @@
+{
+  "ignorePatterns": ["lab/ui/vendor/**"]
+}

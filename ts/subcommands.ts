@@ -12,16 +12,26 @@
  */
 
 import { randomBytes } from "crypto";
-import { closeSync, constants as fsConstants, openSync, realpathSync } from "fs";
-import { execFileSync } from "node:child_process";
-import { appendFile, mkdir, open, readFile, stat, writeFile } from "fs/promises";
+import {
+  closeSync,
+  constants as fsConstants,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  writeFileSync,
+} from "fs";
+import { execFileSync, spawn as spawnChild } from "node:child_process";
+import { appendFile, mkdir, open, readFile, rm, stat, writeFile } from "fs/promises";
 import ms from "ms";
 import { homedir } from "os";
 import path from "path";
 import { type GlobalPidRecord, readGlobalPids, updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { formatIdentity, localHost, localUser } from "./identity.ts";
+import { hostedRoomMember, roomAliasPlaceholder } from "./roomReplyAlias.ts";
 import { buildAgentForest, flattenForest } from "./agentTree.ts";
-import { parseTaskCounts, type TaskCounts } from "./todoParse.ts";
+import { mayHoldTaskBlock, parseTaskCounts, type TaskCounts } from "./todoParse.ts";
 import { agentYesHome } from "./agentYesHome.ts";
 import { PidStore } from "./pidStore.ts";
 import {
@@ -88,17 +98,56 @@ import {
   type SenderVia,
 } from "./senderAncestry.ts";
 import yargs from "yargs";
-import { type ResolvedRemote, readRemotes, resolveRemoteSpec } from "./remotes.ts";
+import {
+  type RemoteConfig,
+  type ResolvedRemote,
+  readRemotes,
+  resolveRemoteSpec,
+} from "./remotes.ts";
+import {
+  cacheAgeLabel,
+  hhmm,
+  humanizeAge,
+  isStale,
+  jsonRemote,
+  noteSnapshotResult,
+  parseWaitFor,
+  readRemoteSnapshot,
+  type RemoteSnapshot,
+  type WaitFor,
+  writeRemoteSnapshot,
+} from "./remoteCache.ts";
 import {
   noteRemoteResult,
   pruneRemoteHealth,
   readRemoteHealth,
-  remoteBackoffMs,
   shouldSkipRemote,
   writeRemoteHealth,
 } from "./remoteHealth.ts";
 import { isWebrtcSpec } from "./webrtcLink.ts";
 import { withIpcLock } from "./ipcLock.ts";
+import { isWithin, resolveWorkDir } from "./workDir.ts";
+import {
+  bodyHash,
+  classifyComposer,
+  composerBoxed,
+  composerPromptRow,
+  DUPLICATE_WINDOW_MS,
+  findRecentDuplicate,
+  noteRecentSend,
+  queuedReceipt,
+  senderKey,
+  type RecentSend,
+  isComposerChrome,
+  claimPending,
+  type ComposerState,
+  enqueuePending,
+  listPending,
+  PENDING_MAX_AGE_MS,
+  readPending,
+  retirePending,
+  rowsFromXterm,
+} from "./composerGuard.ts";
 
 // ---------------------------------------------------------------------------
 // notes store  (~/.agent-yes/notes.jsonl)
@@ -620,6 +669,7 @@ function mergeRecords(...buckets: GlobalPidRecord[][]): GlobalPidRecord[] {
 // this JS layer; keep the two lists in sync.
 const SUBCOMMANDS = new Set([
   "ls",
+  "ls-refresh",
   "list",
   "ps",
   "status",
@@ -633,6 +683,7 @@ const SUBCOMMANDS = new Set([
   "hist",
   "history",
   "send",
+  "send-drain",
   "msgs",
   "key",
   "select",
@@ -670,9 +721,10 @@ const SUBCOMMANDS = new Set([
 //     the machine over WebRTC (#67).
 //   - it is an ordinary English verb people start prompts with: `cy read ts/cli.ts
 //     and explain it` / `cy connect the frontend to the API` must reach claude.
-//     The commands stay reachable on the manager entry (`ay read`, `ay share`,
-//     `ay connect`); `cy cat` / `cy tail` / `cy head` / `cy ls` are unchanged —
-//     nobody opens a prompt with those.
+//     Same for `cy kill the stale dev server`. The commands stay reachable on
+//     the manager entry (`ay read`, `ay share`, `ay connect`, `ay kill`);
+//     `cy cat` / `cy tail` / `cy head` / `cy ls` are unchanged — nobody opens a
+//     prompt with those.
 // Kept one name per line so both runtimes' copies stay easy to keep in sync.
 const MANAGER_SUBCOMMANDS = new Set([
   // manage this host
@@ -682,6 +734,7 @@ const MANAGER_SUBCOMMANDS = new Set([
   "read",
   "share",
   "connect",
+  "kill",
 ]);
 
 const IDLE_THRESHOLD_MS = 60 * 1000;
@@ -701,12 +754,11 @@ const STUCK_THRESHOLD_MS = (() => {
 // trailing Enter before that settles gets swallowed by the CLI's paste handling
 // (it lands mid-paste instead of submitting). So instead of a blind fixed sleep,
 // we poll the log for actual quiet, then confirm the Enter landed by watching for
-// either a `working` busy marker or a meaningful size bump, retrying if not.
+// our message identity in the transcript; retry only while it remains in input.
 const SEND_SETTLE_QUIET_MS = 150; // no log growth for this long → paste finished rendering
 const SEND_SETTLE_MAX_MS = 1500; // cap: don't wait forever on a screen that's busy for other reasons
 const SEND_CONFIRM_QUIET_MS = 400; // after Enter, no growth for this long → response has settled
 const SEND_CONFIRM_MAX_MS = 1200; // cap per confirm attempt
-const SEND_CONFIRM_MIN_GROWTH_BYTES = 8; // filters out pure cursor-blink/frame noise
 const SEND_SUBMIT_MAX_RETRIES = 2; // total attempts = 1 + this
 // `ay send` typing-backoff: if the user is actively typing at the target's
 // terminal, injecting our body mid-line would fuse into their text and submit a
@@ -797,14 +849,19 @@ export function buildEnvelope(opts: {
   replyTarget: string | number;
   via: SenderVia;
   /** Set when the message crossed a host boundary; the sender's own label for
-   * the far side is deliberately NOT used — it is meaningless to the receiver. */
-  remote?: { senderHost: string } | null;
+   * the far side is deliberately NOT used — it is meaningless to the receiver.
+   * `room`: the message went through a shared room this machine hosts in, as
+   * `member`; the receiver fills in its alias for the room (roomReplyAlias.ts). */
+  remote?: { senderHost: string; room?: { id: string; member: string } } | null;
 }): { prefix: string; suffix: string } {
   const attrib = envelopeAttribution(opts.via);
   const via = opts.remote ? " via remote" : "";
-  const reply = opts.remote
-    ? `reply: ay send <your-remote-alias-for-${opts.remote.senderHost}>:${opts.replyTarget} "..."`
-    : `reply: ay send ${opts.replyTarget} "..."`;
+  const room = opts.remote?.room;
+  const reply = room
+    ? `reply: ay send ${roomAliasPlaceholder(room.id)}:${room.member}:${opts.replyTarget} "..."`
+    : opts.remote
+      ? `reply: ay send <your-remote-alias-for-${opts.remote.senderHost}>:${opts.replyTarget} "..."`
+      : `reply: ay send ${opts.replyTarget} "..."`;
   return {
     prefix: `<ay-msg ${opts.nonce} from ${opts.cli}${attrib}${via} ${opts.identity} — ${reply}>\n`,
     suffix: `\n</ay-msg ${opts.nonce}>`,
@@ -1037,6 +1094,10 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await (await import("./hist.ts")).cmdHist(rest);
       case "send":
         return await cmdSend(rest);
+      case "send-drain":
+        return await cmdSendDrain(rest);
+      case "ls-refresh":
+        return await cmdLsRefresh(rest);
       case "msgs":
         return await cmdMsgs(rest);
       case "key":
@@ -1053,6 +1114,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdExit(rest);
       case "restart":
         return await cmdRestart(rest);
+      case "kill":
+        return await (await import("./cmdKill.ts")).cmdKill(rest);
       case "note":
         return await cmdNote(rest);
       case "ask":
@@ -1289,6 +1352,9 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
   const shareAliasNote = managerCommands
     ? ``
     : `                                      (\`ay\` only — \`cy share\`/\`cy connect\` are prompts)\n`;
+  const killAliasNote = managerCommands
+    ? ``
+    : `                                        (\`ay kill\` only — \`cy kill …\` is a prompt)\n`;
   // Only agents carry AGENT_YES_PID — a human shell never sets it — so this
   // section is skipped entirely (no async work at all) for interactive use.
   const self = process.env.AGENT_YES_PID ? await resolveSender() : null;
@@ -1298,7 +1364,8 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `ay - agent-yes CLI\n` +
       `\n` +
       `Management:\n` +
-      `  ay ls [keyword]                     list running agents\n` +
+      `  ay ls [keyword]                     list running agents (remotes from cache, refreshed\n` +
+      `      [--waitFor=all|local|<alias>]     in the background; --waitFor blocks for fresh rows)\n` +
       `  ay ps [keyword]                     per-agent CPU/RSS, rolled up over each\n` +
       `                                        agent's whole process tree, + box vitals\n` +
       `  ay tail [-f] [-n N] <keyword>       last N lines (96), -f to follow\n` +
@@ -1325,6 +1392,9 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay stop <keyword>                   graceful shutdown (/exit for claude/codex)\n` +
       `  ay exit <keyword> [reason]          graceful shutdown, recording who/why (= 'ay send <kw> exit')\n` +
       `  ay restart <keyword> [--fresh]      stop (if live) + relaunch resuming the session; --fresh replays the prompt\n` +
+      `  ay kill <pid> [--dry-run]           SIGKILL an agent + its process group, like the console's\n` +
+      `                                        Kill (exact pid from ay ls; never the calling shell)\n` +
+      killAliasNote +
       `  ay status <keyword>                 agent status snapshot\n` +
       `  ay notify watch --unread            get notified when sub-agents finish/stuck/crash (writes to inbox)\n` +
       `  ay whoami [--json]                  (inside an agent) your own registry identity + reply address\n` +
@@ -1353,6 +1423,8 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `Run an agent (naming a CLI is what launches one — bare 'ay' shows this help):\n` +
       `  ay <claude|codex|...> [options] -- [prompt]\n` +
       `  ay claude -- "fix the bug in auth.ts"\n` +
+      `  ay --detach claude -- "…"           start it in the background and return at once\n` +
+      `                                        (e.g. over ssh); prints its pid + how to drive it\n` +
       `  cy [options] -- [prompt]            shortcut for 'ay claude' (bare 'cy' starts claude)\n` +
       `  ay claude --help                    full agent-runner options\n` +
       `\n` +
@@ -1376,6 +1448,11 @@ export interface CommonOpts {
   json: boolean;
 }
 
+/** Looks like an agent_id (12 hex, or a longer injected one) rather than a word. */
+export function isAgentIdShaped(keyword: string): boolean {
+  return /^[0-9a-f]{12,32}$/i.test(keyword);
+}
+
 export function matchKeyword(record: GlobalPidRecord, keyword: string): boolean {
   if (!keyword) return true;
   const kw = keyword.toLowerCase();
@@ -1389,16 +1466,30 @@ export function matchKeyword(record: GlobalPidRecord, keyword: string): boolean 
     if (record.pid === Number(keyword)) return true;
     return !!(record.agent_id && record.agent_id.toLowerCase().startsWith(kw));
   }
+  // 1a. An id-shaped keyword (12+ hex, the agent_id format) is an identity
+  // selector too. When that agent is gone (its wrapper exited or restarted
+  // under a new id), the id still sits in every sublane's prompt ("reply: ay
+  // send <id>"), so falling through to the prompt rule would resolve it to
+  // whichever lane quoted it — one such lane and `ay send` misdelivers.
+  if (isAgentIdShaped(keyword)) {
+    return !!(record.agent_id && record.agent_id.toLowerCase().startsWith(kw));
+  }
   // 1b. `.` / `./` — shell convention for "the current directory": target the
   // agent whose cwd IS process.cwd() (exact match). Lets `ay send .` reach the
   // sibling agent running in this same dir without typing its pid or a path
   // fragment. Repurposed from the (near-useless) substring behavior — a lone `.`
   // was in almost every path, so it never selected anything meaningful.
   if (kw === "." || kw === "./") {
-    return path.resolve(record.cwd) === path.resolve(process.cwd());
+    const here = path.resolve(process.cwd());
+    return (
+      path.resolve(record.cwd) === here ||
+      (!!record.workdir && path.resolve(record.workdir) === here)
+    );
   }
-  // 2. cwd contains keyword
+  // 2. cwd (spawn dir or effective work dir) contains keyword
   if (record.cwd.toLowerCase().includes(kw)) return true;
+  if (record.workdir && record.workdir.toLowerCase().includes(kw)) return true;
+
   // 3. cli exact (lowercase)
   if (record.cli.toLowerCase() === kw) return true;
   // 4. prompt substring
@@ -1427,14 +1518,43 @@ export async function listRecords(
   if (opts.active) {
     records = records.filter((r) => isPidAlive(r.pid));
   }
+  records = await withWorkDirs(records);
   if (opts.cwdScope) {
     const scope = opts.cwdScope;
-    records = records.filter((r) => r.cwd === scope || r.cwd.startsWith(scope + path.sep));
+    records = records.filter(
+      (r) => isWithin(r.cwd, scope) || (!!r.workdir && isWithin(r.workdir, scope)),
+    );
   }
+
   if (keyword) records = records.filter((r) => matchKeyword(r, keyword));
   // newest first
   records.sort((a, b) => b.started_at - a.started_at);
   return records;
+}
+
+/**
+ * Stamp each live record with its effective work dir (ts/workDir.ts). Exited
+ * agents keep their spawn cwd: their transcript is history, not a location.
+ */
+async function withWorkDirs(records: GlobalPidRecord[]): Promise<GlobalPidRecord[]> {
+  return Promise.all(
+    records.map(async (r) =>
+      r.status === "exited"
+        ? { ...r, workdir: r.cwd, workdir_source: "spawn" as const, workdir_at: null }
+        : { ...r, ...(await resolveWorkDir(r)) },
+    ),
+  );
+}
+
+/**
+ * The CWD column: the effective work dir, with a leading `↪` when it is not the
+ * spawn dir (sampled from its shells) so a reader knows the registry's `cwd`
+ * says otherwise. `ay ls --json` carries both (`cwd` + `workdir`).
+ */
+export function cwdLabel(r: { cwd: string; workdir?: string; workdir_source?: string }): string {
+  if (r.workdir && r.workdir_source && r.workdir_source !== "spawn")
+    return `↪ ${shortenPath(r.workdir)}`;
+  return shortenPath(r.cwd);
 }
 
 export function isPidAlive(pid: number): boolean {
@@ -1546,6 +1666,14 @@ export async function resolveOne(
   }
   const matches = await listRecords(keyword, opts);
   if (matches.length === 0) {
+    if (isAgentIdShaped(keyword)) {
+      const gone = opts.all ? [] : await listRecords(keyword, { ...opts, all: true });
+      throw new Error(
+        `no live agent has id "${keyword}"${gone.length ? ` (pid ${gone[0]!.pid} exited)` : ""} — ` +
+          `it is unknown or stale: an agent whose wrapper restarted gets a new id. ` +
+          `Find the current one with \`ay ls\`; nothing was sent.`,
+      );
+    }
     throw new Error(`no agent matched "${keyword}"`);
   }
   // Exact identity beats fuzzy. A numeric pid or a full agent_id names exactly
@@ -1623,6 +1751,16 @@ async function runRemoteLs(
     return 1;
   }
   const records = (await res.json()) as any[];
+  // A direct `ay ls <alias>` is the freshest data there is — fold it into the
+  // cached-first fleet listing's snapshot for that alias (no keyword filter,
+  // or the cache would hold a subset and print it as the whole machine).
+  if (!remote.keyword && (await readRemotes()).has(remote.label)) {
+    const now = Date.now();
+    const prev = await readRemoteSnapshot(remote.label);
+    await writeRemoteSnapshot(
+      noteSnapshotResult(prev, remote.label, { ok: true, records }, now),
+    ).catch(() => {});
+  }
   if (records.length === 0) {
     process.stderr.write(
       remote.keyword
@@ -1949,7 +2087,7 @@ async function runRemoteSend(
       replyTarget: sender.agent.agent_id || sender.agent.pid,
       via: sender.via,
       // The receiver needs a route back to OUR host, not our label for theirs.
-      remote: { senderHost: localHost() },
+      remote: { senderHost: localHost(), room: await hostedRoomMember(remote.room) },
     });
     wire = prefix + msg + suffix;
   }
@@ -2105,7 +2243,7 @@ async function fetchRemoteRecordsRaw(
    * would mark a live-but-empty host failed and hide it for up to 32 minutes,
    * which is the failure this whole change exists to avoid.
    */
-  onReachable?: (ok: boolean) => void,
+  onReachable?: (ok: boolean, why?: string) => void,
 ): Promise<any[]> {
   const params = new URLSearchParams();
   if (opts.all) params.set("all", "1");
@@ -2131,18 +2269,109 @@ async function fetchRemoteRecordsRaw(
     onReachable?.(true);
     if (!res.ok) return [];
     return (await res.json()) as any[];
-  } catch {
-    onReachable?.(false);
+  } catch (e) {
+    // First line only: the WebRTC viewer's error is a multi-line explanation
+    // (ts/webrtcSignal.ts); the snapshot keeps the headline for the age tag.
+    onReachable?.(false, String((e as Error)?.message ?? e).split("\n")[0]);
     return [];
   } finally {
     bridge?.close();
   }
 }
 
+/** Probe one remote and fold the outcome into its snapshot. Never throws. */
+async function refreshRemoteSnapshot(
+  alias: string,
+  cfg: RemoteConfig,
+  opts: { all: boolean; active: boolean; keyword?: string },
+  now: number,
+): Promise<{ snap: RemoteSnapshot; ok: boolean }> {
+  let ok = false;
+  let why = "did not answer";
+  const records = await fetchRemoteRecordsRaw(cfg.url, cfg.token, opts, (r, w) => {
+    ok = r;
+    if (w) why = w;
+  });
+  const prev = await readRemoteSnapshot(alias);
+  const snap = noteSnapshotResult(
+    prev,
+    alias,
+    ok ? { ok: true, records } : { ok: false, message: why },
+    now,
+  );
+  await writeRemoteSnapshot(snap).catch(() => {});
+  return { snap, ok };
+}
+
+/** Run `ay <args…>` detached from this process (same launcher as the send drainer). */
+function spawnDetachedAy(args: string[]): number | null {
+  const launcher = drainerLauncher(process.execPath, process.argv[1], Bun.which("ay"));
+  if (!launcher) return null;
+  const [cmd, ...pre] = launcher;
+  try {
+    const child = spawnChild(cmd!, [...pre, ...args], { detached: true, stdio: "ignore" });
+    child.on("error", () => {});
+    child.unref();
+    return child.pid ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * `ay ls-refresh <alias…> [--all] [--active] [--keyword k]` — hidden: the
+ * background half of cached-first `ay ls`. Probes each alias once, writes its
+ * snapshot and health, and exits. One refresher per alias at a time (pid
+ * lock), so a burst of listings does not fan out into a burst of probes.
+ */
+async function cmdLsRefresh(rest: string[]): Promise<number> {
+  const aliases: string[] = [];
+  const opts = { all: false, active: false, keyword: undefined as string | undefined };
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]!;
+    if (a === "--all") opts.all = true;
+    else if (a === "--active") opts.active = true;
+    else if (a === "--keyword") opts.keyword = rest[++i];
+    else if (a.startsWith("--keyword=")) opts.keyword = a.slice("--keyword=".length);
+    else if (!a.startsWith("-")) aliases.push(a);
+  }
+  const remotes = await readRemotes();
+  const now = Date.now();
+  await Promise.all(
+    aliases.map(async (alias) => {
+      const cfg = remotes.get(alias);
+      if (!cfg) return;
+      const lock = path.join(
+        agentYesHome(),
+        "remotes",
+        `${encodeURIComponent(alias)}.refresh.lock`,
+      );
+      const owner = Number((await readFile(lock, "utf-8").catch(() => "")).trim());
+      if (owner > 0 && owner !== process.pid && pidAlive(owner)) return;
+      await mkdir(path.dirname(lock), { recursive: true }).catch(() => {});
+      await writeFile(lock, String(process.pid)).catch(() => {});
+      try {
+        const { ok } = await refreshRemoteSnapshot(alias, cfg, opts, now);
+        const health = await readRemoteHealth();
+        health[alias] = noteRemoteResult(health[alias], ok, now);
+        await writeRemoteHealth(health).catch(() => {});
+      } finally {
+        await rm(lock, { force: true }).catch(() => {});
+      }
+    }),
+  );
+  return 0;
+}
+
 async function runAllRemotesLs(opts: {
   all: boolean;
   active: boolean;
   keyword?: string;
+  /** Aliases to refresh in the foreground before printing; null = cached-first. */
+  waitFor: WaitFor | null;
+  /** Per-remote budget for a foreground refresh. */
+  timeoutMs: number;
+  json: boolean;
 }): Promise<number> {
   const remotes = await readRemotes();
   const localOpts: CommonOpts = {
@@ -2153,50 +2382,96 @@ async function runAllRemotesLs(opts: {
     cwdScope: null,
   };
 
-  // A remote that is not answering costs a full connect timeout (25s for a
-  // WebRTC spec) and returns nothing, and this gathers them together — so two
-  // dead entries made every `ay ls` here take 27s instead of 5s. Skip a host
-  // that has been failing, on a doubling backoff, and keep LISTING it as
-  // unreachable so the config stays honest and the operator can see it is being
-  // skipped rather than silently dropped. See ts/remoteHealth.ts.
+  // Cached-first. Remote rows come from each alias's last snapshot
+  // (ts/remoteCache.ts) and print at once; a stale one is refreshed by a
+  // detached `ay ls-refresh` so the NEXT listing is fresh. Only the aliases
+  // named by --waitFor are fetched in the foreground, each on its own budget,
+  // so one dead machine cannot hold the fleet view hostage (a WebRTC remote
+  // takes 25 s to give up; two of them made every `ay ls` here take 27 s).
+  // The backoff in ts/remoteHealth.ts still governs the background refreshers,
+  // so a host that keeps failing is not re-probed on every listing. --waitFor
+  // forces the probe — that is what it is for.
   const health = await readRemoteHealth();
   const healthNow = Date.now();
-  const skipped = new Set(
-    [...remotes.keys()].filter((alias) => shouldSkipRemote(health[alias], healthNow)),
-  );
-  const probed = [...remotes.entries()].filter(([alias]) => !skipped.has(alias));
+  const waiting = new Set(opts.waitFor?.remotes ?? []);
+  const fetchOpts = { all: opts.all, active: opts.active, keyword: opts.keyword };
+  type Section = {
+    alias: string;
+    snap: RemoteSnapshot | null;
+    live: boolean;
+    refreshing: boolean;
+    failure: string | null;
+  };
 
-  const [localResult, ...remoteResults] = await Promise.allSettled([
+  const [localResult, ...waited] = await Promise.allSettled([
     listRecords(opts.keyword, localOpts).then((recs) => ({
       host: "local",
       records: recs as any[],
     })),
-    ...probed.map(([alias, cfg]) => {
-      let reachable = false;
-      return fetchRemoteRecordsRaw(cfg.url, cfg.token, opts, (ok) => {
-        reachable = ok;
-      }).then((records) => ({ host: alias, records, ok: reachable }));
-    }),
+    ...[...remotes.entries()]
+      .filter(([alias]) => waiting.has(alias))
+      .map(async ([alias, cfg]) => {
+        const budget = new Promise<"timeout">((resolve) => {
+          const t = setTimeout(() => resolve("timeout"), opts.timeoutMs);
+          (t as any).unref?.();
+        });
+        const res = await Promise.race([
+          refreshRemoteSnapshot(alias, cfg, fetchOpts, healthNow),
+          budget,
+        ]);
+        if (res === "timeout")
+          return {
+            alias,
+            snap: await readRemoteSnapshot(alias),
+            ok: false,
+            failure: `timed out after ${Math.round(opts.timeoutMs / 1000)}s`,
+          };
+        const failure = res.ok
+          ? null
+          : res.snap.error
+            ? `unreachable since ${hhmm(res.snap.error.since)} (${res.snap.error.message})`
+            : "unreachable";
+        return { alias, snap: res.snap, ok: res.ok, failure };
+      }),
   ]);
 
-  // Record what we learned, then persist once. A host that answered clears its
-  // streak; one that did not extends it. Best-effort: a health file we cannot
-  // write must never break `ay ls`.
-  {
-    // Prune first, so an alias removed from remotes.yaml stops being carried
-    // forever. `remotes` is the live configured set.
-    const next = pruneRemoteHealth({ ...health }, remotes.keys());
-    for (const [i, [alias]] of probed.entries()) {
-      const res = remoteResults[i];
-      const ok = res?.status === "fulfilled" && (res.value as any).ok === true;
-      next[alias] = noteRemoteResult(health[alias], ok, healthNow);
+  // Record what the foreground probes learned, then persist once (pruned, so
+  // an alias removed from remotes.yaml stops being carried forever). A health
+  // file we cannot write must never break `ay ls`.
+  const nextHealth = pruneRemoteHealth({ ...health }, remotes.keys());
+  const waitedByAlias = new Map<
+    string,
+    { snap: RemoteSnapshot | null; ok: boolean; failure: string | null }
+  >();
+  for (const r of waited) if (r.status === "fulfilled") waitedByAlias.set(r.value.alias, r.value);
+  const sections: Section[] = [];
+  const background: string[] = [];
+  for (const [alias] of remotes) {
+    const w = waitedByAlias.get(alias);
+    if (w) {
+      nextHealth[alias] = noteRemoteResult(health[alias], w.ok, healthNow);
+      sections.push({ alias, snap: w.snap, live: w.ok, refreshing: false, failure: w.failure });
+      continue;
     }
-    await writeRemoteHealth(next).catch(() => {});
+    const snap = await readRemoteSnapshot(alias);
+    const refreshing = isStale(snap, healthNow) && !shouldSkipRemote(health[alias], healthNow);
+    if (refreshing) background.push(alias);
+    sections.push({ alias, snap, live: false, refreshing, failure: null });
   }
+  await writeRemoteHealth(nextHealth).catch(() => {});
+  if (background.length)
+    spawnDetachedAy([
+      "ls-refresh",
+      ...background,
+      ...(opts.all ? ["--all"] : []),
+      ...(opts.active ? ["--active"] : []),
+      ...(opts.keyword ? ["--keyword", opts.keyword] : []),
+    ]);
+  const failed = sections.some((s) => waiting.has(s.alias) && s.failure);
 
   // Group by host in a stable order (local first, then each remote alias in
   // config order), so the aggregated table reads top-down per machine.
-  const byHost: { host: string; records: any[] }[] = [];
+  const byHost: { host: string; records: any[]; cached?: boolean }[] = [];
   // Shared per-invocation caches so local agents in the same repo spawn
   // `git status` once (see gitStatusOnce).
   const gitRootCache = new Map<string, string>();
@@ -2216,7 +2491,7 @@ async function runAllRemotesLs(opts: {
           ? await Promise.all([
               r.log_file ? extractTaskCounts(r.log_file) : Promise.resolve(null),
               r.log_file ? extractBadges(r.log_file) : Promise.resolve([]),
-              gitStatusOnce(r.cwd, gitRootCache, gitInfoCache),
+              gitStatusOnce(r.workdir ?? r.cwd, gitRootCache, gitInfoCache),
               isUserTyping(r.pid),
             ])
           : [null, [], null, false];
@@ -2233,47 +2508,70 @@ async function runAllRemotesLs(opts: {
     );
     byHost.push({ host: "local", records: enriched });
   }
-  // A skipped host is REPORTED, not dropped. Silently omitting it would make a
-  // machine that can come back disappear from the fleet view with nothing to
-  // notice — the same failure as deleting it from the config, which is why we
-  // did not do that. One line to stderr per skipped host, so `--json` and any
-  // parser downstream stay unaffected.
-  for (const alias of skipped) {
-    const h = health[alias];
-    // Time REMAINING, not the window length: a host with one second left would
-    // otherwise report "retrying in up to 32m", which is true of the window and
-    // false of the wait, and the operator is reading this to decide whether to
-    // wait or force a probe.
-    const leftMs = Math.max(
-      0,
-      remoteBackoffMs(h?.streak ?? 1) - (healthNow - (h?.lastFailedAt ?? healthNow)),
-    );
-    const left =
-      leftMs >= 60_000 ? `${Math.round(leftMs / 60_000)}m` : `${Math.ceil(leftMs / 1000)}s`;
-    process.stderr.write(
-      `${alias}: unreachable — skipped after ${h?.streak ?? 0} failed attempt(s), ` +
-        `retrying in ${left} (ay ls ${alias} to force a probe now)\n`,
-    );
+  for (const s of sections)
+    byHost.push({ host: s.alias, records: s.snap?.records ?? [], cached: !s.live });
+
+  if (opts.json) {
+    // Aggregated shape (only when remotes are asked for — plain `ay ls --json`
+    // stays this box's flat array): per remote, where the rows came from and
+    // how old they are, so an orchestrator can decide instead of guessing.
+    const out = {
+      local: byHost.find((h) => h.host === "local")?.records ?? [],
+      remotes: Object.fromEntries(
+        sections.map((s) => [
+          s.alias,
+          {
+            ...jsonRemote(s.snap, healthNow),
+            live: s.live,
+            refreshing: s.refreshing,
+            failure: s.failure,
+          },
+        ]),
+      ),
+    };
+    await writeStdoutFlushed(JSON.stringify(out, null, 2) + "\n");
+    return failed ? 1 : 0;
   }
-  for (const res of remoteResults) {
-    if (res.status === "fulfilled")
-      byHost.push({ host: res.value.host, records: res.value.records });
+
+  // One line per remote FIRST — where its rows came from, how old they are, and
+  // (under --waitFor) what went wrong — so nothing cached can pass for live.
+  if (sections.length) {
+    const aliasW = Math.max(...sections.map((s) => s.alias.length));
+    for (const s of sections)
+      process.stdout.write(
+        `${s.alias.padEnd(aliasW)}  ${s.failure ?? (s.live ? "live" : cacheAgeLabel(s.snap, healthNow, s.refreshing))}\n`,
+      );
+    process.stdout.write("\n");
   }
 
   // Flatten each host's records into its agent>subagent forest (parent_pid links),
   // carrying the box-drawing tree prefix — the same nesting the console's left
   // panel shows. Degrades to a flat newest-first list when there are no links.
-  type HostedRow = { host: string; rec: any; prefix: string };
+  type HostedRow = { host: string; rec: any; prefix: string; cached: boolean };
   const rows: HostedRow[] = [];
-  for (const { host, records } of byHost) {
+  for (const { host, records, cached } of byHost) {
     for (const { record, prefix } of flattenForest(buildAgentForest(records))) {
-      rows.push({ host, rec: record, prefix });
+      // A room with several hosts tags each row with its member: `alias/member`
+      // is also how `ay send alias:member:<agent>` addresses it.
+      const where = typeof record.member === "string" ? `${host}/${record.member}` : host;
+      rows.push({ host: where, rec: record, prefix, cached: cached === true });
     }
   }
 
+  const anyCached = sections.some((s) => !s.live);
+  const footer = () => {
+    if (rows.some((r) => r.cached))
+      process.stderr.write(`* = from cache (AGE is real; STATUS may have changed since)\n`);
+    if (anyCached)
+      process.stderr.write(
+        `ay ls --waitFor=all   # block until fresh data from every local+remote machine\n`,
+      );
+  };
+
   if (rows.length === 0) {
     process.stderr.write("no running agents\n");
-    return 0;
+    footer();
+    return failed ? 1 : 0;
   }
 
   const termWidth = (process.stdout as any).columns ?? 120;
@@ -2283,9 +2581,10 @@ async function runAllRemotesLs(opts: {
   const hostW = Math.max(4, ...rows.map((r) => r.host.length));
   const pidW = Math.max(3, ...rows.map((r) => String(r.rec.pid).length));
   const cliW = Math.max(3, ...rows.map((r) => String(r.rec.cli).length));
-  const statusW = Math.max(6, ...rows.map((r) => String(r.rec.status).length));
+  const statusOf = (r: HostedRow) => String(r.rec.status) + (r.cached ? "*" : "");
+  const statusW = Math.max(6, ...rows.map((r) => statusOf(r).length));
   const ageW = Math.max(3, ...rows.map((r) => ageOf(r.rec).length));
-  const cwdW = Math.max(3, ...rows.map((r) => shortenPath(String(r.rec.cwd)).length));
+  const cwdW = Math.max(3, ...rows.map((r) => cwdLabel(r.rec).length));
   const promptBudget = Math.max(
     20,
     termWidth - hostW - pidW - cliW - statusW - ageW - cwdW - 6 * 2 - 1,
@@ -2302,7 +2601,8 @@ async function runAllRemotesLs(opts: {
       "PROMPT",
     ].join("  ") + "\n",
   );
-  for (const { host, rec, prefix } of rows) {
+  for (const row of rows) {
+    const { host, rec, prefix } = row;
     // The tree prefix + task badge + flag chips + git tag live inside the PROMPT
     // column, so they eat into this row's text budget — same as the single-host
     // table. Both local (enriched above) and remote (/api/ls) records carry
@@ -2322,14 +2622,15 @@ async function runAllRemotesLs(opts: {
         host.padEnd(hostW),
         String(rec.pid).padEnd(pidW),
         String(rec.cli).padEnd(cliW),
-        String(rec.status).padEnd(statusW),
+        statusOf(row).padEnd(statusW),
         ageOf(rec).padEnd(ageW),
-        shortenPath(String(rec.cwd)).padEnd(cwdW),
+        cwdLabel(rec).padEnd(cwdW),
         label,
       ].join("  ") + "\n",
     );
   }
-  return 0;
+  footer();
+  return failed ? 1 : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -2735,8 +3036,21 @@ async function cmdLs(rest: string[]): Promise<number> {
       description:
         "Only this machine's agents — skip configured remotes (the pre-default behaviour)",
     })
+    .option("waitFor", {
+      type: "string",
+      description:
+        "Block until fresh rows from this set instead of printing cached remote rows: " +
+        "all | local | <alias>[,<alias>…]. Each remote gets --timeout; a failure is reported per remote",
+    })
+    .option("timeout", {
+      type: "number",
+      default: 30,
+      description: "Seconds to wait per remote with --waitFor",
+    })
     .option("help", { alias: "h", type: "boolean", default: false, description: "Show this help" })
-    .example("ay ls", "list local + all configured remotes")
+    .example("ay ls", "local live + remotes from their last snapshot (refreshed in the background)")
+    .example("ay ls --waitFor=all", "block until every machine answered (or timed out)")
+    .example("ay ls --json --all-remotes", "{local, remotes:{alias:{fetchedAt, stale, records…}}}")
     .example("ay ls --local", "only this machine's agents")
     .example("ay ls --all", "include exited agents")
     .example("ay ls --json", "machine-readable output")
@@ -2752,6 +3066,10 @@ async function cmdLs(rest: string[]): Promise<number> {
     process.stdout.write((await y.getHelp()) + "\n");
     return 0;
   }
+
+  // one-shot `ay ls` only: reuse renders of logs that did not change since the last run (not --watch, which
+  // polls changing logs for as long as it runs and would keep every version)
+  if (!argv.watch) enableRenderDiskCache();
 
   const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
   // A keyword naming a specific remote (alias or token@host:port) → just that
@@ -2806,14 +3124,30 @@ async function cmdLs(rest: string[]): Promise<number> {
   // The human table now spans local + every configured remote by DEFAULT (one
   // fleet view across machines). `--local` opts back to this machine only, and
   // a single-machine box (no remotes configured) keeps the richer local-only
-  // table automatically. The programmatic paths above (--watch) and the --json
-  // path below stay LOCAL-only on purpose: orchestrators parse them and expect
-  // this box's pids, and the aggregated view is a flat human table without the
-  // forest/notes/badges those consumers don't need.
-  if (!argv.local && !opts.json && !argv.latest) {
-    const remotes = await readRemotes();
-    if (argv["all-remotes"] || remotes.size > 0) {
-      return runAllRemotesLs({ all: argv.all, active: argv.active, keyword });
+  // table automatically. The programmatic paths (--watch, plain --json) stay
+  // LOCAL-only on purpose: orchestrators parse them and expect this box's
+  // pids. `--json` opts into the aggregated shape with --all-remotes or
+  // --waitFor, where every remote carries fetchedAt/stale for the parser.
+  const remotesCfg = await readRemotes();
+  let waitFor: WaitFor | null = null;
+  if (typeof argv.waitFor === "string") {
+    const parsed = parseWaitFor(argv.waitFor, [...remotesCfg.keys()]);
+    if ("error" in parsed) {
+      process.stderr.write(parsed.error + "\n");
+      return 2;
+    }
+    waitFor = parsed;
+  }
+  if (!argv.local && !argv.latest && (!opts.json || argv["all-remotes"] || waitFor)) {
+    if (argv["all-remotes"] || waitFor || remotesCfg.size > 0) {
+      return runAllRemotesLs({
+        all: argv.all,
+        active: argv.active,
+        keyword,
+        waitFor,
+        timeoutMs: Math.max(1, Number(argv.timeout) || 30) * 1000,
+        json: opts.json,
+      });
     }
   }
 
@@ -2852,7 +3186,7 @@ async function cmdLs(rest: string[]): Promise<number> {
   );
   const ageOf = (r: GlobalPidRecord) => humanizeAge(now - (lastActive.get(r.pid) ?? r.started_at));
 
-  const rawCwds = records.map((r) => shortenPath(r.cwd));
+  const rawCwds = records.map((r) => cwdLabel(r));
   const widths = {
     pid: Math.max(3, ...records.map((r) => String(r.pid).length)),
     cli: Math.max(3, ...records.map((r) => r.cli.length)),
@@ -2888,7 +3222,7 @@ async function cmdLs(rest: string[]): Promise<number> {
         ? await Promise.all([
             r.log_file ? extractTaskCounts(r.log_file) : Promise.resolve(null),
             r.log_file ? extractBadges(r.log_file) : Promise.resolve([]),
-            gitStatusOnce(r.cwd, gitRootCache, gitInfoCache),
+            gitStatusOnce(r.workdir ?? r.cwd, gitRootCache, gitInfoCache),
             isUserTyping(r.pid),
           ])
         : [null, [], null, false];
@@ -2924,7 +3258,7 @@ async function cmdLs(rest: string[]): Promise<number> {
         cli: r.cli,
         status: displayStatus,
         age: ageOf(r),
-        cwd: shortenPath(r.cwd),
+        cwd: cwdLabel(r),
         label,
         hasNote,
         _alive: displayStatus !== "stopped",
@@ -2986,18 +3320,6 @@ async function cmdLs(rest: string[]): Promise<number> {
   }
 
   return 0;
-}
-
-function humanizeAge(ms: number): string {
-  if (ms < 1000) return "0s";
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h`;
-  const d = Math.floor(h / 24);
-  return `${d}d`;
 }
 
 function shortenPath(p: string): string {
@@ -4100,34 +4422,9 @@ export function resolveReadWindow(opts: {
  * Reads only the last 32 KB for speed, renders via xterm for clean output.
  */
 async function extractActivity(logPath: string): Promise<string | null> {
-  const TAIL_BYTES = 32 * 1024;
-  let buf: Uint8Array;
-  try {
-    const fh = await open(logPath, "r");
-    try {
-      const { size } = await fh.stat();
-      if (size === 0) return null;
-      if (size <= TAIL_BYTES) {
-        const data = await fh.readFile();
-        buf = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
-      } else {
-        const tmp = Buffer.alloc(TAIL_BYTES);
-        const { bytesRead } = await fh.read(tmp, 0, TAIL_BYTES, size - TAIL_BYTES);
-        buf = new Uint8Array(tmp.buffer, 0, bytesRead);
-      }
-    } finally {
-      await fh.close();
-    }
-  } catch {
-    return null;
-  }
-
-  try {
-    const rendered = await renderRawLog(buf, { mode: "tail", n: 40 });
-    return extractActivityFromLines(rendered.split("\n"));
-  } catch {
-    return null;
-  }
+  // the same 32 KB tail, 40 lines and default geometry as the needs_input / stuck checks: rendered once (cached)
+  const lines = await renderLogTailLines(logPath, 40);
+  return lines ? extractActivityFromLines(lines) : null;
 }
 
 /**
@@ -4142,11 +4439,20 @@ export async function extractTaskCounts(logPath: string): Promise<TaskCounts | n
   // Larger window than activity: a todo block is often pushed up by later output.
   const TAIL_BYTES = 256 * 1024;
   let buf: Uint8Array;
+  let key: string;
   try {
     const fh = await open(logPath, "r");
     try {
-      const { size } = await fh.stat();
+      const st = await fh.stat();
+      const { size } = st;
       if (size === 0) return null;
+      // the same log state gives the same counts: reuse the last `ay ls` run's answer (none included)
+      key = `tasks\0${logPath}\0${size}\0${st.mtimeMs}`;
+      const kept = renderDiskGet(key);
+      if (kept !== undefined && (kept === "none" || isTaskCounts(kept))) {
+        renderDiskPut(key, kept);
+        return kept === "none" ? null : kept;
+      }
       if (size <= TAIL_BYTES) {
         const data = await fh.readFile();
         buf = new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
@@ -4162,14 +4468,27 @@ export async function extractTaskCounts(logPath: string): Promise<TaskCounts | n
     return null;
   }
 
+  // No ⎿ or too few markers in the bytes: no render of them holds a block, so skip the xterm replay
+  // (most logs have no todo block; this replay was the biggest cost of `ay ls`).
+  if (!mayHoldTaskBlock(new TextDecoder().decode(buf))) {
+    renderDiskPut(key, "none");
+    return null;
+  }
   try {
     // mode "cat" renders the full window so parseTaskCounts can find the most
     // recent block anywhere in it (not just the last n lines).
     const rendered = await renderRawLog(buf, { mode: "cat", n: 0 });
-    return parseTaskCounts(rendered.split("\n"));
+    const counts = parseTaskCounts(rendered.split("\n"));
+    renderDiskPut(key, counts ?? "none");
+    return counts;
   } catch {
     return null;
   }
+}
+
+function isTaskCounts(v: unknown): v is TaskCounts {
+  const c = v as TaskCounts;
+  return !!c && typeof c === "object" && Number.isInteger(c.done) && Number.isInteger(c.total);
 }
 
 // Shared CLI defaults (ready/working/needsInput patterns), loaded once per
@@ -4208,6 +4527,265 @@ export async function renderLogTailLines(
   n = 40,
   geom?: RenderGeom,
 ): Promise<string[] | null> {
+  // One render per log state per process: an `ay ls` row asks for the same tail up to four times (needs_input
+  // twice, stuck, activity), each a fresh xterm replay — that was most of `ay ls`'s time. Keyed by the file's
+  // size + mtime, so a long-running caller (serve) never gets a stale screen; the size cap bounds the memory.
+  let key: string;
+  try {
+    const s = await stat(logPath);
+    key = `${logPath}\0${s.size}\0${s.mtimeMs}\0${n}\0${geom?.cols ?? ""}x${geom?.rows ?? ""}`;
+  } catch {
+    return null;
+  }
+  const kept = renderDiskGet(key);
+  if (Array.isArray(kept) && kept.every((l) => typeof l === "string")) {
+    renderDiskPut(key, kept);
+    return (kept as string[]).slice();
+  }
+  let hit = tailRenderCache.get(key);
+  if (!hit) {
+    const p = renderLogTailLinesUncached(logPath, n, geom);
+    hit = p;
+    if (tailRenderCache.size >= TAIL_RENDER_CACHE_MAX) {
+      tailRenderCache.delete(tailRenderCache.keys().next().value as string);
+    }
+    tailRenderCache.set(key, p);
+    // a failed read/render is not remembered: the next call retries (concurrent callers still share this one)
+    void p.then((r) => {
+      if (r === null && tailRenderCache.get(key) === p) tailRenderCache.delete(key);
+    });
+  }
+  const lines = await hit;
+  if (lines) renderDiskPut(key, lines);
+  return lines ? lines.slice() : null; // a copy: callers may change their array
+}
+
+const tailRenderCache = new Map<string, Promise<string[] | null>>();
+const TAIL_RENDER_CACHE_MAX = 256;
+
+// Cross-run cache, `ay ls` only (enableRenderDiskCache): most agents are idle between two `ay ls` runs, so
+// their logs are unchanged and the rendered tails / task counts can be reused instead of replayed. Same keys
+// as above (path + size + mtime + …). Only the entries this run used are written back, so the file stays
+// small and entries of changed or gone logs drop out. Not for serve (long-running: nothing would be flushed).
+let renderDiskEnabled = false;
+let renderDiskPath = ""; // fixed when enabled, so a later AGENT_YES_HOME change cannot redirect the write
+let renderDisk: Record<string, unknown> | null = null;
+const renderDiskUsed = new Map<string, unknown>();
+const RENDER_DISK_MAX = 1024; // a safety bound: one `ay ls` run uses about 2 entries per agent
+
+export function enableRenderDiskCache(): void {
+  renderDiskEnabled = true;
+  renderDiskPath = path.join(agentYesHome(), "cache", "ls-render.json");
+}
+
+/** Turn the cross-run cache off and forget it in this process, without writing (tests). */
+export function resetRenderDiskCache(): void {
+  if (renderDiskUsed.size > 0) process.removeListener("exit", saveRenderDisk);
+  renderDiskEnabled = false;
+  renderDiskPath = "";
+  renderDisk = null;
+  renderDiskUsed.clear();
+  tailRenderCache.clear();
+}
+
+function renderDiskGet(key: string): unknown {
+  if (!renderDiskEnabled) return undefined;
+  if (renderDisk === null) {
+    try {
+      const v: unknown = JSON.parse(readFileSync(renderDiskPath, "utf8"));
+      renderDisk = v && typeof v === "object" ? (v as Record<string, unknown>) : {};
+    } catch {
+      renderDisk = {};
+    }
+  }
+  return Object.prototype.hasOwnProperty.call(renderDisk, key) ? renderDisk[key] : undefined;
+}
+
+function renderDiskPut(key: string, value: unknown): void {
+  if (!renderDiskEnabled) return;
+  if (renderDiskUsed.size >= RENDER_DISK_MAX && !renderDiskUsed.has(key)) return;
+  if (renderDiskUsed.size === 0) process.once("exit", saveRenderDisk);
+  renderDiskUsed.set(key, value);
+}
+
+/** Write the entries this run used (runs at exit; exported for tests). */
+export function saveRenderDisk(): void {
+  if (!renderDiskPath) return;
+  try {
+    const file = renderDiskPath;
+    mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+    const tmp = `${file}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify(Object.fromEntries(renderDiskUsed)), { mode: 0o600 });
+    renameSync(tmp, file);
+  } catch {
+    // a cache: losing it only costs the next run a replay
+  }
+}
+
+async function renderLogTailLinesUncached(
+  logPath: string,
+  n: number,
+  geom?: RenderGeom,
+): Promise<string[] | null> {
+  const buf = await readLogTailBytes(logPath);
+  if (!buf) return null;
+  try {
+    // Render at the agent's REAL PTY geometry when provided — the raw log is full
+    // of absolute cursor-positioning, so replaying at the wrong width reflows the
+    // TUI into garbage (chars land in the wrong columns). Callers with a pid pass
+    // readPtysize(pid); without it we fall back to the default width.
+    return (await renderRawLog(buf, { mode: "tail", n, cols: geom?.cols, rows: geom?.rows })).split(
+      "\n",
+    );
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Tail windows the composer check renders, smallest first. Rendering a tail
+ * starts mid-stream, and Claude Code's renderer redraws only the rows that
+ * changed: on a lane that has sat idle for hours the last 32 KB can hold
+ * redraws of transcript rows (an old `❯` turn among them) but not the unchanged
+ * rule and empty prompt row of the composer box, so the old turn was read as
+ * the prompt and the transcript under it as a draft. A Claude screen without
+ * its box is therefore re-rendered from further back, last of all from as far
+ * back as `ay read` renders. When even that shows no box, a draft read under
+ * some other prompt row is reported as "hidden" rather than as a draft: the
+ * send still parks, and the drainer waits for the box.
+ *
+ * Logs run to 100+ MB and the drainer re-checks every few seconds, so the
+ * rendered terminal is kept per log and later checks feed it only the bytes
+ * appended since: each window is rendered at most once per process, and a
+ * screen that stays without a box costs only its new output on every poll.
+ */
+export const COMPOSER_WINDOWS = [32 * 1024, 1024 * 1024, 8 * 1024 * 1024, MAX_RENDER_BYTES];
+
+/** A log's rendered terminal: fed up to `offset`, started from `windows[window]`. */
+type ComposerTerm = {
+  term: InstanceType<typeof import("@xterm/headless").Terminal>;
+  key: string;
+  window: number;
+  offset: number;
+  whole: boolean;
+};
+const composerTerms = new Map<string, ComposerTerm>();
+const COMPOSER_TERMS_MAX = 64;
+
+function dropComposerTerm(logPath: string) {
+  composerTerms.get(logPath)?.term.dispose();
+  composerTerms.delete(logPath);
+}
+
+/**
+ * The bottom 40 rows of a log as the composer check sees them: rendered from
+ * the 32 KB tail and, for Claude, from further back until its composer box is
+ * on screen (see COMPOSER_WINDOWS). Keeps per-cell attributes. Null for an
+ * empty log; throws when the log cannot be read or rendered.
+ */
+async function renderComposerRows(
+  record: GlobalPidRecord & { log_file: string },
+  windows = COMPOSER_WINDOWS,
+  fromContent = false,
+): Promise<ReturnType<typeof rowsFromXterm> | null> {
+  const logPath = record.log_file;
+  const geom = (await readAgentPtysize(record)) ?? undefined;
+  const key = `${geom?.cols}x${geom?.rows}:${record.cli}:${windows.join()}`;
+  const claude = record.cli === "claude";
+  try {
+    const { size } = await stat(logPath);
+    if (size === 0) return null;
+    let ct = composerTerms.get(logPath);
+    if (ct && (ct.key !== key || size < ct.offset)) {
+      dropComposerTerm(logPath); // resized, or the log was truncated
+      ct = undefined;
+    }
+    let rows: ReturnType<typeof rowsFromXterm> | undefined;
+    let next = 0;
+    if (ct) {
+      if (size > ct.offset) {
+        const delta = await readLogRange(logPath, ct.offset, size);
+        await new Promise<void>((resolve) => ct!.term.write(delta, resolve));
+        ct.offset += delta.length;
+      }
+      rows = rowsFromXterm(ct.term as never, 40, fromContent);
+      next = ct.whole ? windows.length : ct.window + 1;
+      if (!claude || composerBoxed(rows.map((r) => r.text))) next = windows.length;
+    }
+    for (let w = next; w < windows.length; w++) {
+      const from = Math.max(0, size - windows[w]!);
+      const buf = await readLogRange(logPath, from, size);
+      const Terminal = await loadXtermTerminal();
+      const term = new Terminal({
+        cols: geom?.cols && geom.cols > 0 ? geom.cols : 200,
+        rows: geom?.rows && geom.rows > 0 ? geom.rows : 50,
+        scrollback: 1000,
+        allowProposedApi: true,
+      });
+      await new Promise<void>((resolve) => term.write(buf, resolve));
+      dropComposerTerm(logPath);
+      composerTerms.set(logPath, {
+        term,
+        key,
+        window: w,
+        offset: from + buf.length,
+        whole: from === 0,
+      });
+      if (composerTerms.size > COMPOSER_TERMS_MAX)
+        dropComposerTerm(composerTerms.keys().next().value!); // oldest first
+      rows = rowsFromXterm(term as never, 40, fromContent);
+      if (!claude || from === 0 || composerBoxed(rows.map((r) => r.text))) break;
+    }
+    return rows ?? [];
+  } catch (e) {
+    dropComposerTerm(logPath);
+    throw e;
+  }
+}
+
+/**
+ * What the target's composer holds right now, read from the same 32 KB tail
+ * `renderLogTailLines` renders (further back when a Claude screen shows no
+ * composer box), keeping per-cell attributes (dim/inverse) so ghost text can be
+ * told from a real draft. See ts/composerGuard.ts.
+ */
+export async function readComposerState(
+  record: GlobalPidRecord,
+  windows = COMPOSER_WINDOWS,
+): Promise<ComposerState> {
+  const logPath = record.log_file;
+  if (!logPath) return { kind: "unknown", reason: "no log file recorded" };
+  const claude = record.cli === "claude";
+  try {
+    const rows = await renderComposerRows({ ...record, log_file: logPath }, windows);
+    if (!rows) return { kind: "unknown", reason: "log unreadable or empty" };
+    const state = classifyComposer(rows);
+    // No window showed the box, so a "draft" was read under some other prompt
+    // row, possibly an old turn: say so instead of reporting it as a draft.
+    if (claude && state.kind === "draft" && !composerBoxed(rows.map((r) => r.text)))
+      return { kind: "hidden", reason: "its input box is not on screen" };
+    return state;
+  } catch (e) {
+    return {
+      kind: "unknown",
+      reason: `log unreadable or render failed: ${(e as Error)?.message ?? e}`,
+    };
+  }
+}
+
+/** Bytes `[from, to)` of a log file. */
+async function readLogRange(logPath: string, from: number, to: number): Promise<Uint8Array> {
+  const fh = await open(logPath, "r");
+  try {
+    const buf = Buffer.alloc(Math.max(0, to - from));
+    const { bytesRead } = await fh.read(buf, 0, buf.length, from);
+    return new Uint8Array(buf.buffer, buf.byteOffset, bytesRead);
+  } finally {
+    await fh.close();
+  }
+}
+
+async function readLogTailBytes(logPath: string): Promise<Uint8Array | null> {
   const TAIL_BYTES = 32 * 1024;
   let buf: Uint8Array;
   try {
@@ -4229,17 +4807,7 @@ export async function renderLogTailLines(
   } catch {
     return null;
   }
-  try {
-    // Render at the agent's REAL PTY geometry when provided — the raw log is full
-    // of absolute cursor-positioning, so replaying at the wrong width reflows the
-    // TUI into garbage (chars land in the wrong columns). Callers with a pid pass
-    // readPtysize(pid); without it we fall back to the default width.
-    return (await renderRawLog(buf, { mode: "tail", n, cols: geom?.cols, rows: geom?.rows })).split(
-      "\n",
-    );
-  } catch {
-    return null;
-  }
+  return buf;
 }
 
 export async function extractNeedsInput(logPath: string, cli: string): Promise<NeedsInput | null> {
@@ -4352,9 +4920,7 @@ function extractActivityFromLines(lines: string[]): string | null {
 
   // ❯ appears after (or without) any spinner → agent is idle/waiting for input
   if (lastPromptIdx > lastSpinnerIdx) {
-    const text = clean[lastPromptIdx]!.trim()
-      .replace(/^❯\s*/, "")
-      .trim();
+    const text = clean[lastPromptIdx]!.trim().replace(/^❯\s*/, "").trim();
     return text ? `» ${text}` : null;
   }
 
@@ -4604,43 +5170,222 @@ export async function backoffWhileTyping(
   return { clear: false, waitedMs: Date.now() - start };
 }
 
+type SubmissionState = "submitted" | "queued" | "not-submitted";
+
+/** Attribute the evidence to THIS message, never to redraws or another turn. */
+export function inspectSubmission(
+  screen: string[],
+  identity: string,
+): {
+  submission: SubmissionState;
+  retry: boolean;
+  transcriptMatches: number;
+  /** A composer is on screen (so `inComposer` means something). */
+  composerVisible: boolean;
+  /** Our message is sitting in that composer, unsent. */
+  inComposer: boolean;
+} {
+  const unknown = {
+    submission: "not-submitted" as const,
+    retry: false,
+    transcriptMatches: 0,
+    composerVisible: false,
+    inComposer: false,
+  };
+  if (!identity.trim()) return unknown;
+  // Strip whitespace to tolerate terminal wrapping of the nonce/header or body.
+  const compact = (text: string) => text.replace(/\s+/gu, "");
+  const needle = compact(identity);
+  const wrapped = identity.startsWith("<ay-msg ");
+  // A wrapped message also ends with `</ay-msg NONCE>`. A long body pushes its
+  // header out of the rendered window (Claude echoes a queued message in full
+  // above the composer), so the closing tag, which sits right above the
+  // composer, is often the only copy of the nonce left on screen.
+  const closer = wrapped ? compact(`</ay-msg ${identity.slice("<ay-msg ".length)}>`) : null;
+  const occurrences = (text: string) =>
+    Math.max(text.split(needle).length - 1, closer ? text.split(closer).length - 1 : 0);
+  // The same boundary the draft check uses: a quoted `› line` inside our own
+  // unsent message must not be taken for the prompt (that would count the
+  // message's nonce as transcript evidence — codex review).
+  const prompt = composerPromptRow(screen);
+  if (prompt < 0) {
+    // No composer on screen: a plain shell (cmd, bash, an ssh session) has no
+    // `❯` row to inspect. It echoes the submitted line after its prompt and
+    // then prints a NEW prompt below, so a line ending in our raw message that
+    // is not the last line on screen is the evidence. The same line as the
+    // last one is the command still sitting typed-but-unsent. A wrapped
+    // (<ay-msg …>) identity never renders that way, so it stays unknown; so
+    // does a raw send whose text is still only on the final line. Without
+    // this, every `ay send --raw` to a shell reported NOT SUBMITTED (exit 1)
+    // after the command had visibly run.
+    if (wrapped) return unknown;
+    let last = screen.length - 1;
+    while (last >= 0 && !screen[last]!.trim()) last--;
+    const echoed = screen
+      .slice(0, Math.max(0, last))
+      .filter((line) => compact(line).endsWith(needle)).length;
+    return echoed
+      ? {
+          submission: "submitted",
+          retry: false,
+          transcriptMatches: echoed,
+          composerVisible: false,
+          inComposer: false,
+        }
+      : unknown;
+  }
+  const transcriptLines = screen.slice(0, prompt);
+  const transcript = compact(transcriptLines.join("\n"));
+  // For raw sends, a short body such as "x" must not match "Codex" or a
+  // suggestion containing that character. Match whole rendered message lines.
+  let transcriptMatches = wrapped ? occurrences(transcript) : 0;
+  if (!wrapped) {
+    const lines = transcriptLines.map((line) => compact(line.replace(/^\s*[❯›]\s*/u, "")));
+    for (let start = 0; start < lines.length; start++) {
+      let candidate = "";
+      for (let end = start; end < lines.length && candidate.length < needle.length; end++) {
+        candidate += lines[end];
+        if (candidate === needle) {
+          transcriptMatches++;
+          break;
+        }
+      }
+    }
+  }
+  const input: string[] = [screen[prompt]!.replace(/^\s*[❯›]\s*/u, "")];
+  for (const line of screen.slice(prompt + 1)) {
+    // A rule or the Claude/Codex footer chrome (incl. the model/cwd status row).
+    if (isComposerChrome(line)) break;
+    input.push(line);
+  }
+  const composer = compact(input.join("\n"));
+  if (wrapped ? occurrences(composer) > 0 : composer === needle) {
+    return {
+      submission: "not-submitted",
+      retry: true,
+      transcriptMatches,
+      composerVisible: true,
+      inComposer: true,
+    };
+  }
+  const queued = screen.some((line) =>
+    /^\s*(?:[❯›]\s*)?Press up to edit queued messages\s*$/iu.test(line),
+  );
+  if (transcriptMatches) {
+    // Empty prompts, Codex placeholders and Claude suggestions all mean that
+    // our message has left the composer when its identity is in the transcript.
+    return {
+      submission: queued ? "queued" : "submitted",
+      retry: false,
+      transcriptMatches,
+      composerVisible: true,
+      inComposer: false,
+    };
+  }
+  return { ...unknown, composerVisible: true };
+}
+
+export function submissionState(screen: string[], identity = ""): SubmissionState {
+  return inspectSubmission(screen, identity).submission;
+}
+
+/** A collapsed paste is not delivery evidence; it can only authorize a retry. */
+function collapsedPasteToken(screen: string[]): string | null {
+  const prompt = screen.findLastIndex((line) => /^\s*❯($|\s)/u.test(line));
+  if (prompt < 0) return null;
+  const input = screen[prompt]!.replace(/^\s*❯\s*/u, "").trim();
+  return /^\[Pasted text #\d+ \+\d+ lines\]$/.test(input) ? input : null;
+}
+
+export function ownedCollapsedPaste(
+  cli: string,
+  beforePaste: string[] | null | undefined,
+  afterPaste: string[],
+): string | null {
+  if (cli !== "claude" || !beforePaste) return null;
+  const token = collapsedPasteToken(afterPaste);
+  // Snapshot under the input lock BEFORE writing the body. A pre-existing
+  // placeholder (even in history), missing snapshot, or another CLI is unknown.
+  return token && !beforePaste.join("\n").includes(token) ? token : null;
+}
+
 /**
- * Send the trailing submit code and confirm the CLI actually acted on it —
- * either a `working` busy marker appears, or the log grows meaningfully. Retries
- * (re-sending just the trailing code) up to SEND_SUBMIT_MAX_RETRIES times when
- * neither shows, since a swallowed Enter looks identical to a slow one until we
- * check. Returns whether submission was confirmed, plus the final rendered tail
- * (for a caller to show the user when it wasn't).
+ * The target's screen as submit-confirm reads it. For Claude this is the
+ * composer check's render, which goes further back than the 32 KB tail when the
+ * tail lacks the composer box: Claude redraws only changed rows, so while it is
+ * busy the tail can hold spinner redraws but neither the box nor a message
+ * queued above it, and nothing on such a screen can be attributed to our send.
  */
+async function renderSendScreen(
+  record: GlobalPidRecord & { log_file: string },
+  geometry?: RenderGeom,
+): Promise<string[]> {
+  if (record.cli === "claude") {
+    const rows = await renderComposerRows(record, COMPOSER_WINDOWS, true).catch(() => undefined);
+    if (rows !== undefined) return (rows ?? []).map((r) => r.text);
+  }
+  return (await renderLogTailLines(record.log_file, 40, geometry)) ?? [];
+}
+
+export const SEND_EXIT_QUEUED = 4;
+
+/** Retry only Enter, never the body. Three attempts, phi delay capped at 400ms. */
 export async function submitAndConfirm(
   record: GlobalPidRecord,
   fifoPath: string,
   trailing: string,
-): Promise<{ confirmed: boolean; screen: string[] }> {
+  identity: string,
+  beforePaste?: string[] | null,
+): Promise<{ confirmed: boolean; screen: string[]; submission: SubmissionState }> {
   const logFile = record.log_file!;
+  const target = { ...record, log_file: logFile };
+  const geometry = (await readAgentPtysize(record)) ?? undefined;
   const cfg = (await cliDefaults())[record.cli];
-  let screen: string[] = [];
+  let screen = await renderSendScreen(target, geometry);
+  const before = inspectSubmission(screen, identity);
+  const baseline = before.transcriptMatches;
+  // Delivered = a NEW copy in the transcript, or — what a count in a rolling
+  // 40-line window cannot show for a repeated raw message like "continue" —
+  // our text was in the visible composer before Enter and has left it while
+  // the composer is still on screen (codex review).
+  const delivered = (e: ReturnType<typeof inspectSubmission>): boolean =>
+    (e.submission !== "not-submitted" && e.transcriptMatches > baseline) ||
+    (before.inComposer && e.composerVisible && !e.inComposer);
+  const outcome = (e: ReturnType<typeof inspectSubmission>, current: string[]) => {
+    const queued =
+      e.submission === "queued" ||
+      current.some((line) => /^\s*(?:[❯›]\s*)?Press up to edit queued messages\s*$/iu.test(line));
+    return {
+      confirmed: !queued,
+      screen: current,
+      submission: (queued ? "queued" : "submitted") as SubmissionState,
+    };
+  };
+  const ownPaste = ownedCollapsedPaste(record.cli, beforePaste, screen);
+  const canRetry = (evidence: ReturnType<typeof inspectSubmission>, current: string[]) =>
+    evidence.retry || (ownPaste !== null && collapsedPasteToken(current) === ownPaste);
   for (let attempt = 0; attempt <= SEND_SUBMIT_MAX_RETRIES; attempt++) {
-    const sizeBefore =
-      (await stat(logFile)
-        .then((s) => s.size)
-        .catch(() => null)) ?? 0;
-    // A working marker already on screen BEFORE this attempt (e.g. a busy agent
-    // that queues typed input) proves nothing about whether THIS Enter landed —
-    // it could just be leftover from whatever the agent was already doing. Only
-    // a working marker that WASN'T there before, or actual log growth, counts.
-    const wasAlreadyWorking = isWorkingScreen(
-      (await renderLogTailLines(logFile, 40)) ?? [],
-      cfg?.working,
-    );
+    if (attempt) {
+      await new Promise((r) => setTimeout(r, Math.min(400, 150 * 1.618 ** (attempt - 1))));
+      // Recheck after the delay: the target could have accepted the earlier Enter.
+      screen = await renderSendScreen(target, geometry);
+      const settled = inspectSubmission(screen, identity);
+      if (delivered(settled)) return outcome(settled, screen);
+      if (
+        !canRetry(settled, screen) ||
+        (cfg?.needsInput?.length &&
+          parseMenu(screen, { needsInput: cfg.needsInput, working: cfg.working }))
+      )
+        break;
+    }
     await writeToIpc(fifoPath, trailing);
-    const sizeAfter = await waitForLogQuiet(logFile, SEND_CONFIRM_QUIET_MS, SEND_CONFIRM_MAX_MS);
-    screen = (await renderLogTailLines(logFile, 40)) ?? [];
-    const grew = sizeAfter !== null && sizeAfter >= sizeBefore + SEND_CONFIRM_MIN_GROWTH_BYTES;
-    const nowWorking = isWorkingScreen(screen, cfg?.working);
-    if ((nowWorking && !wasAlreadyWorking) || grew) return { confirmed: true, screen };
+    await waitForLogQuiet(logFile, SEND_CONFIRM_QUIET_MS, SEND_CONFIRM_MAX_MS);
+    screen = await renderSendScreen(target, geometry);
+    const evidence = inspectSubmission(screen, identity);
+    if (delivered(evidence)) return outcome(evidence, screen);
+    if (!canRetry(evidence, screen)) break;
   }
-  return { confirmed: false, screen };
+  return { confirmed: false, screen, submission: "not-submitted" };
 }
 
 /** Poll until the agent is no longer parked on a menu (selection accepted → it
@@ -4658,6 +5403,235 @@ async function waitForNeedsInputClear(
   return false;
 }
 
+/**
+ * Write one message and its trailing code to the target, then (when `canConfirm`)
+ * confirm the submit. The caller holds the input lock. The body is written
+ * exactly once; only Enter is ever retried (see submitAndConfirm).
+ */
+async function deliverBody(
+  record: GlobalPidRecord,
+  fifoPath: string,
+  fullBody: string,
+  trailing: string,
+  identity: string,
+  canConfirm: boolean,
+): Promise<{
+  confirmed: boolean;
+  screen: string[];
+  submission: "submitted" | "queued" | "not-submitted" | "unchecked";
+}> {
+  if (fullBody && trailing) {
+    const beforePaste =
+      canConfirm && record.log_file
+        ? await renderSendScreen(
+            { ...record, log_file: record.log_file },
+            (await readAgentPtysize(record)) ?? undefined,
+          )
+        : null;
+    await writeToIpc(fifoPath, fullBody);
+    if (canConfirm && record.log_file) {
+      // Wait for the paste to actually finish rendering — a long/multi-line body
+      // can take longer than any fixed guess, and sending Enter mid-paste gets
+      // swallowed by the CLI's bracketed-paste handling instead of submitting.
+      await waitForLogQuiet(record.log_file, SEND_SETTLE_QUIET_MS, SEND_SETTLE_MAX_MS);
+      return submitAndConfirm(record, fifoPath, trailing, identity, beforePaste);
+    }
+    await new Promise((r) => setTimeout(r, 200));
+    await writeToIpc(fifoPath, trailing);
+  } else {
+    await writeToIpc(fifoPath, fullBody + trailing);
+  }
+  return {
+    confirmed: !canConfirm,
+    screen: [],
+    submission: canConfirm ? "not-submitted" : "unchecked",
+  };
+}
+
+// Drainer pacing: poll the parked target with a φ backoff from 500 ms up to 5 s,
+// reset after every delivery. Worst case a message waits PENDING_MAX_AGE_MS.
+const DRAIN_POLL_BASE_MS = 500;
+const DRAIN_POLL_CAP_MS = 5000;
+
+function drainerLockPath(pid: number): string {
+  return path.join(agentYesHome(), "pending", `${pid}.drainer`);
+}
+
+/** The pid of a live drainer for `pid`'s queue, or null. */
+async function liveDrainer(pid: number): Promise<number | null> {
+  const raw = await readFile(drainerLockPath(pid), "utf-8").catch(() => null);
+  const owner = Number(raw?.trim());
+  if (!Number.isInteger(owner) || owner <= 0) return null;
+  try {
+    process.kill(owner, 0);
+    return owner;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The argv that re-launches THIS build as the drainer. The drainer must be the
+ * same build that parked the message (an older `ay` on PATH has no
+ * send-drain), so prefer the running script over PATH lookup. Under the bun
+ * runtime that is `bun <script>` on every platform: argv[1] is a .js/.ts file,
+ * never an executable, so spawning it bare (as the first cut did on win32)
+ * ENOENTs and the parked message waits for a manual `ay send-drain`. A
+ * compiled single-file binary has no script to hand over: re-run the binary.
+ */
+export function drainerLauncher(
+  execPath: string,
+  script: string | undefined,
+  onPath: string | null | undefined,
+): string[] | null {
+  const bunRuntime = /(^|[\\/])bun(\.exe)?$/i.test(execPath);
+  if (!bunRuntime) return [execPath];
+  if (script) return [execPath, script];
+  return onPath ? [execPath, onPath] : null;
+}
+
+/** Start the per-target drainer unless one is already running. */
+async function ensureSendDrainer(pid: number): Promise<number | null> {
+  const existing = await liveDrainer(pid);
+  if (existing) return existing;
+  const { spawn } = await import("node:child_process");
+  const launcher = drainerLauncher(process.execPath, process.argv[1], Bun.which("ay"));
+  if (!launcher) return null;
+  const [cmd, ...pre] = launcher;
+  const child = spawn(cmd!, [...pre, "send-drain", String(pid)], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.on("error", () => {});
+  child.unref();
+  return child.pid ?? null;
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
+/**
+ * `ay send-drain <pid>` — deliver the messages `ay send` parked for <pid>
+ * because its composer held a draft. Runs until the queue is empty, the target
+ * exits, or every message expired. One drainer per target (a pid file under
+ * pending/); a second one exits at once. Normally started by `ay send` itself.
+ */
+async function cmdSendDrain(rest: string[]): Promise<number> {
+  const pid = Number(rest[0]);
+  if (!Number.isInteger(pid) || pid <= 0) throw new Error("usage: ay send-drain <pid>");
+  const lockFile = drainerLockPath(pid);
+  await mkdir(path.dirname(lockFile), { recursive: true });
+  const other = await liveDrainer(pid);
+  if (other && other !== process.pid) return 0;
+  await writeFile(lockFile, `${process.pid}\n`);
+  // Two drainers can both pass the check above; the last writer owns the queue
+  // and the other one leaves. claimPending keeps a message from going out twice
+  // even inside that window.
+  await new Promise((r) => setTimeout(r, 50));
+  if ((await liveDrainer(pid)) !== process.pid) return 0;
+  try {
+    let attempt = 0;
+    // sender + body hash → when this drainer delivered it: a second parked copy
+    // of the same message from the same agent within the window is dropped.
+    const delivered = new Map<string, number>();
+    for (;;) {
+      const names = await listPending(pid);
+      if (!names.length) {
+        // Give up ownership only under the input lock, which every enqueue also
+        // holds: a sender that parks a message after this re-check finds no
+        // drainer pid file and starts a new drainer; one that parked before it
+        // is seen here and keeps this drainer running.
+        const done = await withIpcLock(pid, async () => {
+          if ((await listPending(pid)).length) return false;
+          await rm(lockFile, { force: true });
+          return true;
+        });
+        if (done) return 0;
+        continue;
+      }
+      const name = names[0]!;
+      const msg = await readPending(pid, name);
+      if (!msg) {
+        await retirePending(pid, name, "unparseable pending file");
+        continue;
+      }
+      const gone = !pidAlive(pid);
+      const expired = Date.now() - msg.queuedAt > PENDING_MAX_AGE_MS;
+      if (gone || expired) {
+        const why = gone ? "target exited before its input box was free" : "expired after 24h";
+        for (const n of gone ? names : [name]) await retirePending(pid, n, why);
+        await recordMessage({
+          at: Date.now(),
+          ...(msg.record as Omit<MessageRecord, "at">),
+          confirmed: false,
+          submission: "not-submitted",
+        } as MessageRecord);
+        if (gone) return 1;
+        continue;
+      }
+      const from = senderKey(
+        (msg.record as { from?: { agent_id?: string; pid?: number } | null }).from,
+      );
+      const msgBody = (msg.record as { body?: string }).body ?? "";
+      const dupKey = from && msgBody ? `${from}|${bodyHash(msgBody)}` : null;
+      const prev = dupKey ? delivered.get(dupKey) : undefined;
+      if (prev !== undefined && msg.queuedAt - prev <= DUPLICATE_WINDOW_MS) {
+        await retirePending(
+          pid,
+          name,
+          `duplicate of the same sender's identical message delivered ${Math.round((Date.now() - prev) / 1000)}s ago`,
+        );
+        continue;
+      }
+      const record = (await readGlobalPids()).find((r) => r.pid === pid);
+      let result: Awaited<ReturnType<typeof deliverBody>> | null = null;
+      if (record && !(await isUserTyping(pid))) {
+        await withIpcLock(pid, async () => {
+          // Re-check under the lock, right before the write.
+          if (await isUserTyping(pid)) return;
+          // Only a positive reading releases a parked message: an unreadable
+          // screen or one without a composer (a menu) waits for the next poll.
+          const composer = await readComposerState(record);
+          if (composer.kind !== "empty") return;
+          if (!(await claimPending(pid, name))) return;
+          result = await deliverBody(
+            record,
+            msg.fifoPath,
+            msg.fullBody,
+            msg.trailing,
+            msg.identity,
+            msg.trailing === "\r" && Boolean(record.log_file),
+          );
+        });
+      }
+      if (result) {
+        const d = result as Awaited<ReturnType<typeof deliverBody>>;
+        if (dupKey) delivered.set(dupKey, Date.now());
+        await recordMessage({
+          at: Date.now(),
+          ...(msg.record as Omit<MessageRecord, "at">),
+          confirmed: d.confirmed,
+          submission: d.submission,
+        } as MessageRecord);
+        attempt = 0;
+        continue;
+      }
+      attempt++;
+      await new Promise((r) =>
+        setTimeout(r, Math.min(DRAIN_POLL_CAP_MS, DRAIN_POLL_BASE_MS * 1.618 ** (attempt - 1))),
+      );
+    }
+  } finally {
+    if ((await liveDrainer(pid)) === process.pid) await rm(lockFile, { force: true });
+  }
+}
+
 async function cmdSend(rest: string[]): Promise<number> {
   const y = yargs(rest)
     // Disable yargs' `--no-<flag>` negation: without this, `--no-wait` is parsed
@@ -4669,7 +5643,11 @@ async function cmdSend(rest: string[]): Promise<number> {
     .usage(
       "Usage: ay send <keyword> <msg|-> [options]\n\n" +
         "Exit: 0 sent, 3 target unreachable (nothing sent; ay ls shows it as\n" +
-        "'unreachable' — ay restart <pid> revives it), 1 everything else.",
+        "'unreachable' — ay restart <pid> revives it), 4 QUEUED (accepted, not yet\n" +
+        "submitted: either the CLI queued it, or its input box held someone's draft and\n" +
+        "the message was parked for delivery once the box is empty — do not resend;\n" +
+        "an identical resend from the same agent within 60s is dropped as a DUPLICATE),\n" +
+        "1 everything else.",
     )
     .option("code", {
       type: "string",
@@ -4940,15 +5918,13 @@ async function cmdSend(rest: string[]): Promise<number> {
   // body mid-line fuses into their text and submits a mangled line. Only for a
   // real text body; skipped for --force (caller means it), --no-wait
   // (fire-and-forget), and empty bodies (a bare esc/ctrl-c interrupt is usually
-  // intentional and time-sensitive). Sends anyway after the deadline so a
-  // message is never silently dropped.
+  // intentional and time-sensitive). If they are still typing at the deadline
+  // the message is parked (see the composer guard below) instead of interleaved.
+  let parkReason: string | null = null;
   if (fullBody && !noWait && !force) {
     const { clear, waitedMs } = await backoffWhileTyping(record.pid, SEND_TYPING_MAX_WAIT_MS);
     if (!clear) {
-      process.stderr.write(
-        `warning: user still typing at pid ${record.pid} after ${Math.round(waitedMs / 1000)}s — ` +
-          `sending anyway (may interleave with their line). Use --force to skip this wait.\n`,
-      );
+      parkReason = `user still typing after ${Math.round(waitedMs / 1000)}s`;
     } else if (waitedMs > 0) {
       process.stderr.write(
         `waited ${Math.round(waitedMs / 1000)}s for the user to pause typing before sending.\n`,
@@ -4961,8 +5937,34 @@ async function cmdSend(rest: string[]): Promise<number> {
   // double-interrupt. Checked against the resolved byte, not the code NAME, so
   // every alias that resolves to Enter (--code=enter or --code=cr) is covered.
   const canConfirm = trailing === "\r" && Boolean(fullBody) && !noWait;
-  let confirmed = true;
+  const identity = nonce ? `<ay-msg ${nonce}` : body;
+  let confirmed = !canConfirm;
+  const receipt: { submission: "submitted" | "queued" | "not-submitted" | "unchecked" } = {
+    submission: canConfirm ? "not-submitted" : "unchecked",
+  };
   let lastScreen: string[] = [];
+  let parked = false;
+  let duplicateOf: RecentSend | null = null;
+  // The mailbox fields known before delivery; a parked message carries them to
+  // the drainer so its eventual record names the real sender, not the drainer.
+  const mailBase = {
+    nonce,
+    origin: sender.agent ? undefined : ("shell" as const),
+    from_via: sender.via,
+    sender_observed: observedSender(),
+    from: sender.agent
+      ? {
+          pid: sender.agent.pid,
+          cli: sender.agent.cli,
+          cwd: sender.agent.cwd,
+          agent_id: sender.agent.agent_id,
+        }
+      : null,
+    to: { pid: record.pid, cli: record.cli, cwd: record.cwd, agent_id: record.agent_id },
+    body,
+    code: trailing === "\r" ? undefined : codeName,
+    wrapped: Boolean(nonce),
+  };
   // The body and its Enter are ONE transaction: every gap between them (the
   // paste-settle wait, the submit-confirm retries) is a window where another
   // writer's bytes would land mid-message. See ts/ipcLock.ts.
@@ -4970,25 +5972,53 @@ async function cmdSend(rest: string[]): Promise<number> {
     await withIpcLock(
       record.pid,
       async () => {
-        if (fullBody && trailing) {
-          await writeToIpc(fifoPath, fullBody);
-          if (canConfirm && record.log_file) {
-            // Wait for the paste to actually finish rendering — a long/multi-line body
-            // can take longer than any fixed guess, and sending Enter mid-paste gets
-            // swallowed by the CLI's bracketed-paste handling instead of submitting.
-            await waitForLogQuiet(record.log_file, SEND_SETTLE_QUIET_MS, SEND_SETTLE_MAX_MS);
-            ({ confirmed, screen: lastScreen } = await submitAndConfirm(
-              record,
-              fifoPath,
-              trailing,
-            ));
-          } else {
-            await new Promise((r) => setTimeout(r, 200));
-            await writeToIpc(fifoPath, trailing);
-          }
-        } else {
-          await writeToIpc(fifoPath, fullBody + trailing);
+        // Composer guard (ts/composerGuard.ts): never type into someone else's
+        // draft. Checked under the input lock, right before the write, so no
+        // other `ay send` can change the composer between the check and the
+        // paste. A message already parked for this pid also parks this one, so
+        // delivery keeps send order.
+        // Dedupe at the sink: the same agent re-sending the same body within a
+        // minute (it read rc=4 QUEUED as a failure) is dropped, not typed or
+        // parked twice. --force and human (shell) senders are exempt.
+        const dedupeKey = force || !body ? null : senderKey(mailBase.from);
+        if (dedupeKey) {
+          duplicateOf = await findRecentDuplicate(record.pid, dedupeKey, body);
+          if (duplicateOf) return;
         }
+        if (fullBody) {
+          if (!parkReason && (await listPending(record.pid)).length)
+            parkReason = "earlier messages to this agent are still queued";
+          if (!parkReason) {
+            const composer = await readComposerState(record);
+            if (composer.kind === "draft")
+              parkReason = `its input box holds a draft (${composer.chars} chars)`;
+            else if (composer.kind === "hidden") parkReason = composer.reason;
+            else if (composer.kind === "unknown")
+              process.stderr.write(
+                `warning: ay send could not see pid ${record.pid}'s input box (${composer.reason}) — sending without the draft check.\n`,
+              );
+          }
+          if (dedupeKey)
+            await noteRecentSend(record.pid, dedupeKey, body, parkReason ? "queued" : "sent");
+          if (parkReason) {
+            await enqueuePending({
+              queuedAt: Date.now(),
+              pid: record.pid,
+              fifoPath,
+              fullBody,
+              trailing,
+              identity,
+              record: mailBase,
+            });
+            parked = true;
+            return;
+          }
+        }
+        ({
+          confirmed,
+          screen: lastScreen,
+          submission: receipt.submission,
+        } = await deliverBody(record, fifoPath, fullBody, trailing, identity, canConfirm));
       },
       (why) =>
         process.stderr.write(
@@ -5010,11 +6040,53 @@ async function cmdSend(rest: string[]): Promise<number> {
     );
     return SEND_EXIT_UNREACHABLE;
   }
+  if (duplicateOf) {
+    const dup = duplicateOf as RecentSend;
+    const ago = Math.max(0, Math.round((Date.now() - dup.at) / 1000));
+    process.stdout.write(
+      `DUPLICATE (not resent) to pid ${record.pid} (${record.cli}): ${truncate(body + trailing, 80)}\n`,
+    );
+    process.stderr.write(
+      queuedReceipt(
+        "duplicate",
+        `you sent this exact message to pid ${record.pid} ${ago}s ago and it was ${dup.outcome}`,
+      ) + "\n",
+    );
+    return dup.outcome === "queued" ? SEND_EXIT_QUEUED : 0;
+  }
+  if (parked) {
+    const drainer = await ensureSendDrainer(record.pid);
+    process.stdout.write(
+      `QUEUED to pid ${record.pid} (${record.cli}): ${truncate(body + trailing, 80)}\n`,
+    );
+    process.stderr.write(
+      queuedReceipt("parked", parkReason!) +
+        (drainer
+          ? ` (drainer pid ${drainer})\n`
+          : `\nay send: the drainer did not start; run: ay send-drain ${record.pid}\n`),
+    );
+    if (body)
+      await recordMessage({
+        at: Date.now(),
+        ...mailBase,
+        confirmed: false,
+        submission: "queued",
+      } as MessageRecord);
+    return SEND_EXIT_QUEUED;
+  }
+  const { submission } = receipt;
   const payload = body + trailing;
-  const status = confirmed ? "sent" : "sent but NOT confirmed submitted";
+  const status =
+    submission === "queued"
+      ? "QUEUED"
+      : confirmed
+        ? "sent"
+        : "NOT SUBMITTED (NOT confirmed: our message remains in input or destination evidence is unavailable)";
   process.stdout.write(
     `${status} to pid ${record.pid} (${record.cli}): ${truncate(payload, 80)}\n`,
   );
+  if (submission === "queued")
+    process.stderr.write(queuedReceipt("cli-queued", `${record.cli} is busy`) + "\n");
 
   // Persist a durable record of the exchange from both ends' point of view (the
   // sender's outbox + the recipient's inbox). Only real message bodies are
@@ -5049,12 +6121,13 @@ async function cmdSend(rest: string[]): Promise<number> {
       body,
       code: trailing === "\r" ? undefined : codeName,
       confirmed,
+      submission,
       wrapped: Boolean(nonce),
     });
   }
-  if (!confirmed) {
+  if (!confirmed && submission !== "queued") {
     process.stderr.write(
-      `\nwarning: couldn't confirm the CLI acted on it after ${SEND_SUBMIT_MAX_RETRIES + 1} attempt(s) — ` +
+      `\nwarning: couldn't confirm the CLI acted on this message — ` +
         `it may still be sitting unsubmitted in the prompt. Last screen:\n` +
         lastScreen
           .slice(-8)
@@ -5096,7 +6169,7 @@ async function cmdSend(rest: string[]): Promise<number> {
     const tip = stopTipForCli(record.cli, record.pid);
     if (tip) process.stderr.write(tip);
   }
-  return confirmed ? 0 : 1;
+  return submission === "queued" ? SEND_EXIT_QUEUED : confirmed ? 0 : 1;
 }
 
 // ---------------------------------------------------------------------------
@@ -5205,7 +6278,8 @@ async function cmdMsgs(rest: string[]): Promise<number> {
     const fromLabel = senderLabel(rec);
     const peer = dir === "out" ? `→ ${rec.to.cli} #${rec.to.pid}` : `← ${fromLabel}`;
     const via = rec.remote ? ` (via ${rec.remote})` : "";
-    const flag = rec.confirmed === false ? " (unconfirmed)" : "";
+    const flag =
+      rec.submission === "queued" ? " (QUEUED)" : rec.confirmed === false ? " (unconfirmed)" : "";
     const tag = rec.kind ? `[${rec.kind}] ` : "";
     const line = tag + truncate(rec.body.replace(/\s+/g, " "), 100);
     process.stdout.write(`${when}  ${peer.padEnd(20)}${via}${flag}  ${line}\n`);
@@ -5978,6 +7052,22 @@ async function cmdAttach(rest: string[]): Promise<number> {
   // untouched). Poll briefly for a real size before the first report.
   for (let i = 0; i < 15 && (!process.stdout.columns || !process.stdout.rows); i++)
     await new Promise((r) => setTimeout(r, 100));
+  // Windows: ConPTY only ever emits DIFFS against its own model of the screen,
+  // so our terminal must hold exactly that screen before we start relaying
+  // bytes — the text snapshot printed above is not it. A size CHANGE makes
+  // ConPTY repaint the whole viewport with absolute addressing, which is the
+  // one way to get in sync; a same-size report repaints nothing. So nudge the
+  // PTY one row short, let the 250 ms poll apply it, then report the real
+  // size. (Observed without this: typed characters doubled, the remote prompt
+  // repeated down the screen.)
+  if (process.platform === "win32" && !capMode) {
+    const cols = process.stdout.columns ?? 0;
+    const rows = process.stdout.rows ?? 0;
+    if (cols > 0 && rows > 1) {
+      await writeWinsizeDirect(cols, rows - 1);
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
   await sendResize();
   // A one-shot cap fades on the daemon's ~12s TTL, so renew it while attached (cap
   // mode only — a direct winsize write persists and needs no heartbeat).
@@ -5986,10 +7076,37 @@ async function cmdAttach(rest: string[]): Promise<number> {
         if (capMode) void sendResize();
       }, 5000)
     : null;
+  // The direct winsize file is ignored by the agent once it is 30 s old
+  // (rs/src/pty_spawner.rs WINSIZE_STALE_MS — so a dead attach cannot pin the
+  // size forever). On Windows the agent polls that file every 250 ms, so a
+  // one-shot write meant the PTY silently snapped back to the agent's own
+  // console size 30 s into every session: the remote shell got a resize, redrew
+  // its prompt, and from then on every ConPTY diff targeted a geometry this
+  // terminal did not have. Keep the file fresh while attached — timestamp only,
+  // no SIGWINCH, so an unchanged size never triggers a redraw.
+  const directHeartbeat = !capMode
+    ? setInterval(() => {
+        const cols = process.stdout.columns ?? 0;
+        const rows = process.stdout.rows ?? 0;
+        if (cols > 0 && rows > 0)
+          void writeFile(winsizePath, `${cols} ${rows} ${Date.now()}\n`).catch(() => {});
+      }, 10_000)
+    : null;
   // Release the cap promptly on detach (don't wait out the TTL) so the agent
   // re-negotiates back to the remaining viewers / its real tty immediately.
   const withdrawAttachCap = async () => {
     if (capHeartbeat) clearInterval(capHeartbeat);
+    if (directHeartbeat) clearInterval(directHeartbeat);
+    // Direct mode: drop our size override now rather than letting it age out,
+    // so the agent returns to its own console size at once.
+    if (!capMode) {
+      await rm(winsizePath, { force: true }).catch(() => {});
+      try {
+        process.kill(record.pid, "SIGWINCH");
+      } catch {
+        /* agent gone, or no SIGWINCH on this platform — the poll/TTL handles it */
+      }
+    }
     if (!daemonBase) return; // "" token is valid — gate on the base, not the token
     try {
       // Withdraw by reporting presence for THIS pid with NO cap: the daemon then
@@ -6401,6 +7518,9 @@ export interface StatusSnapshot {
   pid: number;
   cli: string;
   cwd: string;
+  /** Effective work dir (see ts/workDir.ts); equals `cwd` when source is spawn. */
+  workdir: string;
+  workdir_source: "observed" | "spawn";
   // needs_input: alive but blocked on an interactive menu (distinct from idle =
   // alive+quiet/done, and stopped = exited). stuck: alive + busy marker on screen
   // but long-silent (wedged mid-stream). unreachable: alive but its stdin FIFO
@@ -6476,6 +7596,8 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
     pid: record.pid,
     cli: record.cli,
     cwd: record.cwd,
+    workdir: record.workdir ?? record.cwd,
+    workdir_source: record.workdir_source ?? "spawn",
     state,
     activity,
     question,

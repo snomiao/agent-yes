@@ -10,10 +10,10 @@ import {
   unlink,
   writeFile,
 } from "fs/promises";
-import { existsSync, renameSync, watch, writeFileSync } from "node:fs";
+import { existsSync, realpathSync, renameSync, watch, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { createHash, randomBytes, timingSafeEqual } from "crypto";
+import { randomBytes, timingSafeEqual } from "crypto";
 import {
   arch,
   cpus,
@@ -72,7 +72,6 @@ import { updateGlobalPidStatus } from "./globalPidIndex.ts";
 import { spawnRejectionReason } from "./spawnGate.ts";
 import { findSpawnHiddenLauncher } from "./rustBinary.ts";
 import { launchTray } from "./trayApp.ts";
-import { pgidForWrapper } from "./reaper.ts";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
 import { negotiateSize, sanitizeCap, type SizeCap } from "./sizeNego.ts";
@@ -949,14 +948,70 @@ export function oxmgrCmd(argv: string[]): string {
   return argv.map((a) => (/[\\\s"]/.test(a) ? `"${a.replace(/"/g, '\\"')}"` : a)).join(" ");
 }
 
+/**
+ * The argv a daemon manager runs for `ay serve …`. Pure so the contract is
+ * testable: `which` is the `ay` on PATH (or null), `script` is THIS process's
+ * own entry (`process.argv[1]`, always present), `realpath` resolves symlinks.
+ *
+ * Never bake in the `~/.bun/bin/ay` symlink: `bun add -g` removes and recreates
+ * it on every upgrade, and some images ship without it until the first update
+ * — a manager that stored it then restarts into ENOENT thousands of times.
+ * Resolve to the real file instead, and when nothing is on PATH fall back to
+ * the script running this very install (never a bare `ay`, which a manager's
+ * minimal PATH cannot resolve). On POSIX the entry is a `#!/usr/bin/env bun`
+ * script run via bun; on Windows it is a self-contained exe.
+ */
+export function serveLauncher(opts: {
+  which: string | null;
+  script: string | undefined;
+  execPath: string;
+  platform: NodeJS.Platform;
+  realpath: (p: string) => string;
+}): string[] {
+  const resolve = (p: string) => {
+    try {
+      return opts.realpath(p);
+    } catch {
+      return p;
+    }
+  };
+  const entry = opts.which ? resolve(opts.which) : opts.script ? resolve(opts.script) : null;
+  if (!entry) return ["ay"];
+  if (opts.platform === "win32")
+    return /\.(exe|cmd|bat)$/i.test(entry) ? [entry] : [opts.execPath, entry];
+  return [opts.execPath, entry];
+}
+
 function ayServeArgv(args: string[]): string[] {
-  const ayBin = Bun.which("ay");
-  const launcher = ayBin
-    ? process.platform === "win32"
-      ? [ayBin]
-      : [process.execPath, ayBin]
-    : ["ay"];
+  const launcher = serveLauncher({
+    which: Bun.which("ay"),
+    script: process.argv[1],
+    execPath: process.execPath,
+    platform: process.platform,
+    realpath: realpathSync,
+  });
   return [...launcher, "serve", ...args];
+}
+
+// The Task Scheduler entry `ayrs serve install` registered before the daemon
+// moved under oxmgr. A leftover one keeps hosting the WebRTC room, and the new
+// daemon then waits forever on "another ayrs host is already serving room …".
+// Mirrors rs/src/serve/service.rs LABEL / uninstall_quiet.
+export const LEGACY_AYRS_TASK = "com.snomiao.ayrs-serve";
+
+export function legacyAyrsTaskArgv(step: "query" | "end" | "delete"): string[] {
+  const base = ["schtasks", `/${step}`, "/tn", LEGACY_AYRS_TASK];
+  return step === "query" ? [...base, "/fo", "LIST"] : step === "delete" ? [...base, "/f"] : base;
+}
+
+async function stopLegacyAyrsTask(): Promise<void> {
+  if (process.platform !== "win32") return;
+  if ((await spawnExit(legacyAyrsTaskArgv("query"))) !== 0) return; // not registered
+  process.stdout.write(
+    `stopping legacy scheduled task '${LEGACY_AYRS_TASK}' (it would keep hosting the WebRTC room)\n`,
+  );
+  await spawnExit(legacyAyrsTaskArgv("end"));
+  await spawnExit(legacyAyrsTaskArgv("delete"));
 }
 
 // Per-user login auto-start entry on Windows. pm2 core has no Windows startup
@@ -1197,6 +1252,14 @@ async function warnStrayServeProcesses(): Promise<void> {
 // mints a persisted room instead). Mirrors how cmdServe resolves argv.webrtc/argv.share,
 // but over the raw arg list install holds (oxmgr splits the command on whitespace →
 // `--webrtc url`; pm2/`=` → `--webrtc=url`).
+// Which runtime a daemon registered with `args` hosts its room under — see
+// serveRust.ts daemonShareRuntime; the binary check is the live one cmdServe makes.
+async function daemonShareRuntime(args: string[]): Promise<"ts" | "rust"> {
+  const { daemonShareRuntime: decide } = await import("./serveRust.ts");
+  const { findAyrsBinary } = await import("./rustBinary.ts");
+  return decide(args, () => !!findAyrsBinary());
+}
+
 function explicitWebrtcUrl(args: string[]): string | undefined {
   for (let i = 0; i < args.length; i++) {
     const a = args[i]!;
@@ -1211,18 +1274,46 @@ function explicitWebrtcUrl(args: string[]): string | undefined {
 // Ask the live daemon its version over the local HTTP API. null if it's not
 // listening (webrtc-only) or too old to expose /api/version — both of which we
 // treat as "outdated" so a re-install rolls it forward.
-async function fetchDaemonVersion(port: number | null, token: string): Promise<string | null> {
-  if (port === null) return null;
+/** Why a version probe came back empty. "slow" is NOT "down" — see probeDaemon. */
+export type DaemonProbe =
+  | { kind: "ok"; version: string | null }
+  | { kind: "slow" }
+  | { kind: "down" };
+
+// A loaded box answers /api/version in seconds, not milliseconds: the endpoint
+// does almost nothing, but the process still has to be scheduled and paged in.
+// Measured on this host under memory pressure: 1.1s for a no-op call. The old 3s
+// budget turned that into `ay serve status` reporting "not reachable … (not
+// running)" for a daemon that lsof showed LISTENING and answering — the most
+// misleading moment possible, since a slow box is exactly when someone runs
+// status. A refused connection fails instantly regardless, so a longer deadline
+// only costs time in the case where waiting is the right answer.
+const DAEMON_PROBE_TIMEOUT_MS = 15_000;
+
+export async function probeDaemon(
+  port: number | null,
+  token: string,
+  timeoutMs: number = DAEMON_PROBE_TIMEOUT_MS,
+): Promise<DaemonProbe> {
+  if (port === null) return { kind: "down" };
   try {
     const r = await fetch(`http://127.0.0.1:${port}/api/version`, {
       headers: { Authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(3000),
+      signal: AbortSignal.timeout(timeoutMs),
     });
-    if (!r.ok) return null;
-    return ((await r.json()) as { version?: string }).version ?? null;
-  } catch {
-    return null;
+    if (!r.ok) return { kind: "down" };
+    return { kind: "ok", version: ((await r.json()) as { version?: string }).version ?? null };
+  } catch (e) {
+    // AbortSignal.timeout aborts with a TimeoutError; anything else (ECONNREFUSED,
+    // EHOSTUNREACH, a socket hangup) means nothing is listening there.
+    const name = (e as { name?: string } | null)?.name;
+    return name === "TimeoutError" || name === "AbortError" ? { kind: "slow" } : { kind: "down" };
   }
+}
+
+async function fetchDaemonVersion(port: number | null, token: string): Promise<string | null> {
+  const p = await probeDaemon(port, token);
+  return p.kind === "ok" ? p.version : null;
 }
 
 // ay serve start | stop — control the ALREADY-INSTALLED daemon's run state via
@@ -1301,6 +1392,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     }
     if (removed === 0 && failed === 0)
       process.stdout.write(`no '${DAEMON_NAME}' daemon registered with any manager\n`);
+    await stopLegacyAyrsTask();
     await warnStrayServeProcesses();
     return failed ? 1 : 0;
   }
@@ -1352,11 +1444,20 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     const webrtcDaemon = effArgs.some((a) => a.startsWith("--webrtc") || a.startsWith("--share"));
     let shareLink: string | null = null;
     let shareLinkMinted = false; // auto-minted (persisted/rotatable) vs explicit URL
+    // The daemon's `ay serve …` delegates to ayrs whenever it can (serveRust.ts),
+    // and ayrs persists its room in a DIFFERENT file (.share-room-ayrs) — mint
+    // and print from the file of the runtime that will actually host.
+    let roomFile = ".share-room";
     if (webrtcDaemon) {
       try {
-        const { loadOrCreateShareRoom, shareLinkFromRoomUrl } = await import("./share.ts");
+        const { loadOrCreateShareRoom, shareLinkFromRoomUrl, shareRoomFileName } =
+          await import("./share.ts");
+        const runtime = await daemonShareRuntime(effArgs);
+        roomFile = shareRoomFileName(runtime);
         const explicit = explicitWebrtcUrl(effArgs);
-        shareLink = shareLinkFromRoomUrl(explicit ?? (await loadOrCreateShareRoom()));
+        shareLink = shareLinkFromRoomUrl(
+          explicit ?? (await loadOrCreateShareRoom(undefined, runtime)),
+        );
         shareLinkMinted = !explicit;
       } catch {
         /* best effort — fall back to the .share-link file hint in emitShareLink */
@@ -1369,7 +1470,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
           `\nshared over WebRTC — open this link (the token is eaten from the URL on open):\n` +
             `  ${shareLink}\n` +
             (shareLinkMinted
-              ? `  (persistent room — same link across restarts; delete ~/.agent-yes/.share-room to rotate)\n`
+              ? `  (persistent room — same link across restarts; delete ~/.agent-yes/${roomFile} to rotate)\n`
               : ``),
         );
         // Offer to jump straight into the console (default yes); no-ops on a
@@ -1379,8 +1480,8 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       } else
         process.stdout.write(
           `\nthe WebRTC share link carries a secret, so the daemon does NOT log it —\n` +
-            `read it from ~/.agent-yes/.share-link (mode 0600). The room persists in\n` +
-            `~/.agent-yes/.share-room, so the link survives restarts.\n`,
+            `read it with \`ay share status\`. The room persists in\n` +
+            `~/.agent-yes/${roomFile}, so the link survives restarts.\n`,
         );
     };
 
@@ -1411,11 +1512,20 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       await spawnExit([mgr.bin, "stop", DAEMON_NAME]);
       await spawnExit([mgr.bin, "delete", DAEMON_NAME]);
     }
+    // A pre-oxmgr scheduled-task host left behind would keep the WebRTC room
+    // and the new daemon would wait on it forever.
+    await stopLegacyAyrsTask();
     await warnStrayServeProcesses();
 
     // oxmgr takes the command as one string; pm2 takes the binary plus its
     // args after `--`. Both auto-restart on crash by default (pm2) / via the
     // explicit flag (oxmgr).
+    // Start the new daemon from a clean liveness slate. The watchdog registered
+    // below (`ay serve healthcheck`) treats a MISSING .serve-heartbeat as healthy
+    // and a stale one as wedged; a stamp left by a daemon that died — or by a
+    // TypeScript daemon replaced by ayrs before ayrs wrote its own — would trip
+    // the very first checks and put the fresh daemon into a restart loop.
+    await unlink(heartbeatPath()).catch(() => {});
     const serveArgv = ayServeArgv(effArgs);
     // On Windows, interpose the window-less launcher so the manager (pm2/oxmgr)
     // doesn't flash a console window on each (re)start. `ay-spawn-hidden` is a
@@ -1599,11 +1709,19 @@ async function cmdServeStatus(args: string[]): Promise<number> {
   const json = args.includes("--json");
   const mgr = await resolveActiveManager();
   const token = await loadTokenReadOnly();
-  const shareLink = await readShareLink();
 
   // A non-null arg list means the daemon is registered with the manager.
   const daemonArgs = mgr ? await readDaemonServeArgs(mgr) : null;
   const installed = daemonArgs !== null;
+  // The link of the room the registered daemon HOSTS: derived read-only from
+  // the room file of its runtime (ayrs by default — a different file from the
+  // TS host's). `.share-link` is only ever written by the TS host, so for a
+  // Rust daemon it is stale or absent; keep it as the fallback for TS daemons
+  // and for the uninstalled-but-left-over case shareLinkStatus flags.
+  const { daemonShareLink, foregroundAyrsShareLink } = await import("./shareCmd.ts");
+  const shareLink =
+    (installed ? await daemonShareLink(daemonArgs) : await foregroundAyrsShareLink()) ??
+    (await readShareLink());
   // Manager-reported process state — the only up/down signal for webrtc daemons.
   const running = installed ? await readDaemonRunning(mgr!) : false;
   const a = daemonArgs ?? [];
@@ -1620,7 +1738,9 @@ async function cmdServeStatus(args: string[]): Promise<number> {
 
   // Probe the local HTTP API — catches both a daemon and a foreground `ay serve`.
   // Webrtc-only servers open no port, so a null probe there is expected, not down.
-  const runningVersion = httpish && token ? await fetchDaemonVersion(port, token) : null;
+  const probe: DaemonProbe =
+    httpish && token ? await probeDaemon(port, token) : { kind: "down" as const };
+  const runningVersion = probe.kind === "ok" ? probe.version : null;
   const current = getInstalledPackage().version;
   const share = shareLinkStatus(shareLink, installed, webrtcish);
 
@@ -1635,7 +1755,12 @@ async function cmdServeStatus(args: string[]): Promise<number> {
           port: httpish ? port : null,
           localUrl: httpish ? localUrl : null,
           reachable: runningVersion !== null,
+          // Additive: `reachable:false` alone cannot tell a caller whether the
+          // daemon is gone or merely slow, and those want opposite responses
+          // (reinstall vs wait). Existing consumers of `reachable` are unaffected.
+          probe: probe.kind,
           runningVersion,
+
           currentVersion: current,
           upToDate: runningVersion !== null && runningVersion === current,
           args: a,
@@ -1671,8 +1796,14 @@ async function cmdServeStatus(args: string[]): Promise<number> {
   } else if (mode === "webrtc") {
     w(`http api:     none (webrtc-only)`);
   } else {
+    const where = local ? `via ${localUrl}` : `on 127.0.0.1:${port}`;
+    // A timeout is not an absence. Saying "not running" for a daemon that is
+    // listening but slow sends the reader off to reinstall something that was
+    // never broken; name the machine instead.
     w(
-      `http api:     not reachable ${local ? `via ${localUrl}` : `on 127.0.0.1:${port}`} (not running)`,
+      probe.kind === "slow"
+        ? `http api:     listening ${where} but did not answer within ${DAEMON_PROBE_TIMEOUT_MS / 1000}s — the daemon is up and the host is overloaded, not down`
+        : `http api:     not reachable ${where} (not running)`,
     );
   }
   w(`token:        ${token ?? "(none yet — created on first serve)"}`);
@@ -1740,9 +1871,14 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `                    agent-yes.com, or pass a room link to join that room:\n` +
         `                    https://agent-yes.com/room/#room=<id>&s=e1.<secret>).\n` +
         `                    Alone it needs NO port — combine with --http for both.\n` +
-        `                    The minted room persists in ~/.agent-yes/.share-room\n` +
-        `                    (stable link across restarts; delete the file to rotate).\n` +
-        `  --share [URL]     Legacy alias for --http --webrtc\n\n` +
+        `                    The minted room persists in ~/.agent-yes/.share-room-ayrs\n` +
+        `                    (.share-room under --no-rust); stable link across restarts,\n` +
+        `                    delete the file to rotate.\n` +
+        `  --share [URL]     Legacy alias for --http --webrtc\n` +
+        `  --webrtc URL --join\n` +
+        `                    Host URL's room as one more member next to its other\n` +
+        `                    hosts (all members' agents show up for every viewer).\n` +
+        `                    Needs AY_JOIN_SECRET; AY_NAME names this member.\n\n` +
         `Runtime: like \`ay <cli>\`, the Rust daemon (ayrs serve) runs by default for\n` +
         `  the flags it supports — --webrtc [webrtc://url], --port N, --sighost H.\n` +
         `  Everything else (bare \`ay serve\`, --share/--http/--host/--tls-*, the\n` +
@@ -1762,7 +1898,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  ay serve install    install as background daemon (oxmgr; pm2 fallback on Windows without the winfix build)\n` +
         `  ay serve status     show daemon/server status (add --json for scripts)\n` +
         `  ay serve uninstall  remove daemon\n` +
-        `  ay serve logs       view daemon logs\n\n` +
+        `  ay serve logs       view daemon logs\n` +
+        `  ay serve join-secret [--webrtc URL]\n` +
+        `                      print AY_ROOM + AY_JOIN_SECRET for members of this\n` +
+        `                      host's room (mints the secret; the room then requires it)\n\n` +
         `Once running, connect from another machine:\n` +
         `  ay ls   <token>@<host>:<port>\n` +
         `  ay remote add <alias> http://<token>@<host>:<port>\n`,
@@ -1774,11 +1913,21 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // the Rust daemon; the rest stays here. See ts/serveRust.ts for the split.
   // `--no-rust` is stripped for the parsers below either way.
   {
-    const { planRustServe } = await import("./serveRust.ts");
+    const { planRustServe, SERVE_SUBCOMMANDS } = await import("./serveRust.ts");
     const plan = planRustServe(rest);
+    if (plan.kind === "rust-only") {
+      const { ensureAyrsBinary } = await import("./rustBinary.ts");
+      const ayrs = await ensureAyrsBinary();
+      if (ayrs) return runAyrsServe(ayrs, plan.argv);
+      process.stderr.write(
+        `ay serve: ${plan.feature} needs the Rust daemon (ayrs), which was not found ` +
+          `(bun run build:rs, or reinstall)\n`,
+      );
+      return 1;
+    }
     if (plan.kind === "rust") {
-      const { findAyrsBinary } = await import("./rustBinary.ts");
-      const ayrs = findAyrsBinary();
+      const { ensureAyrsBinary } = await import("./rustBinary.ts");
+      const ayrs = await ensureAyrsBinary();
       if (ayrs) return runAyrsServe(ayrs, plan.argv);
       process.stderr.write(
         `ay serve: ayrs binary not found — running the TypeScript server ` +
@@ -1786,6 +1935,18 @@ export async function cmdServe(rest: string[]): Promise<number> {
       );
     } else {
       rest = plan.rest;
+      // Never let the TypeScript server quietly host its own room instead.
+      if (rest[0] === "join-secret" || rest.includes("--join")) {
+        process.stderr.write(`ay serve: ${plan.reason}: joining rooms needs the Rust daemon\n`);
+        return 1;
+      }
+      // Say which server runs and why, so a daemon log (and `ay share`'s
+      // choice of room file) never leaves the operator guessing. Subcommands
+      // and the explicit opt-outs are not "fallbacks", so stay quiet there.
+      const optedOut = plan.reason === "--no-rust" || plan.reason === "AGENT_YES_NO_RUST=1";
+      if (!optedOut && !SERVE_SUBCOMMANDS.has(rest[0] ?? "")) {
+        process.stderr.write(`ay serve: running the TypeScript server (${plan.reason})\n`);
+      }
     }
   }
 
@@ -2005,7 +2166,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
         // eslint-disable-next-line no-control-regex
         const oscTitleRe = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
         let title: string | null = null;
-        for (let m; (m = oscTitleRe.exec(text)); ) if (m[1]!.trim()) title = m[1]!.trim();
+        for (let m; (m = oscTitleRe.exec(text));) if (m[1]!.trim()) title = m[1]!.trim();
         // Defense-in-depth: this title is remote-controlled text (an agent sets its
         // own terminal title) that the web console renders. The console escapes it,
         // but strip C0/C1 control bytes and cap the length at the SOURCE too, so a
@@ -3902,7 +4063,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
       } catch {
         return new Response("invalid JSON body", { status: 400 });
       }
-      const { keyword, msg = "", code = "enter", from = null, raw = false } = body;
+      const { keyword, code = "enter", from = null, raw = false } = body;
+      let msg = body.msg ?? "";
+      // A message from a shared room names the room, not our alias for it, in
+      // its reply hint; fill ours in (ts/roomReplyAlias.ts).
+      if (!raw && msg.startsWith("<ay-msg ") && msg.includes("<alias-for-room-")) {
+        const { fillRoomAlias, roomAliases } = await import("./roomReplyAlias.ts");
+        const aliases = await roomAliases();
+        msg = fillRoomAlias(msg, (room) => aliases.get(room));
+      }
       if (!keyword || typeof keyword !== "string") {
         return new Response("missing keyword", { status: 400 });
       }
@@ -4028,30 +4197,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
         return new Response("force-kill unsupported on a Windows serve", { status: 501 });
       try {
         const record = await resolveOne(keyword, defaultOpts({ all: true }));
-        const killed: string[] = [];
-        const sig = (target: number, label: string) => {
-          if (!target || target <= 1) return;
-          try {
-            process.kill(target, "SIGKILL");
-            killed.push(label);
-          } catch {
-            /* ESRCH: already gone */
-          }
-        };
-        // Whole process group first (kills children too), then the pids directly in
-        // case they aren't group leaders.
-        const pgid = await pgidForWrapper(record.wrapper_pid ?? 0);
-        if (pgid && pgid > 1) {
-          try {
-            process.kill(-pgid, "SIGKILL");
-            killed.push(`group ${pgid}`);
-          } catch {
-            /* group already gone */
-          }
-        }
-        sig(record.pid, `pid ${record.pid}`);
-        if (record.wrapper_pid && record.wrapper_pid !== record.pid)
-          sig(record.wrapper_pid, `wrapper ${record.wrapper_pid}`);
+        const { forceKill, forceKillTargets } = await import("./forceKill.ts");
+        const { killed } = forceKill(await forceKillTargets(record));
         await updateGlobalPidStatus(record.pid, {
           status: "exited",
           exit_reason: "force-killed via console",

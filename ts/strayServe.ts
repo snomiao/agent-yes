@@ -7,6 +7,7 @@ const MANAGEMENT_COMMAND_RE = /\b(?:install|uninstall|status|logs|restart)\b/;
 function isServeCommand(command: string): boolean {
   return (
     /\bay(?:\.js)?\s+serve\b/.test(command) ||
+    /\bayrs(?:\.exe)?\s+serve\b/.test(command) ||
     /\bagent-yes(?:\.js)?\s+serve\b/.test(command) ||
     /\bagent-yes\.js\s+serve\b/.test(command)
   );

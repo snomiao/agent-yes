@@ -65,7 +65,7 @@ jobs:
             type=semver,pattern={{major}}
             type=sha,prefix={{branch}}-,enable=${{ github.event_name != 'pull_request' }}
             type=sha,prefix=pr-${{ github.event.pull_request.number }}-,enable=${{ github.event_name == 'pull_request' }}
-            type=raw,value=latest,enable={{is_default_branch}}
+            # `latest` is the newest release: docker-release.yml.
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v5

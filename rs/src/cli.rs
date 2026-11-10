@@ -21,6 +21,7 @@ use std::env;
 /// MUST mirror `SUBCOMMANDS` in ts/subcommands.ts — keep the two in sync.
 pub const SUBCOMMANDS: &[&str] = &[
     "ls",
+    "ls-refresh",
     "list",
     "ps",
     "status",
@@ -34,6 +35,7 @@ pub const SUBCOMMANDS: &[&str] = &[
     "hist",
     "history",
     "send",
+    "send-drain",
     "key",
     "select",
     "msgs",
@@ -66,13 +68,13 @@ pub const SUBCOMMANDS: &[&str] = &[
 /// Subcommands recognised only on the generic manager entry (`ay`/`agent-yes`),
 /// not on a cli-bound alias like `cy`. Two reasons a name lands here: it manages
 /// the host (`setup`, `ws`), or it is an ordinary English verb people open prompts
-/// with (`read`, `share`, `connect` — `cy read src/main.rs and explain it` and
+/// with (`read`, `share`, `connect`, `kill` — `cy read src/main.rs and explain it` and
 /// `cy connect the frontend to the API` must reach the agent; the commands stay
 /// on the manager entry). Mirrors `MANAGER_SUBCOMMANDS` in ts/subcommands.ts.
 pub const MANAGER_SUBCOMMANDS: &[&str] = &[
     // manage this host
     "setup", "ws", // prompt-word verbs
-    "read", "share", "connect",
+    "read", "share", "connect", "kill",
 ];
 
 /// Whether `name` is a management subcommand. `manager_commands` (true for the
@@ -547,7 +549,16 @@ mod tests {
     #[test]
     fn test_is_subcommand() {
         // Management subcommands are recognised for both manager and alias.
-        for sub in ["restart", "ls", "send", "stop", "serve", "tail", "reap"] {
+        for sub in [
+            "restart",
+            "ls",
+            "ls-refresh",
+            "send",
+            "stop",
+            "serve",
+            "tail",
+            "reap",
+        ] {
             assert!(is_subcommand(sub, true), "{sub} should be a subcommand");
             assert!(is_subcommand(sub, false), "{sub} should be a subcommand");
         }
@@ -562,7 +573,7 @@ mod tests {
         // Same for the prompt-word verbs: `ay read <keyword>` pages a log and
         // `ay connect <url>` saves a remote, while `cy read foo.rs` / `cy connect
         // the frontend to the API` are prompt text and must not be swallowed.
-        for sub in ["read", "share", "connect"] {
+        for sub in ["read", "share", "connect", "kill"] {
             assert!(is_subcommand(sub, true), "ay {sub} is a subcommand");
             assert!(!is_subcommand(sub, false), "cy {sub} is prompt text");
             assert!(should_delegate(sub, "ay"));

@@ -59,4 +59,14 @@ describe("buildEnvelope", () => {
     expect(prefix).toContain("deadbeef");
     expect(suffix).toContain("deadbeef");
   });
+
+  it("names the shared room in the reply route, for the receiver to fill in its alias", () => {
+    // Sent through a room this machine hosts in: the receiver reaches us as
+    // <its alias for the room>:<our member name>:<agent>.
+    const { prefix } = buildEnvelope({
+      ...base,
+      remote: { senderHost: "box", room: { id: "r1", member: "worker-d" } },
+    });
+    expect(prefix).toContain(`reply: ay send <alias-for-room-r1>:worker-d:24db968a3ab1 "..."`);
+  });
 });

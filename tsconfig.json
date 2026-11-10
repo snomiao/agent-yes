@@ -7,6 +7,8 @@
     "moduleDetection": "force",
     "jsx": "react-jsx",
     "allowJs": true,
+    // TypeScript 7 no longer loads every installed @types package by default.
+    "types": ["bun", "node"],
 
     // Bundler mode
     "moduleResolution": "bundler",

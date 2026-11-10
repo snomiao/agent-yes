@@ -344,8 +344,18 @@ describe("layeredRows parentEntry", () => {
 // Identity is the source; the label is only for reading.
 describe("layeredRows peer grouping with duplicate device labels", () => {
   const onEach = () => [
-    { ...agent({ pid: 100, wrapper_pid: 100 }), _room: "r1", _src: "r1/peerAAA111", _host: "u@box" },
-    { ...agent({ pid: 200, wrapper_pid: 200 }), _room: "r1", _src: "r1/peerBBB222", _host: "u@box" },
+    {
+      ...agent({ pid: 100, wrapper_pid: 100 }),
+      _room: "r1",
+      _src: "r1/peerAAA111",
+      _host: "u@box",
+    },
+    {
+      ...agent({ pid: 200, wrapper_pid: 200 }),
+      _room: "r1",
+      _src: "r1/peerBBB222",
+      _host: "u@box",
+    },
   ];
 
   it("keeps two same-labelled machines as separate peer groups", () => {

@@ -252,7 +252,7 @@ channel exists, so the relay never sees it.
    `email=ki.shouzet@gmail.com` (or `hd=acme.com`).
 2. Browser opens the link, establishes the E2E DataChannel (anonymous).
 3. **Host** sends an encrypted `auth.challenge` over the channel: `{ nonce,
-audience, allowedIssuers }`. The `nonce` is bound to the channel transcript.
+   audience, allowedIssuers }`. The `nonce` is bound to the channel transcript.
 4. Browser does Google sign-in (PKCE; ID-token only, no client secret needed).
 5. Browser returns the `idToken` **over the E2E channel** (never to the relay).
 6. **Host verifies** the ID token: JWKS signature, `iss`, `aud` (client id),
@@ -341,7 +341,7 @@ auth's.
   the route→action map; enforce inside `apiFetch`. No user-facing change, but the
   seam now exists. _Highest value-to-complexity ratio._
 - **Phase 2 — local capability links.** `ay share --agent <id> --role viewer|operator|admin
-[--ttl 1h]` mints a signed `#ay1:…` link; `apiFetch` accepts old token **and**
+  [--ttl 1h]` mints a signed `#ay1:…` link; `apiFetch` accepts old token **and**
   new cap.
 - **Phase 3 — UI reflects capability.** Console decodes the fragment to hide
   unavailable controls (read-only terminal for viewers, etc.). Server still
@@ -351,7 +351,7 @@ auth's.
 - **Phase 5 — OIDC-bound shares.** `ay share … --oidc-issuer … --email …`; the
   challenge/verify/bind flow above.
 - **Phase 6 — library/host mode.** Stabilize `createAgentYesApi({ registry,
-ptyManager, authorizer, auditLogger })` so external systems supply org RBAC /
+  ptyManager, authorizer, auditLogger })` so external systems supply org RBAC /
   SSO / DB-backed invites / centralized audit. Core stays small.
 
 ## What stays out of agent-yes core

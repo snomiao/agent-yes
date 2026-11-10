@@ -12,7 +12,11 @@ jobs:
     # beta channel. Repository variable HOLD_PROD=1 is the operator kill switch.
     if: vars.HOLD_PROD != '1'
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # This job waits for rust-build.yml before it publishes to npm. That build
+    # usually takes ~10 min, but one target has taken 32, and a timeout here
+    # leaves a tagged GitHub release that never reaches npm or Docker. Same
+    # budget as publish-beta below.
+    timeout-minutes: 75
     permissions:
       contents: write # to be able to publish a GitHub release
       issues: write # to be able to comment on released issues
@@ -64,13 +68,22 @@ jobs:
           # stale bins when rs/Cargo.toml was just bumped.
           HUSKY: "0"
 
+      # The tag of the release semantic-release just made, or empty when it
+      # made none. Its commit (@semantic-release/git) is the local HEAD, tagged
+      # v<the version it wrote into package.json>. Anything else is not this
+      # run's release: `git describe` used to return the nearest tag, which
+      # after a no-release push (ci:, docs:, chore:) is an older tag, or the
+      # beta tag publish-beta puts on this same commit. Every step below then
+      # ran for it, and npm publish pushed package.json's version as latest:
+      # harmless while that version was already on npm, but it published
+      # 1.302.0 over 1.302.1 after 1.302.0's own release had timed out.
       - name: Get new release tag
         id: get_tag
         run: |
-          git fetch --tags
-          TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          WANT="v$(node -p "require('./package.json').version")"
+          if git tag --points-at HEAD | grep -qxF "$WANT"; then TAG="$WANT"; else TAG=""; fi
           echo "tag=$TAG" >> $GITHUB_OUTPUT
-          echo "New release tag: $TAG"
+          echo "New release tag: ${TAG:-none (no release this run)}"
 
       # Explicitly dispatch rust-build.yml so we can track the exact run ID.
       # (The release: published event on rust-build.yml is a backup; the dispatch here
@@ -127,6 +140,17 @@ jobs:
           npm pkg set name=agent-yes
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # The Docker image installs the version just published to npm, plus the
+      # release's Rust binaries (docker-release.yml, docker/Dockerfile.release).
+      - name: Build the Docker release image
+        # Stable versions only: this job also releases the beta branch.
+        if: steps.get_tag.outputs.tag != '' && !contains(steps.get_tag.outputs.tag, '-')
+        run: |
+          tag="${{ steps.get_tag.outputs.tag }}"
+          gh workflow run docker-release.yml --ref "$GITHUB_REF_NAME" -f version="${tag#v}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   # npm Trusted Publishing is bound to this workflow filename. Keep the beta
   # channel here as a parallel job so it receives the same OIDC trust as stable,

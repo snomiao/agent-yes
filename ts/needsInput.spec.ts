@@ -155,3 +155,39 @@ test("parseMenu: a boxed 'N.M' version still isn't mistaken for an option", () =
   const menu = parseMenu(screen, claude);
   expect(menu!.options).toEqual([1, 2]);
 });
+
+test("detects claude parked on the folder-trust dialog (current un-numbered layout)", () => {
+  // The auto Down+Enter normally answers this; when it loses the race the lane
+  // sits here, and before this pattern `ay ls` reported it as plain idle.
+  const screen = [
+    "Do you trust the files in this folder?",
+    "",
+    "/repo/alpha/tree/feat-x",
+    "",
+    "❯ No, exit",
+    "  Yes, I trust this folder",
+    "",
+    "Enter to confirm · Esc to cancel",
+  ];
+  const r = classifyNeedsInput(screen, claude);
+  expect(r).not.toBeNull();
+  expect(r!.question).toContain("trust");
+});
+
+test("detects the legacy numbered folder-trust dialog", () => {
+  const screen = [
+    "Do you trust the files in this folder?",
+    " > 1. Yes, I trust this folder",
+    "   2. No, exit",
+  ];
+  expect(classifyNeedsInput(screen, claude)).not.toBeNull();
+});
+
+test("prose mentioning the trust dialog is not a trust prompt", () => {
+  const screen = [
+    "⏺ The trust dialog says Yes, I trust this folder when accepted.",
+    "",
+    "? for shortcuts",
+  ];
+  expect(classifyNeedsInput(screen, claude)).toBeNull();
+});

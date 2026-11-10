@@ -231,6 +231,8 @@ Tasks move through a lifecycle per `--kind`, and gated transitions require
 
 ### Ask another agent a question (`ay ask`)
 
+`ay send` の送信確認では、今回のメッセージ識別子が入力欄から履歴へ移ったことを調べます。終了コードは `0` = 送信確認済み、`1` = `NOT SUBMITTED`（宛先を確認してから再送）、`3` = 宛先到達不能、`4` = `QUEUED`（受付済み・処理待ち）です。`4` は失敗として本文を再送せず、宛先の処理を待ってください。確認できない画面や入力候補・ダイアログには Enter を追加しません。`--no-wait` は従来どおり確認を省略するため、終了コード `0` でも送信確認を意味しません。
+
 `ay send` delivers a question but leaves no trace of it: if the asker moves on
 and the other agent dies, wedges, or simply never replies, nothing records that
 an answer is owed. `ay ask` delivers the same way — returning immediately — and
@@ -360,6 +362,30 @@ services:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
     command: ["--", "help me solve all todos"]
 ```
+
+**Sharing from a container (`ay serve --webrtc`):**
+
+`docker.io/snomiao/agent-yes:<version>` (and `:latest`) runs `ay serve --webrtc` by default.
+Docker Desktop on macOS puts containers behind a symmetric NAT: each
+destination gets a new public port, so viewers cannot reach the container
+directly, and the share host logs a `symmetric NAT` warning at startup.
+Publish one UDP port and advertise an address viewers can reach (the Rust
+host only):
+
+```bash
+docker run --rm -it -v ay-home:/home/agent -p 47000:47000/udp \
+  -e AGENT_YES_ICE_UDP_PORT=47000 \
+  -e AGENT_YES_ICE_PUBLIC_IPS=192.0.2.10 \
+  snomiao/agent-yes
+```
+
+`AGENT_YES_ICE_UDP_PORT` puts every peer connection on that one UDP port;
+`AGENT_YES_ICE_PUBLIC_IPS` (comma-separated, or `auto` for the STUN-reported
+public IP) replaces the container's own address in its candidates, e.g. with
+the Docker host's LAN IP for viewers on the same network. Viewers elsewhere
+need that port forwarded to the host, or a TURN relay (`CF_TURN_KEY_ID` +
+`CF_TURN_API_TOKEN`). On a Linux host, `--network host` gives the container
+the host's own network and skips Docker's NAT.
 
 **Available platforms:**
 
@@ -592,6 +618,21 @@ await claudeYes({
 });
 ```
 
+### Chat with your agent from any web page
+
+`agent-yes/liagent` is [liagent](https://github.com/snolab/liagent): a
+floating chat box for your own web pages (a framework-free custom element),
+the hub it talks to (a Cloudflare Durable Object), and the `liagent` CLI that
+delivers each message into an agent-yes agent. It needs none of agent-yes's
+CLI dependencies, so it bundles cleanly for browsers and Workers.
+
+```typescript
+import { connectHub, defineChatBox } from "agent-yes/liagent";
+import { chatHub, routeChat } from "agent-yes/liagent/hub";
+```
+
+See liagent's README and docs for the hub setup and each framework.
+
 ## Implementation
 
 The tool uses `node-pty` to spawn and manage AI CLI processes, with a sophisticated pattern-matching system that:
@@ -620,6 +661,13 @@ Each supported CLI has its own configuration defining:
 ## Inspiration
 
 This project was inspired by: [Claude Code full auto while I sleep : r/ClaudeAI](https://www.reddit.com/r/ClaudeAI/comments/1klk6aw/claude_code_full_auto_while_i_sleep/)
+
+## Contributing
+
+Contributions from humans and coding agents are welcome. Please read
+[CONTRIBUTING.md](CONTRIBUTING.md) first: everything in this repository (code,
+docs, commits, PRs, issues) is written in English, and only synthetic data may
+be committed.
 
 ## License
 
