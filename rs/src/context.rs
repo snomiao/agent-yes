@@ -789,8 +789,39 @@ impl AgentContext {
             })
         };
 
+        // SIGTERM (`kill <pid>`, `ay kill`): stop like Ctrl-C does — forward it to
+        // the child, leave the loop so the terminal is restored below, exit 143.
+        // Without a handler the default action ends this process with the
+        // terminal still raw; the bun launcher used to catch it, but it now
+        // execs into this binary and is gone.
+        #[cfg(unix)]
+        let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .map_err(|e| warn!("Failed to register SIGTERM handler: {}", e))
+            .ok();
+
         loop {
             tokio::select! {
+                // SIGTERM to this process
+                Some(()) = async {
+                    #[cfg(unix)]
+                    { match sigterm.as_mut() { Some(s) => s.recv().await, None => std::future::pending().await } }
+                    #[cfg(not(unix))]
+                    { std::future::pending::<Option<()>>().await }
+                } => {
+                    info!("SIGTERM: stopping the agent");
+                    pty.terminate();
+                    // Brief grace for the child to exit on its own; the process
+                    // group is reaped right after the run loop either way.
+                    for _ in 0..10 {
+                        if matches!(pty.try_wait(), Ok(Some(_))) { break; }
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    // An abort, not a crash: --robust must not restart the CLI.
+                    self.is_user_abort = true;
+                    exit_code = 143;
+                    break;
+                }
+
                 // Heartbeat for pattern detection
                 _ = heartbeat.tick() => {
                     self.heartbeat_check(&mut msg_ctx).await?;
@@ -1029,7 +1060,12 @@ impl AgentContext {
 
         // Print final newline
         if self.is_user_abort {
-            eprintln!("\r\nUser aborted: SIGINT\r");
+            let signal = if exit_code == 143 {
+                "SIGTERM"
+            } else {
+                "SIGINT"
+            };
+            eprintln!("\r\nUser aborted: {signal}\r");
         }
 
         Ok(exit_code)
