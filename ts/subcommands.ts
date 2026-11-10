@@ -4794,22 +4794,17 @@ async function composerFingerprint(record: GlobalPidRecord): Promise<string | nu
 
 /**
  * The target's input box holds text and has not changed for DRAFT_STABLE_WAITS_MS
- * (1, 2, 4, 8 s): nobody is typing, so submit it for them with Enter, or pick the
- * default (yes) when the CLI is stuck on a yes/no question, and report true once
- * the box reads empty again. Any change, or a box that never clears, returns
- * false and the caller parks the message as before.
+ * (1, 2, 4, 8 s): nobody is typing, so submit it with Enter and report true once
+ * the box reads empty again. Only a draft: a menu or yes/no prompt is a question
+ * agent-yes deliberately does not answer. Any change, or a box that never clears,
+ * returns false and the caller parks the message as before.
  */
 export async function submitStableDraft(
   record: GlobalPidRecord,
   waits: number[] = DRAFT_STABLE_WAITS_MS,
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
 ): Promise<boolean> {
-  const first = await readComposerState(record);
-  const yesNo =
-    first.kind !== "draft" && record.log_file
-      ? await extractNeedsInput(record.log_file, record.cli)
-      : null;
-  if (first.kind !== "draft" && !(yesNo && /\byes\b/i.test(yesNo.question))) return false;
+  if ((await readComposerState(record)).kind !== "draft") return false;
   const base = await composerFingerprint(record);
   if (base === null) return false;
   for (const ms of waits) {
