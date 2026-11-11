@@ -1304,7 +1304,11 @@ async function buildAgentContextSection(self: GlobalPidRecord): Promise<string> 
     dutyLine +
     `\n` +
     `As an agent, you can:\n` +
-    `  Spawn a sub-agent:\n` +
+    `  Parallel work: in the SAME cwd use your harness's own subagents (e.g. the Agent\n` +
+    `    tool), NOT a second \`ay\` there (two top-level agents in one checkout is strongly\n` +
+    `    not recommended). For another branch, spawn \`ay\` in a SEPARATE cwd (git worktree)\n` +
+    `    and harvest it by git (merge/PR).\n` +
+    `  Spawn a sub-agent (in its own cwd):\n` +
     `    ay <cli> -- "<prompt>"                                  auto-links as your child\n` +
     `    ay claude --model sonnet --advisor opus -- "<prompt>"   routine task\n` +
     `    ay claude --model opus --advisor fable -- "<prompt>"    complex task\n` +
