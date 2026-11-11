@@ -48,7 +48,8 @@ describe("deliverable", () => {
     expect(msg.length).toBeLessThan(1000);
     const file = /in (\S+\.txt)/.exec(msg)![1];
     expect(readFileSync(file, "utf8")).toBe("x".repeat(2000));
-    expect(statSync(file).mode & 0o777).toBe(0o600);
+    // Windows has no POSIX permission bits (stat reports 0o666).
+    if (process.platform !== "win32") expect(statSync(file).mode & 0o777).toBe(0o600);
     rmSync(dir, { recursive: true });
   });
 });
