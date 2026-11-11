@@ -18,6 +18,21 @@ export interface CwdOccupant {
   cli: string;
 }
 
+/** The vendor behind a cli name: claude/cy/claude-yes -> claude, codex-* -> codex. */
+export function vendorOf(cli: string): string {
+  const c = cli.toLowerCase().replace(/-yes$/, "");
+  if (c === "cy" || c.startsWith("claude")) return "claude";
+  if (c.startsWith("codex")) return "codex";
+  return c;
+}
+
+/** The cli this launch starts: a `<cli>-yes` entry name, else the first non-flag argument. */
+export function launchingCli(rawArgv: string[]): string | null {
+  const bin = path.basename(rawArgv[1] ?? "").replace(/\.(c?js|ts)$/, "");
+  if (bin.endsWith("-yes") && bin !== "agent-yes") return bin.replace(/-yes$/, "");
+  return rawArgv.slice(2).find((a) => !a.startsWith("-")) ?? null;
+}
+
 /**
  * POSIX single-quote a shell token so a copy-pasted recovery command survives
  * spaces, quotes, `$`, `;`, `&`, etc. Safe-charset tokens pass through unquoted
@@ -38,8 +53,26 @@ export function formatCwdConflictWarning(
   occupants: CwdOccupant[],
   cwd: string,
   origCmd: string,
+  launching: string | null = null,
 ): string | null {
   if (occupants.length === 0) return null;
+  // Different vendors in one cwd (say claude + codex) that know about each other
+  // are fine, even good: only same-vendor duplicates get the strong warning.
+  const same = launching
+    ? occupants.filter((r) => vendorOf(r.cli) === vendorOf(launching))
+    : occupants;
+  if (launching && same.length === 0) {
+    const names = occupants
+      .slice(0, 3)
+      .map((r) => `${r.cli} ${r.pid}`)
+      .join(", ");
+    return (
+      `\nℹ  ${names} ${occupants.length > 1 ? "are" : "is"} already running in this directory (${cwd}), from a different vendor than ${launching}.\n` +
+      `   That is fine if they are aware of each other (\`ay ls --cwd .\`, \`ay send <pid> "…"\`). Are they? Otherwise\n` +
+      `   they share one checkout, builds and ports without knowing it. (AGENT_YES_NO_CWD_WARN=1 silences this)\n\n`
+    );
+  }
+  occupants = same;
   // Worktree name doubles as the new dir AND the new branch. `git worktree add`
   // (not `git clone .`) is the correct primitive: it resolves the repo root even
   // from a subdir, shares the object store, and creates the branch in one step.
@@ -84,7 +117,7 @@ export async function warnIfCwdOccupied(rawArgv: string[]): Promise<void> {
     // `-- "fix the bug"`). We can't recover the user's exact original quoting
     // from argv, but per-token quoting is copy-paste-correct.
     const origCmd = ["ay", ...rawArgv.slice(2)].map(shQuote).join(" ");
-    const msg = formatCwdConflictWarning(occupants, here, origCmd);
+    const msg = formatCwdConflictWarning(occupants, here, origCmd, launchingCli(rawArgv));
     if (msg) {
       process.stderr.write(msg);
       // Interactive CLIs (claude/codex) switch to the alternate screen
