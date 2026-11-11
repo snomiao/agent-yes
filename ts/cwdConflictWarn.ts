@@ -53,11 +53,16 @@ export function formatCwdConflictWarning(
   const branch = shQuote(wt);
   const dir = shQuote(`../${wt}`);
   return (
-    `\n⚠  ${occupants.length} agent${occupants.length > 1 ? "s are" : " is"} already running in this directory (${cwd}):\n` +
+    `\n⚠⚠⚠  STRONGLY NOT RECOMMENDED: ${occupants.length} agent${occupants.length > 1 ? "s are" : " is"} already running in this directory (${cwd}):\n` +
     `${list}${more}\n` +
-    `   Parallel agents in one working tree clobber each other's files, builds, and ports.\n` +
-    `   To isolate this run in its own git worktree, cancel (Ctrl-C) and instead:\n` +
-    `      git worktree add -b ${branch} ${dir} && cd ${dir} && ${cmd}\n` +
+    `   Two top-level agents in one working tree share one checkout, one set of builds and\n` +
+    `   one set of live services and ports, and neither knows what the other is doing.\n` +
+    `   Do one of these instead (cancel with Ctrl-C):\n` +
+    `    1. Parallel work in THIS directory: use in-harness subagents inside the existing\n` +
+    `       agent (e.g. Claude's Agent tool), not a second \`ay\`. Subagents are not counted here.\n` +
+    `    2. Parallel work on another branch: start it in its OWN directory (a git worktree)\n` +
+    `       and let the main branch harvest that work by git (merge or PR):\n` +
+    `         git worktree add -b ${branch} ${dir} && cd ${dir} && ${cmd}\n` +
     `   (set AGENT_YES_NO_CWD_WARN=1 to silence)\n\n`
   );
 }

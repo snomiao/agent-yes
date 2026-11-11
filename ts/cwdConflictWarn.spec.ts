@@ -18,6 +18,9 @@ describe("cwdConflictWarn.formatCwdConflictWarning", () => {
     // original command is appended so the suggestion is copy-pasteable
     expect(msg).toContain("&& ay claude -- fix");
     expect(msg).toContain("AGENT_YES_NO_CWD_WARN=1");
+    expect(msg).toContain("STRONGLY NOT RECOMMENDED");
+    expect(msg).toContain("in-harness subagents");
+    expect(msg).toContain("harvest that work by git");
   });
 
   it("pluralizes and lists at most 3 peers with an overflow count", () => {
