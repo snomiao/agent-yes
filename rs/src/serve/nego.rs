@@ -7,7 +7,8 @@
 //   - serve persists one cap file per (daemon, viewer):
 //       ~/.agent-yes/caps/<agent_pid>/d<serve_pid>:<viewer>
 //     containing "<cols> <rows> <ts_ms> <role>\n"; TTL 12s
-//   - negotiation = elementwise min over live caps, floored at 40x10
+//   - negotiation = elementwise min over live caps, floored at 80x10 (cols floor
+//     lowered to the operator's `local` cap when that terminal is narrower)
 //   - the winner is written to ~/.agent-yes/winsize/<pid> ("<cols> <rows> <ts>\n")
 //     followed by SIGWINCH; the agent runtime (rs pty_spawner / ts index) reads
 //     the file on SIGWINCH (or polls on Windows) and resizes the real PTY
@@ -25,7 +26,9 @@ pub const CAP_MIN_COLS: u32 = 20;
 pub const CAP_MAX_COLS: u32 = 500;
 pub const CAP_MIN_ROWS: u32 = 5;
 pub const CAP_MAX_ROWS: u32 = 200;
-pub const NEGO_FLOOR_COLS: u32 = 40;
+/// Below 80 cols TUIs hard-wrap, and that wrapped text is what `ay read` / other
+/// agents get from the log long after a narrow viewer left; it letterboxes instead.
+pub const NEGO_FLOOR_COLS: u32 = 80;
 pub const NEGO_FLOOR_ROWS: u32 = 10;
 pub const CAP_TTL_MS: i64 = 12_000;
 pub const PRESENCE_TTL_MS: i64 = 12_000;
@@ -62,14 +65,16 @@ pub fn sanitize_cap(cols: f64, rows: f64) -> Option<Cap> {
 }
 
 /// Elementwise min over caps, clamped up to the floor (mirrors negotiateSize).
-pub fn negotiate_size(caps: &[Cap]) -> Option<Cap> {
+pub fn negotiate_size(caps: &[Cap], local: Option<Cap>) -> Option<Cap> {
     let first = caps.first()?;
     let mut eff = *first;
     for c in &caps[1..] {
         eff.cols = eff.cols.min(c.cols);
         eff.rows = eff.rows.min(c.rows);
     }
-    eff.cols = eff.cols.max(NEGO_FLOOR_COLS);
+    // never grow the PTY past the operator's real terminal
+    let floor_cols = local.map_or(NEGO_FLOOR_COLS, |l| NEGO_FLOOR_COLS.min(l.cols));
+    eff.cols = eff.cols.max(floor_cols);
     eff.rows = eff.rows.max(NEGO_FLOOR_ROWS);
     Some(eff)
 }
@@ -145,10 +150,12 @@ pub fn withdraw_cap(pid: u32, viewer: &str) {
 }
 
 /// Read every live cap for an agent, pruning files older than CAP_TTL_MS.
-fn read_shared_caps(pid: u32) -> Vec<Cap> {
+/// Live caps for a pid, plus the operator terminal's own (role `local`) cap.
+fn read_shared_caps(pid: u32) -> (Vec<Cap>, Option<Cap>) {
     let mut out = Vec::new();
+    let mut local = None;
     let Ok(entries) = std::fs::read_dir(caps_dir(pid)) else {
-        return out;
+        return (out, local);
     };
     let now = now_ms();
     for e in entries.flatten() {
@@ -164,16 +171,21 @@ fn read_shared_caps(pid: u32) -> Vec<Cap> {
             if now - ts > CAP_TTL_MS {
                 return None; // stale — prune below
             }
-            sanitize_cap(cols, rows)
+            Some((sanitize_cap(cols, rows)?, it.next() == Some("local")))
         })();
         match cap {
-            Some(c) => out.push(c),
+            Some((c, is_local)) => {
+                if is_local {
+                    local = Some(c);
+                }
+                out.push(c)
+            }
             None => {
                 let _ = std::fs::remove_file(&path);
             }
         }
     }
-    out
+    (out, local)
 }
 
 /// `ps -o tty= -p <pid>` — "?"/"??"/empty/error ⇒ no real TTY ⇒ never withdraw
@@ -271,10 +283,10 @@ async fn schedule_nego_inner(pid: u32) {
 }
 
 async fn apply_nego(pid: u32) {
-    let caps = tokio::task::spawn_blocking(move || read_shared_caps(pid))
+    let (caps, local) = tokio::task::spawn_blocking(move || read_shared_caps(pid))
         .await
         .unwrap_or_default();
-    let eff = negotiate_size(&caps);
+    let eff = negotiate_size(&caps, local);
     let mut st = STATE.lock().await;
     match eff {
         Some(eff) => {
@@ -575,11 +587,34 @@ mod tests {
             },
             Cap { cols: 90, rows: 50 },
         ];
-        assert_eq!(negotiate_size(&caps), Some(Cap { cols: 90, rows: 40 }));
-        // floor clamps tiny mins up to 40x10
+        assert_eq!(
+            negotiate_size(&caps, None),
+            Some(Cap { cols: 90, rows: 40 })
+        );
+        // floor clamps tiny mins up to 80x10
         let caps = [Cap { cols: 20, rows: 5 }];
-        assert_eq!(negotiate_size(&caps), Some(Cap { cols: 40, rows: 10 }));
-        assert_eq!(negotiate_size(&[]), None);
+        assert_eq!(
+            negotiate_size(&caps, None),
+            Some(Cap { cols: 80, rows: 10 })
+        );
+        assert_eq!(negotiate_size(&[], None), None);
+    }
+
+    // A narrow web viewer (63 cols) on a headless agent hard-wrapped its TUI and
+    // every `ay read` of it; it letterboxes now. A narrower operator terminal
+    // still bounds the floor, so the PTY never outgrows a real tty.
+    #[test]
+    fn narrow_viewer_floors_at_80_but_not_past_local_tty() {
+        let viewer = Cap { cols: 63, rows: 40 };
+        assert_eq!(
+            negotiate_size(&[viewer], None),
+            Some(Cap { cols: 80, rows: 40 })
+        );
+        let local = Cap { cols: 70, rows: 50 };
+        assert_eq!(
+            negotiate_size(&[viewer, local], Some(local)),
+            Some(Cap { cols: 70, rows: 40 })
+        );
     }
 
     // Regression: a viewer switching agents (prev != pid) used to call

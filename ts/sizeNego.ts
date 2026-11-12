@@ -24,9 +24,11 @@ const CAP_MIN_ROWS = 5;
 const CAP_MAX_COLS = 500;
 const CAP_MAX_ROWS = 200;
 
-/** Never negotiate below this — TUIs (claude, codex) break down when the grid
- * gets absurdly narrow, so a tiny watch-sized viewer can't wedge the agent. */
-export const NEGO_FLOOR_COLS = 40;
+/** Never negotiate below this. A narrower viewer letterboxes instead: below 80
+ * cols TUIs hard-wrap, and the wrapped text is what `ay read` / other agents get
+ * from the log, long after that viewer has gone. Lowered to the operator's own
+ * terminal width when that is narrower (never grow the PTY past a real tty). */
+export const NEGO_FLOOR_COLS = 80;
 export const NEGO_FLOOR_ROWS = 10;
 
 /** Parse a presence-reported cap into a sane SizeCap, or null if unusable. */
@@ -44,7 +46,10 @@ export function sanitizeCap(cap: unknown): SizeCap | null {
  * Returns null when no viewer reports a capacity — meaning "withdraw the
  * negotiated size, let the real tty size rule again".
  */
-export function negotiateSize(caps: ReadonlyArray<SizeCap>): SizeCap | null {
+export function negotiateSize(
+  caps: ReadonlyArray<SizeCap>,
+  local: SizeCap | null = null,
+): SizeCap | null {
   let cols = Infinity;
   let rows = Infinity;
   for (const cap of caps) {
@@ -53,7 +58,7 @@ export function negotiateSize(caps: ReadonlyArray<SizeCap>): SizeCap | null {
   }
   if (!Number.isFinite(cols) || !Number.isFinite(rows)) return null;
   return {
-    cols: Math.max(NEGO_FLOOR_COLS, cols),
+    cols: Math.max(Math.min(NEGO_FLOOR_COLS, local?.cols ?? Infinity), cols),
     rows: Math.max(NEGO_FLOOR_ROWS, rows),
   };
 }
