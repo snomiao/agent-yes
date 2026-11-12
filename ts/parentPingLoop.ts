@@ -31,6 +31,8 @@ import {
   type ReportMode,
 } from "./parentWatching.ts";
 
+import { createParentNotifier } from "./parentNotify.ts";
+
 const POLL_MS = 5_000;
 
 export interface ScreenPatterns {
@@ -144,6 +146,8 @@ export function startParentPingLoop(opts: {
     return inFlight as Promise<void>;
   };
 
+  const notifierReady = createParentNotifier(opts.parentPid, opts.selfWrapperPid).catch(() => null);
+
   const ready = resolveSpawner(opts.parentPid)
     .then((spawner) => {
       if (!spawner || stopped) return false;
@@ -156,11 +160,19 @@ export function startParentPingLoop(opts: {
         } catch {
           return; // a render hiccup is not a signal
         }
-        const stepped = stepParentPing(
-          state,
-          { now: now(), state: classifySelfState(lines, opts.patterns) },
-          cfg,
-        );
+        const current = classifySelfState(lines, opts.patterns);
+        const timestamp = now();
+        void notifierReady
+          .then((notifier) =>
+            notifier?.observe(
+              current,
+              classifyNeedsInput(lines, opts.patterns)?.question ?? null,
+              lines.join("\n"),
+              timestamp,
+            ),
+          )
+          .catch(() => {});
+        const stepped = stepParentPing(state, { now: timestamp, state: current }, cfg);
         state = stepped.state;
         if (stepped.ping) void send(stepped.ping, lines.join("\n"));
       }, opts.pollMs ?? POLL_MS);
@@ -179,6 +191,8 @@ export function startParentPingLoop(opts: {
     async pingExit(exitCode) {
       await ready;
       this.stop();
+      const notifier = await notifierReady;
+      await notifier?.observe("stopped", null, null, now()).catch(() => {});
       if (!target) return;
       let tail: string | null = null;
       try {

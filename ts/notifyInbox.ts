@@ -22,8 +22,8 @@
 import path from "path";
 import { agentYesHome } from "./agentYesHome.ts";
 
-/** The three edges we deliver — the inverse of "background notify on EXIT only". */
-export type NotifyEdge = "needs_input" | "idle" | "exited";
+/** Lifecycle edges plus periodic child liveness reports. */
+export type NotifyEdge = "needs_input" | "idle" | "exited" | "heartbeat";
 
 /**
  * One notification, as stored (one NDJSON line) and streamed. `seq` is the
@@ -169,7 +169,7 @@ export function parseInboxText(text: string): NotifyEvent[] {
   return out;
 }
 
-const EDGES = new Set<string>(["needs_input", "idle", "exited"]);
+const EDGES = new Set<string>(["needs_input", "idle", "exited", "heartbeat"]);
 
 /**
  * Full shape validation at the storage boundary — a torn/partial line missing

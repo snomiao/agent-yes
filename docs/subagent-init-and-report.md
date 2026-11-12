@@ -153,3 +153,27 @@ an orchestrator that wants to drain many children on its own schedule. The wrapp
 ping is child-side **push** into the parent's live stdin, for the parent that
 never asked. A parent running `ay notify watch` will see both; the report block is
 labelled so the duplicate is obvious rather than confusing.
+
+## Child-owned inbox events (TypeScript wrapper)
+
+The TypeScript wrapper also records `idle`, `needs_input`, and `exited` events
+in its parent's existing notify inbox. It resolves the inherited `AGENT_YES_PID`
+to the parent's registry entry at startup and stamps both agents' start times
+on events to guard against PID reuse. Top-level agents and unresolved parents
+produce no events.
+
+The wrapper polls its rendered terminal every five seconds. A ready prompt must
+remain idle for 30 seconds before an `idle` event is written; working indicators
+prevent false completion during silent tool calls. A `heartbeat` event records
+the current state on the first successful poll and every 60 seconds thereafter.
+Heartbeats indicate liveness, including while active; they do not mean the task
+is finished. Normal wrapper termination flushes one `exited` event. Abrupt kills
+still require the daemon's existing process-disappearance detection.
+
+These writes work without a running `ay notify watch` and remain enabled when
+`AGENT_YES_REPORT_PARENT=never` suppresses injected text reports. Read them with
+`ay notify ls --unread --json` or stream them with `ay notify watch --json`.
+Heartbeat events use the same sequence, cursor, and retention rules as other
+inbox events. Running the daemon alongside the child reporter can produce
+repeated lifecycle events; consumers should allow at-least-once delivery.
+The Rust wrapper's existing daemon-based reporting is unchanged.
