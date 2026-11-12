@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, rm, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createParentNotifier, PARENT_HEARTBEAT_MS } from "./parentNotify.ts";
@@ -100,6 +100,20 @@ describe("child-owned parent inbox notifications", () => {
       "heartbeat",
       "heartbeat",
       "needs_input",
+    ]);
+  });
+  it("recovers after an inbox write fails without consuming the lifecycle edge", async () => {
+    const notifier = (await createParentNotifier(1110, 2220))!;
+    await writeFile(path.join(home, "notify"), "blocked");
+    await expect(notifier.observe("idle", null, "ready", 1000)).rejects.toThrow();
+    await unlink(path.join(home, "notify"));
+    await notifier.observe("idle", null, "ready", 2000);
+    await notifier.observe("idle", null, "ready", 32000);
+    await notifier.observe("stopped", null, null, 33000);
+    expect((await readInbox(hostId(), 1110)).map((e) => e.edge)).toEqual([
+      "heartbeat",
+      "idle",
+      "exited",
     ]);
   });
   it("skips roots, missing parents, self links, and reused parent identities", async () => {
