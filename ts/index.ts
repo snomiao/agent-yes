@@ -642,6 +642,7 @@ export default async function agentYes({
     robust,
     autoYes,
   });
+  ctx.screen = () => xtermProxy.tail(24);
 
   // Register agent in global registry (non-blocking)
   try {

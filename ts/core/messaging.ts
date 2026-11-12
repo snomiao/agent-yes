@@ -11,6 +11,8 @@ export interface MessageContext {
   idleWaiter: IdleWaiter;
   stdinReady: ReadyManager;
   nextStdout: ReadyManager;
+  /** Rendered screen. When set, sendEnter judges "responded" by a screen change, not by bytes. */
+  screen?: () => string;
 }
 
 /**
@@ -26,20 +28,21 @@ export async function sendEnter(context: MessageContext, waitms = 1000) {
   context.shell.write("\r");
   context.idleWaiter.ping(); // mirrors sendMessage — a programmatic Enter is activity too
 
-  // Retry Enter if no stdout received within escalating timeouts
+  // The CLI responded only if the rendered screen changed: claude's title spinner
+  // (OSC 0) streams bytes while a dialog that swallowed the Enter sits unanswered.
+  // Without a (non-empty) screen, fall back to "any stdout".
+  const screenAtEnter = context.screen?.() || undefined;
+  const responded = () =>
+    screenAtEnter === undefined ? context.nextStdout.isReady : context.screen?.() !== screenAtEnter;
+
+  // Retry Enter if the CLI hasn't responded within escalating timeouts
   for (const ms of [1000, 3000]) {
-    await Promise.race([
-      context.nextStdout.wait(),
-      new Promise<void>((resolve) =>
-        setTimeout(() => {
-          if (!context.nextStdout.isReady) {
-            context.shell.write("\r");
-            context.idleWaiter.ping();
-          }
-          resolve();
-        }, ms),
-      ),
-    ]);
+    const deadline = Date.now() + ms;
+    while (!responded() && Date.now() < deadline)
+      await new Promise((r) => setTimeout(r, Math.min(100, deadline - Date.now())));
+    if (responded()) return;
+    context.shell.write("\r");
+    context.idleWaiter.ping();
   }
 }
 
