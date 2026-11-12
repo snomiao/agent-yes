@@ -58,17 +58,25 @@ export function formatCwdConflictWarning(
     `   Parallel agents in one working tree clobber each other's files, builds, and ports.\n` +
     `   To isolate this run in its own git worktree, cancel (Ctrl-C) and instead:\n` +
     `      git worktree add -b ${branch} ${dir} && cd ${dir} && ${cmd}\n` +
-    `   (set AGENT_YES_NO_CWD_WARN=1 to silence)\n\n`
+    `   (set AGENT_YES_TRUST_CWD=1 to silence)\n\n`
   );
+}
+
+/**
+ * Check if current working directory is explicitly trusted / silenced.
+ * Supports AGENT_YES_TRUST_CWD=1 (preferred) and legacy AGENT_YES_NO_CWD_WARN=1.
+ */
+export function isCwdTrusted(): boolean {
+  return process.env.AGENT_YES_TRUST_CWD === "1" || process.env.AGENT_YES_NO_CWD_WARN === "1";
 }
 
 /**
  * IO wrapper: discover live same-cwd peers and print the warning to stderr.
  * Best-effort and swallow-all — a discovery hiccup must NEVER block a launch.
- * No-op when AGENT_YES_NO_CWD_WARN=1.
+ * No-op when AGENT_YES_TRUST_CWD=1 or AGENT_YES_NO_CWD_WARN=1.
  */
 export async function warnIfCwdOccupied(rawArgv: string[]): Promise<void> {
-  if (process.env.AGENT_YES_NO_CWD_WARN === "1") return;
+  if (isCwdTrusted()) return;
   try {
     const here = path.resolve(process.cwd());
     const occupants: CwdOccupant[] = (await readGlobalPids({ liveOnly: true }))

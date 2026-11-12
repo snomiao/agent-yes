@@ -17,7 +17,7 @@ describe("cwdConflictWarn.formatCwdConflictWarning", () => {
     expect(msg).not.toContain("git clone");
     // original command is appended so the suggestion is copy-pasteable
     expect(msg).toContain("&& ay claude -- fix");
-    expect(msg).toContain("AGENT_YES_NO_CWD_WARN=1");
+    expect(msg).toContain("AGENT_YES_TRUST_CWD=1");
   });
 
   it("pluralizes and lists at most 3 peers with an overflow count", () => {
