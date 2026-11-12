@@ -132,6 +132,7 @@ import {
   classifyComposer,
   composerBoxed,
   composerPromptRow,
+  stripPromptGlyph,
   DUPLICATE_WINDOW_MS,
   findRecentDuplicate,
   noteRecentSend,
@@ -4763,7 +4764,7 @@ export async function readComposerState(
   try {
     const rows = await renderComposerRows({ ...record, log_file: logPath }, windows);
     if (!rows) return { kind: "unknown", reason: "log unreadable or empty" };
-    const state = classifyComposer(rows);
+    const state = classifyComposer(rows, record.cli);
     // No window showed the box, so a "draft" was read under some other prompt
     // row, possibly an old turn: say so instead of reporting it as a draft.
     if (claude && state.kind === "draft" && !composerBoxed(rows.map((r) => r.text)))
@@ -5180,6 +5181,7 @@ type SubmissionState = "submitted" | "queued" | "not-submitted";
 export function inspectSubmission(
   screen: string[],
   identity: string,
+  cli?: string,
 ): {
   submission: SubmissionState;
   retry: boolean;
@@ -5211,7 +5213,7 @@ export function inspectSubmission(
   // The same boundary the draft check uses: a quoted `› line` inside our own
   // unsent message must not be taken for the prompt (that would count the
   // message's nonce as transcript evidence — codex review).
-  const prompt = composerPromptRow(screen);
+  const prompt = composerPromptRow(screen, cli);
   if (prompt < 0) {
     // No composer on screen: a plain shell (cmd, bash, an ssh session) has no
     // `❯` row to inspect. It echoes the submitted line after its prompt and
@@ -5244,7 +5246,7 @@ export function inspectSubmission(
   // suggestion containing that character. Match whole rendered message lines.
   let transcriptMatches = wrapped ? occurrences(transcript) : 0;
   if (!wrapped) {
-    const lines = transcriptLines.map((line) => compact(line.replace(/^\s*[❯›]\s*/u, "")));
+    const lines = transcriptLines.map((line) => compact(stripPromptGlyph(line, cli)));
     for (let start = 0; start < lines.length; start++) {
       let candidate = "";
       for (let end = start; end < lines.length && candidate.length < needle.length; end++) {
@@ -5256,7 +5258,7 @@ export function inspectSubmission(
       }
     }
   }
-  const input: string[] = [screen[prompt]!.replace(/^\s*[❯›]\s*/u, "")];
+  const input: string[] = [stripPromptGlyph(screen[prompt]!, cli)];
   for (const line of screen.slice(prompt + 1)) {
     // A rule or the Claude/Codex footer chrome (incl. the model/cwd status row).
     if (isComposerChrome(line)) break;
@@ -5289,8 +5291,8 @@ export function inspectSubmission(
   return { ...unknown, composerVisible: true };
 }
 
-export function submissionState(screen: string[], identity = ""): SubmissionState {
-  return inspectSubmission(screen, identity).submission;
+export function submissionState(screen: string[], identity = "", cli?: string): SubmissionState {
+  return inspectSubmission(screen, identity, cli).submission;
 }
 
 /** A collapsed paste is not delivery evidence; it can only authorize a retry. */
@@ -5346,7 +5348,7 @@ export async function submitAndConfirm(
   const geometry = (await readAgentPtysize(record)) ?? undefined;
   const cfg = (await cliDefaults())[record.cli];
   let screen = await renderSendScreen(target, geometry);
-  const before = inspectSubmission(screen, identity);
+  const before = inspectSubmission(screen, identity, record.cli);
   const baseline = before.transcriptMatches;
   // Delivered = a NEW copy in the transcript, or — what a count in a rolling
   // 40-line window cannot show for a repeated raw message like "continue" —
@@ -5373,7 +5375,7 @@ export async function submitAndConfirm(
       await new Promise((r) => setTimeout(r, Math.min(400, 150 * 1.618 ** (attempt - 1))));
       // Recheck after the delay: the target could have accepted the earlier Enter.
       screen = await renderSendScreen(target, geometry);
-      const settled = inspectSubmission(screen, identity);
+      const settled = inspectSubmission(screen, identity, record.cli);
       if (delivered(settled)) return outcome(settled, screen);
       if (
         !canRetry(settled, screen) ||
@@ -5385,7 +5387,7 @@ export async function submitAndConfirm(
     await writeToIpc(fifoPath, trailing);
     await waitForLogQuiet(logFile, SEND_CONFIRM_QUIET_MS, SEND_CONFIRM_MAX_MS);
     screen = await renderSendScreen(target, geometry);
-    const evidence = inspectSubmission(screen, identity);
+    const evidence = inspectSubmission(screen, identity, record.cli);
     if (delivered(evidence)) return outcome(evidence, screen);
     if (!canRetry(evidence, screen)) break;
   }

@@ -1697,6 +1697,17 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
     }
   });
 
+  it("confirms a send to agy, whose prompt row is a plain `>`", async () => {
+    // Regression: agy received every message, but with no `❯` row on screen
+    // `ay send` reported NOT SUBMITTED (rc 1) each time.
+    const { submissionState } = await loadModule();
+    const marker = "<ay-msg abc12345";
+    const rule = "─".repeat(40);
+    const sent = [rule, `> ${marker} from claude`, "  …", "", "  Done.", rule, ">", rule];
+    expect(submissionState([...sent, "? for shortcuts"], marker, "agy")).toBe("submitted");
+    expect(submissionState([rule, `> ${marker}`, rule], marker, "agy")).toBe("not-submitted");
+  });
+
   it("requires our identity to move out of the composer into the transcript", async () => {
     const { submissionState, inspectSubmission } = await loadModule();
     const marker = "<ay-msg abc12345";
