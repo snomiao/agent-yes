@@ -35,7 +35,12 @@ jobs:
           persist-credentials: false
       - uses: actions/setup-node@v5
         with:
-          node-version: "latest"
+          # Not "latest": since 2026-10-30 that resolves to a Node 27 alpha,
+          # and semantic-release's engines range (^22.14.0 || >=24.10.0) does
+          # not match a prerelease, so every stable release failed at
+          # `bunx semantic-release` with "node version ... is required.
+          # Found v27.0.0-alpha.0.0.0" (run 41040691388 and every push since).
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
       - uses: oven-sh/setup-bun@v2
       - run: bun i
@@ -169,7 +174,9 @@ jobs:
           fetch-depth: 0
       - uses: actions/setup-node@v5
         with:
-          node-version: "latest"
+          # Same pin as the release job above: an alpha Node is not what the
+          # beta channel should be published and provenance-signed with.
+          node-version: "24"
           registry-url: https://registry.npmjs.org
       - uses: oven-sh/setup-bun@v2
       - run: bun install --frozen-lockfile
