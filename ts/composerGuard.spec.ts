@@ -23,10 +23,10 @@ import {
 const RULE = "─".repeat(40);
 const FOOTER = "\x1b[38;2;153;153;153m  ⏵⏵ auto mode on (shift+tab to cycle)\x1b[39m";
 
-async function classify(frame: string, cols = 60) {
+async function classify(frame: string, cols = 60, cli?: string) {
   const term = new Terminal({ cols, rows: 12, allowProposedApi: true });
   await new Promise<void>((r) => term.write(frame, r));
-  return classifyComposer(rowsFromXterm(term as never, 40));
+  return classifyComposer(rowsFromXterm(term as never, 40), cli);
 }
 
 const box = (inner: string) => `history\r\n${RULE}\r\n❯ ${inner}\x1b[0m\r\n${RULE}\r\n${FOOTER}`;
@@ -167,6 +167,27 @@ describe("classifyComposer", () => {
       const frame = `❯ first\r\n  a · b\r\n\r\n${GRAY(footers[0]!)}`;
       expect(await classify(frame, 80)).toEqual({ kind: "draft", chars: 8 });
     });
+  });
+});
+
+// agy (Antigravity CLI 1.5.6) draws a claude-shaped box with a plain `>` prompt,
+// as read off a live lane's PTY log.
+const agyBox = (inner: string) =>
+  `history\r\n${RULE}\r\n>${inner}\r\n${RULE}\r\n? for shortcuts      Gemini 3.8 Flash · low`;
+
+describe("agy's ASCII `>` prompt", () => {
+  it("reads agy's empty box as empty, not as a one-char draft", async () => {
+    expect(await classify(agyBox(""), 60, "agy")).toEqual({ kind: "empty", ghost: false });
+  });
+
+  it("reads typed text in agy's box as a draft", async () => {
+    expect(await classify(agyBox(" hi"), 60, "agy")).toEqual({ kind: "draft", chars: 2 });
+  });
+
+  it("keeps `>` a markdown quote, not a prompt, for other CLIs", async () => {
+    expect((await classify(agyBox(""), 60)).kind).toBe("unknown");
+    expect(composerBoxed(["history", RULE, "> quoted", RULE, "? for shortcuts"])).toBe(false);
+    expect(composerBoxed(["history", RULE, ">", RULE, "? for shortcuts"], "agy")).toBe(true);
   });
 });
 

@@ -132,6 +132,7 @@ import {
   classifyComposer,
   composerBoxed,
   composerPromptRow,
+  stripPromptGlyph,
   DUPLICATE_WINDOW_MS,
   findRecentDuplicate,
   noteRecentSend,
@@ -1304,7 +1305,11 @@ async function buildAgentContextSection(self: GlobalPidRecord): Promise<string> 
     dutyLine +
     `\n` +
     `As an agent, you can:\n` +
-    `  Spawn a sub-agent:\n` +
+    `  Parallel work: in the SAME cwd use your harness's own subagents (e.g. the Agent\n` +
+    `    tool), NOT a second \`ay\` there (two top-level agents in one checkout is strongly\n` +
+    `    not recommended). For another branch, spawn \`ay\` in a SEPARATE cwd (git worktree)\n` +
+    `    and harvest it by git (merge/PR).\n` +
+    `  Spawn a sub-agent (in its own cwd):\n` +
     `    ay <cli> -- "<prompt>"                                  auto-links as your child\n` +
     `    ay claude --model sonnet --advisor opus -- "<prompt>"   routine task\n` +
     `    ay claude --model opus --advisor fable -- "<prompt>"    complex task\n` +
@@ -4759,7 +4764,7 @@ export async function readComposerState(
   try {
     const rows = await renderComposerRows({ ...record, log_file: logPath }, windows);
     if (!rows) return { kind: "unknown", reason: "log unreadable or empty" };
-    const state = classifyComposer(rows);
+    const state = classifyComposer(rows, record.cli);
     // No window showed the box, so a "draft" was read under some other prompt
     // row, possibly an old turn: say so instead of reporting it as a draft.
     if (claude && state.kind === "draft" && !composerBoxed(rows.map((r) => r.text)))
@@ -4771,6 +4776,53 @@ export async function readComposerState(
       reason: `log unreadable or render failed: ${(e as Error)?.message ?? e}`,
     };
   }
+}
+
+/** Waits between re-reads of a draft before it counts as abandoned (~15 s in all). */
+export const DRAFT_STABLE_WAITS_MS = [1000, 2000, 4000, 8000];
+
+/** The bottom of the screen as plain text, to tell "unchanged" from "changed". */
+async function composerFingerprint(record: GlobalPidRecord): Promise<string | null> {
+  if (!record.log_file) return null;
+  try {
+    const rows = await renderComposerRows({ ...record, log_file: record.log_file });
+    return rows
+      ? rows
+          .slice(-8)
+          .map((r) => r.text)
+          .join("\n")
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The target's input box holds text and has not changed for DRAFT_STABLE_WAITS_MS
+ * (1, 2, 4, 8 s): nobody is typing, so submit it with Enter and report true once
+ * the box reads empty again. Only a draft: a menu or yes/no prompt is a question
+ * agent-yes deliberately does not answer. Any change, or a box that never clears,
+ * returns false and the caller parks the message as before.
+ */
+export async function submitStableDraft(
+  record: GlobalPidRecord,
+  waits: number[] = DRAFT_STABLE_WAITS_MS,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<boolean> {
+  if ((await readComposerState(record)).kind !== "draft") return false;
+  const base = await composerFingerprint(record);
+  if (base === null) return false;
+  for (const ms of waits) {
+    await sleep(ms);
+    if ((await composerFingerprint(record)) !== base) return false;
+  }
+  if (!record.fifo_file) return false;
+  await withIpcLock(record.pid, () => writeToIpc(record.fifo_file!, "\r"));
+  for (let i = 0; i < 5; i++) {
+    await sleep(500);
+    if ((await readComposerState(record)).kind === "empty") return true;
+  }
+  return false;
 }
 
 /** Bytes `[from, to)` of a log file. */
@@ -5176,6 +5228,7 @@ type SubmissionState = "submitted" | "queued" | "not-submitted";
 export function inspectSubmission(
   screen: string[],
   identity: string,
+  cli?: string,
 ): {
   submission: SubmissionState;
   retry: boolean;
@@ -5207,7 +5260,7 @@ export function inspectSubmission(
   // The same boundary the draft check uses: a quoted `› line` inside our own
   // unsent message must not be taken for the prompt (that would count the
   // message's nonce as transcript evidence — codex review).
-  const prompt = composerPromptRow(screen);
+  const prompt = composerPromptRow(screen, cli);
   if (prompt < 0) {
     // No composer on screen: a plain shell (cmd, bash, an ssh session) has no
     // `❯` row to inspect. It echoes the submitted line after its prompt and
@@ -5240,7 +5293,7 @@ export function inspectSubmission(
   // suggestion containing that character. Match whole rendered message lines.
   let transcriptMatches = wrapped ? occurrences(transcript) : 0;
   if (!wrapped) {
-    const lines = transcriptLines.map((line) => compact(line.replace(/^\s*[❯›]\s*/u, "")));
+    const lines = transcriptLines.map((line) => compact(stripPromptGlyph(line, cli)));
     for (let start = 0; start < lines.length; start++) {
       let candidate = "";
       for (let end = start; end < lines.length && candidate.length < needle.length; end++) {
@@ -5252,7 +5305,7 @@ export function inspectSubmission(
       }
     }
   }
-  const input: string[] = [screen[prompt]!.replace(/^\s*[❯›]\s*/u, "")];
+  const input: string[] = [stripPromptGlyph(screen[prompt]!, cli)];
   for (const line of screen.slice(prompt + 1)) {
     // A rule or the Claude/Codex footer chrome (incl. the model/cwd status row).
     if (isComposerChrome(line)) break;
@@ -5285,8 +5338,8 @@ export function inspectSubmission(
   return { ...unknown, composerVisible: true };
 }
 
-export function submissionState(screen: string[], identity = ""): SubmissionState {
-  return inspectSubmission(screen, identity).submission;
+export function submissionState(screen: string[], identity = "", cli?: string): SubmissionState {
+  return inspectSubmission(screen, identity, cli).submission;
 }
 
 /** A collapsed paste is not delivery evidence; it can only authorize a retry. */
@@ -5342,7 +5395,7 @@ export async function submitAndConfirm(
   const geometry = (await readAgentPtysize(record)) ?? undefined;
   const cfg = (await cliDefaults())[record.cli];
   let screen = await renderSendScreen(target, geometry);
-  const before = inspectSubmission(screen, identity);
+  const before = inspectSubmission(screen, identity, record.cli);
   const baseline = before.transcriptMatches;
   // Delivered = a NEW copy in the transcript, or — what a count in a rolling
   // 40-line window cannot show for a repeated raw message like "continue" —
@@ -5369,7 +5422,7 @@ export async function submitAndConfirm(
       await new Promise((r) => setTimeout(r, Math.min(400, 150 * 1.618 ** (attempt - 1))));
       // Recheck after the delay: the target could have accepted the earlier Enter.
       screen = await renderSendScreen(target, geometry);
-      const settled = inspectSubmission(screen, identity);
+      const settled = inspectSubmission(screen, identity, record.cli);
       if (delivered(settled)) return outcome(settled, screen);
       if (
         !canRetry(settled, screen) ||
@@ -5381,7 +5434,7 @@ export async function submitAndConfirm(
     await writeToIpc(fifoPath, trailing);
     await waitForLogQuiet(logFile, SEND_CONFIRM_QUIET_MS, SEND_CONFIRM_MAX_MS);
     screen = await renderSendScreen(target, geometry);
-    const evidence = inspectSubmission(screen, identity);
+    const evidence = inspectSubmission(screen, identity, record.cli);
     if (delivered(evidence)) return outcome(evidence, screen);
     if (!canRetry(evidence, screen)) break;
   }
@@ -5591,6 +5644,9 @@ async function cmdSendDrain(rest: string[]): Promise<number> {
       }
       const record = (await readGlobalPids()).find((r) => r.pid === pid);
       let result: Awaited<ReturnType<typeof deliverBody>> | null = null;
+      // A draft nobody touches (unchanged at 1/2/4/8 s) is submitted for its
+      // owner here too, so a message parked behind it is not stuck forever.
+      if (record && !(await isUserTyping(pid))) await submitStableDraft(record);
       if (record && !(await isUserTyping(pid))) {
         await withIpcLock(pid, async () => {
           // Re-check under the lock, right before the write.
@@ -5965,6 +6021,11 @@ async function cmdSend(rest: string[]): Promise<number> {
     code: trailing === "\r" ? undefined : codeName,
     wrapped: Boolean(nonce),
   };
+  // A draft nobody is touching (unchanged at 1, 2, 4, 8 s) is submitted for its
+  // owner, so it does not hold this message until someone clears the box.
+  if (fullBody && !noWait && !parkReason && (await listPending(record.pid)).length === 0) {
+    await submitStableDraft(record);
+  }
   // The body and its Enter are ONE transaction: every gap between them (the
   // paste-settle wait, the submit-confirm retries) is a window where another
   // writer's bytes would land mid-message. See ts/ipcLock.ts.
