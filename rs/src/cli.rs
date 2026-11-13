@@ -73,7 +73,7 @@ pub const SUBCOMMANDS: &[&str] = &[
 /// on the manager entry). Mirrors `MANAGER_SUBCOMMANDS` in ts/subcommands.ts.
 pub const MANAGER_SUBCOMMANDS: &[&str] = &[
     // manage this host
-    "setup", "ws", // prompt-word verbs
+    "setup", "ws", "lanes", // prompt-word verbs
     "read", "share", "connect", "kill",
 ];
 

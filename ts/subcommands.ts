@@ -731,6 +731,7 @@ const MANAGER_SUBCOMMANDS = new Set([
   // manage this host
   "setup",
   "ws",
+  "lanes",
   // prompt-word verbs
   "read",
   "share",
@@ -1181,6 +1182,10 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         const { cmdWs } = await import("./ws.ts");
         return cmdWs(rest);
       }
+      case "lanes": {
+        const { cmdLanes } = await import("./lanesCli.ts");
+        return cmdLanes(rest);
+      }
       case "schedule": {
         const { cmdSchedule } = await import("./schedule.ts");
         return cmdSchedule(rest);
@@ -1343,7 +1348,8 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
   // `ws` is manager-only for the same reason as `setup`.
   const wsLines = managerCommands
     ? `  ay ws ls [--status]                 list <owner>/<repo>/tree/<branch> workspaces\n` +
-      `  ay ws new <owner>/<repo>[@branch]   clone/refresh a workspace (ay ws help for more)\n`
+      `  ay ws new <owner>/<repo>[@branch]   clone/refresh a workspace (ay ws help for more)\n` +
+      `  ay lanes ls|id|send|resume          address agents by stable lane name (ay lanes help)\n`
     : ``;
   // `read` is manager-entry-only too, but for the opposite reason: it's a word
   // people open prompts with, so `cy read …` runs the agent. Unlike setup/ws the

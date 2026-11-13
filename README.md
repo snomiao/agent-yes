@@ -195,6 +195,35 @@ cy stop <keyword>                      # graceful shutdown (claude/codex: /exit)
 so subcommands work whether the target agent is the TS or Rust runtime.
 Detailed reference (Japanese): [`docs/cy-subcommands.md`](./docs/cy-subcommands.md).
 
+### Address agents by lane name (`ay lanes`)
+
+A lane is a stable name for "the agent working in this directory", so scripts and
+other agents can reach it after its wrapper restarts. The registry is a TSV file at
+`$AY_LANES_FILE`, else `~/.config/agent-yes/lanes.tsv`:
+
+```tsv
+# name<TAB>cwd relative to $HOME<TAB>[host ssh alias; empty = this machine]
+alpha	work/acme/tree/main
+beta	work/acme/tree/beta
+gamma	work/other	build-box
+```
+
+A lane resolves to the newest live agent whose cwd is exactly `~/<cwd>`. When two lanes
+share a cwd, the agent whose prompt says `You are the [<name>` wins. Lanes on another host
+are resolved there over ssh.
+
+```bash
+ay lanes ls                       # lane -> live pid / agent_id / cwd
+ay lanes id alpha                 # live agent_id (exit 3 if none)
+ay lanes send alpha "rebase please" -- --force
+ay lanes resume --all --dry-run   # lanes with no live agent: show the newest Claude session to resume
+ay lanes resume alpha --max-age 24h
+```
+
+`resume` starts `ay --detach claude -- --resume <session-id> "<note>"` in the lane's cwd,
+picking the newest `~/.claude/projects/<cwd>/*.jsonl` (for a shared cwd, the session that
+mentions `[<name>]` most). Sessions older than `--max-age` (default 48h) are skipped.
+
 ### Shared task list across agents (`ay todo`)
 
 A lifecycle-tracked task list that every agent working on a repo reads and
