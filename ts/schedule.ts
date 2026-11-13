@@ -81,7 +81,11 @@ export async function cmdSchedule(rest: string[]): Promise<number> {
   if (sub === "list" || sub === "ls") {
     // oxmgr lists everything; scheduled agents are the agent-yes-cron-* rows.
     process.stdout.write(`scheduled agents are named '${SCHED_PREFIX}*':\n`);
-    return (await run([oxmgrBin, "list"])).code;
+    const code = (await run([oxmgrBin, "list"])).code;
+    // the shared store's `ay cron` reminders (one listing for both: ay schedules ls)
+    process.stdout.write(`\nay cron reminders (fired by the scheduler daemon):\n`);
+    await (await import("./schedulesCli.ts")).cmdCron(["ls"]);
+    return code;
   }
 
   if (sub === "remove" || sub === "rm" || sub === "delete") {

@@ -206,7 +206,9 @@ describe("subcommands.isSubcommand", () => {
     // and explain it` and `cy connect the frontend to the API` must reach claude.
     // The commands live on the manager entry (`ay read`, `ay share`, `ay connect`).
     // `kill` likewise: `cy kill the stale dev server on :3000` is a prompt.
-    for (const sub of ["read", "share", "connect", "kill"]) {
+    // `cron` / `schedules` / `sched` manage the host (`ay cron …`), so
+    // `cy cron job is broken, fix it` must also stay a prompt.
+    for (const sub of ["read", "share", "connect", "kill", "cron", "schedules", "sched"]) {
       expect(isSubcommand(sub, true)).toBe(true);
       expect(isSubcommand(sub, false)).toBe(false);
     }

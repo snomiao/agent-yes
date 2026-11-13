@@ -731,6 +731,9 @@ const MANAGER_SUBCOMMANDS = new Set([
   // manage this host
   "setup",
   "ws",
+  "schedules",
+  "sched",
+  "cron",
   // prompt-word verbs
   "read",
   "share",
@@ -1181,6 +1184,15 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         const { cmdWs } = await import("./ws.ts");
         return cmdWs(rest);
       }
+      case "schedules":
+      case "sched": {
+        const { cmdSchedules } = await import("./schedulesCli.ts");
+        return cmdSchedules(rest);
+      }
+      case "cron": {
+        const { cmdCron } = await import("./schedulesCli.ts");
+        return cmdCron(rest);
+      }
       case "schedule": {
         const { cmdSchedule } = await import("./schedule.ts");
         return cmdSchedule(rest);
@@ -1343,7 +1355,9 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
   // `ws` is manager-only for the same reason as `setup`.
   const wsLines = managerCommands
     ? `  ay ws ls [--status]                 list <owner>/<repo>/tree/<branch> workspaces\n` +
-      `  ay ws new <owner>/<repo>[@branch]   clone/refresh a workspace (ay ws help for more)\n`
+      `  ay ws new <owner>/<repo>[@branch]   clone/refresh a workspace (ay ws help for more)\n` +
+      `  ay cron "<cron>" <target> <msg>     recurring reminder sent to an agent (ay cron help)\n` +
+      `  ay schedules ls|daemon              all schedules on this machine + the scheduler daemon\n`
     : ``;
   // `read` is manager-entry-only too, but for the opposite reason: it's a word
   // people open prompts with, so `cy read …` runs the agent. Unlike setup/ws the
