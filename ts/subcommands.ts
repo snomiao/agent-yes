@@ -4778,6 +4778,53 @@ export async function readComposerState(
   }
 }
 
+/** Waits between re-reads of a draft before it counts as abandoned (~15 s in all). */
+export const DRAFT_STABLE_WAITS_MS = [1000, 2000, 4000, 8000];
+
+/** The bottom of the screen as plain text, to tell "unchanged" from "changed". */
+async function composerFingerprint(record: GlobalPidRecord): Promise<string | null> {
+  if (!record.log_file) return null;
+  try {
+    const rows = await renderComposerRows({ ...record, log_file: record.log_file });
+    return rows
+      ? rows
+          .slice(-8)
+          .map((r) => r.text)
+          .join("\n")
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The target's input box holds text and has not changed for DRAFT_STABLE_WAITS_MS
+ * (1, 2, 4, 8 s): nobody is typing, so submit it with Enter and report true once
+ * the box reads empty again. Only a draft: a menu or yes/no prompt is a question
+ * agent-yes deliberately does not answer. Any change, or a box that never clears,
+ * returns false and the caller parks the message as before.
+ */
+export async function submitStableDraft(
+  record: GlobalPidRecord,
+  waits: number[] = DRAFT_STABLE_WAITS_MS,
+  sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
+): Promise<boolean> {
+  if ((await readComposerState(record)).kind !== "draft") return false;
+  const base = await composerFingerprint(record);
+  if (base === null) return false;
+  for (const ms of waits) {
+    await sleep(ms);
+    if ((await composerFingerprint(record)) !== base) return false;
+  }
+  if (!record.fifo_file) return false;
+  await withIpcLock(record.pid, () => writeToIpc(record.fifo_file!, "\r"));
+  for (let i = 0; i < 5; i++) {
+    await sleep(500);
+    if ((await readComposerState(record)).kind === "empty") return true;
+  }
+  return false;
+}
+
 /** Bytes `[from, to)` of a log file. */
 async function readLogRange(logPath: string, from: number, to: number): Promise<Uint8Array> {
   const fh = await open(logPath, "r");
@@ -5597,6 +5644,9 @@ async function cmdSendDrain(rest: string[]): Promise<number> {
       }
       const record = (await readGlobalPids()).find((r) => r.pid === pid);
       let result: Awaited<ReturnType<typeof deliverBody>> | null = null;
+      // A draft nobody touches (unchanged at 1/2/4/8 s) is submitted for its
+      // owner here too, so a message parked behind it is not stuck forever.
+      if (record && !(await isUserTyping(pid))) await submitStableDraft(record);
       if (record && !(await isUserTyping(pid))) {
         await withIpcLock(pid, async () => {
           // Re-check under the lock, right before the write.
@@ -5971,6 +6021,11 @@ async function cmdSend(rest: string[]): Promise<number> {
     code: trailing === "\r" ? undefined : codeName,
     wrapped: Boolean(nonce),
   };
+  // A draft nobody is touching (unchanged at 1, 2, 4, 8 s) is submitted for its
+  // owner, so it does not hold this message until someone clears the box.
+  if (fullBody && !noWait && !parkReason && (await listPending(record.pid)).length === 0) {
+    await submitStableDraft(record);
+  }
   // The body and its Enter are ONE transaction: every gap between them (the
   // paste-settle wait, the submit-confirm retries) is a window where another
   // writer's bytes would land mid-message. See ts/ipcLock.ts.
