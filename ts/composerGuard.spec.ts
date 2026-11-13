@@ -207,6 +207,27 @@ describe("agy's ASCII `>` prompt", () => {
     expect(composerBoxed(["history", RULE, "> quoted", RULE, "? for shortcuts"])).toBe(false);
     expect(composerBoxed(["history", RULE, ">", RULE, "? for shortcuts"], "agy")).toBe(true);
   });
+
+  // agy draws each past user turn as a rule over a `> …` row, the same shape as
+  // its input row, and puts a task list and a second rule under its box.
+  const TASKS = [
+    "  ● [10:00:00] build",
+    "  ● [10:01:00] test",
+    "  ↓ 3 more",
+    RULE,
+    "? for shortcuts",
+  ];
+  const turn = [RULE, "> old question", "", "  old answer"];
+
+  it("finds agy's live box under a transcript of past turns", () => {
+    expect(composerBoxed([...turn, "", RULE, ">", RULE, ...TASKS], "agy")).toBe(true);
+    expect(composerBoxed([...turn, "", RULE, "> btw how", RULE, ...TASKS], "agy")).toBe(true);
+  });
+
+  it("does not take a past agy turn for the box when the box is off screen", () => {
+    // A partial redraw left only the transcript, the task list and the footer.
+    expect(composerBoxed([...turn, "", ...TASKS.filter((t) => t !== RULE)], "agy")).toBe(false);
+  });
 });
 
 describe("pending queue", () => {

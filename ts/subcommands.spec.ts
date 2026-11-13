@@ -5119,6 +5119,35 @@ describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () =
     expect((await stateOf(turn.repeat(3000), "codex")).kind).toBe("hidden");
   });
 
+  // agy: past turns are a rule over a `> …` row, like its input row; the box is
+  // followed by a task list, a rule and the footer. The full frame is drawn once,
+  // then >32 KB of redraws touch only the last past turn, the tasks and the footer.
+  function agyIdleLog(composer: string, bytes = 200 * 1024): string {
+    const rule = `${GRAY}${"─".repeat(COLS)}\x1b[0m`;
+    const screen: string[] = [];
+    for (let i = 0; i < 30; i++) screen.push(`  step ${i}: lorem ipsum dolor sit amet`);
+    screen.push(rule, "> please summarise the plan", "  answer 1", "  answer 2", "  answer 3");
+    screen.push("", rule, `> ${composer}`, rule);
+    screen.push("  ● [10:00:00] build", "  ● [10:01:00] test", "  ↓ 3 more", rule);
+    screen.push(`${GRAY}? for shortcuts\x1b[0m`);
+    const redrawn = new Set([31, 32, 33, 34, 35, 40, 41, 42, 44]);
+    let log = "\x1b[2J" + screen.map((t, i) => at(i + 1, t)).join("") + "\x1b[38;3H";
+    for (let k = 0; log.length < bytes; k++) {
+      for (const r of redrawn) log += at(r, screen[r - 1]! + (r === 42 ? ` ${k % 10}` : ""));
+      log += "\x1b[38;3H";
+    }
+    return log;
+  }
+
+  it("reads agy's empty box drawn before the last 32 KB, not a past `>` turn", async () => {
+    // The 32 KB tail alone shows the past turn as the prompt and its answer as a draft.
+    expect(await stateOf(agyIdleLog(""), "agy")).toEqual({ kind: "empty", ghost: false });
+  });
+
+  it("still reads a typed draft in agy's box", async () => {
+    expect(await stateOf(agyIdleLog("btw how"), "agy")).toEqual({ kind: "draft", chars: 6 });
+  });
+
   it("follows what is appended after the first reading, and a truncated log", async () => {
     const { readComposerState } = await loadModule();
     const file = path.join(testHome, "2222.raw.log");

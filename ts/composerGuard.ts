@@ -123,11 +123,16 @@ export function composerBoxed(texts: string[], cli?: string, needRule = true): b
   const nonBlank = (rows: string[]) => rows.filter((t) => t.trim());
   const close = texts.findIndex((t, i) => i > prompt && isComposerChrome(t));
   if (close < 0) return false;
+  // agy's box is closed by a rule and has its task list (a few rows, a rule) and
+  // footer under it. Its past turns are drawn as a rule over a `> …` row too, so
+  // a box closed only by the footer is an old turn left above a partial redraw.
+  const agy = cli === "agy";
+  if (agy && !SEPARATOR_RE.test(texts[close]!)) return false;
   const inside = nonBlank(texts.slice(prompt + 1, close));
   const below = nonBlank(texts.slice(close + 1));
   return (
     inside.length <= MAX_DRAFT_ROWS &&
-    below.length <= MAX_ROWS_BELOW_BOX &&
+    below.length <= (agy ? MAX_ROWS_BELOW_AGY_BOX : MAX_ROWS_BELOW_BOX) &&
     ![...inside, ...below].some((t) => promptRe(cli).test(t))
   );
 }
@@ -136,6 +141,10 @@ export function composerBoxed(texts: string[], cli?: string, needRule = true): b
 const MAX_DRAFT_ROWS = 8;
 /** Footer rows Claude Code draws under its composer box (mode, hints, agents, notices). */
 const MAX_ROWS_BELOW_BOX = 4;
+/** agy: its task list (up to ~5 rows and a "↓ N more" row), a rule, the footer. */
+const MAX_ROWS_BELOW_AGY_BOX = 10;
+/** CLIs whose composer box has a rule above its prompt row (composerBoxed's needRule). */
+export const BOXED_COMPOSER_CLIS = new Set(["claude", "agy"]);
 
 /**
  * Is this row composer chrome (a rule or a Claude/Codex footer) — the end of the

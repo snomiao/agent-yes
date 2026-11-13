@@ -131,6 +131,7 @@ import { isWithin, resolveWorkDir } from "./workDir.ts";
 import {
   bodyHash,
   classifyComposer,
+  BOXED_COMPOSER_CLIS,
   composerBoxed,
   composerPromptRow,
   stripPromptGlyph,
@@ -4753,7 +4754,7 @@ function dropComposerTerm(logPath: string) {
 
 /**
  * The bottom 40 rows of a log as the composer check sees them: rendered from
- * the 32 KB tail and, for Claude, from further back until its composer box is
+ * the 32 KB tail and, for Claude and agy, from further back until its composer box is
  * on screen (see COMPOSER_WINDOWS). Keeps per-cell attributes. Null for an
  * empty log; throws when the log cannot be read or rendered.
  */
@@ -4765,7 +4766,7 @@ async function renderComposerRows(
   const logPath = record.log_file;
   const geom = (await readAgentPtysize(record)) ?? undefined;
   const key = `${geom?.cols}x${geom?.rows}:${record.cli}:${windows.join()}`;
-  const claude = record.cli === "claude";
+  const ruled = BOXED_COMPOSER_CLIS.has(record.cli);
   try {
     const { size } = await stat(logPath);
     if (size === 0) return null;
@@ -4788,7 +4789,7 @@ async function renderComposerRows(
         composerBoxed(
           rows.map((r) => r.text),
           record.cli,
-          claude,
+          ruled,
         )
       )
         next = windows.length;
@@ -4820,7 +4821,7 @@ async function renderComposerRows(
         composerBoxed(
           rows.map((r) => r.text),
           record.cli,
-          claude,
+          ruled,
         )
       )
         break;
@@ -4844,7 +4845,7 @@ export async function readComposerState(
 ): Promise<ComposerState> {
   const logPath = record.log_file;
   if (!logPath) return { kind: "unknown", reason: "no log file recorded" };
-  const claude = record.cli === "claude";
+  const ruled = BOXED_COMPOSER_CLIS.has(record.cli);
   try {
     const rows = await renderComposerRows({ ...record, log_file: logPath }, windows);
     if (!rows) return { kind: "unknown", reason: "log unreadable or empty" };
@@ -4856,7 +4857,7 @@ export async function readComposerState(
       !composerBoxed(
         rows.map((r) => r.text),
         record.cli,
-        claude,
+        ruled,
       )
     )
       return { kind: "hidden", reason: "its input box is not on screen" };
