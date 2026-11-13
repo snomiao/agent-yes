@@ -268,6 +268,8 @@ export interface PendingSend {
   /** Exactly what cmdSend would have written (envelope + paste framing). */
   fullBody: string;
   trailing: string;
+  /** Explicitly cancel a running turn before delivery once the draft is clear. */
+  interrupt?: boolean;
   /** Submit-confirm identity (`<ay-msg nonce` or the raw body). */
   identity: string;
   /** The mailbox record to append once the outcome is known. */

@@ -117,10 +117,17 @@ describe("subcommands.readLogForRender", () => {
 });
 
 describe("subcommands.controlCodeFromName", () => {
+  it("confirms submit codes while excluding cancellation and navigation", async () => {
+    const { isSubmitCode } = await loadModule();
+    for (const code of ["\r", "\x1bm"]) expect(isSubmitCode(code)).toBe(true);
+    for (const code of ["\x1b", "\x03", "\t", ""]) expect(isSubmitCode(code)).toBe(false);
+  });
   it("maps named codes to the right control bytes", async () => {
     const { controlCodeFromName } = await loadModule();
     expect(controlCodeFromName("enter")).toBe("\r");
     expect(controlCodeFromName("cr")).toBe("\r");
+    expect(controlCodeFromName("alt-m")).toBe("\x1bm");
+    expect(controlCodeFromName("alt+m")).toBe("\x1bm");
     expect(controlCodeFromName("esc")).toBe("\x1b");
     expect(controlCodeFromName("ctrl-c")).toBe("\x03");
     expect(controlCodeFromName("ctrl-y")).toBe("\x19");
@@ -1437,7 +1444,10 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
    * false-positive guard below deliberately treats as NOT confirmed).
    */
   async function withFifo(
-    fn: (fifo: string, onKeystroke: () => Promise<boolean>) => Promise<void>,
+    fn: (
+      fifo: string,
+      onKeystroke: (timeoutMs?: number, observe?: (bytes: string) => void) => Promise<boolean>,
+    ) => Promise<void>,
   ) {
     const { spawnSync } = await import("child_process");
     const dir = await mkdtemp(path.join(tmpdir(), "ay-confirm-"));
@@ -1451,12 +1461,19 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
       // keystroke is still here to be observed. O_NONBLOCK is load-bearing —
       // a blocking readSync on an empty fifo wedges the whole vitest worker.
       const readFd = fs.openSync(fifo, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
-      const onKeystroke = async (timeoutMs = 5_000): Promise<boolean> => {
+      const onKeystroke = async (
+        timeoutMs = 5_000,
+        observe?: (bytes: string) => void,
+      ): Promise<boolean> => {
         const buf = Buffer.alloc(64);
         const deadline = Date.now() + timeoutMs;
         while (Date.now() < deadline) {
           try {
-            if (fs.readSync(readFd, buf, 0, buf.length, null) > 0) return true;
+            const count = fs.readSync(readFd, buf, 0, buf.length, null);
+            if (count > 0) {
+              observe?.(buf.subarray(0, count).toString());
+              return true;
+            }
           } catch (err: any) {
             if (err?.code !== "EAGAIN") throw err; // EAGAIN = nothing yet
           }
@@ -1474,6 +1491,66 @@ describe("subcommands.submitAndConfirm (ay send swallowed-Enter fix)", () => {
       await rm(dir, { recursive: true, force: true }).catch(() => null);
     }
   }
+
+  it.skipIf(!itUnix).each([
+    ["agy", "\r"],
+    ["claude", "\r"],
+    ["codex", "\r"],
+    ["agy", "\x1bm"],
+  ])("delivers %s submit %j without substituting a cancellation key", async (cli, code) => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-immediate-"));
+    try {
+      const log = path.join(dir, "agent.log");
+      const marker = "<ay-msg abc12345";
+      const prompt = cli === "agy" ? ">" : "❯";
+      const busy = cli === "agy" ? "Running command..." : "Working (esc to interrupt)";
+      await writeFile(log, `${busy}\r\n${prompt} ${marker}\r\nAlt+M to send immediately\r\n`);
+      const { submitAndConfirm } = await loadModule();
+      await withFifo(async (fifo, onKeystroke) => {
+        let bytes = "";
+        const reaction = onKeystroke(5000, (value) => {
+          bytes = value;
+        }).then(async (got) => {
+          if (got) await writeFile(log, `${prompt} ${marker}\r\nAccepted\r\n${prompt}\r\n`);
+          return got;
+        });
+        const result = await submitAndConfirm(rec({ cli, log_file: log }), fifo, code, marker);
+        expect(await reaction).toBe(true);
+        expect(bytes).toBe(code);
+        expect(result.submission).toBe("submitted");
+        expect(result.confirmed).toBe(true);
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(!itUnix)(
+    "never retries an explicit immediate shortcut even when input stays in the composer",
+    async () => {
+      const dir = await mkdtemp(path.join(tmpdir(), "ay-immediate-once-"));
+      try {
+        const log = path.join(dir, "agent.log");
+        const marker = "<ay-msg abc12345";
+        await writeFile(log, `> ${marker}\r\nAlt+M to send immediately\r\n`);
+        const { submitAndConfirm } = await loadModule();
+        await withFifo(async (fifo, onKeystroke) => {
+          const received = onKeystroke();
+          const result = await submitAndConfirm(
+            rec({ cli: "agy", log_file: log }),
+            fifo,
+            "\x1bm",
+            marker,
+          );
+          expect(await received).toBe(true);
+          expect(result.confirmed).toBe(false);
+          expect(await onKeystroke(100)).toBe(false);
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it.skipIf(!itUnix)(
     "confirms on the first attempt when the busy marker newly appears after sending",
@@ -2148,6 +2225,83 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
       if (savedAyPid !== undefined) process.env.AGENT_YES_PID = savedAyPid;
     }
   }
+
+  it.skipIf(!itUnix).each(["--interrupt", "-i"])(
+    "%s cancels before pasting and waits for idle even with --no-wait",
+    async (flag) => {
+      const log = path.join(testHome, "interrupt.log");
+      const box = "────────\r\n❯ \r\n────────\r\n";
+      await writeFile(log, BUSY + box);
+      const chunks: string[] = [];
+      let idleDrawn = false;
+      let pastedBeforeIdle = false;
+      let transition: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await withDrainedFifo(
+          async (fifo) => {
+            const result = await send(fifo, log, "replacement-task", [flag, "--no-wait"]);
+            await new Promise((resolve) => setTimeout(resolve, 40));
+            expect(result.code).toBe(0);
+          },
+          (bytes) => {
+            chunks.push(bytes);
+            if (bytes === "\x1b")
+              transition = setTimeout(() => {
+                appendFileSync(log, "\x1b[2J\x1b[H" + box);
+                idleDrawn = true;
+              }, 150);
+            if (bytes.includes("replacement-task") && !idleDrawn) pastedBeforeIdle = true;
+          },
+        );
+        expect(chunks[0]).toBe("\x1b");
+        expect(chunks.join("")).toContain("replacement-task");
+        expect(chunks.join("").endsWith("\r")).toBe(true);
+        expect(pastedBeforeIdle).toBe(false);
+        expect(idleDrawn).toBe(true);
+      } finally {
+        if (transition) clearTimeout(transition);
+      }
+    },
+  );
+
+  it("send --help documents interrupt and its short alias without needing a target", async () => {
+    const { runSubcommand } = await loadModule();
+    const out = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+    try {
+      expect(await runSubcommand(["bun", "cli.js", "send", "--help"])).toBe(0);
+      const help = out.mock.calls.map(([value]) => String(value)).join("");
+      expect(help).toContain("--interrupt");
+      expect(help).toContain("-i");
+      expect(help).toContain("permission/confirmation");
+    } finally {
+      out.mockRestore();
+    }
+  });
+
+  it("reports a permission prompt without writing a cancellation key", async () => {
+    const log = path.join(testHome, "permission.log");
+    await writeFile(
+      log,
+      BUSY + "Do you want to allow this command?\r\n❯ 1. Allow\r\n  2. Deny\r\n",
+    );
+    const { interruptSendTarget } = await loadModule();
+    const notice = await interruptSendTarget(
+      {
+        pid: 1111,
+        cli: "claude",
+        cwd: "/repo/alpha",
+        prompt: null,
+        log_file: log,
+        status: "active",
+        exit_code: null,
+        exit_reason: null,
+        started_at: 0,
+      },
+      path.join(testHome, "nonexistent.fifo"),
+    );
+    expect(notice).toContain("permission/confirmation prompt");
+    expect(notice).toContain("sending as usual");
+  });
 
   it.skipIf(!itUnix)(
     "exits 0 and reports 'sent' when a working marker appears after the Enter (genuine confirm)",

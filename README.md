@@ -182,6 +182,26 @@ cy attach <keyword>                    # interactive attach (detach: Ctrl-\)
 cy stop <keyword>                      # graceful shutdown (claude/codex: /exit)
 ```
 
+`ay send` writes to busy agents without waiting for idle, using native Enter
+delivery (including the CLI's own queue). Existing drafts and active typing
+remain protected, so these can defer delivery. It never substitutes a
+cancellation shortcut based on a busy indicator or a shortcut hint.
+
+To explicitly request agy's immediate-send shortcut, use
+`ay send <keyword> "message" --code=alt-m`. This sends `ESC m` after pasting and
+may interrupt the current turn; native queued delivery remains the default.
+The explicit shortcut is supported by `--no-wait` and the drainer too, and is
+never retried automatically.
+
+Use `ay send <keyword> "message" --interrupt` (or `-i`) to stop a running local
+Claude, Codex, or agy turn first. It sends Escape once, waits up to eight seconds
+for an idle input prompt, then pastes and submits the message. If cancellation
+does not reach idle, the message is not sent. Permission and confirmation
+prompts are never cancelled: the command reports that interruption was skipped
+and uses the normal send path. Existing drafts remain protected. `--no-wait`
+still waits for cancellation before skipping message submission confirmation.
+
+
 #### Tips
 
 - A **single** `--code=ctrl-c` does not stop `claude` / `codex` — they treat it
@@ -246,6 +266,7 @@ field, so filters that match on `owner` keep working.
 Tasks move through a lifecycle per `--kind`, and gated transitions require
 **independent verification**: whoever did the work cannot approve it. See
 `ts/todoStore.ts` for the gate model.
+
 
 ### Ask another agent a question (`ay ask`)
 
