@@ -58,6 +58,18 @@ export type ComposerState =
   | { kind: "hidden"; reason: string };
 
 const PROMPT_RE = /^\s*[❯›]($|\s)/u;
+// agy (Antigravity CLI) draws its input row with a plain ASCII `>`. Only for the
+// CLIs listed here: in Claude/Codex transcripts a `> ` row is a markdown quote.
+const ASCII_PROMPT_RE = /^\s*[❯›>]($|\s)/u;
+const ASCII_PROMPT_CLIS = new Set(["agy"]);
+/** A row with its leading prompt glyph (and the space after it) removed. */
+export function stripPromptGlyph(line: string, cli?: string): string {
+  return line.replace(cli && ASCII_PROMPT_CLIS.has(cli) ? /^\s*[❯›>]\s*/u : /^\s*[❯›]\s*/u, "");
+}
+/** The input-row matcher for a CLI (see ASCII_PROMPT_CLIS). */
+export function promptRe(cli?: string): RegExp {
+  return cli && ASCII_PROMPT_CLIS.has(cli) ? ASCII_PROMPT_RE : PROMPT_RE;
+}
 // Same chrome inspectSubmission stops at: the separator rule under the box and
 // the Claude/Codex footer rows.
 const SEPARATOR_RE = /^\s*[─━]{3,}/u;
@@ -83,11 +95,12 @@ const FOOTER_SEGMENT_RE = /·\s*(?:[←→] .*agents?|↓ |esc to interrupt)|\(s
  * any box (Codex) it is the last prompt-looking row. Shared by the draft check
  * and by submission confirmation, so both agree on where history ends.
  */
-export function composerPromptRow(texts: string[]): number {
+export function composerPromptRow(texts: string[], cli?: string): number {
+  const re = promptRe(cli);
   for (let i = texts.length - 2; i >= 0; i--) {
-    if (SEPARATOR_RE.test(texts[i]!) && PROMPT_RE.test(texts[i + 1]!)) return i + 1;
+    if (SEPARATOR_RE.test(texts[i]!) && re.test(texts[i + 1]!)) return i + 1;
   }
-  return texts.findLastIndex((t) => PROMPT_RE.test(t));
+  return texts.findLastIndex((t) => re.test(t));
 }
 
 /**
@@ -101,8 +114,8 @@ export function composerPromptRow(texts: string[]): number {
  * A real draft longer than MAX_DRAFT_ROWS fails too and reads "hidden", which
  * parks the send just as a draft does.
  */
-export function composerBoxed(texts: string[], needRule = true): boolean {
-  const prompt = composerPromptRow(texts);
+export function composerBoxed(texts: string[], cli?: string, needRule = true): boolean {
+  const prompt = composerPromptRow(texts, cli);
   if (prompt < 0) return false;
   // Codex draws no rule above its composer; its footer under the prompt row is
   // what shows the live composer rather than an echoed `›` message in history.
@@ -115,7 +128,7 @@ export function composerBoxed(texts: string[], needRule = true): boolean {
   return (
     inside.length <= MAX_DRAFT_ROWS &&
     below.length <= MAX_ROWS_BELOW_BOX &&
-    ![...inside, ...below].some((t) => PROMPT_RE.test(t))
+    ![...inside, ...below].some((t) => promptRe(cli).test(t))
   );
 }
 
@@ -153,8 +166,11 @@ export function isComposerChrome(text: string, cells?: ComposerCell[]): boolean 
  * draft is not. A draft whose own line starts with a prompt glyph can still be
  * misread there.
  */
-export function classifyComposer(rows: ComposerRow[]): ComposerState {
-  const prompt = composerPromptRow(rows.map((r) => r.text));
+export function classifyComposer(rows: ComposerRow[], cli?: string): ComposerState {
+  const prompt = composerPromptRow(
+    rows.map((r) => r.text),
+    cli,
+  );
   if (prompt < 0) return { kind: "unknown", reason: "no prompt row on screen" };
   let real = 0;
   let ghost = false;
@@ -167,7 +183,8 @@ export function classifyComposer(rows: ComposerRow[]): ComposerState {
     let cells = row.cells;
     if (i === prompt) {
       // Skip the indentation and the prompt glyph itself.
-      const glyph = cells.findIndex((c) => c.ch === "❯" || c.ch === "›");
+      let glyph = cells.findIndex((c) => c.ch.trim() !== "");
+      if (glyph >= 0 && !promptRe(cli).test(cells[glyph]!.ch)) glyph = -1;
       cells = glyph >= 0 ? cells.slice(glyph + 1) : cells;
     }
     for (const c of cells) {
