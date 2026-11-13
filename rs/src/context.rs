@@ -380,6 +380,13 @@ pub struct AgentContext {
     watchdog_stalled: bool,
     unresponsive: bool,
 
+    // Unanswered-prompt alert (needs_input_alert_check): when the agent started
+    // sitting at a needs_input prompt, whether this episode was already alerted,
+    // and when the screen was last scanned for it.
+    needs_input_since: Option<Instant>,
+    needs_input_alerted: bool,
+    needs_input_checked_at: Option<Instant>,
+
     // Shell "typed" prompt (promptArg: typed — bash/cmd/powershell). When set,
     // this command is typed into the interactive session once the shell prompt
     // is first ready, then the session stays live. None for every other CLI
@@ -454,6 +461,9 @@ impl AgentContext {
             poke_unresponsive: false,
             watchdog_stalled: false,
             unresponsive: false,
+            needs_input_since: None,
+            needs_input_alerted: false,
+            needs_input_checked_at: None,
             initial_input,
         }
     }
@@ -1262,6 +1272,11 @@ impl AgentContext {
         // auto-retry below can never see (a stall prints nothing).
         self.stall_watchdog_check(msg_ctx).await?;
 
+        // Unanswered-prompt alert: a permission/selection menu nobody answers
+        // blocks the agent indefinitely and produces no output to trip the
+        // watchdogs above.
+        self.needs_input_alert_check();
+
         // Drive the auto-retry backoff timer. Runs every heartbeat (independent of
         // screen changes) so the delayed "retry" still fires while the agent sits
         // idle on an error banner producing no new output. Arming/reset happens in
@@ -1632,6 +1647,61 @@ impl AgentContext {
         }
     }
 
+    /// Raise an alert when the agent sits at an unanswered needs_input prompt for
+    /// longer than `AGENT_YES_NEEDS_INPUT_ALERT_SECS` (default 600; 0 disables).
+    ///
+    /// Observed: a lane sat 36 min on a permission prompt raised by its own
+    /// sub-agent, every message to it parked, and nothing told anyone. A prompt
+    /// produces no output and no spinner, so neither the stall watchdog nor the
+    /// responsiveness check can see it. Once per episode this fires the webhook
+    /// (`NEEDS_INPUT`) and the optional `AGENT_YES_ON_NEEDS_INPUT` shell hook; an
+    /// alerted episode that clears fires `RUNNING` so the alert is closed.
+    fn needs_input_alert_check(&mut self) {
+        let limit = needs_input_alert_secs();
+        if limit == 0 {
+            return;
+        }
+        // Heartbeats are ~50 ms; a prompt worth alerting on sits for minutes.
+        if self
+            .needs_input_checked_at
+            .is_some_and(|t| t.elapsed() < NEEDS_INPUT_SCAN_EVERY)
+        {
+            return;
+        }
+        self.needs_input_checked_at = Some(Instant::now());
+        let screen = self.vterm.contents();
+        let at_prompt = self
+            .cli_config
+            .needs_input
+            .iter()
+            .any(|p| p.is_match(&screen));
+        let since = self.needs_input_since.map(|t| t.elapsed().as_secs());
+        match decide_needs_input_alert(at_prompt, since, self.needs_input_alerted, limit) {
+            PromptAlert::Start => self.needs_input_since = Some(Instant::now()),
+            PromptAlert::Alert => {
+                self.needs_input_alerted = true;
+                let waited = since.unwrap_or(limit);
+                let question = prompt_question(&screen);
+                let msg = format!(
+                    "waiting {} min at an unanswered prompt: {}",
+                    waited / 60,
+                    question
+                );
+                warn!("Agent {}", msg);
+                crate::webhook::notify("NEEDS_INPUT", &msg, &self.cwd);
+                run_needs_input_hook(self.pid, &self.cwd, &question, waited);
+            }
+            PromptAlert::Clear => {
+                self.needs_input_since = None;
+                self.needs_input_alerted = false;
+                info!("Prompt answered after a needs_input alert");
+                crate::webhook::notify("RUNNING", "prompt answered", &self.cwd);
+            }
+            PromptAlert::Reset => self.needs_input_since = None,
+            PromptAlert::Nothing => {}
+        }
+    }
+
     async fn toggle_auto_yes(&mut self) {
         self.auto_yes_enabled = !self.auto_yes_enabled;
         if self.auto_yes_enabled {
@@ -1816,6 +1886,99 @@ fn is_stalled(
     }
 }
 
+const NEEDS_INPUT_SCAN_EVERY: Duration = Duration::from_secs(5);
+const NEEDS_INPUT_ALERT_DEFAULT_SECS: u64 = 600;
+
+fn needs_input_alert_secs() -> u64 {
+    std::env::var("AGENT_YES_NEEDS_INPUT_ALERT_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(NEEDS_INPUT_ALERT_DEFAULT_SECS)
+}
+
+#[derive(Debug, PartialEq)]
+enum PromptAlert {
+    /// Nothing to do this scan.
+    Nothing,
+    /// A prompt just appeared: start the clock.
+    Start,
+    /// The prompt has outlasted the limit: alert once.
+    Alert,
+    /// An alerted prompt was answered: close the alert.
+    Clear,
+    /// A prompt cleared before alerting: stop the clock quietly.
+    Reset,
+}
+
+/// Unanswered-prompt state machine (see needs_input_alert_check). `since_secs`
+/// is how long the current episode has run, None when no episode is open.
+fn decide_needs_input_alert(
+    at_prompt: bool,
+    since_secs: Option<u64>,
+    alerted: bool,
+    limit_secs: u64,
+) -> PromptAlert {
+    match (at_prompt, since_secs) {
+        (true, None) => PromptAlert::Start,
+        (true, Some(s)) if s >= limit_secs && !alerted => PromptAlert::Alert,
+        (true, Some(_)) => PromptAlert::Nothing,
+        (false, Some(_)) if alerted => PromptAlert::Clear,
+        (false, Some(_)) => PromptAlert::Reset,
+        (false, None) => PromptAlert::Nothing,
+    }
+}
+
+/// The prompt's question, for the alert: the last line near the bottom of the
+/// screen that asks one, stripped of box-drawing, at most 200 chars.
+fn prompt_question(screen: &str) -> String {
+    let lines: Vec<&str> = screen.lines().collect();
+    let start = lines.len().saturating_sub(40);
+    lines[start..]
+        .iter()
+        .rev()
+        .map(|l| l.trim_matches(|c: char| c.is_whitespace() || "│╭╮╰╯─┃".contains(c)))
+        .find(|l| l.contains('?'))
+        .map(|l| l.chars().take(200).collect())
+        .unwrap_or_else(|| "(question not found on screen)".to_string())
+}
+
+/// Run the operator's `AGENT_YES_ON_NEEDS_INPUT` shell hook (e.g. an `ay send`
+/// to an orchestrator, or a chat notification), detached. Its output is not
+/// read and it is only reaped, never waited on by the agent loop.
+fn run_needs_input_hook(pid: u32, cwd: &str, question: &str, waited_secs: u64) {
+    let cmd = match std::env::var("AGENT_YES_ON_NEEDS_INPUT") {
+        Ok(v) if !v.trim().is_empty() => v,
+        _ => return,
+    };
+    #[cfg(windows)]
+    let mut c = {
+        let mut c = std::process::Command::new("cmd");
+        c.arg("/C").arg(&cmd);
+        c
+    };
+    #[cfg(not(windows))]
+    let mut c = {
+        let mut c = std::process::Command::new("sh");
+        c.arg("-c").arg(&cmd);
+        c
+    };
+    c.env("AY_ALERT_PID", pid.to_string())
+        .env("AY_ALERT_CWD", cwd)
+        .env("AY_ALERT_QUESTION", question)
+        .env("AY_ALERT_WAIT_SECS", waited_secs.to_string())
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    match c.spawn() {
+        Ok(mut child) => {
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
+        }
+        Err(e) => warn!("AGENT_YES_ON_NEEDS_INPUT hook failed to start: {}", e),
+    }
+}
+
 /// The unified "stuck" liveness state: the agent is unresponsive when EITHER
 /// detector trips — the post-stdin responsiveness check (`poke_unresponsive`) or
 /// the no-output stall watchdog's frozen spinner (`watchdog_stalled`). A free fn
@@ -1846,6 +2009,29 @@ fn find_char_boundary(s: &str, at: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn needs_input_alert_fires_once_per_episode_and_closes() {
+        use super::{decide_needs_input_alert as d, PromptAlert::*};
+        assert_eq!(d(false, None, false, 600), Nothing);
+        assert_eq!(d(true, None, false, 600), Start);
+        assert_eq!(d(true, Some(599), false, 600), Nothing);
+        assert_eq!(d(true, Some(600), false, 600), Alert);
+        assert_eq!(d(true, Some(4000), true, 600), Nothing); // already alerted
+        assert_eq!(d(false, Some(4000), true, 600), Clear);
+        assert_eq!(d(false, Some(30), false, 600), Reset); // answered in time: silent
+    }
+
+    #[test]
+    fn prompt_question_finds_the_question_line() {
+        let screen =
+            "output\n╭────╮\n│ Do you want to proceed? │\n│ ❯ 1. Yes │\n│   2. No │\n╰────╯";
+        assert_eq!(super::prompt_question(screen), "Do you want to proceed?");
+        assert_eq!(
+            super::prompt_question("no prompt here"),
+            "(question not found on screen)"
+        );
+    }
     use super::*;
 
     // ---- trust-dialog auto-accept race -----------------------------------

@@ -5014,3 +5014,32 @@ describe("inspectSubmission: shells without a composer", () => {
     );
   });
 });
+
+describe("ay send: a target blocked at a prompt", () => {
+  it("names the prompt as the park reason, with its question", async () => {
+    const { promptParkReason } = await loadModule();
+    expect(promptParkReason({ state: "needs_input", question: "Do you want to proceed?" })).toBe(
+      "it is waiting at a prompt (needs_input): Do you want to proceed?",
+    );
+    expect(promptParkReason({ state: "needs_input", question: null })).toBe(
+      "it is waiting at a prompt (needs_input)",
+    );
+  });
+
+  it("is not a reason for any other state", async () => {
+    const { promptParkReason } = await loadModule();
+    for (const state of ["active", "idle", "stuck", "stopped", "unreachable"])
+      expect(promptParkReason({ state, question: "x?" })).toBeNull();
+    expect(promptParkReason(null)).toBeNull();
+  });
+
+  it("exits 6 (distinct from 4) and tells the sender how to unblock it", async () => {
+    const { SEND_EXIT_NEEDS_INPUT, SEND_EXIT_QUEUED, blockedPromptHint } = await loadModule();
+    expect(SEND_EXIT_NEEDS_INPUT).toBe(6);
+    expect(SEND_EXIT_NEEDS_INPUT).not.toBe(SEND_EXIT_QUEUED);
+    const hint = blockedPromptHint(1111);
+    expect(hint).toMatch(/blocked at a prompt/);
+    expect(hint).toMatch(/ay select 1111 <N>/);
+    expect(hint).toMatch(/delivered once it clears/);
+  });
+});
