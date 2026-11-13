@@ -19,6 +19,7 @@ type RawCliConfig = Omit<
   | "exitCommands"
   | "autoRetry"
   | "needsInput"
+  | "scrolledUp"
   | "resumeCommand"
 > & {
   ready?: RegexSource[];
@@ -31,6 +32,7 @@ type RawCliConfig = Omit<
   updateAvailable?: RegexSource[];
   autoRetry?: RegexSource[];
   needsInput?: RegexSource[];
+  scrolledUp?: RegexSource[];
   resumeCommand?: RegexSource;
   exitCommands?: string[];
   exitCommand?: string[];
@@ -86,6 +88,7 @@ export function normalizeCliConfig(raw: RawCliConfig): AgentCliConfig {
     updateAvailable,
     autoRetry,
     needsInput,
+    scrolledUp,
     resumeCommand,
     exitCommands,
     exitCommand,
@@ -104,6 +107,7 @@ export function normalizeCliConfig(raw: RawCliConfig): AgentCliConfig {
     updateAvailable: compileRegexList(updateAvailable),
     autoRetry: compileRegexList(autoRetry),
     needsInput: compileRegexList(needsInput),
+    scrolledUp: compileRegexList(scrolledUp),
     resumeCommand: resumeCommand === undefined ? undefined : compileRegexSource(resumeCommand),
     exitCommands: exitCommands ?? exitCommand,
   };

@@ -387,6 +387,12 @@ pub struct AgentContext {
     needs_input_alerted: bool,
     needs_input_checked_at: Option<Instant>,
 
+    // Scroll-to-bottom nudge (scroll_bottom_check): when the screen was last
+    // scanned, and the screen hash right after the last Ctrl+End we sent — no
+    // resend until the screen changes, so a key that didn't help isn't spammed.
+    scroll_bottom_checked_at: Option<Instant>,
+    scroll_bottom_sent_hash: Option<u64>,
+
     // Shell "typed" prompt (promptArg: typed — bash/cmd/powershell). When set,
     // this command is typed into the interactive session once the shell prompt
     // is first ready, then the session stays live. None for every other CLI
@@ -464,6 +470,8 @@ impl AgentContext {
             needs_input_since: None,
             needs_input_alerted: false,
             needs_input_checked_at: None,
+            scroll_bottom_checked_at: None,
+            scroll_bottom_sent_hash: None,
             initial_input,
         }
     }
@@ -1277,6 +1285,10 @@ impl AgentContext {
         // watchdogs above.
         self.needs_input_alert_check();
 
+        // Fullscreen transcript scrolled up while idle: a pending prompt may be
+        // off screen (unseen by the human and by our own pattern matching).
+        self.scroll_bottom_check(msg_ctx)?;
+
         // Drive the auto-retry backoff timer. Runs every heartbeat (independent of
         // screen changes) so the delayed "retry" still fires while the agent sits
         // idle on an error banner producing no new output. Arming/reset happens in
@@ -1702,6 +1714,58 @@ impl AgentContext {
         }
     }
 
+    /// Bring a scrolled-up fullscreen transcript back to the bottom. claude's
+    /// fullscreen mode can be scrolled (wheel / PgUp) away from the live end,
+    /// hiding a yes/no menu that appears meanwhile. When the screen shows the
+    /// CLI's `scrolledUp` marker and nothing has happened for
+    /// AGENT_YES_SCROLL_BOTTOM_IDLE_SECS (default 300, 0 disables), send Ctrl+End
+    /// once. CLIs without a `scrolledUp` marker are never touched.
+    fn scroll_bottom_check(&mut self, msg_ctx: &MessageContext) -> Result<()> {
+        if self.cli_config.scrolled_up.is_empty() {
+            return Ok(());
+        }
+        let limit = scroll_bottom_idle_secs();
+        if limit == 0 {
+            return Ok(());
+        }
+        if self
+            .scroll_bottom_checked_at
+            .is_some_and(|t| t.elapsed() < NEEDS_INPUT_SCAN_EVERY)
+        {
+            return Ok(());
+        }
+        self.scroll_bottom_checked_at = Some(Instant::now());
+        let screen = self.vterm.contents();
+        let scrolled_up = self
+            .cli_config
+            .scrolled_up
+            .iter()
+            .any(|p| p.is_match(&screen));
+        let hash = hash_str(&screen);
+        if !should_scroll_bottom(
+            scrolled_up,
+            self.idle_waiter.idle_time_ms(),
+            limit * 1000,
+            hash,
+            self.scroll_bottom_sent_hash,
+        ) {
+            return Ok(());
+        }
+        info!("Transcript scrolled up while idle; sending Ctrl+End to show the latest screen");
+        {
+            let mut writer = msg_ctx
+                .writer
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
+            writer.write_all(CTRL_END)?;
+            writer.flush()?;
+        }
+        // Not an idle_waiter ping: this is housekeeping, not activity, and must
+        // not reset the idle clocks other checks (auto-retry, exit-on-idle) use.
+        self.scroll_bottom_sent_hash = Some(hash);
+        Ok(())
+    }
+
     async fn toggle_auto_yes(&mut self) {
         self.auto_yes_enabled = !self.auto_yes_enabled;
         if self.auto_yes_enabled {
@@ -1886,6 +1950,29 @@ fn is_stalled(
     }
 }
 
+/// xterm Ctrl+End (CSI 1;5F) — claude's `scroll:bottom`.
+const CTRL_END: &[u8] = b"\x1b[1;5F";
+const SCROLL_BOTTOM_IDLE_DEFAULT_SECS: u64 = 300;
+
+fn scroll_bottom_idle_secs() -> u64 {
+    std::env::var("AGENT_YES_SCROLL_BOTTOM_IDLE_SECS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(SCROLL_BOTTOM_IDLE_DEFAULT_SECS)
+}
+
+/// Pure decision for scroll_bottom_check: scrolled up, idle long enough, and
+/// the screen isn't the very one we already sent Ctrl+End to.
+fn should_scroll_bottom(
+    scrolled_up: bool,
+    idle_ms: u64,
+    limit_ms: u64,
+    screen_hash: u64,
+    last_sent_hash: Option<u64>,
+) -> bool {
+    scrolled_up && idle_ms >= limit_ms && last_sent_hash != Some(screen_hash)
+}
+
 const NEEDS_INPUT_SCAN_EVERY: Duration = Duration::from_secs(5);
 const NEEDS_INPUT_ALERT_DEFAULT_SECS: u64 = 600;
 
@@ -2020,6 +2107,26 @@ mod tests {
         assert_eq!(d(true, Some(4000), true, 600), Nothing); // already alerted
         assert_eq!(d(false, Some(4000), true, 600), Clear);
         assert_eq!(d(false, Some(30), false, 600), Reset); // answered in time: silent
+    }
+
+    #[test]
+    fn scroll_bottom_fires_only_when_scrolled_up_and_idle() {
+        use super::should_scroll_bottom;
+        let limit = 300_000;
+        assert!(should_scroll_bottom(true, limit, limit, 1, None));
+        assert!(!should_scroll_bottom(false, limit, limit, 1, None));
+        assert!(!should_scroll_bottom(true, limit - 1, limit, 1, None));
+        // Same screen we already nudged: don't repeat; a changed screen may retry.
+        assert!(!should_scroll_bottom(true, limit, limit, 1, Some(1)));
+        assert!(should_scroll_bottom(true, limit, limit, 2, Some(1)));
+    }
+
+    #[test]
+    fn claude_scrolled_up_marker_matches_fullscreen_hint() {
+        let cfg = crate::config::get_cli_config("claude").unwrap();
+        let hint = "  126                     Jump to bottom (ctrl+End) ↓";
+        assert!(cfg.scrolled_up.iter().any(|p| p.is_match(hint)));
+        assert!(!cfg.scrolled_up.iter().any(|p| p.is_match("❯ 1. yes")));
     }
 
     #[test]

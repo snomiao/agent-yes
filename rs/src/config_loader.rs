@@ -117,6 +117,11 @@ pub struct CliConfigOverride {
     /// `needs_input` state).
     #[serde(default)]
     pub needs_input: Option<Vec<RegexSource>>,
+    /// Scrolled-up marker: the CLI's fullscreen transcript is scrolled away
+    /// from the bottom (claude: "Jump to bottom (ctrl+End)"). After a long
+    /// idle the runner sends Ctrl+End so a hidden prompt comes back into view.
+    #[serde(default)]
+    pub scrolled_up: Option<Vec<RegexSource>>,
     /// Liveness window: if we send stdin to the agent and it produces no PTY
     /// output within this many ms, mark it `unresponsive`. 0 (or absent)
     /// disables the check — appropriate for CLIs that don't animate a spinner.
@@ -224,6 +229,7 @@ impl CliConfigOverride {
             stall_timeout_secs,
             wedge_timeout_secs,
             needs_input,
+            scrolled_up,
             unresponsive_timeout_ms,
         } = other;
 
@@ -320,6 +326,9 @@ impl CliConfigOverride {
         }
         if needs_input.is_some() {
             self.needs_input = needs_input;
+        }
+        if scrolled_up.is_some() {
+            self.scrolled_up = scrolled_up;
         }
         if unresponsive_timeout_ms.is_some() {
             self.unresponsive_timeout_ms = unresponsive_timeout_ms;
@@ -699,6 +708,7 @@ logsDir: /custom/logs
                 stall_timeout_secs: Some(111),
                 wedge_timeout_secs: Some(1111),
                 needs_input: Some(vec![pattern("old-needs-input")]),
+                scrolled_up: None,
                 unresponsive_timeout_ms: Some(1000),
             },
         );
@@ -741,6 +751,7 @@ logsDir: /custom/logs
                 stall_timeout_secs: Some(222),
                 wedge_timeout_secs: Some(2222),
                 needs_input: Some(vec![pattern("new-needs-input")]),
+                scrolled_up: None,
                 unresponsive_timeout_ms: Some(2000),
             },
         );

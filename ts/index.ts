@@ -32,6 +32,7 @@ import {
   formatDurationSecs,
   shouldFireRetry,
 } from "./autoRetry.ts";
+import { CTRL_END, scrollBottomIdleMs, shouldScrollBottom } from "./scrollBottom.ts";
 import { recordInbox } from "./messageLog.ts";
 import {
   initializeLogPaths,
@@ -157,6 +158,7 @@ export type AgentCliConfig = {
   enterExclude?: RegExp[]; // array of regex to exclude from auto-enter (even if enter matches)
   typingRespond?: { [message: string]: RegExp[] }; // type specified message to a specified pattern
   autoRetry?: RegExp[]; // recoverable API errors (overload/rate-limit/usage-limit): type "retry" with exponential backoff (up to 8h) instead of exiting
+  scrolledUp?: RegExp[]; // fullscreen transcript scrolled away from the bottom (see ts/scrollBottom.ts)
   needsInput?: RegExp[]; // agent is blocked on an interactive selection menu it did NOT auto-resolve; surfaced as the `needs_input` state by `ay ls`/`ay status` (query-time only — not consumed by the run loop)
 
   // crash/resuming-session behaviour
@@ -954,9 +956,31 @@ export default async function agentYes({
   // Paraphrased reason captured when the error banner was matched — folded
   // into the typed retry message so the agent knows why it is being nudged.
   let retryReason: string | null = null;
+  // Scroll-to-bottom nudge (see ts/scrollBottom.ts): the screen we last sent
+  // Ctrl+End to, so a key that didn't help isn't repeated on the same screen.
+  const scrollBottomLimitMs = scrollBottomIdleMs();
+  let scrollBottomSentScreen: string | null = null;
   const heartbeatInterval = setInterval(async () => {
     try {
       const rendered = removeControlCharacters(xtermProxy.tail(12));
+
+      if (conf.scrolledUp?.length && scrollBottomLimitMs > 0) {
+        const scrolledUp = conf.scrolledUp.some((rx: RegExp) => rx.test(autoRetryScreen));
+        if (
+          shouldScrollBottom(
+            scrolledUp,
+            ctx.idleWaiter.idleTimeMs(),
+            scrollBottomLimitMs,
+            autoRetryScreen,
+            scrollBottomSentScreen,
+          )
+        ) {
+          logger.info(`[${cli}-yes] transcript scrolled up while idle; sending Ctrl+End`);
+          // No idleWaiter.ping(): housekeeping, not activity.
+          ctx.messageContext.shell.write(CTRL_END);
+          scrollBottomSentScreen = autoRetryScreen;
+        }
+      }
 
       // Auto-retry backoff timer — fires the scheduled "retry" using the latest
       // rendered screen captured by the stdout pipeline (consoleResponder). Runs
@@ -1387,8 +1411,10 @@ export default async function agentYes({
             // per-line check). The firing happens on the heartbeat timer, which
             // reads `autoRetryScreen`. Done here, before the `fatal` check below, so
             // these recoverable errors retry instead of exiting.
+            // Latest whole screen for the heartbeat timer (auto-retry and the
+            // scroll-to-bottom nudge both read it).
+            autoRetryScreen = rendered;
             if (conf.autoRetry?.length) {
-              autoRetryScreen = rendered;
               const errVisible = conf.autoRetry.some((rx: RegExp) => rx.test(rendered));
               const readyVisible = conf.ready?.some((rx: RegExp) => rx.test(rendered)) ?? false;
               if (errVisible && readyVisible) {

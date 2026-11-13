@@ -92,6 +92,9 @@ pub struct CliConfig {
     /// selection (AskUserQuestion / permission prompt) — a legitimate
     /// indefinite wait for a human, exempt from the wedge watchdog.
     pub needs_input: Vec<Regex>,
+    /// Scrolled-up marker: the fullscreen transcript is scrolled away from the
+    /// bottom, which can hide a pending prompt. See context.rs scroll_bottom_check.
+    pub scrolled_up: Vec<Regex>,
     /// Liveness window in ms: if we send stdin and the agent produces no PTY
     /// output within this window, mark it `unresponsive`. 0 = disabled.
     pub unresponsive_timeout_ms: u64,
@@ -192,6 +195,7 @@ fn build_cli_config(raw: CliConfigOverride) -> Result<CliConfig> {
         stall_timeout_secs: raw.stall_timeout_secs.unwrap_or(DEFAULT_STALL_TIMEOUT_SECS),
         wedge_timeout_secs: raw.wedge_timeout_secs.unwrap_or(0),
         needs_input: compile_regex_list(raw.needs_input)?,
+        scrolled_up: compile_regex_list(raw.scrolled_up)?,
         unresponsive_timeout_ms: raw.unresponsive_timeout_ms.unwrap_or(0),
     })
 }
