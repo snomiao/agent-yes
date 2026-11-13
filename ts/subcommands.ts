@@ -1675,7 +1675,7 @@ function editDistance(a: string, b: string): number {
 /**
  * The live agents closest to a keyword that matched nothing, best first (at
  * most `max`): each agent is scored by its cwd path segments and title words,
- * so a typo ("symphn") or a stale name still points at the right lane.
+ * so a typo ("lumne" for "lumen") or a stale name still points at the right lane.
  */
 export function suggestAgents(
   records: GlobalPidRecord[],

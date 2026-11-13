@@ -6,10 +6,10 @@ const rec = (pid: number, cwd: string, started_at = pid) =>
 
 describe("suggestAgents", () => {
   const live = [
-    rec(1, "/home/u/ws/symval/symphr/tree/main"),
-    rec(2, "/home/u/ws/symval/symphr/tree/bean"),
-    rec(3, "/home/u/ws/snomiao/slack-term/tree/main"),
-    { ...rec(4, "/home/u/ws/symval/symphr/tree/sf"), status: "exited" },
+    rec(1, "/home/alice/ws/alpha/lumen/tree/main"),
+    rec(2, "/home/alice/ws/alpha/lumen/tree/bean"),
+    rec(3, "/home/alice/ws/gamma/slack-term/tree/main"),
+    { ...rec(4, "/home/alice/ws/alpha/lumen/tree/sf"), status: "exited" },
   ];
   it("suggests by a typo in a path segment", () => {
     expect(suggestAgents(live, "beam").map((r) => r.pid)).toEqual([2]);
