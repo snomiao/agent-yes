@@ -292,6 +292,10 @@ pub struct AgentContext {
     pending_enter_detected_at: Option<Instant>,
     enter_sent_at: Option<Instant>,
     enter_retry_count: u8,
+    // Rendered-screen hash when the last Enter of the cycle was sent. The CLI
+    // "responded" only if the screen differs from it — bytes alone don't count:
+    // claude's title spinner (OSC 0) streams while a dialog sits unanswered.
+    enter_sent_screen_hash: Option<u64>,
 
     // Auto-retry on recoverable API errors (overload / rate-limit / usage-limit).
     // `streak` doubles the backoff on each consecutive failed retry; `started_at`
@@ -425,6 +429,7 @@ impl AgentContext {
             pending_enter_detected_at: None,
             enter_sent_at: None,
             enter_retry_count: 0,
+            enter_sent_screen_hash: None,
             auto_retry_streak: 0,
             auto_retry_started_at: None,
             auto_retry_next_at: None,
@@ -1401,7 +1406,7 @@ impl AgentContext {
                 // A retry fires only while the last Enter got no response.
                 Some(sent) => {
                     let since = now.duration_since(sent).as_millis() as u64;
-                    !self.next_stdout.is_ready().await
+                    !self.screen_changed_since_enter()
                         && ((self.enter_retry_count == 0 && since >= ENTER_RETRY_1_MS)
                             || (self.enter_retry_count == 1 && since >= ENTER_RETRY_2_MS))
                 }
@@ -1421,8 +1426,9 @@ impl AgentContext {
                     self.next_stdout.unready().await;
                 }
             } else if let Some(sent_at) = self.enter_sent_at {
-                // Check if we received output after sending Enter
-                if self.next_stdout.is_ready().await {
+                // Did the Enter land? Judged by the rendered screen, not by
+                // bytes arriving: a title-only OSC tick is not an answer.
+                if self.screen_changed_since_enter() {
                     // Got response, clear pending state
                     debug!("Got response after Enter, clearing pending state");
                     self.end_pending_enter();
@@ -1447,6 +1453,12 @@ impl AgentContext {
                         self.do_send_enter(msg_ctx)?;
                         // After second retry, just keep waiting
                         self.end_pending_enter();
+                        // Still unanswered on an unchanged screen: keep the
+                        // per-heartbeat check quiet (no Enter spam), but lift the
+                        // one-shot suppression so the 60s idle scan presses again.
+                        // Without this the prompt is never retried at all.
+                        self.last_checked_screen_hash = Some(hash_str(&self.vterm.contents()));
+                        self.last_action_screen_hash = None;
                     }
                 }
             }
@@ -1473,7 +1485,13 @@ impl AgentContext {
         self.pending_enter_detected_at = None;
         self.enter_sent_at = None;
         self.enter_retry_count = 0;
+        self.enter_sent_screen_hash = None;
         self.last_checked_screen_hash = None;
+    }
+
+    /// Whether the rendered screen differs from the one the last Enter was sent on.
+    fn screen_changed_since_enter(&self) -> bool {
+        self.enter_sent_screen_hash != Some(hash_str(&self.vterm.contents()))
     }
 
     /// Whether the current screen still shows the prompt that scheduled the
@@ -1501,6 +1519,7 @@ impl AgentContext {
             writer.write_all(b"\r")?;
             writer.flush()?;
         }
+        self.enter_sent_screen_hash = Some(hash_str(&self.vterm.contents()));
         self.idle_waiter.ping();
         self.mark_stdin_sent();
         Ok(())
@@ -1996,6 +2015,103 @@ mod tests {
         h.screen(&trust_frame(true)).await;
         h.tick(100).await;
         assert_eq!(h.out.take(), "\r");
+    }
+
+    fn permission_frame() -> String {
+        "\u{1b}[2J\u{1b}[H Bash command\r\n Do you want to proceed?\r\n ❯ 1. Yes\r\n   2. No"
+            .to_string()
+    }
+
+    /// Claude's window-title spinner (OSC 0): output bytes that change nothing
+    /// on the rendered screen.
+    const TITLE_TICK: &str = "\u{1b}]0;◐ form\u{7}";
+
+    #[tokio::test]
+    async fn swallowed_enter_is_retried_despite_title_only_output() {
+        // The first Enter arrives before the permission dialog listens for
+        // input, and the only output afterwards is the title spinner. Judged by
+        // bytes alone that counts as "the CLI responded": the cycle ends and the
+        // one-shot suppression keeps the unchanged prompt from being pressed
+        // again, parking the session on "❯ 1. Yes".
+        let mut h = Harness::new();
+        h.screen(&permission_frame()).await;
+        h.tick(100).await;
+        assert_eq!(h.out.take(), "\r", "first Enter after the idle wait");
+        h.screen(TITLE_TICK).await; // swallowed: screen unchanged
+        let mut enters = 0;
+        for _ in 0..4 {
+            h.tick(600).await;
+            enters += h.out.take().matches('\r').count();
+        }
+        assert!(enters >= 1, "a swallowed Enter must be retried");
+    }
+
+    #[tokio::test]
+    async fn answered_prompt_is_not_pressed_again() {
+        let mut h = Harness::new();
+        h.screen(&permission_frame()).await;
+        h.tick(100).await;
+        assert_eq!(h.out.take(), "\r");
+        // The dialog closes: the screen really changes.
+        h.screen("\u{1b}[2J\u{1b}[H● Running…").await;
+        for _ in 0..4 {
+            h.tick(600).await;
+            assert_eq!(h.out.take(), "", "no Enter once the prompt is answered");
+        }
+    }
+
+    /// Drive a permission prompt through the first Enter and both retries on
+    /// an unchanged screen. Returns once the cycle has ended.
+    async fn exhaust_enter_retries(h: &mut Harness) {
+        h.screen(&permission_frame()).await;
+        h.tick(100).await;
+        assert_eq!(h.out.take(), "\r", "first Enter after the idle wait");
+        h.screen(TITLE_TICK).await; // swallowed: screen unchanged
+        h.tick(ENTER_RETRY_1_MS + 100).await;
+        h.tick(ENTER_RETRY_2_MS + 100).await;
+        assert_eq!(
+            h.out.take(),
+            "\r\r",
+            "both retries fire, then the cycle ends"
+        );
+        assert!(!h.ctx.pending_enter);
+    }
+
+    #[tokio::test]
+    async fn exhausted_retries_rearm_the_idle_scan() {
+        let mut h = Harness::new();
+        exhaust_enter_retries(&mut h).await;
+        // Between retries and the idle scan the heartbeat stays quiet: the
+        // unchanged prompt is not hammered every 50ms.
+        for _ in 0..3 {
+            h.tick(100).await;
+            assert_eq!(h.out.take(), "", "no Enter spam after the retries");
+        }
+        // The idle scan is due. The screen still shows the prompt, and the
+        // exhausted cycle lifted the one-shot suppression, so it is pressed
+        // again instead of being parked for good.
+        h.ctx.idle_waiter.advance(IDLE_SCAN_INTERVAL_MS);
+        h.tick(10).await;
+        assert_eq!(
+            h.out.take(),
+            "\r",
+            "idle scan presses the unanswered prompt again"
+        );
+        // A new retry cycle runs from here on.
+        assert!(h.ctx.pending_enter);
+    }
+
+    #[tokio::test]
+    async fn idle_scan_stays_suppressed_without_the_rearm() {
+        // Control for the test above: with the suppression still pointing at
+        // the current screen (as before the re-arm), the idle scan skips it.
+        let mut h = Harness::new();
+        exhaust_enter_retries(&mut h).await;
+        h.ctx.last_action_screen_hash = Some(hash_str(&h.ctx.vterm.contents()));
+        h.ctx.idle_waiter.advance(IDLE_SCAN_INTERVAL_MS);
+        h.tick(10).await;
+        assert_eq!(h.out.take(), "", "suppressed screen is not pressed");
+        assert!(!h.ctx.pending_enter);
     }
 
     #[tokio::test]

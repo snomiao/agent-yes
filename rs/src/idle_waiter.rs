@@ -15,6 +15,9 @@ use tokio::time::sleep;
 pub struct IdleWaiter {
     last_activity: Arc<AtomicU64>,
     start_time: Instant,
+    /// Milliseconds added to the clock, shared by every clone. Tests use it to
+    /// stand in for a long idle stretch instead of sleeping through one.
+    skew_ms: Arc<AtomicU64>,
 }
 
 impl IdleWaiter {
@@ -24,20 +27,31 @@ impl IdleWaiter {
         Self {
             last_activity: Arc::new(AtomicU64::new(0)),
             start_time: start,
+            skew_ms: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    /// Milliseconds since creation on the (possibly skewed) clock.
+    fn now_ms(&self) -> u64 {
+        self.start_time.elapsed().as_millis() as u64 + self.skew_ms.load(Ordering::SeqCst)
     }
 
     /// Record activity (reset idle timer)
     pub fn ping(&self) {
-        let elapsed = self.start_time.elapsed().as_millis() as u64;
-        self.last_activity.store(elapsed, Ordering::SeqCst);
+        self.last_activity.store(self.now_ms(), Ordering::SeqCst);
     }
 
     /// Get time since last activity in milliseconds
     pub fn idle_time_ms(&self) -> u64 {
         let last = self.last_activity.load(Ordering::SeqCst);
-        let now = self.start_time.elapsed().as_millis() as u64;
-        now.saturating_sub(last)
+        self.now_ms().saturating_sub(last)
+    }
+
+    /// Move the clock forward by `ms` without waiting: the idle time grows by
+    /// `ms` for this waiter and all its clones.
+    #[cfg(test)]
+    pub fn advance(&self, ms: u64) {
+        self.skew_ms.fetch_add(ms, Ordering::SeqCst);
     }
 
     /// Wait until idle for at least the specified duration

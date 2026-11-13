@@ -51,6 +51,8 @@ export class AgentContext {
   stdinFirstReady = new ReadyManager();
   nextStdout = new ReadyManager();
   idleWaiter = new IdleWaiter();
+  // Rendered screen, set once the terminal emulator exists (see messageContext)
+  screen?: () => string;
 
   // Flags
   isFatal = false;
@@ -92,6 +94,7 @@ export class AgentContext {
       idleWaiter: this.idleWaiter,
       stdinReady: this.stdinReady,
       nextStdout: this.nextStdout,
+      screen: this.screen,
     };
   }
 }
