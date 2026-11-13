@@ -31,6 +31,24 @@ async function classify(frame: string, cols = 60, cli?: string) {
 
 const box = (inner: string) => `history\r\n${RULE}\r\n❯ ${inner}\x1b[0m\r\n${RULE}\r\n${FOOTER}`;
 
+describe("composerBoxed without a rule (Codex)", () => {
+  const live = ["› hello", "", "  gpt-x default · ~/repo", "  ? for shortcuts"];
+  it("accepts a prompt row followed by Codex's footer", () => {
+    expect(composerBoxed(live, "codex", false)).toBe(true);
+  });
+  it("rejects an echoed › message with only transcript under it", () => {
+    const stale = [
+      "› start the app",
+      "",
+      "• queued a request",
+      "  Worked for 18s",
+      "  ↳ Recap: done",
+    ];
+    expect(composerBoxed(stale, "codex", false)).toBe(false);
+    expect(composerBoxed(stale)).toBe(false);
+  });
+});
+
 describe("classifyComposer", () => {
   it("reads an empty prompt as empty", async () => {
     expect(await classify(box(""))).toEqual({ kind: "empty", ghost: false });

@@ -114,9 +114,12 @@ export function composerPromptRow(texts: string[], cli?: string): number {
  * A real draft longer than MAX_DRAFT_ROWS fails too and reads "hidden", which
  * parks the send just as a draft does.
  */
-export function composerBoxed(texts: string[], cli?: string): boolean {
+export function composerBoxed(texts: string[], cli?: string, needRule = true): boolean {
   const prompt = composerPromptRow(texts, cli);
-  if (prompt < 1 || !SEPARATOR_RE.test(texts[prompt - 1]!)) return false;
+  if (prompt < 0) return false;
+  // Codex draws no rule above its composer; its footer under the prompt row is
+  // what shows the live composer rather than an echoed `›` message in history.
+  if (needRule && (prompt < 1 || !SEPARATOR_RE.test(texts[prompt - 1]!))) return false;
   const nonBlank = (rows: string[]) => rows.filter((t) => t.trim());
   const close = texts.findIndex((t, i) => i > prompt && isComposerChrome(t));
   if (close < 0) return false;
