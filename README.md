@@ -208,7 +208,7 @@ ay schedules daemon status        # the per-machine scheduler daemon
 ```
 
 Reminders live in one store (`~/.config/agent-yes/schedules.json`). One scheduler
-daemon per machine fires them with `ay send --force`; it is kept alive by oxmgr when
+daemon per machine fires them (it sleeps until the next fire, no polling, and wakes when the store changes) with `ay send --force`; it is kept alive by oxmgr when
 installed, else systemd --user, launchd, Windows Task Scheduler, or a detached process.
 A tick missed while the daemon was down is skipped. Fires are logged as JSONL to
 `~/.local/share/agent-yes/schedules.log`; a target that isn't live is logged and skipped.

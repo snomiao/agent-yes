@@ -315,16 +315,50 @@ export function dueNow(entries: StoreEntry[], state: RunState, now: number): Sto
     const from = Math.max(state.lastTick, e.since, state.last[e.name]?.at ?? 0);
     const first = nextRuns(e.cron, e.tz, from, 1)[0];
     if (first == null || first > now) continue;
-    const recent = nextRuns(e.cron, e.tz, now - ON_TIME_MS, 1)[0];
+    // the latest slot at or before now (a */1 cron has two in the window)
+    const recent = nextRuns(e.cron, e.tz, now - ON_TIME_MS, 3)
+      .filter((t) => t <= now)
+      .at(-1);
     const onTime = recent != null && recent <= now && recent > from;
     if (onTime || e.missed === "run-once") out.push(e);
   }
   return out;
 }
 
-/** Milliseconds until the next minute boundary (the daemon wakes once per minute). */
-export function msToNextMinute(now: number): number {
-  return 60000 - (now % 60000) + 50;
+/**
+ * Longest single sleep. The daemon sleeps until the earliest next fire (no polling),
+ * but never longer than this, so a wall-clock jump or a suspend is noticed within a day.
+ */
+export const MAX_SLEEP_MS = 24 * 3600e3;
+
+/** How long to sleep from `now` until the earliest next fire of any enabled entry. */
+export function wakeDelay(entries: StoreEntry[], now: number): number {
+  let best = Infinity;
+  for (const e of entries) {
+    if (!e.enabled) continue;
+    const t = nextRuns(e.cron, e.tz, now, 1)[0];
+    if (t != null && t < best) best = t;
+  }
+  return best === Infinity ? MAX_SLEEP_MS : Math.min(MAX_SLEEP_MS, Math.max(0, best - now + 50));
+}
+
+/**
+ * One wake-up, judged by the wall clock: what fires, and the new state. A clock
+ * that jumped backwards (lastTick in the future) resets lastTick to now, so
+ * nothing replays and the schedule resumes from the new time. A jump forwards
+ * or a suspend is a plain "slept past the slot": skip, or run-once.
+ */
+export function tick(
+  entries: StoreEntry[],
+  state: RunState,
+  now: number,
+): { fire: StoreEntry[]; state: RunState; clockBack: boolean } {
+  const clockBack = state.lastTick > now;
+  const last = Object.fromEntries(
+    Object.entries(state.last).map(([k, v]) => [k, v.at > now ? { ...v, at: now } : v]),
+  );
+  const st: RunState = { lastTick: clockBack ? now : state.lastTick || now - 60000, last };
+  return { fire: dueNow(entries, st, now), state: { ...st, lastTick: now }, clockBack };
 }
 
 // ---------------------------------------------------------------------------

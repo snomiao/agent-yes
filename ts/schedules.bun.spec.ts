@@ -8,7 +8,7 @@ import {
   launchdDaemonPlist,
   legacyRows,
   logFile,
-  msToNextMinute,
+  MAX_SLEEP_MS,
   nextCronId,
   nextRuns,
   parseCron,
@@ -21,7 +21,9 @@ import {
   stateFile,
   storeFile,
   systemdDaemonUnit,
+  tick,
   validTz,
+  wakeDelay,
   windowsTaskArgs,
 } from "./schedules.ts";
 
@@ -200,6 +202,14 @@ describe("scheduler loop (fake clock)", () => {
       "c1@00:15",
     ]);
   });
+  it("every minute fires every minute", () => {
+    const st: RunState = { lastTick: T0 - 30000, last: {} };
+    expect(simulate([entry({ cron: "* * * * *", since: T0 - 30000 })], st, T0, 3)).toEqual([
+      "c1@00:00",
+      "c1@00:01",
+      "c1@00:02",
+    ]);
+  });
   it("does not fire before an entry was added", () => {
     const st: RunState = { lastTick: T0 - MIN, last: {} };
     expect(simulate([entry({ since: T0 + 2 * MIN })], st, T0, 6)).toEqual(["c1@00:05"]);
@@ -223,8 +233,98 @@ describe("scheduler loop (fake clock)", () => {
     const st: RunState = { lastTick: T0, last: {} };
     expect(dueNow([entry()], st, T0 + 30 * MIN + 50).map((e) => e.name)).toEqual(["c1"]);
   });
-  it("wakes just after the minute", () => {
-    expect(msToNextMinute(T0 + 1000)).toBe(59050);
+});
+
+/**
+ * Event-driven daemon on a fake clock: sleep wakeDelay(), unless the store changes
+ * first (`changes`: at -> new entries) or the machine suspends (`suspend`: the
+ * wake that was due at or after `from` happens at `until`).
+ */
+function runDaemon(
+  initial: StoreEntry[],
+  start: number,
+  end: number,
+  o: {
+    changes?: [number, StoreEntry[]][];
+    suspend?: { from: number; until: number };
+    state?: RunState;
+  } = {},
+) {
+  let entries = initial;
+  let st: RunState = o.state ?? { lastTick: 0, last: {} };
+  let now = start;
+  const changes = [...(o.changes ?? [])];
+  const fired: string[] = [];
+  const wakes: string[] = [];
+  let suspended = false;
+  for (;;) {
+    const t = tick(entries, st, now);
+    for (const e of t.fire) {
+      fired.push(`${e.name}@${fmtTime(now, TZ).slice(11, 16)}`);
+      t.state.last[e.name] = { at: now, ok: true, code: 0 };
+    }
+    st = t.state;
+    let next = now + wakeDelay(entries, now);
+    if (changes.length && changes[0]![0] < next) {
+      const [at, es] = changes.shift()!;
+      next = at;
+      entries = es;
+    }
+    if (o.suspend && !suspended && next >= o.suspend.from) {
+      suspended = true;
+      next = o.suspend.until;
+    }
+    if (next > end) break;
+    now = next;
+    wakes.push(fmtTime(now, TZ).slice(11, 16));
+  }
+  return { fired, wakes };
+}
+
+describe("daemon wake-ups (no polling)", () => {
+  const hourly = entry({ name: "h", cron: "0 * * * *" });
+  it("sleeps until the earliest next fire, capped at a day", () => {
+    expect(wakeDelay([hourly, entry({ cron: "*/20 * * * *" })], T0 + 10 * MIN)).toBe(10 * MIN + 50);
+    expect(wakeDelay([], T0)).toBe(MAX_SLEEP_MS);
+    expect(wakeDelay([entry({ enabled: false })], T0)).toBe(MAX_SLEEP_MS);
+    expect(wakeDelay([entry({ cron: "0 0 1 1 *" })], T0)).toBe(MAX_SLEEP_MS);
+  });
+  it("wakes only at fire times and re-arms after each", () => {
+    const r = runDaemon([hourly], T0 + 10 * MIN, T0 + 3 * 60 * MIN + MIN);
+    expect(r.fired).toEqual(["h@01:00", "h@02:00", "h@03:00"]);
+    expect(r.wakes).toEqual(["01:00", "02:00", "03:00"]);
+  });
+  it("store changed while sleeping: re-plans at once", () => {
+    const r = runDaemon([hourly], T0 + 10 * MIN, T0 + 51 * MIN, {
+      changes: [[T0 + 31 * MIN, [hourly, entry({ name: "c2", since: T0 + 31 * MIN })]]],
+    });
+    expect(r.wakes.slice(0, 3)).toEqual(["00:31", "00:35", "00:40"]);
+    expect(r.fired).toEqual(["c2@00:35", "c2@00:40", "c2@00:45", "c2@00:50"]);
+  });
+  it("slept past the slot (suspend): skip fires nothing, run-once fires once", () => {
+    const sus = { from: T0 + 60 * MIN, until: T0 + 200 * MIN };
+    const skip = runDaemon([hourly], T0 + 10 * MIN, T0 + 241 * MIN, { suspend: sus });
+    expect(skip.fired).toEqual(["h@04:00"]);
+    const once = runDaemon([{ ...hourly, missed: "run-once" }], T0 + 10 * MIN, T0 + 241 * MIN, {
+      suspend: sus,
+    });
+    expect(once.fired).toEqual(["h@03:20", "h@04:00"]);
+  });
+  it("clock jumped backwards: no replay, resumes from the new time", () => {
+    const st: RunState = {
+      lastTick: T0 + 120 * MIN,
+      last: { h: { at: T0 + 120 * MIN, ok: true, code: 0 } },
+    };
+    const t = tick([hourly], st, T0 + 30 * MIN);
+    expect(t.clockBack).toBe(true);
+    expect(t.fire).toEqual([]);
+    expect(t.state.lastTick).toBe(T0 + 30 * MIN);
+    const r = runDaemon([hourly], T0 + 30 * MIN, T0 + 61 * MIN, { state: st });
+    expect(r.fired).toEqual(["h@01:00"]);
+  });
+  it("first start fires nothing missed", () => {
+    expect(tick([entry()], { lastTick: 0, last: {} }, T0 + 2 * MIN + 50).fire).toEqual([]);
+    expect(tick([entry()], { lastTick: 0, last: {} }, T0 + 50).fire.length).toBe(1);
   });
 });
 

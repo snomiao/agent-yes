@@ -8,6 +8,7 @@ import {
   openSync,
   readFileSync,
   renameSync,
+  watch,
   writeFileSync,
 } from "fs";
 import { homedir } from "os";
@@ -20,12 +21,10 @@ import {
   type RunState,
   type Store,
   type StoreEntry,
-  dueNow,
   fmtTime,
   launchdDaemonPlist,
   legacyRows,
   logFile,
-  msToNextMinute,
   nextCronId,
   nextRuns,
   parseCronAdd,
@@ -37,6 +36,8 @@ import {
   stateFile,
   storeFile,
   systemdDaemonUnit,
+  tick,
+  wakeDelay,
   windowsTaskArgs,
 } from "./schedules.ts";
 
@@ -220,7 +221,11 @@ export function daemonPid(): number | null {
   return pid && alive(pid) ? pid : null;
 }
 
-/** Foreground loop. One per machine (pid file); wakes each minute. */
+/**
+ * Foreground loop, one per machine (pid file). Sleeps until the earliest next fire
+ * (capped at MAX_SLEEP_MS), re-arms after each fire, and wakes at once when the
+ * store file changes (fs.watch on its directory: writes are atomic renames).
+ */
 export async function daemonRun(): Promise<number> {
   const other = daemonPid();
   if (other && other !== process.pid) {
@@ -228,18 +233,36 @@ export async function daemonRun(): Promise<number> {
     return 0;
   }
   writeAtomic(pidFile(), `${process.pid}\n`);
-  console.error(`${DAEMON_NAME}: started pid ${process.pid}, store ${storeFile()}`);
+  const sf = storeFile();
+  mkdirSync(path.dirname(sf), { recursive: true });
+  console.error(`${DAEMON_NAME}: started pid ${process.pid}, store ${sf}`);
+  let wake: (() => void) | null = null;
+  watch(path.dirname(sf), (_ev, file) => {
+    if (!file || file.toString() === path.basename(sf)) wake?.();
+  });
   for (;;) {
     const now = Date.now();
-    const st = loadState();
-    if (!st.lastTick) st.lastTick = now - 60000; // first start: nothing is "missed"
-    for (const e of dueNow(loadStore().entries, st, now)) {
+    const entries = loadStore().entries;
+    const t = tick(entries, loadState(), now);
+    if (t.clockBack)
+      console.error(
+        `${DAEMON_NAME}: clock went backwards; resuming from ${new Date(now).toISOString()}`,
+      );
+    for (const e of t.fire) {
       const code = fire(e, now);
-      st.last[e.name] = { at: now, ok: code === 0, code };
+      t.state.last[e.name] = { at: now, ok: code === 0, code };
     }
-    st.lastTick = now;
-    saveState(st);
-    await new Promise((r) => setTimeout(r, msToNextMinute(Date.now())));
+    saveState(t.state);
+    const ms = wakeDelay(entries, Date.now());
+    await new Promise<void>((r) => {
+      const timer = setTimeout(done, ms);
+      function done() {
+        clearTimeout(timer);
+        wake = null;
+        r();
+      }
+      wake = done;
+    });
   }
 }
 
