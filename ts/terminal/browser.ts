@@ -83,7 +83,7 @@ export class AyTerminal {
    * daemon's negotiation (3a/3b) can shrink the shared PTY to what the panel shows —
    * the "drag the widget to resize the agent" behavior, but through the same
    * smallest-client-wins negotiation as every other viewer (bounded by the operator's
-   * local terminal + the 40×10 floor), NOT a raw /api/resize that scrambled everyone.
+   * local terminal + the 80×10 floor), NOT a raw /api/resize that scrambled everyone.
    * Debounced so a drag doesn't spam. Read-only widgets never report (pure observers).
    */
   private sendCap(cols: number, rows: number): void {

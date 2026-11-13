@@ -47,8 +47,28 @@ case "$MODE" in
     ;;
 esac
 
-echo "[pre-push] running full test + coverage gate"
-bun run test:coverage
+# The 90% gate is V8 coverage on the Node CI runs. Where `node` is only a symlink
+# to bun, vitest runs on JavaScriptCore and branch coverage reads ~1.5 points low
+# (88.5% against 90.2% on Node 22, same tree and tests), so the gate fails on
+# unchanged code. Run vitest with a real Node, or stop and say so; never relax
+# the threshold.
+real_node=""
+for n in $(which -a node 2>/dev/null) /opt/homebrew/bin/node /usr/local/bin/node; do
+  [ -x "$n" ] || continue
+  # bun's shim answers `-p`; a real Node has no process.versions.bun.
+  if [ "$("$n" -p 'process.versions.bun ? "bun" : "node"' 2>/dev/null)" = "node" ]; then
+    real_node="$n"
+    break
+  fi
+done
+if [ -z "$real_node" ]; then
+  echo "[pre-push] coverage needs Node, found bun at $(command -v node || echo 'no node on PATH')." >&2
+  echo "[pre-push] put a real Node (22) first on PATH and push again." >&2
+  exit 1
+fi
+
+echo "[pre-push] running full test + coverage gate on $("$real_node" -v) ($real_node)"
+PATH="$(dirname "$real_node"):$PATH" "$real_node" node_modules/vitest/vitest.mjs run --coverage
 
 # Guard the console's OS light/dark adaptation before it can ship. Only when the
 # UI source actually changed since upstream, so unrelated pushes stay fast. The

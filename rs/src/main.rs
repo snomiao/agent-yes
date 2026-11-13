@@ -3,6 +3,7 @@ mod cli;
 mod codex_sessions;
 mod config;
 mod config_loader;
+mod conpty_mode_filter;
 mod context;
 mod fifo;
 mod identity;
