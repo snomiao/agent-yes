@@ -69,6 +69,9 @@ export default defineConfig({
         // also contains a Windows named-pipe branch and an xterm-headless
         // import-failure fallback that aren't reachable on Linux CI.
         "ts/subcommands.ts",
+        // `ay cron` / `ay schedules` shell — store files, ay ls/send, daemon loop and
+        // OS autostart; the logic lives in schedules.ts (covered).
+        "ts/schedulesCli.ts",
         // HTTP server and remote config — integration-test only (requires a
         // running server and network); unit coverage not meaningful here.
         "ts/serve.ts",
