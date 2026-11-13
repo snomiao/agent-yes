@@ -59,7 +59,7 @@ import { isTermToken, mintTermToken, verifyTermToken, type TermScope } from "./t
 import { isCallbackRevoked, loadCallbackSecretReadOnly } from "./callback.ts";
 import { CLAUDE_SESSION_PIN_ENV } from "./sessionEnv.ts";
 import { MAX_CALLBACK_MSG_BYTES, frameVisitorMessage, verifyCapability } from "./callbackCore.ts";
-import { isTerminalReply } from "./terminalReply.ts";
+import { isRedundantViewerReply, isTerminalReply } from "./terminalReply.ts";
 import { framePaste, shouldFramePaste } from "./bracketedPaste.ts";
 import * as serveSampler from "./serveSampler.ts";
 import { withIpcLock } from "./ipcLock.ts";
@@ -4084,6 +4084,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
         const record = await resolveOne(keyword, defaultOpts());
         if (!record.fifo_file)
           return new Response(`pid ${record.pid}: no fifo_file`, { status: 409 });
+        // A viewer's xterm answering the TUI's cursor/DA query: the wrapper
+        // already answered, so a second reply is only a stray-byte risk.
+        if (isRedundantViewerReply(raw, msg)) return Response.json({ ok: true, dropped: "reply" });
         const trailing = controlCodeFromName(code.toLowerCase());
         const fifo = record.fifo_file;
         // Same one-paste delivery `ay send` uses locally (ts/bracketedPaste.ts):
