@@ -1,3 +1,4 @@
+import { ConptyModeFilter } from "./conptyModeFilter.ts";
 import { randomBytes } from "node:crypto";
 import { execaCommandSync, parseCommandString } from "execa";
 import { fromWritable } from "from-node-stream";
@@ -574,7 +575,16 @@ export default async function agentYes({
 
   // Attach data handler IMMEDIATELY after spawn to avoid losing early PTY output.
   // node-pty emits 'data' events eagerly — if no listener is attached, events are lost.
-  function onData(data: string) {
+  let modeFilter = new ConptyModeFilter();
+  let modeFilterPid = shell.pid;
+  function onData(data: string, final = false) {
+    if (modeFilterPid !== shell.pid) {
+      modeFilter = new ConptyModeFilter();
+      modeFilterPid = shell.pid;
+    }
+    if (process.platform === "win32")
+      data = modeFilter.feed(data) + (final ? modeFilter.finish() : "");
+    if (!data) return;
     const currentPid = shell.pid;
     xtermProxy.write(data);
     globalAgentRegistry.appendStdout(currentPid, data);
@@ -679,6 +689,7 @@ export default async function agentYes({
   const pendingExitCode = Promise.withResolvers<number | null>();
 
   shell.onExit(async function onExit({ exitCode }) {
+    onData("", true); // Flush an incomplete final control sequence before a restart.
     const exitedPid = shell.pid; // Capture PID immediately before any shell reassignment
     // Reap the exited agent's process group. The PTY child is a session/group
     // leader, so a `yes | cmd` (or any descendant) it leaked shares its pgid even
