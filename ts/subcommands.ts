@@ -705,9 +705,6 @@ const SUBCOMMANDS = new Set([
   "serve",
   "tray",
   "schedule",
-  "schedules",
-  "sched",
-  "cron",
   "remote",
   "expose",
   "callback",
@@ -1359,7 +1356,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
   const wsLines = managerCommands
     ? `  ay ws ls [--status]                 list <owner>/<repo>/tree/<branch> workspaces\n` +
       `  ay ws new <owner>/<repo>[@branch]   clone/refresh a workspace (ay ws help for more)\n` +
-          `  ay cron "<cron>" <target> <msg>     recurring reminder sent to an agent (ay cron help)\n` +
+      `  ay cron "<cron>" <target> <msg>     recurring reminder sent to an agent (ay cron help)\n` +
       `  ay schedules ls|daemon              all schedules on this machine + the scheduler daemon\n`
     : ``;
   // `read` is manager-entry-only too, but for the opposite reason: it's a word

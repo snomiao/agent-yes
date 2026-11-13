@@ -3,7 +3,7 @@
 // ONE store ($AY_SCHEDULES_STORE, else ~/.config/agent-yes/schedules.json) holds every
 // reminder. `ay cron` adds/lists/removes entries (source "cron"); `ay schedules ls`
 // lists them together with the legacy oxmgr-backed `ay schedule` jobs. A single
-// per-machine daemon (`ay schedules daemon run`) wakes every minute, fires due
+// per-machine daemon (`ay schedules daemon run`) sleeps until the next fire, sends due
 // entries with `ay send --force`, and keeps last-run state on disk
 // ($AY_SCHEDULES_STATE) so a restart neither double-fires nor storms missed runs.
 // It is kept alive by oxmgr when present (the runner `ay schedule` already uses),

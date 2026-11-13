@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import path from "path";
 import {
   type RunState,
   type StoreEntry,
@@ -166,9 +167,13 @@ describe("store", () => {
     expect(storeFile({ AY_SCHEDULES_STORE: "/s" })).toBe("/s");
     expect(stateFile({ AY_SCHEDULES_STATE: "/t" })).toBe("/t");
     expect(logFile({ AY_SCHEDULES_LOG: "/l" })).toBe("/l");
-    expect(storeFile({}, "/home/alice")).toBe("/home/alice/.config/agent-yes/schedules.json");
+    expect(storeFile({}, "/home/alice")).toBe(
+      path.join("/home/alice", ".config", "agent-yes", "schedules.json"),
+    );
     expect(stateFile({}, "/home/alice")).toMatch(/schedules\.state\.json$/);
-    expect(logFile({}, "/home/alice")).toBe("/home/alice/.local/share/agent-yes/schedules.log");
+    expect(logFile({}, "/home/alice")).toBe(
+      path.join("/home/alice", ".local", "share", "agent-yes", "schedules.log"),
+    );
   });
   it("renders messages", () => {
     expect(renderMessage(entry(), T0)).toBe("ping c1 at 2026-01-05 00:00 Asia/Tokyo");
