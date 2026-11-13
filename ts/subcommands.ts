@@ -12,6 +12,7 @@
  */
 
 import { randomBytes } from "crypto";
+import { interruptBeforeSend, interruptScreenState } from "./interruptSend.ts";
 import {
   closeSync,
   constants as fsConstants,
@@ -5415,8 +5416,11 @@ export async function submitAndConfirm(
     };
   };
   const ownPaste = ownedCollapsedPaste(record.cli, beforePaste, screen);
+  // Immediate-send shortcuts may cancel work. A requested shortcut is sent
+  // once; only native Enter is safe to retry against an owned composer.
   const canRetry = (evidence: ReturnType<typeof inspectSubmission>, current: string[]) =>
-    evidence.retry || (ownPaste !== null && collapsedPasteToken(current) === ownPaste);
+    trailing === "\r" &&
+    (evidence.retry || (ownPaste !== null && collapsedPasteToken(current) === ownPaste));
   for (let attempt = 0; attempt <= SEND_SUBMIT_MAX_RETRIES; attempt++) {
     if (attempt) {
       await new Promise((r) => setTimeout(r, Math.min(400, 150 * 1.618 ** (attempt - 1))));
@@ -5499,6 +5503,43 @@ async function deliverBody(
     screen: [],
     submission: canConfirm ? "not-submitted" : "unchecked",
   };
+}
+
+/** Called under the same input lock as the subsequent paste and submit. */
+export async function interruptSendTarget(
+  record: GlobalPidRecord,
+  fifoPath: string,
+): Promise<string> {
+  const cfg = (await cliDefaults())[record.cli] ?? {};
+  const result = await interruptBeforeSend(record.cli, {
+    readState: async () => {
+      if (!record.log_file) return "unknown";
+      const screen = await renderSendScreen({ ...record, log_file: record.log_file });
+      return interruptScreenState(record.cli, screen, cfg);
+    },
+    write: (code) => writeToIpc(fifoPath, code),
+    sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+  });
+  const notice =
+    result === "permission"
+      ? "ay send: --interrupt skipped: target is at a permission/confirmation prompt; sending as usual"
+      : result === "unknown" || result === "unsupported"
+        ? `ay send: --interrupt skipped: ${result === "unknown" ? "could not verify the target's screen" : `unsupported CLI ${record.cli}`}; sending as usual`
+        : `ay send: ${result === "interrupted" ? "current turn interrupted; idle prompt confirmed" : "target is already idle"}`;
+  process.stderr.write(notice + "\n");
+  return notice;
+}
+
+async function interruptPermissionPrompt(record: GlobalPidRecord): Promise<boolean> {
+  if (!record.log_file) return false;
+  const cfg = (await cliDefaults())[record.cli] ?? {};
+  return (
+    interruptScreenState(
+      record.cli,
+      await renderSendScreen({ ...record, log_file: record.log_file }),
+      cfg,
+    ) === "permission"
+  );
 }
 
 // Drainer pacing: poll the parked target with a φ backoff from 500 ms up to 5 s,
@@ -5646,7 +5687,7 @@ async function cmdSendDrain(rest: string[]): Promise<number> {
       let result: Awaited<ReturnType<typeof deliverBody>> | null = null;
       // A draft nobody touches (unchanged at 1/2/4/8 s) is submitted for its
       // owner here too, so a message parked behind it is not stuck forever.
-      if (record && !(await isUserTyping(pid))) await submitStableDraft(record);
+      if (record && !msg.interrupt && !(await isUserTyping(pid))) await submitStableDraft(record);
       if (record && !(await isUserTyping(pid))) {
         await withIpcLock(pid, async () => {
           // Re-check under the lock, right before the write.
@@ -5655,6 +5696,10 @@ async function cmdSendDrain(rest: string[]): Promise<number> {
           // screen or one without a composer (a menu) waits for the next poll.
           const composer = await readComposerState(record);
           if (composer.kind !== "empty") return;
+          if (msg.interrupt) {
+            await interruptSendTarget(record, msg.fifoPath);
+            if ((await readComposerState(record)).kind !== "empty") return;
+          }
           if (!(await claimPending(pid, name))) return;
           result = await deliverBody(
             record,
@@ -5662,7 +5707,7 @@ async function cmdSendDrain(rest: string[]): Promise<number> {
             msg.fullBody,
             msg.trailing,
             msg.identity,
-            msg.trailing === "\r" && Boolean(record.log_file),
+            isSubmitCode(msg.trailing) && Boolean(record.log_file),
           );
         });
       }
@@ -5690,6 +5735,7 @@ async function cmdSendDrain(rest: string[]): Promise<number> {
 
 async function cmdSend(rest: string[]): Promise<number> {
   const y = yargs(rest)
+    .help(false)
     // Disable yargs' `--no-<flag>` negation: without this, `--no-wait` is parsed
     // as negating a phantom `wait` option (argv.wait=false) instead of setting our
     // explicitly-defined `no-wait`/`noWait` flag — so `--no-wait` silently did
@@ -5698,6 +5744,9 @@ async function cmdSend(rest: string[]): Promise<number> {
     .parserConfiguration({ "boolean-negation": false })
     .usage(
       "Usage: ay send <keyword> <msg|-> [options]\n\n" +
+        "Busy targets receive input without waiting for idle using native Enter input.\n" +
+        "Explicit --code=alt-m requests immediate send and may interrupt work.\n" +
+        "Existing drafts are protected and may defer delivery.\n\n" +
         "Exit: 0 sent, 3 target unreachable (nothing sent; ay ls shows it as\n" +
         "'unreachable' — ay restart <pid> revives it), 4 QUEUED (accepted, not yet\n" +
         "submitted: either the CLI queued it, or its input box held someone's draft and\n" +
@@ -5708,8 +5757,17 @@ async function cmdSend(rest: string[]): Promise<number> {
     .option("code", {
       type: "string",
       default: "enter",
-      description: "Trailing control code (enter|esc|ctrl-c|ctrl-y|tab|none)",
+      description:
+        "Trailing control code (enter|alt-m|esc|ctrl-c|ctrl-y|tab|none); alt-m may interrupt work",
     })
+    .option("interrupt", {
+      alias: "i",
+      type: "boolean",
+      default: false,
+      description:
+        "Stop a local target's current turn, wait for idle, then deliver; never cancel a permission/confirmation prompt",
+    })
+    .option("help", { alias: "h", type: "boolean", description: "Show send options" })
     .option("all", { type: "boolean", default: false, description: "Include exited agents" })
     .option("latest", { type: "boolean", default: false, description: "Use most recent match" })
     .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
@@ -5733,7 +5791,6 @@ async function cmdSend(rest: string[]): Promise<number> {
       description:
         "Send the body verbatim: omit the <ay-msg …> attribution wrapper that agent senders add by default (also: AGENT_YES_SEND_RAW=1)",
     })
-    .help(false)
     .version(false)
     // An UNKNOWN flag must be an error, never a silent reinterpretation of the
     // message. yargs otherwise swallows `--body-file /tmp/x` as an ad-hoc option
@@ -5747,6 +5804,10 @@ async function cmdSend(rest: string[]): Promise<number> {
     .exitProcess(false);
 
   const argv = await y.parseAsync();
+  if (argv.help) {
+    process.stdout.write((await y.getHelp()) + "\n");
+    return 0;
+  }
   const opts: CommonOpts = {
     all: argv.all,
     active: false,
@@ -5758,7 +5819,9 @@ async function cmdSend(rest: string[]): Promise<number> {
   const rawMessage = argv._.slice(1).map(String).join(" ");
 
   if (!keyword)
-    throw new Error("usage: ay send <keyword> <msg|-> [--code=enter|esc|ctrl-c|ctrl-y|tab|none]");
+    throw new Error(
+      "usage: ay send <keyword> <msg|-> [--code=enter|alt-m|esc|ctrl-c|ctrl-y|tab|none]",
+    );
 
   // Second line of defence, independent of how the message went missing: never
   // deliver nothing. Sending an empty body is never what anyone meant, and its
@@ -5776,6 +5839,10 @@ async function cmdSend(rest: string[]): Promise<number> {
     const remote = await resolveRemoteSpec(keyword);
     // --raw / AGENT_YES_SEND_RAW means "deliver verbatim"; it has to be honoured
     // on this path too, now that the remote path wraps at all.
+    if (remote && argv.interrupt)
+      throw new Error(
+        "ay send: --interrupt requires a local target; run ay send --interrupt on the target host",
+      );
     if (remote)
       return runRemoteSend(
         remote,
@@ -5969,6 +6036,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   }
   const fullBody = framePaste ? frameAsPaste(prefix + body + suffix) : prefix + body + suffix;
   const noWait = Boolean(argv.noWait) || process.env.AGENT_YES_SEND_NO_WAIT === "1";
+  let interrupt = argv.interrupt;
 
   // Back off while the user is typing at the target's terminal — injecting our
   // body mid-line fuses into their text and submits a mangled line. Only for a
@@ -5987,12 +6055,12 @@ async function cmdSend(rest: string[]): Promise<number> {
       );
     }
   }
-  // Submit-confirm only applies to an actual submit (Enter/CR) with a body and a
+  // Submit-confirm only applies to an actual submit (Enter/CR or explicit Alt+M) with a body and a
   // log to watch — other trailing codes (esc/ctrl-c/tab/none) don't have a "did
   // it land" signal in the same sense, and retrying e.g. ctrl-c could
   // double-interrupt. Checked against the resolved byte, not the code NAME, so
-  // every alias that resolves to Enter (--code=enter or --code=cr) is covered.
-  const canConfirm = trailing === "\r" && Boolean(fullBody) && !noWait;
+  // every submit alias is covered. Alt+M is never automatically retried.
+  const canConfirm = isSubmitCode(trailing) && Boolean(fullBody) && !noWait;
   const identity = nonce ? `<ay-msg ${nonce}` : body;
   let confirmed = !canConfirm;
   const receipt: { submission: "submitted" | "queued" | "not-submitted" | "unchecked" } = {
@@ -6023,7 +6091,13 @@ async function cmdSend(rest: string[]): Promise<number> {
   };
   // A draft nobody is touching (unchanged at 1, 2, 4, 8 s) is submitted for its
   // owner, so it does not hold this message until someone clears the box.
-  if (fullBody && !noWait && !parkReason && (await listPending(record.pid)).length === 0) {
+  if (
+    fullBody &&
+    !interrupt &&
+    !noWait &&
+    !parkReason &&
+    (await listPending(record.pid)).length === 0
+  ) {
     await submitStableDraft(record);
   }
   // The body and its Enter are ONE transaction: every gap between them (the
@@ -6046,6 +6120,26 @@ async function cmdSend(rest: string[]): Promise<number> {
           duplicateOf = await findRecentDuplicate(record.pid, dedupeKey, body);
           if (duplicateOf) return;
         }
+        const park = async () => {
+          if (dedupeKey) await noteRecentSend(record.pid, dedupeKey, body, "queued");
+          await enqueuePending({
+            queuedAt: Date.now(),
+            pid: record.pid,
+            fifoPath,
+            fullBody,
+            trailing,
+            interrupt,
+            identity,
+            record: mailBase,
+          });
+          parked = true;
+        };
+        if (interrupt && (await interruptPermissionPrompt(record))) {
+          process.stderr.write(
+            "ay send: --interrupt skipped: target is at a permission/confirmation prompt; sending as usual\n",
+          );
+          interrupt = false;
+        }
         if (fullBody) {
           if (!parkReason && (await listPending(record.pid)).length)
             parkReason = "earlier messages to this agent are still queued";
@@ -6059,19 +6153,19 @@ async function cmdSend(rest: string[]): Promise<number> {
                 `warning: ay send could not see pid ${record.pid}'s input box (${composer.reason}) — sending without the draft check.\n`,
               );
           }
-          if (dedupeKey)
-            await noteRecentSend(record.pid, dedupeKey, body, parkReason ? "queued" : "sent");
           if (parkReason) {
-            await enqueuePending({
-              queuedAt: Date.now(),
-              pid: record.pid,
-              fifoPath,
-              fullBody,
-              trailing,
-              identity,
-              record: mailBase,
-            });
-            parked = true;
+            await park();
+            return;
+          }
+        }
+        if (interrupt) {
+          await interruptSendTarget(record, fifoPath);
+          // Cancellation can restore a prior draft. Recheck before pasting so
+          // stopping the turn never submits or overwrites that restored input.
+          const composer = await readComposerState(record);
+          if (composer.kind === "draft" || composer.kind === "hidden") {
+            parkReason = "input box was occupied after cancelling the current turn";
+            await park();
             return;
           }
         }
@@ -6080,6 +6174,7 @@ async function cmdSend(rest: string[]): Promise<number> {
           screen: lastScreen,
           submission: receipt.submission,
         } = await deliverBody(record, fifoPath, fullBody, trailing, identity, canConfirm));
+        if (dedupeKey) await noteRecentSend(record.pid, dedupeKey, body, "sent");
       },
       (why) =>
         process.stderr.write(
@@ -6581,12 +6676,19 @@ export const GRACEFUL_EXIT_COMMANDS: Record<string, string> = {
   powershell: "exit",
 };
 
+export function isSubmitCode(code: string): boolean {
+  return code === "\r" || code === "\x1bm";
+}
+
 export function controlCodeFromName(name: string): string {
   switch (name) {
     case "enter":
     case "cr":
     case "return":
       return "\r";
+    case "alt-m":
+    case "alt+m":
+      return "\x1bm";
     case "esc":
     case "escape":
       return "\x1b";
