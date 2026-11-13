@@ -1,0 +1,33 @@
+import { describe, expect, it } from "vitest";
+import { suggestAgents } from "./subcommands";
+
+const rec = (pid: number, cwd: string, started_at = pid) =>
+  ({ pid, cwd, started_at, status: "active", agent_id: `id${pid}` }) as any;
+
+describe("suggestAgents", () => {
+  const live = [
+    rec(1, "/home/alice/ws/alpha/lumen/tree/main"),
+    rec(2, "/home/alice/ws/alpha/lumen/tree/bean"),
+    rec(3, "/home/alice/ws/gamma/slack-term/tree/main"),
+    { ...rec(4, "/home/alice/ws/alpha/lumen/tree/sf"), status: "exited" },
+  ];
+  it("suggests by a typo in a path segment", () => {
+    expect(suggestAgents(live, "beam").map((r) => r.pid)).toEqual([2]);
+  });
+  it("suggests by substring", () => {
+    expect(suggestAgents(live, "slack").map((r) => r.pid)).toEqual([3]);
+  });
+  it("skips exited agents and unrelated keywords", () => {
+    expect(suggestAgents(live, "sf")).toEqual([]);
+    expect(suggestAgents(live, "zzzzzz")).toEqual([]);
+  });
+  it("does not match every agent because the keyword contains a path word", () => {
+    // "ws", "tree", "main" and "home" are in every cwd; a keyword that merely
+    // contains one of them says nothing about which agent was meant.
+    expect(suggestAgents(live, "mainframe")).toEqual([]);
+    expect(suggestAgents(live, "treehouse")).toEqual([]);
+  });
+  it("never suggests for numeric keywords (identity selectors)", () => {
+    expect(suggestAgents(live, "12345")).toEqual([]);
+  });
+});
