@@ -2026,11 +2026,11 @@ mod tests {
 
     #[tokio::test]
     async fn swallowed_enter_is_retried_despite_title_only_output() {
-        // Observed on a syform lane (11-10): the first Enter landed before the
-        // permission dialog listened, and the only output afterwards was the
-        // title spinner. That counted as "the CLI responded", the cycle ended,
-        // and one-shot suppression kept the unchanged prompt from ever being
-        // pressed again — 46 min parked on "❯ 1. Yes".
+        // The first Enter arrives before the permission dialog listens for
+        // input, and the only output afterwards is the title spinner. Judged by
+        // bytes alone that counts as "the CLI responded": the cycle ends and the
+        // one-shot suppression keeps the unchanged prompt from being pressed
+        // again, parking the session on "❯ 1. Yes".
         let mut h = Harness::new();
         h.screen(&permission_frame()).await;
         h.tick(100).await;
@@ -2056,6 +2056,60 @@ mod tests {
             h.tick(600).await;
             assert_eq!(h.out.take(), "", "no Enter once the prompt is answered");
         }
+    }
+
+    /// Drive a permission prompt through the first Enter and both retries on
+    /// an unchanged screen. Returns once the cycle has ended.
+    async fn exhaust_enter_retries(h: &mut Harness) {
+        h.screen(&permission_frame()).await;
+        h.tick(100).await;
+        assert_eq!(h.out.take(), "\r", "first Enter after the idle wait");
+        h.screen(TITLE_TICK).await; // swallowed: screen unchanged
+        h.tick(ENTER_RETRY_1_MS + 100).await;
+        h.tick(ENTER_RETRY_2_MS + 100).await;
+        assert_eq!(
+            h.out.take(),
+            "\r\r",
+            "both retries fire, then the cycle ends"
+        );
+        assert!(!h.ctx.pending_enter);
+    }
+
+    #[tokio::test]
+    async fn exhausted_retries_rearm_the_idle_scan() {
+        let mut h = Harness::new();
+        exhaust_enter_retries(&mut h).await;
+        // Between retries and the idle scan the heartbeat stays quiet: the
+        // unchanged prompt is not hammered every 50ms.
+        for _ in 0..3 {
+            h.tick(100).await;
+            assert_eq!(h.out.take(), "", "no Enter spam after the retries");
+        }
+        // The idle scan is due. The screen still shows the prompt, and the
+        // exhausted cycle lifted the one-shot suppression, so it is pressed
+        // again instead of being parked for good.
+        h.ctx.idle_waiter.advance(IDLE_SCAN_INTERVAL_MS);
+        h.tick(10).await;
+        assert_eq!(
+            h.out.take(),
+            "\r",
+            "idle scan presses the unanswered prompt again"
+        );
+        // A new retry cycle runs from here on.
+        assert!(h.ctx.pending_enter);
+    }
+
+    #[tokio::test]
+    async fn idle_scan_stays_suppressed_without_the_rearm() {
+        // Control for the test above: with the suppression still pointing at
+        // the current screen (as before the re-arm), the idle scan skips it.
+        let mut h = Harness::new();
+        exhaust_enter_retries(&mut h).await;
+        h.ctx.last_action_screen_hash = Some(hash_str(&h.ctx.vterm.contents()));
+        h.ctx.idle_waiter.advance(IDLE_SCAN_INTERVAL_MS);
+        h.tick(10).await;
+        assert_eq!(h.out.take(), "", "suppressed screen is not pressed");
+        assert!(!h.ctx.pending_enter);
     }
 
     #[tokio::test]
