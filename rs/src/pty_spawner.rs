@@ -511,6 +511,15 @@ impl PtyContext {
         Ok(self.child.wait()?)
     }
 
+    /// Ask the child to stop (SIGTERM, to its own pid); false when there is none.
+    pub fn terminate(&self) -> bool {
+        #[cfg(unix)]
+        if let Some(pid) = self.child.process_id() {
+            return unsafe { libc::kill(pid as i32, libc::SIGTERM) } == 0;
+        }
+        false
+    }
+
     /// Kill the child process (and its whole process group).
     pub fn kill(&mut self) -> Result<()> {
         self.reap_group(); // take leaked descendants (a `yes | cmd`, etc.) with it
