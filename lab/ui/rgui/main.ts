@@ -38,6 +38,7 @@ import { RTCClient, parseRoomHash } from "../rtc.js";
 // commands. A .js module with no types → treated as any here.
 // @ts-ignore — sibling JS module, no .d.ts (bundled, not type-checked)
 import { SIG_DEFAULT, mintPairing } from "../pairing.js";
+import { createRoomSync } from "../room-sync-client.js";
 
 // ── /api/ls record shape (subset we use; see ts/globalPidIndex.ts + serve.ts) ──
 type AgentStatus = "active" | "idle" | "needs_input" | "stuck" | "exited";
@@ -144,6 +145,8 @@ function hostEnvFields(src: string): [string, string][] {
 // all (static preview, no cached rooms). A hash share link still eats its
 // token from the URL on open (only the room mnemonic stays — /w/ parity).
 const ROOMS_KEY = "ay.rooms";
+// Optional room sync; created at boot (below), declared here so saveRoom can use it.
+let roomSync: ReturnType<typeof createRoomSync> | null = null;
 function loadRooms(): Record<string, { token: string; host?: string; ts?: number }> {
   try {
     return JSON.parse(localStorage.getItem(ROOMS_KEY) || "{}");
@@ -162,8 +165,15 @@ function cachedRoom(name: string): { token: string; host: string } | null {
 function saveRoom(name: string, token: string, host: string) {
   try {
     const r = JSON.parse(localStorage.getItem(ROOMS_KEY) || "{}");
-    r[name] = { token, host, ts: Date.now() };
+    const prev = r[name];
+    const now = Date.now();
+    // added only moves for a new room/token: see saveRoom in index.html.
+    const fresh = !prev || prev.token !== token || prev.host !== host;
+    r[name] = { token, host, ts: now, added: fresh ? now : prev.added || 0 };
+    // A device-only room stays so across reconnects (see room-sync.js).
+    if (prev?.localOnly && !fresh) r[name].localOnly = true;
     localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
+    if (fresh) roomSync?.schedule();
   } catch {
     /* private mode / quota — the session still works, just not cached */
   }
@@ -1416,6 +1426,24 @@ function drawInfoCard(ctx: CanvasRenderingContext2D, rect: { width: number; heig
 // (canvas can't host either). Built once and handed to annotationNode as its
 // `el`; rgui glues it over the note-card frame and re-binds it across setGraph.
 let infoOverlayEl: HTMLElement | null = null;
+
+// The info card's sync line: a sign-in button, a pointer to the console when a
+// passphrase is needed (the console owns that form), or the last sync.
+function renderSyncStatus() {
+  const box = infoOverlayEl?.querySelector<HTMLElement>(".ay-info-sync");
+  const st = roomSync?.state();
+  if (!box) return;
+  box.title = st?.error || "";
+  if (!st?.available) box.innerHTML = "";
+  else if (!st.user)
+    box.innerHTML = `<button class="ay-info-copy" data-sync="in">sync my rooms</button>`;
+  else if (st.needs)
+    box.innerHTML = `rooms sync: <a href="/w/">enter your passphrase in the console</a>`;
+  else
+    box.innerHTML =
+      `${st.error ? "sync failed · " : st.busy ? "syncing… · " : "rooms synced · "}` +
+      `<button class="ay-info-copy" data-sync="now">sync now</button>`;
+}
 const escText = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;");
 // Attributes need `&` escaped too: a room link is full of `&s=`/`&sig=`, and
 // an unescaped `&` in an attribute is an entity reference waiting to happen.
@@ -1500,8 +1528,16 @@ function ensureInfoOverlay(): HTMLElement {
     `<button class="ay-info-pair">pair a machine</button></div>` +
     `<div class="ay-info-tag">${INFO_TAG_DEFAULT}</div>` +
     `<div class="ay-info-rows">${copyRow("install", SETUP_SH) + copyRow("windows", SETUP_PS)}</div>` +
-    `<a class="ay-info-link" href="https://agent-yes.com" target="_blank" rel="noopener">agent-yes.com ↗</a>`;
+    `<div class="ay-info-foot"><a class="ay-info-link" href="https://agent-yes.com" target="_blank" rel="noopener">agent-yes.com ↗</a>` +
+    `<span class="ay-info-sync"></span></div>`;
   el.addEventListener("click", async (e) => {
+    const sync = (e.target as HTMLElement).closest<HTMLElement>("[data-sync]");
+    if (sync) {
+      e.stopPropagation();
+      if (sync.dataset.sync === "in") await roomSync?.signIn().catch(() => {});
+      else if (sync.dataset.sync === "now") await roomSync?.run();
+      return;
+    }
     const pair = (e.target as HTMLElement).closest<HTMLElement>(".ay-info-pair");
     if (pair) {
       e.stopPropagation();
@@ -1526,6 +1562,7 @@ function ensureInfoOverlay(): HTMLElement {
     }
   });
   infoOverlayEl = el;
+  renderSyncStatus();
   return el;
 }
 
@@ -2503,6 +2540,21 @@ if (embedMode) {
   if (roomInfo) addRtcWire(roomInfo.room, roomInfo.token, roomInfo.host);
   for (const [name, r] of Object.entries(loadRooms()))
     if (r?.token) addRtcWire(name, r.token, r.host || "s.agent-yes.com");
+  // Optional room sync (same session and per-device key as the console at /w/,
+  // which owns the passphrase UI). Rooms from other devices join as wires; a room
+  // forgotten elsewhere is gone from ay.rooms and drops out on the next load.
+  roomSync = createRoomSync({
+    onApply: (
+      _before: unknown,
+      after: { rooms: Record<string, { token: string; host?: string }> },
+    ) => {
+      for (const [name, r] of Object.entries(after.rooms))
+        if (r?.token && r.host !== "codehost")
+          addRtcWire(name, r.token, r.host || "s.agent-yes.com");
+    },
+    onState: renderSyncStatus,
+  });
+  void roomSync.refresh().then((st: { user: unknown }) => st.user && roomSync?.run());
   refresh();
   setInterval(refresh, 3000);
   void fetchHosts();

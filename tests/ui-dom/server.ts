@@ -96,7 +96,11 @@ function file(res: http.ServerResponse, path: string, type: string) {
 // disturbing the shared fixture the other tests assert exact counts against.
 export async function startServer(
   agents: unknown[] = AGENTS,
-  options: { negotiateSize?: boolean } = {},
+  options: {
+    negotiateSize?: boolean;
+    /** Serve the optional sign-in routes the way agent-yes.com does (absent = `ay serve`). */
+    auth?: { providers: string[]; user: { name: string; email: string } | null };
+  } = {},
 ): Promise<{ url: string; close: () => void }> {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url || "/", "http://localhost");
@@ -125,6 +129,17 @@ export async function startServer(
         join(UI, p.slice(1)),
         p.endsWith(".css") ? "text/css; charset=utf-8" : "text/javascript; charset=utf-8",
       );
+
+    if (req.method === "GET" && /^\/(profile|room-sync|room-sync-client)\.js$/.test(p))
+      return file(res, join(UI, p.slice(1)), "text/javascript; charset=utf-8");
+    if (options.auth && p.startsWith("/_ay/auth/")) {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      if (p === "/_ay/auth/providers")
+        return res.end(JSON.stringify({ providers: options.auth.providers }));
+      if (p === "/_ay/auth/get-session")
+        return res.end(JSON.stringify(options.auth.user ? { user: options.auth.user } : null));
+      return res.end("{}");
+    }
 
     if (req.method === "GET" && p === "/api/ls") {
       res.writeHead(200, { "Content-Type": "application/json" });
