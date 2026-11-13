@@ -26,53 +26,26 @@ unset $(git rev-parse --local-env-vars)
 # a markdown edit is what drives people to `--no-verify`, and that habit then
 # skips the gate on the pushes that DO need it. So: prose-only push → skip,
 # everything else → the full suite, and NO information (empty stdin, e.g. a
-# manual run) → also the full suite, because the safe default is to test.
+# manual run; a ref with no comparison base) → also the full suite, because
+# the safe default is to test.
 #
-# `SKILL.md` is deliberately not prose: ts/ reads it at runtime for --use-skills.
-# No spec reads any .md file (checked), so the rest cannot change a test result.
-ZERO=0000000000000000000000000000000000000000
-REFS=$(cat) # git's ref lines; empty when the hook is run by hand
+# The classification lives in push-gate-plan.sh (tested by
+# ts/pushGatePlan.spec.ts): first line is the plan, the rest the pushed files.
+PLAN=$(sh "$(dirname "$0")/push-gate-plan.sh")
+MODE=$(printf '%s\n' "$PLAN" | head -n 1)
+FILES=$(printf '%s\n' "$PLAN" | tail -n +2)
 
-files_for_refs() {
-  while read -r _local_ref local_sha _remote_ref remote_sha; do
-    [ -z "$local_sha" ] && continue
-    if [ "$remote_sha" = "$ZERO" ] || ! git cat-file -e "$remote_sha" 2>/dev/null; then
-      # New branch (or a remote sha we don't have): compare against the default branch.
-      base=$(git merge-base "$local_sha" refs/remotes/origin/main 2>/dev/null || true)
-    else
-      base="$remote_sha"
-    fi
-    if [ -n "$base" ]; then
-      git diff --name-only "$base" "$local_sha"
-    else
-      git show --name-only --format= "$local_sha" # no common base: just the tip
-    fi
-  done
-}
-
-FILES=""
-if [ -n "$REFS" ]; then
-  # Drop deletions (local sha all zeros) — `git push origin :branch` ships no code.
-  LIVE_REFS=$(printf '%s\n' "$REFS" | awk -v z="$ZERO" '$2 != z && $2 != ""')
-  if [ -z "$LIVE_REFS" ]; then
+case "$MODE" in
+  deletion)
     echo "[pre-push] deletion only — nothing to test"
     exit 0
-  fi
-  FILES=$(printf '%s\n' "$LIVE_REFS" | files_for_refs | sort -u)
-fi
-
-if [ -n "$FILES" ]; then
-  # Line-based, so paths containing spaces are handled.
-  NON_PROSE=$(
-    printf '%s\n' "$FILES" | grep -vE '^docs/|\.md$' || true
-    printf '%s\n' "$FILES" | grep -xF SKILL.md || true
-  )
-  if [ -z "$NON_PROSE" ]; then
+    ;;
+  prose)
     echo "[pre-push] prose-only push — skipping the test gate:"
     printf '             %s\n' $FILES
     exit 0
-  fi
-fi
+    ;;
+esac
 
 echo "[pre-push] running full test + coverage gate"
 bun run test:coverage
