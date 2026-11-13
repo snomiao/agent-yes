@@ -1,5 +1,21 @@
 /// <reference types="vitest" />
+import os from "node:os";
 import { defineConfig } from "vitest/config";
+
+// One worker per IDLE core. Vitest otherwise sizes the pool to the core count,
+// which on a shared box already running an agent fleet — loadavg at or above the
+// core count BEFORE the suite starts — oversubscribes it: workers get starved
+// and the run dies on "Timeout waiting for worker to respond" after several
+// times the normal wall clock. (That failure is what pushes people to
+// `git push --no-verify`, which then skips the gate on pushes that need it.)
+// Sizing by FREE capacity means a busy host runs a narrower pool that actually
+// finishes, while an idle host and CI are untouched: loadavg is ~0 there, and
+// always 0 on Windows, so this evaluates to the core count as before.
+// Override with VITEST_MAX_WORKERS=<n>.
+const cpus = os.availableParallelism?.() ?? os.cpus().length;
+const maxWorkers =
+  Number(process.env.VITEST_MAX_WORKERS) ||
+  Math.max(2, Math.min(cpus, Math.round(cpus - os.loadavg()[0])));
 
 export default defineConfig({
   test: {
@@ -29,9 +45,10 @@ export default defineConfig({
     // CPU-oversubscribed host — wedged on fork spawn/terminate timeouts.
     fileParallelism: true,
     pool: "forks",
-    forks: {
-      isolate: true,
-    },
+    // NOT `forks: { isolate: true }` / `poolOptions`: vitest 4 dropped per-pool
+    // option objects, so that key was silently ignored. Isolation comes from the
+    // top-level `isolate: true` below, which is the live setting.
+    maxWorkers,
     sequence: {
       concurrent: false,
       hooks: "list",
