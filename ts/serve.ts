@@ -2621,12 +2621,16 @@ export async function cmdServe(rest: string[]): Promise<number> {
     await unlink(capFile(pid, `${daemonTag}:${viewer}`)).catch(() => {});
   };
   // Read every live cap for a pid across ALL daemons; prune expired files.
-  const readSharedCaps = async (pid: number): Promise<SizeCap[]> => {
+  // `local` = the operator terminal's cap (role "local"), which bounds the nego floor.
+  const readSharedCaps = async (
+    pid: number,
+  ): Promise<{ caps: SizeCap[]; local: SizeCap | null }> => {
+    let local: SizeCap | null = null;
     let files: string[];
     try {
       files = await readdir(capsDir(pid));
     } catch {
-      return [];
+      return { caps: [], local };
     }
     const now = Date.now();
     const caps: SizeCap[] = [];
@@ -2641,11 +2645,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
         }
         const cap = sanitizeCap({ cols: Number(parts[0]), rows: Number(parts[1]) });
         if (cap) caps.push(cap);
+        if (cap && parts[3] === "local") local = cap;
       } catch {
         /* unreadable/racing — skip */
       }
     }
-    return caps;
+    return { caps, local };
   };
 
   // ── PTY size negotiation — tmux's "smallest client wins" ──────────────────
@@ -2697,8 +2702,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
     negoTimers.delete(pid);
     // Negotiate over the SHARED cap store — every daemon's viewers (+ the local
     // tty cap, 3b) — so all daemons compute the same min and converge.
-    const caps = await readSharedCaps(pid);
-    const eff = negotiateSize(caps);
+    const { caps, local } = await readSharedCaps(pid);
+    const eff = negotiateSize(caps, local);
     const file = winsizePathFor(pid);
     const prev = negoApplied.get(pid);
     try {

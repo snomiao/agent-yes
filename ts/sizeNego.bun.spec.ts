@@ -34,15 +34,22 @@ describe("negotiateSize", () => {
   });
   it("phone + desktop: elementwise min (the tmux rule)", () => {
     // phone is narrow but tall, desktop is wide but short → min of each axis
-    const phone = { cols: 51, rows: 60 };
+    const phone = { cols: 91, rows: 60 };
     const desktop = { cols: 200, rows: 50 };
-    expect(negotiateSize([phone, desktop])).toEqual({ cols: 51, rows: 50 });
+    expect(negotiateSize([phone, desktop])).toEqual({ cols: 91, rows: 50 });
   });
   it("clamps to the floor so a tiny viewer can't wedge the agent", () => {
     expect(negotiateSize([{ cols: 20, rows: 5 }])).toEqual({
       cols: NEGO_FLOOR_COLS,
       rows: NEGO_FLOOR_ROWS,
     });
+  });
+  it("a narrow viewer letterboxes at 80 cols instead of hard-wrapping the agent", () => {
+    expect(negotiateSize([{ cols: 63, rows: 40 }])).toEqual({ cols: 80, rows: 40 });
+  });
+  it("a narrower operator terminal lowers the floor (never outgrow a real tty)", () => {
+    const local = { cols: 70, rows: 50 };
+    expect(negotiateSize([{ cols: 63, rows: 40 }, local], local)).toEqual({ cols: 70, rows: 40 });
   });
   it("three viewers: min wins per axis", () => {
     expect(
