@@ -36,6 +36,7 @@ pub const SUBCOMMANDS: &[&str] = &[
     "history",
     "send",
     "send-drain",
+    "submit",
     "key",
     "select",
     "msgs",

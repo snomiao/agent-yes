@@ -7,6 +7,7 @@ import {
   claimPending,
   classifyComposer,
   composerBoxed,
+  ownEnvelopeNonce,
   DUPLICATE_WINDOW_MS,
   enqueuePending,
   findRecentDuplicate,
@@ -30,6 +31,31 @@ async function classify(frame: string, cols = 60, cli?: string) {
 }
 
 const box = (inner: string) => `history\r\n${RULE}\r\n❯ ${inner}\x1b[0m\r\n${RULE}\r\n${FOOTER}`;
+
+describe("ownEnvelopeNonce", () => {
+  const head =
+    '› <ay-msg 1a2b3c4d from claude alice@box:/repo/alpha:main#1111 — reply: ay send 1111 "...">';
+  const lines = Array.from({ length: 20 }, (_, i) => `  - note ${i}`);
+  const footer = ["", "  gpt-x default · ~/repo", "  ? for shortcuts"];
+  it("finds an ay envelope left whole in the box, however tall", () => {
+    expect(ownEnvelopeNonce([head, ...lines, "  </ay-msg 1a2b3c4d>", ...footer], "codex")).toBe(
+      "1a2b3c4d",
+    );
+  });
+  it("is null for a typed draft, a half-pasted envelope, or a foreign closer", () => {
+    expect(ownEnvelopeNonce(["› btw how", ...footer], "codex")).toBeNull();
+    expect(ownEnvelopeNonce([head, ...lines, ...footer], "codex")).toBeNull();
+    expect(
+      ownEnvelopeNonce([head, ...lines, "  </ay-msg 99999999>", ...footer], "codex"),
+    ).toBeNull();
+  });
+  it("is null when the closer is followed by more than a footer", () => {
+    const after = Array.from({ length: 12 }, (_, i) => `  typed ${i}`);
+    expect(
+      ownEnvelopeNonce([head, "  </ay-msg 1a2b3c4d>", ...after, ...footer], "codex"),
+    ).toBeNull();
+  });
+});
 
 describe("composerBoxed without a rule (Codex)", () => {
   const live = ["› hello", "", "  gpt-x default · ~/repo", "  ? for shortcuts"];
@@ -198,6 +224,10 @@ describe("agy's ASCII `>` prompt", () => {
     expect(await classify(agyBox(""), 60, "agy")).toEqual({ kind: "empty", ghost: false });
   });
 
+  it("reads agy's gray mode notice in an empty box as ghost text, not a draft", async () => {
+    const notice = " \x1b[90mAuto mode: edits & safe commands auto-approved\x1b[0m";
+    expect(await classify(agyBox(notice), 60, "agy")).toEqual({ kind: "empty", ghost: true });
+  });
   it("reads typed text in agy's box as a draft", async () => {
     expect(await classify(agyBox(" hi"), 60, "agy")).toEqual({ kind: "draft", chars: 2 });
   });
@@ -206,6 +236,27 @@ describe("agy's ASCII `>` prompt", () => {
     expect((await classify(agyBox(""), 60)).kind).toBe("unknown");
     expect(composerBoxed(["history", RULE, "> quoted", RULE, "? for shortcuts"])).toBe(false);
     expect(composerBoxed(["history", RULE, ">", RULE, "? for shortcuts"], "agy")).toBe(true);
+  });
+
+  // agy draws each past user turn as a rule over a `> …` row, the same shape as
+  // its input row, and puts a task list and a second rule under its box.
+  const TASKS = [
+    "  ● [10:00:00] build",
+    "  ● [10:01:00] test",
+    "  ↓ 3 more",
+    RULE,
+    "? for shortcuts",
+  ];
+  const turn = [RULE, "> old question", "", "  old answer"];
+
+  it("finds agy's live box under a transcript of past turns", () => {
+    expect(composerBoxed([...turn, "", RULE, ">", RULE, ...TASKS], "agy")).toBe(true);
+    expect(composerBoxed([...turn, "", RULE, "> btw how", RULE, ...TASKS], "agy")).toBe(true);
+  });
+
+  it("does not take a past agy turn for the box when the box is off screen", () => {
+    // A partial redraw left only the transcript, the task list and the footer.
+    expect(composerBoxed([...turn, "", ...TASKS.filter((t) => t !== RULE)], "agy")).toBe(false);
   });
 });
 

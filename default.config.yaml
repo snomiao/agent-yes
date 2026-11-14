@@ -365,6 +365,12 @@ clis:
     needsInput:
       - pattern: '^ {0,4}> ?\d+\.'
         flags: m
+    typingRespond:
+      # Feedback survey agy shows after a turn ("How's the CLI experience so
+      # far? ... [1] Good [2] Fine [3] Bad [0] Skip"). A digit key answers it;
+      # until then it holds the keyboard, so press 0 to skip.
+      "0":
+        - '\[1\] Good +\[2\] Fine +\[3\] Bad +\[0\] Skip'
     enter:
       # First-launch trust dialog; cursor starts on "Yes, I trust this folder".
       - pattern: "^ {0,4}> ?Yes, I trust this folder"
