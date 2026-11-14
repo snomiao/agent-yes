@@ -5036,6 +5036,29 @@ describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () =
     return readComposerState({ pid: 1111, cli, log_file: file } as never, windows);
   }
 
+  // A codex screen whose input box holds a whole `ay send` envelope, taller than
+  // a draft may be for the box to count as on screen.
+  function codexEnvelopeLog(withDraft = true): string {
+    const rows = ["• done: committed, not pushed", ""];
+    if (withDraft) {
+      rows.push(
+        '› <ay-msg 1a2b3c4d from claude alice@box:/repo/alpha:main#1111 — reply: ay send 1111 "...">',
+      );
+      for (let i = 0; i < 12; i++) rows.push(`  - note ${i}`);
+      rows.push("  </ay-msg 1a2b3c4d>");
+    } else rows.push("› ");
+    rows.push("", "  gpt-x default · ~/repo", "  ? for shortcuts");
+    return "\x1b[2J" + rows.map((t, i) => at(50 - rows.length + i + 1, t)).join("");
+  }
+
+  it("reads ay's own tall envelope in a codex box as a draft it owns, not hidden", async () => {
+    expect(await stateOf(codexEnvelopeLog(), "codex")).toEqual({
+      kind: "draft",
+      chars: expect.any(Number),
+      own: "1a2b3c4d",
+    });
+  });
+
   describe("submitStableDraft", () => {
     async function setup(draft: string) {
       const { submitStableDraft } = await loadModule();
@@ -5075,6 +5098,29 @@ describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () =
       expect(sent).toBe(false);
       expect(await readFile(fifo_file, "utf-8")).toBe("");
     });
+
+    // writeToIpc connects to a named pipe on Windows; this fake FIFO is a plain file.
+    it.skipIf(process.platform === "win32")(
+      "submits ay's own envelope left in a codex box at once, without the stability waits",
+      async () => {
+        const { submitStableDraft } = await loadModule();
+        const n = 2000 + logs++;
+        const log_file = path.join(testHome, `${n}.raw.log`);
+        const fifo_file = path.join(testHome, `${n}.fifo`);
+        await writeFile(log_file, codexEnvelopeLog());
+        await writeFile(fifo_file, "");
+        const record = { pid: n, cli: "codex", log_file, fifo_file } as never;
+        const waits: number[] = [];
+        const sent = await submitStableDraft(record, [1, 2, 4, 8], async (ms) => {
+          waits.push(ms);
+          if ((await readFile(fifo_file, "utf-8")).includes("\r"))
+            await writeFile(log_file, codexEnvelopeLog(false));
+        });
+        expect(sent).toBe(true);
+        expect(waits.slice(0, 4)).not.toEqual([1, 2, 4, 8]);
+        expect(await readFile(fifo_file, "utf-8")).toBe("\r");
+      },
+    );
 
     it("does nothing for an empty box", async () => {
       const { submitStableDraft, record, fifo_file } = await setup("");

@@ -49,7 +49,12 @@ export type ComposerState =
   /** Nothing typed: an empty prompt, possibly showing dim ghost text. */
   | { kind: "empty"; ghost: boolean }
   /** Real input is sitting in the composer. `chars` counts the real cells. */
-  | { kind: "draft"; chars: number }
+  | {
+      kind: "draft";
+      chars: number;
+      /** The draft is a whole `ay send` envelope with this nonce (see ownEnvelopeNonce). */
+      own?: string;
+    }
   /** No composer is visible (menu, trust dialog, unknown CLI screen). */
   | { kind: "unknown"; reason: string }
   /**
@@ -103,6 +108,25 @@ export function composerPromptRow(texts: string[], cli?: string): number {
     if (SEPARATOR_RE.test(texts[i]!) && re.test(texts[i + 1]!)) return i + 1;
   }
   return texts.findLastIndex((t) => re.test(t));
+}
+
+/**
+ * The nonce of an `ay send` envelope sitting whole in the input box — its
+ * `<ay-msg NONCE …` header on the prompt row and its `</ay-msg NONCE>` closer as
+ * the last text above the footer — or null. That is ay's own message whose Enter
+ * was swallowed, not someone's draft, however many rows it spans.
+ */
+export function ownEnvelopeNonce(texts: string[], cli?: string): string | null {
+  const prompt = composerPromptRow(texts, cli);
+  if (prompt < 0) return null;
+  const nonce = /^<ay-msg ([0-9a-f]{8}) /.exec(stripPromptGlyph(texts[prompt]!, cli))?.[1];
+  if (!nonce) return null;
+  const close = texts.findLastIndex((t, i) => i > prompt && t.trim() === `</ay-msg ${nonce}>`);
+  if (close < 0) return null;
+  const below = texts.slice(close + 1).filter((t) => t.trim());
+  if (below.length > MAX_ROWS_BELOW_AGY_BOX || below.some((t) => promptRe(cli).test(t)))
+    return null;
+  return nonce;
 }
 
 /**

@@ -134,6 +134,7 @@ import {
   BOXED_COMPOSER_CLIS,
   composerBoxed,
   composerPromptRow,
+  ownEnvelopeNonce,
   stripPromptGlyph,
   DUPLICATE_WINDOW_MS,
   findRecentDuplicate,
@@ -687,6 +688,7 @@ const SUBCOMMANDS = new Set([
   "history",
   "send",
   "send-drain",
+  "submit",
   "msgs",
   "key",
   "select",
@@ -1102,6 +1104,8 @@ export async function runSubcommand(argv: string[]): Promise<number | null> {
         return await cmdSend(rest);
       case "send-drain":
         return await cmdSendDrain(rest);
+      case "submit":
+        return await cmdSubmit(rest);
       case "ls-refresh":
         return await cmdLsRefresh(rest);
       case "msgs":
@@ -1408,6 +1412,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `  ay widget ls | read selection|dom   read an opted-in page widget's context (selection/DOM) (ay widget help)\n` +
       `  ay mint <target> --caps ...         mint a scoped, short-TTL capability token (embeddable in a page)\n` +
       `  ay key <keyword> <key...>           send raw keystrokes (down/up/enter/esc/…) — drives menus\n` +
+      `  ay submit <keyword>                 press Enter on text left in its input box\n` +
       `  ay select <keyword> <N>             pick option N of a needs_input selection menu\n` +
       `  ay attach <keyword>                 interactive attach (detach: Ctrl-\\)\n` +
       `  ay stop <keyword>                   graceful shutdown (/exit for claude/codex)\n` +
@@ -4850,6 +4855,14 @@ export async function readComposerState(
     const rows = await renderComposerRows({ ...record, log_file: logPath }, windows);
     if (!rows) return { kind: "unknown", reason: "log unreadable or empty" };
     const state = classifyComposer(rows, record.cli);
+    const own =
+      state.kind === "draft"
+        ? ownEnvelopeNonce(
+            rows.map((r) => r.text),
+            record.cli,
+          )
+        : null;
+    if (state.kind === "draft" && own) return { ...state, own };
     // No window showed the box, so a "draft" was read under some other prompt
     // row, possibly an old turn: say so instead of reporting it as a draft.
     if (
@@ -4894,17 +4907,20 @@ async function composerFingerprint(record: GlobalPidRecord): Promise<string | nu
  * (1, 2, 4, 8 s): nobody is typing, so submit it with Enter and report true once
  * the box reads empty again. Only a draft: a menu or yes/no prompt is a question
  * agent-yes deliberately does not answer. Any change, or a box that never clears,
- * returns false and the caller parks the message as before.
+ * returns false and the caller parks the message as before. An `ay send`
+ * envelope whose Enter was swallowed (ownEnvelopeNonce) is submitted at once.
  */
 export async function submitStableDraft(
   record: GlobalPidRecord,
   waits: number[] = DRAFT_STABLE_WAITS_MS,
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
 ): Promise<boolean> {
-  if ((await readComposerState(record)).kind !== "draft") return false;
+  const state = await readComposerState(record);
+  if (state.kind !== "draft") return false;
   const base = await composerFingerprint(record);
   if (base === null) return false;
-  for (const ms of waits) {
+  // ay's own envelope left whole in the box lost its Enter: nobody is editing it.
+  for (const ms of state.own ? [] : waits) {
     await sleep(ms);
     if ((await composerFingerprint(record)) !== base) return false;
   }
@@ -6577,6 +6593,78 @@ async function recordKeyEvent(
     confirmed: true,
     wrapped: false,
   });
+}
+
+/**
+ * `ay submit <keyword>`: press Enter on whatever sits in the target's input box —
+ * typically an `ay send` whose Enter was swallowed, holding every later message
+ * in the queue. Does nothing to an empty box or a screen without one (a menu is
+ * answered with `ay key`/`ay select`, not Enter).
+ */
+async function cmdSubmit(rest: string[]): Promise<number> {
+  const y = yargs(rest)
+    .usage(
+      "Usage: ay submit <keyword> [options]\n\n" +
+        "Press Enter on the text left in a live agent's input box, e.g. an `ay send`\n" +
+        "whose Enter was swallowed and that is now holding later messages in the\n" +
+        "queue. Leaves an empty box and any menu or dialog alone.",
+    )
+    .option("all", { type: "boolean", default: false, description: "Include exited agents" })
+    .option("latest", { type: "boolean", default: false, description: "Use most recent match" })
+    .option("cwd", { type: "string", description: "Restrict to agents under this dir" })
+    .option("force", {
+      type: "boolean",
+      default: false,
+      description: "Skip the recency/self-send guard (also: AGENT_YES_FORCE_SEND=1)",
+    })
+    .help(false)
+    .version(false)
+    .exitProcess(false);
+  const argv = await y.parseAsync();
+  const keyword = argv._[0] !== undefined ? String(argv._[0]) : undefined;
+  if (!keyword) throw new Error("usage: ay submit <keyword>");
+  const opts: CommonOpts = {
+    all: argv.all,
+    active: false,
+    json: false,
+    latest: argv.latest,
+    cwdScope: typeof argv.cwd === "string" ? path.resolve(argv.cwd) : null,
+  };
+  const record = await resolveWritableAgent(keyword, opts);
+  const force = Boolean(argv.force) || process.env.AGENT_YES_FORCE_SEND === "1";
+  const sender = await enforceSendGuards(record, force);
+  const before = await readComposerState(record);
+  if (before.kind !== "draft" && before.kind !== "hidden") {
+    process.stdout.write(
+      `nothing to submit in pid ${record.pid} (${record.cli}): ${
+        before.kind === "empty" ? "its input box is empty" : before.reason
+      }\n`,
+    );
+    return 0;
+  }
+  await withIpcLock(
+    record.pid,
+    () => writeToIpc(record.fifo_file!, "\r"),
+    (why) =>
+      process.stderr.write(
+        `warning: ay submit writing pid ${record.pid} without the input lock (${why})\n`,
+      ),
+  );
+  await recordKeyEvent(sender, record, "key", "enter");
+  let after: ComposerState = before;
+  for (let i = 0; i < 6 && after.kind !== "empty"; i++) {
+    await new Promise((r) => setTimeout(r, 500));
+    after = await readComposerState(record);
+  }
+  if ((await listPending(record.pid)).length) await ensureSendDrainer(record.pid);
+  if (after.kind === "empty") {
+    process.stdout.write(`submitted pid ${record.pid} (${record.cli})'s input box\n`);
+    return 0;
+  }
+  process.stdout.write(
+    `pressed Enter on pid ${record.pid} (${record.cli}), but its input box still reads ${after.kind} — check: ay tail ${record.pid}\n`,
+  );
+  return 1;
 }
 
 async function cmdKey(rest: string[]): Promise<number> {

@@ -7,6 +7,7 @@ import {
   claimPending,
   classifyComposer,
   composerBoxed,
+  ownEnvelopeNonce,
   DUPLICATE_WINDOW_MS,
   enqueuePending,
   findRecentDuplicate,
@@ -30,6 +31,31 @@ async function classify(frame: string, cols = 60, cli?: string) {
 }
 
 const box = (inner: string) => `history\r\n${RULE}\r\n❯ ${inner}\x1b[0m\r\n${RULE}\r\n${FOOTER}`;
+
+describe("ownEnvelopeNonce", () => {
+  const head =
+    '› <ay-msg 1a2b3c4d from claude alice@box:/repo/alpha:main#1111 — reply: ay send 1111 "...">';
+  const lines = Array.from({ length: 20 }, (_, i) => `  - note ${i}`);
+  const footer = ["", "  gpt-x default · ~/repo", "  ? for shortcuts"];
+  it("finds an ay envelope left whole in the box, however tall", () => {
+    expect(ownEnvelopeNonce([head, ...lines, "  </ay-msg 1a2b3c4d>", ...footer], "codex")).toBe(
+      "1a2b3c4d",
+    );
+  });
+  it("is null for a typed draft, a half-pasted envelope, or a foreign closer", () => {
+    expect(ownEnvelopeNonce(["› btw how", ...footer], "codex")).toBeNull();
+    expect(ownEnvelopeNonce([head, ...lines, ...footer], "codex")).toBeNull();
+    expect(
+      ownEnvelopeNonce([head, ...lines, "  </ay-msg 99999999>", ...footer], "codex"),
+    ).toBeNull();
+  });
+  it("is null when the closer is followed by more than a footer", () => {
+    const after = Array.from({ length: 12 }, (_, i) => `  typed ${i}`);
+    expect(
+      ownEnvelopeNonce([head, "  </ay-msg 1a2b3c4d>", ...after, ...footer], "codex"),
+    ).toBeNull();
+  });
+});
 
 describe("composerBoxed without a rule (Codex)", () => {
   const live = ["› hello", "", "  gpt-x default · ~/repo", "  ? for shortcuts"];
