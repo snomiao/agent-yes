@@ -35,6 +35,8 @@ export interface ComposerCell {
   inverse: boolean;
   /** Drawn in a non-default foreground colour (Claude's footer is; typed text is not). */
   colored: boolean;
+  /** Drawn in bright black (SGR 90): agy's input-row notices; typed text is not. */
+  gray?: boolean;
 }
 
 /** A rendered row: its plain text plus per-cell attributes. */
@@ -181,6 +183,7 @@ export function classifyComposer(rows: ComposerRow[], cli?: string): ComposerSta
     cli,
   );
   if (prompt < 0) return { kind: "unknown", reason: "no prompt row on screen" };
+  const agyGhost = cli === "agy";
   let real = 0;
   let ghost = false;
   for (let i = prompt; i < rows.length; i++) {
@@ -199,7 +202,9 @@ export function classifyComposer(rows: ComposerRow[], cli?: string): ComposerSta
     for (const c of cells) {
       if (!c.ch.trim() || c.ch === "\u00a0") continue;
       if (c.inverse) continue;
-      if (c.dim) ghost = true;
+      // agy writes its mode notice ("Auto mode: … (shift+tab to cycle)") into the
+      // empty input row in gray, where Claude/Codex use dim ghost text.
+      if (c.dim || (c.gray && agyGhost)) ghost = true;
       else real++;
     }
   }
@@ -220,6 +225,8 @@ type XtermLike = {
                   isDim(): number;
                   isInverse(): number;
                   isFgDefault(): boolean;
+                  isFgPalette(): boolean;
+                  getFgColor(): number;
                   getWidth(): number;
                 }
               | undefined;
@@ -255,6 +262,7 @@ export function rowsFromXterm(term: XtermLike, n: number, fromContent = false): 
         dim: c.isDim() !== 0,
         inverse: c.isInverse() !== 0,
         colored: !c.isFgDefault(),
+        gray: c.isFgPalette() && c.getFgColor() === 8,
       });
     }
     rows.push({ text: line.translateToString(true), cells });

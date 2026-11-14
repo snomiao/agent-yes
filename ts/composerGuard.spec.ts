@@ -198,6 +198,10 @@ describe("agy's ASCII `>` prompt", () => {
     expect(await classify(agyBox(""), 60, "agy")).toEqual({ kind: "empty", ghost: false });
   });
 
+  it("reads agy's gray mode notice in an empty box as ghost text, not a draft", async () => {
+    const notice = " \x1b[90mAuto mode: edits & safe commands auto-approved\x1b[0m";
+    expect(await classify(agyBox(notice), 60, "agy")).toEqual({ kind: "empty", ghost: true });
+  });
   it("reads typed text in agy's box as a draft", async () => {
     expect(await classify(agyBox(" hi"), 60, "agy")).toEqual({ kind: "draft", chars: 2 });
   });

@@ -128,6 +128,15 @@ describe("configShared", () => {
     expect(decide("no-such-cli", "the deploy is green")).toBe(false);
   });
 
+  it("skips agy's feedback survey with 0, and only the survey row", async () => {
+    const clis = await loadSharedCliDefaults(import.meta.url);
+    const skip = clis.agy?.typingRespond?.["0"]?.map((p) => compileRegexSource(p)) ?? [];
+    const hits = (line: string) => skip.some((rx) => rx.test(line));
+    expect(hits(" [1] Good  [2] Fine  [3] Bad  [0] Skip")).toBe(true);
+    expect(hits(" How's the CLI experience so far? Help us improve:")).toBe(false);
+    expect(hits("> rate it [1] Good")).toBe(false);
+  });
+
   it("finds the shared defaults file by walking upward", async () => {
     const found = await findSharedCliDefaultsPath(import.meta.url);
     expect(found.endsWith("default.config.yaml")).toBe(true);
