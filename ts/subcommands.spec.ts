@@ -5038,9 +5038,12 @@ describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () =
 
   // A codex screen whose input box holds a whole `ay send` envelope, taller than
   // a draft may be for the box to count as on screen.
-  function codexEnvelopeLog(withDraft = true): string {
+  function codexEnvelopeLog(withDraft: boolean | "plain" = true): string {
     const rows = ["• done: committed, not pushed", ""];
-    if (withDraft) {
+    if (withDraft === "plain") {
+      rows.push("› a long pasted note");
+      for (let i = 0; i < 12; i++) rows.push(`  - note ${i}`);
+    } else if (withDraft) {
       rows.push(
         '› <ay-msg 1a2b3c4d from claude alice@box:/repo/alpha:main#1111 — reply: ay send 1111 "...">',
       );
@@ -5118,6 +5121,28 @@ describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () =
         });
         expect(sent).toBe(true);
         expect(waits.slice(0, 4)).not.toEqual([1, 2, 4, 8]);
+        expect(await readFile(fifo_file, "utf-8")).toBe("\r");
+      },
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "submits a tall draft that reads hidden only after twice the wait",
+      async () => {
+        const { submitStableDraft } = await loadModule();
+        const n = 2000 + logs++;
+        const log_file = path.join(testHome, `${n}.raw.log`);
+        const fifo_file = path.join(testHome, `${n}.fifo`);
+        await writeFile(log_file, codexEnvelopeLog("plain"));
+        await writeFile(fifo_file, "");
+        const record = { pid: n, cli: "codex", log_file, fifo_file } as never;
+        const waits: number[] = [];
+        const sent = await submitStableDraft(record, [1, 2, 4, 8], async (ms) => {
+          waits.push(ms);
+          if ((await readFile(fifo_file, "utf-8")).includes("\r"))
+            await writeFile(log_file, codexEnvelopeLog(false));
+        });
+        expect(sent).toBe(true);
+        expect(waits.slice(0, 5)).toEqual([1, 2, 4, 8, 15]);
         expect(await readFile(fifo_file, "utf-8")).toBe("\r");
       },
     );

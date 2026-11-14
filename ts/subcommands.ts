@@ -4908,7 +4908,9 @@ async function composerFingerprint(record: GlobalPidRecord): Promise<string | nu
  * the box reads empty again. Only a draft: a menu or yes/no prompt is a question
  * agent-yes deliberately does not answer. Any change, or a box that never clears,
  * returns false and the caller parks the message as before. An `ay send`
- * envelope whose Enter was swallowed (ownEnvelopeNonce) is submitted at once.
+ * envelope whose Enter was swallowed (ownEnvelopeNonce) is submitted at once; a
+ * "hidden" box (a draft taller than the box check allows) after twice the wait,
+ * unless the screen shows a menu or dialog.
  */
 export async function submitStableDraft(
   record: GlobalPidRecord,
@@ -4916,11 +4918,19 @@ export async function submitStableDraft(
   sleep: (ms: number) => Promise<void> = (ms) => new Promise((r) => setTimeout(r, ms)),
 ): Promise<boolean> {
   const state = await readComposerState(record);
-  if (state.kind !== "draft") return false;
+  if (state.kind !== "draft" && state.kind !== "hidden") return false;
+  // A draft too tall for the box to read as on screen is "hidden": give it twice
+  // the wait (~30 s by default), and never press Enter on a menu or dialog.
+  if (state.kind === "hidden") {
+    if (!record.log_file || (await extractNeedsInput(record.log_file, record.cli))) return false;
+  }
   const base = await composerFingerprint(record);
   if (base === null) return false;
+  const total = waits.reduce((a, b) => a + b, 0);
   // ay's own envelope left whole in the box lost its Enter: nobody is editing it.
-  for (const ms of state.own ? [] : waits) {
+  const plan =
+    state.kind === "draft" && state.own ? [] : state.kind === "hidden" ? [...waits, total] : waits;
+  for (const ms of plan) {
     await sleep(ms);
     if ((await composerFingerprint(record)) !== base) return false;
   }
