@@ -144,6 +144,7 @@ mod tests {
             agent_id: agent_id.map(String::from),
             title: None,
             permissions: None,
+            quota_wait: None,
         }
     }
 

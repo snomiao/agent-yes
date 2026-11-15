@@ -360,6 +360,11 @@ clis:
       - 'Generating\.\.\.'
       - 'Running command\.\.\.'
     wedgeTimeoutSecs: 1800
+    # "⚠ Individual quota reached … Resets in 4m56s" ends the turn and leaves the
+    # request dropped. Wait it out: read /usage, resend the interrupted input on
+    # a 1, 2, 4, 8 … minute ladder capped at the reset, and show `quota-wait` in
+    # `ay ls` meanwhile. See rs/src/quota_wait.rs.
+    quotaWait: true
     # A permission/selection menu the `enter` list below did NOT auto-resolve —
     # the cursor `>` sits on a numbered option other than the auto-accepted "1.".
     needsInput:

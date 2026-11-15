@@ -17,7 +17,14 @@
  * caller cannot otherwise tell staffed from dead, and finds out only when the
  * send fails. See `probeStdinReachable` in subcommands.ts.
  */
-export type LiveState = "active" | "idle" | "stopped" | "needs_input" | "stuck" | "unreachable";
+export type LiveState =
+  | "active"
+  | "idle"
+  | "stopped"
+  | "needs_input"
+  | "stuck"
+  | "unreachable"
+  | "quota-wait";
 
 /** The observable state of one agent at a single tick. */
 export interface LsAgentState {

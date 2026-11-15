@@ -95,6 +95,10 @@ pub struct CliConfig {
     /// Liveness window in ms: if we send stdin and the agent produces no PTY
     /// output within this window, mark it `unresponsive`. 0 = disabled.
     pub unresponsive_timeout_ms: u64,
+    /// Ride out an account quota cap (agy's "Individual quota reached" banner):
+    /// read `/usage`, resend the interrupted input on a backoff ladder capped at
+    /// the reset, and publish the wait to `ay ls`. See quota_wait.rs.
+    pub quota_wait: bool,
 }
 
 /// Built-in no-output watchdog timeout when a CLI doesn't override it. Generous
@@ -193,6 +197,7 @@ fn build_cli_config(raw: CliConfigOverride) -> Result<CliConfig> {
         wedge_timeout_secs: raw.wedge_timeout_secs.unwrap_or(0),
         needs_input: compile_regex_list(raw.needs_input)?,
         unresponsive_timeout_ms: raw.unresponsive_timeout_ms.unwrap_or(0),
+        quota_wait: raw.quota_wait.unwrap_or(false),
     })
 }
 

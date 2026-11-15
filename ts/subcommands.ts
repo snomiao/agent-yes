@@ -31,6 +31,7 @@ import path from "path";
 import {
   getGlobalPidIndexPath,
   type GlobalPidRecord,
+  type QuotaWaitRecord,
   readGlobalPids,
   updateGlobalPidStatus,
 } from "./globalPidIndex.ts";
@@ -2906,6 +2907,10 @@ export async function deriveLiveState(
   // so its row ages into the probe on its own.
   if (reachabilityProbeApplies(r, base) && (await confirmStdinUnreachable(r)))
     return { state: "unreachable", question: null };
+  // Waiting out an account quota cap (the Rust supervisor resends the
+  // interrupted input on its own). Quiet on purpose — not stuck, not idle, and
+  // not free for new work.
+  if (r.quota_wait) return { state: "quota-wait", question: null };
   // The Rust supervisor flagged this agent unresponsive (no PTY output after a
   // poke / a frozen "working" spinner) — an authoritative wedge signal, so it
   // wins over the log-tail heuristics (needs_input / stuck) below.
@@ -3412,6 +3417,8 @@ async function cmdLs(rest: string[]): Promise<number> {
       if (note) {
         label = truncate(note, budget);
         hasNote = true;
+      } else if (displayStatus === "quota-wait" && r.quota_wait) {
+        label = truncate(quotaWaitLabel(r.quota_wait), budget);
       } else if (r.log_file && alive) {
         const activity = await extractActivity(r.log_file);
         label = truncate(activity ?? (r.prompt ? `→ ${r.prompt}` : ""), budget);
@@ -3433,6 +3440,9 @@ async function cmdLs(rest: string[]): Promise<number> {
     }),
   );
 
+  // The live state ("needs_input", "quota-wait") can be wider than any stored
+  // status the width pass above measured.
+  widths.status = Math.max(widths.status, ...rows.map((r) => r.status.length));
   const header =
     [
       "PID".padEnd(widths.pid),
@@ -3487,6 +3497,21 @@ async function cmdLs(rest: string[]): Promise<number> {
   }
 
   return 0;
+}
+
+/** "HH:MM" in local time. */
+function localHhmm(ms: number): string {
+  const d = new Date(ms);
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * The `ay ls` prompt column for an agent waiting out a quota cap: when it is
+ * expected back, and when the interrupted input is next resent.
+ */
+export function quotaWaitLabel(w: QuotaWaitRecord): string {
+  const tries = w.attempt > 0 ? `, ${w.attempt} failed` : "";
+  return `⏳ quota cap, back ~${localHhmm(w.until)} (next resend ${localHhmm(w.next_at)}${tries})`;
 }
 
 function shortenPath(p: string): string {
@@ -8018,6 +8043,8 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
   // it overrides the log-tail heuristics above (but never a dead agent, which
   // Rust clears the flag on anyway).
   if (alive && record.unresponsive) state = "stuck";
+  // Waiting out a quota cap: quiet by design, see deriveLiveState.
+  if (alive && record.quota_wait) state = "quota-wait";
   // Alive but undeliverable outranks all of the above, exactly as in
   // deriveLiveState — `ay status` and `ay ls` must not disagree about whether a
   // row can be given work. Same grace period, from the same helper.
