@@ -122,6 +122,10 @@ pub struct CliConfigOverride {
     /// disables the check — appropriate for CLIs that don't animate a spinner.
     #[serde(default)]
     pub unresponsive_timeout_ms: Option<u64>,
+    /// Wait out an account quota cap instead of leaving the agent parked on it
+    /// (see quota_wait.rs). Absent = off.
+    #[serde(default)]
+    pub quota_wait: Option<bool>,
 }
 
 /// Install configuration override
@@ -225,6 +229,7 @@ impl CliConfigOverride {
             wedge_timeout_secs,
             needs_input,
             unresponsive_timeout_ms,
+            quota_wait,
         } = other;
 
         if let Some(install) = install {
@@ -323,6 +328,9 @@ impl CliConfigOverride {
         }
         if unresponsive_timeout_ms.is_some() {
             self.unresponsive_timeout_ms = unresponsive_timeout_ms;
+        }
+        if quota_wait.is_some() {
+            self.quota_wait = quota_wait;
         }
     }
 }
@@ -700,6 +708,7 @@ logsDir: /custom/logs
                 wedge_timeout_secs: Some(1111),
                 needs_input: Some(vec![pattern("old-needs-input")]),
                 unresponsive_timeout_ms: Some(1000),
+                quota_wait: None,
             },
         );
 
@@ -742,6 +751,7 @@ logsDir: /custom/logs
                 wedge_timeout_secs: Some(2222),
                 needs_input: Some(vec![pattern("new-needs-input")]),
                 unresponsive_timeout_ms: Some(2000),
+                quota_wait: Some(true),
             },
         );
 
@@ -797,6 +807,7 @@ logsDir: /custom/logs
         assert_eq!(t.wedge_timeout_secs, Some(2222));
         assert_eq!(t.needs_input, Some(vec![pattern("new-needs-input")]));
         assert_eq!(t.unresponsive_timeout_ms, Some(2000));
+        assert_eq!(t.quota_wait, Some(true));
         assert!(t.typing_respond.as_ref().unwrap().contains_key("y"));
         assert!(t.typing_respond.as_ref().unwrap().contains_key("1"));
     }

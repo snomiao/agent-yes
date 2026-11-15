@@ -71,6 +71,22 @@ pub struct PidRecord {
     /// otherwise. Mirrors the TS `permissions`. See agent_permissions.rs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permissions: Option<AgentPermissions>,
+    /// Set while the agent waits out an account quota cap (quota_wait.rs):
+    /// `ay ls` shows it as `quota-wait` with the expected recovery time.
+    /// Cleared on recovery and on exit. Mirrors the TS `quota_wait`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quota_wait: Option<QuotaWaitRecord>,
+}
+
+/// The published state of a quota wait. Times are unix ms.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct QuotaWaitRecord {
+    /// When the quota is expected back.
+    pub until: i64,
+    /// When the interrupted input is next resent.
+    pub next_at: i64,
+    /// Failed resends so far.
+    pub attempt: u32,
 }
 
 /// The agent id for this process: adopt a caller-injected `AGENT_YES_AGENT_ID`
@@ -166,6 +182,7 @@ impl PidStore {
             agent_id: Some(new_agent_id()),
             title: None,
             permissions,
+            quota_wait: None,
         };
         // Hold the cross-runtime lock across the append so a concurrent rewrite
         // (another wrapper's clean_stale / a status update) can't clobber it.
@@ -209,6 +226,7 @@ impl PidStore {
                     // record flagged unresponsive.
                     if status == "exited" {
                         r.unresponsive = false;
+                        r.quota_wait = None;
                     }
                     // Only repoint the log when given one (raw -> rendered on
                     // clean exit); otherwise keep the raw path recorded at start.
@@ -272,6 +290,29 @@ impl PidStore {
         })();
         if let Err(e) = result {
             warn!("PidStore: failed to set unresponsive: {}", e);
+        }
+    }
+
+    /// Publish (Some) or clear (None) this agent's quota wait. Rewrites the
+    /// registry only on a change. Leaves `status` untouched.
+    pub fn set_quota_wait(&self, pid: u32, wait: Option<QuotaWaitRecord>) {
+        let _lock = acquire_lock(&self.path);
+        let result = (|| -> Result<()> {
+            let mut records = self.read_all()?;
+            let mut changed = false;
+            for r in &mut records {
+                if r.pid == pid && r.quota_wait != wait {
+                    r.quota_wait = wait.clone();
+                    changed = true;
+                }
+            }
+            if changed {
+                self.write_all(&records)?;
+            }
+            Ok(())
+        })();
+        if let Err(e) = result {
+            warn!("PidStore: failed to set quota wait: {}", e);
         }
     }
 
@@ -363,6 +404,7 @@ impl PidStore {
                     agent_id: Some(new_agent_id()),
                     title: None,
                     permissions: None,
+                    quota_wait: None,
                 });
             }
         }
@@ -1050,6 +1092,7 @@ mod tests {
             agent_id: None,
             title: None,
             permissions: None,
+            quota_wait: None,
         }];
         store.write_all(&records).unwrap();
         let loaded = store.read_all().unwrap();
@@ -1089,6 +1132,7 @@ mod tests {
                 agent_id: None,
                 title: None,
                 permissions: None,
+                quota_wait: None,
             }])
             .unwrap();
 
