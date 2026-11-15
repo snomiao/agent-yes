@@ -3179,7 +3179,11 @@ async function cmdLs(rest: string[]): Promise<number> {
   // already reports, so consumers parse one schema.
   if (argv.watch) {
     const fallbackMs = Math.max(500, (Number.isFinite(argv.interval) ? argv.interval : 2) * 1000);
-    const tailers = new Map<string, ReturnType<typeof spawnChild>>();
+    const rescanMs = Math.max(15_000, fallbackMs * 15);
+    const tailers = new Map<
+      string,
+      { child: ReturnType<typeof spawnChild>; identity: string | null }
+    >();
     const indexFiles = new Set([
       getGlobalPidIndexPath(),
       path.join(process.cwd(), ".agent-yes", "pid-records.jsonl"),
@@ -3190,40 +3194,64 @@ async function cmdLs(rest: string[]): Promise<number> {
     let prev = new Map<number, LsAgentState>();
     let pending = Promise.resolve();
     let closing = false;
-    const follow = (file: string): void => {
-      if (process.platform === "win32" || tailers.has(file)) return;
-      // `fs.watch` on macOS can miss appends to long-lived files. `tail -F`
-      // follows the bytes themselves and reopens rotated/replaced files.
-      const child = spawnChild("tail", ["-F", "-n", "0", file], {
+    const identityOf = async (file: string): Promise<string | null> => {
+      try {
+        const info = await stat(file);
+        return `${info.dev}:${info.ino}`;
+      } catch {
+        return null;
+      }
+    };
+    const follow = async (file: string, checkIdentity = false): Promise<void> => {
+      if (process.platform === "win32") return;
+      const existing = tailers.get(file);
+      if (existing && !checkIdentity) return;
+      const identity = await identityOf(file);
+      if (existing && (!checkIdentity || existing.identity === identity)) return;
+      if (existing) {
+        tailers.delete(file);
+        existing.child.kill("SIGTERM");
+      }
+      // macOS tail -f follows appends with kqueue. Unlike -F it does not
+      // poll for replacement; the slow rescan below detects a new inode.
+      const child = spawnChild("tail", ["-f", "-n", "0", file], {
         stdio: ["ignore", "pipe", "ignore"],
       });
       child.stdout?.on("data", schedule);
-      child.on("error", () => tailers.delete(file));
-      child.on("exit", () => tailers.delete(file));
-      tailers.set(file, child);
+      const forget = (): void => {
+        if (tailers.get(file)?.child === child) tailers.delete(file);
+      };
+      child.on("error", forget);
+      child.on("exit", forget);
+      tailers.set(file, { child, identity });
+    };
+    const queueSnapshot = (checkIdentity = false): void => {
+      pending = pending
+        .then(() => snapshot(checkIdentity))
+        .catch((error) => {
+          process.stderr.write(`ay ls --watch: ${String(error)}\n`);
+        });
     };
     const schedule = (): void => {
       if (closing) return;
       if (timer) clearTimeout(timer);
       timer = setTimeout(() => {
-        pending = pending.then(snapshot).catch((error) => {
-          process.stderr.write(`ay ls --watch: ${String(error)}\n`);
-        });
+        queueSnapshot();
       }, 75);
     };
-    const snapshot = async (): Promise<void> => {
+    const snapshot = async (checkIdentity = false): Promise<void> => {
       const recs = await listRecords(keyword, opts);
       const targets = new Set([
         ...indexFiles,
         ...recs.map((record) => record.log_file).filter((file): file is string => !!file),
       ]);
-      for (const [file, child] of tailers) {
+      for (const [file, follower] of tailers) {
         if (!targets.has(file)) {
           tailers.delete(file);
-          child.kill("SIGTERM");
+          follower.child.kill("SIGTERM");
         }
       }
-      for (const file of targets) follow(file);
+      await Promise.all([...targets].map((file) => follow(file, checkIdentity)));
       const cur: LsAgentState[] = await Promise.all(
         recs.map(async (r) => {
           const { state, question } = await deriveLiveState(r);
@@ -3237,22 +3265,24 @@ async function cmdLs(rest: string[]): Promise<number> {
     process.stderr.write(
       process.platform === "win32"
         ? `watching agents with a ${fallbackMs / 1000}s fallback poll… (Ctrl-C to stop)\n`
-        : "watching agent indexes and logs for changes… (Ctrl-C to stop)\n",
+        : `watching agent indexes and logs with tail -f; rescanning for replacement files every ${rescanMs / 1000}s… (Ctrl-C to stop)\n`,
     );
     // Start the index follower before the baseline so an agent registered
     // during startup is either included in the baseline or triggers a follow-up.
-    for (const file of indexFiles) follow(file);
+    for (const file of indexFiles) await follow(file);
     await snapshot();
     await new Promise<void>((resolve) => {
       process.on("SIGINT", () => {
         closing = true;
         if (timer) clearTimeout(timer);
         if (fallback) clearInterval(fallback);
-        for (const child of tailers.values()) child.kill("SIGTERM");
+        for (const follower of tailers.values()) follower.child.kill("SIGTERM");
         resolve();
       });
       if (process.platform === "win32") {
         fallback = setInterval(schedule, fallbackMs);
+      } else {
+        fallback = setInterval(() => queueSnapshot(true), rescanMs);
       }
     });
     return 0;
