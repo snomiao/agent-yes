@@ -5036,6 +5036,32 @@ describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () =
     return readComposerState({ pid: 1111, cli, log_file: file } as never, windows);
   }
 
+  // A codex screen whose input box holds a whole `ay send` envelope, taller than
+  // a draft may be for the box to count as on screen.
+  function codexEnvelopeLog(withDraft: boolean | "plain" = true): string {
+    const rows = ["• done: committed, not pushed", ""];
+    if (withDraft === "plain") {
+      rows.push("› a long pasted note");
+      for (let i = 0; i < 12; i++) rows.push(`  - note ${i}`);
+    } else if (withDraft) {
+      rows.push(
+        '› <ay-msg 1a2b3c4d from claude alice@box:/repo/alpha:main#1111 — reply: ay send 1111 "...">',
+      );
+      for (let i = 0; i < 12; i++) rows.push(`  - note ${i}`);
+      rows.push("  </ay-msg 1a2b3c4d>");
+    } else rows.push("› ");
+    rows.push("", "  gpt-x default · ~/repo", "  ? for shortcuts");
+    return "\x1b[2J" + rows.map((t, i) => at(50 - rows.length + i + 1, t)).join("");
+  }
+
+  it("reads ay's own tall envelope in a codex box as a draft it owns, not hidden", async () => {
+    expect(await stateOf(codexEnvelopeLog(), "codex")).toEqual({
+      kind: "draft",
+      chars: expect.any(Number),
+      own: "1a2b3c4d",
+    });
+  });
+
   describe("submitStableDraft", () => {
     async function setup(draft: string) {
       const { submitStableDraft } = await loadModule();
@@ -5075,6 +5101,51 @@ describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () =
       expect(sent).toBe(false);
       expect(await readFile(fifo_file, "utf-8")).toBe("");
     });
+
+    // writeToIpc connects to a named pipe on Windows; this fake FIFO is a plain file.
+    it.skipIf(process.platform === "win32")(
+      "submits ay's own envelope left in a codex box at once, without the stability waits",
+      async () => {
+        const { submitStableDraft } = await loadModule();
+        const n = 2000 + logs++;
+        const log_file = path.join(testHome, `${n}.raw.log`);
+        const fifo_file = path.join(testHome, `${n}.fifo`);
+        await writeFile(log_file, codexEnvelopeLog());
+        await writeFile(fifo_file, "");
+        const record = { pid: n, cli: "codex", log_file, fifo_file } as never;
+        const waits: number[] = [];
+        const sent = await submitStableDraft(record, [1, 2, 4, 8], async (ms) => {
+          waits.push(ms);
+          if ((await readFile(fifo_file, "utf-8")).includes("\r"))
+            await writeFile(log_file, codexEnvelopeLog(false));
+        });
+        expect(sent).toBe(true);
+        expect(waits.slice(0, 4)).not.toEqual([1, 2, 4, 8]);
+        expect(await readFile(fifo_file, "utf-8")).toBe("\r");
+      },
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "submits a tall draft that reads hidden only after twice the wait",
+      async () => {
+        const { submitStableDraft } = await loadModule();
+        const n = 2000 + logs++;
+        const log_file = path.join(testHome, `${n}.raw.log`);
+        const fifo_file = path.join(testHome, `${n}.fifo`);
+        await writeFile(log_file, codexEnvelopeLog("plain"));
+        await writeFile(fifo_file, "");
+        const record = { pid: n, cli: "codex", log_file, fifo_file } as never;
+        const waits: number[] = [];
+        const sent = await submitStableDraft(record, [1, 2, 4, 8], async (ms) => {
+          waits.push(ms);
+          if ((await readFile(fifo_file, "utf-8")).includes("\r"))
+            await writeFile(log_file, codexEnvelopeLog(false));
+        });
+        expect(sent).toBe(true);
+        expect(waits.slice(0, 5)).toEqual([1, 2, 4, 8, 15]);
+        expect(await readFile(fifo_file, "utf-8")).toBe("\r");
+      },
+    );
 
     it("does nothing for an empty box", async () => {
       const { submitStableDraft, record, fifo_file } = await setup("");
@@ -5117,6 +5188,35 @@ describe("readComposerState on a lane idle for hours", { timeout: 60_000 }, () =
     });
     // Codex has no rule, but a prompt row with no footer under it is history too.
     expect((await stateOf(turn.repeat(3000), "codex")).kind).toBe("hidden");
+  });
+
+  // agy: past turns are a rule over a `> …` row, like its input row; the box is
+  // followed by a task list, a rule and the footer. The full frame is drawn once,
+  // then >32 KB of redraws touch only the last past turn, the tasks and the footer.
+  function agyIdleLog(composer: string, bytes = 200 * 1024): string {
+    const rule = `${GRAY}${"─".repeat(COLS)}\x1b[0m`;
+    const screen: string[] = [];
+    for (let i = 0; i < 30; i++) screen.push(`  step ${i}: lorem ipsum dolor sit amet`);
+    screen.push(rule, "> please summarise the plan", "  answer 1", "  answer 2", "  answer 3");
+    screen.push("", rule, `> ${composer}`, rule);
+    screen.push("  ● [10:00:00] build", "  ● [10:01:00] test", "  ↓ 3 more", rule);
+    screen.push(`${GRAY}? for shortcuts\x1b[0m`);
+    const redrawn = new Set([31, 32, 33, 34, 35, 40, 41, 42, 44]);
+    let log = "\x1b[2J" + screen.map((t, i) => at(i + 1, t)).join("") + "\x1b[38;3H";
+    for (let k = 0; log.length < bytes; k++) {
+      for (const r of redrawn) log += at(r, screen[r - 1]! + (r === 42 ? ` ${k % 10}` : ""));
+      log += "\x1b[38;3H";
+    }
+    return log;
+  }
+
+  it("reads agy's empty box drawn before the last 32 KB, not a past `>` turn", async () => {
+    // The 32 KB tail alone shows the past turn as the prompt and its answer as a draft.
+    expect(await stateOf(agyIdleLog(""), "agy")).toEqual({ kind: "empty", ghost: false });
+  });
+
+  it("still reads a typed draft in agy's box", async () => {
+    expect(await stateOf(agyIdleLog("btw how"), "agy")).toEqual({ kind: "draft", chars: 6 });
   });
 
   it("follows what is appended after the first reading, and a truncated log", async () => {

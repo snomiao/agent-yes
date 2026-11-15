@@ -35,6 +35,8 @@ export interface ComposerCell {
   inverse: boolean;
   /** Drawn in a non-default foreground colour (Claude's footer is; typed text is not). */
   colored: boolean;
+  /** Drawn in bright black (SGR 90): agy's input-row notices; typed text is not. */
+  gray?: boolean;
 }
 
 /** A rendered row: its plain text plus per-cell attributes. */
@@ -47,7 +49,12 @@ export type ComposerState =
   /** Nothing typed: an empty prompt, possibly showing dim ghost text. */
   | { kind: "empty"; ghost: boolean }
   /** Real input is sitting in the composer. `chars` counts the real cells. */
-  | { kind: "draft"; chars: number }
+  | {
+      kind: "draft";
+      chars: number;
+      /** The draft is a whole `ay send` envelope with this nonce (see ownEnvelopeNonce). */
+      own?: string;
+    }
   /** No composer is visible (menu, trust dialog, unknown CLI screen). */
   | { kind: "unknown"; reason: string }
   /**
@@ -104,6 +111,25 @@ export function composerPromptRow(texts: string[], cli?: string): number {
 }
 
 /**
+ * The nonce of an `ay send` envelope sitting whole in the input box — its
+ * `<ay-msg NONCE …` header on the prompt row and its `</ay-msg NONCE>` closer as
+ * the last text above the footer — or null. That is ay's own message whose Enter
+ * was swallowed, not someone's draft, however many rows it spans.
+ */
+export function ownEnvelopeNonce(texts: string[], cli?: string): string | null {
+  const prompt = composerPromptRow(texts, cli);
+  if (prompt < 0) return null;
+  const nonce = /^<ay-msg ([0-9a-f]{8}) /.exec(stripPromptGlyph(texts[prompt]!, cli))?.[1];
+  if (!nonce) return null;
+  const close = texts.findLastIndex((t, i) => i > prompt && t.trim() === `</ay-msg ${nonce}>`);
+  if (close < 0) return null;
+  const below = texts.slice(close + 1).filter((t) => t.trim());
+  if (below.length > MAX_ROWS_BELOW_AGY_BOX || below.some((t) => promptRe(cli).test(t)))
+    return null;
+  return nonce;
+}
+
+/**
  * Is Claude Code's composer box the bottom of the screen: a rule directly above a
  * prompt row, at most a few draft rows (none of them another prompt) up to the
  * rule or footer that closes the box, and below that nothing but a few footer
@@ -123,11 +149,16 @@ export function composerBoxed(texts: string[], cli?: string, needRule = true): b
   const nonBlank = (rows: string[]) => rows.filter((t) => t.trim());
   const close = texts.findIndex((t, i) => i > prompt && isComposerChrome(t));
   if (close < 0) return false;
+  // agy's box is closed by a rule and has its task list (a few rows, a rule) and
+  // footer under it. Its past turns are drawn as a rule over a `> …` row too, so
+  // a box closed only by the footer is an old turn left above a partial redraw.
+  const agy = cli === "agy";
+  if (agy && !SEPARATOR_RE.test(texts[close]!)) return false;
   const inside = nonBlank(texts.slice(prompt + 1, close));
   const below = nonBlank(texts.slice(close + 1));
   return (
     inside.length <= MAX_DRAFT_ROWS &&
-    below.length <= MAX_ROWS_BELOW_BOX &&
+    below.length <= (agy ? MAX_ROWS_BELOW_AGY_BOX : MAX_ROWS_BELOW_BOX) &&
     ![...inside, ...below].some((t) => promptRe(cli).test(t))
   );
 }
@@ -136,6 +167,10 @@ export function composerBoxed(texts: string[], cli?: string, needRule = true): b
 const MAX_DRAFT_ROWS = 8;
 /** Footer rows Claude Code draws under its composer box (mode, hints, agents, notices). */
 const MAX_ROWS_BELOW_BOX = 4;
+/** agy: its task list (up to ~5 rows and a "↓ N more" row), a rule, the footer. */
+const MAX_ROWS_BELOW_AGY_BOX = 10;
+/** CLIs whose composer box has a rule above its prompt row (composerBoxed's needRule). */
+export const BOXED_COMPOSER_CLIS = new Set(["claude", "agy"]);
 
 /**
  * Is this row composer chrome (a rule or a Claude/Codex footer) — the end of the
@@ -172,6 +207,7 @@ export function classifyComposer(rows: ComposerRow[], cli?: string): ComposerSta
     cli,
   );
   if (prompt < 0) return { kind: "unknown", reason: "no prompt row on screen" };
+  const agyGhost = cli === "agy";
   let real = 0;
   let ghost = false;
   for (let i = prompt; i < rows.length; i++) {
@@ -190,7 +226,9 @@ export function classifyComposer(rows: ComposerRow[], cli?: string): ComposerSta
     for (const c of cells) {
       if (!c.ch.trim() || c.ch === "\u00a0") continue;
       if (c.inverse) continue;
-      if (c.dim) ghost = true;
+      // agy writes its mode notice ("Auto mode: … (shift+tab to cycle)") into the
+      // empty input row in gray, where Claude/Codex use dim ghost text.
+      if (c.dim || (c.gray && agyGhost)) ghost = true;
       else real++;
     }
   }
@@ -211,6 +249,8 @@ type XtermLike = {
                   isDim(): number;
                   isInverse(): number;
                   isFgDefault(): boolean;
+                  isFgPalette(): boolean;
+                  getFgColor(): number;
                   getWidth(): number;
                 }
               | undefined;
@@ -246,6 +286,7 @@ export function rowsFromXterm(term: XtermLike, n: number, fromContent = false): 
         dim: c.isDim() !== 0,
         inverse: c.isInverse() !== 0,
         colored: !c.isFgDefault(),
+        gray: c.isFgPalette() && c.getFgColor() === 8,
       });
     }
     rows.push({ text: line.translateToString(true), cells });

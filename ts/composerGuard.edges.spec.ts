@@ -49,6 +49,8 @@ describe("composer and pending-input recovery edges", () => {
       isDim: () => 0,
       isInverse: () => 0,
       isFgDefault: () => true,
+      isFgPalette: () => false,
+      getFgColor: () => 0,
     });
     const line = {
       length: 4,
