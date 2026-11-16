@@ -24,6 +24,7 @@ on:
     paths:
       - "lab/ui/**"
       - "tests/ui-dom/**"
+      - "tests/auth/**"
       - "tests/ui-test/**"
       - ".github/workflows/ui-test.yml"
   pull_request:
@@ -49,7 +50,7 @@ jobs:
           if [ "${{ github.event_name }}" = "pull_request" ]; then
             base="${{ github.event.pull_request.base.sha }}"
             if git diff --name-only "$base"...HEAD -- \
-                 'lab/ui' 'tests/ui-dom' 'tests/ui-test' '.github/workflows/ui-test.yml' \
+                 'lab/ui' 'tests/ui-dom' 'tests/ui-test' 'tests/auth' '.github/workflows/ui-test.yml' \
                  | grep -q .; then
               echo "changed=1" >> "$GITHUB_OUTPUT"
             else
@@ -68,6 +69,9 @@ jobs:
       - name: Install Playwright Chromium
         if: steps.diff.outputs.changed == '1'
         run: bunx playwright install --with-deps chromium
+      - name: Run authentication backend tests
+        if: steps.diff.outputs.changed == '1'
+        run: bun run test:auth
       - name: Run deterministic console DOM test
         if: steps.diff.outputs.changed == '1'
         run: bun run test:ui-dom
