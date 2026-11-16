@@ -30,10 +30,16 @@ export async function detachStream(options: {
   child.on("exit", (code, signal) => {
     failure = `wrapper exited (${signal ?? code})`;
   });
-  const deadline = Date.now() + (options.timeoutMs ?? 5000);
+  const startedAt = Date.now();
+  const deadline = startedAt + (options.timeoutMs ?? 5000);
   try {
     while (Date.now() < deadline) {
-      const record = (await readGlobalPids()).find((record) => record.wrapper_pid === child.pid);
+      const record = (await readGlobalPids()).find(
+        (record) =>
+          child.pid !== undefined &&
+          record.wrapper_pid === child.pid &&
+          record.started_at >= startedAt - 1000,
+      );
       if (record && (record.status !== "exited" || record.exit_code === 0)) return record;
       if (record?.status === "exited") failure = `CLI exited (${record.exit_code})`;
       if (failure) break;
