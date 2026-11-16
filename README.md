@@ -730,7 +730,8 @@ explicit `--input-format stream-json --replay-user-messages`.
 
 Each session writes normalized `<pid>.events.jsonl`, original `<pid>.native.jsonl`,
 and a readable `<pid>.raw.log` under the working directory's `.agent-yes/`.
-Stream capture currently requires macOS or Linux and does not support `--detach`.
+Stream capture currently requires macOS or Linux. `ay --detach claude ...` starts a
+background TypeScript wrapper and prints its registered CLI pid.
 Permission requests are recorded; use an explicit Claude permission policy for
 unattended sessions until approval commands are available.
 
@@ -740,7 +741,8 @@ as `stuck`. `ay ls` shows the latest reported cumulative session cost in `COST`
 (and `cost_usd` in JSON), with `-` when cost is unavailable.
 
 `ay send <pid> "message"` sends one JSON line and returns success only after
-Claude echoes that message's unique ID. `--interrupt` sends Claude's native
+Claude echoes that message's unique ID. Bodies are sent verbatim; sender provenance
+stays in mailbox history rather than adding reply instructions to the task. `--interrupt` sends Claude's native
 interrupt request before the new message. Receipt timeouts report an uncertain
 outcome and never retry automatically. Stream sessions require receipts, so
 `--no-wait` and terminal control codes are not supported. `ay tail`, including
@@ -749,3 +751,9 @@ follow and `--until`, reads the transcript without terminal wrapping.
 A local preview executable such as `aysj` can forward arguments unchanged to a
 worktree build. It behaves exactly like `ay`, including the PTY default; its name
 does not enable stream capture.
+
+Native stream flags also work after the wrapper separator, for example
+`ay --detach claude -- -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --model haiku "task"`.
+The initial stream task is passed verbatim, without PTY init-message envelopes.
+The registry mirrors active/idle turn transitions, and event files preserve stream
+identity when an older registry writer drops the transport field.
