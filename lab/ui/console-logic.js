@@ -104,6 +104,14 @@ export function normCwd(cwd) {
   return (cwd || "").replace(/\\/g, "/");
 }
 
+// Where an agent works: the dir its shells run in (`workdir`, sampled by the
+// wrapper and sent by serve), else the dir it was spawned in. A lane spawned in
+// one dir that cds into a worktree is shown, grouped and searched by the
+// worktree, not by where it started.
+export function agentDir(e) {
+  return (e && (e.workdir || e.cwd)) || "";
+}
+
 // Parse owner/repo/branch from a cwd like .../ws/<owner>/<repo>/tree/<branch>.
 // A cwd inside a git submodule keeps trailing path after the worktree branch
 // (e.g. .../tree/share/lib/bot, where lib/bot is a submodule). The owner/repo/
@@ -112,7 +120,7 @@ export function normCwd(cwd) {
 // leaf dir as `sub` to keep nested repos distinguishable. `sub` is "" when the
 // cwd is the worktree root.
 export function repoBranch(e) {
-  const m = /\/([^/]+)\/([^/]+)\/tree\/([^/]+)(\/.*)?$/.exec(normCwd(e.cwd));
+  const m = /\/([^/]+)\/([^/]+)\/tree\/([^/]+)(\/.*)?$/.exec(normCwd(agentDir(e)));
   if (!m) return null;
   const sub = (m[4] || "").split("/").filter(Boolean).pop() || "";
   return { owner: m[1], repo: m[2], branch: m[3], sub };
@@ -460,7 +468,7 @@ export function matches(e, toks) {
     " " +
     e.cli +
     " " +
-    (e.cwd || "") +
+    agentDir(e) +
     " " +
     e.status +
     " " +
@@ -537,17 +545,17 @@ function agentForestNodes(list) {
   //    (longest containing cwd) wins; same-worktree guard keeps an unrelated
   //    shared prefix (e.g. /Users/x/ws) from grouping strangers together.
   for (const e of list) {
-    if (parentOf.has(e) || !e.cwd) continue;
+    if (parentOf.has(e) || !agentDir(e)) continue;
     const rb = repoBranch(e);
     if (!rb) continue;
-    const ecwd = normCwd(e.cwd);
+    const ecwd = normCwd(agentDir(e));
     let best = null;
     for (const c of list) {
-      if (c === e || !c.cwd || !ecwd.startsWith(normCwd(c.cwd) + "/")) continue;
+      if (c === e || !agentDir(c) || !ecwd.startsWith(normCwd(agentDir(c)) + "/")) continue;
       const crb = repoBranch(c);
       if (!crb || crb.owner !== rb.owner || crb.repo !== rb.repo || crb.branch !== rb.branch)
         continue;
-      if (!best || normCwd(c.cwd).length > normCwd(best.cwd).length) best = c;
+      if (!best || normCwd(agentDir(c)).length > normCwd(agentDir(best)).length) best = c;
     }
     if (best) parentOf.set(e, best);
   }
@@ -984,7 +992,7 @@ export function omniScore(e, query) {
   if (title === q) return 100;
   if (title.startsWith(q)) return 80;
   if (title.includes(q)) return 60;
-  if ((e.cwd || "").toLowerCase().includes(q)) return 40;
+  if (agentDir(e).toLowerCase().includes(q)) return 40;
   if ((e.prompt || "").toLowerCase().includes(q)) return 20;
   return 0;
 }

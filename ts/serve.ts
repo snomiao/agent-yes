@@ -87,6 +87,7 @@ import {
   resolveSpawnCwd,
   allowsSkipPermissions,
 } from "./workspaceConfig.ts";
+import { resolveWorkDir } from "./workDir.ts";
 
 const DEFAULT_PORT = 0;
 const PORTLESS_APP_NAME = "agent-yes";
@@ -2538,8 +2539,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
     // collaborator sees input land even when they weren't the one sending it) and can
     // sort by it. See resolveLastStdinAt / noteStdinWrite. Null for exited agents.
     const lastStdinAt = status !== "exited" ? await resolveLastStdinAt(r) : null;
+    // Where the agent works now (its shells' cwd, sampled by the Rust wrapper),
+    // not just where it was spawned: the console labels and groups agents by it.
+    const where = await resolveWorkDir(r);
     return {
       ...r,
+      ...where,
       last_active_at: lastActiveAt,
       last_stdin_at: lastStdinAt,
       // Precedence: exited stays exited; the Rust supervisor's unresponsive flag is
@@ -2553,7 +2558,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
       question,
       title: await logTitle(r.log_file),
       status_text: status === "exited" ? null : await logStatusText(r.log_file),
-      git: status === "exited" ? null : await gitStatus(r.cwd),
+      git: status === "exited" ? null : await gitStatus(where.workdir),
       // Task progress from the rendered todo block (null when none detected → no
       // badge). Skipped for exited agents — their screen is no longer live.
       tasks: status === "exited" ? null : await logTasks(r.log_file),

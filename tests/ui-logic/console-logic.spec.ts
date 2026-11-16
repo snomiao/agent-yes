@@ -4,6 +4,7 @@
 // filtering, age formatting, and the Alt+PageUp/PageDown selection clamp.
 import { describe, it, expect } from "vitest";
 import {
+  agentDir,
   cliLabel,
   repoBranch,
   ident,
@@ -166,6 +167,13 @@ describe("repoBranch", () => {
       branch: "main",
       sub: "",
     });
+  });
+  it("follows the dir the agent works in (workdir) over its spawn cwd", () => {
+    const moved = agent({ cwd: "/home/alice", workdir: "/x/acme/widget/tree/feat-a" });
+    expect(agentDir(moved)).toBe("/x/acme/widget/tree/feat-a");
+    expect(repoBranch(moved)).toEqual({ owner: "acme", repo: "widget", branch: "feat-a", sub: "" });
+    expect(agentDir(agent({ cwd: "/home/alice" }))).toBe("/home/alice");
+    expect(agentDir(null)).toBe("");
   });
   it("returns null when the cwd doesn't match the layout", () => {
     expect(repoBranch(agent({ cwd: "/tmp/scratch" }))).toBeNull();
