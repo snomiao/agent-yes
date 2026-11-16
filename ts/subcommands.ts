@@ -6315,7 +6315,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   let prefix = "";
   let suffix = "";
   let nonce: string | undefined;
-  if (sender.agent && !isSlashCommand(body) && !raw) {
+  if (record.mode !== "stream" && sender.agent && !isSlashCommand(body) && !raw) {
     nonce = randomBytes(4).toString("hex");
     // The standardized identity (<user>@<host>:<path>:<branch>#<pid>) names the
     // sender in one token: the branch usually carries the lane name for free
@@ -6351,7 +6351,7 @@ async function cmdSend(rest: string[]): Promise<number> {
       throw new Error("ay send: --code is not supported for stream sessions; use --interrupt");
     if (argv.noWait || process.env.AGENT_YES_SEND_NO_WAIT === "1")
       throw new Error("ay send: stream sessions require a replay receipt; omit --no-wait");
-    const receipt = await sendStream(record, prefix + body + suffix, {
+    const receipt = await sendStream(record, body, {
       interrupt: Boolean(argv.interrupt),
       write: (payload) =>
         withIpcLock(
