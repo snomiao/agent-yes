@@ -64,6 +64,13 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
   let fd: number | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   const logs: ReturnType<typeof createWriteStream>[] = [];
+  let liveStatus: "active" | "idle" = "active";
+  let registered = false;
+  let pidUpdates = Promise.resolve();
+  const mirrorStatus = () => {
+    const status = liveStatus;
+    pidUpdates = pidUpdates.then(() => updateGlobalPidStatus(pid, { mode: "stream", status }));
+  };
   const stop = () => {
     try {
       process.kill(-pid, "SIGTERM");
@@ -98,6 +105,12 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
       });
     }
     const emit = (event: AyEvent) => {
+      const nextStatus =
+        event.type === "turn_end" ? "idle" : event.type === "turn_start" ? "active" : liveStatus;
+      if (nextStatus !== liveStatus) {
+        liveStatus = nextStatus;
+        if (registered) mirrorStatus();
+      }
       writeLog(events, JSON.stringify(event) + "\n");
       const text = renderEvent(event);
       writeLog(raw, text);
@@ -171,7 +184,7 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
       cwd: options.cwd,
       log_file: `${base}.raw.log`,
       fifo_file: jsonInput && replay ? fifo : null,
-      status: "active",
+      status: liveStatus,
       exit_code: null,
       exit_reason: null,
       started_at: Date.now(),
@@ -179,13 +192,17 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
       parent_pid: Number(process.env.AGENT_YES_PID) || null,
       agent_id: randomUUID().replaceAll("-", "").slice(0, 12),
     });
+    registered = true;
+    mirrorStatus();
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
     if (jsonInput && options.prompt) adapter.send(options.prompt);
     if (!jsonInput) child.stdin.end();
     const code = await exited;
     if (code) emit({ type: "error", message: `Claude exited (${code})`, fatal: true });
+    await pidUpdates;
     await updateGlobalPidStatus(pid, {
+      mode: "stream",
       status: "exited",
       exit_code: code,
       exit_reason: "stream-exit",

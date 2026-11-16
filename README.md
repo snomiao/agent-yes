@@ -730,6 +730,13 @@ explicit `--input-format stream-json --replay-user-messages`.
 
 Each session writes normalized `<pid>.events.jsonl`, original `<pid>.native.jsonl`,
 and a readable `<pid>.raw.log` under the working directory's `.agent-yes/`.
-Stream capture currently requires macOS or Linux and does not support `--detach`.
+Stream capture currently requires macOS or Linux. `ay --detach claude ...` starts a
+background TypeScript wrapper and prints its registered CLI pid.
 Permission requests are recorded; use an explicit Claude permission policy for
 unattended sessions until approval commands are available.
+
+Native stream flags also work after the wrapper separator, for example
+`ay --detach claude -- -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --model haiku "task"`.
+The initial stream task is passed verbatim, without PTY init-message envelopes.
+The registry mirrors active/idle turn transitions, and event files preserve stream
+identity when an older registry writer drops the transport field.

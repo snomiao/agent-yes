@@ -338,6 +338,22 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
 
   // Return the config object that would be passed to cliYes (same logic as cli.ts:99-121)
   return {
+    // The first separator belongs to the wrapper. Stream launch planning needs
+    // the original native tokens, including flags written after that separator.
+    nativeArgs: (() => {
+      const args =
+        parsedArgv._[0] && !cliName
+          ? rawArgs.slice((cliArgIndex ?? 0) + 1)
+          : [
+              ...cliArgsForSpawn,
+              ...positionalPromptWords,
+              ...(dashIndex === undefined ? [] : rawArgs.slice(dashIndex + 1)),
+            ];
+      const separator = args.indexOf("--");
+      if (parsedArgv._[0] && !cliName && separator !== -1) args.splice(separator, 1);
+      return args;
+    })(),
+    explicitPrompt: parsedArgv.prompt,
     stream: parsedArgv.stream,
     cwd: process.cwd(),
     env: process.env as Record<string, string>,
