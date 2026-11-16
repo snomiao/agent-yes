@@ -2,7 +2,7 @@
  * The standardized agent identity string:
  *
  *   <username>@<hostname>:<path>:<branch>#<pid>
- *   e.g.  sno@Mac:~/ws/symval/symval/tree/crm:main#30402
+ * Example: alice@host:~/work/org/repo:main#1111
  *
  * One line answers "who is this agent" across every surface that names one —
  * the `ay send` envelope header, `ay whoami`, logs. The branch segment usually

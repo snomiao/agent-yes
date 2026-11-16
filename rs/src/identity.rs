@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! <username>@<hostname>:<path>:<branch>#<pid>
-//! e.g.  sno@Mac:~/ws/symval/symval/tree/crm:main#30402
+//! Example: alice@host:~/work/org/repo:main#1111
 //! ```
 //!
 //! Rust mirror of `ts/identity.ts`. One line answers "who is this agent" across

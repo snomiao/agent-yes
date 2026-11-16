@@ -3,6 +3,7 @@ mod cli;
 mod codex_sessions;
 mod config;
 mod config_loader;
+#[cfg(any(windows, test))]
 mod conpty_mode_filter;
 mod context;
 mod fifo;

@@ -123,7 +123,7 @@ Rust 側はパイプを **自プロセスで O_RDWR で開いたまま** にし�
 
 ```
 <username>@<hostname>:<path>:<branch>#<pid>
-例: sno@Mac:~/ws/symval/symval/tree/crm:main#30402
+Example: `alice@host:~/work/org/repo:main#1111`
 ```
 
 - `branch` は cwd の git checkout から純 file read で解決する
