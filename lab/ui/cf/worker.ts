@@ -17,7 +17,9 @@
 // HONEST server fails a cross-generation join closed; that pin is a UX/migration
 // aid only — the real confidentiality/integrity guarantees are client-enforced.
 
-export interface Env {
+import { AUTH_PATH, authFetch, type AuthEnv } from "./auth";
+
+export interface Env extends AuthEnv {
   ROOMS: DurableObjectNamespace;
   EXPOSURES: DurableObjectNamespace;
   ASSETS: Fetcher;
@@ -188,6 +190,10 @@ export default {
 
     // The lab subdomain is served entirely out of the /lab asset directory.
     if (host === LAB_HOST) return labFetch(url, req, env);
+
+    if (url.pathname === AUTH_PATH || url.pathname.startsWith(`${AUTH_PATH}/`)) {
+      return authFetch(req, env);
+    }
 
     if (url.pathname === "/health") return new Response("ok\n");
 

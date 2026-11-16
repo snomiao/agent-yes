@@ -20,6 +20,9 @@ cp ../index.html ../ch.html ../*.js ../manifest.webmanifest ../icon.svg ./public
 # existing dir copies the source dir INSIDE it).
 rm -rf ./public/w/vendor && cp -R ../vendor ./public/w/vendor
 cp ../landing.html ./public/index.html
+# Shared account UI and the Google sign-in page live at the stable /auth/ path.
+mkdir -p ./public/auth
+cp ../auth/* ./public/auth/
 # The room landing page (a room link opened in a browser). Its own directory so
 # the URL keeps its trailing slash: a bare /room WOULD match worker.ts's
 # signaling route (/^\/([A-Za-z0-9_-]{1,64})$/) on a websocket upgrade and be

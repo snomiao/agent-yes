@@ -1,0 +1,137 @@
+.ay-account {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  font:
+    13px/1.4 -apple-system,
+    BlinkMacSystemFont,
+    "Segoe UI",
+    sans-serif;
+  color: var(--fg, #e6edf3);
+}
+.ay-account-content {
+  position: relative;
+}
+.ay-account a {
+  margin: 0;
+  text-decoration: none;
+}
+.ay-account button {
+  font: inherit;
+  cursor: pointer;
+}
+.ay-account-signin,
+.ay-account-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 5px 10px;
+  border: 1px solid var(--border, var(--line, #30363d));
+  border-radius: 8px;
+  background: var(--panel, #161b22);
+  color: var(--fg, #e6edf3);
+  white-space: nowrap;
+}
+.ay-account-signin:hover,
+.ay-account-trigger:hover {
+  border-color: var(--muted, #9198a1);
+  text-decoration: none;
+}
+.ay-account button:focus-visible,
+.ay-account a:focus-visible {
+  outline: 2px solid var(--accent, #2f81f7);
+  outline-offset: 3px;
+}
+.ay-account-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 25px;
+  height: 25px;
+  border-radius: 50%;
+  background: #264c39;
+  color: #b8f4c5;
+  font-size: 10px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+.ay-account-label {
+  max-width: 110px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ay-account-chevron {
+  color: var(--muted, #9198a1);
+}
+.ay-account-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 9px);
+  z-index: 120;
+  width: min(280px, calc(100vw - 30px));
+  padding: 6px;
+  border: 1px solid var(--border, var(--line, #30363d));
+  border-radius: 12px;
+  background: var(--panel, #161b22);
+  box-shadow: 0 16px 50px #0005;
+}
+.ay-account-panel[hidden] {
+  display: none;
+}
+.ay-account-identity {
+  display: grid;
+  gap: 3px;
+  padding: 10px 10px 12px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--border, var(--line, #30363d));
+  overflow-wrap: anywhere;
+}
+.ay-account-email {
+  color: var(--muted, #9198a1);
+  font-size: 12px;
+}
+.ay-account-item {
+  display: block;
+  width: 100%;
+  border: 0;
+  border-radius: 6px;
+  text-align: left;
+  padding: 9px 10px;
+  color: var(--fg, #e6edf3);
+  background: transparent;
+  font: inherit;
+}
+.ay-account-item:hover {
+  background: #80808018;
+  text-decoration: none;
+}
+.ay-account-item:disabled {
+  opacity: 0.6;
+  cursor: wait;
+}
+.ay-account-status {
+  position: absolute;
+  top: calc(100% + 5px);
+  right: 0;
+  width: 220px;
+  font-size: 11px;
+  color: var(--muted, #9198a1);
+}
+.ay-account-status:empty {
+  display: none;
+}
+.ay-account-loading {
+  color: var(--muted, #9198a1);
+  padding: 7px 10px;
+}
+@media (max-width: 600px) {
+  .ay-account-label {
+    display: none;
+  }
+  .ay-account-trigger {
+    gap: 5px;
+    padding: 4px 7px;
+  }
+}

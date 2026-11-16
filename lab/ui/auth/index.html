@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="description" content="Sign in to agent-yes securely with your Google account." />
+    <title>Sign in · agent-yes</title>
+    <link rel="icon" href="/w/icon.svg" />
+    <link rel="stylesheet" href="/auth/profile.css" />
+    <link rel="stylesheet" href="/auth/page.css" />
+    <script type="module" src="/auth/page.js"></script>
+  </head>
+  <body>
+    <header class="auth-header">
+      <a class="auth-brand" href="/" aria-label="agent-yes home"><span>✓</span> agent-yes</a>
+      <div data-ay-account></div>
+    </header>
+    <main class="auth-main">
+      <section class="auth-intro" aria-labelledby="intro-title">
+        <p class="eyebrow"><span class="status-dot"></span> YOUR AGENT WORKSPACE</p>
+        <h1 id="intro-title">
+          Good to<br />
+          have you <span>here.</span>
+        </h1>
+        <p class="intro-copy">
+          One account for your next great idea.<br />Sign in, open your console, and get going.
+        </p>
+        <div class="terminal-note" aria-hidden="true">
+          <span>$</span> agent-yes <span class="terminal-cursor">▍</span>
+        </div>
+      </section>
+      <section class="auth-card" aria-labelledby="auth-title">
+        <div class="card-symbol" aria-hidden="true">✓</div>
+        <div id="signed-out">
+          <p class="eyebrow">WELCOME TO AGENT-YES</p>
+          <h2 id="auth-title">Your work starts here.</h2>
+          <p class="card-copy">
+            Sign in or create an account with Google.<br />No extra password to remember.
+          </p>
+          <button id="google-signin" class="google-button" type="button" disabled>
+            <svg viewBox="0 0 48 48" aria-hidden="true">
+              <path
+                fill="#4285F4"
+                d="M43.6 20.5H42V20H24v8h11.3A12 12 0 1 1 32 14.8l5.7-5.7A20 20 0 1 0 44 24c0-1.2-.1-2.4-.4-3.5Z"
+              />
+              <path
+                fill="#34A853"
+                d="m6.3 34.7 6.6-5.1A12 12 0 0 0 24 36c3 0 5.7-1.1 7.8-2.9l6.2 5A20 20 0 0 1 6.3 34.7Z"
+              />
+              <path
+                fill="#FBBC05"
+                d="m6.3 13.3 6.6 5.1A12 12 0 0 0 12 24c0 2 .3 3.9.9 5.6l-6.6 5.1A20 20 0 0 1 6.3 13.3Z"
+              />
+              <path
+                fill="#EA4335"
+                d="m6.3 13.3 6.6 5.1A12 12 0 0 1 32 14.8l5.7-5.7A20 20 0 0 0 6.3 13.3Z"
+              />
+            </svg>
+            <span id="google-label">Checking your account…</span>
+          </button>
+          <p class="signin-note">The same button works for new and existing accounts.</p>
+        </div>
+        <div id="signed-in" hidden>
+          <p class="eyebrow">YOU'RE SIGNED IN</p>
+          <h2 id="profile-name">Welcome back.</h2>
+          <p id="profile-email" class="card-copy"></p>
+          <a id="continue" class="continue-button" href="/w/"
+            >Open console <span aria-hidden="true">↗</span></a
+          >
+          <button id="page-signout" class="text-button" type="button">
+            Sign out of this account
+          </button>
+        </div>
+        <p id="auth-status" class="auth-status" role="status" aria-live="polite"></p>
+        <p class="legal-links">
+          <a href="/auth/privacy.html">Privacy</a><span aria-hidden="true">·</span>
+          <a href="/auth/terms.html">Account terms</a>
+        </p>
+        <div class="card-footer">
+          <span aria-hidden="true">◇</span> Secure sign-in, powered by Google.
+        </div>
+      </section>
+    </main>
+    <footer class="auth-footer">
+      <span>Built for the way you work.</span
+      ><a href="/w/">Back to console <span aria-hidden="true">↗</span></a>
+    </footer>
+  </body>
+</html>

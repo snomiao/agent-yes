@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Account privacy · agent-yes</title>
+    <meta name="description" content="How Google sign-in and account data work on agent-yes." />
+    <link rel="icon" href="/w/icon.svg" />
+    <link rel="stylesheet" href="/auth/profile.css" />
+    <link rel="stylesheet" href="/auth/page.css" />
+    <script type="module" src="/auth/profile.js"></script>
+  </head>
+  <body>
+    <header class="auth-header">
+      <a class="auth-brand" href="/" aria-label="agent-yes home"><span>✓</span> agent-yes</a>
+      <div data-ay-account></div>
+    </header>
+    <main class="legal-main">
+      <p class="eyebrow">YOUR ACCOUNT</p>
+      <h1>Account privacy</h1>
+      <p>This page describes the data used by Google sign-in on agent-yes.</p>
+      <h2>Google profile information</h2>
+      <p>
+        Google handles your Google account authentication. When you continue with Google, agent-yes
+        receives your Google account identifier and basic profile information, including your name,
+        email address and profile image. This information creates or links your agent-yes account
+        and identifies your signed-in profile. Google sign-in does not give agent-yes your Google
+        password.
+      </p>
+      <h2>Sessions and cookies</h2>
+      <p>
+        Authentication uses Better Auth and a Cloudflare-hosted database to store account and
+        session records. Session cookies keep your browser signed in. Temporary OAuth verification
+        information protects the sign-in flow. The authentication service also uses request and
+        session information for security and rate limiting. OAuth tokens stored by the
+        authentication service are encrypted.
+      </p>
+      <h2>Your agents are separate</h2>
+      <p>
+        Your website account is separate from the tokens and permissions used to connect to
+        terminals and shared agent rooms. Signing in with Google does not itself grant access to an
+        agent, change a terminal's permissions, or replace a room's access token.
+      </p>
+      <h2>Signing out</h2>
+      <p>
+        Signing out ends this browser session. It does not delete your account records or revoke
+        access in your Google Account. You can review connected services in your
+        <a href="https://myaccount.google.com/connections" rel="noreferrer">Google Account</a>.
+      </p>
+      <p class="legal-back">
+        <a href="/auth/">← Back to your account</a> · <a href="/auth/terms.html">Account terms</a>
+      </p>
+    </main>
+  </body>
+</html>

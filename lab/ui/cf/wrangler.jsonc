@@ -6,6 +6,18 @@
   "account_id": "0beef4cd2d2da6befa47d8d149d6e157",
   "main": "worker.ts",
   "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": { "BETTER_AUTH_URL": "https://agent-yes.com" },
+  // OAuth credentials and BETTER_AUTH_SECRET are Worker secrets, never vars
+  // or committed files. Apply the checked-in migration before first use.
+  "d1_databases": [
+    {
+      "binding": "AUTH_DB",
+      "database_name": "agent-yes-accounts",
+      "database_id": "75729abb-60e1-4025-9ea1-d9cfa33cfe5f",
+      "migrations_dir": "migrations",
+    },
+  ],
   // Sync the canonical UI (lab/ui/*) into ./public before EVERY deploy/dev, so
   // the deployed assets can never drift from source again (the old manual-copy
   // workflow is how agent-yes.com ended up serving a stale console). public/ is
