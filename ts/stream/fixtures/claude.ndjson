@@ -1,0 +1,11 @@
+{"type":"system","subtype":"init","session_id":"session-example","model":"haiku"}
+{"type":"user","uuid":"user-one","message":{"role":"user","content":"Say hello."}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Hello."},{"type":"tool_use","id":"tool-one","name":"Bash","input":{"command":"printf hello"}}]}}
+{"type":"control_request","request_id":"permission-one","request":{"subtype":"can_use_tool","tool_name":"Bash","input":{"command":"printf hello"}}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-one","content":"hello"}]}}
+{"type":"rate_limit_event","rate_limit_info":{}}
+{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.004,"usage":{"input_tokens":100,"output_tokens":10,"cache_read_input_tokens":25},"stop_reason":"end_turn"}
+{"type":"system","subtype":"init","session_id":"session-example","model":"haiku"}
+{"type":"user","uuid":"user-two","message":{"role":"user","content":"Say goodbye."}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Goodbye."}]}}
+{"type":"result","subtype":"success","is_error":false,"total_cost_usd":0.006,"usage":{"input_tokens":120,"output_tokens":8}}

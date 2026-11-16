@@ -27,6 +27,11 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
     )
     // TODO: add a --docker option, will tell cli.ts to start docker process with tty and handles all stdio forwarding
 
+    .option("stream", {
+      type: "boolean",
+      default: false,
+      description: "Run Claude using the stream JSON protocol (TypeScript runtime)",
+    })
     .option("robust", {
       type: "boolean",
       default: true,
@@ -333,6 +338,7 @@ export function parseCliArgs(argv: string[], supportedClis?: readonly string[]) 
 
   // Return the config object that would be passed to cliYes (same logic as cli.ts:99-121)
   return {
+    stream: parsedArgv.stream,
     cwd: process.cwd(),
     env: process.env as Record<string, string>,
     cli: (cliName ||

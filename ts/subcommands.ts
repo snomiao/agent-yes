@@ -1454,6 +1454,7 @@ export async function cmdHelp(managerCommands = true): Promise<number> {
       `Run an agent (naming a CLI is what launches one — bare 'ay' shows this help):\n` +
       `  ay <claude|codex|...> [options] -- [prompt]\n` +
       `  ay claude -- "fix the bug in auth.ts"\n` +
+      `  ay --stream claude "task"           use the Claude stream JSON protocol\n` +
       `  ay --detach claude -- "…"           start it in the background and return at once\n` +
       `                                        (e.g. over ssh); prints its pid + how to drive it\n` +
       `  cy [options] -- [prompt]            shortcut for 'ay claude' (bare 'cy' starts claude)\n` +

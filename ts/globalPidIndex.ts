@@ -28,6 +28,7 @@ import { logger } from "./logger.ts";
  */
 
 export interface GlobalPidRecord {
+  mode?: "pty" | "stream";
   pid: number;
   cli: string;
   prompt: string | null;

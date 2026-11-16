@@ -158,6 +158,20 @@ if (!config.showVersion && !config.appendPrompt && !config.tray) {
   await warnIfCwdOccupied(process.argv);
 }
 
+// Stream sessions use pipes in the TypeScript runtime, including when Rust is the default.
+{
+  const { loadCascadingConfig } = await import("./configLoader.ts");
+  const configured = (await loadCascadingConfig()).clis?.[config.cli];
+  if (config.stream || configured?.mode === "stream") {
+    if (config.detach) throw new Error("--stream does not support --detach yet");
+    const { runStream } = await import("./stream/runner.ts");
+    const args = [...(configured?.defaultArgs ?? []), ...config.cliArgs];
+    if (config.skipPermissions) args.push("--dangerously-skip-permissions");
+    if (config.resume) args.push("--continue");
+    process.exit(await runStream({ ...config, cliArgs: args, binary: configured?.binary }));
+  }
+}
+
 // Handle --rust: spawn the Rust binary instead, fall back to TypeScript if unavailable
 if (config.useRust) {
   let rustBinary: string | undefined;
