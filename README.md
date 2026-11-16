@@ -733,3 +733,19 @@ and a readable `<pid>.raw.log` under the working directory's `.agent-yes/`.
 Stream capture currently requires macOS or Linux and does not support `--detach`.
 Permission requests are recorded; use an explicit Claude permission policy for
 unattended sessions until approval commands are available.
+
+For stream sessions, `ay status` and `ay ls --watch` derive state from events.
+Permission requests and questions appear as `needs_input`; protocol errors appear
+as `stuck`. `ay ls` shows the latest reported cumulative session cost in `COST`
+(and `cost_usd` in JSON), with `-` when cost is unavailable.
+
+`ay send <pid> "message"` sends one JSON line and returns success only after
+Claude echoes that message's unique ID. `--interrupt` sends Claude's native
+interrupt request before the new message. Receipt timeouts report an uncertain
+outcome and never retry automatically. Stream sessions require receipts, so
+`--no-wait` and terminal control codes are not supported. `ay tail`, including
+follow and `--until`, reads the transcript without terminal wrapping.
+
+A local preview executable such as `aysj` can forward arguments unchanged to a
+worktree build. It behaves exactly like `ay`, including the PTY default; its name
+does not enable stream capture.

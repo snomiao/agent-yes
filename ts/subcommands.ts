@@ -1,3 +1,5 @@
+import { eventFile, readStreamSnapshot } from "./stream/state.ts";
+import { sendStream } from "./stream/send.ts";
 /**
  * `ay ls / read / cat / tail / head / send` subcommand implementations.
  *
@@ -2734,6 +2736,8 @@ async function runAllRemotesLs(opts: {
  */
 export async function deriveLiveStatus(r: GlobalPidRecord): Promise<"active" | "idle" | "exited"> {
   if (r.status === "exited" || !isPidAlive(r.pid)) return "exited";
+  if (r.mode === "stream")
+    return (await readStreamSnapshot(r)).state === "idle" ? "idle" : "active";
   if (!r.log_file) return "active";
   const mtime = await stat(r.log_file)
     .then((s) => s.mtimeMs)
@@ -2895,6 +2899,12 @@ export async function deriveLiveState(
 ): Promise<{ state: LiveState; question: string | null }> {
   const base = await deriveLiveStatus(r);
   if (base === "exited") return { state: "stopped", question: null };
+  if (r.mode === "stream") {
+    if (reachabilityProbeApplies(r, base) && (await confirmStdinUnreachable(r)))
+      return { state: "unreachable", question: null };
+    const { state, question } = await readStreamSnapshot(r);
+    return { state, question };
+  }
   // Alive but nothing can be delivered to it. Wins over every state below,
   // including needs_input: a question we cannot answer is not a state a caller
   // should be invited to act on, and reporting it as `idle` is what let a
@@ -3244,7 +3254,9 @@ async function cmdLs(rest: string[]): Promise<number> {
       const recs = await listRecords(keyword, opts);
       const targets = new Set([
         ...indexFiles,
-        ...recs.map((record) => record.log_file).filter((file): file is string => !!file),
+        ...recs
+          .map((record) => (record.mode === "stream" ? eventFile(record) : record.log_file))
+          .filter((file): file is string => !!file),
       ]);
       for (const [file, follower] of tailers) {
         if (!targets.has(file)) {
@@ -3327,7 +3339,11 @@ async function cmdLs(rest: string[]): Promise<number> {
     // an orchestrator parses) reports the same status the human table does. The
     // original `status` field is preserved for backward compatibility.
     const enriched = await Promise.all(
-      records.map(async (r) => ({ ...r, ...(await deriveLiveState(r)) })),
+      records.map(async (r) => ({
+        ...r,
+        ...(await deriveLiveState(r)),
+        ...(r.mode === "stream" ? { cost_usd: (await readStreamSnapshot(r)).costUsd ?? null } : {}),
+      })),
     );
     await writeStdoutFlushed(JSON.stringify(enriched, null, 2) + "\n");
     return 0;
@@ -3355,14 +3371,26 @@ async function cmdLs(rest: string[]): Promise<number> {
   const ageOf = (r: GlobalPidRecord) => humanizeAge(now - (lastActive.get(r.pid) ?? r.started_at));
 
   const rawCwds = records.map((r) => cwdLabel(r));
+  const costs = new Map(
+    await Promise.all(
+      records.map(
+        async (r) =>
+          [r.pid, r.mode === "stream" ? (await readStreamSnapshot(r)).costUsd : undefined] as const,
+      ),
+    ),
+  );
+  const costOf = (r: GlobalPidRecord) =>
+    costs.get(r.pid) === undefined ? "-" : `$${costs.get(r.pid)!.toFixed(4)}`;
   const widths = {
+    cost: Math.max(4, ...records.map((r) => costOf(r).length)),
     pid: Math.max(3, ...records.map((r) => String(r.pid).length)),
     cli: Math.max(3, ...records.map((r) => r.cli.length)),
     status: Math.max(6, ...records.map((r) => r.status.length)),
     age: Math.max(3, ...records.map((r) => ageOf(r).length)),
     cwd: Math.max(3, ...rawCwds.map((c) => c.length)),
   };
-  const fixedWidth = widths.pid + widths.cli + widths.status + widths.age + widths.cwd + 5 * 2; // 5 separators of "  "
+  const fixedWidth =
+    widths.pid + widths.cli + widths.status + widths.age + widths.cwd + widths.cost + 6 * 2; // 6 separators of "  "
   const promptBudget = Math.max(20, termWidth - fixedWidth - 1);
 
   // Reorder into the agent>subagent forest: a nested `ay` launched from inside
@@ -3426,6 +3454,7 @@ async function cmdLs(rest: string[]): Promise<number> {
         cli: r.cli,
         status: displayStatus,
         age: ageOf(r),
+        cost: costOf(r),
         cwd: cwdLabel(r),
         label,
         hasNote,
@@ -3440,6 +3469,7 @@ async function cmdLs(rest: string[]): Promise<number> {
       "CLI".padEnd(widths.cli),
       "STATUS".padEnd(widths.status),
       "AGE".padEnd(widths.age),
+      "COST".padEnd(widths.cost),
       "CWD".padEnd(widths.cwd),
       "NOTE/PROMPT",
     ].join("  ") + "\n";
@@ -3452,6 +3482,7 @@ async function cmdLs(rest: string[]): Promise<number> {
         r.cli.padEnd(widths.cli),
         r.status.padEnd(widths.status),
         r.age.padEnd(widths.age),
+        r.cost.padEnd(widths.cost),
         r.cwd.padEnd(widths.cwd),
         r.label,
       ].join("  ") + "\n",
@@ -3742,7 +3773,12 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
 
   if (follow) {
     // Follow mode ignores pagination: print the initial context, then stream deltas.
-    const rendered = await renderRawLog(buf, { mode, n, cols: size?.cols, rows: size?.rows });
+    const rendered =
+      record.mode === "stream"
+        ? n
+          ? Buffer.from(buf).toString("utf8").trimEnd().split("\n").slice(-n).join("\n")
+          : Buffer.from(buf).toString("utf8")
+        : await renderRawLog(buf, { mode, n, cols: size?.cols, rows: size?.rows });
     process.stderr.write(header + "\n");
     // `--until -q` is a predicate, not a reader: no context window, no stream —
     // only the matching line, so a caller can capture it without filtering.
@@ -3774,6 +3810,23 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
     // Seed the follow from the log's REAL byte frontier (`stats.size`), not
     // `buf.length` — `buf` may be a capped tail window, so its length is not the
     // file offset. `buf` still seeds the terminal render (identical final state).
+    if (record.mode === "stream")
+      return followTranscriptLocal(
+        logPath,
+        stats.size,
+        tally
+          ? {
+              tally,
+              failTally,
+              pattern: until as string,
+              failPattern: failOn,
+              quiet: Boolean(argv.quiet),
+              timeoutMs: untilTimeoutMs,
+              matchBacklog: Boolean(argv["match-backlog"]),
+              pid: record.pid,
+            }
+          : undefined,
+      );
     return plain
       ? followPlainLocal(
           logPath,
@@ -3801,7 +3854,10 @@ async function cmdRead(rest: string[], { mode }: ReadOpts): Promise<number> {
 
   // Static read: render the full log once, then window into the rendered lines
   // so line numbers (and the pagination cursor in the footer) are exact.
-  const allLines = await renderRawLogLines(buf, { cols: size?.cols, rows: size?.rows });
+  const allLines =
+    record.mode === "stream"
+      ? Buffer.from(buf).toString("utf8").trimEnd().split("\n")
+      : await renderRawLogLines(buf, { cols: size?.cols, rows: size?.rows });
   const total = allLines.length;
   const win = resolveReadWindow({
     total,
@@ -3946,6 +4002,69 @@ async function watchAppend(
     void pump();
   });
   return offset;
+}
+
+/** Follow the already-readable stream transcript without terminal wrapping. */
+async function followTranscriptLocal(
+  logPath: string,
+  startOffset: number,
+  until?: FollowUntil,
+): Promise<number> {
+  const { StringDecoder } = await import("node:string_decoder");
+  const decoder = new StringDecoder("utf8");
+  const ac = new AbortController();
+  const judge = until ? makeJudge(until.tally, until.failTally) : null;
+  let pending = "";
+  let outcome: UntilOutcome = "stopped";
+  const feed = (chunk: Uint8Array) => {
+    const text = decoder.write(Buffer.from(chunk));
+    if (!until?.quiet) process.stdout.write(text);
+    pending += text;
+    let end: number;
+    while ((end = pending.indexOf("\n")) !== -1) {
+      const line = pending.slice(0, end);
+      pending = pending.slice(end + 1);
+      if (judge && !judge.settled && judge.test(line)) {
+        outcome = judge.outcome ?? "match";
+        ac.abort();
+      }
+    }
+  };
+  process.stderr.write(
+    until ? untilBanner(until) : "following transcript... (Ctrl-C / SIGTERM to stop)\n",
+  );
+  const timer =
+    until?.timeoutMs != null
+      ? setTimeout(() => {
+          outcome = "timeout";
+          ac.abort();
+        }, until.timeoutMs)
+      : undefined;
+  const liveness = until
+    ? setInterval(() => {
+        if (!isPidAlive(until.pid)) {
+          outcome = "exited";
+          ac.abort();
+        }
+      }, 250)
+    : undefined;
+  try {
+    const offset = await watchAppend(logPath, startOffset, feed, () => {}, ac.signal);
+    // Catch output written just before process exit but after the last watch notification.
+    const remaining = await readFile(logPath).catch(() => Buffer.alloc(0));
+    if (remaining.length > offset) feed(remaining.subarray(offset));
+    if (pending && judge && !judge.settled && judge.test(pending))
+      outcome = judge.outcome ?? "match";
+    return until
+      ? reportUntil(outcome, judge?.matched ?? null, until.quiet, until.failPattern, {
+          hits: until.tally.hits,
+          needed: until.tally.needed,
+        })
+      : 0;
+  } finally {
+    if (timer) clearTimeout(timer);
+    if (liveness) clearInterval(liveness);
+  }
 }
 
 /**
@@ -6088,7 +6207,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   // `-` is the exception: resolving it means reading stdin, and a send that
   // cannot land must not first consume the caller's piped body. That form keeps
   // the reachability gate first and pays its cap check afterwards.
-  if (rawMessage !== "-") {
+  if (rawMessage !== "-" && record.mode !== "stream") {
     const rawFlag = Boolean(argv.raw) || process.env.AGENT_YES_SEND_RAW === "1";
     const err = sendPayloadCapError(rawMessage.length, await envelopeCostFor(rawMessage, rawFlag));
     if (err) throw new Error(err);
@@ -6098,6 +6217,11 @@ async function cmdSend(rest: string[]): Promise<number> {
   // Both shapes of "there is nobody to deliver to" exit with the same
   // distinguishable status, before we read stdin or take the input lock — a
   // send that cannot land should not first consume the caller's piped body.
+  if (!fifoPath && record.mode === "stream") {
+    throw new Error(
+      "ay send: this native stream invocation has no replay-confirmed input; relaunch with --input-format stream-json --replay-user-messages",
+    );
+  }
   if (!fifoPath) {
     process.stderr.write(
       `ay send: pid ${record.pid}: no fifo_file recorded — this agent didn't register a stdin FIFO (an older agent, or one not started with --stdpush), so there is no channel to deliver on. If it is still running, restarting it (ay restart ${record.pid}) registers one; if the row is stale, ay stop ${record.pid} retires it.\n`,
@@ -6143,7 +6267,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   // send guards run. The AUTHORITATIVE check is on the transmitted payload,
   // below, once the envelope's length is known — see sendPayloadCapError.
   {
-    const err = sendPayloadCapError(body.length, 0);
+    const err = record.mode === "stream" ? null : sendPayloadCapError(body.length, 0);
     if (err) throw new Error(err);
   }
 
@@ -6156,7 +6280,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   // literal `/exit` command, so `ay send <pid> exit` lands as plain text and the
   // model just replies "Exiting…" while the process keeps running. Route an exact
   // exit request to a real graceful shutdown instead, recording who asked.
-  if (isExitRequest(body)) {
+  if (record.mode !== "stream" && isExitRequest(body)) {
     const reason = sender.agent
       ? `requested by ${sender.agent.cli} #${sender.agent.pid} @ ${shortenPath(sender.agent.cwd)}`
       : `requested via 'ay send ${keyword} exit'`;
@@ -6220,6 +6344,46 @@ async function cmdSend(rest: string[]): Promise<number> {
           `Send the bare body instead (or pass --raw if you really mean to deliver a pre-built envelope verbatim; forwarding a quoted message inside a plain body is fine).\n`,
       );
     }
+  }
+
+  if (record.mode === "stream") {
+    if (codeName !== "enter")
+      throw new Error("ay send: --code is not supported for stream sessions; use --interrupt");
+    if (argv.noWait || process.env.AGENT_YES_SEND_NO_WAIT === "1")
+      throw new Error("ay send: stream sessions require a replay receipt; omit --no-wait");
+    const receipt = await sendStream(record, prefix + body + suffix, {
+      interrupt: Boolean(argv.interrupt),
+      write: (payload) =>
+        withIpcLock(
+          record.pid,
+          () => writeToIpc(fifoPath, payload),
+          (reason) => {
+            throw new Error(`ay send: cannot lock stream input (${reason}); nothing sent`);
+          },
+        ),
+    });
+    await recordMessage({
+      at: Date.now(),
+      nonce,
+      origin: sender.agent ? undefined : "shell",
+      from_via: sender.via,
+      sender_observed: observedSender(),
+      from: sender.agent
+        ? {
+            pid: sender.agent.pid,
+            cli: sender.agent.cli,
+            cwd: sender.agent.cwd,
+            agent_id: sender.agent.agent_id,
+          }
+        : null,
+      to: { pid: record.pid, cli: record.cli, cwd: record.cwd, agent_id: record.agent_id },
+      body,
+      confirmed: true,
+      submission: "submitted",
+      wrapped: Boolean(nonce),
+    });
+    process.stdout.write(`sent to pid ${record.pid} (${record.cli}); replay receipt ${receipt}\n`);
+    return 0;
   }
 
   // Deliver as ONE paste when the target CLI supports it, instead of a burst it
