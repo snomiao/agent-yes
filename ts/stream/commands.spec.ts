@@ -3,9 +3,11 @@ import { closeSync, constants, openSync, readSync } from "node:fs";
 import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { expect, it, vi } from "vitest";
+import { expect, it as test, vi } from "vitest";
 import { appendGlobalPid, type GlobalPidRecord } from "../globalPidIndex.ts";
 import { deriveLiveState, deriveLiveStatus, runSubcommand } from "../subcommands.ts";
+
+const it = test.skipIf(process.platform === "win32");
 
 it("drives stream status, tail, ls cost and send through the existing commands", async () => {
   const cwd = await mkdtemp(path.join(tmpdir(), "ay-stream-commands-"));

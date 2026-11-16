@@ -47,7 +47,7 @@ describe("stream state", () => {
       expect(await readEvents(file, 10)).toEqual([]);
       expect(await readEvents(path.join(dir, "missing"))).toEqual([]);
       expect(eventFile({ cwd: "/repo/alpha", pid: 1111, log_file: null })).toBe(
-        "/repo/alpha/.agent-yes/1111.events.jsonl",
+        path.join("/repo/alpha", ".agent-yes", "1111.events.jsonl"),
       );
     } finally {
       await rm(dir, { recursive: true, force: true });

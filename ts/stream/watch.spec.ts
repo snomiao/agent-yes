@@ -2,7 +2,9 @@ import { spawn } from "node:child_process";
 import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { expect, it } from "vitest";
+import { expect, it as test } from "vitest";
+
+const it = test.skipIf(process.platform === "win32");
 
 it("wakes ls --watch on event appends even when raw.log and the pid index stay unchanged", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "ay-stream-watch-"));
