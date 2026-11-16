@@ -117,7 +117,6 @@ async function compactRawLogTail(logPath: string, keepBytes = RAW_LOG_KEEP_BYTES
 }
 
 export type AgentCliConfig = {
-  mode?: "pty" | "stream";
   // cli
   install?:
     | string

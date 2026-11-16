@@ -158,14 +158,19 @@ if (!config.showVersion && !config.appendPrompt && !config.tray) {
   await warnIfCwdOccupied(process.argv);
 }
 
-// Stream sessions use pipes in the TypeScript runtime, including when Rust is the default.
+// Detect the native protocol without adding or overriding wrapped CLI flags.
 {
   const { loadCascadingConfig } = await import("./configLoader.ts");
+  const { isClaudeStream, withStreamFlags } = await import("./stream/launch.ts");
   const configured = (await loadCascadingConfig()).clis?.[config.cli];
-  if (config.stream || configured?.mode === "stream") {
-    if (config.detach) throw new Error("--stream does not support --detach yet");
+  let args = [...(configured?.defaultArgs ?? []), ...config.cliArgs];
+  if (config.stream) {
+    if (config.cli !== "claude") throw new Error("--stream currently supports claude only");
+    args = withStreamFlags(args);
+  }
+  if (isClaudeStream(config.cli, args)) {
+    if (config.detach) throw new Error("Stream sessions do not support --detach yet");
     const { runStream } = await import("./stream/runner.ts");
-    const args = [...(configured?.defaultArgs ?? []), ...config.cliArgs];
     if (config.skipPermissions) args.push("--dangerously-skip-permissions");
     if (config.resume) args.push("--continue");
     process.exit(await runStream({ ...config, cliArgs: args, binary: configured?.binary }));

@@ -19,17 +19,6 @@ export class ClaudeAdapter implements StreamAdapter {
   spawn(opts: Parameters<StreamAdapter["spawn"]>[0]): ChildProcessWithoutNullStreams {
     const args = [...opts.args];
     if (opts.resumeId) args.push("--resume", opts.resumeId);
-    args.push(
-      "-p",
-      "--input-format",
-      "stream-json",
-      "--output-format",
-      "stream-json",
-      "--verbose",
-      "--replay-user-messages",
-      "--permission-prompt-tool",
-      "stdio",
-    );
     this.child = spawn(opts.binary ?? "claude", args, {
       cwd: opts.cwd,
       env: opts.env ?? process.env,

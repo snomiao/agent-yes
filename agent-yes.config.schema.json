@@ -93,11 +93,6 @@
           "type": "string",
           "description": "Command to check if CLI is installed (e.g., 'claude --version')"
         },
-        "mode": {
-          "type": "string",
-          "enum": ["pty", "stream"],
-          "description": "Session transport (stream currently supports Claude only)"
-        },
         "binary": {
           "type": "string",
           "description": "Actual binary name if different from CLI name (e.g., 'cursor-agent' for cursor)"

@@ -714,14 +714,22 @@ MIT
 
 ### Claude stream sessions (preview)
 
-Run `ay --stream claude "task"` to use Claude's stream JSON protocol through the
-TypeScript runtime. PTY sessions remain the default. Alternatively, set
-`clis.claude.mode: stream` in `.agent-yes.config.yaml`. Claude arguments still
-follow the CLI name, for example `ay --stream claude --model haiku -- "task"`.
+PTY remains the default. When Claude's own arguments request
+`--output-format stream-json`, `ay` detects the protocol, records `mode: "stream"`,
+and captures NDJSON through pipes in the TypeScript runtime. It does not add
+stream flags to a native invocation:
+
+```sh
+ay claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages -- "task"
+```
+
+`ay --stream claude "task"` is optional shorthand that appends those native
+flags (and the stdio permission protocol). There is no config transport default.
+Output-only stream invocations are also captured; bidirectional sends require
+explicit `--input-format stream-json --replay-user-messages`.
 
 Each session writes normalized `<pid>.events.jsonl`, original `<pid>.native.jsonl`,
 and a readable `<pid>.raw.log` under the working directory's `.agent-yes/`.
-The global pid registry marks these sessions with `mode: "stream"`.
-Stream mode currently requires macOS or Linux and does not support `--detach`.
+Stream capture currently requires macOS or Linux and does not support `--detach`.
 Permission requests are recorded; use an explicit Claude permission policy for
 unattended sessions until approval commands are available.

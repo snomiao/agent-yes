@@ -14,6 +14,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { agentYesHome } from "../agentYesHome.ts";
 import { appendGlobalPid, updateGlobalPidStatus } from "../globalPidIndex.ts";
+import { nativeFlagValue } from "./launch.ts";
 import { ClaudeAdapter } from "./claude.ts";
 import { renderEvent } from "./transcript.ts";
 import { register as registerReaper } from "../reaper.ts";
@@ -34,10 +35,14 @@ export interface StreamRunOptions {
 export async function runStream(options: StreamRunOptions): Promise<number> {
   if (options.cli !== "claude") throw new Error("--stream currently supports claude only");
   if (process.platform === "win32") throw new Error("--stream currently requires a POSIX FIFO");
+  const jsonInput = nativeFlagValue(options.cliArgs, "--input-format") === "stream-json";
+  const replay = options.cliArgs.includes("--replay-user-messages");
+  const args = [...options.cliArgs];
+  if (!jsonInput && options.prompt) args.push(options.prompt);
   const adapter = new ClaudeAdapter();
   const child = adapter.spawn({
     cwd: options.cwd,
-    args: options.cliArgs,
+    args,
     binary: options.binary,
     env: stripClaudeSessionPin({
       ...process.env,
@@ -77,11 +82,25 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
     const native = createWriteStream(`${base}.native.jsonl`, { mode: 0o600 });
     const raw = createWriteStream(`${base}.raw.log`, { mode: 0o600 });
     logs.push(events, native, raw);
-    for (const log of logs) log.on("error", stop);
+    const writeLog = (log: ReturnType<typeof createWriteStream>, text: string | Buffer) => {
+      if (!log.write(text)) {
+        child.stdout.pause();
+        child.stderr.pause();
+      }
+    };
+    for (const log of logs) {
+      log.on("error", stop);
+      log.on("drain", () => {
+        if (logs.every((stream) => !stream.writableNeedDrain)) {
+          child.stdout.resume();
+          child.stderr.resume();
+        }
+      });
+    }
     const emit = (event: AyEvent) => {
-      events.write(JSON.stringify(event) + "\n");
+      writeLog(events, JSON.stringify(event) + "\n");
       const text = renderEvent(event);
-      raw.write(text);
+      writeLog(raw, text);
       process.stdout.write(text);
     };
     let pending = "";
@@ -93,20 +112,20 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
         const line = pending.slice(0, end);
         pending = pending.slice(end + 1);
         if (!line.trim()) continue;
-        native.write(line + "\n");
+        writeLog(native, line + "\n");
         for (const event of adapter.parse(line)) emit(event);
       }
     });
     child.stdout.on("end", () => {
       pending += decoder.end();
       if (pending.trim()) {
-        native.write(pending + "\n");
+        writeLog(native, pending + "\n");
         for (const event of adapter.parse(pending)) emit(event);
       }
       pending = "";
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      raw.write(chunk);
+      writeLog(raw, chunk);
       process.stderr.write(chunk);
     });
     child.stdin.on("error", stop);
@@ -151,7 +170,7 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
       prompt: options.prompt ?? null,
       cwd: options.cwd,
       log_file: `${base}.raw.log`,
-      fifo_file: fifo,
+      fifo_file: jsonInput && replay ? fifo : null,
       status: "active",
       exit_code: null,
       exit_reason: null,
@@ -162,7 +181,8 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
     });
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
-    if (options.prompt) adapter.send(options.prompt);
+    if (jsonInput && options.prompt) adapter.send(options.prompt);
+    if (!jsonInput) child.stdin.end();
     const code = await exited;
     if (code) emit({ type: "error", message: `Claude exited (${code})`, fatal: true });
     await updateGlobalPidStatus(pid, {
