@@ -614,9 +614,15 @@ fn with_meta(r: &PidRecord) -> Value {
     } else {
         "idle"
     };
+    // Where the agent works now (its shells' cwd, sampled by the wrapper), not
+    // just where it was spawned: the console labels and groups agents by it.
+    let (workdir, workdir_source, workdir_at) =
+        crate::workdir_sampler::resolve_workdir(r.pid, &r.cwd, r.agent_id.as_deref());
     let mut v = serde_json::to_value(r).unwrap_or_else(|_| json!({}));
     let o = v.as_object_mut().unwrap();
     o.insert("status".into(), json!(status));
+    o.insert("workdir_source".into(), json!(workdir_source));
+    o.insert("workdir_at".into(), json!(workdir_at));
     // Same sources as the TS daemon: OSC title + rendered-screen spinner line.
     o.insert("title".into(), json!(log_title(r.log_file.as_deref())));
     o.insert(
@@ -634,9 +640,10 @@ fn with_meta(r: &PidRecord) -> Value {
         if exited {
             Value::Null
         } else {
-            git_status(Some(&r.cwd))
+            git_status(Some(&workdir))
         },
     );
+    o.insert("workdir".into(), json!(workdir));
     o.insert(
         "tasks".into(),
         if exited {

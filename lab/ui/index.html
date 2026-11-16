@@ -2569,6 +2569,7 @@
       // script is a module (deferred, runs after the codehost shim above sets
       // window.__codehost), so a static import is safe.
       import {
+        agentDir,
         cliLabel,
         repoBranch,
         ident,
@@ -6476,7 +6477,7 @@ my.translate = async (text, lang) => {
         // Split off the leading "/" before the rtl-ellipsis path span — it sits
         // at the bidi paragraph edge and would otherwise get reordered to the
         // far end of the line (see the .rcwd-path comment).
-        const cwd = e.cwd || "";
+        const cwd = agentDir(e);
         const cwdLead = cwd.startsWith("/") ? "/" : "";
         $("rcwdlead").textContent = cwdLead;
         $("rcwdpath").textContent = cwd.slice(cwdLead.length);
@@ -7425,7 +7426,7 @@ my.translate = async (text, lang) => {
       // (forkWorktree needs a worktree with a branch/origin).
       function omniForkSource() {
         const cur = omniReturnSel ? entries.find((x) => x._key === omniReturnSel) : null;
-        return cur && cur.cwd && cur.git && cur.git.branch ? cur : null;
+        return cur && agentDir(cur) && cur.git && cur.git.branch ? cur : null;
       }
 
       // Slash commands that act on the OPEN agent (the omnibox anchor), mirroring the
@@ -7484,7 +7485,7 @@ my.translate = async (text, lang) => {
               kind: "fork",
               branch: forkSlug(parts.slice(1).join(" "), src.git.branch),
               srcBranch: src.git.branch,
-              fromCwd: src.cwd,
+              fromCwd: agentDir(src),
               cli: src.cli,
               src: src._src,
             });
@@ -7715,7 +7716,7 @@ my.translate = async (text, lang) => {
                 <span class="dot active"></span>
                 <div class="omni-main">
                   <div class="omni-title">✦ Spawn new ${esc(anchor?.cli || "claude")} agent here</div>
-                  <div class="omni-sub">${esc(anchor?.cwd || "(host default)")} &nbsp;·&nbsp; prompt: ${esc(q || "(empty)")}</div>
+                  <div class="omni-sub">${esc(agentDir(anchor) || "(host default)")} &nbsp;·&nbsp; prompt: ${esc(q || "(empty)")}</div>
                 </div></div>`;
             }
             if (r.kind === "fork") {
@@ -7807,7 +7808,7 @@ my.translate = async (text, lang) => {
               <span class="dot ${esc(e.status)}"></span>
               <div class="omni-main">
                 <div class="omni-title">${esc(e.title || cliLabel(e) || ident(e) || "agent")}</div>
-                <div class="omni-sub">${esc((e.cli || "") + " · " + (e.cwd || ""))}</div>
+                <div class="omni-sub">${esc((e.cli || "") + " · " + agentDir(e))}</div>
                 ${snip}
               </div></div>`;
           })
@@ -7868,7 +7869,7 @@ my.translate = async (text, lang) => {
               kind: "fork",
               branch: forkSlug(q, forkSrc.git.branch),
               srcBranch: forkSrc.git.branch,
-              fromCwd: forkSrc.cwd,
+              fromCwd: agentDir(forkSrc),
               cli: forkSrc.cli,
               src: forkSrc._src,
             });
@@ -8043,7 +8044,11 @@ my.translate = async (text, lang) => {
         if (forceSpawn || (row && row.kind === "spawn")) {
           closeOmni(false); // committing — keep the bg as-is, spawnAndSelect takes over
           await spawnAndSelect(
-            { cli: anchor?.cli || "claude", cwd: anchor?.cwd || undefined, prompt: q || undefined },
+            {
+              cli: anchor?.cli || "claude",
+              cwd: agentDir(anchor) || undefined,
+              prompt: q || undefined,
+            },
             anchor?._src,
           );
           return;
@@ -8068,7 +8073,7 @@ my.translate = async (text, lang) => {
           return;
         }
         if (row && row.kind === "spawncwd") {
-          const cwd = prompt("Spawn in which working directory?", anchor?.cwd || "");
+          const cwd = prompt("Spawn in which working directory?", agentDir(anchor));
           if (cwd == null) return; // cancelled
           closeOmni(false);
           await spawnAndSelect(
@@ -8883,7 +8888,7 @@ my.translate = async (text, lang) => {
           .filter((e) => (room ? e._src === room : true))
           .sort((a, b) => (b.exit_code == null) - (a.exit_code == null));
         for (const e of pool) {
-          const c = (e.cwd || "").replace(/\/+$/, "");
+          const c = agentDir(e).replace(/\/+$/, "");
           if (c && !seen.has(c)) {
             seen.add(c);
             out.push(`<option value="${esc(c)}"></option>`);
@@ -8893,7 +8898,7 @@ my.translate = async (text, lang) => {
       }
       function showNew() {
         const here = entries.find((x) => x._key === sel);
-        const cwd = here?.cwd || "";
+        const cwd = agentDir(here);
         // CLI preselect chain: current selected agent > last-used > none (forces
         // an explicit pick — the Launch handler refuses an empty CLI).
         let lastCli = "";
@@ -9217,7 +9222,7 @@ my.translate = async (text, lang) => {
             (e) =>
               (room ? e._src === room : true) &&
               e.exit_code == null &&
-              norm(e.cwd) === norm(spec.cwd),
+              norm(agentDir(e)) === norm(spec.cwd),
           );
           if (
             busy &&

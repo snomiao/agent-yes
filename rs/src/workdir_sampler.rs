@@ -384,6 +384,49 @@ pub fn workdir_path(pid: u32) -> Option<PathBuf> {
     crate::log_files::global_dir().map(|d| d.join("workdir").join(format!("{pid}.json")))
 }
 
+/// Where an agent works, for consumers of the registry (the serve API):
+/// `(workdir, source, at)`, with source "observed" or "spawn". Mirrors
+/// ts/workDir.ts `resolveWorkDir`: the sample counts only when it carries the
+/// record's `agent_id` (a pid reused by a later agent never inherits it), when
+/// it doesn't merely contain the spawn dir (the spawn cwd is more precise
+/// then), and when the dir still exists.
+#[allow(dead_code)] // used by the serve API (ayrs), not the wrapper
+pub fn resolve_workdir(
+    pid: u32,
+    cwd: &str,
+    agent_id: Option<&str>,
+) -> (String, &'static str, Option<i64>) {
+    let sample = workdir_path(pid)
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+    pick_workdir(cwd, agent_id, sample.as_ref(), |d| d.is_dir())
+}
+
+#[allow(dead_code)] // used by the serve API (ayrs), not the wrapper
+pub fn pick_workdir(
+    cwd: &str,
+    agent_id: Option<&str>,
+    sample: Option<&serde_json::Value>,
+    is_dir: impl Fn(&Path) -> bool,
+) -> (String, &'static str, Option<i64>) {
+    let spawn = (cwd.to_string(), "spawn", None);
+    let Some(s) = sample else { return spawn };
+    let (Some(w), Some(at)) = (
+        s.get("workdir").and_then(|v| v.as_str()),
+        s.get("at").and_then(|v| v.as_i64()),
+    ) else {
+        return spawn;
+    };
+    match (agent_id, s.get("agent_id").and_then(|v| v.as_str())) {
+        (Some(a), Some(b)) if a == b => {}
+        _ => return spawn,
+    }
+    if cwd.is_empty() || Path::new(cwd).starts_with(w) || !is_dir(Path::new(w)) {
+        return spawn;
+    }
+    (w.to_string(), "observed", Some(at))
+}
+
 /// Store the winner for `pid`, tagged with the registration's `agent_id` so a
 /// later agent that reuses the pid never inherits it. Atomic (temp + rename).
 pub fn write_workdir(pid: u32, agent_id: Option<&str>, u: &Update) {
@@ -451,6 +494,33 @@ impl Drop for AbortOnDrop {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pick_workdir_prefers_the_sampled_repo() {
+        let s = serde_json::json!({ "workdir": "/repo/beta", "at": 5, "agent_id": "a1" });
+        let yes = |_: &Path| true;
+        assert_eq!(
+            pick_workdir("/home/u", Some("a1"), Some(&s), yes),
+            ("/repo/beta".into(), "observed", Some(5))
+        );
+        // A different agent that reused the pid, or no id on either side.
+        assert_eq!(
+            pick_workdir("/home/u", Some("b2"), Some(&s), yes).1,
+            "spawn"
+        );
+        assert_eq!(pick_workdir("/home/u", None, Some(&s), yes).1, "spawn");
+        // The sample merely contains the spawn dir: the spawn cwd is more precise.
+        assert_eq!(
+            pick_workdir("/repo/beta/sub", Some("a1"), Some(&s), yes),
+            ("/repo/beta/sub".into(), "spawn", None)
+        );
+        // Gone from disk, or no sample at all.
+        assert_eq!(
+            pick_workdir("/home/u", Some("a1"), Some(&s), |_| false).1,
+            "spawn"
+        );
+        assert_eq!(pick_workdir("/home/u", Some("a1"), None, yes).1, "spawn");
+    }
+
     use super::*;
 
     fn p(pid: u32, ppid: u32, comm: &str) -> Proc {

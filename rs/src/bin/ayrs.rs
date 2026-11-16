@@ -30,6 +30,9 @@ mod serve;
 mod supported_clis;
 #[path = "../vterm.rs"]
 mod vterm;
+// The serve API reports where each agent works, read from the wrapper's samples.
+#[path = "../workdir_sampler.rs"]
+mod workdir_sampler;
 
 use clap::{Parser, Subcommand};
 
