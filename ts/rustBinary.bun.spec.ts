@@ -2,7 +2,12 @@ import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { chmodExtractedBinaries, ensureExecutable, gcOldBinaryDirs } from "./rustBinary.ts";
+import {
+  chmodExtractedBinaries,
+  ensureExecutable,
+  extractZipWindows,
+  gcOldBinaryDirs,
+} from "./rustBinary.ts";
 import { _setInstalledPackageForTesting } from "./versionChecker.ts";
 
 // Startup GC for the versioned binary download cache (PERFORMANCE-EVENT
@@ -111,6 +116,63 @@ describe("ensureExecutable", () => {
       writeFileSync(p, "#!/bin/sh\n", { mode: 0o644 });
       expect(ensureExecutable(p)).toBe(p);
       if (process.platform !== "win32") expect(statSync(p).mode & 0o111).toBe(0o111);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// Windows release bundles are .zip. Run from a PowerShell 7 session, the
+// inherited PSModulePath made powershell.exe 5.1 load PS7's Archive module,
+// whose Expand-Archive threw and extracted nothing while exiting 0 — so the
+// download "succeeded" and the spawn then died with "Rust binary not found".
+describe.skipIf(process.platform !== "win32")("extractZipWindows", () => {
+  const sysRoot = process.env.SystemRoot || String.raw`C:\Windows`;
+  const tarExe = path.join(sysRoot, "System32", "tar.exe");
+
+  function makeZip(dir: string): string {
+    const src = path.join(dir, "src");
+    mkdirSync(src, { recursive: true });
+    writeFileSync(path.join(src, "agent-yes-win32-x64.exe"), "bin");
+    writeFileSync(path.join(src, "ayrs.exe"), "ayrs");
+    const zip = path.join(dir, "bundle.zip");
+    const r = Bun.spawnSync([tarExe, "-a", "-cf", zip, "-C", src, "."]);
+    expect(r.exitCode).toBe(0);
+    return zip;
+  }
+
+  const poisonedModulePath = [
+    String.raw`C:\Program Files\PowerShell\7\Modules`,
+    String.raw`C:\Windows\system32\WindowsPowerShell\v1.0\Modules`,
+  ].join(";");
+
+  for (const via of ["tar", "Expand-Archive fallback"] as const) {
+    it(`extracts every file via ${via} despite a PS7 PSModulePath`, async () => {
+      const dir = mkdtempSync(path.join(os.tmpdir(), "ay-zip-"));
+      const prev = process.env.PSModulePath;
+      try {
+        const zip = makeZip(dir);
+        const out = path.join(dir, "out");
+        mkdirSync(out);
+        process.env.PSModulePath = poisonedModulePath;
+        // A tar.exe that doesn't exist forces the Expand-Archive fallback.
+        await extractZipWindows(zip, out, via === "tar" ? undefined : path.join(dir, "no-tar.exe"));
+        expect(existsSync(path.join(out, "agent-yes-win32-x64.exe"))).toBe(true);
+        expect(existsSync(path.join(out, "ayrs.exe"))).toBe(true);
+      } finally {
+        if (prev === undefined) delete process.env.PSModulePath;
+        else process.env.PSModulePath = prev;
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  it("throws instead of returning silently on a corrupt zip", async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "ay-zip-"));
+    try {
+      const zip = path.join(dir, "bad.zip");
+      writeFileSync(zip, "not a zip");
+      await expect(extractZipWindows(zip, dir)).rejects.toThrow(/Failed to extract/);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

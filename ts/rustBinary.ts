@@ -328,6 +328,61 @@ export function getDownloadUrl(version = "latest"): string {
 }
 
 /**
+ * Extract a release .zip on Windows.
+ *
+ * Prefers the bsdtar that ships in System32 (Windows 10 1803+), which reads
+ * zips natively. Falls back to Windows PowerShell's Expand-Archive with
+ * PSModulePath cleared: when `ay` runs from a PowerShell 7 session the
+ * inherited PSModulePath makes powershell.exe 5.1 load PS7's Archive module,
+ * whose Expand-Archive throws "ExtractToDirectory ... argument count 3" and
+ * extracts nothing (while still exiting 0).
+ */
+export async function extractZipWindows(
+  zipPath: string,
+  destDir: string,
+  // Overridable so tests can exercise the Expand-Archive fallback.
+  tarExe = path.join(
+    process.env.SystemRoot || process.env.windir || "C:\\Windows",
+    "System32",
+    "tar.exe",
+  ),
+): Promise<void> {
+  const run = async (cmd: string[], env?: Record<string, string | undefined>) => {
+    const proc = Bun.spawn(cmd, { cwd: destDir, env, stdio: ["ignore", "pipe", "pipe"] });
+    const [code, stderr] = await Promise.all([proc.exited, new Response(proc.stderr).text()]);
+    return { code, stderr: stderr.trim() };
+  };
+  const errors: string[] = [];
+
+  if (existsSync(tarExe)) {
+    try {
+      const r = await run([tarExe, "-xf", zipPath, "-C", destDir]);
+      if (r.code === 0) return;
+      errors.push(`tar exited ${r.code}: ${r.stderr}`);
+    } catch (err) {
+      errors.push(`tar: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  const env: Record<string, string | undefined> = { ...process.env };
+  for (const k of Object.keys(env)) if (k.toLowerCase() === "psmodulepath") delete env[k];
+  const quote = (p: string) => `'${p.replace(/'/g, "''")}'`;
+  const r = await run(
+    [
+      "powershell",
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      `$ErrorActionPreference='Stop'; Expand-Archive -LiteralPath ${quote(zipPath)} -DestinationPath ${quote(destDir)} -Force`,
+    ],
+    env,
+  );
+  if (r.code === 0) return;
+  errors.push(`Expand-Archive exited ${r.code}: ${r.stderr}`);
+  throw new Error(`Failed to extract ${zipPath}:\n${errors.join("\n")}`);
+}
+
+/**
  * Download and extract the binary
  */
 export async function downloadBinary(verbose = false): Promise<string> {
@@ -360,16 +415,7 @@ export async function downloadBinary(verbose = false): Promise<string> {
     const tempZipPath = path.join(binDir, "temp.zip");
     await Bun.write(tempZipPath, await response.arrayBuffer());
 
-    // Use PowerShell to extract zip
-    const proc = Bun.spawn(
-      [
-        "powershell",
-        "-Command",
-        `Expand-Archive -Path '${tempZipPath}' -DestinationPath '${binDir}' -Force`,
-      ],
-      { cwd: binDir, stdio: ["ignore", "pipe", "pipe"] },
-    );
-    await proc.exited;
+    await extractZipWindows(tempZipPath, binDir);
 
     // Clean up
     try {
@@ -411,6 +457,13 @@ export async function downloadBinary(verbose = false): Promise<string> {
     // helpers alongside the main binary, not just binaryPath.
     await chmodExtractedBinaries(binDir);
     await chmod(binaryPath, 0o755);
+  }
+
+  // Every extractor above can fail quietly (non-zero exit, error only on
+  // stderr). Never hand back a path that isn't there — the caller would spawn
+  // it and die with a misleading "Rust binary not found".
+  if (!existsSync(binaryPath)) {
+    throw new Error(`Downloaded ${url} but ${binaryPath} is missing after extraction`);
   }
 
   if (verbose) {
