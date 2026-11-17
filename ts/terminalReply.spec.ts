@@ -111,11 +111,15 @@ describe("isUnpromptedTerminalReply", () => {
 });
 
 describe("isRedundantViewerReply (nothing reaches the FIFO)", () => {
-  it("drops a raw cursor-position reply", () => {
-    expect(isRedundantViewerReply(true, "\x1b[12;1R")).toBe(true);
+  it("drops unambiguous raw terminal replies", () => {
     expect(isRedundantViewerReply(true, "\x1b[?12;1R\x1b[?1;2c")).toBe(true);
   });
   it("keeps real keystrokes and non-raw sends", () => {
+    for (const modifier of [2, 3, 4, 5, 6, 7, 8]) {
+      expect(isRedundantViewerReply(true, `\x1b[1;${modifier}R`)).toBe(false);
+    }
+    expect(isRedundantViewerReply(true, "\x1b[12;1R")).toBe(false);
+    expect(isRedundantViewerReply(true, "\x1b[1;2R\x1b[?1;2c")).toBe(false);
     expect(isRedundantViewerReply(true, "R")).toBe(false);
     expect(isRedundantViewerReply(true, "\x1b[A")).toBe(false);
     expect(isRedundantViewerReply(false, "\x1b[12;1R")).toBe(false);

@@ -49,12 +49,13 @@ export const isUnpromptedTerminalReply = (s: string): boolean =>
 /**
  * Should /api/send discard this write instead of putting it on the agent's FIFO?
  *
- * Yes for a `raw` payload that is purely CPR / DA / DSR replies. The agent's
+ * Yes for a `raw` payload that is purely unambiguous CPR / DA / DSR replies. The agent's
  * wrapper already answers those queries itself (ts/xterm-proxy.ts, rs/src/vterm.rs),
  * so each attached console viewer's xterm answering too only adds duplicate or
  * late replies. A late `ESC[<r>;<c>R` that the TUI is no longer waiting for can
  * be split by its escape-timeout parser and leave a stray `R` in the input box.
- * Only `raw` writes qualify: a person's `ay send` body is never discarded.
+ * Plain CPR shares its encoding with modified F3 keys. Preserve those bytes
+ * unless the producer can identify them as replies. Only `raw` writes qualify.
  */
 export const isRedundantViewerReply = (raw: boolean, s: string): boolean =>
-  raw && isTerminalReply(s);
+  raw && isTerminalReply(s) && isUnpromptedTerminalReply(s);
