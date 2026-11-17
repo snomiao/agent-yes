@@ -194,12 +194,14 @@
     "test:coverage": "vitest run --coverage",
     "test:ui": "vitest run --config tests/ui-test/vitest.config.ts",
     "test:ui-dom": "vitest run --config tests/ui-dom/vitest.config.ts",
+    "test:auth": "bun test tests/auth/backend.bun.spec.ts",
     "test:theme": "node tests/ui-test/theme.e2e.mjs"
   },
   "dependencies": {
     "@snomiao/bun-pty": "^0.3.4",
     "@snomiao/ws-provision": "^0.1.0",
     "@xterm/headless": "^6.0.0",
+    "better-auth": "1.7.25",
     "bun-pty": "^0.4.8",
     "execa": "^9.6.1",
     "from-node-stream": "^0.2.0",

@@ -7,6 +7,8 @@
       content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
     />
     <title>agent-yes · console</title>
+    <link rel="stylesheet" href="/auth/profile.css" />
+    <script type="module" src="/auth/profile.js"></script>
     <!-- PWA: installable console under /w/ (manifest scope is /w/). The service
          worker is network-first so it never serves a stale wire protocol — the
          cache is only an offline-launch fallback. -->
@@ -2229,6 +2231,7 @@
               <span id="count" class="count"></span>
             </span>
             <span class="metaright">
+              <span data-ay-account></span>
               <span class="viewmenu">
                 <button
                   id="viewmenubtn"

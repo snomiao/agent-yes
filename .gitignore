@@ -58,4 +58,8 @@ tmp-test-shared-e2e/
 
 # wrangler local cache (scripts/cf.ts) + rech/playwright scratch
 .wrangler/
+.rechrome/
+.playwright-cli/
+.dev.vars
+.dev.vars.*
 .playwright-cli-multi-tab/
