@@ -6,7 +6,7 @@
  *
  * One line answers "who is this agent" across every surface that names one —
  * the `ay send` envelope header, `ay whoami`, logs. The branch segment usually
- * carries the lane name for free (worktree checkouts like `crm-yamamoto-wifi`
+ * carries the lane name for free (worktree checkouts like `feature/example`
  * or `fix/t173-tone-core` name their purpose), which is why there is no
  * separate role concept.
  *

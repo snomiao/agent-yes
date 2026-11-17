@@ -9,7 +9,7 @@
 //! every surface that names one — the `ay send` envelope header, `ay whoami`,
 //! logs, and (since this module landed) the `<ay-init-msg>` header the wrapper
 //! puts on a sub-agent's initial prompt. The branch segment usually carries the
-//! lane name for free (worktree checkouts like `crm-yamamoto-wifi` or
+//! lane name for free (worktree checkouts like `feature/example` or
 //! `fix/t173-tone-core` name their purpose), which is why there is no separate
 //! role concept.
 //!
