@@ -72,8 +72,9 @@ Take B's main benefit into A by keeping credentials out of the pod:
   byte or sequence offset on `ay serve` streams gives AX-style "reconnect from seq N"
   almost for free.
 - **Idle detection as a signal.** `idle` / `needs_input` is exactly what
-  Substrate-style suspend (and plain scale-to-zero) needs. Idle means no model request
-  is in flight, so suspending loses nothing.
+  Substrate-style suspend (and plain scale-to-zero) can use to identify candidates.
+  Before suspending, verify work has quiesced and the application can reconnect
+  its external sessions on restore.
 - **Isolation per spawn.** The DSec idea: `isolation: container | gvisor | microvm`
   on `/api/spawn`, which becomes a k8s `runtimeClassName`. Trusted repos get a cheap
   container and unknown repos get a microVM.

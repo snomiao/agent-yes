@@ -123,9 +123,11 @@ spec:
 
 **Agent Substrate as a later GKE backend:**
 
-- agent-yes already classifies agents as `active` / `idle` / `needs_input`. **Idle
-  and needs-input are safe suspend points**: no model request is in flight, so the
-  "open connections are dropped" limit costs nothing.
+- An idle agent or one waiting for input can still have live connections to a
+  model provider, MCP server, or hub. GKE closes external connections when
+  restoring a Pod snapshot. The application must reconnect and re-establish
+  its session before continuing. Listening sockets, loopback connections, and
+  Unix-domain sockets survive the restore. [GKE Pod snapshots](https://docs.cloud.google.com/kubernetes-engine/docs/concepts/pod-snapshots)
 - An agent-yes ActorTemplate would be the same image as the agent-sandbox template.
   The wrapper's PTY and the agent's in-memory state are snapshotted together, and
   that is better than `--continue`, which re-reads the transcript.

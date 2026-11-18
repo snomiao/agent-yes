@@ -187,7 +187,10 @@ The trust boundary moves. On the desktop, the agent already runs as the same use
 1. **Separate UIDs.** The agent runs as 1000 and `ay serve` as 1001. The token comes
    from a Secret mounted only into the sidecar. It is never written under
    `AGENT_YES_HOME`, and never passed on argv or env visible to the agent
-   (`shareProcessNamespace: false`).
+   (`shareProcessNamespace: false`). Separate UIDs enforce Unix ownership and
+   file permissions. Namespace isolation is configured independently. The
+   containers still share the Pod's network namespace and can reach each
+   other's listening ports on localhost. [Kubernetes Pod networking](https://kubernetes.io/docs/concepts/workloads/pods/#pod-networking)
 2. **Shared state through a group, not a user.** `pids.jsonl`, the FIFOs and the logs
    need group read/write via `fsGroup`. The `.serve-token` path must not exist in the
    shared home.

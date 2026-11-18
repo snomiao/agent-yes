@@ -54,7 +54,7 @@ and remote goes. There are two shapes:
 | ------------------------------ | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
 | Works with closed CLIs         | **Yes**: claude / codex / copilot run unmodified in the pod                              | **No**: needs a harness whose tool layer is pluggable (dsh, ADK, own loop)         |
 | Model credentials              | In the pod (mitigate: Vertex/Bedrock identity, or a credential-injecting egress gateway) | **Never in the sandbox**                                                           |
-| Control API reachable by agent | Yes, unless split UIDs / no listening port ([kubernetes.md](./kubernetes.md#security))   | No: the loop is on another host, so the CVE class below is structurally impossible |
+| Control API reachable by agent | Yes, via shared localhost when the sidecar listens, even with separate UIDs ([kubernetes.md](./kubernetes.md#security))   | No: the loop is on another host, so the CVE class below is structurally impossible |
 | Survives client disconnect     | Yes (the loop lives with the workspace)                                                  | Loop host must stay up; the sandbox can be suspended between tool calls            |
 | Idle cost                      | Pod idles while waiting on the model / human                                             | Sandbox can be released between tool calls; only the loop stays                    |
 | Latency per tool call          | Local                                                                                    | A network round-trip per tool call                                                 |
