@@ -307,6 +307,13 @@ pub struct AgentContext {
     // into the typed retry message so the agent knows why it is being nudged.
     auto_retry_reason: Option<&'static str>,
 
+    // Quota wait (cli_config.quota_wait): rides out an account quota cap by
+    // resending the interrupted input on a backoff ladder. See quota_wait.rs.
+    quota: crate::quota_wait::QuotaTracker,
+    // Heads-ups sent to the task's sender: (reply address, line). Kept so the
+    // tests can see them; the real send is a detached `ay send`.
+    quota_notices: Vec<(String, String)>,
+
     // Idle screen scanner - re-checks enter patterns after prolonged idle
     last_idle_scan_at: Option<Instant>,
 
@@ -434,6 +441,8 @@ impl AgentContext {
             auto_retry_started_at: None,
             auto_retry_next_at: None,
             auto_retry_reason: None,
+            quota: crate::quota_wait::QuotaTracker::new(),
+            quota_notices: Vec::new(),
             stall_esc_sent_at: None,
             stall_force_restart: false,
             ctrl_c_times: Vec::new(),
@@ -460,6 +469,14 @@ impl AgentContext {
             watchdog_stalled: false,
             unresponsive: false,
             initial_input,
+        }
+    }
+
+    /// The launch prompt, for the quota wait: a cap hit right after start
+    /// interrupted it, and its envelope names whom to tell.
+    pub fn set_launch_prompt(&mut self, prompt: &str) {
+        if self.cli_config.quota_wait {
+            self.quota.set_initial_prompt(prompt, Instant::now());
         }
     }
 
@@ -926,6 +943,9 @@ impl AgentContext {
                                 w.write_all(&data)?;
                                 w.flush()?;
                             }
+                            if self.cli_config.quota_wait {
+                                self.quota.on_input(&data, Instant::now());
+                            }
                             self.idle_waiter.ping();
                             self.mark_stdin_sent();
                         }
@@ -1323,6 +1343,10 @@ impl AgentContext {
             }
         }
 
+        if self.cli_config.quota_wait && self.quota.wait.is_some() {
+            self.quota_wait_tick(msg_ctx)?;
+        }
+
         // A typingRespond key that changed nothing on screen was lost — e.g. the
         // trust dialog's Down sent before the dialog listened for input. The
         // one-shot suppression would otherwise park the session on that screen
@@ -1541,6 +1565,107 @@ impl AgentContext {
         Ok(())
     }
 
+    /// Perform what the quota tracker asks for on this heartbeat.
+    fn quota_wait_tick(&mut self, msg_ctx: &MessageContext) -> Result<()> {
+        use crate::quota_wait::QuotaAction;
+        let screen = self.vterm.contents();
+        let working = self.cli_config.working.iter().any(|p| p.is_match(&screen));
+        let ready = self.cli_config.ready.iter().any(|p| p.is_match(&screen))
+            && !self
+                .cli_config
+                .needs_input
+                .iter()
+                .any(|p| p.is_match(&screen));
+        // Same gate as the auto-retry: idle at the prompt, and a few quiet
+        // seconds so a line someone is typing is never typed over.
+        let at_prompt = should_fire_retry(
+            working,
+            ready,
+            self.idle_waiter.idle_time_ms(),
+            RETRY_MIN_IDLE_MS,
+        );
+        match self.quota.on_tick(Instant::now(), at_prompt) {
+            QuotaAction::None => {}
+            QuotaAction::TypeUsage => self.quota_write(msg_ctx, b"/usage")?,
+            QuotaAction::EnterUsage => self.quota_write(msg_ctx, b"\r")?,
+            QuotaAction::CloseUsage => send_esc(&msg_ctx.writer)?,
+            QuotaAction::Notify(line) => self.notify_quota_sender(&line),
+            QuotaAction::Resend(bytes) => {
+                warn!("Quota wait: resending the interrupted input");
+                self.quota_write(msg_ctx, &bytes)?;
+            }
+            QuotaAction::Recovered => {
+                info!("Quota wait: the resend went through, wait over");
+                self.publish_quota_wait();
+            }
+        }
+        Ok(())
+    }
+
+    fn quota_write(&mut self, msg_ctx: &MessageContext, bytes: &[u8]) -> Result<()> {
+        {
+            let mut w = msg_ctx
+                .writer
+                .lock()
+                .map_err(|e| anyhow::anyhow!("Lock: {}", e))?;
+            w.write_all(bytes)?;
+            w.flush()?;
+        }
+        self.idle_waiter.ping();
+        self.mark_stdin_sent();
+        Ok(())
+    }
+
+    /// Mirror the tracker's wait into this agent's pid record (`ay ls`).
+    fn publish_quota_wait(&self) {
+        let rec = self
+            .quota
+            .wait
+            .as_ref()
+            .map(|w| crate::pid_store::QuotaWaitRecord {
+                until: w.reset_unix_ms,
+                next_at: w.next_unix_ms,
+                attempt: w.attempt,
+            });
+        crate::pid_store::PidStore::new().set_quota_wait(self.pid, rec);
+    }
+
+    /// Tell the agent that handed out the task when to expect this one back:
+    /// a detached `ay send` to the latest envelope's reply address, sent as
+    /// this agent (AGENT_YES_PID = our wrapper pid). Best-effort.
+    fn notify_quota_sender(&mut self, line: &str) {
+        let Some(to) = self.quota.reply_to.clone() else {
+            info!("Quota wait: no reply address seen, nobody to tell");
+            return;
+        };
+        info!("Quota wait: telling {} — {}", to, line);
+        self.quota_notices.push((to.clone(), line.to_string()));
+        if cfg!(test) {
+            return;
+        }
+        let launcher = std::env::var("AGENT_YES_JS_CLI")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "ay".to_string());
+        let spawned = std::process::Command::new(&launcher)
+            .args(["send", &to, line])
+            .env("AGENT_YES_PID", std::process::id().to_string())
+            .current_dir(&self.cwd)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match spawned {
+            // Reap it off-thread so it never lingers as a zombie.
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(e) => warn!("Quota wait: could not run `{} send`: {}", launcher, e),
+        }
+    }
+
     /// Best-effort structured record of the nudge into this agent's own
     /// `<cwd>/.agent-yes/inbox.jsonl` (schema mirrors ts/messageLog.ts
     /// MessageRecord, kind "auto-retry"), so `ay msgs` / the console can show
@@ -1677,6 +1802,32 @@ impl AgentContext {
             return Ok(());
         }
         self.last_checked_screen_hash = Some(buffer_hash);
+
+        if self.cli_config.quota_wait {
+            use crate::quota_wait::ScreenEvent;
+            let now_ms = chrono::Utc::now().timestamp_millis();
+            match self.quota.on_screen(&buffer, Instant::now(), now_ms) {
+                ScreenEvent::None => {}
+                ScreenEvent::Started => {
+                    let w = self.quota.wait.as_ref();
+                    warn!(
+                        "Quota wait: cap hit, expected back at {} — resending with backoff",
+                        w.map(|w| crate::quota_wait::local_hhmm(w.reset_unix_ms))
+                            .unwrap_or_default()
+                    );
+                    self.publish_quota_wait();
+                }
+                ScreenEvent::Failed => {
+                    let w = self.quota.wait.as_ref();
+                    warn!(
+                        "Quota wait: resend hit the cap again (attempt {})",
+                        w.map(|w| w.attempt).unwrap_or(0)
+                    );
+                    self.publish_quota_wait();
+                }
+                ScreenEvent::UsageRead => self.publish_quota_wait(),
+            }
+        }
 
         // Auto-retry on recoverable API errors (overload / rate-limit / usage-
         // limit). Evaluated BEFORE fatal so these don't kill the session. We only
@@ -1917,10 +2068,13 @@ mod tests {
 
     impl Harness {
         fn new() -> Self {
+            Self::with_cli("claude")
+        }
+        fn with_cli(cli: &str) -> Self {
             let dir = tempfile::tempdir().unwrap();
             let ctx = AgentContext::new(
-                "claude".into(),
-                crate::config::get_cli_config("claude").unwrap(),
+                cli.into(),
+                crate::config::get_cli_config(cli).unwrap(),
                 false,
                 false,
                 true,
@@ -1961,6 +2115,31 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(ms)).await;
             self.ctx.heartbeat_check(&mut self.msg).await.unwrap();
         }
+    }
+
+    fn quota_frame(id: &str) -> String {
+        format!(
+            "\u{1b}[2J\u{1b}[H\u{26a0} Individual quota reached. Please upgrade your subscription to increase your\r\n\r\nlimits. Resets in 4m56s.\r\n\r\nError ID: {id}\r\n\r\n> "
+        )
+    }
+
+    #[tokio::test]
+    async fn quota_banner_starts_a_wait_only_where_configured() {
+        let mut agy = Harness::with_cli("agy");
+        agy.ctx
+            .set_launch_prompt("<ay-msg 1a2b3c4d from x \u{2014} reply: ay send 0123abcd \"...\">\nbuild it\n</ay-msg 1a2b3c4d>");
+        agy.screen(&quota_frame("id-1")).await;
+        let w = agy.ctx.quota.wait.as_ref().expect("agy waits out the cap");
+        assert_eq!(w.attempt, 0);
+        assert!(w.resend.ends_with(b"</ay-msg 1a2b3c4d>\r"));
+        assert_eq!(agy.ctx.quota.reply_to.as_deref(), Some("0123abcd"));
+        // The banner staying on screen is the same failure, not a new one.
+        agy.screen(&quota_frame("id-1")).await;
+        assert_eq!(agy.ctx.quota.wait.as_ref().unwrap().attempt, 0);
+
+        let mut claude = Harness::new();
+        claude.screen(&quota_frame("id-1")).await;
+        assert!(claude.ctx.quota.wait.is_none());
     }
 
     #[tokio::test]

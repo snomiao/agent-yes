@@ -18,6 +18,7 @@ mod messaging;
 mod non_tty_renderer;
 mod pid_store;
 mod pty_spawner;
+mod quota_wait;
 mod ready_manager;
 mod reaper;
 mod running_lock;
@@ -439,6 +440,9 @@ async fn run_agent(mut args: CliArgs, cwd: &str) -> Result<i32> {
             render_plain,
             initial_input.clone(),
         );
+        if let Some(p) = args.prompt.as_deref() {
+            agent_ctx.set_launch_prompt(p);
+        }
 
         // Create per-pid FIFO for `cy send <keyword> <msg>`. Best-effort —
         // failure (Windows, full disk, etc.) just means cy send won't work

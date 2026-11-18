@@ -27,6 +27,12 @@ import { logger } from "./logger.ts";
  * reader always merges by `pid`, last-line wins.
  */
 
+export interface QuotaWaitRecord {
+  until: number;
+  next_at: number;
+  attempt: number;
+}
+
 export interface GlobalPidRecord {
   pid: number;
   cli: string;
@@ -40,6 +46,11 @@ export interface GlobalPidRecord {
   // wedged. Orthogonal to `status` (which stays "active"); cleared on recovery
   // and on exit. The ls/status live-state derivation surfaces it as `stuck`.
   unresponsive?: boolean;
+  // Set by the Rust supervisor while the agent waits out an account quota cap
+  // (rs/src/quota_wait.rs): when the quota is expected back, when the
+  // interrupted input is next resent (unix ms), and how many resends failed.
+  // Cleared on recovery and on exit. Surfaced as the `quota-wait` live state.
+  quota_wait?: QuotaWaitRecord | null;
   exit_code: number | null;
   exit_reason: string | null;
   started_at: number;

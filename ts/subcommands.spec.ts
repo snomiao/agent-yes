@@ -5270,3 +5270,40 @@ describe("inspectSubmission: shells without a composer", () => {
     );
   });
 });
+
+describe("subcommands quota-wait state", () => {
+  const at = (h: number, m: number) => new Date(2026, 0, 1, h, m).getTime();
+  const rec = (over: any) => ({
+    pid: process.pid,
+    cli: "agy",
+    prompt: null,
+    cwd: "/repo/alpha",
+    log_file: null,
+    fifo_file: null,
+    status: "active",
+    exit_code: null,
+    exit_reason: null,
+    started_at: Date.now(),
+    ...over,
+  });
+
+  it("reads an agent waiting out a quota cap as quota-wait, not idle or stuck", async () => {
+    const mod = await loadModule();
+    const quota_wait = { until: at(15, 20), next_at: at(15, 2), attempt: 1 };
+    expect(await mod.deriveLiveState(rec({ quota_wait, unresponsive: true }))).toEqual({
+      state: "quota-wait",
+      question: null,
+    });
+    expect((await mod.deriveLiveState(rec({ quota_wait: null }))).state).toBe("active");
+  });
+
+  it("labels the wait with the expected recovery and the next resend", async () => {
+    const mod = await loadModule();
+    expect(mod.quotaWaitLabel({ until: at(15, 20), next_at: at(15, 2), attempt: 0 })).toBe(
+      "⏳ quota cap, back ~15:20 (next resend 15:02)",
+    );
+    expect(mod.quotaWaitLabel({ until: at(9, 5), next_at: at(9, 1), attempt: 3 })).toBe(
+      "⏳ quota cap, back ~09:05 (next resend 09:01, 3 failed)",
+    );
+  });
+});
