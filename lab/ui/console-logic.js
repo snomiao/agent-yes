@@ -686,7 +686,7 @@ export function forestOrder(entries) {
 // display order. Headers (room/peer) are non-selectable; only 'agent' rows are.
 // A purely local fleet (one room, one unlabelled host) yields only agent rows —
 // identical to forestOrder — so the common case stays a plain agent tree.
-export function layeredRows(entries) {
+export function layeredRows(entries, { showHost = false } = {}) {
   const multiRoom = new Set(entries.map((e) => e._room || "")).size > 1;
 
   // Container nodes carry a `kind`/`label` for headers; agent nodes carry an
@@ -718,7 +718,7 @@ export function layeredRows(entries) {
       const agentNodes = agentForestNodes(pe).map(toAgentNode);
       const host = pe[0]?._host || "";
       const label = host && labelCounts.get(host) > 1 ? `${host} (${String(src).slice(-6)})` : host;
-      if (multiPeer && label)
+      if ((multiPeer || showHost) && label)
         underRoom.push({ kind: "peer", label, room: rid, host, src, children: agentNodes });
       else underRoom.push(...agentNodes); // single/unlabelled peer hidden
     }

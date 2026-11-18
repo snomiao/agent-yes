@@ -324,7 +324,8 @@
         border: 1px solid var(--line);
         border-radius: 8px;
         padding: 4px;
-        min-width: 140px;
+        min-width: min(210px, 85vw);
+        white-space: nowrap;
         box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
       }
       .rmenupanel[hidden] {
@@ -383,6 +384,7 @@
       }
       /* A viewer can't steer/share — hide the composer, key bar and every agent
          action in the ⋯ menu (Share/Stop/Restart/Kill). View prefs stay. */
+      .app.readonly-agent .input-tools-toggle,
       .app.readonly-agent .composer,
       .app.readonly-agent .keybar,
       .app.readonly-agent .rmenuact {
@@ -737,6 +739,7 @@
       }
       #q {
         flex: 1;
+        min-width: 0;
         background: transparent;
         border: 0;
         outline: 0;
@@ -939,7 +942,8 @@
         outline: none;
       }
       .omni-results {
-        max-height: 52vh;
+        max-height: min(52vh, calc(85dvh - 100px));
+        padding-bottom: 6px;
         overflow-y: auto;
       }
       .omni-row {
@@ -1266,7 +1270,7 @@
         /* clear the home-indicator / gesture bar so the last row stays tappable,
            plus room for the floating New-agent FAB parked at the bottom-right —
            without it the last row can never be scrolled out from under the button. */
-        padding-bottom: calc(var(--sab) + 60px);
+        margin-bottom: calc(var(--sab) + 54px);
       }
       .row {
         padding: 11px 18px;
@@ -1296,7 +1300,7 @@
         background: var(--panel);
       }
       .row.sel {
-        background: var(--panel);
+        background: color-mix(in srgb, var(--accent) 18%, var(--panel));
         box-shadow: inset 3px 0 0 var(--accent);
       }
       /* A human peer (not you) is watching this agent: yellow, mirrored on the
@@ -1307,7 +1311,7 @@
         background: color-mix(in srgb, var(--peer) 7%, transparent);
       }
       .row.sel.peerfocus {
-        background: var(--panel);
+        background: color-mix(in srgb, var(--accent) 18%, var(--panel));
         box-shadow:
           inset 3px 0 0 var(--accent),
           inset -3px 0 0 var(--peer);
@@ -1588,7 +1592,11 @@
         font-family: var(--mono);
         font-size: 11.5px;
         color: var(--green);
-        flex: none;
+        flex: 0 1 34%;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
       }
       .crow .cname {
         font-weight: 600;
@@ -1874,6 +1882,9 @@
         border-top: 1px solid var(--line);
         background: var(--panel);
       }
+      .app.show-input-tools:not(.readonly-agent) .keybar,
+      .app.show-input-tools:not(.readonly-agent) .composer { display: flex; }
+      @media (pointer: coarse), (max-width: 720px) { .input-tools-toggle { display: none; } }
       .composer textarea {
         flex: 1;
         min-width: 0;
@@ -2220,11 +2231,12 @@
             <span class="mag">⌕</span>
             <input
               id="q"
-              placeholder="filter…  repo:agent-yes  claude  (space = AND)"
+              placeholder="Filter agents…"
               aria-label="Filter agents by repo, CLI, or title"
               autocomplete="off"
               autofocus
             />
+            <button type="button" class="viewbtn" id="open-search" aria-label="Search agents and commands">Search</button>
           </div>
           <div class="meta">
             <span class="metaleft">
@@ -2249,10 +2261,10 @@
                     type="button"
                     title="fold subagent trees"
                   >
-                    ⊞ subs
+                    Expand subagents
                   </button>
                   <button id="sortbtn" class="viewmenuitem" type="button" title="cycle sort order">
-                    ⇅ state
+                    Sort by state
                   </button>
                   <button
                     id="stalebtn"
@@ -2262,7 +2274,11 @@
                     aria-checked="false"
                     title="show stale stopped agents (exited over 5 minutes ago)"
                   >
-                    ◌ stale
+                    Show stopped agents
+                  </button>
+                  <button
+                    id="idle-filter" class="viewmenuitem" type="button" role="checkbox" aria-checked="false">
+                    Hide agents idle over a day
                   </button>
                   <button
                     id="portsbtn"
@@ -2270,7 +2286,7 @@
                     type="button"
                     title="manage exposed localhost ports"
                   >
-                    ⇄ ports
+                    Exposed ports
                   </button>
                   <button
                     id="rguibtn"
@@ -2278,7 +2294,7 @@
                     type="button"
                     title="open the agent graph view (/r/) for this fleet"
                   >
-                    ⌗ graph
+                    Agent graph
                   </button>
                 </div>
               </span>
@@ -2343,6 +2359,7 @@
                   <button type="button" id="fontUp" aria-label="larger font">A+</button>
                 </span>
               </div>
+              <label class="rmenuitem input-tools-toggle"><input type="checkbox" id="input-tools"> Terminal input tools</label>
               <div class="rmenusep"></div>
               <label class="rmenuitem"
                 ><input type="checkbox" id="perfToggle" /> <span>Perf HUD</span></label
@@ -2551,7 +2568,7 @@
       <div class="omnibox">
         <input
           id="omni-input"
-          placeholder='Search agents &amp; workspaces, then output…  ·  "/" commands  ·  /ws workspaces'
+          placeholder='Search agents, workspaces or /commands'
           spellcheck="false"
           autocapitalize="off"
           autocomplete="off"
@@ -2581,13 +2598,10 @@
         age,
         matches,
         nextIndex,
-        identContext,
-        compactIdent,
-        IDENT_CAP,
+        identFields,
         rowTitle,
         isTransientTitle,
         fullIdent,
-        hasIdent,
         deviceCount,
         layeredRows,
         foldSummaries,
@@ -5673,6 +5687,7 @@ my.translate = async (text, lang) => {
       // to the IME/autocorrect glitches that dog xterm's hidden input. Enter
       // sends text + a carriage return in one write (identical to typing then ↵);
       // Shift+Enter inserts a literal newline.
+      $("input-tools").onchange = (event) => document.querySelector(".app").classList.toggle("show-input-tools", event.target.checked);
       (function composerBoot() {
         const form = $("composer"),
           ta = $("cmpin");
@@ -5974,9 +5989,19 @@ my.translate = async (text, lang) => {
       const isStaleStopped = (e) =>
         e.status === "exited" &&
         Date.now() - (e.last_active_at || e.started_at || 0) > STALE_STOP_MS;
+      let hideOldIdle = localStorage.getItem("ay.hideOldIdle") === "1";
+      $("idle-filter").onclick = () => {
+        hideOldIdle = !hideOldIdle;
+        localStorage.setItem("ay.hideOldIdle", hideOldIdle ? "1" : "0");
+        renderList();
+      };
       function pruneStale(list) {
-        if (showStale) return list;
-        const keep = new Set(list.filter((e) => !isStaleStopped(e) || e._key === sel));
+        const cutoff = Date.now() - 86400000;
+        const keep = new Set(list.filter((e) => {
+          const last = e.last_active_at || e.started_at;
+          return e._key === sel || ((showStale || !isStaleStopped(e)) &&
+            !(hideOldIdle && e.status === "idle" && last && last < cutoff));
+        }));
         for (let grew = true; grew;) {
           grew = false;
           const wanted = new Set();
@@ -6178,7 +6203,9 @@ my.translate = async (text, lang) => {
         const toks = $("q").value.trim().split(/\s+/).filter(Boolean);
         // Build the full signalling-server > rooms > peers > agents > subagents
         // tree. Single-node room/peer layers fold away; ≥2 become ├ └ │ branches.
-        const fullRows = layeredRows(orderedEntries(toks));
+        const fullRows = layeredRows(orderedEntries(toks), { showHost: true });
+        const connected = [...sources.values()].some((s) => s.live);
+        const emptyLabel = entries.length && toks.length ? "No matching agents" : connected ? "No agents to show" : ($("conn").textContent || "Connecting…").replace(/^●\s*/, "");
         const agentRows = fullRows.filter((r) => r.kind === "agent");
         // Fold: summarize each root's hidden descendants, then drop subagent rows
         // (any agent row with a parent agent). The count still reports every
@@ -6189,20 +6216,19 @@ my.translate = async (text, lang) => {
           : fullRows;
         shownAgentCount = agentRows.length;
         updateSummary(); // one consolidated "agents · rooms · peers" badge
-        $("foldbtn").textContent = foldSubs ? "⊞ subs" : "⊟ subs";
+        $("foldbtn").textContent = foldSubs ? "Expand subagents" : "Collapse subagents";
+        $("idle-filter").setAttribute("aria-checked", String(hideOldIdle));
+        $("idle-filter").classList.toggle("on", hideOldIdle);
         $("stalebtn").classList.toggle("on", showStale);
         $("stalebtn").setAttribute("aria-checked", showStale ? "true" : "false");
-        $("stalebtn").textContent = showStale ? "◉ stale" : "◌ stale";
+        $("stalebtn").textContent = showStale ? "Hide stopped agents" : "Show stopped agents";
         $("foldbtn").classList.toggle("on", !foldSubs);
         // Show the active sort mode on the button so it's self-documenting; the
         // default ("state") is also highlighted to hint it's the implicit order.
-        $("sortbtn").textContent = `⇅ ${sortMode}`;
+        $("sortbtn").textContent = `Sort by ${sortMode}`;
         $("sortbtn").classList.toggle("on", sortMode !== "state");
-        // identContext blanks any field uniform across the shown list (so a
-        // single-device fleet shows no device); multiDevice gates the detailed
-        // host tag so it only appears when machines are actually mixed.
+        // The detailed host tag only earns space when multiple devices are shown.
         const shownEntries = agentRows.map((r) => r.entry);
-        const ctx = identContext(shownEntries);
         const multiDevice = deviceCount(shownEntries) > 1;
         if (compactList) {
           $("list").innerHTML =
@@ -6214,13 +6240,15 @@ my.translate = async (text, lang) => {
                 // (spinner / "· done" stamp) doesn't replace it on the next draw.
                 if (e.title && !isTransientTitle(e.title)) topicTitles.set(e._key, e.title);
                 const t = rowTitle(e, topicTitles.get(e._key));
-                const id = compactIdent(e, ctx, IDENT_CAP, r.parentEntry);
+                const fields = identFields(e);
+                const path = [fields.owner, fields.repo, fields.branch].filter(Boolean).join("/");
+                const id = [path, fields.sub].filter(Boolean).join(" → ") || `PID ${e.pid}`;
                 const cli = cliLabel(e);
                 return `<div class="row crow ${e._key === sel ? "sel" : ""}${rowFlags(e)}" data-key="${esc(e._key)}">${rowIoHeat(e)}
         ${r.branch ? `<span class="tbranch">${esc(r.branch)}</span>` : ""}
         ${pinMarkHtml(e)}
         <span class="dot ${esc(e.status)}"></span>
-        ${hasIdent(id) ? `<span class="cident" title="${esc(fullIdent(e))}">${esc(id)}</span>` : ""}
+        <span class="cident" title="${esc(fullIdent(e))}">${esc(id)}</span>
         ${cli ? `<span class="cname">${esc(cli)}</span>` : ""}
         <span class="ctitle ${e.title ? "" : "dim"}" title="${esc(t)}">${esc(t)}</span>
         ${foldChipHtml(e)}
@@ -6230,7 +6258,7 @@ my.translate = async (text, lang) => {
         ${peerChipHtml(e)}
         <span class="age">${age(e)}</span></div>`;
               })
-              .join("") || `<div class="empty">no match</div>`;
+              .join("") || `<div class="empty">${esc(emptyLabel)}</div>`;
           renderSendWires(); // rows were replaced — re-draw the overlay (see below)
           return;
         }
@@ -6270,7 +6298,7 @@ my.translate = async (text, lang) => {
         <div class="rowtags">${tags}</div>
       </div>`;
             })
-            .join("") || `<div class="empty">no match</div>`;
+            .join("") || `<div class="empty">${esc(emptyLabel)}</div>`;
         // The innerHTML above replaced every row — and with them the wire overlay
         // (a child of #list). Re-draw it against the fresh rects, or an in-flight
         // wire would vanish on the next list render.
@@ -6389,6 +6417,7 @@ my.translate = async (text, lang) => {
           } else {
             sel = e._key;
             renderList();
+            $("list").querySelector(".row.sel")?.scrollIntoView({ block: "nearest" });
           }
         }
       }
@@ -6450,6 +6479,7 @@ my.translate = async (text, lang) => {
         const pid = e.pid;
         const tx = txFor(e);
         renderList();
+        $("list").querySelector(".row.sel")?.scrollIntoView({ block: "nearest" });
         // Mobile: flip the single-column layout to the terminal ("detail") pane.
         // Done BEFORE term.open below so xterm measures a visible container.
         // Entering detail FROM the list gets a history entry, so the hardware
@@ -7128,7 +7158,7 @@ my.translate = async (text, lang) => {
         location.href = "/r/" + frag;
       });
       // Cycle the sort order: state → created → identity → state.
-      // "◌ stale" checkbox: show/hide stopped agents older than 5 min.
+      // "Show stopped agents" checkbox: show/hide stopped agents older than 5 min.
       $("stalebtn").addEventListener("click", () => {
         showStale = !showStale;
         localStorage.setItem("ay.showStale", showStale ? "1" : "0");
@@ -7376,6 +7406,8 @@ my.translate = async (text, lang) => {
       let omniPreviewTimer = null;
       const omniOpen = () => $("omni").style.display !== "none";
 
+      $("open-search").textContent = IS_MAC ? "Search ⌘K" : "Search Ctrl+K";
+      $("open-search").onclick = openOmni;
       function openOmni() {
         omniReturnSel = sel;
         omniWasDetail = document.querySelector(".app").classList.contains("show-detail");
@@ -7811,7 +7843,7 @@ my.translate = async (text, lang) => {
               <span class="dot ${esc(e.status)}"></span>
               <div class="omni-main">
                 <div class="omni-title">${esc(e.title || cliLabel(e) || ident(e) || "agent")}</div>
-                <div class="omni-sub">${esc((e.cli || "") + " · " + agentDir(e))}</div>
+                <div class="omni-sub">${esc([e.cli, "PID " + e.pid, agentDir(e)].filter(Boolean).join(" · "))}</div>
                 ${snip}
               </div></div>`;
           })
@@ -8640,7 +8672,7 @@ my.translate = async (text, lang) => {
               .map(
                 (n) => `<div class="ritem ${roomLive(n) ? "cur" : ""}">
           ${roomStatus(n)}
-          <span class="rname" data-room="${esc(n)}">${esc(n)}</span>
+          <span class="rname" data-room="${esc(n)}" title="${esc(n)}">${esc([...new Set(roomSources(n).map((s) => hostStats.get(s.id)?.host).filter(Boolean))].join(", ") || n)}</span>
           <span class="rhost">${esc(r[n].host)}</span>
           ${resChipHtml(n)}
           <span class="rx" data-del="${esc(n)}" title="forget">✕</span></div>`,
@@ -8648,7 +8680,7 @@ my.translate = async (text, lang) => {
               .join("")
           : `<div class="empty2">no saved rooms — paste a share link below</div>`;
         $("rooms").innerHTML = `<div class="rtitle">rooms · stored on this device</div>${items}
-      <div class="radd"><input id="roomin" placeholder="room:token  or  https://…/#room:token" /><button id="roomadd">add</button></div>
+      <div class="radd"><input id="roomin" placeholder="room:token  or  https://…/#room:token" /><button id="roomadd">Add</button></div>
       <div class="rconnect">new here? install agent-yes (bun or npm, auto):
         <code id="cmdinstall" class="copy" title="click to copy">curl -fsSL https://agent-yes.com/setup.sh | sh</code>
         <span style="opacity:.6">Windows:</span>
@@ -8931,10 +8963,10 @@ my.translate = async (text, lang) => {
       <div class="nfield"><label>Prompt — optional</label><textarea id="nf-prompt" rows="3" placeholder="initial message to send the agent…"></textarea></div>
       <div class="lrow">
         <button class="lfleet" id="nf-go">▷ Launch</button>
-        <button class="lcancel" id="nf-cancel">cancel</button>
+        <button class="lcancel" id="nf-cancel">Cancel</button>
       </div>
       <div id="nf-hook" class="lhint" style="display:none"></div>
-      <div class="lhint">POST /api/spawn on this machine. ${IS_MAC ? "⌘" : "Ctrl"}+Enter to launch.</div></div>`;
+      <div class="lhint">${IS_MAC ? "⌘" : "Ctrl"}+Enter to launch.</div></div>`;
         $("newform").style.display = "flex";
         setTimeout(() => $("nf-prompt")?.focus(), 0);
         // Retarget the form when the user picks another machine — the spawn-hook
@@ -9066,7 +9098,10 @@ my.translate = async (text, lang) => {
         const parsed = parseRepoInput($("nf-repo")?.value || "");
         const row = $("nf-branch-row");
         const hint = $("nf-branch-hint");
-        nfRemoteBranches = null;
+        if (parsed?.kind !== "github") {
+          delete row.dataset.lookup;
+          nfRemoteBranches = null;
+        }
         if (row) row.style.display = parsed ? "" : "none";
         updateProvisionCwd();
         if (!parsed) return;
@@ -9088,6 +9123,10 @@ my.translate = async (text, lang) => {
       }
       function loadBranchPicker(target, repo) {
         const dl = $("nf-branch-list");
+        const row = $("nf-branch-row");
+        const lookup = JSON.stringify([target?.id, repo]);
+        if (row.dataset.lookup === lookup) return;
+        row.dataset.lookup = lookup;
         const hint = $("nf-branch-hint");
         nfRemoteBranches = null;
         if (dl) dl.innerHTML = "";
@@ -9102,7 +9141,7 @@ my.translate = async (text, lang) => {
           .then((d) => {
             // user picked another repo meanwhile (value may be a URL — normalize)
             const cur = parseRepoInput($("nf-repo")?.value || "");
-            if (!cur || cur.kind !== "github" || `${cur.owner}/${cur.repo}` !== want) return;
+            if (row !== $("nf-branch-row") || row.dataset.lookup !== lookup || !cur || cur.kind !== "github" || `${cur.owner}/${cur.repo}` !== want) return;
             const branches = (d && d.branches) || [];
             nfRemoteBranches = new Set(branches.filter((b) => b.remote).map((b) => b.name));
             if (dl)
@@ -9116,6 +9155,8 @@ my.translate = async (text, lang) => {
             updateProvisionCwd();
           })
           .catch(() => {
+            if (row !== $("nf-branch-row") || row.dataset.lookup !== lookup) return;
+            delete row.dataset.lookup;
             if (hint) hint.textContent = "branch list unavailable — type a branch name";
           });
       }
