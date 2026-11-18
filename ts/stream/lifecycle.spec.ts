@@ -6,6 +6,7 @@ import {
   mkdir,
   mkdtemp,
   readFile,
+  open,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -55,7 +56,7 @@ describe.skipIf(process.platform === "win32")("native stream lifecycle", () => {
     }
     throw new Error("stream did not register and become idle");
   };
-  const launch = (args: string[]) => {
+  const launch = (args: string[], input?: string) => {
     const child = spawn("bun", [cli, ...args], {
       cwd,
       env: {
@@ -67,9 +68,10 @@ describe.skipIf(process.platform === "win32")("native stream lifecycle", () => {
         AGENT_YES_NO_CWD_WARN: "1",
         AY_STREAM_TEST_CAPTURE: capture,
       },
-      stdio: ["ignore", "pipe", "pipe"],
+      stdio: [input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
     });
     children.push(child);
+    if (input !== undefined) child.stdin!.end(input);
     let out = "",
       err = "";
     child.stdout!.on("data", (data) => {
@@ -161,5 +163,61 @@ describe.skipIf(process.platform === "win32")("native stream lifecycle", () => {
       JSON.stringify({ ...record, started_at: Date.now() + 5000 }) + "\n",
     );
     expect((await readGlobalPids()).find((row) => row.pid === record.pid)?.mode).toBeUndefined();
+  });
+  it("accepts caller JSON stdin and keeps replay sessions available to FIFO input", async () => {
+    const message = {
+      type: "user",
+      uuid: "00000000-0000-4000-8000-000000000001",
+      parent_tool_use_id: null,
+      message: { role: "user", content: "caller task" },
+    };
+    const run = launch(["claude", ...native.slice(0, -1)], JSON.stringify(message) + "\n");
+    const record = await idle();
+    expect(JSON.parse((await readFile(capture, "utf8")).trim())).toEqual(message);
+    const fifo = await open(record.fifo_file, "w");
+    await fifo.writeFile(
+      JSON.stringify({
+        type: "user",
+        uuid: "fifo-two",
+        message: { role: "user", content: "fifo task" },
+      }) + "\n",
+    );
+    const deadline = Date.now() + 5000;
+    while ((await readFile(capture, "utf8")).trim().split("\n").length < 2 && Date.now() < deadline)
+      await delay(25);
+    expect(
+      (await readFile(capture, "utf8"))
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line).message.content),
+    ).toEqual(["caller task", "fifo task"]);
+    await fifo.writeFile(
+      JSON.stringify({
+        type: "user",
+        uuid: "fifo-three",
+        message: { role: "user", content: "finish" },
+      }) + "\n",
+    );
+    await fifo.close();
+    expect(await Promise.race([run.exited, delay(7000).then(() => "timeout")]), run.error()).toBe(
+      0,
+    );
+  });
+  it("preserves JSON caller EOF when no replay-confirmed FIFO channel is exposed", async () => {
+    const args = native.slice(0, -1).filter((arg) => arg !== "--replay-user-messages");
+    const run = launch(
+      ["claude", ...args],
+      JSON.stringify({
+        type: "user",
+        uuid: "caller-one",
+        message: { role: "user", content: "single task" },
+      }) + "\n",
+    );
+    expect(await Promise.race([run.exited, delay(7000).then(() => "timeout")]), run.error()).toBe(
+      0,
+    );
+    expect(JSON.parse((await readFile(capture, "utf8")).trim()).message.content).toBe(
+      "single task",
+    );
   });
 });
