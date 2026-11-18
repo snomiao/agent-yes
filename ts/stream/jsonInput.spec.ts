@@ -1,5 +1,5 @@
 import { once } from "node:events";
-import { PassThrough, Readable } from "node:stream";
+import { PassThrough, Readable, Writable } from "node:stream";
 import { expect, it, vi } from "vitest";
 import { forwardJsonInput } from "./jsonInput.ts";
 
@@ -10,11 +10,13 @@ it("frames split caller records with backpressure and preserves metadata and fin
   ];
   const bytes = Buffer.from(records.map((record) => JSON.stringify(record)).join("\n"));
   const source = Readable.from([bytes.subarray(0, 57), bytes.subarray(57, 61), bytes.subarray(61)]);
-  const target = new PassThrough({ highWaterMark: 1 });
   let output = "";
-  target.setEncoding("utf8");
-  target.on("data", (chunk) => {
-    output += chunk;
+  const target = new Writable({
+    highWaterMark: 1,
+    write(chunk, _encoding, done) {
+      output += chunk.toString();
+      setImmediate(done);
+    },
   });
   const done = once(target, "finish");
   const error = vi.fn();
