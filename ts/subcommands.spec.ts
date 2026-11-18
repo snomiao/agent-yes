@@ -2184,6 +2184,32 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
     }
   });
 
+  it.skipIf(!itUnix)("parks a send at a permission prompt and returns exit 6", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-blocked-send-"));
+    const log = path.join(dir, "session.log");
+    try {
+      // Give the fixture an existing drainer so it keeps the pending record
+      // available for inspection and never launches a background process.
+      const pendingDir = path.join(process.env.AGENT_YES_HOME!, "pending");
+      await mkdir(pendingDir, { recursive: true });
+      await writeFile(path.join(pendingDir, process.pid + ".drainer"), String(process.pid));
+      await writeFile(log, "May I proceed?\r\n❯ 1. Allow\r\n  2. Cancel\r\n");
+      await withDrainedFifo(
+        async (fifo) => {
+          const { code, stdout } = await send(fifo, log, "queued example");
+          expect(code).toBe(6);
+          expect(stdout).toContain("QUEUED");
+          const { listPending, readPending } = await import("./composerGuard.ts");
+          const [queued] = await listPending(process.pid);
+          expect((await readPending(process.pid, queued!))?.record.body).toBe("queued example");
+        },
+        () => {},
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(!itUnix)("reports QUEUED with its distinct exit 4", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "ay-queue-e2e-"));
     const log = path.join(dir, "a.log");
@@ -4819,6 +4845,14 @@ describe("drainerLauncher", () => {
       "/usr/local/bin/ay",
     ]);
     expect(drainerLauncher("/usr/local/bin/bun", undefined, null)).toBeNull();
+  });
+
+  it("re-runs the CLI script when a Node sender starts a drainer", async () => {
+    const { drainerLauncher } = await loadModule();
+    expect(drainerLauncher("/usr/bin/node", "/repo/dist/cli.js", undefined)).toEqual([
+      "/usr/bin/node",
+      "/repo/dist/cli.js",
+    ]);
   });
 
   it("re-runs a compiled single-file binary as itself", async () => {

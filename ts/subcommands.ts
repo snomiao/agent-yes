@@ -2305,7 +2305,7 @@ async function refreshRemoteSnapshot(
 
 /** Run `ay <args…>` detached from this process (same launcher as the send drainer). */
 function spawnDetachedAy(args: string[]): number | null {
-  const launcher = drainerLauncher(process.execPath, process.argv[1], Bun.which("ay"));
+  const launcher = drainerLauncher(process.execPath, process.argv[1], globalThis.Bun?.which("ay"));
   if (!launcher) return null;
   const [cmd, ...pre] = launcher;
   try {
@@ -5515,8 +5515,8 @@ export function drainerLauncher(
   script: string | undefined,
   onPath: string | null | undefined,
 ): string[] | null {
-  const bunRuntime = /(^|[\\/])bun(\.exe)?$/i.test(execPath);
-  if (!bunRuntime) return [execPath];
+  const interpreter = /(^|[\\/])(bun|node)(\.exe)?$/i.test(execPath);
+  if (!interpreter) return [execPath];
   if (script) return [execPath, script];
   return onPath ? [execPath, onPath] : null;
 }
@@ -5526,7 +5526,7 @@ async function ensureSendDrainer(pid: number): Promise<number | null> {
   const existing = await liveDrainer(pid);
   if (existing) return existing;
   const { spawn } = await import("node:child_process");
-  const launcher = drainerLauncher(process.execPath, process.argv[1], Bun.which("ay"));
+  const launcher = drainerLauncher(process.execPath, process.argv[1], globalThis.Bun?.which("ay"));
   if (!launcher) return null;
   const [cmd, ...pre] = launcher;
   const child = spawn(cmd!, [...pre, "send-drain", String(pid)], {
