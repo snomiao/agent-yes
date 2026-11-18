@@ -6059,6 +6059,11 @@ async function cmdSend(rest: string[]): Promise<number> {
   const trailing = controlCodeFromName(codeName);
 
   const record = await resolveOne(keyword, opts);
+  if (record.mode === "stream") {
+    throw new Error(
+      "ay send: stream sessions require replay-confirmed JSON delivery; this version does not support it",
+    );
+  }
 
   // Misdelivery guard: when the keyword isn't a plain pid (an exact identity),
   // it resolved by cwd/cli/prompt substring — which can silently land on an

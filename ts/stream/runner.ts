@@ -218,7 +218,13 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
         unlinkSync(fifo);
       } catch {}
     }
-    if (child.exitCode === null && child.signalCode === null) stop();
+    // The group can outlive its leader, including after a successful CLI exit.
+    // Kill only the detached group created by this session; never join its readers.
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
     // Never join stdout: descendants may retain its pipe after the child exits.
     child.stdout.destroy();
     child.stderr.destroy();

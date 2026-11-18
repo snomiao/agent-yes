@@ -740,3 +740,8 @@ Native stream flags also work after the wrapper separator, for example
 The initial stream task is passed verbatim, without PTY init-message envelopes.
 The registry mirrors active/idle turn transitions, and event files preserve stream
 identity when an older registry writer drops the transport field.
+
+This capture-only change rejects `ay send` for stream sessions rather than claiming
+terminal input was delivered. Replay-confirmed stream delivery is added in #562.
+Successful CLI exit also cleans up its detached process group, including remaining
+descendants that inherited the output pipes.
