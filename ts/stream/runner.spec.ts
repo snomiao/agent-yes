@@ -1,6 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { Readable } from "node:stream";
 import { expect, it, vi } from "vitest";
 import { runStream } from "./runner.ts";
 
@@ -64,9 +65,10 @@ it.skipIf(process.platform === "win32")(
       const mock = path.join(cwd, "output.cjs");
       await writeFile(
         mock,
-        `process.stdin.resume();
+        `const chunks=[];
+process.stdin.on('data',chunk=>chunks.push(chunk));
 process.stdin.on('end', () => {
- process.stdout.write(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:JSON.stringify(process.argv.slice(2))}]}})+'\\n');
+ process.stdout.write(JSON.stringify({type:'assistant',message:{content:[{type:'text',text:JSON.stringify({args:process.argv.slice(2),input:Buffer.concat(chunks).toString('utf8')})}]}})+'\\n');
  process.stdout.write(JSON.stringify({type:'result',is_error:false})+'\\n');
 });`,
       );
@@ -77,6 +79,7 @@ process.stdin.on('end', () => {
           binary: process.execPath,
           cliArgs: [mock, "--output-format", "stream-json"],
           prompt: "hello",
+          input: Readable.from(["piped\ntext"]),
         }),
       ).toBe(0);
       const record = JSON.parse(
@@ -84,7 +87,7 @@ process.stdin.on('end', () => {
       );
       expect(record.fifo_file).toBeNull();
       expect(await readFile(record.log_file, "utf8")).toContain(
-        'assistant: ["--output-format","stream-json","hello"]',
+        'assistant: {"args":["--output-format","stream-json","hello"],"input":"piped\\ntext"}',
       );
     } finally {
       stdout.mockRestore();

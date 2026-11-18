@@ -19,6 +19,7 @@ import { agentYesHome } from "../agentYesHome.ts";
 import { appendGlobalPid, updateGlobalPidStatus } from "../globalPidIndex.ts";
 import { nativeFlagValue } from "./launch.ts";
 import { ClaudeAdapter } from "./claude.ts";
+import { forwardInput } from "./input.ts";
 import { renderEvent } from "./transcript.ts";
 import { register as registerReaper } from "../reaper.ts";
 import { derivePermissions } from "../agentPermissions.ts";
@@ -194,7 +195,7 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
     if (jsonInput && options.prompt) adapter.send(options.prompt);
     if (jsonInput && options.input)
       releaseInput = forwardJsonInput(options.input, child.stdin, replay, stop);
-    if (!jsonInput) child.stdin.end();
+    if (!jsonInput) releaseInput = forwardInput(options.input, child.stdin, stop);
     let code = await exited;
     // Reap writers before waiting for EOF. On a killed-child path abandon the
     // readers; even normal exit gets a deadline in case an escaped group holds a pipe.

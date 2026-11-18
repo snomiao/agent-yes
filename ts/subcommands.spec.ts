@@ -914,7 +914,7 @@ describe("subcommands.cmdLs human table", () => {
     } finally {
       cap.restore();
     }
-    expect(cap.text).toMatch(/PID\s+CLI\s+STATUS\s+AGE\s+CWD\s+NOTE\/PROMPT/);
+    expect(cap.text).toMatch(/PID\s+CLI\s+STATUS\s+AGE\s+COST\s+CWD\s+NOTE\/PROMPT/);
     expect(cap.text).toMatch(new RegExp(`${process.pid}\\s`));
     expect(cap.text).toMatch(/claude/);
     expect(cap.text).toMatch(/table format test/);
@@ -1006,7 +1006,7 @@ describe("subcommands.cmdLs human table", () => {
     }
     // The local table has an AGE column under NOTE/PROMPT; the aggregated remote
     // table has a HOST column and no AGE. --local must pick the former.
-    expect(cap.text).toMatch(/PID\s+CLI\s+STATUS\s+AGE\s+CWD\s+NOTE\/PROMPT/);
+    expect(cap.text).toMatch(/PID\s+CLI\s+STATUS\s+AGE\s+COST\s+CWD\s+NOTE\/PROMPT/);
     expect(cap.text).not.toMatch(/^HOST\s/m);
     expect(cap.text).toMatch(new RegExp(`${process.pid}\\s`));
   });
