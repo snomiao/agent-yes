@@ -9,6 +9,9 @@ import {
   unlinkSync,
 } from "node:fs";
 import { once } from "node:events";
+import { finished } from "node:stream/promises";
+import type { Readable } from "node:stream";
+import { forwardJsonInput } from "./jsonInput.ts";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -29,6 +32,8 @@ export interface StreamRunOptions {
   prompt?: string;
   binary?: string;
   env?: NodeJS.ProcessEnv;
+  input?: Readable;
+  outputDrainTimeoutMs?: number;
 }
 
 /** A pipe-backed session, with the same discovery/FIFO paths as PTY sessions. */
@@ -64,6 +69,18 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
   let fd: number | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   const logs: ReturnType<typeof createWriteStream>[] = [];
+  let releaseInput = () => {};
+  let groupReaped = false;
+  let captureError: Error | undefined;
+  const reapGroup = () => {
+    if (groupReaped) return;
+    groupReaped = true;
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
+  };
   let liveStatus: "active" | "idle" = "active";
   let registered = false;
   let pidUpdates = Promise.resolve();
@@ -72,6 +89,7 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
     pidUpdates = pidUpdates.then(() => updateGlobalPidStatus(pid, { mode: "stream", status }));
   };
   const stop = () => {
+    if (groupReaped) return;
     try {
       process.kill(-pid, "SIGTERM");
     } catch {
@@ -96,7 +114,10 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
       }
     };
     for (const log of logs) {
-      log.on("error", stop);
+      log.on("error", (error) => {
+        captureError = error;
+        stop();
+      });
       log.on("drain", () => {
         if (logs.every((stream) => !stream.writableNeedDrain)) {
           child.stdout.resume();
@@ -141,6 +162,17 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
       writeLog(raw, chunk);
       process.stderr.write(chunk);
     });
+    // Register before yielding so fast exits cannot outrun the EOF observers.
+    const outputDone = Promise.all([
+      finished(child.stdout, { cleanup: true }),
+      finished(child.stderr, { cleanup: true }),
+    ]).then(
+      () => true,
+      (error) => {
+        captureError = error;
+        return false;
+      },
+    );
     child.stdin.on("error", stop);
     let input = "";
     const inputDecoder = new StringDecoder("utf8");
@@ -197,19 +229,41 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
     if (jsonInput && options.prompt) adapter.send(options.prompt);
+    if (jsonInput && options.input)
+      releaseInput = forwardJsonInput(options.input, child.stdin, replay, stop);
     if (!jsonInput) child.stdin.end();
-    const code = await exited;
+    let code = await exited;
+    // Reap writers before waiting for EOF. On a killed-child path abandon the
+    // readers; even normal exit gets a deadline in case an escaped group holds a pipe.
+    reapGroup();
+    if (child.signalCode === null) {
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      const drained = await Promise.race([
+        outputDone,
+        new Promise<boolean>((resolve) => {
+          timeout = setTimeout(() => resolve(false), options.outputDrainTimeoutMs ?? 5000);
+        }),
+      ]);
+      if (timeout) clearTimeout(timeout);
+      if (!drained)
+        captureError ??= new Error("Timed out draining stream output after process-group cleanup");
+    }
+    if (captureError) {
+      code ||= 1;
+      emit({ type: "error", message: captureError.message, fatal: true });
+    }
     if (code) emit({ type: "error", message: `Claude exited (${code})`, fatal: true });
     await pidUpdates;
     await updateGlobalPidStatus(pid, {
       mode: "stream",
       status: "exited",
       exit_code: code,
-      exit_reason: "stream-exit",
+      exit_reason: captureError ? "stream-output-error" : "stream-exit",
     });
     return code;
   } finally {
     if (timer) clearInterval(timer);
+    releaseInput();
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     if (fd !== undefined) {
@@ -218,14 +272,8 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
         unlinkSync(fifo);
       } catch {}
     }
-    // The group can outlive its leader, including after a successful CLI exit.
-    // Kill only the detached group created by this session; never join its readers.
-    try {
-      process.kill(-pid, "SIGKILL");
-    } catch {
-      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    }
-    // Never join stdout: descendants may retain its pipe after the child exits.
+    reapGroup();
+    // A timeout abandons these readers rather than joining inherited pipes.
     child.stdout.destroy();
     child.stderr.destroy();
     child.stdin.destroy();

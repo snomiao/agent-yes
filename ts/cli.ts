@@ -187,7 +187,13 @@ if (streamLaunch) {
     process.exit(0);
   }
   process.exit(
-    await runStream({ ...config, ...streamLaunch, cliArgs: args, binary: streamCliConfig?.binary }),
+    await runStream({
+      ...config,
+      ...streamLaunch,
+      cliArgs: args,
+      binary: streamCliConfig?.binary,
+      input: process.stdin.isTTY ? undefined : process.stdin,
+    }),
   );
 }
 
