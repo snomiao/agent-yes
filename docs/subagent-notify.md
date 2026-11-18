@@ -253,30 +253,12 @@ parent addresses its own inbox with no argument.
   (tail + git head), daemon lifecycle.
 - `ts/subcommands.ts` — `ay notify` / `ay notifyd` CLI.
 
-## Unanswered prompts: the runner's own alert
+## Sending to an unanswered prompt
 
-Everything above reaches a **parent**, and only while `ay notifyd` runs. A lane
-whose parent is gone, or one nobody watches, can sit at a permission/selection
-prompt indefinitely: a prompt prints nothing and shows no spinner, so the stall
-watchdogs never trip, and every message sent to it is parked. So the Rust runner
-watches for this itself, independent of notifyd:
-
-- `AGENT_YES_NEEDS_INPUT_ALERT_SECS` (default `600`, `0` disables): once the agent
-  has sat at an unanswered `needsInput` prompt this long, the runner alerts
-  **once per episode**, and again with `RUNNING` when the prompt is answered.
-- The alert fires the `AGENT_YES_MESSAGE_WEBHOOK` URL (status `NEEDS_INPUT`,
-  with the minutes waited and the prompt's question) and, if set, the shell
-  command in `AGENT_YES_ON_NEEDS_INPUT`, run detached with `AY_ALERT_PID`,
-  `AY_ALERT_CWD`, `AY_ALERT_QUESTION` and `AY_ALERT_WAIT_SECS` in its
-  environment. Point it at whoever should act, for example:
-
-  ```bash
-  export AGENT_YES_ON_NEEDS_INPUT='ay send <orchestrator-id> "pid $AY_ALERT_PID waits at a prompt: $AY_ALERT_QUESTION"'
-  ```
-
-Senders see it too: `ay send` to an agent at a prompt still parks the message
-(it is delivered once the prompt clears) but exits **6** instead of 4, names the
-prompt as the reason, and prints the `ay select <pid> <N>` that unblocks it.
+When a permission or selection menu blocks delivery, `ay send` parks the
+message and exits with code **6**. Its diagnostic identifies the prompt and
+shows the `ay select <pid> <N>` command for answering it. The parked message
+can proceed when the prompt clears. Other parked sends use exit code 4.
 
 ## Known limitations (tracked as follow-ups)
 
