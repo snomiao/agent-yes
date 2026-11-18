@@ -3,13 +3,24 @@ import { chromium, type WebSocketRoute } from "playwright";
 import { expect, it } from "vitest";
 
 it("exchanges snapshots directly and reads them offline without re-pairing", async () => {
-  const browser = await chromium.launch();
+  const browser = await chromium.launch({
+    args: ["--allow-loopback-in-peer-connection", "--disable-features=WebRtcHideLocalIpsWithMdns"],
+  });
   const sockets: WebSocketRoute[] = [];
   const signals: string[] = [];
   try {
     const pages = await Promise.all(
       ["alpha", "beta"].map(async (name) => {
         const context = await browser.newContext();
+        // Keep CI independent of external STUN and multicast DNS. Chromium
+        // still negotiates a real encrypted peer connection and data channel.
+        await context.addInitScript(() => {
+          window.RTCPeerConnection = class extends RTCPeerConnection {
+            constructor(options?: RTCConfiguration) {
+              super({ ...options, iceServers: [] });
+            }
+          };
+        });
         await context.route("https://example.test/**", async (route) => {
           const path = new URL(route.request().url()).pathname;
           if (path.endsWith(".js")) {

@@ -8,6 +8,8 @@ export function exchange(snapshot, receive, report) {
     received = false,
     acknowledged = false,
     sent = false;
+  let candidateTimer,
+    descriptionSent = false;
   const timeout = setTimeout(
     () => finish("Pairing timed out. Start again on both devices."),
     85000,
@@ -16,6 +18,7 @@ export function exchange(snapshot, receive, report) {
     if (ended) return;
     ended = true;
     clearTimeout(timeout);
+    clearTimeout(candidateTimer);
     pc.close();
     ws.close();
     report(message);
@@ -62,9 +65,17 @@ export function exchange(snapshot, receive, report) {
     dc.onerror = () => finish("Device connection interrupted.");
   }
   pc.ondatachannel = (e) => channel(e.channel);
+  function sendDescription() {
+    if (descriptionSent || ended || ws.readyState !== WebSocket.OPEN) return;
+    descriptionSent = true;
+    clearTimeout(candidateTimer);
+    ws.send(JSON.stringify(pc.localDescription));
+  }
   pc.onicecandidate = ({ candidate }) => {
-    if (!candidate && !ended && ws.readyState === WebSocket.OPEN)
-      ws.send(JSON.stringify(pc.localDescription));
+    if (!candidate) sendDescription();
+    // A blocked STUN server can delay ICE completion even when both peers
+    // already have usable local addresses. Give it time to find a public one.
+    else if (!candidateTimer) candidateTimer = setTimeout(sendDescription, 6000);
   };
   ws.onmessage = async ({ data }) => {
     try {
