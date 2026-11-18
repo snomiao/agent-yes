@@ -3,6 +3,7 @@ import path from "node:path";
 import type { GlobalPidRecord } from "../globalPidIndex.ts";
 import type { LiveState } from "../lsWatch.ts";
 import type { AyEvent } from "./types.ts";
+import { readCumulativeCost } from "./cost.ts";
 
 export function eventFile(record: Pick<GlobalPidRecord, "cwd" | "pid" | "log_file">): string {
   return (
@@ -79,5 +80,10 @@ export function streamSnapshot(events: AyEvent[]): {
 }
 
 export async function readStreamSnapshot(record: GlobalPidRecord) {
-  return streamSnapshot(await readEvents(eventFile(record)));
+  const file = eventFile(record);
+  const [events, costUsd] = await Promise.all([
+    readEvents(file),
+    readCumulativeCost(file, record.started_at),
+  ]);
+  return { ...streamSnapshot(events), costUsd };
 }
