@@ -1486,6 +1486,29 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
                 "features": ["rtc-stdin-v1"],
             }),
         ),
+        ("GET", "/api/schedule-summary") => {
+            // The JS CLI owns both local schedule sources. Its JSON mode only
+            // exports timetable fields and works without an account or network.
+            let launcher = std::env::var_os("AGENT_YES_JS_CLI").unwrap_or_else(|| "ay".into());
+            let mut cmd = tokio::process::Command::new(launcher);
+            if let Some(env) = super::shell_env::login_shell_env() {
+                cmd.envs(env);
+            }
+            cmd.args(["schedule", "list", "--json"])
+                .stdin(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .kill_on_drop(true);
+            if let Ok(Ok(output)) =
+                tokio::time::timeout(std::time::Duration::from_secs(6), cmd.output()).await
+            {
+                if output.status.success() {
+                    if let Ok(rows) = serde_json::from_slice::<Vec<Value>>(&output.stdout) {
+                        return json_res(200, &Value::Array(rows));
+                    }
+                }
+            }
+            text(503, "Schedule unavailable")
+        }
         ("GET", "/api/host") => json_res(200, &host_info()),
         ("GET", p) if p.starts_with("/api/size/") => {
             let kw = url_decode(&p["/api/size/".len()..]);

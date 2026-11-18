@@ -223,6 +223,7 @@ Send a message to an agent on a 5-field cron (timezone `$AY_CRON_TZ`, default As
 ay cron "*/30 9-18 * * 1-5" lane:alpha "progress report please ({now})"
 ay cron ls                        # id, cron, target, next run, last result
 ay cron rm c1
+ay schedule list --json           # read the local timetable as JSON
 ay schedules ls                   # everything: cron reminders + legacy `ay schedule` jobs
 ay schedules daemon status        # the per-machine scheduler daemon
 ```

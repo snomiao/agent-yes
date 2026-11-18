@@ -3411,6 +3411,15 @@ export async function cmdServe(rest: string[]): Promise<number> {
       });
     }
 
+    if (req.method === "GET" && p === "/api/schedule-summary") {
+      try {
+        const { scheduleSummary } = await import("./schedule.ts");
+        return Response.json(await scheduleSummary(), { headers: { "Cache-Control": "no-store" } });
+      } catch {
+        return new Response("Schedule unavailable", { status: 503 });
+      }
+    }
+
     // GET /api/host — this machine as an ENVIRONMENT: identity + live health
     // (load, memory) + what the environment permits (capability flags, otoji
     // environment-node style). The /rgui viewer renders it as the host env node
@@ -5200,6 +5209,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return serveUiFile("rgui/dist/main.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/r/main.js.map")
       return serveUiFile("rgui/dist/main.js.map", "application/json");
+    if (req.method === "GET" && (p === "/device-sync.js" || p === "/device-transfer.js"))
+      return serveUiFile(p.slice(1), "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/room-client.js")
       return serveUiFile("room-client.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/console-logic.js")
