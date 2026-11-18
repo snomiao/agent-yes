@@ -82,7 +82,10 @@ describe("console DOM behaviour", () => {
 
   it("reveals a deep-linked row once and keeps the list scrollable afterward", async () => {
     const fleet = Array.from({ length: 55 }, (_, i) => ({
-      pid: 2000 + i, cli: "codex", status: "active", title: "Session " + i,
+      pid: 2000 + i,
+      cli: "codex",
+      status: "active",
+      title: "Session " + i,
     }));
     const fixture = await startServer(fleet);
     try {
@@ -90,17 +93,26 @@ describe("console DOM behaviour", () => {
       try {
         const row = page.locator('#list .sel[data-key="local#2054"]');
         await row.waitFor();
-        const visible = () => row.evaluate(el => {
-          const list = el.closest("#list")!.getBoundingClientRect();
-          const rect = el.getBoundingClientRect();
-          return rect.top >= list.top && rect.bottom <= list.bottom;
+        const visible = () =>
+          row.evaluate((el) => {
+            const list = el.closest("#list")!.getBoundingClientRect();
+            const rect = el.getBoundingClientRect();
+            // scrollTop is rounded to a CSS pixel while row bounds are fractional.
+            return rect.top >= list.top - 1 && rect.bottom <= list.bottom + 1;
+          });
+        await expect.poll(visible, { timeout: 5000 }).toBe(true);
+        await page.locator("#list").evaluate((el) => {
+          el.scrollTop = 0;
         });
-        await expect.poll(visible).toBe(true);
-        await page.locator("#list").evaluate(el => { el.scrollTop = 0; });
+        expect(await visible()).toBe(false);
         await page.click("#open-search");
         expect(await page.locator("#omni-input").isVisible()).toBe(true);
-      } finally { await ctx.close(); }
-    } finally { fixture.close(); }
+      } finally {
+        await ctx.close();
+      }
+    } finally {
+      fixture.close();
+    }
   });
 
   it("renders one compact row per agent; identity readable in full, default claude omitted", async () => {
