@@ -9,7 +9,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { once } from "node:events";
-import { finished } from "node:stream/promises";
+import { captureOutput, readNativeLines } from "./output.ts";
 import type { Readable } from "node:stream";
 import { forwardJsonInput } from "./jsonInput.ts";
 import { randomUUID } from "node:crypto";
@@ -107,24 +107,15 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
     const native = createWriteStream(`${base}.native.jsonl`, { mode: 0o600 });
     const raw = createWriteStream(`${base}.raw.log`, { mode: 0o600 });
     logs.push(events, native, raw);
-    const writeLog = (log: ReturnType<typeof createWriteStream>, text: string | Buffer) => {
-      if (!log.write(text)) {
-        child.stdout.pause();
-        child.stderr.pause();
-      }
-    };
-    for (const log of logs) {
-      log.on("error", (error) => {
+    const { write: writeLog, drain: drainOutput } = captureOutput(
+      child.stdout,
+      child.stderr,
+      logs,
+      (error) => {
         captureError = error;
         stop();
-      });
-      log.on("drain", () => {
-        if (logs.every((stream) => !stream.writableNeedDrain)) {
-          child.stdout.resume();
-          child.stderr.resume();
-        }
-      });
-    }
+      },
+    );
     const emit = (event: AyEvent) => {
       const nextStatus =
         event.type === "turn_end" ? "idle" : event.type === "turn_start" ? "active" : liveStatus;
@@ -137,42 +128,14 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
       writeLog(raw, text);
       process.stdout.write(text);
     };
-    let pending = "";
-    const decoder = new StringDecoder("utf8");
-    child.stdout.on("data", (chunk: Buffer) => {
-      pending += decoder.write(chunk);
-      let end: number;
-      while ((end = pending.indexOf("\n")) !== -1) {
-        const line = pending.slice(0, end);
-        pending = pending.slice(end + 1);
-        if (!line.trim()) continue;
-        writeLog(native, line + "\n");
-        for (const event of adapter.parse(line)) emit(event);
-      }
-    });
-    child.stdout.on("end", () => {
-      pending += decoder.end();
-      if (pending.trim()) {
-        writeLog(native, pending + "\n");
-        for (const event of adapter.parse(pending)) emit(event);
-      }
-      pending = "";
+    readNativeLines(child.stdout, (line) => {
+      writeLog(native, line + "\n");
+      for (const event of adapter.parse(line)) emit(event);
     });
     child.stderr.on("data", (chunk: Buffer) => {
       writeLog(raw, chunk);
       process.stderr.write(chunk);
     });
-    // Register before yielding so fast exits cannot outrun the EOF observers.
-    const outputDone = Promise.all([
-      finished(child.stdout, { cleanup: true }),
-      finished(child.stderr, { cleanup: true }),
-    ]).then(
-      () => true,
-      (error) => {
-        captureError = error;
-        return false;
-      },
-    );
     child.stdin.on("error", stop);
     let input = "";
     const inputDecoder = new StringDecoder("utf8");
@@ -236,18 +199,11 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
     // Reap writers before waiting for EOF. On a killed-child path abandon the
     // readers; even normal exit gets a deadline in case an escaped group holds a pipe.
     reapGroup();
-    if (child.signalCode === null) {
-      let timeout: ReturnType<typeof setTimeout> | undefined;
-      const drained = await Promise.race([
-        outputDone,
-        new Promise<boolean>((resolve) => {
-          timeout = setTimeout(() => resolve(false), options.outputDrainTimeoutMs ?? 5000);
-        }),
-      ]);
-      if (timeout) clearTimeout(timeout);
-      if (!drained)
-        captureError ??= new Error("Timed out draining stream output after process-group cleanup");
-    }
+    const outputError = await drainOutput(
+      child.signalCode !== null,
+      options.outputDrainTimeoutMs ?? 5000,
+    );
+    captureError ??= outputError;
     if (captureError) {
       code ||= 1;
       emit({ type: "error", message: captureError.message, fatal: true });
