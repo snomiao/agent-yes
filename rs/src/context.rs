@@ -1570,7 +1570,12 @@ impl AgentContext {
         use crate::quota_wait::QuotaAction;
         let screen = self.vterm.contents();
         let working = self.cli_config.working.iter().any(|p| p.is_match(&screen));
-        let ready = self.cli_config.ready.iter().any(|p| p.is_match(&screen));
+        let ready = self.cli_config.ready.iter().any(|p| p.is_match(&screen))
+            && !self
+                .cli_config
+                .needs_input
+                .iter()
+                .any(|p| p.is_match(&screen));
         // Same gate as the auto-retry: idle at the prompt, and a few quiet
         // seconds so a line someone is typing is never typed over.
         let at_prompt = should_fire_retry(

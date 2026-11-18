@@ -196,15 +196,13 @@ pub fn parse_usage(screen: &str) -> Vec<UsageLimit> {
     out
 }
 
-/// Seconds until the quota is expected back: the banner's reset, pushed out to
-/// the refresh of any limit `/usage` shows as spent.
-pub fn expected_reset_secs(banner_reset: Option<u64>, limits: &[UsageLimit]) -> u64 {
-    let banner = banner_reset.unwrap_or(DEFAULT_RESET_SECS);
+/// Longest refresh countdown among the spent limits in this panel.
+fn spent_refresh_secs(limits: &[UsageLimit]) -> Option<u64> {
     limits
         .iter()
         .filter(|l| l.remaining_pct < SPENT_PCT)
         .filter_map(|l| l.refresh_secs)
-        .fold(banner, u64::max)
+        .max()
 }
 
 /// Wait before resend number `attempt` (0-based): 1, 2, 4, 8 … minutes, capped
@@ -272,7 +270,8 @@ pub struct QuotaWait {
     /// Expected reset, as unix ms (published) and as an Instant (scheduling).
     pub reset_unix_ms: i64,
     pub reset_at: Instant,
-    banner_reset: Option<u64>,
+    // A panel countdown is relative to the time we read it, even after another banner.
+    usage_reset: Option<(Instant, i64)>,
     /// Failed resends so far (0 until the first resend fails).
     pub attempt: u32,
     pub next_at: Instant,
@@ -388,11 +387,14 @@ impl QuotaTracker {
                 if !limits.is_empty() {
                     w.limits = limits;
                     w.usage = UsagePhase::Close;
-                    let secs = expected_reset_secs(w.banner_reset, &w.limits);
-                    let since = now.saturating_duration_since(w.started_at).as_secs();
-                    let left = secs.saturating_sub(since);
-                    w.reset_at = now + Duration::from_secs(left);
-                    w.reset_unix_ms = add_secs_ms(now_ms, left);
+                    w.usage_reset = spent_refresh_secs(&w.limits)
+                        .map(|secs| (now + Duration::from_secs(secs), add_secs_ms(now_ms, secs)));
+                    if let Some(reset) = w.usage_reset {
+                        if reset.0 > w.reset_at {
+                            (w.reset_at, w.reset_unix_ms) = reset;
+                        }
+                    }
+                    let left = w.reset_at.saturating_duration_since(now).as_secs();
                     let wait = backoff_secs(w.attempt, left);
                     let next = (w.started_at + Duration::from_secs(wait)).max(now);
                     w.next_unix_ms =
@@ -413,7 +415,7 @@ impl QuotaTracker {
 
         match self.wait.as_mut() {
             None => {
-                let reset = expected_reset_secs(banner.reset_secs, &[]);
+                let reset = banner.reset_secs.unwrap_or(DEFAULT_RESET_SECS);
                 let wait = backoff_secs(0, reset);
                 let resend = match &self.last_input {
                     Some((bytes, at))
@@ -432,7 +434,7 @@ impl QuotaTracker {
                     started_at: now,
                     reset_unix_ms: add_secs_ms(now_ms, reset),
                     reset_at: now + Duration::from_secs(reset),
-                    banner_reset: banner.reset_secs,
+                    usage_reset: None,
                     attempt: 0,
                     next_at: now + Duration::from_secs(wait),
                     next_unix_ms: add_secs_ms(now_ms, wait),
@@ -446,11 +448,15 @@ impl QuotaTracker {
             }
             Some(w) => {
                 w.attempt = w.attempt.saturating_add(1);
-                w.banner_reset = banner.reset_secs;
-                let reset = expected_reset_secs(banner.reset_secs, &w.limits);
-                w.reset_at = now + Duration::from_secs(reset);
-                w.reset_unix_ms = add_secs_ms(now_ms, reset);
-                let wait = backoff_secs(w.attempt, reset);
+                let secs = banner.reset_secs.unwrap_or(DEFAULT_RESET_SECS);
+                let banner_reset = (now + Duration::from_secs(secs), add_secs_ms(now_ms, secs));
+                (w.reset_at, w.reset_unix_ms) = w
+                    .usage_reset
+                    .map_or(banner_reset, |reset| reset.max(banner_reset));
+                let wait = backoff_secs(
+                    w.attempt,
+                    w.reset_at.saturating_duration_since(now).as_secs(),
+                );
                 w.next_at = now + Duration::from_secs(wait);
                 w.next_unix_ms = add_secs_ms(now_ms, wait);
                 w.probe_at = None;
@@ -474,7 +480,10 @@ impl QuotaTracker {
                 return QuotaAction::None;
             }
             UsagePhase::Typed(t) => {
-                if now.saturating_duration_since(t).as_millis() as u64 >= USAGE_ENTER_DELAY_MS {
+                if at_prompt
+                    && now.saturating_duration_since(t).as_millis()
+                        >= u128::from(USAGE_ENTER_DELAY_MS)
+                {
                     w.usage = UsagePhase::Entered(now);
                     return QuotaAction::EnterUsage;
                 }
@@ -624,11 +633,9 @@ Scroll · pgup/pgdown Page · ctrl+end Bottom · ctrl+home Top · esc Close\n";
                 refresh_secs: Some(2 * 3600),
             },
         ];
-        // The banner says 5 minutes, but the five-hour limit is at 0%.
-        assert_eq!(expected_reset_secs(Some(300), &spent), 2 * 3600);
-        // Only spent limits count: a healthy weekly limit refreshing later is ignored.
-        assert_eq!(expected_reset_secs(Some(300), &spent[..1]), 300);
-        assert_eq!(expected_reset_secs(None, &[]), DEFAULT_RESET_SECS);
+        assert_eq!(spent_refresh_secs(&spent), Some(2 * 3600));
+        assert_eq!(spent_refresh_secs(&spent[..1]), None);
+        assert_eq!(spent_refresh_secs(&[]), None);
     }
 
     #[test]
@@ -666,7 +673,10 @@ Scroll · pgup/pgdown Page · ctrl+end Bottom · ctrl+home Top · esc Close\n";
         assert_eq!(t.on_tick(now, true), QuotaAction::TypeUsage);
         let now = now + Duration::from_millis(USAGE_ENTER_DELAY_MS);
         assert_eq!(t.on_tick(now, true), QuotaAction::EnterUsage);
-        assert_eq!(t.on_screen(screen, now, ms), ScreenEvent::UsageRead);
+        assert_eq!(
+            t.on_screen(screen, now, ms + USAGE_ENTER_DELAY_MS as i64),
+            ScreenEvent::UsageRead
+        );
         assert_eq!(t.on_tick(now, true), QuotaAction::CloseUsage);
         now
     }
@@ -742,9 +752,44 @@ Scroll · pgup/pgdown Page · ctrl+end Bottom · ctrl+home Top · esc Close\n";
         let spent = USAGE.replace("49.82%", "0.00%");
         run_usage(&mut t, t0, ms0, &spent);
         let w = t.wait.as_ref().unwrap();
-        assert_eq!(w.reset_unix_ms, ms0 + (143 * 3600 + 9 * 60) * 1000);
+        assert_eq!(
+            w.reset_unix_ms,
+            ms0 + USAGE_ENTER_DELAY_MS as i64 + (143 * 3600 + 9 * 60) * 1000
+        );
         // The first rung is still one minute: the cap only bounds the ladder.
         assert_eq!(w.next_at, t0 + Duration::from_secs(60));
+    }
+
+    #[test]
+    fn enter_rechecks_the_prompt_after_typing_usage() {
+        let now = Instant::now();
+        let mut tracker = QuotaTracker::new();
+        tracker.on_screen(&banner_with("first", "1m"), now, 0);
+        assert_eq!(tracker.on_tick(now, true), QuotaAction::TypeUsage);
+        let later = now + Duration::from_millis(USAGE_ENTER_DELAY_MS);
+        assert_eq!(tracker.on_tick(later, false), QuotaAction::None);
+        assert_eq!(tracker.on_tick(later, true), QuotaAction::EnterUsage);
+    }
+
+    #[test]
+    fn a_fresh_banner_preserves_the_absolute_spent_limit_deadline() {
+        let start = Instant::now();
+        let mut tracker = QuotaTracker::new();
+        tracker.on_screen(&banner_with("first", "1m"), start, 0);
+        let observed = run_usage(
+            &mut tracker,
+            start,
+            0,
+            "Weekly Limit Remaining\n0.00%\nRefreshes in 2h\n",
+        );
+        tracker.on_screen(
+            &banner_with("second", "1m"),
+            start + Duration::from_secs(60),
+            60_000,
+        );
+        let wait = tracker.wait.as_ref().unwrap();
+        assert_eq!(wait.reset_at, observed + Duration::from_secs(7200));
+        assert_eq!(wait.reset_unix_ms, USAGE_ENTER_DELAY_MS as i64 + 7_200_000);
     }
 
     #[test]
