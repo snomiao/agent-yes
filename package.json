@@ -65,6 +65,8 @@
     "!ts/terminal/*.spec.ts",
     "dist/**/*.js",
     "lab/ui/console-logic.js",
+    "lab/ui/device-sync.js",
+    "lab/ui/device-transfer.js",
     "lab/ui/e2e.d.ts",
     "lab/ui/e2e.js",
     "lab/ui/icon.svg",

@@ -51,6 +51,7 @@
   "assets": { "directory": "./public", "binding": "ASSETS", "run_worker_first": true },
   "durable_objects": {
     "bindings": [
+      { "name": "DEVICE_SIGNAL", "class_name": "DeviceSignal" },
       { "name": "ROOMS", "class_name": "Room" },
       { "name": "EXPOSURES", "class_name": "Exposure" },
     ],
@@ -59,6 +60,7 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Room"] },
     { "tag": "v2", "new_sqlite_classes": ["Exposure"] },
+    { "tag": "v3", "new_sqlite_classes": ["DeviceSignal"] },
   ],
   // One Worker, two custom domains: the UI on agent-yes.com, signaling on
   // s.agent-yes.com. Custom domains auto-provision DNS in the zone.

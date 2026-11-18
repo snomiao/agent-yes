@@ -19,7 +19,11 @@
 
 import { AUTH_PATH, authFetch, type AuthEnv } from "./auth";
 
+import { signal } from "./device-signal";
+export { DeviceSignal } from "./device-signal";
+
 export interface Env extends AuthEnv {
+  DEVICE_SIGNAL: DurableObjectNamespace;
   ROOMS: DurableObjectNamespace;
   EXPOSURES: DurableObjectNamespace;
   ASSETS: Fetcher;
@@ -191,6 +195,7 @@ export default {
     // The lab subdomain is served entirely out of the /lab asset directory.
     if (host === LAB_HOST) return labFetch(url, req, env);
 
+    if (url.pathname === "/api/device-pair") return signal(req, env);
     if (url.pathname === AUTH_PATH || url.pathname.startsWith(`${AUTH_PATH}/`)) {
       return authFetch(req, env);
     }

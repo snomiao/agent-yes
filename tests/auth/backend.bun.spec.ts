@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { signal } from "../../lab/ui/cf/device-signal";
 import { Database } from "bun:sqlite";
 import { betterAuth } from "better-auth";
 import { serializeSignedCookie } from "better-call";
@@ -115,6 +116,29 @@ describe("Google auth backend", () => {
     expect(cookies).toMatch(/^__Host-agent-yes\./);
     expect(cookies).not.toMatch(/\bDomain=/i);
     expect(db.query("SELECT count(*) AS total FROM auth_verification").get()).toEqual({ total: 1 });
+  });
+
+  it("pairs only same-origin sessions and chooses the room from the verified account", async () => {
+    const { env } = await fixture();
+    const ctx = await betterAuth(authOptions(env)).$context;
+    const rooms: string[] = [];
+    const bindings = { ...env, DEVICE_SIGNAL: {
+      idFromName: (id: string) => id,
+      get: (id: string) => ({ fetch: () => { rooms.push(id); return new Response("paired"); } }),
+    } } as unknown as Parameters<typeof signal>[1];
+    const pair = (cookie = "", origin = "https://agent-yes.com") => signal(new Request(
+      "https://agent-yes.com/api/device-pair?account=other", {headers:{Origin:origin, Upgrade:"websocket", Cookie:cookie}}),bindings);
+    expect((await pair()).status).toBe(401);
+    for (const label of ["first","second"]) {
+      const user = await ctx.internalAdapter.createUser({name:label, email:label+"@example.com", emailVerified:true},
+        {method:"oauth",oauth:{providerId:"google"}});
+      const session = await ctx.internalAdapter.createSession(user.id);
+      const cookie = (await serializeSignedCookie(ctx.authCookies.sessionToken.name,session.token,env.BETTER_AUTH_SECRET!)).split(";")[0]!;
+      expect((await pair(cookie,"https://other.example")).status).toBe(403);
+      expect((await pair(cookie)).status).toBe(200);
+      expect(rooms.at(-1)).toBe(user.id);
+    }
+    expect(new Set(rooms).size).toBe(2);
   });
 
   it("reads a signed persistent session and revokes it on sign-out", async () => {

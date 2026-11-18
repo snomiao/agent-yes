@@ -1,3 +1,7 @@
+import { execFile } from "node:child_process";
+import { readFile } from "node:fs/promises";
+import { promisify } from "node:util";
+import { parseStore, storeFile } from "./schedules.ts";
 import { createHash } from "node:crypto";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { resolveSpawnCwd } from "./workspaceConfig.ts";
@@ -47,7 +51,53 @@ async function run(cmd: string[], capture = false): Promise<{ code: number; out:
   return { code: (await p.exited) ?? 1, out };
 }
 
+/** The read-only timetable shared by the CLI and device sync. Process manager
+ * records also contain command arguments and environment; only project times and names. */
+export async function scheduleSummary() {
+  const file = await readFile(storeFile(), "utf8").catch((err: NodeJS.ErrnoException) => {
+    if (err.code === "ENOENT") return null;
+    throw err;
+  });
+  const reminders = parseStore(file).entries.map(({ name, cron, tz, enabled }) => ({
+    name,
+    cron,
+    tz,
+    enabled,
+  }));
+  const ox = Bun.which("oxmgr");
+  if (!ox) return reminders;
+  await ensureNodeRuntime();
+  const { stdout } = await promisify(execFile)(ox, ["list", "--json"], {
+    encoding: "utf8",
+    timeout: 3000,
+    maxBuffer: 8 * 1024 * 1024,
+    env: liveEnv(),
+  });
+  const rows: { name?: string; cron_restart?: string; desired_state?: string }[] =
+    JSON.parse(stdout);
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  return [
+    ...rows.flatMap((row) =>
+      typeof row?.name === "string" &&
+      row.name.startsWith(SCHED_PREFIX) &&
+      typeof row.cron_restart === "string"
+        ? [{ name: row.name, cron: row.cron_restart, tz, enabled: row.desired_state !== "stopped" }]
+        : [],
+    ),
+    ...reminders,
+  ];
+}
+
 export async function cmdSchedule(rest: string[]): Promise<number> {
+  if ((rest[0] === "list" || rest[0] === "ls") && rest[1] === "--json") {
+    try {
+      console.log(JSON.stringify(await scheduleSummary()));
+      return 0;
+    } catch {
+      console.error("ay schedule: timetable unavailable");
+      return 1;
+    }
+  }
   // On a bun-only box oxmgr's `#!/usr/bin/env node` launcher needs the node→bun
   // shim before ANY oxmgr call below can exec (same fix as serve-install).
   await ensureNodeRuntime();
@@ -68,7 +118,7 @@ export async function cmdSchedule(rest: string[]): Promise<number> {
       `Usage:\n` +
         `  ay schedule <when> <cli> [--cwd DIR] [--name N] [-- <prompt>]\n` +
         `                                    schedule a recurring agent\n` +
-        `  ay schedule list                  list scheduled agents\n` +
+        `  ay schedule list                  list scheduled agents (--json for timetable metadata)\n` +
         `  ay schedule remove <name>         remove one\n\n` +
         `<when> is a daily HH:MM (e.g. 10:00) or a 5-field cron ("0 10 * * *").\n` +
         `The agent runs once now and then on every tick, and survives reboot.\n\n` +

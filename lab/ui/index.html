@@ -1190,7 +1190,10 @@
         min-width: 150px;
         box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
       }
-      .viewmenupanel[hidden] {
+      #sync-dialog { max-width: min(32rem, 90vw); max-height: 80vh; overflow: auto; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; }
+      #sync-dialog button { cursor: pointer; margin-block: 4px; }
+      #sync-dialog::backdrop { background: #0008; }
+      #device-sync[hidden], .viewmenupanel[hidden] {
         display: none;
       }
       .viewmenuitem {
@@ -2169,6 +2172,7 @@
          share QR codes render offline under `ay serve --http`. Classic script:
          defines the global `qrcode`. -->
     <script src="./qrcode.js"></script>
+
     <script type="module">
       // codehost room transport — vendored from codehost's `bun run build:lib`.
       // Loaded as a module (deferred), so the classic script below awaits the
@@ -2179,6 +2183,13 @@
     </script>
   </head>
   <body>
+    <dialog id="sync-dialog" aria-labelledby="sync-title">
+      <h2 id="sync-title">Sync devices</h2>
+      <p>Open this on two devices signed in to the same account. Sync now exchanges saved room access tokens, agent status and schedule times directly between them. Use devices you trust.</p>
+      <p>Copies stay on each device for offline use. Jobs run on their original host.</p>
+      <button class="pair">Sync now</button> <button class="forget">Clear saved copies</button> <button class="close">Close</button>
+      <p role="status"></p><div class="copies"></div>
+    </dialog>
     <div class="app">
       <div class="left">
         <div class="head">
@@ -2264,6 +2275,7 @@
                   >
                     ◌ stale
                   </button>
+                  <button hidden id="device-sync" class="viewmenuitem" type="button">Sync devices…</button>
                   <button
                     id="portsbtn"
                     class="viewmenuitem"
@@ -8182,6 +8194,40 @@ my.translate = async (text, lang) => {
         }
         localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
       };
+      if (location.pathname.startsWith("/w/")) {
+        const btn = $("device-sync");
+        btn.hidden = false;
+        let openSync;
+        btn.onclick = async () => {
+          const { mountDeviceSync } = await import("./device-sync.js");
+          openSync ??= mountDeviceSync({
+            dialog: $("sync-dialog"),
+            connect: async (r) => {
+              const existing = loadRooms()[r.name];
+              if (existing && (existing.token !== r.token || existing.host !== r.host)) return false;
+              await addRoomSource(r.name, r.token, r.host);
+              return true;
+            },
+            getLocal: async () => {
+              const rooms = Object.entries(loadRooms()).map(([name, r]) => ({
+                name, token: r.token, host: r.host || SIG_DEFAULT, ts: r.ts || Date.now(),
+              }));
+              const agents = entries.map(e => ({ room: e._src, pid: e.pid, status: e.status || "unknown" }));
+              const schedules = [], unavailable = [];
+              await Promise.all([...sources.values()].filter(s => !s.readonly).map(async s => {
+                try {
+                  if (!s.live || !s.tx) throw Error();
+                  const jobs = await s.tx.fetchJSON("/api/schedule-summary");
+                  if (!Array.isArray(jobs)) throw Error();
+                  for (const j of jobs) schedules.push({ host:s.id, name:j.name, cron:j.cron, tz:j.tz, enabled:j.enabled });
+                } catch { unavailable.push(s.id); }
+              }));
+              return { rooms, agents, schedules, unavailable };
+            },
+          });
+          await openSync();
+        };
+      }
       const dropRoom = (room) => {
         const r = loadRooms();
         delete r[room];

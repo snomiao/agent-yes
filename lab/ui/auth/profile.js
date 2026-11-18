@@ -59,6 +59,9 @@ export async function signOut() {
   } catch {
     throw new Error("Sign-out could not be confirmed. Please try again.");
   }
+  for (const key of Object.keys(localStorage)) if (key.startsWith("ay.peerCopy.")) localStorage.removeItem(key);
+  localStorage.removeItem("ay.peerOwner");
+  localStorage.setItem("ay.peerSignout", String(Date.now()));
   window.dispatchEvent(new Event("ay-auth-changed"));
 }
 
