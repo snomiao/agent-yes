@@ -757,3 +757,10 @@ Native stream flags also work after the wrapper separator, for example
 The initial stream task is passed verbatim, without PTY init-message envelopes.
 The registry mirrors active/idle turn transitions, and event files preserve stream
 identity when an older registry writer drops the transport field.
+
+Successful CLI exit also cleans up its detached process group, including remaining
+descendants that inherited the output pipes.
+
+`ay status` uses the same normalized stream state and pending question as `ay ls`,
+including permission requests. Output-only native stream invocations forward piped
+stdin unchanged and preserve EOF; they do not convert text input into JSON messages.

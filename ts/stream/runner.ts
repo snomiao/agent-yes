@@ -9,6 +9,7 @@ import {
   unlinkSync,
 } from "node:fs";
 import { once } from "node:events";
+import type { Readable } from "node:stream";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
@@ -16,6 +17,7 @@ import { agentYesHome } from "../agentYesHome.ts";
 import { appendGlobalPid, updateGlobalPidStatus } from "../globalPidIndex.ts";
 import { nativeFlagValue } from "./launch.ts";
 import { ClaudeAdapter } from "./claude.ts";
+import { forwardInput } from "./input.ts";
 import { renderEvent } from "./transcript.ts";
 import { register as registerReaper } from "../reaper.ts";
 import { derivePermissions } from "../agentPermissions.ts";
@@ -29,6 +31,7 @@ export interface StreamRunOptions {
   prompt?: string;
   binary?: string;
   env?: NodeJS.ProcessEnv;
+  input?: Readable;
 }
 
 /** A pipe-backed session, with the same discovery/FIFO paths as PTY sessions. */
@@ -64,6 +67,7 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
   let fd: number | undefined;
   let timer: ReturnType<typeof setInterval> | undefined;
   const logs: ReturnType<typeof createWriteStream>[] = [];
+  let releaseInput = () => {};
   let liveStatus: "active" | "idle" = "active";
   let registered = false;
   let pidUpdates = Promise.resolve();
@@ -197,7 +201,7 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
     process.on("SIGINT", stop);
     process.on("SIGTERM", stop);
     if (jsonInput && options.prompt) adapter.send(options.prompt);
-    if (!jsonInput) child.stdin.end();
+    if (!jsonInput) releaseInput = forwardInput(options.input, child.stdin, stop);
     const code = await exited;
     if (code) emit({ type: "error", message: `Claude exited (${code})`, fatal: true });
     await pidUpdates;
@@ -210,6 +214,7 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
     return code;
   } finally {
     if (timer) clearInterval(timer);
+    releaseInput();
     process.off("SIGINT", stop);
     process.off("SIGTERM", stop);
     if (fd !== undefined) {
@@ -218,7 +223,13 @@ export async function runStream(options: StreamRunOptions): Promise<number> {
         unlinkSync(fifo);
       } catch {}
     }
-    if (child.exitCode === null && child.signalCode === null) stop();
+    // The group can outlive its leader, including after a successful CLI exit.
+    // Kill only the detached group created by this session; never join its readers.
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    }
     // Never join stdout: descendants may retain its pipe after the child exits.
     child.stdout.destroy();
     child.stderr.destroy();

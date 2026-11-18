@@ -8150,9 +8150,15 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
   // not disagree about whether a row can be given work.
   const alive = record.status !== "exited" && isPidAlive(record.pid);
   let state: LiveState;
+  let question: string | null = null;
   let logMtimeMs: number | null = null;
   if (!alive) {
     state = "stopped";
+  } else if (record.mode === "stream") {
+    ({ state, question } = await deriveLiveState(record));
+    logMtimeMs = await stat(eventFile(record))
+      .then((info) => info.mtimeMs)
+      .catch(() => null);
   } else if (record.log_file) {
     logMtimeMs = await stat(record.log_file)
       .then((s) => s.mtimeMs)
@@ -8165,11 +8171,12 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
   // rewrite `state`. Gates the reachability probe.
   const baseState: "active" | "idle" = state === "idle" ? "idle" : "active";
   const activity =
-    state !== "stopped" && record.log_file ? await extractActivity(record.log_file) : null;
+    state !== "stopped" && record.mode !== "stream" && record.log_file
+      ? await extractActivity(record.log_file)
+      : null;
   // A blocked interactive menu overrides active/idle — the agent is alive and
   // quiet, but quiet because it's waiting for an answer, not because it's done.
-  let question: string | null = null;
-  if (state !== "stopped" && record.log_file) {
+  if (record.mode !== "stream" && state !== "stopped" && record.log_file) {
     const ni = await extractNeedsInput(record.log_file, record.cli);
     if (ni) {
       state = "needs_input";
@@ -8182,12 +8189,13 @@ export async function snapshotStatus(record: GlobalPidRecord): Promise<StatusSna
   // The Rust supervisor's unresponsive flag is an authoritative wedge signal —
   // it overrides the log-tail heuristics above (but never a dead agent, which
   // Rust clears the flag on anyway).
-  if (alive && record.unresponsive) state = "stuck";
+  if (alive && record.mode !== "stream" && record.unresponsive) state = "stuck";
   // Alive but undeliverable outranks all of the above, exactly as in
   // deriveLiveState — `ay status` and `ay ls` must not disagree about whether a
   // row can be given work. Same grace period, from the same helper.
   if (
     alive &&
+    record.mode !== "stream" &&
     reachabilityProbeApplies(record, baseState) &&
     (await confirmStdinUnreachable(record))
   ) {
