@@ -28,6 +28,7 @@ import { logger } from "./logger.ts";
  */
 
 export interface GlobalPidRecord {
+  mode?: "pty" | "stream";
   pid: number;
   cli: string;
   prompt: string | null;
@@ -137,7 +138,7 @@ export async function appendGlobalPid(record: GlobalPidRecord): Promise<void> {
 export async function updateGlobalPidStatus(
   pid: number,
   patch: Partial<
-    Pick<GlobalPidRecord, "status" | "exit_code" | "exit_reason" | "log_file" | "title">
+    Pick<GlobalPidRecord, "status" | "exit_code" | "exit_reason" | "log_file" | "title" | "mode">
   >,
 ): Promise<void> {
   const file = resolveGlobalFile(); // capture at call time (see withLock)
@@ -190,7 +191,23 @@ export async function readGlobalPids(
     liveOnly?: boolean;
   } = {},
 ): Promise<GlobalPidRecord[]> {
-  const records = await readGlobalPidsRaw();
+  const records = await Promise.all(
+    (await readGlobalPidsRaw()).map(async (record) => {
+      if (
+        record.mode != null ||
+        typeof record.cwd !== "string" ||
+        typeof record.started_at !== "number"
+      )
+        return record;
+      // Older Rust wrappers rewrite the shared index and drop unknown fields.
+      // The session's event file survives that rewrite and identifies its transport.
+      const events = path.join(record.cwd, ".agent-yes", `${record.pid}.events.jsonl`);
+      const info = await stat(events).catch(() => null);
+      if (info?.isFile() && info.mtimeMs >= record.started_at - 1000)
+        return { ...record, mode: "stream" as const };
+      return record;
+    }),
+  );
   if (!opts.liveOnly) return records;
   return records.filter((r) => r.status !== "exited" && isProcessAlive(r.pid));
 }

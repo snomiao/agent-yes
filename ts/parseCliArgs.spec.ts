@@ -481,3 +481,13 @@ describe("CLI argument parsing", () => {
     expect(result.prompt).toContain("--attach");
   });
 });
+
+describe("stream transport", () => {
+  it("consumes --stream before the CLI and retains its prompt", () => {
+    const config = parseCliArgs(["bun", "agent-yes", "--stream", "claude", "hello"]);
+    expect(config.stream).toBe(true);
+    expect(config.cli).toBe("claude");
+    expect(config.prompt).toBe("hello");
+    expect(config.cliArgs).not.toContain("--stream");
+  });
+});

@@ -25,6 +25,9 @@ const LOCK_RETRY_MAX_MS: u64 = 500;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PidRecord {
+    /// Preserve the TypeScript stream transport marker through registry rewrites.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     pub pid: u32,
     pub cli: String,
     pub prompt: Option<String>,
@@ -146,6 +149,7 @@ impl PidStore {
         permissions: Option<AgentPermissions>,
     ) {
         let record = PidRecord {
+            mode: None,
             pid,
             cli: cli.to_string(),
             prompt: prompt.map(|s| s.to_string()),
@@ -339,6 +343,7 @@ impl PidStore {
                 // be a lie about someone else's agent. Only what the log path
                 // itself proves is filled in.
                 found.push(PidRecord {
+                    mode: None,
                     pid,
                     // Not guessable from the log path. "unknown" keeps a
                     // recovered row visibly distinct instead of silently wrong;
@@ -1034,6 +1039,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let store = PidStore::with_path(dir.path().join("pids.jsonl"));
         let records = vec![PidRecord {
+            mode: None,
             pid: 1,
             cli: "claude".into(),
             prompt: None,
@@ -1073,6 +1079,7 @@ mod tests {
             - (DEFAULT_LOG_RETENTION_DAYS + 1) * 24 * 60 * 60 * 1000;
         store
             .write_all(&[PidRecord {
+                mode: None,
                 pid: 999999,
                 cli: "claude".into(),
                 prompt: None,
@@ -1214,5 +1221,16 @@ mod tests {
             std::env::set_var("AGENT_YES_PID", v);
         }
         assert_eq!(out, "hello");
+    }
+    #[test]
+    fn stream_mode_survives_registry_rewrite() {
+        let record: PidRecord = serde_json::from_value(serde_json::json!({
+            "pid": 1111, "cli": "claude", "prompt": null, "cwd": "/repo/alpha",
+            "log_file": null, "status": "active", "exit_code": null,
+            "exit_reason": null, "started_at": 0, "mode": "stream"
+        }))
+        .unwrap();
+        assert_eq!(record.mode.as_deref(), Some("stream"));
+        assert_eq!(serde_json::to_value(record).unwrap()["mode"], "stream");
     }
 }

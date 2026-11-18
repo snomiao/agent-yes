@@ -128,6 +128,7 @@ mod tests {
 
     fn rec(pid: u32, wrapper: Option<u32>, status: &str, agent_id: Option<&str>) -> PidRecord {
         PidRecord {
+            mode: None,
             pid,
             cli: "claude".into(),
             prompt: None,

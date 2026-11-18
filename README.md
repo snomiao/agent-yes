@@ -712,3 +712,37 @@ be committed.
 ## License
 
 MIT
+
+### Claude stream sessions (preview)
+
+PTY remains the default. When Claude's own arguments request
+`--output-format stream-json`, `ay` detects the protocol, records `mode: "stream"`,
+and captures NDJSON through pipes in the TypeScript runtime. It does not add
+stream flags to a native invocation:
+
+```sh
+ay claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages -- "task"
+```
+
+`ay --stream claude "task"` is optional shorthand that appends those native
+flags (and the stdio permission protocol). There is no config transport default.
+Output-only stream invocations are also captured; bidirectional sends require
+explicit `--input-format stream-json --replay-user-messages`.
+
+Each session writes normalized `<pid>.events.jsonl`, original `<pid>.native.jsonl`,
+and a readable `<pid>.raw.log` under the working directory's `.agent-yes/`.
+Stream capture currently requires macOS or Linux. `ay --detach claude ...` starts a
+background TypeScript wrapper and prints its registered CLI pid.
+Permission requests are recorded; use an explicit Claude permission policy for
+unattended sessions until approval commands are available.
+
+Native stream flags also work after the wrapper separator, for example
+`ay --detach claude -- -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages --model haiku "task"`.
+The initial stream task is passed verbatim, without PTY init-message envelopes.
+The registry mirrors active/idle turn transitions, and event files preserve stream
+identity when an older registry writer drops the transport field.
+
+This capture-only change rejects `ay send` for stream sessions rather than claiming
+terminal input was delivered. Replay-confirmed stream delivery is added in #562.
+Successful CLI exit also cleans up its detached process group, including remaining
+descendants that inherited the output pipes.

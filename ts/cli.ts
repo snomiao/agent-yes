@@ -91,6 +91,17 @@ logger.info(versionString());
 
 // Parse CLI arguments (no choices validation — SUPPORTED_CLIS loaded lazily below)
 const config = parseCliArgs(process.argv);
+const { loadCascadingConfig } = await import("./configLoader.ts");
+const { planClaudeStream } = await import("./stream/launch.ts");
+const streamCliConfig = (await loadCascadingConfig()).clis?.[config.cli];
+if (config.stream && config.cli !== "claude")
+  throw new Error("--stream currently supports claude only");
+const streamLaunch = planClaudeStream(
+  config.cli,
+  [...(streamCliConfig?.defaultArgs ?? []), ...config.nativeArgs],
+  config.explicitPrompt,
+  config.stream,
+);
 
 // --detach is implemented by the Rust-runtime fork below (same path as a nested
 // agent's fork-by-default). Refuse the contradictions up front rather than
@@ -109,7 +120,7 @@ if (config.detach && (config.attach || process.env.AGENT_YES_ATTACH === "1")) {
   console.error("--detach and --attach (or AGENT_YES_ATTACH=1) contradict each other.");
   process.exit(1);
 }
-if (config.detach && !config.useRust) {
+if (config.detach && !config.useRust && !streamLaunch) {
   console.error("--detach needs the Rust runtime (drop --no-rust / AGENT_YES_NO_RUST).");
   process.exit(1);
 }
@@ -156,6 +167,34 @@ if (!config.showVersion && !config.appendPrompt && !config.tray) {
 if (!config.showVersion && !config.appendPrompt && !config.tray) {
   const { warnIfCwdOccupied } = await import("./cwdConflictWarn.ts");
   await warnIfCwdOccupied(process.argv);
+}
+
+// Native stream launches bypass PTY prompt/envelope construction entirely.
+if (streamLaunch) {
+  const { runStream } = await import("./stream/runner.ts");
+  const args = [...streamLaunch.args];
+  if (config.skipPermissions) args.push("--dangerously-skip-permissions");
+  if (config.resume) args.push("--continue");
+  if (config.detach) {
+    const { detachStream } = await import("./stream/detach.ts");
+    const record = await detachStream({
+      entry: process.argv[1]!,
+      args: process.argv.slice(2),
+      cwd: config.cwd,
+    });
+    console.log(`Spawned ${record.cli} stream session as pid ${record.pid}.`);
+    console.log(`  ay tail ${record.pid}\n  ay send ${record.pid} "message"`);
+    process.exit(0);
+  }
+  process.exit(
+    await runStream({
+      ...config,
+      ...streamLaunch,
+      cliArgs: args,
+      binary: streamCliConfig?.binary,
+      input: process.stdin.isTTY ? undefined : process.stdin,
+    }),
+  );
 }
 
 // Handle --rust: spawn the Rust binary instead, fall back to TypeScript if unavailable
