@@ -16,11 +16,10 @@ import path from "path";
  * config someone must REMEMBER to re-add is a worse failure than a slow list.
  * So the entry stays, and we stop paying for it every time.
  *
- * WHY EXPONENTIAL AND NOT φ: the operator's φ-backoff rule (golden ratio, no
- * 2x) is a symval/symval convention — its AGENTS.md, its helpers. agent-yes is a
- * general tool in snomiao/ and that rule does not reach it. This repo already
- * has one backoff shape, `ts/autoRetry.ts` (base × 2ⁿ, capped, mirrored in
- * rs/src/context.rs), and one repo with two backoff shapes is its own defect.
+ * WHY EXPONENTIAL AND NOT φ: this CLI follows its repository-local retry rule,
+ * documented in AGENTS.md and helper code. It has one backoff shape,
+ * `ts/autoRetry.ts` (base × 2ⁿ, capped, mirrored in `rs/src/context.rs`);
+ * two backoff shapes in one repository would be a defect.
  * So this mirrors autoRetry deliberately rather than importing a foreign
  * convention or inventing a third.
  */
