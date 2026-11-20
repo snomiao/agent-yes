@@ -177,6 +177,15 @@ export default {
   async fetch(req: Request, env: Env): Promise<Response> {
     const url = new URL(req.url);
 
+    // Accounts use host-only cookies and trust only the canonical origin.
+    // Redirect the www alias before serving a console that cannot use auth.
+    if (url.hostname === "www.agent-yes.com") {
+      url.protocol = "https:";
+      url.hostname = "agent-yes.com";
+      url.port = "";
+      return Response.redirect(url.toString(), 308);
+    }
+
     // Route on the Host header (not url.hostname) so `wrangler dev` — where the
     // URL is always localhost — still resolves via a spoofed Host; in
     // production the two are identical.

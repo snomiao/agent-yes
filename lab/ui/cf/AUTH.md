@@ -1,7 +1,8 @@
 # Google sign-in
 
 The apex Worker mounts Better Auth at `/api/auth/*`; `/auth/` is the sign-in
-page. Signing in creates the Google-backed account on first use. Existing
+page. The `www` alias redirects to the apex before serving pages or APIs,
+so sign-in and host-only session cookies use one origin. Signing in creates the Google-backed account on first use. Existing
 terminal tokens, sharing links, signaling, and exposed applications retain
 their existing authorization.
 
