@@ -2351,6 +2351,32 @@ describe("subcommands.cmdSend end-to-end submit-confirm wiring", () => {
     }
   });
 
+  it.skipIf(!itUnix)("parks a send at a permission prompt and returns exit 6", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "ay-blocked-send-"));
+    const log = path.join(dir, "session.log");
+    try {
+      // Give the fixture an existing drainer so it keeps the pending record
+      // available for inspection and never launches a background process.
+      const pendingDir = path.join(process.env.AGENT_YES_HOME!, "pending");
+      await mkdir(pendingDir, { recursive: true });
+      await writeFile(path.join(pendingDir, process.pid + ".drainer"), String(process.pid));
+      await writeFile(log, "May I proceed?\r\n❯ 1. Allow\r\n  2. Cancel\r\n");
+      await withDrainedFifo(
+        async (fifo) => {
+          const { code, stdout } = await send(fifo, log, "queued example");
+          expect(code).toBe(6);
+          expect(stdout).toContain("QUEUED");
+          const { listPending, readPending } = await import("./composerGuard.ts");
+          const [queued] = await listPending(process.pid);
+          expect((await readPending(process.pid, queued!))?.record.body).toBe("queued example");
+        },
+        () => {},
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it.skipIf(!itUnix)("reports QUEUED with its distinct exit 4", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "ay-queue-e2e-"));
     const log = path.join(dir, "a.log");
@@ -4988,6 +5014,14 @@ describe("drainerLauncher", () => {
     expect(drainerLauncher("/usr/local/bin/bun", undefined, null)).toBeNull();
   });
 
+  it("re-runs the CLI script when a Node sender starts a drainer", async () => {
+    const { drainerLauncher } = await loadModule();
+    expect(drainerLauncher("/usr/bin/node", "/repo/dist/cli.js", undefined)).toEqual([
+      "/usr/bin/node",
+      "/repo/dist/cli.js",
+    ]);
+  });
+
   it("re-runs a compiled single-file binary as itself", async () => {
     const { drainerLauncher } = await loadModule();
     expect(drainerLauncher("/opt/ay/ay", "/$bunfs/root/cli", "/usr/local/bin/ay")).toEqual([
@@ -5268,5 +5302,34 @@ describe("inspectSubmission: shells without a composer", () => {
     expect(inspectSubmission(["alice@box:~/repo$ "], "echo PIPE_OK_1").submission).toBe(
       "not-submitted",
     );
+  });
+});
+
+describe("ay send: a target blocked at a prompt", () => {
+  it("names the prompt as the park reason, with its question", async () => {
+    const { promptParkReason } = await loadModule();
+    expect(promptParkReason({ state: "needs_input", question: "Do you want to proceed?" })).toBe(
+      "it is waiting at a prompt (needs_input): Do you want to proceed?",
+    );
+    expect(promptParkReason({ state: "needs_input", question: null })).toBe(
+      "it is waiting at a prompt (needs_input)",
+    );
+  });
+
+  it("is not a reason for any other state", async () => {
+    const { promptParkReason } = await loadModule();
+    for (const state of ["active", "idle", "stuck", "stopped", "unreachable"])
+      expect(promptParkReason({ state, question: "x?" })).toBeNull();
+    expect(promptParkReason(null)).toBeNull();
+  });
+
+  it("exits 6 (distinct from 4) and tells the sender how to unblock it", async () => {
+    const { SEND_EXIT_NEEDS_INPUT, SEND_EXIT_QUEUED, blockedPromptHint } = await loadModule();
+    expect(SEND_EXIT_NEEDS_INPUT).toBe(6);
+    expect(SEND_EXIT_NEEDS_INPUT).not.toBe(SEND_EXIT_QUEUED);
+    const hint = blockedPromptHint(1111);
+    expect(hint).toMatch(/blocked at a prompt/);
+    expect(hint).toMatch(/ay select 1111 <N>/);
+    expect(hint).toMatch(/delivered once it clears/);
   });
 });

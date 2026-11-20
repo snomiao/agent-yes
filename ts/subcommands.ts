@@ -2393,7 +2393,7 @@ async function refreshRemoteSnapshot(
 
 /** Run `ay <args…>` detached from this process (same launcher as the send drainer). */
 function spawnDetachedAy(args: string[]): number | null {
-  const launcher = drainerLauncher(process.execPath, process.argv[1], Bun.which("ay"));
+  const launcher = drainerLauncher(process.execPath, process.argv[1], globalThis.Bun?.which("ay"));
   if (!launcher) return null;
   const [cmd, ...pre] = launcher;
   try {
@@ -5706,6 +5706,37 @@ async function renderSendScreen(
 }
 
 export const SEND_EXIT_QUEUED = 4;
+// Parked (like 4) because the target sits at a permission/selection prompt
+// (needs_input): nothing can be typed until someone answers it, and the message
+// is delivered once it clears. Distinct from 4 so a relay can tell "busy, will
+// land shortly" from "blocked until a human or orchestrator picks an option".
+export const SEND_EXIT_NEEDS_INPUT = 6;
+
+/**
+ * Park reason when the target sits at a permission/selection prompt, or null.
+ * A prompt hides the input box, so without this the composer check reports
+ * "its input box is not on screen" and every later send "earlier messages are
+ * still queued": the reason the target is stuck never reaches the sender.
+ */
+export function promptParkReason(
+  snap: { state: string; question?: string | null } | null,
+): string | null {
+  if (snap?.state !== "needs_input") return null;
+  return (
+    "it is waiting at a prompt (needs_input)" +
+    (snap.question ? `: ${truncate(snap.question, 100)}` : "")
+  );
+}
+
+/** What a sender can do about a target blocked at a prompt (exit 6). */
+export function blockedPromptHint(pid: number): string {
+  return (
+    `ay send: pid ${pid} is blocked at a prompt and will not read anything until it is ` +
+    `answered. Queued messages are delivered once it clears:\n` +
+    `  ay status ${pid}            # the question and its options\n` +
+    `  ay select ${pid} <N>        # pick option N\n`
+  );
+}
 
 /** Retry only Enter, never the body. Three attempts, phi delay capped at 400ms. */
 export async function submitAndConfirm(
@@ -5902,8 +5933,8 @@ export function drainerLauncher(
   script: string | undefined,
   onPath: string | null | undefined,
 ): string[] | null {
-  const bunRuntime = /(^|[\\/])bun(\.exe)?$/i.test(execPath);
-  if (!bunRuntime) return [execPath];
+  const interpreter = /(^|[\\/])(bun|node)(\.exe)?$/i.test(execPath);
+  if (!interpreter) return [execPath];
   if (script) return [execPath, script];
   return onPath ? [execPath, onPath] : null;
 }
@@ -5913,7 +5944,7 @@ async function ensureSendDrainer(pid: number): Promise<number | null> {
   const existing = await liveDrainer(pid);
   if (existing) return existing;
   const { spawn } = await import("node:child_process");
-  const launcher = drainerLauncher(process.execPath, process.argv[1], Bun.which("ay"));
+  const launcher = drainerLauncher(process.execPath, process.argv[1], globalThis.Bun?.which("ay"));
   if (!launcher) return null;
   const [cmd, ...pre] = launcher;
   const child = spawn(cmd!, [...pre, "send-drain", String(pid)], {
@@ -6076,6 +6107,8 @@ async function cmdSend(rest: string[]): Promise<number> {
         "submitted: either the CLI queued it, or its input box held someone's draft and\n" +
         "the message was parked for delivery once the box is empty — do not resend;\n" +
         "an identical resend from the same agent within 60s is dropped as a DUPLICATE),\n" +
+        "6 QUEUED because the target is waiting at a prompt (needs_input): parked like 4\n" +
+        "and delivered once the prompt is answered — answer it with ay select <pid> <N>,\n" +
         "1 everything else.",
     )
     .option("code", {
@@ -6437,6 +6470,7 @@ async function cmdSend(rest: string[]): Promise<number> {
   };
   let lastScreen: string[] = [];
   let parked = false;
+  let blockedAtPrompt = false;
   let duplicateOf: RecentSend | null = null;
   // The mailbox fields known before delivery; a parked message carries them to
   // the drainer so its eventual record names the real sender, not the drainer.
@@ -6510,6 +6544,15 @@ async function cmdSend(rest: string[]): Promise<number> {
           interrupt = false;
         }
         if (fullBody) {
+          // A prompt hides the input box, so the composer check below would park
+          // this with "its input box is not on screen", and every later send with
+          // "earlier messages are still queued": the reason the target is stuck
+          // never reaches the sender. Check for it first and name it.
+          const atPrompt = promptParkReason(await snapshotStatus(record).catch(() => null));
+          if (atPrompt) {
+            blockedAtPrompt = true;
+            parkReason = atPrompt;
+          }
           if (!parkReason && (await listPending(record.pid)).length)
             parkReason = "earlier messages to this agent are still queued";
           if (!parkReason) {
@@ -6597,6 +6640,10 @@ async function cmdSend(rest: string[]): Promise<number> {
         confirmed: false,
         submission: "queued",
       } as MessageRecord);
+    if (blockedAtPrompt) {
+      process.stderr.write(blockedPromptHint(record.pid));
+      return SEND_EXIT_NEEDS_INPUT;
+    }
     return SEND_EXIT_QUEUED;
   }
   const { submission } = receipt;

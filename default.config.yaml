@@ -46,6 +46,12 @@ clis:
       # and `ay ls` called it idle — a lane silently stuck on the dialog.
       - pattern: '(❯|>) ?(\d\. ?)?(Yes, I trust this folder|No, exit)'
         flags: m
+    # scrolledUp: fullscreen mode (CLAUDE_CODE_NO_FLICKER) shows this hint while
+    # the transcript is scrolled up — which can push a pending prompt off screen.
+    # After a long idle the runner sends Ctrl+End (claude's scroll:bottom; it
+    # leaves a menu's selection alone, unlike plain End, which moves it).
+    scrolledUp:
+      - 'Jump to bottom \(ctrl\+End\)'
     typingRespond:
       "1\n":
         - '│ Do you want to use this API key\?'

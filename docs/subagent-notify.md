@@ -253,6 +253,13 @@ parent addresses its own inbox with no argument.
   (tail + git head), daemon lifecycle.
 - `ts/subcommands.ts` — `ay notify` / `ay notifyd` CLI.
 
+## Sending to an unanswered prompt
+
+When a permission or selection menu blocks delivery, `ay send` parks the
+message and exits with code **6**. Its diagnostic identifies the prompt and
+shows the `ay select <pid> <N>` command for answering it. The parked message
+can proceed when the prompt clears. Other parked sends use exit code 4.
+
 ## Known limitations (tracked as follow-ups)
 
 The v1 identity/liveness/retention residuals below were closed in issue #169 —
