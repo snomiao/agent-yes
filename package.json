@@ -196,7 +196,7 @@
     "test:coverage": "vitest run --coverage",
     "test:ui": "vitest run --config tests/ui-test/vitest.config.ts",
     "test:ui-dom": "vitest run --config tests/ui-dom/vitest.config.ts",
-    "test:auth": "bun test tests/auth/backend.bun.spec.ts",
+    "test:auth": "bun test tests/auth/",
     "test:theme": "node tests/ui-test/theme.e2e.mjs"
   },
   "dependencies": {
