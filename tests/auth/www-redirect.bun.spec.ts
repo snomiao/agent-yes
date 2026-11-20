@@ -31,6 +31,17 @@ describe("canonical account host", () => {
     expect(response.headers.get("Location")).toBe("https://agent-yes.com/api/auth/sign-in/social");
   });
 
+  it("ignores a spoofed www Host header on the canonical origin", async () => {
+    const response = await worker.fetch(
+      new Request("https://agent-yes.com/w/", {
+        headers: { Host: "www.agent-yes.com" },
+      }),
+      env,
+    );
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Location")).toBeNull();
+  });
+
   it("does not redirect the canonical console", async () => {
     const response = await worker.fetch(new Request("https://agent-yes.com/w/"), env);
     expect(response.status).toBe(200);
