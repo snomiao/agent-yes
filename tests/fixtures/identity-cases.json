@@ -18,93 +18,93 @@
   "identity": [
     {
       "name": "the documented shape",
-      "user": "sno",
-      "host": "Mac",
-      "cwd": "/Users/sno/ws/symval/symval/tree/crm",
-      "home": "/Users/sno",
+      "user": "alice",
+      "host": "host",
+      "cwd": "/Users/alice/work/org/repo",
+      "home": "/Users/alice",
       "branch": "main",
-      "pid": 30402,
-      "want": "sno@Mac:~/ws/symval/symval/tree/crm:main#30402"
+      "pid": 1111,
+      "want": "alice@host:~/work/org/repo:main#1111"
     },
     {
       "name": "a cwd outside home keeps its absolute path",
-      "user": "sno",
-      "host": "Mac",
+      "user": "alice",
+      "host": "host",
       "cwd": "/srv/app",
-      "home": "/Users/sno",
+      "home": "/Users/alice",
       "branch": "main",
       "pid": 1,
-      "want": "sno@Mac:/srv/app:main#1"
+      "want": "alice@host:/srv/app:main#1"
     },
     {
       "name": "home itself collapses to ~",
-      "user": "sno",
-      "host": "Mac",
-      "cwd": "/Users/sno",
-      "home": "/Users/sno",
+      "user": "alice",
+      "host": "host",
+      "cwd": "/Users/alice",
+      "home": "/Users/alice",
       "branch": "main",
       "pid": 2,
-      "want": "sno@Mac:~:main#2"
+      "want": "alice@host:~:main#2"
     },
     {
       "name": "no branch omits the segment entirely",
-      "user": "sno",
-      "host": "Mac",
+      "user": "alice",
+      "host": "host",
       "cwd": "/srv/app",
-      "home": "/Users/sno",
+      "home": "/Users/alice",
       "branch": null,
       "pid": 3,
-      "want": "sno@Mac:/srv/app#3"
+      "want": "alice@host:/srv/app#3"
     },
     {
       "name": "an empty branch also omits it — never a bare trailing colon",
-      "user": "sno",
-      "host": "Mac",
+      "user": "alice",
+      "host": "host",
       "cwd": "/srv/app",
-      "home": "/Users/sno",
+      "home": "/Users/alice",
       "branch": "",
       "pid": 4,
-      "want": "sno@Mac:/srv/app#4"
+      "want": "alice@host:/srv/app#4"
     },
     {
       "name": "a slash in the branch survives — parsing anchors on #pid",
-      "user": "sno",
-      "host": "Mac",
+      "user": "alice",
+      "host": "host",
       "cwd": "/srv/app",
-      "home": "/Users/sno",
+      "home": "/Users/alice",
       "branch": "fix/t173-tone-core",
       "pid": 5,
-      "want": "sno@Mac:/srv/app:fix/t173-tone-core#5"
+      "want": "alice@host:/srv/app:fix/t173-tone-core#5"
     },
     {
       "name": "a worktree lane name rides in the branch segment for free",
-      "user": "sno",
-      "host": "Mac",
-      "cwd": "/Users/sno/ws/symval/symval/tree/crm-yamamoto-wifi",
-      "home": "/Users/sno",
-      "branch": "crm-yamamoto-wifi",
+      "user": "alice",
+      "host": "host",
+      "cwd": "/Users/alice/work/org/repo/tree/feature-example",
+      "home": "/Users/alice",
+      "branch": "feature/example",
       "pid": 6,
-      "want": "sno@Mac:~/ws/symval/symval/tree/crm-yamamoto-wifi:crm-yamamoto-wifi#6"
+      "want": "alice@host:~/work/org/repo/tree/feature-example:feature/example#6"
     },
     {
       "name": "an empty home never rewrites the path",
-      "user": "sno",
-      "host": "Mac",
+      "user": "alice",
+      "host": "host",
       "cwd": "/srv/app",
       "home": "",
       "branch": "main",
       "pid": 7,
-      "want": "sno@Mac:/srv/app:main#7"
+      "want": "alice@host:/srv/app:main#7"
     },
     {
       "name": "a Windows path keeps its drive colon — parsing anchors on the ends",
-      "user": "sno",
+      "user": "alice",
       "host": "WinBox",
       "cwd": "C:\\ws\\repo",
-      "home": "C:\\Users\\sno",
+      "home": "C:\\Users\\alice",
       "branch": "main",
       "pid": 8,
-      "want": "sno@WinBox:C:\\ws\\repo:main#8"
+      "want": "alice@WinBox:C:\\ws\\repo:main#8"
     }
   ],
 
@@ -145,7 +145,7 @@
     { "name": "a newline is neutralised", "raw": "a\nb", "max": 32, "want": "a-b" },
     { "name": "clamped to max length", "raw": "abcdefghij", "max": 4, "want": "abcd" },
     { "name": "non-ascii is neutralised", "raw": "日本語", "max": 32, "want": "" },
-    { "name": "mixed non-ascii keeps the ascii", "raw": "sno日本", "max": 32, "want": "sno" }
+    { "name": "mixed non-ascii keeps the ascii", "raw": "alice日本", "max": 32, "want": "alice" }
   ],
 
   "safeBranch": [
