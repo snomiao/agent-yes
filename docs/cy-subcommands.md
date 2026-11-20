@@ -123,13 +123,13 @@ Rust 側はパイプを **自プロセスで O_RDWR で開いたまま** にし�
 
 ```
 <username>@<hostname>:<path>:<branch>#<pid>
-例: sno@Mac:~/ws/symval/symval/tree/crm:main#30402
+Example: `alice@host:~/work/org/repo:main#1111`
 ```
 
 - `branch` は cwd の git checkout から純 file read で解決する
   (worktree の `gitdir:` 間接参照も辿る。detached HEAD は短縮 commit id、
   repo 外ではセグメントごと省略)。worktree 運用では branch 名がそのまま
-  lane の役割を表すことが多い(`crm-yamamoto-wifi` / `fix/t173-tone-core`)。
+  lane の役割を表すことが多い(`feature/example` / `fix/t173-tone-core`)。
 - パースは右端から: `#<pid>` を末尾から、`branch` は最後の `:` の後
   (git の ref 名は `:` を含めない)、`username` は先頭の `@` まで。
   途中の `path` は `:` や `@` を含み得るため、両端アンカーで読む。
