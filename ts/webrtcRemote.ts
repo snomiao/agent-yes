@@ -117,7 +117,9 @@ class WebRtcConn {
       const keys = await deriveDirKeys(this.link.s, this.th);
       this.keyC2H = keys.keyC2H;
       this.keyH2C = keys.keyH2C;
-      this.ws.send(JSON.stringify({ type: "answer", to: this.hostPeer, sdp: pc.localDescription.sdp }));
+      this.ws.send(
+        JSON.stringify({ type: "answer", to: this.hostPeer, sdp: pc.localDescription.sdp }),
+      );
     } else if (m.type === "candidate" && this.pc) {
       await this.pc.addIceCandidate(m.candidate).catch(() => {});
     }
@@ -146,7 +148,11 @@ class WebRtcConn {
     if (!this.confirmed) {
       if (!env || env.t !== "confirm") return;
       if (typeof env.nonce === "string" && !this.confirmedOut) {
-        await this.enqueueSeal(FLAG_CONFIRM, { t: "confirm", nonce: this.myNonce, echo: env.nonce });
+        await this.enqueueSeal(FLAG_CONFIRM, {
+          t: "confirm",
+          nonce: this.myNonce,
+          echo: env.nonce,
+        });
         this.confirmedOut = true;
       }
       if (env.echo && env.echo === this.myNonce) this.confirmedIn = true;
