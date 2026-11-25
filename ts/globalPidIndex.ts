@@ -136,7 +136,9 @@ export async function appendGlobalPid(record: GlobalPidRecord): Promise<void> {
 /** Append a partial update by pid (status, exit_code, exit_reason, log_file). */
 export async function updateGlobalPidStatus(
   pid: number,
-  patch: Partial<Pick<GlobalPidRecord, "status" | "exit_code" | "exit_reason" | "log_file" | "role">>,
+  patch: Partial<
+    Pick<GlobalPidRecord, "status" | "exit_code" | "exit_reason" | "log_file" | "role">
+  >,
 ): Promise<void> {
   const file = resolveGlobalFile(); // capture at call time (see withLock)
   try {

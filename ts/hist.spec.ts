@@ -54,9 +54,9 @@ describe("snippet", () => {
 describe("renderRecord", () => {
   it("labels the human as user and the agent by its source", () => {
     expect(renderRecord(rec, { color: false, max: 0 })).toContain("user");
-    expect(
-      renderRecord({ ...rec, role: "assistant" }, { color: false, max: 0 }),
-    ).toContain("claude");
+    expect(renderRecord({ ...rec, role: "assistant" }, { color: false, max: 0 })).toContain(
+      "claude",
+    );
     expect(
       renderRecord({ ...rec, role: "assistant", source: "codex" }, { color: false, max: 0 }),
     ).toContain("codex");

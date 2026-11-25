@@ -3125,7 +3125,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
       >();
       for (const w of workspaces) {
         const key = `${w.owner}/${w.repo}`;
-        const entry = byRepo.get(key) ?? { owner: w.owner, repo: w.repo, local: true, branches: [] };
+        const entry = byRepo.get(key) ?? {
+          owner: w.owner,
+          repo: w.repo,
+          local: true,
+          branches: [],
+        };
         entry.branches.push({ name: w.branch, path: w.path });
         byRepo.set(key, entry);
       }
@@ -3227,7 +3232,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
           ".[].name",
         ]);
         if (r.ok) {
-          remote = r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+          remote = r.stdout
+            .split("\n")
+            .map((s) => s.trim())
+            .filter(Boolean);
           source = "gh";
           error = undefined;
         } else if (!error) {
@@ -4169,11 +4177,23 @@ export async function cmdServe(rest: string[]): Promise<number> {
           provision: (
             spec: Spec,
             opts?: { wsRoot?: string },
-          ) => Promise<{ ok: boolean; folder: string; action: string; error?: string; reason?: string }>;
+          ) => Promise<{
+            ok: boolean;
+            folder: string;
+            action: string;
+            error?: string;
+            reason?: string;
+          }>;
           createBranch?: (
             spec: Spec,
             opts?: { wsRoot?: string },
-          ) => Promise<{ ok: boolean; folder: string; action: string; error?: string; reason?: string }>;
+          ) => Promise<{
+            ok: boolean;
+            folder: string;
+            action: string;
+            error?: string;
+            reason?: string;
+          }>;
         };
         try {
           prov = (await importProvisionModule()) as typeof prov;
@@ -4224,7 +4244,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
             { status: 403 },
           );
         }
-        let result: { ok: boolean; folder: string; action: string; error?: string; reason?: string };
+        let result: {
+          ok: boolean;
+          folder: string;
+          action: string;
+          error?: string;
+          reason?: string;
+        };
         try {
           const wsRoot = getProvisionRoot();
           result = await prov.provision(spec, wsRoot ? { wsRoot } : undefined);

@@ -522,7 +522,7 @@ export function isUnknownManagerToken(
  * The CLI ends with `process.exit()`, which DISCARDS bytes still sitting in the
  * pipe buffer. Writing to a file completes synchronously so this never showed
  * there, but any consumer that PIPES us silently lost everything past 64KiB.
- * Measured on `ay ls --json` with a large fleet (symval CTO, 2026-08-05):
+ * Measured on `ay ls --json` with a large fleet (example-project-3 CTO, 2026-08-05):
  *
  *     ay ls --json > file    118055 bytes, valid JSON
  *     ay ls --json | consumer 65536 bytes, cut mid-multibyte — will not parse
@@ -3717,7 +3717,7 @@ const ROLE_RESOLVE_OPTS: CommonOpts = {
 
 async function cmdRole(rest: string[]): Promise<number> {
   const y = yargs(rest)
-    .usage('Usage: ay role [name] | ay role <keyword> <name> | ay role [keyword] --clear')
+    .usage("Usage: ay role [name] | ay role <keyword> <name> | ay role [keyword] --clear")
     .option("clear", { type: "boolean", default: false, description: "Remove the role" })
     .help(false)
     .version(false)
