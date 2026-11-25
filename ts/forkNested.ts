@@ -225,3 +225,15 @@ export async function confirmAgentStarted(
   }
   return { ok: true };
 }
+
+/**
+ * Environment for a detached/forked agent. A caller without a terminal (an
+ * agent's shell tool, cron) often has TERM unset or `dumb`; the child CLI then
+ * draws its UI with no colour codes, which blinds the composer guard (it reads
+ * the input box's dim/gray hint by colour). Give the child a real terminal type
+ * unless the caller set a usable one.
+ */
+export function detachedChildEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const term = env.TERM?.trim();
+  return !term || term === "dumb" ? { ...env, TERM: "xterm-256color" } : env;
+}
