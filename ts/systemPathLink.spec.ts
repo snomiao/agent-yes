@@ -1,5 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, lstatSync, readlinkSync, rmSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  symlinkSync,
+  lstatSync,
+  readlinkSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { linkBunBinsToSystemPath } from "./systemPathLink.ts";
@@ -55,7 +63,9 @@ describe("systemPathLink.linkBunBinsToSystemPath", () => {
     symlinkSync(path.join(bunDir, "ay-old-removed"), path.join(target, "ay"));
     const r = linkBunBinsToSystemPath({ bunDir, target })!;
     expect(r.refreshed).toContain("ay");
-    expect(path.resolve(target, readlinkSync(path.join(target, "ay")))).toBe(path.join(bunDir, "ay"));
+    expect(path.resolve(target, readlinkSync(path.join(target, "ay")))).toBe(
+      path.join(bunDir, "ay"),
+    );
   });
 
   it("returns null when the bun dir is absent", () => {

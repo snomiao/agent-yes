@@ -467,8 +467,8 @@ function loginShellEnv(): Record<string, string> | null {
     // $SHELL when the daemon has one; a launchd/systemd env usually doesn't,
     // so fall back through the common defaults (zsh first — the macOS default).
     const shell =
-      [process.env.SHELL, "/bin/zsh", "/bin/bash", "/bin/sh"].find(
-        (s): s is string => Boolean(s && existsSync(s)),
+      [process.env.SHELL, "/bin/zsh", "/bin/bash", "/bin/sh"].find((s): s is string =>
+        Boolean(s && existsSync(s)),
       ) ?? "/bin/sh";
     // Delimiters fence off the env dump from any banner/prompt noise the rc files
     // print to stdout; `env -0` is NUL-separated so values with newlines survive.
@@ -3185,7 +3185,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
       >();
       for (const w of workspaces) {
         const key = `${w.owner}/${w.repo}`;
-        const entry = byRepo.get(key) ?? { owner: w.owner, repo: w.repo, local: true, branches: [] };
+        const entry = byRepo.get(key) ?? {
+          owner: w.owner,
+          repo: w.repo,
+          local: true,
+          branches: [],
+        };
         entry.branches.push({ name: w.branch, path: w.path });
         byRepo.set(key, entry);
       }
@@ -3287,7 +3292,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
           ".[].name",
         ]);
         if (r.ok) {
-          remote = r.stdout.split("\n").map((s) => s.trim()).filter(Boolean);
+          remote = r.stdout
+            .split("\n")
+            .map((s) => s.trim())
+            .filter(Boolean);
           source = "gh";
           error = undefined;
         } else if (!error) {
@@ -4329,11 +4337,23 @@ export async function cmdServe(rest: string[]): Promise<number> {
           provision: (
             spec: Spec,
             opts?: { wsRoot?: string },
-          ) => Promise<{ ok: boolean; folder: string; action: string; error?: string; reason?: string }>;
+          ) => Promise<{
+            ok: boolean;
+            folder: string;
+            action: string;
+            error?: string;
+            reason?: string;
+          }>;
           createBranch?: (
             spec: Spec,
             opts?: { wsRoot?: string },
-          ) => Promise<{ ok: boolean; folder: string; action: string; error?: string; reason?: string }>;
+          ) => Promise<{
+            ok: boolean;
+            folder: string;
+            action: string;
+            error?: string;
+            reason?: string;
+          }>;
         };
         try {
           prov = (await importProvisionModule()) as typeof prov;
@@ -4384,7 +4404,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
             { status: 403 },
           );
         }
-        let result: { ok: boolean; folder: string; action: string; error?: string; reason?: string };
+        let result: {
+          ok: boolean;
+          folder: string;
+          action: string;
+          error?: string;
+          reason?: string;
+        };
         try {
           const wsRoot = getProvisionRoot();
           result = await prov.provision(spec, wsRoot ? { wsRoot } : undefined);
