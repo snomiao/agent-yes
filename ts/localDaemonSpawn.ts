@@ -1,6 +1,7 @@
 import { readFile, rename, unlink, writeFile } from "fs/promises";
 import { randomUUID } from "crypto";
 import path from "path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { agentYesHome } from "./agentYesHome.ts";
 
 type Discovery = { pid: number; port: number; spool?: string };
@@ -63,7 +64,7 @@ async function spawnViaSpool(
           cwd: typeof value.cwd === "string" ? value.cwd : request.cwd,
         };
       } catch {
-        await Bun.sleep(50);
+        await sleep(50);
       }
     }
     return null;
