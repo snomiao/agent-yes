@@ -27,8 +27,7 @@ function validDiscovery(value: unknown): value is Discovery {
     Number(v.pid) > 1 &&
     Number(v.port) > 0 &&
     Number(v.port) <= 65535 &&
-    (v.spool === undefined ||
-      (typeof v.spool === "string" && path.isAbsolute(v.spool)))
+    (v.spool === undefined || (typeof v.spool === "string" && path.isAbsolute(v.spool)))
   );
 }
 
@@ -55,8 +54,7 @@ async function spawnViaSpool(
           status?: number;
           body?: string;
         };
-        if (response.status !== 200 || typeof response.body !== "string")
-          return null;
+        if (response.status !== 200 || typeof response.body !== "string") return null;
         const value = JSON.parse(response.body) as Partial<DaemonSpawnResult>;
         if (!Number.isInteger(value.pid) || Number(value.pid) <= 1) return null;
         return {
@@ -72,11 +70,7 @@ async function spawnViaSpool(
   } catch {
     return null;
   } finally {
-    await Promise.allSettled([
-      unlink(partialPath),
-      unlink(requestPath),
-      unlink(responsePath),
-    ]);
+    await Promise.allSettled([unlink(partialPath), unlink(requestPath), unlink(responsePath)]);
   }
 }
 
@@ -102,26 +96,18 @@ export async function spawnViaLocalDaemon(
     const token = rawToken.trim();
     if (!token) return null;
 
-    const spoolResult = await spawnViaSpool(
-      discovery,
-      token,
-      request,
-      timeoutMs,
-    );
+    const spoolResult = await spawnViaSpool(discovery, token, request, timeoutMs);
     if (spoolResult) return spoolResult;
 
-    const response = await fetchFn(
-      `http://127.0.0.1:${discovery.port}/api/spawn`,
-      {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${token}`,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify(request),
-        signal: AbortSignal.timeout(timeoutMs),
+    const response = await fetchFn(`http://127.0.0.1:${discovery.port}/api/spawn`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
       },
-    );
+      body: JSON.stringify(request),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
     if (!response.ok) return null;
     const value = (await response.json()) as Partial<DaemonSpawnResult>;
     if (!Number.isInteger(value.pid) || Number(value.pid) <= 1) return null;

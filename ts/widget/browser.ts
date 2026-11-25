@@ -218,12 +218,7 @@ export class AyWidget {
     return null;
   }
 
-  private async h2c(
-    el: any,
-    viewport: boolean,
-    rect?: any,
-    unclipSelector?: string,
-  ): Promise<any> {
+  private async h2c(el: any, viewport: boolean, rect?: any, unclipSelector?: string): Promise<any> {
     const g = globalThis as any;
     // html2canvas-pro (fork) supports color-mix()/oklch()/lab() — the modern CSS
     // the original html2canvas silently fails on. Deferred: only loaded on a screenshot.

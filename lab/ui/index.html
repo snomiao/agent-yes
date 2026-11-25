@@ -6166,13 +6166,7 @@ my.translate = async (text, lang) => {
         // repair (garbled, overlapping, dim-bleed output). First event is an
         // xterm-rendered tail snapshot; later events are incremental deltas.
         const startTail = () => {
-          if (
-            document.visibilityState === "hidden" ||
-            sel !== selKey ||
-            !term ||
-            es
-          )
-            return; // switched/paused during size sync, or already resumed
+          if (document.visibilityState === "hidden" || sel !== selKey || !term || es) return; // switched/paused during size sync, or already resumed
           $("livedot").className = "dot idle";
           $("livetxt").textContent = "connecting…";
           const close = tx.subscribe(

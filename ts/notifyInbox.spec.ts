@@ -234,7 +234,7 @@ describe("notifyInbox — emergency rotation (#169.3)", () => {
 
   it("returns events in ascending seq order (append order preserved)", () => {
     const kept = emergencyKeep(many(), 1, 10);
-    expect(kept.map((e) => e.seq)).toEqual([...kept.map((e) => e.seq)].sort((a, b) => a - b));
+    expect(kept.map((e) => e.seq)).toEqual(kept.map((e) => e.seq).sort((a, b) => a - b));
   });
 });
 

@@ -4,11 +4,7 @@ import { spawn } from "child_process";
 import { parseCliArgs } from "./parseCliArgs.ts";
 import { invokedCliName } from "./invokedCli.ts";
 import { logger } from "./logger.ts";
-import {
-  checkAndAutoUpdate,
-  displayVersion,
-  versionString,
-} from "./versionChecker.ts";
+import { checkAndAutoUpdate, displayVersion, versionString } from "./versionChecker.ts";
 import { getRustBinary } from "./rustBinary.ts";
 import { buildRustArgs } from "./buildRustArgs.ts";
 
@@ -65,8 +61,7 @@ import { buildRustArgs } from "./buildRustArgs.ts";
 // (the flag still works); suppress the Rust runner's mirror of this warning so
 // it isn't printed twice when we spawn the Rust binary below.
 {
-  const { detectCwdDeprecation, SUPPRESS_CWD_WARN_ENV } =
-    await import("./cwdDeprecation.ts");
+  const { detectCwdDeprecation, SUPPRESS_CWD_WARN_ENV } = await import("./cwdDeprecation.ts");
   const dep = detectCwdDeprecation(process.argv);
   if (dep) {
     console.warn(dep.message);
@@ -136,9 +131,7 @@ if (config.useRust) {
   } catch (err) {
     // Rust binary unavailable (not yet released for this version, or network issue) — fall back to TypeScript
     if (config.verbose) {
-      console.error(
-        `[rust] ${err instanceof Error ? err.message : String(err)}`,
-      );
+      console.error(`[rust] ${err instanceof Error ? err.message : String(err)}`);
       console.error("[rust] Falling back to TypeScript implementation.");
     }
   }
@@ -156,8 +149,7 @@ if (config.useRust) {
     // agent so we don't block the parent's tool call for the whole session, then
     // print how to drive it and exit. `--attach`/AGENT_YES_ATTACH=1 opts out.
     const attach = config.attach || process.env.AGENT_YES_ATTACH === "1";
-    const { shouldForkNested, buildSpawnTutorial, waitForFifo } =
-      await import("./forkNested.ts");
+    const { shouldForkNested, buildSpawnTutorial, waitForFifo } = await import("./forkNested.ts");
     if (
       shouldForkNested({
         isTTY: Boolean(process.stdout.isTTY),
@@ -180,8 +172,7 @@ if (config.useRust) {
       if (daemonSpawn) {
         const registered = await waitForFifo(daemonSpawn.pid, 5000);
         console.log(buildSpawnTutorial(config.cli || "agent", daemonSpawn.pid));
-        if (!registered)
-          console.log(`(note: still registering — give ay send/tail a moment)`);
+        if (!registered) console.log(`(note: still registering — give ay send/tail a moment)`);
         process.exit(0);
       }
 
@@ -208,19 +199,14 @@ if (config.useRust) {
       forked.on("exit", (code, signal) => {
         deathMsg ??= `Agent exited immediately (${signal ?? `code ${code}`}). See: ay tail ${forkedPid}`;
       });
-      const registered = await waitForFifo(
-        forkedPid,
-        2000,
-        () => deathMsg !== null,
-      );
+      const registered = await waitForFifo(forkedPid, 2000, () => deathMsg !== null);
       if (deathMsg) {
         console.error(deathMsg);
         process.exit(1);
       }
       forked.unref();
       console.log(buildSpawnTutorial(config.cli || "agent", forkedPid));
-      if (!registered)
-        console.log(`(note: still registering — give ay send/tail a moment)`);
+      if (!registered) console.log(`(note: still registering — give ay send/tail a moment)`);
       process.exit(0);
     }
 
@@ -232,9 +218,7 @@ if (config.useRust) {
 
     child.on("error", (err) => {
       if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        console.error(
-          `Rust binary '${rustBinary}' not found. Try: npx agent-yes --rust --verbose`,
-        );
+        console.error(`Rust binary '${rustBinary}' not found. Try: npx agent-yes --rust --verbose`);
       } else {
         console.error(`Failed to spawn Rust binary: ${err.message}`);
       }
@@ -243,9 +227,7 @@ if (config.useRust) {
 
     child.on("exit", (code, signal) => {
       if (signal) {
-        process.exit(
-          128 + (signal === "SIGINT" ? 2 : signal === "SIGTERM" ? 15 : 1),
-        );
+        process.exit(128 + (signal === "SIGINT" ? 2 : signal === "SIGTERM" ? 15 : 1));
       }
       process.exit(code ?? 1);
     });

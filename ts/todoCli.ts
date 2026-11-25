@@ -18,7 +18,7 @@
  * Argument parsing: a real yargs COMMAND TREE — one `yargs(argv)` instance
  * with a `CommandModule` per verb registered via `.command()`, `--root`/
  * `--format` declared once as `global: true` options on that same instance —
- * matching the pattern `tools/symval-dev-cli`'s `sv` CLI already uses
+ * matching the pattern `tools/example-project-3-dev-cli`'s `sv` CLI already uses
  * (`todoCommand`/`lsCmd` etc. in that repo's `commands/todo.ts`), per taku's
  * explicit feedback that this gives better help behavior for free: a real
  * `.command()` tree yields an auto-generated `ay todo --help` listing every

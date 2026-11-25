@@ -14,10 +14,7 @@ describe("spawnViaLocalDaemon", () => {
     process.env.AGENT_YES_HOME = home;
     await mkdir(home, { recursive: true });
     await writeFile(path.join(home, ".serve-token"), "secret\n");
-    await writeFile(
-      path.join(home, "ayrs-http.json"),
-      '{"pid":123,"port":31545}',
-    );
+    await writeFile(path.join(home, "ayrs-http.json"), '{"pid":123,"port":31545}');
   });
 
   afterEach(async () => {
@@ -63,20 +60,13 @@ describe("spawnViaLocalDaemon", () => {
     );
     const watcher = (async () => {
       for (let i = 0; i < 20; i++) {
-        const requestName = (await readdir(spool)).find((name) =>
-          name.endsWith(".request.json"),
-        );
+        const requestName = (await readdir(spool)).find((name) => name.endsWith(".request.json"));
         if (requestName) {
-          const request = JSON.parse(
-            await readFile(path.join(spool, requestName), "utf8"),
-          );
+          const request = JSON.parse(await readFile(path.join(spool, requestName), "utf8"));
           expect(request.token).toBe("secret");
           expect(request.request.prompt).toBe("task");
           await writeFile(
-            path.join(
-              spool,
-              requestName.replace(".request.json", ".response.json"),
-            ),
+            path.join(spool, requestName.replace(".request.json", ".response.json")),
             JSON.stringify({
               status: 200,
               body: JSON.stringify({
@@ -119,16 +109,12 @@ describe("spawnViaLocalDaemon", () => {
       ),
     ).resolves.toBeNull();
 
-    await writeFile(
-      path.join(home, "ayrs-http.json"),
-      '{"pid":123,"port":31545}',
-    );
+    await writeFile(path.join(home, "ayrs-http.json"), '{"pid":123,"port":31545}');
     await expect(
       spawnViaLocalDaemon(
         { cli: "claude", cwd: "/work" },
         {
-          fetch: (async () =>
-            new Response("no", { status: 503 })) as unknown as typeof fetch,
+          fetch: (async () => new Response("no", { status: 503 })) as unknown as typeof fetch,
         },
       ),
     ).resolves.toBeNull();

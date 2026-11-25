@@ -10,9 +10,9 @@ describe("derivePermissions", () => {
   const YES = ["--dangerously-skip-permissions"];
 
   it("detects the configured yolo flag", () => {
-    expect(
-      derivePermissions({ cliArgs: ["--print", ...YES], yesArgs: YES }).skip_permissions,
-    ).toBe(true);
+    expect(derivePermissions({ cliArgs: ["--print", ...YES], yesArgs: YES }).skip_permissions).toBe(
+      true,
+    );
   });
 
   it("detects a dangerous flag the config never declared", () => {

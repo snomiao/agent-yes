@@ -47,10 +47,11 @@ async function rebuild() {
   building = true;
   await stopChild();
   console.log("[dev:ayrs] incremental build");
-  const build = Bun.spawn(
-    ["cargo", "build", "--manifest-path", cargo, "--bin", "ayrs"],
-    { cwd: root, stdout: "inherit", stderr: "inherit" },
-  );
+  const build = Bun.spawn(["cargo", "build", "--manifest-path", cargo, "--bin", "ayrs"], {
+    cwd: root,
+    stdout: "inherit",
+    stderr: "inherit",
+  });
   const code = await build.exited;
   if (code === 0) {
     console.log(`[dev:ayrs] restart: serve ${serveArgs.join(" ")}`);
@@ -69,9 +70,7 @@ async function rebuild() {
       { cwd: root, stdin: "inherit", stdout: "inherit", stderr: "inherit" },
     );
   } else {
-    console.error(
-      `[dev:ayrs] build failed (${code}); waiting for the next change`,
-    );
+    console.error(`[dev:ayrs] build failed (${code}); waiting for the next change`);
   }
   building = false;
   if (queued) {
