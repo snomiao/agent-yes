@@ -21,10 +21,10 @@ mod live_output;
 mod log_files;
 #[path = "../reaper.rs"]
 mod reaper;
-#[path = "../supported_clis.rs"]
-mod supported_clis;
 #[path = "../serve/mod.rs"]
 mod serve;
+#[path = "../supported_clis.rs"]
+mod supported_clis;
 #[path = "../vterm.rs"]
 mod vterm;
 
