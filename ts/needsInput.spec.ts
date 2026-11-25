@@ -155,3 +155,36 @@ test("parseMenu: a boxed 'N.M' version still isn't mistaken for an option", () =
   const menu = parseMenu(screen, claude);
   expect(menu!.options).toEqual([1, 2]);
 });
+
+test("configured global and sticky matchers stay reusable without changing caller state", () => {
+  for (const pattern of [/❯\s+\d+\./g, /❯\s+\d+\./y]) {
+    pattern.lastIndex = 99;
+    const cfg = { needsInput: [pattern], working: [] };
+    const screen = ["Choose a value", " 1. first", "❯ 2. second"];
+    const first = classifyNeedsInput(screen, cfg);
+    expect(first?.question).toContain("Choose a value");
+    expect(classifyNeedsInput(screen, cfg)).toEqual(first);
+    expect(parseMenu(screen, cfg)).toMatchObject({ cursor: 2, options: [1, 2] });
+    expect(pattern.lastIndex).toBe(99);
+  }
+});
+
+test("whole-screen patterns classify a question without inventing a cursor row", () => {
+  const cfg = { needsInput: [/Question\?\n❯ \d+\./], working: [] };
+  const screen = ["Question?", "❯ 1. option"];
+  expect(classifyNeedsInput(screen, cfg)?.question).toContain("Question?");
+  expect(parseMenu(screen, cfg)).toBeNull();
+});
+
+test("configured unnumbered prompts have no numeric selection menu", () => {
+  const cfg = { needsInput: [/❯ /], working: [] };
+  const screen = ["Continue?", "❯ Continue", " Cancel"];
+  expect(classifyNeedsInput(screen, cfg)?.question).toContain("Continue?");
+  expect(parseMenu(screen, cfg)).toBeNull();
+});
+
+test("deduplicates visible numbers and retains a configured prefixed cursor", () => {
+  const cfg = { needsInput: [/❯ \d+\./], working: [] };
+  const screen = ["Choose a value", "prefix ❯ 2. current", " 1. alternative", " 1. repeated"];
+  expect(parseMenu(screen, cfg)).toMatchObject({ cursor: 2, options: [1, 2] });
+});
