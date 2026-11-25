@@ -36,6 +36,9 @@ const sys = (over: Partial<SystemStats> = {}): SystemStats => ({
 });
 
 describe("repoLabel", () => {
+  it("keeps a filesystem root label instead of returning an absent path segment", () => {
+    expect(repoLabel("/")).toBe("/");
+  });
   it("names the repo, not the branch dir every worktree shares", () => {
     expect(repoLabel("/code/snomiao/agent-yes/tree/main")).toBe("agent-yes");
     expect(repoLabel("/code/snomiao/agent-yes/tree/feat/x")).toBe("agent-yes");
@@ -51,6 +54,12 @@ describe("repoLabel", () => {
 });
 
 describe("formatSystemLine", () => {
+  it("marks unavailable memory and swap counters without inventing an exhausted swap", () => {
+    const line = formatSystemLine(sys({ memAvailableBytes: null, swapFreeBytes: null }));
+    expect(line).toContain("mem -/16.0Gi");
+    expect(line).toContain("swap -/5.0Gi");
+    expect(line).not.toContain("FULL");
+  });
   it("puts the oversubscription ratio next to the raw load", () => {
     // "15.23" is meaningless without the core count beside it.
     expect(formatSystemLine(sys())).toContain("load 15.23 12.52 9.86 (8 cpu, 1.9x)");
@@ -317,5 +326,19 @@ describe("cmdPs", () => {
       }),
     });
     expect(r.out.startsWith("PID")).toBe(true);
+  });
+  it("marks its own process tree on Linux without walking any process files", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...descriptor, value: "linux" });
+    try {
+      const pid = process.pid;
+      const result = await run(["--json"], {
+        records: [rec({ pid })],
+        trees: new Map([[pid, stats({ pid })]]),
+      });
+      expect(JSON.parse(result.out).agents[0]).toMatchObject({ pid, self: true });
+    } finally {
+      Object.defineProperty(process, "platform", descriptor);
+    }
   });
 });
