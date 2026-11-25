@@ -388,7 +388,6 @@ clis:
       - "Error: The cursor position could not be read within"
     noEOL: true
 
-
   # codex-ds-direct — same idea as codex-ds, but pointed straight at DeepSeek's
   # own endpoint instead of going through OpenRouter. DeepSeek gained native
   # Responses API support in the 2026-08-13 V4 Pro update
@@ -438,7 +437,6 @@ clis:
     fatal:
       - "Error: The cursor position could not be read within"
     noEOL: true
-
 
   qwen:
     install:
