@@ -454,7 +454,7 @@ export function isUnknownManagerToken(
  * The CLI ends with `process.exit()`, which DISCARDS bytes still sitting in the
  * pipe buffer. Writing to a file completes synchronously so this never showed
  * there, but any consumer that PIPES us silently lost everything past 64KiB.
- * Measured on `ay ls --json` with a large fleet (symval CTO, 2026-08-05):
+ * Measured on `ay ls --json` with a large fleet (example-project-3 CTO, 2026-08-05):
  *
  *     ay ls --json > file    118055 bytes, valid JSON
  *     ay ls --json | consumer 65536 bytes, cut mid-multibyte — will not parse
@@ -1770,7 +1770,7 @@ async function cmdLs(rest: string[]): Promise<number> {
     .example("ay ls --all", "include exited agents")
     .example("ay ls --json", "machine-readable output")
     .example("ay ls --watch", "stream state transitions for a whole fan-out as NDJSON")
-    .example("ay ls symval", "filter by cwd/prompt keyword")
+    .example("ay ls example-project-3", "filter by cwd/prompt keyword")
     .help(false)
     .version(false)
     .exitProcess(false);
