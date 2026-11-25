@@ -388,7 +388,6 @@ clis:
       - "Error: The cursor position could not be read within"
     noEOL: true
 
-
   qwen:
     install:
       npm: "npm install -g @qwen-code/qwen-code@latest"

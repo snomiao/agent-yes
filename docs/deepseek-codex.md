@@ -3,12 +3,12 @@
 Codex を DeepSeek で動かす経路は 2 つある。**まず `ay codex-ds` を試すこと。**
 そちらで足りない場合にだけ、このアダプタを使う。
 
-| | `ay codex-ds` | このアダプタ (`ay ds`) |
-|---|---|---|
-| 経路 | OpenRouter (`deepseek/deepseek-v4-pro-0813`) | DeepSeek API に直結 |
-| 仕組み | codex に `-c` オーバーライドを渡すだけ。追加プロセスなし | ローカル HTTP プロキシを立てて Responses ⇄ Chat Completions を変換 |
-| 必要なもの | `OPENROUTER_API_KEY` のみ | `DEEPSEEK_API_KEY` |
-| 設定ファイル | 不要 (素の codex install で動く) | 隔離した `CODEX_HOME` を自動生成 |
+|              | `ay codex-ds`                                            | このアダプタ (`ay ds`)                                             |
+| ------------ | -------------------------------------------------------- | ------------------------------------------------------------------ |
+| 経路         | OpenRouter (`deepseek/deepseek-v4-pro-0813`)             | DeepSeek API に直結                                                |
+| 仕組み       | codex に `-c` オーバーライドを渡すだけ。追加プロセスなし | ローカル HTTP プロキシを立てて Responses ⇄ Chat Completions を変換 |
+| 必要なもの   | `OPENROUTER_API_KEY` のみ                                | `DEEPSEEK_API_KEY`                                                 |
+| 設定ファイル | 不要 (素の codex install で動く)                         | 隔離した `CODEX_HOME` を自動生成                                   |
 
 **`ay codex-ds` を既定にする理由**: 変換レイヤを挟まないぶん壊れる箇所が少ない。
 codex が `wire_api = "responses"` しか話さなくなった (0.147) 一方で OpenRouter は
@@ -24,7 +24,6 @@ DeepSeek の API は Chat Completions しか提供していないので、codex 
 (`ay ls` / `ay tail` / resume) として扱える。
 
 ## Setup
-
 
 Create `.env.local` in the repository root:
 
