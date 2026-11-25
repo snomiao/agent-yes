@@ -124,6 +124,7 @@ const SHELL = [
   "./room-client.js",
   "./device-sync.js",
   "./device-transfer.js",
+  "./sync-storage.js",
   "./console-logic.js",
   "./rtc.js",
   "./e2e.js",

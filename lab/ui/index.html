@@ -1194,10 +1194,28 @@
         min-width: 150px;
         box-shadow: 0 6px 20px rgba(0, 0, 0, 0.25);
       }
-      #sync-dialog { max-width: min(32rem, 90vw); max-height: 80vh; overflow: auto; background: var(--panel); color: var(--fg); border: 1px solid var(--line); border-radius: 8px; }
-      #sync-dialog button { cursor: pointer; margin-block: 4px; }
-      #sync-dialog::backdrop { background: #0008; }
-      #device-sync[hidden], .viewmenupanel[hidden] {
+      #sync-dialog {
+        max-width: min(32rem, 90vw);
+        max-height: 80vh;
+        overflow: auto;
+        background: var(--panel);
+        color: var(--fg);
+        border: 1px solid var(--line);
+        border-radius: 8px;
+      }
+      #sync-dialog button {
+        cursor: pointer;
+        margin-block: 4px;
+      }
+      #sync-dialog .checklist label {
+        display: block;
+        margin-block: 6px;
+      }
+      #sync-dialog::backdrop {
+        background: #0008;
+      }
+      #device-sync[hidden],
+      .viewmenupanel[hidden] {
         display: none;
       }
       .viewmenuitem {
@@ -2198,10 +2216,14 @@
   <body>
     <dialog id="sync-dialog" aria-labelledby="sync-title">
       <h2 id="sync-title">Sync devices</h2>
-      <p>Open this on two devices signed in to the same account. Sync now exchanges saved room access tokens, agent status and schedule times directly between them. Use devices you trust.</p>
-      <p>Copies stay on each device for offline use. Jobs run on their original host.</p>
-      <button class="pair">Sync now</button> <button class="forget">Clear saved copies</button> <button class="close">Close</button>
-      <p role="status"></p><div class="copies"></div>
+      <p>
+        Choose rooms to sync with other browsers signed in to this account. Keep the console open on
+        both devices. Room access, agent status and schedule times travel directly between them.
+      </p>
+      <div class="checklist"></div>
+      <button class="forget">Clear offline snapshots</button> <button class="close">Close</button>
+      <p role="status"></p>
+      <div class="copies"></div>
     </dialog>
     <div class="app">
       <div class="left">
@@ -2788,7 +2810,13 @@
             // deep links). p.h re-lands the console on the current agent.
             let dest = "https://" + host + "/w/" + location.hash;
             try {
-              const json = JSON.stringify({ r: loadRooms(), h: location.hash.slice(1) });
+              const rooms = Object.fromEntries(
+                Object.entries(loadRooms()).map(([name, { token, host, ts }]) => [
+                  name,
+                  { token, host, ts },
+                ]),
+              );
+              const json = JSON.stringify({ r: rooms, h: location.hash.slice(1) });
               const b64 = btoa(unescape(encodeURIComponent(json)))
                 .replace(/\+/g, "-")
                 .replace(/\//g, "_")
@@ -8196,6 +8224,10 @@ my.translate = async (text, lang) => {
           const now = Date.now();
           let changed = false;
           for (const k of Object.keys(r)) {
+            if (r[k] && typeof r[k].sync !== "boolean") {
+              r[k].sync = false;
+              changed = true;
+            }
             if (r[k]?.ts && now - r[k].ts > ROOM_TTL_MS) {
               delete r[k];
               changed = true;
@@ -8215,9 +8247,19 @@ my.translate = async (text, lang) => {
           return {};
         }
       };
+      let deviceSync,
+        syncSignedIn = false;
       const saveRoom = (room, token, host) => {
         const r = loadRooms();
-        r[room] = { token, host: host || SIG_DEFAULT, ts: Date.now() };
+        const old = r[room];
+        const same = old?.token === token && old.host === (host || SIG_DEFAULT);
+        if (!same && old?.sync) deviceSync?.uncheck(room);
+        r[room] = {
+          ...(same ? old : { sync: false }),
+          token,
+          host: host || SIG_DEFAULT,
+          ts: Date.now(),
+        };
         // Bound at write time too: loadRooms() trims on read, but a fresh add can
         // push to MAX_ROOMS+1 until the next read. The just-added room has the
         // newest ts, so the trim drops the oldest OTHER room, never this one.
@@ -8227,45 +8269,72 @@ my.translate = async (text, lang) => {
           for (const k of keys.slice(MAX_ROOMS)) delete r[k];
         }
         localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
+        if (!same) deviceSync?.render();
       };
       if (location.pathname.startsWith("/w/")) {
-        const btn = $("device-sync");
-        btn.hidden = false;
-        let openSync;
-        btn.onclick = async () => {
-          const { mountDeviceSync } = await import("./device-sync.js");
-          openSync ??= mountDeviceSync({
-            dialog: $("sync-dialog"),
-            connect: async (r) => {
-              const existing = loadRooms()[r.name];
-              if (existing && (existing.token !== r.token || existing.host !== r.host)) return false;
-              await addRoomSource(r.name, r.token, r.host);
-              return true;
-            },
-            getLocal: async () => {
-              const rooms = Object.entries(loadRooms()).map(([name, r]) => ({
-                name, token: r.token, host: r.host || SIG_DEFAULT, ts: r.ts || Date.now(),
-              }));
-              const agents = entries.map(e => ({ room: e._src, pid: e.pid, status: e.status || "unknown" }));
-              const schedules = [], unavailable = [];
-              await Promise.all([...sources.values()].filter(s => !s.readonly).map(async s => {
-                try {
-                  if (!s.live || !s.tx) throw Error();
-                  const jobs = await s.tx.fetchJSON("/api/schedule-summary");
-                  if (!Array.isArray(jobs)) throw Error();
-                  for (const j of jobs) schedules.push({ host:s.id, name:j.name, cron:j.cron, tz:j.tz, enabled:j.enabled });
-                } catch { unavailable.push(s.id); }
-              }));
-              return { rooms, agents, schedules, unavailable };
-            },
-          });
-          await openSync();
-        };
+        import("./device-sync.js")
+          .then(({ mountDeviceSync }) => {
+            deviceSync = mountDeviceSync({
+              dialog: $("sync-dialog"),
+              loadRooms,
+              changed(signed) {
+                syncSignedIn = signed;
+                $("device-sync").hidden = !signed && !localStorage.getItem("ay.peerOwner");
+                renderRoomsIfOpen();
+              },
+              disconnect: removeRoom,
+              compatible(r) {
+                const current = sources.get(r.name) || chRooms.get(r.name);
+                return (
+                  !current || (current.token === r.token && (current.host || CH_HOST) === r.host)
+                );
+              },
+              connect(r) {
+                if (!sources.has(r.name) && !chRooms.has(r.name))
+                  void addRoomSource(r.name, r.token, r.host);
+              },
+              async collect(name) {
+                const members = roomSources(name).filter((s) => s.room === name);
+                const ids = new Set(members.map((s) => s.id));
+                const agents = entries
+                  .filter((e) => ids.has(e._src))
+                  .map((e) => ({ pid: e.pid, status: e.status || "unknown" }));
+                const schedules = [],
+                  unavailable = [];
+                await Promise.all(
+                  members
+                    .filter((s) => !s.readonly)
+                    .map(async (s) => {
+                      try {
+                        if (!s.live || !s.tx) throw Error();
+                        const jobs = await s.tx.fetchJSON("/api/schedule-summary");
+                        if (!Array.isArray(jobs)) throw Error();
+                        for (const j of jobs)
+                          schedules.push({
+                            host: s.id,
+                            name: j.name,
+                            cron: j.cron,
+                            tz: j.tz,
+                            enabled: j.enabled,
+                          });
+                      } catch {
+                        unavailable.push(s.id);
+                      }
+                    }),
+                );
+                return { agents, schedules, unavailable };
+              },
+            });
+            $("device-sync").onclick = () => deviceSync.open();
+          })
+          .catch(() => {}); // Local console access works without the account module.
       }
       const dropRoom = (room) => {
+        deviceSync?.uncheck(room);
         const r = loadRooms();
         delete r[room];
         localStorage.setItem(ROOMS_KEY, JSON.stringify(r));
+        deviceSync?.render();
       };
       function setConn(text, color) {
         $("conn").textContent = text;
@@ -8720,9 +8789,18 @@ my.translate = async (text, lang) => {
               .map(
                 (n) => `<div class="ritem ${roomLive(n) ? "cur" : ""}">
           ${roomStatus(n)}
-          <span class="rname" data-room="${esc(n)}" title="${esc(n)}">${esc([...new Set(roomSources(n).map((s) => hostStats.get(s.id)?.host).filter(Boolean))].join(", ") || n)}</span>
+          <span class="rname" data-room="${esc(n)}" title="${esc(n)}">${esc(
+            [
+              ...new Set(
+                roomSources(n)
+                  .map((s) => hostStats.get(s.id)?.host)
+                  .filter(Boolean),
+              ),
+            ].join(", ") || n,
+          )}</span>
           <span class="rhost">${esc(r[n].host)}</span>
           ${resChipHtml(n)}
+          ${syncSignedIn ? `<label><input type="checkbox" data-sync="${esc(n)}" ${r[n].sync === true ? "checked" : ""}> Sync</label>` : ""}
           <span class="rx" data-del="${esc(n)}" title="forget">✕</span></div>`,
               )
               .join("")
@@ -8750,6 +8828,10 @@ my.translate = async (text, lang) => {
           el.style.display = "none";
           stopHostPoll();
         }
+      });
+      $("rooms").addEventListener("change", (ev) => {
+        const box = ev.target.closest("input[data-sync]");
+        if (box) deviceSync?.toggle(box.dataset.sync, box.checked);
       });
       $("rooms").addEventListener("click", (ev) => {
         const name = ev.target.closest(".rname");
@@ -9373,7 +9455,8 @@ my.translate = async (text, lang) => {
             let changed = false;
             for (const [room, v] of Object.entries(p.r || {})) {
               if (v && v.token && (!mine[room] || (v.ts || 0) > (mine[room].ts || 0))) {
-                mine[room] = v;
+                const same = mine[room]?.token === v.token && mine[room]?.host === v.host;
+                mine[room] = { ...(same ? mine[room] : {sync:false}), token:v.token, host:v.host, ts:v.ts };
                 changed = true;
               }
             }

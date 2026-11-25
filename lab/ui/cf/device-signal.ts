@@ -2,8 +2,8 @@ import { betterAuth } from "better-auth";
 import { authOptions, authOrigin } from "./auth";
 import type { Env } from "./worker";
 
-// Only SDP crosses this service. The user ID comes from the verified session.
-// The two sockets live in memory for a short pairing window.
+// The service exchanges peer IDs, negotiation controls and SDP. The user ID comes from the verified session.
+// Connection identifiers last only for this rendezvous and are never written to D1.
 export async function signal(req: Request, env: Env) {
   if (req.method !== "GET" || req.headers.get("Upgrade")?.toLowerCase() !== "websocket")
     return new Response(null, { status: 426 });
@@ -19,41 +19,53 @@ export async function signal(req: Request, env: Env) {
 }
 
 export class DeviceSignal {
-  private sockets = new Set<WebSocket>();
+  private sockets = new Map<string, WebSocket>();
+
   fetch() {
-    if (this.sockets.size >= 2) return new Response("Two devices already pairing", { status: 409 });
     const { 0: client, 1: ws } = new WebSocketPair();
-    const role = this.sockets.size === 0 ? "offer" : "answer";
     ws.accept();
-    this.sockets.add(ws);
-    const timeout = setTimeout(() => ws.close(1000, "Pairing window ended"), 90000);
-    const cleanup = () => {
-      clearTimeout(timeout);
-      if (this.sockets.delete(ws)) {
-        for (const peer of this.sockets) peer.close(1000, "Peer left");
+    this.attach(ws);
+    return new Response(null, { status: 101, webSocket: client });
+  }
+
+  attach(ws: WebSocket) {
+    const id = crypto.randomUUID();
+    const pair = () => {
+      for (const [peer, socket] of this.sockets) {
+        if (peer === id) continue;
+        const round = crypto.randomUUID();
+        socket.send(JSON.stringify({ type: "start", peer: id, round, offer: false }));
+        ws.send(JSON.stringify({ type: "start", peer, round, offer: true }));
       }
+    };
+    this.sockets.set(id, ws);
+    // Renew through the authenticated HTTP upgrade. A socket must not outlive
+    // a revoked session indefinitely, even if its browser never signs out.
+    const lease = setTimeout(() => ws.close(1000, "Renew session"), 90000);
+    const cleanup = () => {
+      clearTimeout(lease);
+      this.sockets.delete(id);
     };
     ws.addEventListener("close", cleanup);
     ws.addEventListener("error", cleanup);
-    let sent = false;
     ws.addEventListener("message", ({ data }) => {
       try {
-        if (sent || typeof data !== "string" || data.length > 48000) throw Error();
-        const { type, sdp } = JSON.parse(data);
+        if (typeof data !== "string" || data.length > 48000) throw Error();
+        const { type, peer, round, sdp } = JSON.parse(data);
+        if (type === "refresh") return pair();
         if (
-          this.sockets.size !== 2 ||
-          type !== role ||
+          (type !== "offer" && type !== "answer") ||
           typeof sdp !== "string" ||
-          !sdp.startsWith("v=0")
+          !sdp.startsWith("v=0") ||
+          typeof round !== "string" ||
+          !/^[0-9a-f-]{36}$/.test(round)
         )
           throw Error();
-        sent = true;
-        for (const peer of this.sockets) if (peer !== ws) peer.send(JSON.stringify({ type, sdp }));
+        this.sockets.get(peer)?.send(JSON.stringify({ type, peer: id, round, sdp }));
       } catch {
         ws.close(1008, "Invalid signal");
       }
     });
-    if (this.sockets.size === 2) [...this.sockets][0].send('{"type":"start"}');
-    return new Response(null, { status: 101, webSocket: client });
+    pair();
   }
 }

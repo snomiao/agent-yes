@@ -5209,7 +5209,10 @@ export async function cmdServe(rest: string[]): Promise<number> {
       return serveUiFile("rgui/dist/main.js", "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/r/main.js.map")
       return serveUiFile("rgui/dist/main.js.map", "application/json");
-    if (req.method === "GET" && (p === "/device-sync.js" || p === "/device-transfer.js"))
+    if (
+      req.method === "GET" &&
+      (p === "/device-sync.js" || p === "/device-transfer.js" || p === "/sync-storage.js")
+    )
       return serveUiFile(p.slice(1), "text/javascript; charset=utf-8");
     if (req.method === "GET" && p === "/room-client.js")
       return serveUiFile("room-client.js", "text/javascript; charset=utf-8");
