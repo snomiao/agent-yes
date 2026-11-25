@@ -201,7 +201,7 @@ describe("TodoStore", () => {
     expect(s.list({ blocked: true }).map((t) => t.summary)).toEqual(["b"]);
   });
 
-  it("a done task with a leftover block is not counted by --blocked (mirrors symval-dev-cli's equivalent fix)", async () => {
+  it("a done task with a leftover block is not counted by --blocked (mirrors example-project-3-dev-cli's equivalent fix)", async () => {
     const s = await openStore(TEST_ROOT);
     const t = await s.create({ summary: "a", kind: "human" });
     await s.setBlock(t._id, { type: "blocked-by-human", who: "x" });

@@ -11,7 +11,9 @@ describe("detectCwdDeprecation", () => {
   });
 
   it("detects `--cwd DIR` and rebuilds the command without it", () => {
-    const dep = detectCwdDeprecation(argv("/x/dist/cy.js", "claude", "--cwd", "/ws/app", "-p", "fix"));
+    const dep = detectCwdDeprecation(
+      argv("/x/dist/cy.js", "claude", "--cwd", "/ws/app", "-p", "fix"),
+    );
     expect(dep).not.toBeNull();
     expect(dep!.dir).toBe("/ws/app");
     expect(dep!.suggestion).toBe("cd /ws/app && cy claude -p fix");
