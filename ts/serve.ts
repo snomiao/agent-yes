@@ -3413,7 +3413,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
         // answer is nothing the caller can or should act on.
         const autoReply = msg !== "" && isTerminalReply(msg);
         if (autoReply && !allowTerminalReply(record.pid, msg)) {
-          return Response.json({ ok: true, pid: record.pid, cli: record.cli, dropped: "autoreply" });
+          return Response.json({
+            ok: true,
+            pid: record.pid,
+            cli: record.cli,
+            dropped: "autoreply",
+          });
         }
         const trailing = controlCodeFromName(code.toLowerCase());
         if (msg && trailing) {
