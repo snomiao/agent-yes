@@ -49,7 +49,7 @@ describe("account sign-in and profile", () => {
         return;
       }
       const filename =
-        url.pathname === "/auth/" ? "auth/index.html" : url.pathname.replace(/^\//, "");
+        url.pathname === "/auth/" ? "auth/index.html" : url.pathname.replace(/^\/(?:w\/)?/, "");
       const file = path.resolve("lab/ui", filename);
       if (!file.startsWith(path.resolve("lab/ui") + path.sep)) {
         await route.fulfill({ status: 404, body: "Not found" });
@@ -99,11 +99,27 @@ describe("account sign-in and profile", () => {
     await page.keyboard.press("Escape");
     expect(await menu.getAttribute("aria-expanded")).toBe("false");
     expect(await menu.evaluate((node) => node === document.activeElement)).toBe(true);
+    // Sign-out also cleans a closed console. Its own saved rooms remain local.
+    await page.evaluate(() => {
+      localStorage.setItem(
+        "ay.rooms",
+        JSON.stringify({
+          local: { token: "fixture-local", sync: true, syncId: "local-id" },
+          received: { token: "fixture-received", sync: true, syncImported: true },
+        }),
+      );
+      localStorage.setItem("ay.peerOwner", "user-example");
+    });
     await menu.click();
     await page.getByRole("button", { name: "Sign out", exact: true }).click();
     await expect
       .poll(() => page.getByRole("button", { name: "Continue with Google" }).isVisible())
       .toBe(true);
+    expect(await page.evaluate(() => JSON.parse(localStorage.getItem("ay.rooms") || "{}"))).toEqual(
+      {
+        local: { token: "fixture-local", sync: false },
+      },
+    );
     expect(posts).toContainEqual({ path: "/api/auth/sign-out", body: {} });
     expect(await page.getByRole("link", { name: "Sign in", exact: true }).isVisible()).toBe(true);
   });
