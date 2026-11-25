@@ -20,11 +20,11 @@
       "name": "the documented shape",
       "user": "sno",
       "host": "Mac",
-      "cwd": "/Users/sno/ws/symval/symval/tree/crm",
+      "cwd": "/Users/sno/ws/example-project-3/example-project-3/tree/crm",
       "home": "/Users/sno",
       "branch": "main",
       "pid": 30402,
-      "want": "sno@Mac:~/ws/symval/symval/tree/crm:main#30402"
+      "want": "sno@Mac:~/ws/example-project-3/example-project-3/tree/crm:main#30402"
     },
     {
       "name": "a cwd outside home keeps its absolute path",
@@ -80,11 +80,11 @@
       "name": "a worktree lane name rides in the branch segment for free",
       "user": "sno",
       "host": "Mac",
-      "cwd": "/Users/sno/ws/symval/symval/tree/crm-yamamoto-wifi",
+      "cwd": "/Users/sno/ws/example-project-3/example-project-3/tree/crm-sample-network",
       "home": "/Users/sno",
-      "branch": "crm-yamamoto-wifi",
+      "branch": "crm-sample-network",
       "pid": 6,
-      "want": "sno@Mac:~/ws/symval/symval/tree/crm-yamamoto-wifi:crm-yamamoto-wifi#6"
+      "want": "sno@Mac:~/ws/example-project-3/example-project-3/tree/crm-sample-network:crm-sample-network#6"
     },
     {
       "name": "an empty home never rewrites the path",

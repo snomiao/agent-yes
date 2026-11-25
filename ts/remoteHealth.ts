@@ -17,7 +17,7 @@ import path from "path";
  * So the entry stays, and we stop paying for it every time.
  *
  * WHY EXPONENTIAL AND NOT φ: the operator's φ-backoff rule (golden ratio, no
- * 2x) is a symval/symval convention — its AGENTS.md, its helpers. agent-yes is a
+ * 2x) is a example-project-3/example-project-3 convention — its AGENTS.md, its helpers. agent-yes is a
  * general tool in snomiao/ and that rule does not reach it. This repo already
  * has one backoff shape, `ts/autoRetry.ts` (base × 2ⁿ, capped, mirrored in
  * rs/src/context.rs), and one repo with two backoff shapes is its own defect.
