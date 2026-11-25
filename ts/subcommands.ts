@@ -786,7 +786,7 @@ async function cmdLs(rest: string[]): Promise<number> {
     .example("ay ls --all-remotes", "include all configured remote machines")
     .example("ay ls --all", "include exited agents")
     .example("ay ls --json", "machine-readable output")
-    .example("ay ls symval", "filter by cwd/prompt keyword")
+    .example("ay ls example-project-3", "filter by cwd/prompt keyword")
     .help(false)
     .version(false)
     .exitProcess(false);
