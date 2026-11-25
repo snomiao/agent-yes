@@ -1,6 +1,7 @@
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
+import { setTimeout as sleep } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawnViaLocalDaemon } from "./localDaemonSpawn.ts";
 
@@ -79,7 +80,7 @@ describe("spawnViaLocalDaemon", () => {
           );
           return;
         }
-        await Bun.sleep(20);
+        await sleep(20);
       }
       throw new Error("spool request did not appear");
     })();
