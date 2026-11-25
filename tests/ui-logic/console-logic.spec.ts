@@ -77,9 +77,11 @@ describe("repoBranch", () => {
   it("surfaces a submodule leaf below the worktree as `sub`", () => {
     // cwd inside a submodule keeps the superproject's owner/repo/branch (git
     // resolves it that way) but exposes the submodule dir so it's distinguishable.
-    expect(repoBranch(agent({ cwd: "/x/symval/symval/tree/share/lib/bot" }))).toEqual({
-      owner: "symval",
-      repo: "symval",
+    expect(
+      repoBranch(agent({ cwd: "/x/example-project-3/example-project-3/tree/share/lib/bot" })),
+    ).toEqual({
+      owner: "example-project-3",
+      repo: "example-project-3",
       branch: "share",
       sub: "bot",
     });
@@ -190,8 +192,8 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
   });
   it("appends a submodule leaf with → when the cwd is nested", () => {
     const list = [
-      agent({ cwd: "/x/symval/symval/tree/share/lib/bot" }),
-      agent({ cwd: "/x/symval/symval/tree/share/lib/api" }),
+      agent({ cwd: "/x/example-project-3/example-project-3/tree/share/lib/bot" }),
+      agent({ cwd: "/x/example-project-3/example-project-3/tree/share/lib/api" }),
     ];
     const ctx = identContext(list);
     // owner/repo/branch uniform → blanked; only the submodule leaf differs.
@@ -202,11 +204,11 @@ describe("compactIdent (omit-if-uniform, separators kept)", () => {
 
 describe("compactIdent (parent-relative omission in a tree)", () => {
   it("omits fields a subagent shares with its tree parent, keeping the submodule delta", () => {
-    const parent = agent({ cwd: "/x/symval/symval/tree/share" });
+    const parent = agent({ cwd: "/x/example-project-3/example-project-3/tree/share" });
     const list = [
       parent,
-      agent({ cwd: "/x/symval/symval/tree/share/lib/bot" }),
-      agent({ cwd: "/x/symval/symval/tree/syn" }),
+      agent({ cwd: "/x/example-project-3/example-project-3/tree/share/lib/bot" }),
+      agent({ cwd: "/x/example-project-3/example-project-3/tree/syn" }),
     ];
     const ctx = identContext(list);
     // Same owner/repo/branch as the parent → blanked; only →bot remains.
@@ -216,8 +218,8 @@ describe("compactIdent (parent-relative omission in a tree)", () => {
     expect(compactIdent(list[2], ctx, 3, parent)).toBe("//syn");
   });
   it("hides the identity entirely for a subagent in the very same checkout", () => {
-    const parent = agent({ cwd: "/x/symval/symval/tree/share" });
-    const child = agent({ cwd: "/x/symval/symval/tree/share" });
+    const parent = agent({ cwd: "/x/example-project-3/example-project-3/tree/share" });
+    const child = agent({ cwd: "/x/example-project-3/example-project-3/tree/share" });
     const ctx = identContext([parent, child, agent()]);
     const id = compactIdent(child, ctx, 3, parent);
     expect(id).toBe("//");
@@ -227,12 +229,16 @@ describe("compactIdent (parent-relative omission in a tree)", () => {
 
 describe("layeredRows parentEntry", () => {
   it("links a subagent row to its superagent's entry, null for roots/headers", () => {
-    const root = agent({ pid: 1, wrapper_pid: 1, cwd: "/x/symval/symval/tree/share" });
+    const root = agent({
+      pid: 1,
+      wrapper_pid: 1,
+      cwd: "/x/example-project-3/example-project-3/tree/share",
+    });
     const child = agent({
       pid: 2,
       wrapper_pid: 2,
       parent_pid: 1,
-      cwd: "/x/symval/symval/tree/share/lib/bot",
+      cwd: "/x/example-project-3/example-project-3/tree/share/lib/bot",
     });
     const rows = layeredRows([root, child]);
     const rootRow = rows.find((r) => r.entry?.pid === 1);
@@ -371,9 +377,9 @@ describe("age", () => {
     expect(age(agent({ started_at: now + 10_000 }), now)).toBe("0s");
   });
   it("prefers last_active_at (last stdout) over started_at when present", () => {
-    expect(
-      age(agent({ started_at: now - 3 * 3_600_000, last_active_at: now - 5_000 }), now),
-    ).toBe("5s");
+    expect(age(agent({ started_at: now - 3 * 3_600_000, last_active_at: now - 5_000 }), now)).toBe(
+      "5s",
+    );
   });
   it("falls back to started_at when last_active_at is absent", () => {
     expect(age(agent({ started_at: now - 5 * 60_000, last_active_at: undefined }), now)).toBe("5m");
@@ -916,10 +922,7 @@ describe("sortEntries", () => {
   });
 
   it("active mode: falls back to started_at when last_active_at is absent", () => {
-    const list = [
-      a({ _k: "old", started_at: 100 }),
-      a({ _k: "new", started_at: 900 }),
-    ];
+    const list = [a({ _k: "old", started_at: 100 }), a({ _k: "new", started_at: 900 })];
     expect(keys(sortEntries(list, "active"))).toEqual(["new", "old"]);
   });
 

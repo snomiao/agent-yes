@@ -138,10 +138,7 @@ async function atomicWrite(file: string, data: string): Promise<boolean> {
  * deliberately NO wall-clock backstop: elapsed wait time alone never steals, so a
  * live holder is inviolable.
  */
-export async function acquireLock(
-  lockDir: string,
-  staleMs = 30_000,
-): Promise<() => Promise<void>> {
+export async function acquireLock(lockDir: string, staleMs = 30_000): Promise<() => Promise<void>> {
   const ownerFile = path.join(lockDir, "owner");
   // A fencing token unique to THIS acquisition. Everything we do to the lock is
   // gated on the owner file still carrying our token — so if we were stale-stolen
@@ -194,15 +191,18 @@ export async function acquireLock(
       // window) — means we no longer own it, so we stop rather than clobber an
       // unknown/absent owner. Atomic writes above mean a null read is never just
       // our own write in flight. Refresh well inside staleMs; cleared on release.
-      const beat = setInterval(() => {
-        void (async () => {
-          if ((await readOwnerToken()) !== token) {
-            clearInterval(beat);
-            return;
-          }
-          await stampOwner();
-        })();
-      }, Math.max(500, Math.floor(staleMs / 3)));
+      const beat = setInterval(
+        () => {
+          void (async () => {
+            if ((await readOwnerToken()) !== token) {
+              clearInterval(beat);
+              return;
+            }
+            await stampOwner();
+          })();
+        },
+        Math.max(500, Math.floor(staleMs / 3)),
+      );
       if (typeof beat.unref === "function") beat.unref();
       return async () => {
         clearInterval(beat);
@@ -296,7 +296,11 @@ export async function listInboxParents(host: string): Promise<number[]> {
   return pids;
 }
 
-export async function getCursor(host: string, parentPid: number, consumer = "parent"): Promise<number> {
+export async function getCursor(
+  host: string,
+  parentPid: number,
+  consumer = "parent",
+): Promise<number> {
   const text = await readFile(cursorPath(host, parentPid, consumer), "utf8").catch(() => null);
   return parseCursor(text).seq;
 }

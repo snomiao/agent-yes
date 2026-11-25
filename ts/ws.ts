@@ -231,7 +231,8 @@ export async function resolveOperand(
       );
     }
     const dir = prov.folderFor(spec, wsRoot);
-    if (!existsSync(dir)) throw new Error(`workspace not provisioned: ${dir}  (ay ws new ${operand})`);
+    if (!existsSync(dir))
+      throw new Error(`workspace not provisioned: ${dir}  (ay ws new ${operand})`);
     return { dir, spec };
   };
   if (mode === "path") return asPath();
@@ -306,7 +307,13 @@ async function cmdWsLs(args: string[]): Promise<number> {
 
   const [bare, records] = await Promise.all([
     walkWorkspaces(wsRoot),
-    listRecords(undefined, { all: false, active: false, json: false, latest: false, cwdScope: null }),
+    listRecords(undefined, {
+      all: false,
+      active: false,
+      json: false,
+      latest: false,
+      cwdScope: null,
+    }),
   ]);
 
   let entries: WsEntry[] = bare.map((w) => ({
@@ -410,12 +417,16 @@ async function cmdWsStatus(args: string[]): Promise<number> {
   };
 
   if (flags.json) {
-    process.stdout.write(JSON.stringify({ schema: WS_JSON_SCHEMA, workspace: entry }, null, 2) + "\n");
+    process.stdout.write(
+      JSON.stringify({ schema: WS_JSON_SCHEMA, workspace: entry }, null, 2) + "\n",
+    );
     return 0;
   }
   process.stdout.write(
     `${dir}\n` +
-      (layoutSpec ? `  spec:     ${layoutSpec.owner}/${layoutSpec.repo}@${layoutSpec.branch}\n` : "") +
+      (layoutSpec
+        ? `  spec:     ${layoutSpec.owner}/${layoutSpec.repo}@${layoutSpec.branch}\n`
+        : "") +
       `  branch:   ${git.branch} @ ${git.head}\n` +
       `  state:    ${gitSummary(entry)}\n` +
       `  agents:   ${entry.agents.live} live\n`,
@@ -464,7 +475,9 @@ async function cmdWsFork(args: string[]): Promise<number> {
     typeof flags.from === "string" ? flags.from : await defaultForkFrom(),
   );
 
-  process.stderr.write(`forking ${fromCwd} → branch ${branch}${flags.wip ? " (with WIP)" : ""} …\n`);
+  process.stderr.write(
+    `forking ${fromCwd} → branch ${branch}${flags.wip ? " (with WIP)" : ""} …\n`,
+  );
   const res = await prov.forkWorktree({
     fromCwd,
     branch,

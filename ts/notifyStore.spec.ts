@@ -176,7 +176,10 @@ describe("notifyStore (fs)", () => {
     await mkdir(inboxDir(host), { recursive: true });
     // Simulate a crash between "reserve seq 5" and "append line": the counter
     // says 5, but the inbox only has 1..3 (4 and 5 are reserved gaps).
-    await writeFile(inboxPath(host, 700), [1, 2, 3].map((s) => JSON.stringify(baseEvent("idle", { seq: s }))).join("\n") + "\n");
+    await writeFile(
+      inboxPath(host, 700),
+      [1, 2, 3].map((s) => JSON.stringify(baseEvent("idle", { seq: s }))).join("\n") + "\n",
+    );
     await writeFile(seqPath(host, 700), "5");
     const next = await appendEvent(700, baseEvent("idle"));
     expect(next).toBe(6); // continues past the reserved gap, never reuses 4 or 5

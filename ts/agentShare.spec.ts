@@ -147,9 +147,11 @@ describe("scopedFetch — /api/ls/subscribe remove + teardown", () => {
   }
 
   it("forwards removes only for pids it forwarded (sibling removals stay hidden)", async () => {
-    const res = await scopedFetch(SHARED, removalInner(), "r")(
-      new Request("http://ay.local/api/ls/subscribe"),
-    );
+    const res = await scopedFetch(
+      SHARED,
+      removalInner(),
+      "r",
+    )(new Request("http://ay.local/api/ls/subscribe"));
     const events = (await sse(res))
       .split("\n\n")
       .filter((e) => e.startsWith("data:"))

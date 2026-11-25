@@ -33,7 +33,9 @@
     "amp-yes": "./dist/amp-yes.js",
     "auggie-yes": "./dist/auggie-yes.js",
     "ay": "./dist/agent-yes.js",
+    "bash-yes": "./dist/bash-yes.js",
     "claude-yes": "./dist/claude-yes.js",
+    "cmd-yes": "./dist/cmd-yes.js",
     "codex-yes": "./dist/codex-yes.js",
     "copilot-yes": "./dist/copilot-yes.js",
     "cursor-yes": "./dist/cursor-yes.js",
@@ -45,10 +47,8 @@
     "openrouter-yes": "./dist/openrouter-yes.js",
     "orcy": "./dist/orcy.js",
     "pi-yes": "./dist/pi-yes.js",
-    "qwen-yes": "./dist/qwen-yes.js",
-    "bash-yes": "./dist/bash-yes.js",
-    "cmd-yes": "./dist/cmd-yes.js",
-    "powershell-yes": "./dist/powershell-yes.js"
+    "powershell-yes": "./dist/powershell-yes.js",
+    "qwen-yes": "./dist/qwen-yes.js"
   },
   "directories": {
     "doc": "docs"
@@ -137,6 +137,7 @@
     "@types/yargs": "^17.0.35",
     "@typescript/native-preview": "^7.0.0-dev.20260124.1",
     "@vitest/coverage-v8": "4.1.0",
+    "codehost": "^0.32.0",
     "husky": "^9.1.7",
     "lint-staged": "^16.2.7",
     "node-pty": "^1.1.0",
@@ -150,8 +151,7 @@
     "tsdown": "^0.20.3",
     "vitest": "4.1.0",
     "ws": "^8.20.0",
-    "zod": "^3.23.0",
-    "codehost": "^0.32.0"
+    "zod": "^3.23.0"
   },
   "peerDependencies": {
     "node-pty": "latest",

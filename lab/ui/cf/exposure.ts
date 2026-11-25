@@ -83,13 +83,19 @@ export class Exposure {
       }
       const { 0: client, 1: server } = new WebSocketPair();
       this.state.acceptWebSocket(server);
-      server.serializeAttachment({ role: "daemon", authed: false, at: Date.now() } satisfies Attach);
+      server.serializeAttachment({
+        role: "daemon",
+        authed: false,
+        at: Date.now(),
+      } satisfies Attach);
       await this.ensureSweep(UNAUTH_MS);
       return new Response(null, { status: 101, webSocket: client });
     }
 
     // Visitor leg: the Worker prefixes the real path with /_visit.
-    const path = url.pathname.startsWith("/_visit") ? url.pathname.slice("/_visit".length) || "/" : url.pathname;
+    const path = url.pathname.startsWith("/_visit")
+      ? url.pathname.slice("/_visit".length) || "/"
+      : url.pathname;
 
     // Visitor claim: swap a single-use token for a session cookie.
     if (path === "/_ay/claim") {
@@ -264,7 +270,9 @@ export class Exposure {
   private async registerClaims(raw: string[] | undefined): Promise<void> {
     const claims = (raw ?? []).filter((c) => /^[a-f0-9]{64}$/.test(c)).slice(0, MAX_CLAIMS);
     if (!claims.length) return;
-    const existing = [...(await this.state.storage.list<number>({ prefix: "claim:" }))].sort((a, b) => a[1] - b[1]);
+    const existing = [...(await this.state.storage.list<number>({ prefix: "claim:" }))].sort(
+      (a, b) => a[1] - b[1],
+    );
     const excess = existing.length + claims.length - MAX_CLAIMS;
     for (const [k] of existing.slice(0, Math.max(0, excess))) await this.state.storage.delete(k);
     const expires = Date.now() + CLAIM_TTL_MS;
@@ -307,7 +315,12 @@ export class Exposure {
 
   // ---- visitor request paths ----
 
-  private async visitorHttp(tunnel: TunnelClient, hostname: string, pathAndQuery: string, req: Request): Promise<Response> {
+  private async visitorHttp(
+    tunnel: TunnelClient,
+    hostname: string,
+    pathAndQuery: string,
+    req: Request,
+  ): Promise<Response> {
     const len = Number(req.headers.get("content-length") ?? 0);
     if (len > MAX_BODY) return new Response("body too large", { status: 413 });
 
@@ -341,11 +354,19 @@ export class Exposure {
     try {
       return await tunnel.fetch(req.method, pathAndQuery, headers, body);
     } catch (err) {
-      return new Response(`upstream error: ${String(err)}\n`, { status: 502, headers: { "cache-control": "no-store" } });
+      return new Response(`upstream error: ${String(err)}\n`, {
+        status: 502,
+        headers: { "cache-control": "no-store" },
+      });
     }
   }
 
-  private visitorWebSocket(tunnel: TunnelClient, _hostname: string, pathAndQuery: string, req: Request): Response {
+  private visitorWebSocket(
+    tunnel: TunnelClient,
+    _hostname: string,
+    pathAndQuery: string,
+    req: Request,
+  ): Response {
     const protoHeader = req.headers.get("Sec-WebSocket-Protocol");
     const protocols = protoHeader ? protoHeader.split(",").map((s) => s.trim()) : undefined;
     const { 0: client, 1: server } = new WebSocketPair();
@@ -384,7 +405,10 @@ export class Exposure {
 
 /** Read a stream into one buffer, aborting (→ null) once it exceeds `max`, so a
  *  body without/with-a-lying Content-Length can't be buffered unboundedly. */
-async function readCapped(body: ReadableStream<Uint8Array>, max: number): Promise<Uint8Array | null> {
+async function readCapped(
+  body: ReadableStream<Uint8Array>,
+  max: number,
+): Promise<Uint8Array | null> {
   const reader = body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;

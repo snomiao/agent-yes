@@ -45,7 +45,9 @@ if (!existsSync(path.join(RGUI_DIR, "node_modules/d3-selection"))) {
   await $`bun install --cwd ${RGUI_DIR}`;
 }
 
-const outdir = process.argv[2] ? path.resolve(process.argv[2]) : path.join(root, "lab/ui/rgui/dist");
+const outdir = process.argv[2]
+  ? path.resolve(process.argv[2])
+  : path.join(root, "lab/ui/rgui/dist");
 await mkdir(outdir, { recursive: true });
 
 const result = await Bun.build({

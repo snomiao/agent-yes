@@ -5,7 +5,7 @@ committed their work but then **sat at an idle `❯` prompt without exiting**
 (`claude-yes` does not exit on idle by default). Claude Code's built-in
 background-task notification only fires on process **EXIT** — so the parent
 never learned the children went idle and left two of them parked **16 minutes**.
-The stop-gap was Monitor-on-HEAD polling, which catches a *commit* but is blind
+The stop-gap was Monitor-on-HEAD polling, which catches a _commit_ but is blind
 to a child that finished **without** committing (an investigation, a failure, a
 question).
 
@@ -93,7 +93,7 @@ parent addresses its own inbox with no argument.
 
 - **Singleton lock with liveness-based steal; ownership proven only by mkdir.**
   The daemon holds an mkdir lock whose `owner.json` records `{pid, started_at,
-  ts}`. A stale lock (owner pid dead / torn) is **stolen** — but the steal only
+ts}`. A stale lock (owner pid dead / torn) is **stolen** — but the steal only
   removes the dir; ownership is then re-proven by the next `mkdir(recursive:false)`
   (the atomic, exclusive create), so two would-be stealers can never both enter.
   A lock held by a **live** owner is respected. The parent `notify/` dir is
@@ -224,7 +224,7 @@ parent addresses its own inbox with no argument.
   daemon came up.
 
 - **pid-reuse & cross-host safety.** Inboxes are namespaced by host; events carry
-  the child pid/wrapper. (Cross-host *delivery* is out of scope — the daemon only
+  the child pid/wrapper. (Cross-host _delivery_ is out of scope — the daemon only
   sees the local registry.)
 
 - **Retention.** GC deletes an inbox (+ counter + cursors) once its parent is
@@ -259,7 +259,7 @@ with a documented mitigation, tracked in a single follow-up issue.
   goes stale within the TTL and is dropped — but carrying the watch subprocess's
   pid/token in the heartbeat for a strict check is a follow-up.
 - **No postmortem inbox inspection after the parent exits.** `ay notify
-  read/watch` fail closed when the parent isn't a live registry record (started_at
+read/watch` fail closed when the parent isn't a live registry record (started_at
   can't be resolved) — deliberately, so a recycled parent pid can't read another
   session's inbox. The trade-off is that you can't inspect a parent's inbox after
   that parent has exited. A read-only "postmortem" mode (inspect without

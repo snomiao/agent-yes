@@ -402,7 +402,8 @@ export function sortEntries(entries, mode = "state") {
           ? byNewest
           : mode === "identity"
             ? (a, b) => fullIdent(a).localeCompare(fullIdent(b)) || byNewest(a, b)
-            : (a, b) => stateRank(a) - stateRank(b) || gitWeight(b) - gitWeight(a) || byNewest(a, b);
+            : (a, b) =>
+                stateRank(a) - stateRank(b) || gitWeight(b) - gitWeight(a) || byNewest(a, b);
   return entries.slice().sort(cmp);
 }
 

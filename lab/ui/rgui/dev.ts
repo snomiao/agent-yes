@@ -52,4 +52,8 @@ Bun.serve({
 });
 
 console.log(`rgui dev  →  http://localhost:${PORT}   (proxying ${AY_API})`);
-console.log(watch ? "  --watch: rebuilding bundle on every request" : "  restart to rebuild (or pass --watch)");
+console.log(
+  watch
+    ? "  --watch: rebuilding bundle on every request"
+    : "  restart to rebuild (or pass --watch)",
+);

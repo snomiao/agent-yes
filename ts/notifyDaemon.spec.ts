@@ -91,10 +91,7 @@ describe("notifyd singleton lock", () => {
     expect(await acquireDaemonLock(() => true)).toBe(true);
     const owner = JSON.parse(await readFile(daemonLockOwnerPath(), "utf8"));
     // Rewrite the owner to a DIFFERENT, "alive" pid to simulate another daemon.
-    await writeFile(
-      daemonLockOwnerPath(),
-      JSON.stringify({ ...owner, pid: owner.pid + 1 }),
-    );
+    await writeFile(daemonLockOwnerPath(), JSON.stringify({ ...owner, pid: owner.pid + 1 }));
     expect(await acquireDaemonLock((pid) => pid === owner.pid + 1)).toBe(false);
   });
 });
@@ -139,10 +136,7 @@ describe("notifyd identity (status/stop safety)", () => {
   it("returns null for an INCOMPLETE owner missing started_at (I1)", async () => {
     await mkdir(daemonLockDir(), { recursive: true });
     // pid alive + fresh ts, but no started_at → identity incomplete, not trusted.
-    await writeFile(
-      daemonLockOwnerPath(),
-      JSON.stringify({ pid: process.pid, ts: Date.now() }),
-    );
+    await writeFile(daemonLockOwnerPath(), JSON.stringify({ pid: process.pid, ts: Date.now() }));
     expect(await daemonStatus()).toBeNull();
   });
 

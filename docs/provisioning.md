@@ -12,7 +12,7 @@ Three ways to produce the `cwd`, in precedence order:
 
 | Request body                | What happens                                                                                      | Backed by                                 |
 | --------------------------- | ------------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| `fork: { fromCwd, branch }` | Fork an existing worktree to a **new branch (clean — committed work only)**, then spawn there      | `codehost/provision` `forkWorktree`       |
+| `fork: { fromCwd, branch }` | Fork an existing worktree to a **new branch (clean — committed work only)**, then spawn there     | `codehost/provision` `forkWorktree`       |
 | `from: "<source>"`          | Provision a GitHub source (clone / worktree / ff-pull) into `<root>/<owner>/<repo>/tree/<branch>` | `codehost/provision` `provision`          |
 | `cwd: "<dir>"` (or omitted) | Resolve against the workspace root and `mkdir -p` (a missing dir no longer ENOENTs into a 500)    | `ts/workspaceConfig.ts` `resolveSpawnCwd` |
 
@@ -80,7 +80,7 @@ so config lives per host, never synced between peers.
   "provisionAllowlist": ["snomiao"],
   // koho-style: pick the account per owner, then allow (exit 0). This REPLACES
   // provisionAllowlist as the gate — a non-zero exit denies the provision.
-  "provisionHook": "case \"$KOHO_OWNER\" in symval) gh auth switch --user snomiao;; snomiao) gh auth switch --user snomiao;; *) echo \"unknown owner $KOHO_OWNER\"; exit 1;; esac",
+  "provisionHook": "case \"$KOHO_OWNER\" in example-project-3) gh auth switch --user snomiao;; snomiao) gh auth switch --user snomiao;; *) echo \"unknown owner $KOHO_OWNER\"; exit 1;; esac",
 }
 ```
 
