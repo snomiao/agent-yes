@@ -23,12 +23,12 @@
 
 ## 4. 服务端 perf 分支（已全部合并，无遗留）
 
-| 分支 | 内容 | main 落点 |
-|---|---|---|
-| `perf/edges-backscan` | エッジ走査時刻窓打ち切り + `/api/ls` メタ収集並列化 | `ee6917a #422` |
-| `perf/raw-log-gc` | 旧版書き手の raw ログ daemon 回収 + log_tasks 再計算間引き | `9ad6aed #425` |
-| `perf/raw-log-read-cap` | cap raw PTY log reads/size + compact-in-place | `18b100e/ad58931` → `a672f91 #264` |
-| `perf-w-startup` | web console 启动加速 | 已合并 |
+| 分支                    | 内容                                                       | main 落点                          |
+| ----------------------- | ---------------------------------------------------------- | ---------------------------------- |
+| `perf/edges-backscan`   | エッジ走査時刻窓打ち切り + `/api/ls` メタ収集並列化        | `ee6917a #422`                     |
+| `perf/raw-log-gc`       | 旧版書き手の raw ログ daemon 回収 + log_tasks 再計算間引き | `9ad6aed #425`                     |
+| `perf/raw-log-read-cap` | cap raw PTY log reads/size + compact-in-place              | `18b100e/ad58931` → `a672f91 #264` |
+| `perf-w-startup`        | web console 启动加速                                       | 已合并                             |
 
 > 这些本地分支与 worktree 已于 2026-08-17 清理（内容已全在 main）。远程 `origin/perf/*` 分支是 PR 来源，保留即可。
 
