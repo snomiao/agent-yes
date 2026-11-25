@@ -78,6 +78,7 @@ function emit(opts: CommonOpts, obj: unknown, human: string): void {
 
 export async function runTodoSubcommand(rest: string[]): Promise<number> {
   const y = yargs(rest)
+    .parserConfiguration({ "unknown-options-as-args": true })
     .scriptName("ay todo")
     .option("root", {
       type: "string",
