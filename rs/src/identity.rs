@@ -2,14 +2,14 @@
 //!
 //! ```text
 //! <username>@<hostname>:<path>:<branch>#<pid>
-//! e.g.  sno@Mac:~/ws/symval/symval/tree/crm:main#30402
+//! e.g.  sno@Mac:~/ws/example-project-3/example-project-3/tree/crm:main#30402
 //! ```
 //!
 //! Rust mirror of `ts/identity.ts`. One line answers "who is this agent" across
 //! every surface that names one — the `ay send` envelope header, `ay whoami`,
 //! logs, and (since this module landed) the `<ay-init-msg>` header the wrapper
 //! puts on a sub-agent's initial prompt. The branch segment usually carries the
-//! lane name for free (worktree checkouts like `crm-yamamoto-wifi` or
+//! lane name for free (worktree checkouts like `crm-sample-network` or
 //! `fix/t173-tone-core` name their purpose), which is why there is no separate
 //! role concept.
 //!
