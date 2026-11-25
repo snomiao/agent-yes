@@ -64,7 +64,9 @@ describe("formatMessage", () => {
   });
   it("shows (deleted) and reaction counts", () => {
     expect(formatMessage({ ...base, deleted: true, text: "" })).toContain("(deleted)");
-    expect(formatMessage({ ...base, reactions: [{ emoji: "👍", by: ["a", "b"] }] })).toContain("👍2");
+    expect(formatMessage({ ...base, reactions: [{ emoji: "👍", by: ["a", "b"] }] })).toContain(
+      "👍2",
+    );
     expect(formatMessage({ ...base, reactions: [{ emoji: "🎉", by: ["a"] }] })).toContain("🎉");
   });
 });
