@@ -835,6 +835,11 @@
         color: var(--muted);
         opacity: 0.6;
       }
+      .rooms .rstat.fail {
+        color: var(--red);
+        opacity: 1;
+        cursor: help;
+      }
       .rooms .rname {
         font-family: var(--mono);
         color: var(--accent);
@@ -2643,6 +2648,7 @@
         cpuPct,
         memPct,
         resLabel,
+        roomFailHint,
         badgesFor,
         advanceStdinFlashes,
         focusSummary,
@@ -8439,6 +8445,7 @@ my.translate = async (text, lang) => {
           } catch {
             c.fastInput = false;
           }
+          s.lastError = null;
           s.reconnectDelay = RTC_BACKOFF_MIN; // a healthy connect resets the backoff
           s.failCount = 0; // …and the dead-room escalation (see RTC_BACKOFF_DEAD_MAX)
           clearTimeout(s.reconnectTimer); // cancel any reconnect queued during replace
@@ -8504,9 +8511,11 @@ my.translate = async (text, lang) => {
             // subscription + send closures). Re-select to rebind it to the new
             // transport, else the room looks live but the terminal stays frozen.
             if (sel && sel.startsWith(s.id + "#")) select(sel);
-          } catch {
+          } catch (e) {
             s.live = false;
+            s.lastError = String(e?.message ?? e); // shown on the room row (roomStatus)
             s.failCount = (s.failCount || 0) + 1; // dead-room escalation counter
+            renderRoomsIfOpen();
             scheduleRtcReconnect(s); // keep trying
           }
         }, delay);
@@ -8629,6 +8638,7 @@ my.translate = async (text, lang) => {
           s.live = true;
         } catch (e) {
           s.live = false;
+          s.lastError = String(e?.message ?? e); // shown on the room row (roomStatus)
           s.failCount = (s.failCount || 0) + 1; // dead-room escalation counter
           scheduleRtcReconnect(s);
         }
@@ -8690,7 +8700,14 @@ my.translate = async (text, lang) => {
       // connected, so we show the source's last-known serverCount.
       function roomStatus(n) {
         if (!sources.has(n) && !chRooms.has(n)) return `<span class="rstat off">○</span>`;
-        if (!roomLive(n)) return `<span class="rstat off" title="offline">○</span>`;
+        if (!roomLive(n)) {
+          // Say WHY it is not connecting (stale link, unreachable host…)
+          // instead of an endless silent retry behind a bare ○.
+          const hint = roomFailHint(roomSources(n).find((s) => s.lastError)?.lastError);
+          return hint
+            ? `<span class="rstat off fail" title="${esc(hint.tip)}">○ ${esc(hint.label)}</span>`
+            : `<span class="rstat off" title="offline">○</span>`;
+        }
         const c = roomSources(n).filter((s) => s.live).length;
         return `<span class="rstat on" title="${c} live ${c === 1 ? "server" : "servers"}">● ${c}</span>`;
       }

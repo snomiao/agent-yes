@@ -316,6 +316,43 @@ export function resLabel(stats) {
 // Task-progress badge ("2/5") from the agent's parsed todo block (e.tasks =
 // { done, total }, computed live in /api/ls). Empty string when no todo block was
 // confidently detected — the badge is omitted entirely, never shown as "0/0".
+// Why a share room is not connecting, from RTCClient.connect()'s error, as a
+// short row label plus a tooltip that says what to do. null when the error is
+// not one we can explain (the row then just shows "offline").
+export function roomFailHint(err) {
+  const m = String(err ?? "");
+  if (!m) return null;
+  if (/room not open/.test(m))
+    return {
+      label: "not hosted",
+      tip:
+        "No host has ever opened this room: the link is stale (or the daemon " +
+        "hosts a different room). Run `ay serve status` on the host and open " +
+        "the share link it prints.",
+    };
+  if (/room rejected/.test(m))
+    return {
+      label: "link rejected",
+      tip:
+        "The signaling server rejected this link (" +
+        m.replace(/^room rejected: /, "") +
+        "): the room was rotated. Get the current link with `ay serve status`.",
+    };
+  if (/no host in room|that host left/.test(m))
+    return { label: "host offline", tip: "The room exists but no host is in it right now." };
+  if (/no network path/.test(m))
+    return {
+      label: "unreachable",
+      tip:
+        "The host answered but no network path opened (NAT/firewall). For a " +
+        "host behind NAT (e.g. Docker): ay serve install --webrtc " +
+        "--ice-public-ip auto --ice-udp-port 47000 and publish that UDP port, " +
+        "or give it a TURN relay (CF_TURN_KEY_ID + CF_TURN_API_TOKEN).",
+    };
+  if (/old agent-yes|old unencrypted/.test(m)) return { label: "upgrade host", tip: m };
+  return null;
+}
+
 export function taskLabel(e) {
   const t = e.tasks;
   if (!t || typeof t.total !== "number" || t.total <= 0) return "";

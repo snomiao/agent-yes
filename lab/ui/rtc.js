@@ -342,8 +342,26 @@ export class RTCClient {
         }
       };
       ws.onerror = () => fail(new Error("signaling error"));
-      ws.onclose = () => fail(new Error("signaling closed"));
-      setTimeout(() => fail(new Error("connect timeout")), 8000);
+      // Keep the server's reason: a 1008 "room not open" (nobody ever hosted
+      // this room, i.e. a stale link) or "forbidden" (rotated room) is a dead
+      // link, not a network blip, and the console says so (roomFailHint).
+      ws.onclose = (e) =>
+        fail(
+          new Error(
+            e?.code === 1008 ? `room rejected: ${e.reason || "forbidden"}` : "signaling closed",
+          ),
+        );
+      // Past the offer means the host answered but no ICE path opened: say
+      // that, not a bare timeout, so a NAT problem is not read as "offline".
+      setTimeout(
+        () =>
+          fail(
+            new Error(
+              pc ? `no network path to host (ice ${pc.iceConnectionState})` : "connect timeout",
+            ),
+          ),
+        8000,
+      );
     });
   }
   // Seal an envelope and send it, serialized so wire order == counter order.

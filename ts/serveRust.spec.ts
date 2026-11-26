@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { daemonShareRuntime, planRustServe } from "./serveRust.ts";
+import {
+  daemonShareRuntime,
+  ensureDaemonShareRuntime,
+  iceEnv,
+  planRustServe,
+} from "./serveRust.ts";
 import { planDaemonArgs } from "./shareCore.ts";
 
 // `ay serve` runs the Rust daemon (`ayrs serve`) by default, like `ay <cli>`
@@ -148,5 +153,76 @@ describe("daemonShareRuntime", () => {
     expect(daemonShareRuntime(["--webrtc"], ayrs, { AGENT_YES_NO_RUST: "1" })).toBe("ts");
     expect(daemonShareRuntime(["--share"], ayrs, env)).toBe("ts");
     expect(daemonShareRuntime([], ayrs, env)).toBe("ts");
+  });
+});
+
+// The first `ay share webrtc` on a fresh box: ayrs is not downloaded yet, but
+// the daemon about to start fetches it and hosts the Rust room. The minting
+// side must fetch too, or it prints the TS room's link (a room nobody hosts).
+describe("ensureDaemonShareRuntime", () => {
+  const env = {};
+
+  it("fetches ayrs before deciding, so a fresh install mints the Rust room", async () => {
+    let fetched = 0;
+    const ensure = async () => (fetched++, "/bin/ayrs");
+    expect(await ensureDaemonShareRuntime(["--webrtc"], ensure, env)).toBe("rust");
+    expect(fetched).toBe(1);
+  });
+
+  it("is ts when the fetch finds nothing, and never fetches for a TS-only daemon", async () => {
+    expect(await ensureDaemonShareRuntime(["--webrtc"], async () => undefined, env)).toBe("ts");
+    let fetched = 0;
+    const ensure = async () => (fetched++, "/bin/ayrs");
+    expect(await ensureDaemonShareRuntime(["--webrtc", "--no-rust"], ensure, env)).toBe("ts");
+    expect(await ensureDaemonShareRuntime(["--share"], ensure, env)).toBe("ts");
+    expect(fetched).toBe(0);
+  });
+});
+
+// A host behind NAT (a Docker container) needs the address viewers reach it
+// at. The flags ride in the daemon's args (so `ay serve install` persists
+// them) and reach ayrs as the env it reads.
+describe("--ice-public-ip / --ice-udp-port", () => {
+  const env = {};
+
+  it("delegate to ayrs with the ICE settings split off the argv", () => {
+    const plan = planRustServe(
+      [
+        "--webrtc",
+        "--ice-public-ip",
+        "auto",
+        "--ice-public-ip=192.0.2.10,100.64.0.7",
+        "--ice-udp-port",
+        "47000",
+      ],
+      env,
+    );
+    expect(plan).toEqual({
+      kind: "rust",
+      argv: ["serve", "--webrtc"],
+      ice: { publicIps: ["auto", "192.0.2.10", "100.64.0.7"], udpPort: "47000" },
+    });
+  });
+
+  it("fall back with a reason on a bad value or without --webrtc", () => {
+    expect(planRustServe(["--webrtc", "--ice-public-ip", "box.local"], env).kind).toBe("ts");
+    expect(planRustServe(["--webrtc", "--ice-public-ip", "300.1.1.1"], env).kind).toBe("ts");
+    expect(planRustServe(["--webrtc", "--ice-udp-port", "0"], env).kind).toBe("ts");
+    expect(planRustServe(["--webrtc", "--ice-udp-port"], env).kind).toBe("ts");
+    expect(planRustServe(["--port", "9000", "--ice-udp-port", "47000"], env).kind).toBe("ts");
+  });
+
+  it("auto adds the tailnet IPv4 when tailscale has one", () => {
+    expect(iceEnv({ publicIps: ["auto"], udpPort: "47000" }, () => "100.64.0.7")).toEqual({
+      AGENT_YES_ICE_PUBLIC_IPS: "auto,100.64.0.7",
+      AGENT_YES_ICE_UDP_PORT: "47000",
+    });
+    expect(iceEnv({ publicIps: ["AUTO"] }, () => undefined)).toEqual({
+      AGENT_YES_ICE_PUBLIC_IPS: "auto",
+    });
+    expect(iceEnv({ publicIps: ["100.64.0.7", "auto"] }, () => "100.64.0.7")).toEqual({
+      AGENT_YES_ICE_PUBLIC_IPS: "100.64.0.7,auto",
+    });
+    expect(iceEnv(undefined, () => "100.64.0.7")).toEqual({});
   });
 });

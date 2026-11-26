@@ -140,6 +140,15 @@ async function shareRuntimeOf(args: string[] | null): Promise<"ts" | "rust"> {
   return daemonShareRuntime(args ?? [], () => !!findAyrsBinary());
 }
 
+// shareRuntimeOf for a caller about to mint the room: fetches ayrs first, as
+// the daemon itself will, so a fresh box does not mint the TS room and print
+// its link while the daemon hosts the Rust one.
+async function mintingShareRuntimeOf(args: string[] | null): Promise<"ts" | "rust"> {
+  const { ensureDaemonShareRuntime } = await import("./serveRust.ts");
+  const { ensureAyrsBinary } = await import("./rustBinary.ts");
+  return ensureDaemonShareRuntime(args ?? [], () => ensureAyrsBinary());
+}
+
 // The console link for the room a `--webrtc` daemon hosts, derived read-only
 // from the persisted room file of its runtime; null when nothing is minted yet.
 export async function daemonShareLink(args: string[] | null): Promise<string | null> {
@@ -362,7 +371,7 @@ export async function cmdShare(rest: string[]): Promise<number> {
     // link points at a room nobody hosts.
     const { loadOrCreateShareRoom, shareLinkFromRoomUrl } = await import("./share.ts");
     url = shareLinkFromRoomUrl(
-      await loadOrCreateShareRoom(undefined, await shareRuntimeOf(state.args)),
+      await loadOrCreateShareRoom(undefined, await mintingShareRuntimeOf(state.args)),
     );
   } else if (mode === "portless") {
     url = state.consoleUrl ?? httpShareUrl("https://agent-yes.localhost", state.token);

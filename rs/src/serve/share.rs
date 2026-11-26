@@ -1924,6 +1924,16 @@ async fn start_peer(
                 if let Some(c) = c {
                     if let Ok(init) = c.to_json() {
                         if let Ok(cand) = serde_json::to_value(&init) {
+                            // Extra advertised addresses (AGENT_YES_ICE_PUBLIC_IPS
+                            // beyond the first per family) ride as copies.
+                            for extra in super::ice_net::extra_candidates(&init.candidate) {
+                                let mut copy = cand.clone();
+                                copy["candidate"] = json!(extra);
+                                let _ = sig_tx.send(SigOut::Send(
+                                    json!({"type":"candidate","to":peer_id,"candidate":copy})
+                                        .to_string(),
+                                ));
+                            }
                             let _ = sig_tx.send(SigOut::Send(
                                 json!({"type":"candidate","to":peer_id,"candidate":cand})
                                     .to_string(),
