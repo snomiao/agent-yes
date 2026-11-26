@@ -13,6 +13,10 @@ on:
       # `rs/**` here it merged untested, because touching the recipe never
       # triggered the matrix that runs it.
       - ".github/workflows/rust-build.yml"
+      # How the launcher finds the binaries. The npm install test below
+      # (job `npm`) is what proves that it finds the packaged ones.
+      - "ts/rustBinary.ts"
+      - "package.json"
 
   # Triggered by release.yml after semantic-release creates a new tag
   workflow_dispatch:
@@ -37,9 +41,17 @@ jobs:
     # Generous cap for Rust LTO + cross/zig darwin builds, but far under the 6h
     # default so a stuck compile/link can't run away.
     timeout-minutes: 45
+    # PR runs only, empty otherwise: the version the npm install test packs
+    # (see "Stamp a never-released version"). Every leg writes the same value.
+    outputs:
+      npm-version: ${{ steps.npm_version.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
+        # `npm`: the platform key (rustify's templates/npm/platforms.json) of
+        # the npm platform package this leg's binaries go into. The launcher
+        # downloads the musl builds on Linux (rustBinary.ts PLATFORM_MAP), so
+        # those are the ones packed.
         include:
           # Linux x64
           - target: x86_64-unknown-linux-gnu
@@ -52,6 +64,7 @@ jobs:
             os: ubuntu-latest
             artifact: agent-yes-linux-x64-musl
             ext: ""
+            npm: linux-x64
 
           # Linux ARM64
           - target: aarch64-unknown-linux-gnu
@@ -66,6 +79,7 @@ jobs:
             artifact: agent-yes-linux-arm64-musl
             ext: ""
             cross: true
+            npm: linux-arm64
 
           # macOS x64 (Intel) — cross-compiled from Linux via cargo-zigbuild
           # (no macOS runner: the zigbuild Docker image bundles the macOS SDK).
@@ -74,6 +88,7 @@ jobs:
             artifact: agent-yes-darwin-x64
             ext: ""
             zig: true
+            npm: darwin-x64
 
           # macOS ARM64 (Apple Silicon) — cross-compiled from Linux via zigbuild
           - target: aarch64-apple-darwin
@@ -81,12 +96,14 @@ jobs:
             artifact: agent-yes-darwin-arm64
             ext: ""
             zig: true
+            npm: darwin-arm64
 
           # Windows x64
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             artifact: agent-yes-win32-x64
             ext: ".exe"
+            npm: win32-x64
 
     steps:
       - uses: actions/checkout@v4
@@ -113,6 +130,22 @@ jobs:
           sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" rs/Cargo.toml
           rm -f rs/Cargo.toml.bak
           grep -m1 '^version = ' rs/Cargo.toml
+
+      # PR runs: stamp a version no GitHub release has, the same on every leg.
+      # The npm install test (job `npm`) packs this version, so a launcher that
+      # missed the packaged binaries and fell back to downloading the release
+      # would get a 404, and the test would fail instead of passing silently.
+      - name: Stamp a never-released version (PR)
+        id: npm_version
+        if: github.event_name == 'pull_request'
+        shell: bash
+        run: |
+          BASE=$(grep -m1 '^version = ' rs/Cargo.toml | sed -E 's/^version = "([^"]*)".*/\1/')
+          VERSION="${BASE}-ci.${{ github.run_number }}"
+          sed -i.bak "s/^version = \".*\"/version = \"${VERSION}\"/" rs/Cargo.toml
+          rm -f rs/Cargo.toml.bak
+          grep -m1 '^version = ' rs/Cargo.toml
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -192,6 +225,34 @@ jobs:
           path: artifacts/
           if-no-files-found: error
 
+      # The same binaries for the npm install test (job `npm`): one artifact
+      # per platform, named native-<platform key>, the binaries at its top
+      # level. The packer copies them into the platform package's bin/. The
+      # runner goes in as agent-yes-native, not agent-yes: see NATIVE_RUNNER in
+      # ts/rustBinary.ts.
+      - name: Stage npm platform binaries (PR)
+        if: github.event_name == 'pull_request' && matrix.npm
+        shell: bash
+        run: |
+          src="rs/target/${{ matrix.target }}/release"
+          dir="native/${{ matrix.npm }}"
+          mkdir -p "$dir"
+          cp "$src/agent-yes${{ matrix.ext }}" "$dir/agent-yes-native${{ matrix.ext }}"
+          cp "$src/ayrs${{ matrix.ext }}" "$dir/ayrs${{ matrix.ext }}"
+          if [ "${{ matrix.ext }}" = ".exe" ]; then
+            cp "$src/ay-spawn-hidden.exe" "$dir/ay-spawn-hidden.exe"
+          fi
+          ls -la "$dir"
+
+      - name: Upload npm platform binaries (PR)
+        if: github.event_name == 'pull_request' && matrix.npm
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.npm }}
+          path: native/${{ matrix.npm }}
+          if-no-files-found: error
+          retention-days: 7
+
   # Create a combined artifact with all binaries
   combine:
     name: Combine Artifacts
@@ -203,6 +264,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: binaries
+          # Only the per-target release bundles, not the npm job's artifacts
+          # (native-*, npm-dist) that share this run on pull requests.
+          pattern: agent-yes-*
 
       - name: Combine into single directory
         run: |
@@ -258,6 +322,9 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: binaries
+          # Only the per-target release bundles, not the npm job's artifacts
+          # (native-*, npm-dist) that share this run on pull requests.
+          pattern: agent-yes-*
 
       - name: Create release archives
         run: |
@@ -297,3 +364,32 @@ jobs:
           prerelease: ${{ contains(steps.get_tag.outputs.tag, 'beta') }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # npm platform packages (pull requests only; nothing is published). rustify's
+  # pipeline packs the binaries staged above as agent-yes@<version>-<platform>
+  # packages, which the otherwise unchanged JavaScript package pulls in as
+  # optional dependencies. It then installs that release from a throwaway local
+  # registry on every platform listed in package.json `rustify.platforms`, with
+  # bun and with npm, and runs it. The commands stay JavaScript; the launcher
+  # finds the binaries in the platform package (ts/rustBinary.ts
+  # getPlatformPackageBinDir) instead of downloading them on first run.
+  #
+  # `ay serve join-secret` runs ayrs and nothing else: there is no TypeScript
+  # fallback for it. Because the version stamped above has no GitHub release,
+  # it can only pass with the binary from the platform package. The room in
+  # the link is synthetic, so the runner's own room is left alone.
+  npm:
+    name: npm platform packages
+    needs: build
+    if: github.event_name == 'pull_request'
+    uses: snomiao/rustify/.github/workflows/rust-npm-build.yml@releases/v1
+    with:
+      prebuilt: true
+      manifest: rs/Cargo.toml
+      # Only used by the pipeline's own build, which `prebuilt` skips.
+      bins: agent-yes ayrs ay-spawn-hidden
+      version: ${{ needs.build.outputs.npm-version }}
+      js-build: bun install --frozen-lockfile && bun run build
+      smoke: agent-yes --version
+      smoke-extra: |
+        ay serve join-secret --webrtc webrtc://rsmoke0:e1.0000000000000000000000000000000000000000000000000000000000000000@s.agent-yes.com => AY_ROOM=https://agent-yes.com/w/#rsmoke0:e1.
