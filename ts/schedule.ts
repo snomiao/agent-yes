@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { resolveSpawnCwd } from "./workspaceConfig.ts";
 import { ensureBootAutostart } from "./oxmgrService.ts";
-import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
+import { ensureNodeRuntime, liveEnv, resolveOxmgrBin } from "./nodeRuntime.ts";
 
 // `ay schedule` — run an agent on a recurring schedule via oxmgr's cron support.
 // A scheduled job runs once immediately AND on every cron tick (with
@@ -101,7 +101,7 @@ export async function cmdSchedule(rest: string[]): Promise<number> {
   // On a bun-only box oxmgr's `#!/usr/bin/env node` launcher needs the node→bun
   // shim before ANY oxmgr call below can exec (same fix as serve-install).
   await ensureNodeRuntime();
-  const oxmgrBin = Bun.which("oxmgr");
+  const oxmgrBin = resolveOxmgrBin();
   if (!oxmgrBin) {
     process.stderr.write(
       "ay schedule: oxmgr not found\n" +

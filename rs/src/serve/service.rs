@@ -513,6 +513,75 @@ fn which(bin: &str) -> Option<String> {
     None
 }
 
+/// The oxmgr binary to exec. `bun add -g oxmgr` puts a `#!/usr/bin/env node`
+/// JS launcher on PATH that only spawns the native binary it vendors at
+/// `<pkg>/vendor/oxmgr`; on a bun-only host (no node) that launcher dies with
+/// "env: 'node': No such file or directory". Exec the vendored binary directly
+/// when the PATH entry resolves to such a launcher. Mirrors the TS
+/// `resolveOxmgrBin` (ts/nodeRuntime.ts).
+fn oxmgr_bin() -> Option<String> {
+    let bin = which("oxmgr")?;
+    Some(vendored_oxmgr(std::path::Path::new(&bin)).unwrap_or(bin))
+}
+
+fn vendored_oxmgr(bin: &std::path::Path) -> Option<String> {
+    let real = std::fs::canonicalize(bin).ok()?;
+    let ext = real.extension()?.to_str()?;
+    if !matches!(ext, "js" | "cjs" | "mjs") {
+        return None;
+    }
+    let exe = if cfg!(windows) { "oxmgr.exe" } else { "oxmgr" };
+    let vendored = real.parent()?.parent()?.join("vendor").join(exe);
+    vendored
+        .is_file()
+        .then(|| vendored.to_string_lossy().into_owned())
+}
+
+/// `--env K=V` pairs forwarding ay's own settings (AGENT_YES_* / AY_*) to the
+/// oxmgr-managed process: oxmgr runs it with its long-lived daemon's env, not
+/// the env of the shell that ran install. The CF_TURN_* relay credentials the
+/// share host reads are forwarded too; per-session names and room join secrets
+/// are left out. Keep in sync with the TS `isDaemonEnvName`.
+fn daemon_env_flags(env: impl Iterator<Item = (String, String)>) -> Vec<String> {
+    const EXCLUDE: &[&str] = &[
+        "AGENT_YES_PID",
+        "AGENT_YES_AGENT_ID",
+        "AGENT_YES_CWD",
+        "AGENT_YES_CLI",
+        "AGENT_YES_ATTACH",
+        "AGENT_YES_UPDATED",
+        "AGENT_YES_PORTLESS_CHILD",
+        "AGENT_YES_REPORT_PARENT",
+        "AGENT_YES_DAEMON_MANAGER",
+        "AGENT_YES_NO_PM_BOOTSTRAP",
+        "AGENT_YES_FORCE_SEND",
+        "AGENT_YES_SEND_RAW",
+        "AGENT_YES_SEND_NO_WAIT",
+        "AY_TERM_TOKEN",
+        "AY_CH_NAME",
+        "AY_CH_LINK",
+        "AY_ROOM",
+        "AY_JOIN_SECRET",
+    ];
+    let mut pairs: Vec<(String, String)> = env
+        .filter(|(k, v)| {
+            !v.is_empty()
+                && (k == "CF_TURN_KEY_ID"
+                    || k == "CF_TURN_API_TOKEN"
+                    || k.starts_with("AGENT_YES_")
+                    || k.starts_with("AY_"))
+                && k.bytes()
+                    .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+                && !EXCLUDE.contains(&k.as_str())
+        })
+        .collect();
+    pairs.sort();
+    pairs
+        .into_iter()
+        .flat_map(|(k, v)| ["--env".to_string(), format!("{k}={v}")])
+        .collect()
+}
+
 /// Is a usable systemd user bus present? Probe with a cheap read-only call — if
 /// the bus is unreachable this fails with the same connection error `install`
 /// would hit, so a `false` here reliably means "don't use systemd --user".
@@ -560,19 +629,19 @@ fn oxmgr_command(exe: &str, args: &[String]) -> String {
 fn oxmgr_install(oxmgr: &str, exe: &str, args: &[String]) -> Result<()> {
     let _ = Command::new(oxmgr).args(["delete", OXMGR_NAME]).output(); // idempotent
     let cmd = oxmgr_command(exe, args);
-    run(
-        oxmgr,
-        &[
-            "start",
-            &cmd,
-            "--name",
-            OXMGR_NAME,
-            "--restart",
-            "always",
-            "--max-restarts",
-            "20",
-        ],
-    )?;
+    let env_flags = daemon_env_flags(std::env::vars());
+    let mut argv: Vec<&str> = vec![
+        "start",
+        &cmd,
+        "--name",
+        OXMGR_NAME,
+        "--restart",
+        "always",
+        "--max-restarts",
+        "20",
+    ];
+    argv.extend(env_flags.iter().map(String::as_str));
+    run(oxmgr, &argv)?;
     Ok(())
 }
 
@@ -662,7 +731,7 @@ pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
             run("systemctl", &["--user", "daemon-reload"])?;
             run("systemctl", &["--user", "enable", "--now", LABEL])?;
             println!("installed {LABEL} ({exe} {})", args.join(" "));
-        } else if let Some(oxmgr) = which("oxmgr") {
+        } else if let Some(oxmgr) = oxmgr_bin() {
             // No systemd --user bus (typically a container). Supervise via oxmgr
             // instead of writing an inert unit that never loads. Also clear any
             // stray unit a prior systemd attempt may have left behind.
@@ -734,7 +803,7 @@ fn uninstall_quiet() -> Result<()> {
             .output();
         // Also drop the oxmgr fallback registration, if any (harmless no-op when
         // absent). Covers the container path where install() used oxmgr.
-        if let Some(oxmgr) = which("oxmgr") {
+        if let Some(oxmgr) = oxmgr_bin() {
             let _ = Command::new(oxmgr).args(["delete", OXMGR_NAME]).output();
         }
     }
@@ -862,7 +931,7 @@ pub fn restart() -> Result<()> {
             let (prog, args) = restart_argv();
             exec_restart(&prog, &args)?;
             println!("restarted {LABEL}");
-        } else if let Some(oxmgr) = which("oxmgr") {
+        } else if let Some(oxmgr) = oxmgr_bin() {
             // Same fallback `install` uses on a host with no systemd --user bus
             // (typically a container). oxmgr's `restart` takes an already
             // registered name, so a failure here means it never was registered.
@@ -946,7 +1015,7 @@ pub fn status() -> Result<()> {
             if let Ok(o) = s {
                 print!("{}", String::from_utf8_lossy(&o.stdout));
             }
-        } else if let Some(oxmgr) = which("oxmgr") {
+        } else if let Some(oxmgr) = oxmgr_bin() {
             // Report the oxmgr fallback registration (the container path).
             println!("supervisor: oxmgr (no systemd --user bus)");
             let s = Command::new(oxmgr).args(["list"]).output();
@@ -1054,6 +1123,50 @@ mod tests {
             cmd,
             "/root/.cargo/bin/ayrs serve --webrtc --sighost s.agent-yes.com"
         );
+    }
+
+    #[test]
+    fn daemon_env_flags_forward_host_settings_only() {
+        let env = [
+            ("AGENT_YES_ICE_PUBLIC_IPS", "203.0.113.7"),
+            ("AY_NAME", "alpha"),
+            ("AGENT_YES_PID", "1111"),
+            ("AY_JOIN_SECRET", "s"),
+            ("AGENT_YES_EMPTY", ""),
+            ("HOME", "/home/alice"),
+            ("CF_TURN_KEY_ID", "k"),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()));
+        assert_eq!(
+            daemon_env_flags(env),
+            [
+                "--env",
+                "AGENT_YES_ICE_PUBLIC_IPS=203.0.113.7",
+                "--env",
+                "AY_NAME=alpha",
+                "--env",
+                "CF_TURN_KEY_ID=k"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn vendored_oxmgr_is_found_behind_the_js_launcher() {
+        let dir = std::env::temp_dir().join(format!("ay-oxmgr-{}", std::process::id()));
+        let pkg = dir.join("node_modules/oxmgr");
+        std::fs::create_dir_all(pkg.join("bin")).unwrap();
+        std::fs::create_dir_all(pkg.join("vendor")).unwrap();
+        std::fs::write(pkg.join("bin/oxmgr.js"), "").unwrap();
+        let link = dir.join("oxmgr");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink(pkg.join("bin/oxmgr.js"), &link).unwrap();
+        assert_eq!(vendored_oxmgr(&link), None); // vendor binary not there yet
+        std::fs::write(pkg.join("vendor/oxmgr"), "").unwrap();
+        let got = vendored_oxmgr(&link).unwrap();
+        assert!(got.ends_with("node_modules/oxmgr/vendor/oxmgr"), "{got}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

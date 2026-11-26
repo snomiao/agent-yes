@@ -201,7 +201,6 @@ prompts are never cancelled: the command reports that interruption was skipped
 and uses the normal send path. Existing drafts remain protected. `--no-wait`
 still waits for cancellation before skipping message submission confirmation.
 
-
 #### Tips
 
 - A **single** `--code=ctrl-c` does not stop `claude` / `codex` — they treat it
@@ -267,7 +266,6 @@ field, so filters that match on `owner` keep working.
 Tasks move through a lifecycle per `--kind`, and gated transitions require
 **independent verification**: whoever did the work cannot approve it. See
 `ts/todoStore.ts` for the gate model.
-
 
 ### Ask another agent a question (`ay ask`)
 
@@ -426,6 +424,12 @@ the Docker host's LAN IP for viewers on the same network. Viewers elsewhere
 need that port forwarded to the host, or a TURN relay (`CF_TURN_KEY_ID` +
 `CF_TURN_API_TOKEN`). On a Linux host, `--network host` gives the container
 the host's own network and skips Docker's NAT.
+
+When the daemon is installed with `ay serve install` / `ay share` under oxmgr
+(e.g. a container without systemd), the `AGENT_YES_*` / `AY_*` and `CF_TURN_*`
+settings of the installing shell are forwarded to it and kept across later
+re-installs; set one to an empty value (`AGENT_YES_ICE_PUBLIC_IPS= ay serve install`)
+to drop it.
 
 **Available platforms:**
 

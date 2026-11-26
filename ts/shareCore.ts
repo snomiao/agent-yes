@@ -93,6 +93,24 @@ export function tailscaleDnsName(status: any): string | null {
   return dns || null;
 }
 
+/**
+ * Is tailscaled running in userspace-networking mode (no tun device)? Its
+ * `status --json` reports `TUN: false` then. A missing field (older tailscale)
+ * reads as kernel mode, so the strict end-to-end check stays the default.
+ */
+export function tailscaleUserspace(status: any): boolean {
+  return status?.TUN === false;
+}
+
+/** `ay share` health line when the ts.net self-probe can't work (userspace mode). */
+export function tailscaleUserspaceNote(base: string, port: number): string {
+  return (
+    `route ok, backend 127.0.0.1:${port} ok — WARNING: ${base}/ not self-checked: ` +
+    `tailscaled runs with userspace networking, so this host can't reach its own ` +
+    `ts.net name; open it from another tailnet device to confirm`
+  );
+}
+
 export type TsRoute =
   | { status: "ok" }
   | { status: "missing" }

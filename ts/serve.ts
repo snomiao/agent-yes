@@ -65,7 +65,7 @@ import * as serveSampler from "./serveSampler.ts";
 import { withIpcLock } from "./ipcLock.ts";
 import { removeControlCharacters } from "./removeControlCharacters.ts";
 import { parseStatusText } from "./statusText.ts";
-import { ensureNodeRuntime, liveEnv } from "./nodeRuntime.ts";
+import { daemonEnv, ensureNodeRuntime, liveEnv, resolveOxmgrBin } from "./nodeRuntime.ts";
 import { acquireWebrtcHostLock, type ServeLockOwner } from "./serveLock.ts";
 import { type MailParty, recordInbox } from "./messageLog.ts";
 import { updateGlobalPidStatus } from "./globalPidIndex.ts";
@@ -754,7 +754,7 @@ function oxmgrHasWindowsFix(bin: string): boolean {
 // never had that failure mode) and keep oxmgr only as a last resort if pm2 is
 // absent. AGENT_YES_DAEMON_MANAGER=pm2|oxmgr forces a choice (bypasses the probe).
 function resolveDaemonManager(): DaemonManager | null {
-  const oxmgrBin = Bun.which("oxmgr");
+  const oxmgrBin = resolveOxmgrBin();
   const pm2Bin = Bun.which("pm2");
   const override = process.env.AGENT_YES_DAEMON_MANAGER?.toLowerCase();
   if (override === "pm2") return pm2Bin ? { id: "pm2", bin: pm2Bin } : null;
@@ -830,7 +830,7 @@ async function managerRunnable(mgr: DaemonManager): Promise<boolean> {
 // runnable AND has our daemon registered; fall back to the first runnable one,
 // else whatever resolveDaemonManager returns.
 async function resolveActiveManager(): Promise<DaemonManager | null> {
-  const oxmgr = Bun.which("oxmgr");
+  const oxmgr = resolveOxmgrBin();
   const pm2 = Bun.which("pm2");
   const present: DaemonManager[] = [];
   if (oxmgr) present.push({ id: "oxmgr", bin: oxmgr });
@@ -889,7 +889,7 @@ async function installAndVerify(pkg: "oxmgr" | "pm2"): Promise<DaemonManager | n
   // prepend it before resolving so Bun.which can see the fresh binary.
   const binDir = await globalBinDir(installer);
   if (binDir) process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
-  const bin = Bun.which(pkg);
+  const bin = pkg === "oxmgr" ? resolveOxmgrBin() : Bun.which(pkg);
   if (!bin) return null;
   const mgr: DaemonManager = { id: pkg, bin };
   await ensureNodeRuntime();
@@ -1130,6 +1130,39 @@ async function readDaemonServeArgs(mgr: DaemonManager): Promise<string[] | null>
   }
 }
 
+// The env map oxmgr holds for our daemon, so a re-install keeps the settings
+// forwarded last time. `oxmgr list --json` redacts env, so read oxmgr's own
+// state file: $OXMGR_HOME/state.json, else its platform data dir. Best-effort:
+// {} when absent or unreadable (then only the current env is forwarded).
+export function oxmgrStatePath(
+  env: Record<string, string | undefined> = process.env,
+  platform: NodeJS.Platform = process.platform,
+  home: string = homedir(),
+): string {
+  if (env.OXMGR_HOME) return path.join(env.OXMGR_HOME, "state.json");
+  const data =
+    platform === "darwin"
+      ? path.join(home, "Library", "Application Support")
+      : platform === "win32"
+        ? (env.APPDATA ?? path.join(home, "AppData", "Roaming"))
+        : (env.XDG_DATA_HOME ?? path.join(home, ".local", "share"));
+  return path.join(data, "oxmgr", "state.json");
+}
+
+async function readOxmgrDaemonEnv(): Promise<Record<string, string>> {
+  try {
+    const state = JSON.parse(await readFile(oxmgrStatePath(), "utf-8")) as {
+      processes?: Array<{ name?: string; env?: Record<string, unknown> }>;
+    };
+    const env = state.processes?.find((x) => x.name === DAEMON_NAME)?.env ?? {};
+    return Object.fromEntries(
+      Object.entries(env).filter((e): e is [string, string] => typeof e[1] === "string"),
+    );
+  } catch {
+    return {};
+  }
+}
+
 // Whether the daemon PROCESS is currently online per the manager. Distinct from
 // `readDaemonServeArgs` (registered?) and from the HTTP probe (reachable?) — a
 // webrtc-only daemon opens no port, so the manager's own view is the only way to
@@ -1358,7 +1391,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
   // It also must never bootstrap-install a manager just to uninstall.
   if (sub === "uninstall") {
     const present: DaemonManager[] = [];
-    const oxmgrBin = Bun.which("oxmgr");
+    const oxmgrBin = resolveOxmgrBin();
     const pm2Bin = Bun.which("pm2");
     if (oxmgrBin) present.push({ id: "oxmgr", bin: oxmgrBin });
     if (pm2Bin) present.push({ id: "pm2", bin: pm2Bin });
@@ -1431,6 +1464,11 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     // unchanged across the restart.
     const priorArgs = await readDaemonServeArgs(mgr);
     const effArgs = args.length ? args : (priorArgs ?? []);
+    // oxmgr does not hand this shell's env to the process it runs, so forward
+    // ay's own settings explicitly (see daemonEnv) and treat a changed set as a
+    // config change. pm2 already captures the starting shell's env itself.
+    const priorEnv = mgr.id === "oxmgr" && priorArgs !== null ? await readOxmgrDaemonEnv() : {};
+    const effEnv = mgr.id === "oxmgr" ? daemonEnv(process.env, priorEnv) : {};
     const current = getInstalledPackage().version;
 
     // WebRTC daemon: resolve the share link up front so we can print it on every
@@ -1493,7 +1531,9 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       // reaches on the default port) would be silently ignored, and we'd print a
       // share link for a WebRTC bridge that isn't actually running. A bare re-run
       // passes no args, so effArgs === priorArgs and this stays a no-op as before.
-      const sameConfig = JSON.stringify(effArgs) === JSON.stringify(priorArgs);
+      const sameConfig =
+        JSON.stringify(effArgs) === JSON.stringify(priorArgs) &&
+        JSON.stringify(effEnv) === JSON.stringify(daemonEnv({}, priorEnv));
       const daemonPort = argsUsePortless(effArgs) ? await portlessAppPort() : portFromArgs(effArgs);
       const runningVer = await fetchDaemonVersion(daemonPort, token);
       if (runningVer === current && sameConfig) {
@@ -1507,7 +1547,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       // reconnect fast), then we re-create with the new binary/args.
       process.stdout.write(
         runningVer === current
-          ? `reconfiguring '${DAEMON_NAME}' (serve args changed)…\n`
+          ? `reconfiguring '${DAEMON_NAME}' (serve args or forwarded env changed)…\n`
           : `rolling '${DAEMON_NAME}' ${runningVer ? `v${runningVer}` : "(unknown)"} → v${current}…\n`,
       );
       await spawnExit([mgr.bin, "stop", DAEMON_NAME]);
@@ -1574,6 +1614,7 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
             // crash-restart-limit still guards against a tight crash loop.
             "--max-restarts",
             "1000000",
+            ...Object.entries(effEnv).flatMap(([k, v]) => ["--env", `${k}=${v}`]),
             ...oxmgrHealth,
           ]
         : [
@@ -1612,6 +1653,10 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
         `\n${priorArgs !== null ? `rolled '${DAEMON_NAME}' forward to` : `installed '${DAEMON_NAME}' as a daemon via ${mgr.id} —`} v${current}\n`,
       );
       if (trayShown) process.stdout.write(`tray:         shown (hide it with \`ay tray hide\`)\n`);
+      // Names only: values may be secrets (oxmgr keeps them in its state file).
+      const envNames = Object.keys(effEnv);
+      if (envNames.length)
+        process.stdout.write(`env:          ${envNames.join(", ")} (forwarded to the daemon)\n`);
       if (mgr.id === "oxmgr" && process.platform === "win32")
         process.stdout.write(
           onBoot
