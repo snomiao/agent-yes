@@ -1833,10 +1833,32 @@ async function cmdServeStatus(args: string[]): Promise<number> {
 // Run `ayrs serve …` in the foreground with our stdio, forwarding the signals a
 // terminal sends us so Ctrl-C reaches the daemon (which closes its room peers)
 // and the manager's SIGTERM on `stop` isn't swallowed by the launcher.
+/**
+ * The package's console assets (`lab/ui`). Resolved from this module, so it is
+ * `<pkg>/dist/../lab/ui` in an install and `<repo>/ts/../lab/ui` in dev.
+ */
+function packageUiDir(): string {
+  return path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "lab", "ui");
+}
+
+/**
+ * Env for the `ayrs serve` child. ayrs usually runs from a version cache
+ * (`~/.cache/agent-yes/bin/<ver>/ayrs`) with no `lab/ui` next to it, so tell it
+ * where the package's console assets are (rs/src/serve/http.rs UI_DIR_ENV).
+ * An explicit AGENT_YES_UI_DIR from the caller wins.
+ */
+export function ayrsServeEnv(
+  env: Record<string, string | undefined> = process.env,
+  uiDir: string = packageUiDir(),
+): Record<string, string | undefined> {
+  if (env.AGENT_YES_UI_DIR) return env;
+  return { ...env, AGENT_YES_UI_DIR: uiDir };
+}
+
 async function runAyrsServe(ayrs: string, argv: string[]): Promise<number> {
   const child = Bun.spawn([ayrs, ...argv], {
     stdio: ["inherit", "inherit", "inherit"],
-    env: process.env,
+    env: ayrsServeEnv(),
     cwd: process.cwd(),
   });
   const forward = (sig: NodeJS.Signals) => () => {
@@ -5066,7 +5088,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // no separate proxy and no agent-yes.com. Static routes are unauthenticated
   // (the page holds no secrets); the page carries the token via the #k= link
   // and sends it on every /api call.
-  const uiDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "lab", "ui");
+  const uiDir = packageUiDir();
   // Defense-in-depth CSP for the console document served by --http (mirrors the
   // one in lab/ui/cf/worker.ts — keep them in sync). The console renders remote
   // host-supplied agent metadata, so we constrain where an injection could send

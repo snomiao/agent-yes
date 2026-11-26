@@ -46,7 +46,17 @@ jobs:
         # peer metadata ("Cannot read properties of null (reading 'edgesOut')"
         # in arborist's #loadPeerSet — hit live 2026-07-21 via a dep's peer
         # set; npm 11 and bun resolve the same tree fine). Pin npm ≥11.
+        #
+        # Run under bash, not the Windows default pwsh: oxmgr's postinstall
+        # (pulled in via codehost) extracts its zip by spawning Windows
+        # PowerShell 5.1 (`powershell Expand-Archive`). Launched from pwsh 7 it
+        # inherits pwsh's PSModulePath, loads PS7's Archive module and fails
+        # with `Cannot find an overload for "ExtractToDirectory" ... "3"`
+        # (a .NET Core-only overload). Dropping PSModulePath lets 5.1 load its
+        # own module. No-op on Linux.
+        shell: bash
         run: |
+          unset PSModulePath
           npm install -g npm@^11
           npm install
 

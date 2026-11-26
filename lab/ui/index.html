@@ -2669,6 +2669,11 @@
       const SEND_FLASH_MS = 2000;
       const SEND_FADE_MS = 20000; // wire fully faded this long after delivery
       let es = null; // live-tail subscription closer
+      // Set per selection once the live tail runs (null before that): reset the
+      // xterm and re-subscribe, so the snapshot replays onto the current grid.
+      let replayTail = null;
+      let replayTailTimer = 0;
+      let tailGen = 0; // bumps per subscription; a closed one's late events are dropped
       let term = null; // xterm.js Terminal rendering the raw PTY stream
       let fit = null;
       // One-shot on OPEN (select): fit the terminal to our pane, then adopt — push
@@ -4541,6 +4546,7 @@
           return;
         }
         if (sz.cols !== term.cols || sz.rows !== term.rows) {
+          const colsChanged = sz.cols !== term.cols;
           agentSize = sz;
           // Grid-level twin of snapIfHeightOnly: the host regrids rows-only in
           // response to our keyboard-shrunk capacity report — keep the bottom
@@ -4553,6 +4559,16 @@
             try {
               term.scrollToBottom();
             } catch {}
+          }
+          // Someone else (another viewer's negotiation, a local tty) changed the
+          // width. The agent repainted at the new width the moment its PTY was
+          // resized, but we only learn the size on the next /api/size poll — so
+          // that repaint already landed on our old grid, split mid-word, and a
+          // TUI does not repaint again. Replay the tail onto the new grid, like a
+          // fresh open does. Coalesced, since negotiation can step a few times.
+          if (colsChanged && replayTail) {
+            clearTimeout(replayTailTimer);
+            replayTailTimer = setTimeout(() => replayTail && replayTail(), 300);
           }
         }
         applyCanvasScale();
@@ -6533,6 +6549,8 @@ my.translate = async (text, lang) => {
         // Render the agent's native TUI with xterm.js by feeding it the raw PTY
         // stream (ANSI/cursor control intact) — see /api/tail?raw=1.
         if (es) es.close();
+        replayTail = null;
+        clearTimeout(replayTailTimer);
         if (term) {
           term.dispose();
           term = null;
@@ -7021,6 +7039,7 @@ my.translate = async (text, lang) => {
           if (sel !== selKey || !term) return; // switched away during size sync
           $("livedot").className = "dot idle";
           $("livetxt").textContent = "connecting…";
+          const gen = ++tailGen;
           const close = tx.subscribe(
             "/api/tail/" + encodeURIComponent(pid) + "?raw=1",
             (raw) => {
@@ -7029,7 +7048,8 @@ my.translate = async (text, lang) => {
               // be written into the NEW terminal — otherwise the previous agent's
               // raw bleeds into the one we just switched to. Preview makes switches
               // frequent, so this race is no longer theoretical.
-              if (term && sel === selKey) {
+              // The same applies to our own replayTail re-subscription (gen).
+              if (term && sel === selKey && gen === tailGen) {
                 // Stay on xterm's public write path. Reaching into its private
                 // render debouncer and cancelling the scheduled animation frame
                 // can strand later dirty rows, making a live terminal appear
@@ -7039,15 +7059,24 @@ my.translate = async (text, lang) => {
               }
             },
             () => {
+              if (gen !== tailGen) return;
               $("livedot").className = "dot active";
               $("livetxt").textContent = "live";
             },
             () => {
+              if (gen !== tailGen) return;
               $("livedot").className = "dot stopped";
               $("livetxt").textContent = "disconnected";
             },
           );
           es = { close };
+          replayTail = () => {
+            if (sel !== selKey || !term) return;
+            if (es) es.close();
+            es = null;
+            term.reset();
+            startTail();
+          };
         };
         Promise.resolve(resyncTerm()).finally(startTail);
       }
