@@ -678,6 +678,89 @@ fn with_meta(r: &PidRecord) -> Value {
     v
 }
 
+/// GET /api/status/<kw>: the same snapshot shape `ay status` prints locally
+/// (ts/subcommands.ts snapshotStatus), derived from the /api/ls row so the two
+/// routes can never disagree about an agent's state.
+fn status_json(r: &PidRecord) -> Value {
+    let meta = with_meta(r);
+    let state = match meta
+        .get("status")
+        .and_then(|s| s.as_str())
+        .unwrap_or("idle")
+    {
+        "exited" => "stopped",
+        s => s,
+    };
+    let log_mtime = if state == "stopped" {
+        None
+    } else {
+        r.log_file.as_deref().and_then(file_mtime_ms)
+    };
+    let note = crate::serve::discover::notes(&global_dir())
+        .get(r.pid.to_string())
+        .cloned()
+        .unwrap_or(Value::Null);
+    json!({
+        "pid": r.pid,
+        "cli": r.cli,
+        "cwd": r.cwd,
+        "workdir": r.cwd,
+        "workdir_source": "spawn",
+        "state": state,
+        "activity": meta.get("status_text").cloned().unwrap_or(Value::Null),
+        "question": meta.get("question").cloned().unwrap_or(Value::Null),
+        "note": note,
+        "log_mtime_ms": log_mtime,
+        "started_at": r.started_at,
+        "age_ms": now_ms() - r.started_at,
+        "exit_code": r.exit_code,
+        "exit_reason": r.exit_reason,
+        "log_file": r.log_file,
+    })
+}
+
+/// Byte window `/api/read` replays. The TS daemon renders the whole log; a
+/// bound keeps one read of a huge log from pinning the daemon.
+const READ_MAX_BYTES: u64 = 4 * 1024 * 1024;
+
+/// GET /api/read/<kw>?mode=cat|tail|head&n=N: the rendered screen text, sliced
+/// like ts/subcommands.ts renderRawLog. Replayed at the agent's real PTY size
+/// when known, so wrapped lines don't duplicate.
+fn read_text(kw: &str, mode: &str, n: usize) -> Result<String, String> {
+    let r = resolve_one(kw)?;
+    let log = r
+        .log_file
+        .clone()
+        .ok_or_else(|| format!("pid {}: no log_file", r.pid))?;
+    let (_, _, buf) =
+        read_file_tail(&log, READ_MAX_BYTES).map_err(|e| format!("pid {}: {e}", r.pid))?;
+    let (cols, rows) = crate::serve::nego::read_ptysize(r.pid).unwrap_or((200, 50));
+    let mut vt = crate::vterm::VTermProxy::new(
+        rows.min(u16::MAX as u32) as u16,
+        cols.min(u16::MAX as u32) as u16,
+    );
+    vt.process(&buf);
+    let rendered = if vt.alternate_screen() {
+        vt.contents()
+    } else {
+        vt.dump_scrollback()
+    };
+    Ok(slice_lines(&rendered, mode, n))
+}
+
+fn slice_lines(rendered: &str, mode: &str, n: usize) -> String {
+    let mut lines: Vec<&str> = rendered.lines().map(|l| l.trim_end()).collect();
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    let picked: &[&str] = match mode {
+        "cat" => &lines,
+        "head" => &lines[..n.min(lines.len())],
+        _ => &lines[lines.len().saturating_sub(n)..],
+    };
+    picked.join("\n")
+}
+
 fn matches_keyword(r: &PidRecord, kw: &str) -> bool {
     if kw.is_empty() {
         return true;
@@ -1551,6 +1634,39 @@ pub async fn handle(method: &str, path_with_query: &str, body: &str) -> ApiRespo
                 Err(e) => text(404, e),
             }
         }
+        // `ay status <remote>:<kw>` / `ay read <remote>:<kw>` — the TS daemon
+        // served these but this one 404'd them, so every remote status/read
+        // against a Rust `ay serve` failed with "not found".
+        ("GET", p) if p.starts_with("/api/status/") => {
+            let kw = url_decode(&p["/api/status/".len()..]);
+            match tokio::task::spawn_blocking(move || resolve_one(&kw).map(|r| status_json(&r)))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+            {
+                Ok(v) => json_res(200, &v),
+                Err(e) => text(404, e),
+            }
+        }
+        ("GET", p) if p.starts_with("/api/read/") => {
+            let kw = url_decode(&p["/api/read/".len()..]);
+            let mode = q.get("mode").cloned().unwrap_or_else(|| "tail".into());
+            let n = q
+                .get("n")
+                .and_then(|v| v.parse::<usize>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(96);
+            match tokio::task::spawn_blocking(move || read_text(&kw, &mode, n))
+                .await
+                .unwrap_or_else(|e| Err(e.to_string()))
+            {
+                Ok(body) => ApiResponse {
+                    status: 200,
+                    content_type: "text/plain; charset=utf-8".into(),
+                    body: Body::Full(body.into_bytes()),
+                },
+                Err(e) => text(404, e),
+            }
+        }
         ("GET", p) if p.starts_with("/api/tail/") => {
             let kw = url_decode(&p["/api/tail/".len()..]);
             let raw = q.get("raw").map(|v| v == "1").unwrap_or(false);
@@ -1887,6 +2003,72 @@ mod tests {
         let (end, bytes) = read_log_range(p.to_str().unwrap(), 10, None).unwrap();
         assert_eq!(end, 3);
         assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn read_slices_rendered_lines_like_the_ts_daemon() {
+        let screen = "one\ntwo  \nthree\nfour\n\n\n";
+        assert_eq!(slice_lines(screen, "tail", 2), "three\nfour");
+        assert_eq!(slice_lines(screen, "head", 2), "one\ntwo");
+        assert_eq!(slice_lines(screen, "cat", 1), "one\ntwo\nthree\nfour");
+        // n past either end clamps instead of panicking
+        assert_eq!(slice_lines(screen, "tail", 99), "one\ntwo\nthree\nfour");
+        assert_eq!(slice_lines(screen, "head", 99), "one\ntwo\nthree\nfour");
+        assert_eq!(slice_lines("", "tail", 5), "");
+    }
+
+    #[test]
+    fn status_snapshot_matches_the_ts_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("1111.raw.log");
+        std::fs::write(&log, "hello\r\n").unwrap();
+        let rec: PidRecord = serde_json::from_value(json!({
+            "pid": 4_000_000_002u32, "cli": "claude", "cwd": "/repo/alpha",
+            "prompt": null, "log_file": log.to_str().unwrap(), "status": "exited",
+            "exit_code": 0, "exit_reason": "done", "started_at": 1_000,
+        }))
+        .unwrap();
+        let v = status_json(&rec);
+        // exited maps to the local `ay status` vocabulary
+        assert_eq!(v["state"], "stopped");
+        assert_eq!(v["cwd"], "/repo/alpha");
+        assert_eq!(v["exit_reason"], "done");
+        assert!(v["log_mtime_ms"].is_null());
+        for k in [
+            "pid",
+            "cli",
+            "workdir",
+            "workdir_source",
+            "activity",
+            "question",
+            "note",
+            "started_at",
+            "age_ms",
+            "exit_code",
+            "log_file",
+        ] {
+            assert!(v.get(k).is_some(), "missing {k}");
+        }
+    }
+
+    #[tokio::test]
+    async fn status_and_read_routes_exist() {
+        // Regression: the Rust daemon had no /api/status/ or /api/read/, so a
+        // remote `ay status|read|tail <host>:<kw>` got the router's bare
+        // "not found" even for a live agent. An unknown keyword must now reach
+        // the resolver and say so.
+        for path in [
+            "/api/status/zz-no-such-agent-zz",
+            "/api/read/zz-no-such-agent-zz?mode=tail&n=5",
+        ] {
+            let res = handle("GET", path, "").await;
+            assert_eq!(res.status, 404, "{path}");
+            let Body::Full(b) = res.body else {
+                panic!("{path}: streamed body")
+            };
+            let body = String::from_utf8_lossy(&b);
+            assert!(body.contains("no agent matches"), "{path}: {body}");
+        }
     }
 
     #[tokio::test]
