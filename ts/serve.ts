@@ -797,11 +797,26 @@ export function isNoNodeExecError(stderr: string): boolean {
 async function managerProbe(mgr: DaemonManager): Promise<{ ok: boolean; stderr: string }> {
   try {
     const p = Bun.spawn([mgr.bin, "--version"], {
+      stdin: "ignore",
       stdout: "ignore",
       stderr: "pipe",
       env: { ...liveEnv(), LC_ALL: "C" },
     });
-    const [code, stderr] = await Promise.all([p.exited, new Response(p.stderr).text()]);
+    // Bounded: a launcher that never execs must not hang every `ay serve …`.
+    // On timeout the stderr read is abandoned, not awaited (see CLAUDE.md).
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const code = await Promise.race([
+      p.exited,
+      new Promise<"timeout">((r) => {
+        timer = setTimeout(() => r("timeout"), 10_000);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (code === "timeout") {
+      p.kill("SIGKILL");
+      return { ok: false, stderr: `${mgr.bin} --version timed out` };
+    }
+    const stderr = await new Response(p.stderr).text();
     return { ok: (code ?? 1) === 0, stderr };
   } catch (e) {
     return { ok: false, stderr: String(e) };
@@ -1086,14 +1101,60 @@ async function ensureBootAutostart(mgr: DaemonManager): Promise<boolean> {
   }
 }
 
-async function spawnExit(cmd: string[]): Promise<number> {
+// How long one process-manager command may take before we give up on it. A
+// manager talks to its long-lived daemon over a socket; a wedged daemon (or a
+// launcher that never execs) must not leave `ay serve …` hanging with no output.
+export const MANAGER_TIMEOUT_MS = Number(process.env.AGENT_YES_MANAGER_TIMEOUT_MS) || 60_000;
+
+/** Exit code reported for a manager command killed by MANAGER_TIMEOUT_MS. */
+export const MANAGER_TIMED_OUT = 124;
+
+/**
+ * Run a process-manager command with a deadline: kill it and resolve
+ * MANAGER_TIMED_OUT when it overruns, so no caller can hang forever. With
+ * `capture`, stdout is collected — but on the timeout path the read is
+ * abandoned, never awaited: a grandchild that inherited the pipe can keep it
+ * open long after the kill (see CLAUDE.md).
+ */
+export async function runManagerCmd(
+  cmd: string[],
+  opts: { capture?: boolean; timeoutMs?: number; stdio?: "ignore" | "inherit" } = {},
+): Promise<{ code: number; stdout: string; timedOut: boolean }> {
+  const timeoutMs = opts.timeoutMs ?? MANAGER_TIMEOUT_MS;
+  let p: ReturnType<typeof Bun.spawn>;
   try {
-    return (
-      (await Bun.spawn(cmd, { stdio: ["ignore", "ignore", "ignore"], env: liveEnv() }).exited) ?? 1
-    );
+    const out = opts.capture ? "pipe" : (opts.stdio ?? "ignore");
+    p = Bun.spawn(cmd, {
+      stdin: "ignore",
+      stdout: out,
+      stderr: opts.stdio === "inherit" ? "inherit" : "ignore",
+      env: liveEnv(),
+    });
   } catch {
-    return 1;
+    return { code: 1, stdout: "", timedOut: false };
   }
+  const text = opts.capture
+    ? new Response(p.stdout as ReadableStream).text().catch(() => "")
+    : Promise.resolve("");
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<"timeout">((r) => {
+    timer = setTimeout(() => r("timeout"), timeoutMs);
+  });
+  const res = await Promise.race([p.exited, timedOut]);
+  clearTimeout(timer);
+  if (res === "timeout") {
+    try {
+      p.kill("SIGKILL");
+    } catch {
+      /* already gone */
+    }
+    return { code: MANAGER_TIMED_OUT, stdout: "", timedOut: true };
+  }
+  return { code: res ?? 1, stdout: await text, timedOut: false };
+}
+
+async function spawnExit(cmd: string[]): Promise<number> {
+  return (await runManagerCmd(cmd)).code;
 }
 
 // The `serve` args the running daemon was started with, so a bare
@@ -1103,21 +1164,17 @@ async function spawnExit(cmd: string[]): Promise<number> {
 async function readDaemonServeArgs(mgr: DaemonManager): Promise<string[] | null> {
   try {
     if (mgr.id === "oxmgr") {
-      const p = Bun.spawn([mgr.bin, "status", DAEMON_NAME], {
-        stdout: "pipe",
-        stderr: "ignore",
-        env: liveEnv(),
-      });
-      const out = await new Response(p.stdout).text();
-      if ((await p.exited) !== 0) return null;
+      const r = await runManagerCmd([mgr.bin, "status", DAEMON_NAME], { capture: true });
+      if (r.code !== 0) return null;
+      const out = r.stdout;
       const m = /Command:\s*(.+)/.exec(out);
       if (!m) return null;
       const after = /\bserve\b\s*(.*)$/.exec(m[1]!.trim());
       return after ? after[1]!.split(/\s+/).filter(Boolean) : [];
     }
-    const p = Bun.spawn([mgr.bin, "jlist"], { stdout: "pipe", stderr: "ignore", env: liveEnv() });
-    const out = await new Response(p.stdout).text();
-    if ((await p.exited) !== 0) return null;
+    const r = await runManagerCmd([mgr.bin, "jlist"], { capture: true });
+    if (r.code !== 0) return null;
+    const out = r.stdout;
     const list = JSON.parse(out) as Array<{ name?: string; pm2_env?: { args?: string[] } }>;
     const proc = list.find((x) => x.name === DAEMON_NAME);
     if (!proc) return null;
@@ -1168,18 +1225,14 @@ async function readOxmgrDaemonEnv(): Promise<Record<string, string>> {
 async function readDaemonRunning(mgr: DaemonManager): Promise<boolean> {
   try {
     if (mgr.id === "oxmgr") {
-      const p = Bun.spawn([mgr.bin, "status", DAEMON_NAME], {
-        stdout: "pipe",
-        stderr: "ignore",
-        env: liveEnv(),
-      });
-      const out = await new Response(p.stdout).text();
-      if ((await p.exited) !== 0) return false;
+      const r = await runManagerCmd([mgr.bin, "status", DAEMON_NAME], { capture: true });
+      if (r.code !== 0) return false;
+      const out = r.stdout;
       return /^\s*Status:\s*running\b/im.test(out);
     }
-    const p = Bun.spawn([mgr.bin, "jlist"], { stdout: "pipe", stderr: "ignore", env: liveEnv() });
-    const out = await new Response(p.stdout).text();
-    if ((await p.exited) !== 0) return false;
+    const r = await runManagerCmd([mgr.bin, "jlist"], { capture: true });
+    if (r.code !== 0) return false;
+    const out = r.stdout;
     const list = JSON.parse(out) as Array<{ name?: string; pm2_env?: { status?: string } }>;
     return list.find((x) => x.name === DAEMON_NAME)?.pm2_env?.status === "online";
   } catch {
@@ -1350,11 +1403,24 @@ async function fetchDaemonVersion(port: number | null, token: string): Promise<s
   return p.kind === "ok" ? p.version : null;
 }
 
-// ay serve start | stop — control the ALREADY-INSTALLED daemon's run state via
-// the manager. Used by the tray's toggle and available on the CLI. Starting an
-// unregistered daemon is a no-op with a hint to `install`.
-async function cmdServeStartStop(sub: "start" | "stop"): Promise<number> {
-  const mgr = resolveDaemonManager();
+// ay serve start | stop | restart — control the ALREADY-INSTALLED daemon's run
+// state via the manager. Used by the tray's toggle and available on the CLI.
+// Starting an unregistered daemon is a no-op with a hint to `install`.
+// `restart` re-launches the registered command, so after an upgrade
+// (`bun add -g agent-yes@…`) the daemon comes back on the new version.
+export function managerRunStateArgv(
+  mgr: DaemonManager,
+  sub: "start" | "stop" | "restart",
+): string[] {
+  if (sub === "stop") return [mgr.bin, "stop", DAEMON_NAME];
+  if (sub === "restart") return [mgr.bin, "restart", DAEMON_NAME];
+  // pm2 restarts a stopped named proc with `start <name>`; oxmgr's `start` takes
+  // a command, so an existing app is (re)started via `restart <name>`.
+  return mgr.id === "oxmgr" ? [mgr.bin, "restart", DAEMON_NAME] : [mgr.bin, "start", DAEMON_NAME];
+}
+
+async function cmdServeStartStop(sub: "start" | "stop" | "restart"): Promise<number> {
+  const mgr = await resolveActiveManager();
   if (!mgr) {
     process.stderr.write("ay serve " + sub + ": no process manager found (need pm2 or oxmgr)\n");
     return 1;
@@ -1365,21 +1431,20 @@ async function cmdServeStartStop(sub: "start" | "stop"): Promise<number> {
     );
     return 1;
   }
-  // pm2 restarts a stopped named proc with `start <name>`; oxmgr's `start` takes a
-  // command, so an existing app is (re)started via `restart <name>`.
-  const argv =
-    sub === "stop"
-      ? [mgr.bin, "stop", DAEMON_NAME]
-      : mgr.id === "oxmgr"
-        ? [mgr.bin, "restart", DAEMON_NAME]
-        : [mgr.bin, "start", DAEMON_NAME];
-  const code = await spawnExit(argv);
-  process.stdout.write(
-    code === 0
-      ? `${sub === "stop" ? "stopped" : "started"} '${DAEMON_NAME}' (via ${mgr.id})\n`
-      : `ay serve ${sub}: manager command failed (exit ${code})\n`,
-  );
-  return code;
+  const argv = managerRunStateArgv(mgr, sub);
+  const r = await runManagerCmd(argv);
+  if (r.timedOut) {
+    process.stderr.write(
+      `ay serve ${sub}: '${argv.join(" ")}' did not finish within ` +
+        `${Math.round(MANAGER_TIMEOUT_MS / 1000)}s — the ${mgr.id} daemon may be wedged ` +
+        `(set AGENT_YES_MANAGER_TIMEOUT_MS to wait longer)\n`,
+    );
+    return r.code;
+  }
+  const done = sub === "stop" ? "stopped" : sub === "restart" ? "restarted" : "started";
+  if (r.code === 0) process.stdout.write(`${done} '${DAEMON_NAME}' (via ${mgr.id})\n`);
+  else process.stderr.write(`ay serve ${sub}: manager command failed (exit ${r.code})\n`);
+  return r.code;
 }
 
 async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
@@ -1400,14 +1465,13 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     for (const m of present) {
       if (!(await managerRunnable(m))) continue;
       if ((await readDaemonServeArgs(m)) === null) continue; // not registered here
-      const code =
-        (await Bun.spawn([m.bin, "delete", DAEMON_NAME], {
-          stdio: ["ignore", "inherit", "inherit"],
-          env: liveEnv(),
-        }).exited) ?? 1;
+      const del = await runManagerCmd([m.bin, "delete", DAEMON_NAME], { stdio: "inherit" });
+      const code = del.code;
       if (code !== 0) {
         failed++;
-        process.stderr.write(`ay serve uninstall: ${m.id} delete failed (exit ${code})\n`);
+        process.stderr.write(
+          `ay serve uninstall: ${m.id} delete ${del.timedOut ? "timed out" : `failed (exit ${code})`}\n`,
+        );
         continue;
       }
       removed++;
@@ -1635,8 +1699,14 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
             "--",
             ...managedArgv.slice(1),
           ];
-    const proc = Bun.spawn(startArgv, { stdio: ["ignore", "inherit", "inherit"], env: liveEnv() });
-    const code = await proc.exited;
+    const started = await runManagerCmd(startArgv, { stdio: "inherit" });
+    const code = started.code;
+    if (started.timedOut) {
+      process.stderr.write(
+        `ay serve install: '${mgr.id} start' did not finish within ` +
+          `${Math.round(MANAGER_TIMEOUT_MS / 1000)}s — the ${mgr.id} daemon may be wedged\n`,
+      );
+    }
     if (code === 0) {
       const onBoot = await ensureBootAutostart(mgr);
       // Desktop companion: bring up the tray icon (best-effort; no-op on headless
@@ -1996,6 +2066,9 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `Subcommands:\n` +
         `  ay serve install    install as background daemon (oxmgr; pm2 fallback on Windows without the winfix build)\n` +
         `  ay serve status     show daemon/server status (add --json for scripts)\n` +
+        `  ay serve start      start the installed daemon\n` +
+        `  ay serve stop       stop the installed daemon\n` +
+        `  ay serve restart    restart the installed daemon (e.g. after an upgrade)\n` +
         `  ay serve uninstall  remove daemon\n` +
         `  ay serve logs       view daemon logs\n` +
         `  ay serve join-secret [--webrtc URL]\n` +
@@ -2006,6 +2079,29 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  ay remote add <alias> http://<token>@<host>:<port>\n`,
     );
     return 0;
+  }
+
+  // A bare first word is a subcommand. An unknown one (a typo, or a subcommand
+  // this version lacks) must fail fast: falling through would start a
+  // foreground server with the word ignored — which is how `ay serve restart`
+  // used to "hang" forever while the old daemon kept running.
+  {
+    const first = rest[0];
+    const { SERVE_SUBCOMMANDS } = await import("./serveRust.ts");
+    if (
+      first !== undefined &&
+      !first.startsWith("-") &&
+      first !== "join-secret" &&
+      !SERVE_SUBCOMMANDS.has(first)
+    ) {
+      const hint = first === "share" ? " (did you mean --share?)" : "";
+      process.stderr.write(
+        `ay serve: unknown subcommand '${first}'${hint}\n` +
+          `  subcommands: ${[...SERVE_SUBCOMMANDS].filter((x) => x !== "healthcheck").join(", ")}, join-secret\n` +
+          `  run 'ay serve --help' for flags\n`,
+      );
+      return 2;
+    }
   }
 
   // Rust first, like `ay <cli>`: an invocation `ayrs serve` can express runs
@@ -2052,7 +2148,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // Daemon subcommands
   const sub = rest[0];
   if (sub === "status") return cmdServeStatus(rest.slice(1));
-  if (sub === "start" || sub === "stop") return cmdServeStartStop(sub);
+  if (sub === "start" || sub === "stop" || sub === "restart") return cmdServeStartStop(sub);
   if (sub === "healthcheck") {
     // oxmgr --health-cmd liveness probe. Exit non-zero only when the heartbeat is
     // demonstrably stale (event loop wedged), so the manager restarts us. A

@@ -100,9 +100,10 @@ describe("manager spawns pass a live env snapshot", () => {
     // Grab each Bun.spawn(...) call whose argv mentions a manager binary.
     // Capture from the call opening through the options object's closing `})`.
     const calls = src.match(
-      /Bun\.spawn\((?:\[[^\]]*\bm(?:gr)?\.bin[^\]]*\]|startArgv|installer),[\s\S]*?\}\)/g,
+      /Bun\.spawn\((?:\[[^\]]*\bm(?:gr)?\.bin[^\]]*\]|startArgv|installer|cmd),[\s\S]*?\}\)/g,
     );
-    expect(calls?.length).toBeGreaterThanOrEqual(7);
+    // Most manager commands go through runManagerCmd's single `Bun.spawn(cmd, …)`.
+    expect(calls?.length).toBeGreaterThanOrEqual(4);
     for (const call of calls!) {
       // Require a real liveEnv() env option, not just the substring "env:"
       // (which a comment inside the options object could satisfy).
