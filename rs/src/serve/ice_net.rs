@@ -13,7 +13,15 @@
 //! - `AGENT_YES_ICE_PUBLIC_IPS=192.0.2.10[,…]`: advertise these addresses in
 //!   place of the container's own (1:1 NAT), e.g. the Docker host's LAN IP.
 //!   `auto` asks a STUN server for this host's public IP, which only helps
-//!   when that port is forwarded on the router too.
+//!   when that port is forwarded on the router too. `auto` may sit in the
+//!   list next to plain addresses (`auto,100.64.0.7`).
+//!
+//! webrtc-rs maps each local address to ONE external address, so only the
+//! first address per IP family becomes the 1:1 NAT address. Every further one
+//! (e.g. the host's tailnet IP next to its public IP) is offered as an extra
+//! copy of each host candidate: same port, other address. That is what lets a
+//! container on a userspace-networking tailnet be reached on its tailnet IP,
+//! which no local interface carries.
 //!
 //! The socket is shared through ice_mux.rs. A muxed socket gathers host candidates only (no server-reflexive ones);
 //! TURN relay candidates are unaffected.
@@ -35,10 +43,11 @@ pub struct IceNetConfig {
     pub public_ips: Option<PublicIps>,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum PublicIps {
-    Auto,
-    List(Vec<String>),
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct PublicIps {
+    /// Also advertise the public IP a STUN server sees.
+    pub auto: bool,
+    pub ips: Vec<String>,
 }
 
 pub fn parse(udp_port: Option<&str>, public_ips: Option<&str>) -> Result<IceNetConfig> {
@@ -51,9 +60,16 @@ pub fn parse(udp_port: Option<&str>, public_ips: Option<&str>) -> Result<IceNetC
     };
     let public_ips = match public_ips.map(str::trim).filter(|s| !s.is_empty()) {
         None => None,
-        Some(s) if s.eq_ignore_ascii_case("auto") => Some(PublicIps::Auto),
         Some(s) => {
-            let ips: Vec<String> = s.split(',').map(|x| x.trim().to_string()).collect();
+            let mut auto = false;
+            let mut ips: Vec<String> = Vec::new();
+            for x in s.split(',').map(str::trim).filter(|x| !x.is_empty()) {
+                if x.eq_ignore_ascii_case("auto") {
+                    auto = true;
+                } else {
+                    ips.push(x.to_string());
+                }
+            }
             for ip in &ips {
                 // webrtc-rs also takes "external/local" pairs.
                 for part in ip.split('/') {
@@ -62,7 +78,7 @@ pub fn parse(udp_port: Option<&str>, public_ips: Option<&str>) -> Result<IceNetC
                     })?;
                 }
             }
-            Some(PublicIps::List(ips))
+            Some(PublicIps { auto, ips })
         }
     };
     Ok(IceNetConfig {
@@ -75,6 +91,8 @@ pub fn parse(udp_port: Option<&str>, public_ips: Option<&str>) -> Result<IceNetC
 struct IceNet {
     mux: Option<Arc<super::ice_mux::IceMux>>,
     public_ips: Vec<String>,
+    /// Advertised as extra host-candidate copies (see the module doc).
+    extra_ips: Vec<std::net::IpAddr>,
 }
 
 static ICE_NET: OnceCell<IceNet> = OnceCell::const_new();
@@ -95,18 +113,27 @@ async fn ice_net() -> Result<&'static IceNet> {
                     Some(super::ice_mux::IceMux::new(sock)?)
                 }
             };
-            let public_ips = match cfg.public_ips {
-                None => vec![],
-                Some(PublicIps::List(ips)) => ips,
-                Some(PublicIps::Auto) => {
+            let mut all = vec![];
+            if let Some(p) = cfg.public_ips {
+                if p.auto {
                     let kind = tokio::task::spawn_blocking(super::nat_probe::probe)
                         .await?
                         .context("AGENT_YES_ICE_PUBLIC_IPS=auto: STUN lookup")?;
-                    vec![super::nat_probe::public_addr(&kind).ip().to_string()]
+                    all.push(super::nat_probe::public_addr(&kind).ip().to_string());
                 }
-            };
+                for ip in p.ips {
+                    if !all.contains(&ip) {
+                        all.push(ip);
+                    }
+                }
+            }
+            let (public_ips, extra_ips) = split_primary(all);
             let public_ips = pin_to_local(public_ips, primary_local_ipv4());
-            Ok(IceNet { mux, public_ips })
+            Ok(IceNet {
+                mux,
+                public_ips,
+                extra_ips,
+            })
         })
         .await
 }
@@ -117,6 +144,61 @@ fn primary_local_ipv4() -> Option<std::net::IpAddr> {
     let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     s.connect("192.0.2.1:9").ok()?;
     Some(s.local_addr().ok()?.ip())
+}
+
+/// The first bare address per IP family (and every explicit `ext/local`
+/// pair) is a 1:1 NAT address; the remaining bare ones are extra addresses.
+fn split_primary(ips: Vec<String>) -> (Vec<String>, Vec<std::net::IpAddr>) {
+    let (mut primary, mut extra) = (Vec::new(), Vec::new());
+    let (mut v4, mut v6) = (false, false);
+    for ip in ips {
+        let Ok(addr) = ip.parse::<std::net::IpAddr>() else {
+            primary.push(ip); // an `ext/local` pair
+            continue;
+        };
+        let seen = if addr.is_ipv4() { &mut v4 } else { &mut v6 };
+        if *seen {
+            extra.push(addr);
+        } else {
+            *seen = true;
+            primary.push(ip);
+        }
+    }
+    (primary, extra)
+}
+
+/// Copies of a gathered host candidate (`candidate:…` line) at each extra
+/// address of the same family: same port, priority one lower so the real
+/// address stays preferred when both work. Not a UDP host candidate: none.
+pub fn extra_candidates(candidate: &str) -> Vec<String> {
+    match ICE_NET.get() {
+        Some(n) if !n.extra_ips.is_empty() => copies_at(candidate, &n.extra_ips),
+        _ => vec![],
+    }
+}
+
+fn copies_at(candidate: &str, extra: &[std::net::IpAddr]) -> Vec<String> {
+    // candidate:<foundation> <component> <transport> <priority> <address> <port> typ <type> …
+    let f: Vec<&str> = candidate.split(' ').collect();
+    if f.len() < 8 || !f[2].eq_ignore_ascii_case("udp") || f[6] != "typ" || f[7] != "host" {
+        return vec![];
+    }
+    let Ok(addr) = f[4].parse::<std::net::IpAddr>() else {
+        return vec![];
+    };
+    let Ok(prio) = f[3].parse::<u32>() else {
+        return vec![];
+    };
+    extra
+        .iter()
+        .filter(|e| e.is_ipv4() == addr.is_ipv4() && **e != addr)
+        .map(|e| {
+            let mut g: Vec<String> = f.iter().map(|x| x.to_string()).collect();
+            g[3] = prio.saturating_sub(1).to_string();
+            g[4] = e.to_string();
+            g.join(" ")
+        })
+        .collect()
 }
 
 /// Pin each bare external IP to one local address (`external/local`).
@@ -154,16 +236,18 @@ pub async fn init() -> Result<Option<String>> {
             .trim()
             .to_string()
     });
-    Ok(match (port, n.public_ips.is_empty()) {
+    let mut shown: Vec<String> = n.public_ips.clone();
+    shown.extend(n.extra_ips.iter().map(|ip| ip.to_string()));
+    Ok(match (port, shown.is_empty()) {
         (None, true) => None,
         (port, _) => Some(format!(
             "ICE {}{}",
             port.map(|p| format!("on one UDP port {p}"))
                 .unwrap_or_else(|| "on ephemeral UDP ports".into()),
-            if n.public_ips.is_empty() {
+            if shown.is_empty() {
                 String::new()
             } else {
-                format!(", advertising {}", n.public_ips.join(", "))
+                format!(", advertising {}", shown.join(", "))
             }
         )),
     })
@@ -172,7 +256,7 @@ pub async fn init() -> Result<Option<String>> {
 pub fn is_configured() -> bool {
     ICE_NET
         .get()
-        .is_some_and(|n| n.mux.is_some() || !n.public_ips.is_empty())
+        .is_some_and(|n| n.mux.is_some() || !n.public_ips.is_empty() || !n.extra_ips.is_empty())
 }
 
 /// The webrtc API for one share peer connection.
@@ -202,15 +286,65 @@ mod tests {
         assert_eq!(c.udp_port, Some(47000));
         assert_eq!(
             c.public_ips,
-            Some(PublicIps::List(vec![
-                "192.0.2.10".into(),
-                "198.51.100.7/172.17.0.2".into()
-            ]))
+            Some(PublicIps {
+                auto: false,
+                ips: vec!["192.0.2.10".into(), "198.51.100.7/172.17.0.2".into()]
+            })
         );
         assert_eq!(
             parse(None, Some("AUTO")).unwrap().public_ips,
-            Some(PublicIps::Auto)
+            Some(PublicIps {
+                auto: true,
+                ips: vec![]
+            })
         );
+        assert_eq!(
+            parse(None, Some("auto, 100.64.0.7")).unwrap().public_ips,
+            Some(PublicIps {
+                auto: true,
+                ips: vec!["100.64.0.7".into()]
+            })
+        );
+    }
+
+    #[test]
+    fn only_the_first_address_per_family_is_the_nat_address() {
+        let (primary, extra) = split_primary(vec![
+            "192.0.2.10".into(),
+            "100.64.0.7".into(),
+            "198.51.100.7/172.17.0.2".into(),
+            "2001:db8::1".into(),
+        ]);
+        assert_eq!(
+            primary,
+            vec!["192.0.2.10", "198.51.100.7/172.17.0.2", "2001:db8::1"]
+        );
+        assert_eq!(
+            extra,
+            vec!["100.64.0.7".parse::<std::net::IpAddr>().unwrap()]
+        );
+    }
+
+    #[test]
+    fn extra_addresses_copy_udp_host_candidates_only() {
+        let extra = [
+            "100.64.0.7".parse().unwrap(),
+            "2001:db8::1".parse().unwrap(),
+        ];
+        assert_eq!(
+            copies_at(
+                "candidate:1 1 udp 2130706431 192.0.2.10 47000 typ host",
+                &extra
+            ),
+            vec!["candidate:1 1 udp 2130706430 100.64.0.7 47000 typ host".to_string()]
+        );
+        assert!(copies_at(
+            "candidate:2 1 udp 1694498815 192.0.2.10 5000 typ srflx raddr 0.0.0.0 rport 0",
+            &extra
+        )
+        .is_empty());
+        assert!(copies_at("candidate:3 1 tcp 1 192.0.2.10 9 typ host", &extra).is_empty());
+        assert!(copies_at("", &extra).is_empty());
     }
 
     #[test]

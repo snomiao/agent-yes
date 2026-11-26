@@ -13,6 +13,7 @@ import {
   cpuPct,
   memPct,
   resLabel,
+  roomFailHint,
   age,
   matches,
   nextIndex,
@@ -1460,5 +1461,23 @@ describe("cpuPct / memPct / resLabel — the room row's resource chip", () => {
 
   it("ignores hosts that have not reported yet instead of throwing", () => {
     expect(resLabel([null, undefined, host()]).label).toBe("cpu 50% · mem 50%");
+  });
+});
+
+// A saved room that never connects must say why on its row, not retry behind
+// a bare "offline" dot (a stale share link looked exactly like a slow host).
+describe("roomFailHint", () => {
+  it("names a stale link, a rotated room, an offline host, and a NAT problem", () => {
+    expect(roomFailHint("room rejected: room not open")?.label).toBe("not hosted");
+    expect(roomFailHint("room rejected: room not open")?.tip).toMatch(/ay serve status/);
+    expect(roomFailHint("room rejected: forbidden")?.label).toBe("link rejected");
+    expect(roomFailHint("no host in room")?.label).toBe("host offline");
+    expect(roomFailHint("no network path to host (ice checking)")?.tip).toMatch(/--ice-public-ip/);
+  });
+
+  it("is null for nothing or an error it cannot explain", () => {
+    expect(roomFailHint(null)).toBeNull();
+    expect(roomFailHint("")).toBeNull();
+    expect(roomFailHint("signaling closed")).toBeNull();
   });
 });

@@ -1255,10 +1255,12 @@ async function warnStrayServeProcesses(): Promise<void> {
 // `--webrtc url`; pm2/`=` → `--webrtc=url`).
 // Which runtime a daemon registered with `args` hosts its room under — see
 // serveRust.ts daemonShareRuntime; the binary check is the live one cmdServe makes.
+// Fetches ayrs first when the daemon would (see ensureDaemonShareRuntime), so
+// the room minted and printed here is the one the daemon then hosts.
 async function daemonShareRuntime(args: string[]): Promise<"ts" | "rust"> {
-  const { daemonShareRuntime: decide } = await import("./serveRust.ts");
-  const { findAyrsBinary } = await import("./rustBinary.ts");
-  return decide(args, () => !!findAyrsBinary());
+  const { ensureDaemonShareRuntime } = await import("./serveRust.ts");
+  const { ensureAyrsBinary } = await import("./rustBinary.ts");
+  return ensureDaemonShareRuntime(args, () => ensureAyrsBinary());
 }
 
 function explicitWebrtcUrl(args: string[]): string | undefined {
@@ -1857,10 +1859,32 @@ export function ayrsServeEnv(
   return { ...env, AGENT_YES_UI_DIR: uiDir };
 }
 
-async function runAyrsServe(ayrs: string, argv: string[]): Promise<number> {
+// `tailscale ip -4`, first address; undefined without tailscale. Bounded so a
+// wedged tailscaled cannot hold up the daemon's start.
+function tailscaleIp4(): string | undefined {
+  try {
+    const r = Bun.spawnSync(["tailscale", "ip", "-4"], {
+      stdout: "pipe",
+      stderr: "ignore",
+      timeout: 3000,
+    });
+    if (r.exitCode !== 0) return undefined;
+    return new TextDecoder().decode(r.stdout).split(/\s+/).find(Boolean);
+  } catch {
+    return undefined; // not installed
+  }
+}
+
+async function runAyrsServe(
+  ayrs: string,
+  argv: string[],
+  ice?: import("./serveRust.ts").IceFlags,
+): Promise<number> {
+  const { iceEnv } = await import("./serveRust.ts");
+  const extra = iceEnv(ice, tailscaleIp4);
   const child = Bun.spawn([ayrs, ...argv], {
     stdio: ["inherit", "inherit", "inherit"],
-    env: ayrsServeEnv(),
+    env: { ...ayrsServeEnv(), ...extra },
     cwd: process.cwd(),
   });
   const forward = (sig: NodeJS.Signals) => () => {
@@ -1901,9 +1925,18 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  --webrtc URL --join\n` +
         `                    Host URL's room as one more member next to its other\n` +
         `                    hosts (all members' agents show up for every viewer).\n` +
-        `                    Needs AY_JOIN_SECRET; AY_NAME names this member.\n\n` +
+        `                    Needs AY_JOIN_SECRET; AY_NAME names this member.\n` +
+        `  --ice-public-ip IP|auto\n` +
+        `                    (with --webrtc) Address(es) viewers reach this host at,\n` +
+        `                    for a host behind NAT (e.g. a Docker container). Repeat\n` +
+        `                    or comma-separate. auto = the STUN-seen public IP plus\n` +
+        `                    \`tailscale ip -4\` when tailscale is installed.\n` +
+        `  --ice-udp-port N  (with --webrtc) Use one UDP port for every viewer, so a\n` +
+        `                    single published port (-p N:N/udp) covers them all.\n` +
+        `                    Both persist with \`ay serve install --webrtc …\`.\n\n` +
         `Runtime: like \`ay <cli>\`, the Rust daemon (ayrs serve) runs by default for\n` +
-        `  the flags it supports — --webrtc [webrtc://url], --port N, --sighost H.\n` +
+        `  the flags it supports — --webrtc [webrtc://url], --port N, --sighost H,\n` +
+        `  --ice-public-ip, --ice-udp-port.\n` +
         `  Everything else (bare \`ay serve\`, --share/--http/--host/--tls-*, the\n` +
         `  subcommands) runs the TypeScript server. --no-rust forces TypeScript.\n\n` +
         `Options:\n` +
@@ -1941,7 +1974,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
     if (plan.kind === "rust-only") {
       const { ensureAyrsBinary } = await import("./rustBinary.ts");
       const ayrs = await ensureAyrsBinary();
-      if (ayrs) return runAyrsServe(ayrs, plan.argv);
+      if (ayrs) return runAyrsServe(ayrs, plan.argv, plan.ice);
       process.stderr.write(
         `ay serve: ${plan.feature} needs the Rust daemon (ayrs), which was not found ` +
           `(bun run build:rs, or reinstall)\n`,
@@ -1951,7 +1984,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
     if (plan.kind === "rust") {
       const { ensureAyrsBinary } = await import("./rustBinary.ts");
       const ayrs = await ensureAyrsBinary();
-      if (ayrs) return runAyrsServe(ayrs, plan.argv);
+      if (ayrs) return runAyrsServe(ayrs, plan.argv, plan.ice);
       process.stderr.write(
         `ay serve: ayrs binary not found — running the TypeScript server ` +
           `(bun run build:rs, or reinstall, to get the Rust daemon)\n`,

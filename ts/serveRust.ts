@@ -20,6 +20,14 @@
  *                        console, so the flag is implied and dropped)
  *   --host <loopback>   (with --port: 127.0.0.1 / localhost / ::1 — ayrs
  *                        binds loopback anyway, so the flag is dropped)
+ *   --ice-public-ip <ip>|auto  (repeatable / comma list; the address(es)
+ *                        viewers should reach this host at. `auto` = the
+ *                        STUN-seen public IP plus `tailscale ip -4` when
+ *                        tailscale is present. → AGENT_YES_ICE_PUBLIC_IPS)
+ *   --ice-udp-port <n>  (one UDP port for every viewer, for a published
+ *                        container port. → AGENT_YES_ICE_UDP_PORT)
+ *     Both are daemon args rather than env, so `ay serve install` persists
+ *     them in the registration and they survive restarts.
  *
  * What stays on TypeScript, with the reason printed:
  *   - `--no-rust` / AGENT_YES_NO_RUST=1 (explicit opt-out)
@@ -48,11 +56,43 @@ export const SERVE_SUBCOMMANDS = new Set([
 
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "::1"]);
 
+/** The ICE flags, as given; `iceEnv` turns them into the ayrs env. */
+export type IceFlags = { publicIps: string[]; udpPort?: string };
+
 export type RustServePlan =
-  | { kind: "rust"; argv: string[] }
+  | { kind: "rust"; argv: string[]; ice?: IceFlags }
   | { kind: "ts"; reason: string; rest: string[] }
   /** Only ayrs can do this; there is no TypeScript fallback. */
-  | { kind: "rust-only"; argv: string[]; feature: string };
+  | { kind: "rust-only"; argv: string[]; feature: string; ice?: IceFlags };
+
+const IPV4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/;
+const isIp = (s: string) =>
+  IPV4.test(s)
+    ? s.split(".").every((n) => Number(n) <= 255)
+    : /^[0-9a-fA-F:]+:[0-9a-fA-F:.]*$/.test(s);
+
+/**
+ * The env ayrs reads its ICE settings from (rs/src/serve/ice_net.rs).
+ * `auto` keeps the STUN lookup (ayrs does it) and adds this host's tailnet
+ * IPv4 when there is one: a container on a userspace-networking tailnet has
+ * no interface carrying that address, so nothing else would advertise it.
+ */
+export function iceEnv(ice: IceFlags | undefined, tailscaleIp4: () => string | undefined) {
+  const env: Record<string, string> = {};
+  if (!ice) return env;
+  const ips: string[] = [];
+  for (const ip of ice.publicIps) {
+    if (ip.toLowerCase() === "auto") {
+      ips.push("auto");
+      const ts = tailscaleIp4();
+      if (ts) ips.push(ts);
+    } else ips.push(ip);
+  }
+  const uniq = [...new Set(ips)];
+  if (uniq.length) env.AGENT_YES_ICE_PUBLIC_IPS = uniq.join(",");
+  if (ice.udpPort) env.AGENT_YES_ICE_UDP_PORT = ice.udpPort;
+  return env;
+}
 
 /**
  * Decide whether `rest` (the argv after `serve`) can run as `ayrs serve`.
@@ -91,6 +131,7 @@ export function planRustServe(
   // one, TypeScript's HTTP console runs behind Portless, which ayrs lacks.
   const hasPort = rest.some((a) => a === "--port" || a.startsWith("--port="));
   const argv = ["serve"];
+  let ice: IceFlags | undefined;
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]!;
     const eq = a.indexOf("=");
@@ -153,16 +194,37 @@ export function planRustServe(
         argv.push("--sighost", v);
         break;
       }
+      case "--ice-public-ip": {
+        const v = takeNext();
+        const ips = (v ?? "")
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean);
+        const bad = ips.find((x) => x.toLowerCase() !== "auto" && !isIp(x));
+        if (!ips.length || bad)
+          return { kind: "ts", reason: `--ice-public-ip ${bad ?? v ?? "(missing)"}`, rest };
+        ice = { publicIps: [...(ice?.publicIps ?? []), ...ips], udpPort: ice?.udpPort };
+        break;
+      }
+      case "--ice-udp-port": {
+        const v = takeNext();
+        if (v === undefined || !/^\d+$/.test(v) || Number(v) < 1 || Number(v) > 65535)
+          return { kind: "ts", reason: `--ice-udp-port ${v ?? "(missing)"}`, rest };
+        ice = { publicIps: ice?.publicIps ?? [], udpPort: v };
+        break;
+      }
       default:
         return { kind: "ts", reason: a, rest };
     }
   }
+  if (ice && !argv.includes("--webrtc"))
+    return { kind: "ts", reason: "--ice-* flags need --webrtc", rest };
   if (argv.includes("--join")) {
     if (!argv.some((x) => x.startsWith("webrtc://")))
       return { kind: "ts", reason: "--join needs --webrtc <room link>", rest };
-    return { kind: "rust-only", argv, feature: "--join" };
+    return { kind: "rust-only", argv, feature: "--join", ...(ice ? { ice } : {}) };
   }
-  return { kind: "rust", argv };
+  return { kind: "rust", argv, ...(ice ? { ice } : {}) };
 }
 
 /**
@@ -182,4 +244,22 @@ export function daemonShareRuntime(
   env: Record<string, string | undefined> = process.env,
 ): "ts" | "rust" {
   return planRustServe(args, env).kind !== "ts" && hasAyrs() ? "rust" : "ts";
+}
+
+/**
+ * daemonShareRuntime for a caller that is about to MINT (or print) the room
+ * for a daemon it is installing. The daemon's `ay serve --webrtc` fetches ayrs
+ * when it is missing (ensureAyrsBinary) and then hosts the Rust room, so a
+ * plain "does ayrs exist yet?" check here is wrong on exactly the first run:
+ * on a fresh box the binary is not downloaded yet, the TS room gets minted and
+ * printed, and the daemon comes up a second later in a different room. Fetch
+ * it the same way the daemon will, then decide.
+ */
+export async function ensureDaemonShareRuntime(
+  args: string[],
+  ensureAyrs: () => Promise<string | undefined>,
+  env: Record<string, string | undefined> = process.env,
+): Promise<"ts" | "rust"> {
+  if (planRustServe(args, env).kind === "ts") return "ts";
+  return (await ensureAyrs()) ? "rust" : "ts";
 }
