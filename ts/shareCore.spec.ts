@@ -9,6 +9,8 @@ import {
   tailscaleDnsName,
   tailscaleServeArgv,
   tailscaleServeOffArgv,
+  tailscaleUserspace,
+  tailscaleUserspaceNote,
 } from "./shareCore.ts";
 
 describe("planDaemonArgs", () => {
@@ -232,5 +234,22 @@ describe("ay connect", () => {
       err.restore();
     }
     expect(err.read()).toContain("not a share URL");
+  });
+});
+
+describe("tailscaleUserspace", () => {
+  it("is true only when tailscaled reports no tun device", () => {
+    expect(tailscaleUserspace({ TUN: false })).toBe(true);
+    expect(tailscaleUserspace({ TUN: true })).toBe(false);
+    expect(tailscaleUserspace({})).toBe(false);
+    expect(tailscaleUserspace(null)).toBe(false);
+  });
+
+  it("the note is a warning that names the unverified leg and the checked backend", () => {
+    const t = tailscaleUserspaceNote("https://box.example.ts.net/ay", 7432);
+    expect(t).toContain("WARNING");
+    expect(t).toContain("127.0.0.1:7432 ok");
+    expect(t).toContain("userspace networking");
+    expect(t).not.toContain("FAILS");
   });
 });

@@ -17,6 +17,8 @@ import {
   tailscaleDnsName,
   tailscaleServeArgv,
   tailscaleServeOffArgv,
+  tailscaleUserspace,
+  tailscaleUserspaceNote,
 } from "./shareCore.ts";
 
 // `ay share [local|portless|lan|tailscale|webrtc]` — guided "make this machine reachable".
@@ -52,11 +54,20 @@ async function runJson(cmd: string[], timeoutMs = 4000): Promise<any | null> {
   }
 }
 
-async function detectTailscale(): Promise<{ dns: string; serveStatus: any } | null> {
+async function detectTailscale(): Promise<{
+  dns: string;
+  serveStatus: any;
+  userspace: boolean;
+} | null> {
   if (!Bun.which("tailscale")) return null;
-  const dns = tailscaleDnsName(await runJson(["tailscale", "status", "--json"]));
+  const status = await runJson(["tailscale", "status", "--json"]);
+  const dns = tailscaleDnsName(status);
   if (!dns) return null;
-  return { dns, serveStatus: await runJson(["tailscale", "serve", "status", "--json"]) };
+  return {
+    dns,
+    serveStatus: await runJson(["tailscale", "serve", "status", "--json"]),
+    userspace: tailscaleUserspace(status),
+  };
 }
 
 async function ask(q: string): Promise<string> {
@@ -96,6 +107,38 @@ async function runInherit(argv: string[]): Promise<number> {
 }
 
 /** GET <base>/api/version with the token — the end-to-end health check. */
+// Health of the tailscale route. The end-to-end probe goes through the host's
+// own ts.net name, which a tailscaled in userspace-networking mode (a container
+// without /dev/net/tun) cannot reach: there is no tun device routing 100.x back
+// into tailscaled, so it times out even though every OTHER tailnet device gets
+// through fine. In that mode a failed self-probe is not evidence of a broken
+// route, so check the local backend tailscale proxies to instead and report the
+// ts.net leg as unverified (a warning) rather than failed.
+async function tailscaleHealth(
+  base: string,
+  token: string,
+  ts: { userspace: boolean },
+  port: number,
+): Promise<{ ok: boolean; text: string }> {
+  const err = await probe(base, token);
+  if (!err) return { ok: true, text: `${base}/ ok` };
+  if (!ts.userspace)
+    return {
+      ok: false,
+      text:
+        `route ok, but ${base}/ FAILS: ${err}` +
+        // The first HTTPS request to a ts.net name makes tailscale fetch its TLS
+        // certificate, which can outlast the probe's deadline.
+        (/timed? ?out/i.test(err)
+          ? ` (a first request can time out while tailscale issues the HTTPS certificate — retry in a minute)`
+          : ``),
+    };
+  const localErr = await probe(`http://127.0.0.1:${port}`, token);
+  return localErr
+    ? { ok: false, text: `route ok, but the local backend 127.0.0.1:${port} FAILS: ${localErr}` }
+    : { ok: true, text: tailscaleUserspaceNote(base, port) };
+}
+
 async function probe(base: string, token: string): Promise<string | null> {
   try {
     const r = await fetch(`${base}/api/version`, {
@@ -224,9 +267,9 @@ async function cmdShareStatus(mount: string): Promise<number> {
     return d.httpUp || webrtc ? 0 : 1;
   }
   const base = `https://${ts.dns}${mount}`;
-  const err = await probe(base, d.token);
-  line("tailscale:", err ? `route ok, but ${base}/ FAILS: ${err}` : `${base}/ ok`);
-  return err ? 1 : 0;
+  const health = await tailscaleHealth(base, d.token, ts, d.port!);
+  line("tailscale:", health.text);
+  return health.ok ? 0 : 1;
 }
 
 export async function cmdShare(rest: string[]): Promise<number> {
@@ -410,11 +453,11 @@ export async function cmdShare(rest: string[]): Promise<number> {
       }
     }
     // Health: the route actually reaches THIS daemon with THIS token, end to end.
-    const err = await probe(base, state.token);
+    const health = await tailscaleHealth(base, state.token, ts!, port);
     say(
-      err
-        ? `\nhealth: ${base}/ not reachable yet (${err}) — check \`ay share status\`\n`
-        : `\nhealth: ${base}/ ok\n`,
+      health.ok
+        ? `\nhealth: ${health.text}\n`
+        : `\nhealth: not reachable yet (${health.text}) — check \`ay share status\`\n`,
     );
   }
 

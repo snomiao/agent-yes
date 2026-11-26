@@ -11,6 +11,7 @@ import {
   probeDaemon,
   isNoNodeExecError,
   oxmgrCmd,
+  oxmgrStatePath,
   oxmgrVersionHasWindowsFix,
   parseGitUrl,
   portlessConsoleUrl,
@@ -406,5 +407,24 @@ describe("ayrsServeEnv", () => {
       "/custom/ui",
     );
     expect(ayrsServeEnv({}, "/pkg/lab/ui").AGENT_YES_UI_DIR).toBe("/pkg/lab/ui");
+  });
+});
+
+describe("oxmgrStatePath", () => {
+  it("honors OXMGR_HOME", () => {
+    expect(oxmgrStatePath({ OXMGR_HOME: "/x/ox" }, "linux", "/home/alice")).toBe(
+      path.join("/x/ox", "state.json"),
+    );
+  });
+  it("uses the platform data dir otherwise", () => {
+    expect(oxmgrStatePath({}, "linux", "/home/alice")).toBe(
+      path.join("/home/alice", ".local", "share", "oxmgr", "state.json"),
+    );
+    expect(oxmgrStatePath({ XDG_DATA_HOME: "/d" }, "linux", "/home/alice")).toBe(
+      path.join("/d", "oxmgr", "state.json"),
+    );
+    expect(oxmgrStatePath({}, "darwin", "/Users/alice")).toBe(
+      path.join("/Users/alice", "Library", "Application Support", "oxmgr", "state.json"),
+    );
   });
 });
