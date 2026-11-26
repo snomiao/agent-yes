@@ -3,6 +3,7 @@ import {
   daemonShareRuntime,
   ensureDaemonShareRuntime,
   iceEnv,
+  joinRefusal,
   planRustServe,
 } from "./serveRust.ts";
 import { planDaemonArgs } from "./shareCore.ts";
@@ -233,5 +234,44 @@ describe("--ice-public-ip / --ice-udp-port", () => {
       AGENT_YES_ICE_PUBLIC_IPS: "100.64.0.7,auto",
     });
     expect(iceEnv(undefined, () => "100.64.0.7")).toEqual({});
+  });
+});
+
+// Only ayrs hosts as a room member, so a join the TypeScript side would run is
+// refused. A daemon install only registers flags, and its daemon plans them
+// again on start: `ay serve install --webrtc <link> --join` must go through.
+describe("joinRefusal", () => {
+  const env = {};
+  const link = "webrtc://r1:e1.ab@s.example";
+
+  it("lets a daemon install of a room join through, in both forms", () => {
+    expect(joinRefusal(["install", "--webrtc", link, "--join", "--port", "7432"], env)).toBeNull();
+    expect(joinRefusal(["--webrtc", link, "--join", "-d"], env)).toBeNull();
+    expect(joinRefusal(["--daemon", "--webrtc", link, "--join"], env)).toBeNull();
+  });
+
+  it("refuses a daemon install whose flags would not run on ayrs", () => {
+    expect(joinRefusal(["install", "--webrtc", "--join"], env)).toBe(
+      "--join needs --webrtc <room link>",
+    );
+    expect(joinRefusal(["install", "--webrtc", link, "--join", "--token", "t"], env)).toBe(
+      "--token",
+    );
+    expect(joinRefusal(["install", "--no-rust", "--webrtc", link, "--join"], env)).toBe(
+      "--no-rust",
+    );
+    expect(joinRefusal(["install", "--webrtc", link, "--join"], { AGENT_YES_NO_RUST: "1" })).toBe(
+      "AGENT_YES_NO_RUST=1",
+    );
+  });
+
+  it("refuses a foreground join the TypeScript server would run", () => {
+    expect(joinRefusal(["--no-rust", "--webrtc", link, "--join"], env)).toBe("--no-rust");
+    expect(joinRefusal(["join-secret", "--port", "1"], env)).toContain("join-secret");
+  });
+
+  it("has nothing to say without a join", () => {
+    expect(joinRefusal(["install", "--webrtc", link], env)).toBeNull();
+    expect(joinRefusal(["--no-rust", "--webrtc", link], env)).toBeNull();
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_SIGHOST,
+  explicitWebrtcUrl,
   hasJoinSecret,
   isWebrtcSpec,
   parseWebrtcLink,
@@ -110,5 +111,35 @@ describe("host links (view link + join secret)", () => {
       expect(toWebrtcUrl(link, { join: true })).toBe(`webrtc://r1:${v}:${j}@s.agent-yes.com`);
     }
     expect(hasJoinSecret(`https://agent-yes.com/w/#r1:${v}`)).toBe(false);
+  });
+});
+
+// The room a daemon's registered serve args name. `ay serve status` reports the
+// room from this, not from the runtime's room file: a member installed with
+// `--webrtc <link>` is in that room, while the file still holds whatever room
+// this runtime minted earlier.
+describe("explicitWebrtcUrl", () => {
+  const v = `e1.${"ab".repeat(32)}`;
+  const j = `j1.${"cd".repeat(32)}`;
+  const want = `webrtc://r1:${v}@s.agent-yes.com`;
+
+  it("finds the link in both spellings, for --webrtc and --share", () => {
+    expect(
+      explicitWebrtcUrl(["--webrtc", `https://agent-yes.com/w/#r1:${v}`, "--port", "7432"]),
+    ).toBe(want);
+    expect(explicitWebrtcUrl([`--webrtc=https://agent-yes.com/w/#r1:${v}`])).toBe(want);
+    expect(explicitWebrtcUrl(["--share", want])).toBe(want);
+  });
+
+  it("drops a host link's join secret", () => {
+    expect(explicitWebrtcUrl(["--webrtc", `https://agent-yes.com/w/#r1:${v}:${j}`, "--join"])).toBe(
+      want,
+    );
+  });
+
+  it("is undefined for a bare flag or no flag", () => {
+    expect(explicitWebrtcUrl(["--webrtc", "--port", "7432"])).toBeUndefined();
+    expect(explicitWebrtcUrl(["--webrtc"])).toBeUndefined();
+    expect(explicitWebrtcUrl(["--port", "7432"])).toBeUndefined();
   });
 });

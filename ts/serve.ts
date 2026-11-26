@@ -76,7 +76,7 @@ import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
 import { negotiateSize, sanitizeCap, type SizeCap } from "./sizeNego.ts";
 import { listStrayServeProcesses } from "./strayServe.ts";
-import { isWebrtcSpec, toWebrtcUrl } from "./webrtcLink.ts";
+import { explicitWebrtcUrl, isWebrtcSpec, toWebrtcUrl } from "./webrtcLink.ts";
 import {
   getProvisionHook,
   getProvisionRoot,
@@ -1332,11 +1332,6 @@ async function warnStrayServeProcesses(): Promise<void> {
   );
 }
 
-// An explicit room URL passed to --webrtc/--share in the daemon's serve args,
-// normalized to the internal webrtc:// form — or undefined for a bare flag (which
-// mints a persisted room instead). Mirrors how cmdServe resolves argv.webrtc/argv.share,
-// but over the raw arg list install holds (oxmgr splits the command on whitespace →
-// `--webrtc url`; pm2/`=` → `--webrtc=url`).
 // Which runtime a daemon registered with `args` hosts its room under — see
 // serveRust.ts daemonShareRuntime; the binary check is the live one cmdServe makes.
 // Fetches ayrs first when the daemon would (see ensureDaemonShareRuntime), so
@@ -1345,17 +1340,6 @@ async function daemonShareRuntime(args: string[]): Promise<"ts" | "rust"> {
   const { ensureDaemonShareRuntime } = await import("./serveRust.ts");
   const { ensureAyrsBinary } = await import("./rustBinary.ts");
   return ensureDaemonShareRuntime(args, () => ensureAyrsBinary());
-}
-
-function explicitWebrtcUrl(args: string[]): string | undefined {
-  for (let i = 0; i < args.length; i++) {
-    const a = args[i]!;
-    for (const flag of ["--webrtc", "--share"]) {
-      const v = a === flag ? args[i + 1] : a.startsWith(`${flag}=`) ? a.slice(flag.length + 1) : "";
-      if (v && isWebrtcSpec(v)) return toWebrtcUrl(v) ?? undefined;
-    }
-  }
-  return undefined;
 }
 
 // Ask the live daemon its version over the local HTTP API. null if it's not
@@ -2108,7 +2092,7 @@ export async function cmdServe(rest: string[]): Promise<number> {
   // the Rust daemon; the rest stays here. See ts/serveRust.ts for the split.
   // `--no-rust` is stripped for the parsers below either way.
   {
-    const { planRustServe, SERVE_SUBCOMMANDS } = await import("./serveRust.ts");
+    const { planRustServe, joinRefusal, SERVE_SUBCOMMANDS } = await import("./serveRust.ts");
     const plan = planRustServe(rest);
     if (plan.kind === "rust-only") {
       const { ensureAyrsBinary } = await import("./rustBinary.ts");
@@ -2129,10 +2113,13 @@ export async function cmdServe(rest: string[]): Promise<number> {
           `(bun run build:rs, or reinstall, to get the Rust daemon)\n`,
       );
     } else {
+      // Never let the TypeScript server quietly host its own room instead. A
+      // daemon install is judged by the flags its daemon will run. (Judge the
+      // argv as given: plan.rest has --no-rust stripped.)
+      const refusal = joinRefusal(rest);
       rest = plan.rest;
-      // Never let the TypeScript server quietly host its own room instead.
-      if (rest[0] === "join-secret" || rest.includes("--join")) {
-        process.stderr.write(`ay serve: ${plan.reason}: joining rooms needs the Rust daemon\n`);
+      if (refusal !== null) {
+        process.stderr.write(`ay serve: ${refusal}: joining rooms needs the Rust daemon\n`);
         return 1;
       }
       // Say which server runs and why, so a daemon log (and `ay share`'s

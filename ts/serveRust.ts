@@ -229,6 +229,30 @@ export function planRustServe(
 }
 
 /**
+ * Why `ay serve <rest>` has to refuse a room join, or null when it may go
+ * ahead. Only ayrs hosts as a room member, so a `--join` / `join-secret` that
+ * stays on the TypeScript side is an error, never a TS server quietly hosting
+ * its own room. A daemon install (`install <flags>`, `-d`) only registers its
+ * flags, and the daemon plans them again when it starts, so it is judged by
+ * those flags, not by the TS-only subcommand that carries them.
+ */
+export function joinRefusal(
+  rest: string[],
+  env: Record<string, string | undefined> = process.env,
+): string | null {
+  if (rest[0] !== "join-secret" && !rest.includes("--join")) return null;
+  const isDaemonFlag = (a: string) => a === "-d" || a === "--daemon";
+  const daemonArgs =
+    rest[0] === "install"
+      ? rest.slice(1)
+      : rest.some(isDaemonFlag)
+        ? rest.filter((a) => !isDaemonFlag(a))
+        : null;
+  const plan = planRustServe(daemonArgs ?? rest, env);
+  return plan.kind === "ts" ? plan.reason : null;
+}
+
+/**
  * Which runtime a daemon registered with these `ay serve` args actually runs —
  * and therefore which persisted room file holds the room it hosts
  * (`.share-room` for TypeScript, `.share-room-ayrs` for ayrs; see share.ts).

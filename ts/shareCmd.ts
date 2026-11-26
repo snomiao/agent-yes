@@ -192,11 +192,15 @@ async function mintingShareRuntimeOf(args: string[] | null): Promise<"ts" | "rus
   return ensureDaemonShareRuntime(args ?? [], () => ensureAyrsBinary());
 }
 
-// The console link for the room a `--webrtc` daemon hosts, derived read-only
-// from the persisted room file of its runtime; null when nothing is minted yet.
+// The console link for the room a `--webrtc` daemon hosts, derived read-only:
+// the room its args name (`--webrtc <link>`, as a room member does), else the
+// persisted room file of its runtime; null when nothing is minted yet. The
+// room file alone is wrong for a member: it still holds whatever room this
+// runtime minted earlier, which the daemon is not in.
 export async function daemonShareLink(args: string[] | null): Promise<string | null> {
   const { readShareRoom, shareLinkFromRoomUrl } = await import("./share.ts");
-  const room = await readShareRoom(await shareRuntimeOf(args));
+  const { explicitWebrtcUrl } = await import("./webrtcLink.ts");
+  const room = explicitWebrtcUrl(args ?? []) ?? (await readShareRoom(await shareRuntimeOf(args)));
   if (!room) return null;
   try {
     return shareLinkFromRoomUrl(room);
