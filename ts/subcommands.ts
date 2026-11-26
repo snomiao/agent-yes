@@ -2120,11 +2120,19 @@ async function runRemoteRead(
   // Static read (cat/head/tail without -f)
   const params = new URLSearchParams({ mode, n: String(n) });
   const res = await remoteGet(remote, `/api/read/${encodeURIComponent(keyword)}?${params}`);
-  if (!res.ok) {
-    process.stderr.write(`remote error ${res.status}: ${await res.text()}\n`);
-    return 1;
+  let text: string;
+  if (res.ok) {
+    text = await res.text();
+  } else {
+    const body = await res.text();
+    // An older Rust host has no /api/read/: render its raw tail snapshot here.
+    const raw = isMissingRoute(res.status, body) ? await remoteRawSnapshot(remote, keyword) : null;
+    if (raw === null) {
+      process.stderr.write(`remote error ${res.status}: ${body}\n`);
+      return 1;
+    }
+    text = await renderRawLog(new TextEncoder().encode(raw), { mode, n });
   }
-  const text = await res.text();
   process.stderr.write(`[remote ${remote.label}  ${keyword}]\n`);
   process.stdout.write(text);
   if (!text.endsWith("\n")) process.stdout.write("\n");
@@ -2309,11 +2317,118 @@ async function runRemoteStatus(remote: ResolvedRemote): Promise<number> {
   }
   const res = await remoteGet(remote, `/api/status/${encodeURIComponent(keyword)}`);
   if (!res.ok) {
-    process.stderr.write(`remote error ${res.status}: ${await res.text()}\n`);
+    const body = await res.text();
+    if (isMissingRoute(res.status, body)) {
+      const snap = await remoteStatusFromLs(remote, keyword);
+      if (snap) {
+        process.stdout.write(JSON.stringify(snap, null, 2) + "\n");
+        return 0;
+      }
+    }
+    process.stderr.write(`remote error ${res.status}: ${body}\n`);
     return 1;
   }
   process.stdout.write(JSON.stringify(await res.json(), null, 2) + "\n");
   return 0;
+}
+
+/**
+ * True when a 404 is the server's router saying it has no such ROUTE, not a
+ * resolver saying it has no such agent ("no agent match…"). Rust `ay serve`
+ * daemons before 1.309 had no /api/status/ or /api/read/ and answered every
+ * remote `ay status|read|tail <host>:<kw>` this way, even for a live agent.
+ */
+export function isMissingRoute(status: number, body: string): boolean {
+  return status === 404 && body.trim().toLowerCase() === "not found";
+}
+
+/**
+ * `ay status` against a host without /api/status/: the same snapshot shape,
+ * derived from its /api/ls row (which every daemon serves). Null when the host
+ * lists no match, so the caller reports the original error.
+ */
+async function remoteStatusFromLs(
+  remote: ResolvedRemote,
+  keyword: string,
+): Promise<Record<string, unknown> | null> {
+  const params = new URLSearchParams({ keyword, all: "1" });
+  const res = await remoteGet(remote, `/api/ls?${params}`).catch(() => null);
+  if (!res?.ok) return null;
+  const rows = (await res.json().catch(() => null)) as any[] | null;
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const r = pickRemoteRow(rows, keyword);
+  return statusSnapshotFromLsRow(r);
+}
+
+/** Same precedence as resolveOne: exact pid, then exact agent_id, then a live row. */
+export function pickRemoteRow(rows: any[], keyword: string): any {
+  if (/^\d+$/.test(keyword)) {
+    const byPid = rows.find((r) => r.pid === Number(keyword));
+    if (byPid) return byPid;
+  }
+  const kw = keyword.toLowerCase();
+  return (
+    rows.find((r) => typeof r.agent_id === "string" && r.agent_id.toLowerCase() === kw) ??
+    rows.find((r) => r.status !== "exited") ??
+    rows[0]
+  );
+}
+
+/** Map an /api/ls row to the `ay status` snapshot fields (see snapshotStatus). */
+export function statusSnapshotFromLsRow(r: any, now = Date.now()): Record<string, unknown> {
+  const state = r.status === "exited" ? "stopped" : (r.status ?? "idle");
+  return {
+    pid: r.pid,
+    cli: r.cli,
+    cwd: r.cwd,
+    workdir: r.workdir ?? r.cwd,
+    workdir_source: r.workdir_source ?? "spawn",
+    state,
+    activity: r.status_text ?? null,
+    question: r.question ?? null,
+    note: r.note ?? null,
+    log_mtime_ms: state === "stopped" ? null : (r.last_active_at ?? null),
+    started_at: r.started_at,
+    age_ms: typeof r.started_at === "number" ? now - r.started_at : null,
+    exit_code: r.exit_code ?? null,
+    exit_reason: r.exit_reason ?? null,
+    log_file: r.log_file ?? null,
+  };
+}
+
+/**
+ * The raw PTY snapshot an /api/tail?raw=1 stream opens with (the last 64KB of
+ * the log), for hosts without /api/read/. Null when the stream can't be read.
+ */
+async function remoteRawSnapshot(remote: ResolvedRemote, keyword: string): Promise<string | null> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 15_000);
+  try {
+    const res = await fetch(`${remote.url}/api/tail/${encodeURIComponent(keyword)}?raw=1`, {
+      headers: { Authorization: `Bearer ${remote.token}`, Accept: "text/event-stream" },
+      signal: ac.signal,
+    });
+    if (!res.ok || !res.body) return null;
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) return null;
+      buf += dec.decode(value, { stream: true });
+      const m = /^data: (.*)$/m.exec(buf);
+      if (m && buf.indexOf("\n", m.index) >= 0) {
+        // Abandon the stream; never wait on it (see CLAUDE.md on draining readers).
+        void reader.cancel().catch(() => {});
+        return JSON.parse(m[1]!) as string;
+      }
+    }
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+    ac.abort();
+  }
 }
 
 // ---------------------------------------------------------------------------

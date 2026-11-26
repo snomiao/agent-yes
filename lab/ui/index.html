@@ -7,8 +7,26 @@
       content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content"
     />
     <title>agent-yes · console</title>
-    <link rel="stylesheet" href="/auth/profile.css" />
-    <script type="module" src="/auth/profile.js"></script>
+    <script>
+      // The account menu lives at the hosted site's root /auth/ (this console is
+      // its /w/). A self-hosted `ay serve` has no /auth/ or /api/auth, and behind
+      // a path prefix (tailscale serve at /ay/) root-absolute URLs escape the
+      // mount entirely — the console 404'd both files and refused the module as
+      // text/html. Load it only where it exists.
+      if (location.pathname.startsWith("/w/")) {
+        const css = document.createElement("link");
+        css.rel = "stylesheet";
+        css.href = "/auth/profile.css";
+        document.head.append(css);
+        // After parsing: profile.js mounts on [data-ay-account] at load time.
+        addEventListener("DOMContentLoaded", () => {
+          const js = document.createElement("script");
+          js.type = "module";
+          js.src = "/auth/profile.js";
+          document.head.append(js);
+        });
+      }
+    </script>
     <!-- PWA: installable console under /w/ (manifest scope is /w/). The service
          worker is network-first so it never serves a stale wire protocol — the
          cache is only an offline-launch fallback. -->
@@ -9435,6 +9453,15 @@ my.translate = async (text, lang) => {
           } catch {}
           // SECURITY: strip the token from the URL immediately.
           history.replaceState(null, document.title, location.pathname + location.search);
+          // boot() already ran ensureLocalSource() before this token was stored,
+          // and on a non-localhost origin (a tailnet share) that opened the
+          // /api/ls/subscribe EventSource WITHOUT it: one 401, and EventSource
+          // never retries a non-200, so the live stream stayed dead all session.
+          // Re-subscribe now that requests carry the token.
+          if (sources.has(LOCAL)) {
+            unsubscribeSource(sources.get(LOCAL));
+            sources.delete(LOCAL);
+          }
           ensureLocalSource();
           startPolling();
           connectAllRooms();
