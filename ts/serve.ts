@@ -122,14 +122,12 @@ async function resolvedPortlessConsoleUrl(token?: string): Promise<string> {
   return portlessConsoleUrl(token);
 }
 
-async function runWithPortless(rest: string[]): Promise<number> {
-  const portless = Bun.which("portless");
-  if (!portless) {
-    process.stderr.write(
-      "ay serve: Portless is required for local HTTPS. Install it with: npm install -g portless\n",
-    );
-    return 1;
-  }
+/** Path of the `portless` binary, or null when it is not installed. */
+export function findPortless(): string | null {
+  return Bun.which("portless") ?? null;
+}
+
+async function runWithPortless(rest: string[], portless: string): Promise<number> {
   const script = process.argv[1];
   const self =
     script && /\.[cm]?[jt]s$/.test(script) ? [process.execPath, script] : [process.execPath];
@@ -2063,13 +2061,21 @@ export async function cmdServe(rest: string[]): Promise<number> {
     }
   }
   const fixedPort = typeof argv.port === "number";
-  const usePortless = wantHttp && !fixedPort;
+  let usePortless = wantHttp && !fixedPort;
   if (argv.local === true && fixedPort) {
     process.stderr.write("ay serve: --local and --port cannot be used together\n");
     return 1;
   }
   if (usePortless && process.env[PORTLESS_CHILD_ENV] !== "1" && process.env.PORTLESS !== "0") {
-    return runWithPortless(rest);
+    const portless = findPortless();
+    if (portless) return runWithPortless(rest, portless);
+    // Portless is optional: warn once and serve plain HTTP on loopback instead of
+    // exiting (which would crash-loop under a process manager).
+    process.stderr.write(
+      "ay serve: Portless not found; serving plain HTTP on localhost instead of local HTTPS. " +
+        "Install it with `npm install -g portless` to get https://agent-yes.localhost.\n",
+    );
+    usePortless = false;
   }
 
   // `ay serve` takes only flags (plus the install/uninstall/logs subcommands

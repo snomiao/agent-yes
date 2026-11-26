@@ -1,4 +1,5 @@
 import { readFile } from "fs/promises";
+import path from "path";
 import { describe, expect, it } from "bun:test";
 import {
   installerArgv,
@@ -213,4 +214,37 @@ describe("probeDaemon", () => {
   it("treats a null port as down without dialling", async () => {
     expect((await probeDaemon(null, "tok", 1)).kind).toBe("down");
   });
+});
+
+describe("serve without portless installed", () => {
+  it("warns once and keeps serving plain HTTP instead of exiting", async () => {
+    const home = await (
+      await import("fs/promises")
+    ).mkdtemp(path.join((await import("os")).tmpdir(), "ay-noportless-"));
+    const proc = Bun.spawn(
+      [
+        process.execPath,
+        "-e",
+        `const { cmdServe } = await import(${JSON.stringify(path.join(import.meta.dir, "serve.ts"))}); process.exit(await cmdServe(["--no-rust"]));`,
+      ],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        env: {
+          HOME: home,
+          USERPROFILE: home,
+          PATH: path.dirname(process.execPath),
+          AGENT_YES_PORTLESS_CHILD: "",
+          PORTLESS: "",
+        },
+      },
+    );
+    const exited = proc.exited.then(() => "exited");
+    const outcome = await Promise.race([exited, Bun.sleep(35000).then(() => "alive")]);
+    proc.kill();
+    const err = await new Response(proc.stderr).text();
+    expect(err).not.toContain("Portless is required");
+    expect(err.match(/Portless not found/g)?.length).toBe(1);
+    expect(outcome).toBe("alive");
+  }, 60000);
 });
