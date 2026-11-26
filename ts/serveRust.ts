@@ -12,8 +12,11 @@
  *   --webrtc            (bare: load/mint the persisted room)
  *   --webrtc <link>     / --webrtc=<link>  (a room link, any spelling; passed on
  *                                          as webrtc://)
- *   --join              (host that room as one of its members; ayrs only)
- *   join-secret         (print the link + join secret members need; ayrs only)
+ *   --join              (host that room as one of its members; ayrs only;
+ *                        with a bare --webrtc the link comes from AY_ROOM_URL,
+ *                        else AY_ROOM)
+ *   join-secret [--new] (print the link + join secret members need; --new
+ *                        mints a fresh fleet token instead; ayrs only)
  *   --port <n>          / --port=<n>       (loopback HTTP console; 0 = free port)
  *   --sighost <host>    / --sighost=<host>
  *   --http              (with --port: ayrs's --port listener IS the HTTP
@@ -116,13 +119,22 @@ export function planRustServe(
   }
   const first = rest[0]!;
   if (first === "join-secret") {
-    const flags = rest.slice(1);
+    // --new mints a fresh fleet token (AY_ROOM_URL + AY_JOIN_SECRET) and
+    // writes nothing; it only takes --sighost.
+    const isNew = rest.includes("--new");
+    const flags = rest.slice(1).filter((a) => a !== "--new");
+    if (isNew && flags.some((a) => a === "--webrtc" || a.startsWith("--webrtc=")))
+      return { kind: "ts", reason: "`ay serve join-secret --new` takes only --sighost", rest };
     const plan = flags.length
       ? planRustServe(flags, env)
       : ({ kind: "rust", argv: ["serve"] } as const);
     if (plan.kind !== "rust" || plan.argv.some((a) => a === "--port" || a === "--join"))
       return { kind: "ts", reason: `\`ay serve join-secret\` takes only --webrtc/--sighost`, rest };
-    return { kind: "rust-only", argv: [...plan.argv, "join-secret"], feature: first };
+    return {
+      kind: "rust-only",
+      argv: [...plan.argv, "join-secret", ...(isNew ? ["--new"] : [])],
+      feature: first,
+    };
   }
   if (SERVE_SUBCOMMANDS.has(first)) {
     return { kind: "ts", reason: `\`ay serve ${first}\``, rest };
@@ -221,8 +233,10 @@ export function planRustServe(
   if (ice && !argv.includes("--webrtc"))
     return { kind: "ts", reason: "--ice-* flags need --webrtc", rest };
   if (argv.includes("--join")) {
-    if (!argv.some((x) => x.startsWith("webrtc://")))
-      return { kind: "ts", reason: "--join needs --webrtc <room link>", rest };
+    // A bare --webrtc is fine: ayrs reads the link from AY_ROOM_URL / AY_ROOM,
+    // which keeps it (and the view secret it carries) out of argv.
+    if (!argv.includes("--webrtc"))
+      return { kind: "ts", reason: "--join needs --webrtc [room link]", rest };
     return { kind: "rust-only", argv, feature: "--join", ...(ice ? { ice } : {}) };
   }
   return { kind: "rust", argv, ...(ice ? { ice } : {}) };

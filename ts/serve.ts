@@ -1551,7 +1551,12 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     // and ayrs persists its room in a DIFFERENT file (.share-room-ayrs) — mint
     // and print from the file of the runtime that will actually host.
     let roomFile = ".share-room";
-    if (webrtcDaemon) {
+    // `--webrtc --join` with no link: the daemon reads the room from
+    // AY_ROOM_URL / AY_ROOM and its join secret from AY_JOIN_SECRET. Those are
+    // never forwarded (oxmgr would get them in its argv and state), so there is
+    // no link to print here and nothing to mint.
+    const envRoomJoin = webrtcDaemon && effArgs.includes("--join") && !explicitWebrtcUrl(effArgs);
+    if (webrtcDaemon && !envRoomJoin) {
       try {
         const { loadOrCreateShareRoom, shareLinkFromRoomUrl, shareRoomFileName } =
           await import("./share.ts");
@@ -1568,6 +1573,14 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     }
     const emitShareLink = async () => {
       if (!webrtcDaemon) return;
+      if (envRoomJoin) {
+        process.stdout.write(
+          `\njoining the room in AY_ROOM_URL as a member: the daemon must get AY_ROOM_URL\n` +
+            `and AY_JOIN_SECRET from its own environment (they are not forwarded, to keep\n` +
+            `them out of argv) — e.g. a systemd unit with EnvironmentFile=<0600 file>.\n`,
+        );
+        return;
+      }
       if (shareLink) {
         process.stdout.write(
           `\nshared over WebRTC — open this link (the token is eaten from the URL on open):\n` +
@@ -2039,6 +2052,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `                    Host URL's room as one more member next to its other\n` +
         `                    hosts (all members' agents show up for every viewer).\n` +
         `                    Needs AY_JOIN_SECRET; AY_NAME names this member.\n` +
+        `  --webrtc --join   Same, with the room link read from AY_ROOM_URL (else\n` +
+        `                    AY_ROOM), so no secret shows up in argv / ps.\n` +
         `  --ice-public-ip IP|auto\n` +
         `                    (with --webrtc) Address(es) viewers reach this host at,\n` +
         `                    for a host behind NAT (e.g. a Docker container). Repeat\n` +
@@ -2073,7 +2088,12 @@ export async function cmdServe(rest: string[]): Promise<number> {
         `  ay serve logs       view daemon logs\n` +
         `  ay serve join-secret [--webrtc URL]\n` +
         `                      print AY_ROOM + AY_JOIN_SECRET for members of this\n` +
-        `                      host's room (mints the secret; the room then requires it)\n\n` +
+        `                      host's room (mints the secret; the room then requires it)\n` +
+        `  ay serve join-secret --new [--sighost H]\n` +
+        `                      mint a fresh fleet token with no creator: prints\n` +
+        `                      AY_ROOM_URL=… and AY_JOIN_SECRET=… (env-file lines only);\n` +
+        `                      writes no file. Every member then runs, with both in its env:\n` +
+        `                        AY_NAME=<name> ay serve --webrtc --join\n\n` +
         `Once running, connect from another machine:\n` +
         `  ay ls   <token>@<host>:<port>\n` +
         `  ay remote add <alias> http://<token>@<host>:<port>\n`,

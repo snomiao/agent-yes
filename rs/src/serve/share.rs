@@ -715,6 +715,66 @@ mod claim_tests {
     }
 
     #[test]
+    fn the_join_room_comes_from_the_env_in_either_spelling() {
+        let v = format!("e1.{}", "ab".repeat(32));
+        let j = format!("j1.{}", "cd".repeat(32));
+        let w = format!("webrtc://r1:{v}@s.agent-yes.com");
+        let env = |pairs: Vec<(&'static str, String)>| {
+            move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.clone())
+        };
+        assert_eq!(room_url_from_env(env(vec![])).unwrap(), None);
+        assert_eq!(
+            room_url_from_env(env(vec![("AY_ROOM_URL", w.clone())])).unwrap(),
+            Some(w.clone())
+        );
+        // AY_ROOM_URL wins; AY_ROOM may be the https host link join-secret prints.
+        let host_link = format!("https://agent-yes.com/w/#r2:{v}:{j}");
+        assert_eq!(
+            room_url_from_env(env(vec![
+                ("AY_ROOM", host_link.clone()),
+                ("AY_ROOM_URL", w.clone())
+            ]))
+            .unwrap(),
+            Some(w)
+        );
+        let u = room_url_from_env(env(vec![("AY_ROOM", host_link)]))
+            .unwrap()
+            .unwrap();
+        let r = parse_share_url(&u).unwrap();
+        assert_eq!(
+            (r.room.as_str(), r.token.as_str(), r.host.as_str()),
+            ("r2", v.as_str(), DEFAULT_SIGHOST)
+        );
+        assert_eq!(r.join.as_deref(), Some(j.as_str()));
+        let dev = format!("http://localhost:7778/w/#r3:{v}@s.example");
+        let r = parse_share_url(
+            &room_url_from_env(env(vec![("AY_ROOM", dev)]))
+                .unwrap()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(r.host, "s.example");
+        assert!(room_url_from_env(env(vec![("AY_ROOM_URL", "nope".into())])).is_err());
+    }
+
+    #[test]
+    fn a_new_fleet_token_is_two_env_lines_in_the_expected_shapes() {
+        let out = format_new_fleet_token(DEFAULT_SIGHOST);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 2, "{out}");
+        let url = lines[0].strip_prefix("AY_ROOM_URL=").unwrap();
+        let r = parse_share_url(url).unwrap();
+        assert!(r.room.len() == 13 && r.room.starts_with('r'));
+        assert!(r.room[1..].bytes().all(|b| b.is_ascii_hexdigit()));
+        assert!(e2e::parse_secret(&r.token).unwrap().1);
+        assert_eq!(r.host, DEFAULT_SIGHOST);
+        assert!(r.join.is_none());
+        let j = lines[1].strip_prefix("AY_JOIN_SECRET=").unwrap();
+        assert!(e2e::derive_host_token(j, &r.room, &r.host).is_ok());
+        assert_ne!(out, format_new_fleet_token(DEFAULT_SIGHOST));
+    }
+
+    #[test]
     fn a_host_link_carries_the_join_secret_apart_from_the_view_token() {
         let v = format!("e1.{}", "ab".repeat(32));
         let j = format!("j1.{}", "cd".repeat(32));
@@ -845,10 +905,68 @@ mod claim_tests {
     }
 }
 
-pub async fn run_share(cfg: ShareConfig) -> Result<()> {
+/// Env names a `--join` host reads its room link from when `--webrtc` has no
+/// value, so the link (it carries the view secret) stays out of argv / `ps`.
+/// `AY_ROOM_URL` (what `ay serve join-secret --new` prints) wins over
+/// `AY_ROOM` (the host link `ay serve join-secret` prints).
+pub const ROOM_ENV: &[&str] = &["AY_ROOM_URL", "AY_ROOM"];
+
+/// The room link from the environment (see [`ROOM_ENV`]), normalized to
+/// `webrtc://room:e1.<view>[:j1.<join>]@host`.
+pub fn room_url_from_env(get: impl Fn(&str) -> Option<String>) -> Result<Option<String>> {
+    for k in ROOM_ENV {
+        let Some(v) = get(k)
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        else {
+            continue;
+        };
+        return match normalize_room_link(&v) {
+            Some(u) => Ok(Some(u)),
+            None => bail!("{k} is not a room link (want webrtc://<room>:e1.<view>@<host>)"),
+        };
+    }
+    Ok(None)
+}
+
+/// `webrtc://…` as-is, or a console link `https://agent-yes.com/w/#room:e1.…`
+/// / `http://localhost:7778/w/#room:e1.…@host` turned into it.
+fn normalize_room_link(v: &str) -> Option<String> {
+    if v.starts_with("webrtc://") {
+        return parse_share_url(v).ok().map(|_| v.to_string());
+    }
+    let (base, frag) = v.split_once("/w/#")?;
+    let (roomtok, host) = match frag.rsplit_once('@') {
+        Some((rt, h)) => (rt, h.to_string()),
+        None if base == "https://agent-yes.com" => (frag, DEFAULT_SIGHOST.to_string()),
+        None => return None,
+    };
+    let u = format!("webrtc://{roomtok}@{host}");
+    parse_share_url(&u).ok().map(|_| u)
+}
+
+/// `ayrs serve join-secret --new`: a fresh room link and join secret for a
+/// fleet that shares one room with no creator. Writes nothing: every member
+/// (this machine included) gets both from its environment.
+pub fn format_new_fleet_token(sighost: &str) -> String {
+    let room = mint_room(sighost);
+    format!(
+        "AY_ROOM_URL={}\nAY_JOIN_SECRET={}\n",
+        format_room_url(&room),
+        e2e::mint_join_secret()
+    )
+}
+
+pub async fn run_share(mut cfg: ShareConfig) -> Result<()> {
+    if cfg.join && cfg.url.is_none() {
+        cfg.url = room_url_from_env(|k| std::env::var(k).ok())?;
+    }
     let explicit = cfg.url.is_some();
     if cfg.join && !explicit {
-        bail!("--join needs the room's link (--webrtc <link> --join)");
+        bail!(
+            "--join needs the room's link: --webrtc <link> --join, or set AY_ROOM_URL \
+             (`ay serve join-secret --new` mints one)"
+        );
     }
     let mut room = match &cfg.url {
         Some(u) => parse_share_url(u)?,

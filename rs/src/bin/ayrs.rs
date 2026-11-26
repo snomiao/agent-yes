@@ -57,7 +57,8 @@ enum Command {
         webrtc: Option<String>,
         /// Host the --webrtc room as one more member next to its other hosts.
         /// Needs the room's join secret in AY_JOIN_SECRET; AY_NAME names this
-        /// member (default: the hostname).
+        /// member (default: the hostname). With a bare --webrtc the room link
+        /// comes from AY_ROOM_URL (else AY_ROOM), keeping it out of argv.
         #[arg(long, requires = "webrtc")]
         join: bool,
         /// Signaling host when minting a room
@@ -91,7 +92,13 @@ enum ServeAction {
     /// Print what another host needs to join this room as a member: the
     /// room link and its join secret (minted on first use; the room requires
     /// it from the next hello on)
-    JoinSecret,
+    JoinSecret {
+        /// Mint a whole new fleet token instead: print AY_ROOM_URL and
+        /// AY_JOIN_SECRET (env-file lines, nothing else on stdout) for a room
+        /// every member joins with --join. Writes no file.
+        #[arg(long)]
+        new: bool,
+    },
 }
 
 #[tokio::main]
@@ -112,7 +119,14 @@ async fn main() -> anyhow::Result<()> {
                 Some(ServeAction::Uninstall) => return serve::service::uninstall(),
                 Some(ServeAction::Restart) => return serve::service::restart(),
                 Some(ServeAction::Status) => return serve::service::status(),
-                Some(ServeAction::JoinSecret) => {
+                Some(ServeAction::JoinSecret { new: true }) => {
+                    if webrtc.as_deref().is_some_and(|w| !w.is_empty()) {
+                        anyhow::bail!("join-secret --new mints a new room; drop --webrtc <link>");
+                    }
+                    print!("{}", serve::share::format_new_fleet_token(&sighost));
+                    return Ok(());
+                }
+                Some(ServeAction::JoinSecret { new: false }) => {
                     return serve::share::print_join_secret(webrtc.as_deref(), &sighost)
                 }
                 None => {}

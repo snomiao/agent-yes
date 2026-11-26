@@ -21,6 +21,31 @@
 - **CLI remote read** (`ay read`/`ay tail`): HTTP `/api/read|tail/:keyword` gated
   by the whole-machine `.serve-token`, reached via `token@host:port:keyword`.
   Needs **direct HTTP reachability** (LAN / public port) — no NAT traversal.
+- **Fleet room with a pre-agreed token** (no creator): several machines host
+  one shared room as members (`--join`). Mint the token once, anywhere:
+
+  ```bash
+  ay serve join-secret --new > fleet.env   # AY_ROOM_URL=webrtc://r<12 hex>:e1.<64 hex>@s.agent-yes.com
+  chmod 600 fleet.env                      # AY_JOIN_SECRET=j1.<64 hex>
+  ```
+
+  It prints only those two env-file lines and writes no file (nothing under
+  `~/.agent-yes`). Copy `fleet.env` to every member, then run each with both in
+  its environment and **no link in argv**:
+
+  ```bash
+  set -a; . ./fleet.env; set +a
+  AY_NAME=alpha ay serve --webrtc --join
+  ```
+
+  A bare `--webrtc` next to `--join` reads the link from `AY_ROOM_URL` (else
+  `AY_ROOM`, the host link `ay serve join-secret` prints), so neither secret
+  shows up in `ps`. For a supervised member use a unit with
+  `EnvironmentFile=<the 0600 file>` and `ExecStart=… ay serve --webrtc --join`;
+  `ay serve install` does not forward `AY_ROOM*` / `AY_JOIN_SECRET` to the
+  daemon (that would put them in the process manager's argv and state).
+  Viewers open the plain view link (`https://agent-yes.com/w/#<room>:e1.<view>`).
+
 - **Scoping today**: only a client-side `cwd` filter. The token is
   **all-or-nothing per machine**. There is no "share a single agent" capability.
 
