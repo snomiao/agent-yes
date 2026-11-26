@@ -765,6 +765,59 @@ function resolveDaemonManager(): DaemonManager | null {
   return order.find((m): m is DaemonManager => !!m) ?? null;
 }
 
+// Should `ay serve install` bootstrap oxmgr even though a working pm2 already
+// resolved? oxmgr is the daemon manager; pm2 is only a fallback. A box that got
+// pm2 earlier (before oxmgr bootstrapping worked, or a glibc fallback) would
+// otherwise stay on pm2 forever, because resolveDaemonManager happily picks it.
+// So when pm2 won only because oxmgr is ABSENT, try installing oxmgr first; if
+// that fails (glibc < 2.39, offline) we keep pm2. Not on Windows (pm2 is still
+// preferred there without the winfix build), not when the user forced a manager,
+// not when bootstrapping is disabled.
+export function shouldBootstrapOxmgrOverPm2(opts: {
+  resolved: "oxmgr" | "pm2" | null;
+  oxmgrPresent: boolean;
+  platform: NodeJS.Platform;
+  env: Record<string, string | undefined>;
+}): boolean {
+  if (opts.resolved !== "pm2" || opts.oxmgrPresent) return false;
+  if (opts.platform === "win32") return false;
+  if (opts.env.AGENT_YES_DAEMON_MANAGER) return false;
+  if (opts.env.AGENT_YES_NO_PM_BOOTSTRAP === "1") return false;
+  return true;
+}
+
+// Our daemon's entry in `pm2 jlist` output: its serve args (leading "serve"
+// stripped), the env pm2 holds for it, and whether it's online. null when the
+// output doesn't parse or has no `agent-yes` entry. Used both to read a pm2
+// daemon and to migrate one to oxmgr with the same args and forwarded env.
+export function parsePm2Daemon(
+  jlist: string,
+): { args: string[]; env: Record<string, string>; online: boolean } | null {
+  try {
+    const list = JSON.parse(jlist) as Array<{
+      name?: string;
+      pm2_env?: { args?: unknown; status?: string; env?: Record<string, unknown> };
+    }>;
+    if (!Array.isArray(list)) return null;
+    const proc = list.find((x) => x?.name === DAEMON_NAME);
+    if (!proc) return null;
+    const raw = proc.pm2_env?.args;
+    const a = Array.isArray(raw) ? raw.filter((x): x is string => typeof x === "string") : [];
+    const env = Object.fromEntries(
+      Object.entries(proc.pm2_env?.env ?? {}).filter(
+        (e): e is [string, string] => typeof e[1] === "string",
+      ),
+    );
+    return {
+      args: a[0] === "serve" ? a.slice(1) : a,
+      env,
+      online: proc.pm2_env?.status === "online",
+    };
+  } catch {
+    return null;
+  }
+}
+
 // Ask a JS package manager for its global bin dir, so a binary we just
 // `-g`-installed is discoverable in THIS process even though a fresh login
 // shell hasn't added that dir to PATH yet (setup.sh warns about exactly this).
@@ -902,7 +955,11 @@ async function installAndVerify(pkg: "oxmgr" | "pm2"): Promise<DaemonManager | n
   // prepend it before resolving so Bun.which can see the fresh binary.
   const binDir = await globalBinDir(installer);
   if (binDir) process.env.PATH = `${binDir}${path.delimiter}${process.env.PATH ?? ""}`;
-  const bin = pkg === "oxmgr" ? resolveOxmgrBin() : Bun.which(pkg);
+  // Pass PATH explicitly: Bun.which does not see a runtime process.env.PATH
+  // update, so without it the binary installed a moment ago is never found and
+  // a fresh oxmgr install silently fell back to pm2.
+  const whichNow = (cmd: string) => Bun.which(cmd, { PATH: process.env.PATH ?? "" });
+  const bin = pkg === "oxmgr" ? resolveOxmgrBin(whichNow) : whichNow(pkg);
   if (!bin) return null;
   const mgr: DaemonManager = { id: pkg, bin };
   await ensureNodeRuntime();
@@ -1174,12 +1231,7 @@ async function readDaemonServeArgs(mgr: DaemonManager): Promise<string[] | null>
     }
     const r = await runManagerCmd([mgr.bin, "jlist"], { capture: true });
     if (r.code !== 0) return null;
-    const out = r.stdout;
-    const list = JSON.parse(out) as Array<{ name?: string; pm2_env?: { args?: string[] } }>;
-    const proc = list.find((x) => x.name === DAEMON_NAME);
-    if (!proc) return null;
-    const a = proc.pm2_env?.args ?? [];
-    return a[0] === "serve" ? a.slice(1) : a;
+    return parsePm2Daemon(r.stdout)?.args ?? null;
   } catch {
     return null;
   }
@@ -1232,9 +1284,7 @@ async function readDaemonRunning(mgr: DaemonManager): Promise<boolean> {
     }
     const r = await runManagerCmd([mgr.bin, "jlist"], { capture: true });
     if (r.code !== 0) return false;
-    const out = r.stdout;
-    const list = JSON.parse(out) as Array<{ name?: string; pm2_env?: { status?: string } }>;
-    return list.find((x) => x.name === DAEMON_NAME)?.pm2_env?.status === "online";
+    return parsePm2Daemon(r.stdout)?.online ?? false;
   } catch {
     return false;
   }
@@ -1447,6 +1497,23 @@ async function cmdServeStartStop(sub: "start" | "stop" | "restart"): Promise<num
   return r.code;
 }
 
+// A runnable pm2 that still has our daemon registered (see the migration in
+// cmdServeDaemon install). null when pm2 is absent, can't exec, or holds none.
+async function readLegacyPm2Daemon(): Promise<{
+  bin: string;
+  args: string[];
+  env: Record<string, string>;
+} | null> {
+  const bin = Bun.which("pm2");
+  if (!bin) return null;
+  const pm2: DaemonManager = { id: "pm2", bin };
+  if (!(await managerRunnable(pm2))) return null;
+  const r = await runManagerCmd([bin, "jlist"], { capture: true });
+  if (r.code !== 0) return null;
+  const d = parsePm2Daemon(r.stdout);
+  return d ? { bin, args: d.args, env: d.env } : null;
+}
+
 async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
   // Uninstall first, before any manager resolution/bootstrap: it must sweep
   // EVERY present manager, not just the currently-preferred one. After a
@@ -1507,6 +1574,20 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     );
     mgr = null;
   }
+  if (
+    sub === "install" &&
+    shouldBootstrapOxmgrOverPm2({
+      resolved: mgr?.id ?? null,
+      oxmgrPresent: !!resolveOxmgrBin(),
+      platform: process.platform,
+      env: process.env,
+    })
+  ) {
+    process.stderr.write(
+      `ay serve install: oxmgr not found — installing it (the pm2 daemon, if any, is migrated)…\n`,
+    );
+    mgr = (await installAndVerify("oxmgr")) ?? mgr;
+  }
   if (!mgr) mgr = await bootstrapDaemonManager();
   if (!mgr) {
     process.stderr.write(
@@ -1527,11 +1608,21 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     // new args are given. The persisted room + token mean the share link is
     // unchanged across the restart.
     const priorArgs = await readDaemonServeArgs(mgr);
-    const effArgs = args.length ? args : (priorArgs ?? []);
+    // pm2 → oxmgr migration: a daemon still registered with pm2 while oxmgr is
+    // the manager now. Carry its serve args (and ay's forwarded env) over so the
+    // oxmgr daemon is "the same daemon" — the token and share room live in
+    // ~/.agent-yes, so the share link stays valid. The pm2 entry is stopped
+    // before the oxmgr start (both would fight for the WebRTC room) and only
+    // deleted once oxmgr has it; if the oxmgr start fails it is restarted.
+    const legacyPm2 = mgr.id === "oxmgr" && priorArgs === null ? await readLegacyPm2Daemon() : null;
+    const effArgs = args.length ? args : (priorArgs ?? legacyPm2?.args ?? []);
     // oxmgr does not hand this shell's env to the process it runs, so forward
     // ay's own settings explicitly (see daemonEnv) and treat a changed set as a
     // config change. pm2 already captures the starting shell's env itself.
-    const priorEnv = mgr.id === "oxmgr" && priorArgs !== null ? await readOxmgrDaemonEnv() : {};
+    const priorEnv =
+      mgr.id === "oxmgr" && priorArgs !== null
+        ? await readOxmgrDaemonEnv()
+        : (legacyPm2?.env ?? {});
     const effEnv = mgr.id === "oxmgr" ? daemonEnv(process.env, priorEnv) : {};
     const current = getInstalledPackage().version;
 
@@ -1620,6 +1711,10 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     // A pre-oxmgr scheduled-task host left behind would keep the WebRTC room
     // and the new daemon would wait on it forever.
     await stopLegacyAyrsTask();
+    if (legacyPm2) {
+      process.stdout.write(`migrating '${DAEMON_NAME}' from pm2 to oxmgr (same args)…\n`);
+      await spawnExit([legacyPm2.bin, "stop", DAEMON_NAME]);
+    }
     await warnStrayServeProcesses();
 
     // oxmgr takes the command as one string; pm2 takes the binary plus its
@@ -1706,6 +1801,22 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
         `ay serve install: '${mgr.id} start' did not finish within ` +
           `${Math.round(MANAGER_TIMEOUT_MS / 1000)}s — the ${mgr.id} daemon may be wedged\n`,
       );
+    }
+    if (legacyPm2) {
+      if (code === 0) {
+        // Drop it from pm2 and its dump (--force: see uninstall) so neither
+        // `pm2 resurrect` nor pm2's boot hook revives a second daemon.
+        await spawnExit([legacyPm2.bin, "delete", DAEMON_NAME]);
+        await spawnExit([legacyPm2.bin, "save", "--force"]);
+        if (process.platform === "win32")
+          await spawnExit(["reg", "delete", WIN_RUN_KEY, "/v", WIN_RUN_VALUE, "/f"]);
+        process.stdout.write(`removed '${DAEMON_NAME}' from pm2 (now managed by oxmgr)\n`);
+      } else {
+        process.stderr.write(
+          `ay serve install: oxmgr start failed — restarting the pm2 '${DAEMON_NAME}' daemon\n`,
+        );
+        await spawnExit([legacyPm2.bin, "restart", DAEMON_NAME]);
+      }
     }
     if (code === 0) {
       const onBoot = await ensureBootAutostart(mgr);
