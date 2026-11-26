@@ -2,7 +2,11 @@ import { readFile } from "fs/promises";
 import path from "path";
 import { describe, expect, it } from "bun:test";
 import {
+  cmdServe,
   installerArgv,
+  managerRunStateArgv,
+  MANAGER_TIMED_OUT,
+  runManagerCmd,
   probeDaemon,
   isNoNodeExecError,
   oxmgrVersionHasWindowsFix,
@@ -91,9 +95,10 @@ describe("manager spawns pass a live env snapshot", () => {
     // Grab each Bun.spawn(...) call whose argv mentions a manager binary.
     // Capture from the call opening through the options object's closing `})`.
     const calls = src.match(
-      /Bun\.spawn\((?:\[[^\]]*\bm(?:gr)?\.bin[^\]]*\]|startArgv|installer),[\s\S]*?\}\)/g,
+      /Bun\.spawn\((?:\[[^\]]*\bm(?:gr)?\.bin[^\]]*\]|startArgv|installer|cmd),[\s\S]*?\}\)/g,
     );
-    expect(calls?.length).toBeGreaterThanOrEqual(7);
+    // Most manager commands go through runManagerCmd's single `Bun.spawn(cmd, …)`.
+    expect(calls?.length).toBeGreaterThanOrEqual(4);
     for (const call of calls!) {
       // Require a real liveEnv() env option, not just the substring "env:"
       // (which a comment inside the options object could satisfy).
@@ -247,4 +252,67 @@ describe("serve without portless installed", () => {
     expect(err.match(/Portless not found/g)?.length).toBe(1);
     expect(outcome).toBe("alive");
   }, 60000);
+});
+
+describe("managerRunStateArgv", () => {
+  const oxmgr = { id: "oxmgr" as const, bin: "/bin/oxmgr" };
+  const pm2 = { id: "pm2" as const, bin: "/bin/pm2" };
+  it("restarts the registered daemon by name under both managers", () => {
+    expect(managerRunStateArgv(oxmgr, "restart")).toEqual(["/bin/oxmgr", "restart", "agent-yes"]);
+    expect(managerRunStateArgv(pm2, "restart")).toEqual(["/bin/pm2", "restart", "agent-yes"]);
+  });
+  it("starts an existing oxmgr app via restart (oxmgr's start takes a command)", () => {
+    expect(managerRunStateArgv(oxmgr, "start")).toEqual(["/bin/oxmgr", "restart", "agent-yes"]);
+    expect(managerRunStateArgv(pm2, "start")).toEqual(["/bin/pm2", "start", "agent-yes"]);
+    expect(managerRunStateArgv(oxmgr, "stop")).toEqual(["/bin/oxmgr", "stop", "agent-yes"]);
+  });
+});
+
+describe("runManagerCmd", () => {
+  it("returns the exit code and captured stdout", async () => {
+    const r = await runManagerCmd(["sh", "-c", "echo hi; exit 3"], { capture: true });
+    expect(r).toEqual({ code: 3, stdout: "hi\n", timedOut: false });
+  });
+
+  it("kills a command that overruns its deadline instead of hanging", async () => {
+    const t0 = Date.now();
+    const r = await runManagerCmd(["sh", "-c", "sleep 30"], { timeoutMs: 200 });
+    expect(r.timedOut).toBe(true);
+    expect(r.code).toBe(MANAGER_TIMED_OUT);
+    expect(Date.now() - t0).toBeLessThan(5_000);
+  });
+
+  it("does not wait on a pipe a grandchild still holds after the timeout", async () => {
+    const t0 = Date.now();
+    // The grandchild `sleep` inherits stdout and outlives the killed shell.
+    const r = await runManagerCmd(["sh", "-c", "sleep 30 & wait"], {
+      capture: true,
+      timeoutMs: 200,
+    });
+    expect(r.timedOut).toBe(true);
+    expect(Date.now() - t0).toBeLessThan(5_000);
+  });
+
+  it("reports a spawn failure as exit 1", async () => {
+    const r = await runManagerCmd(["/nonexistent/oxmgr-binary", "status"]);
+    expect(r).toEqual({ code: 1, stdout: "", timedOut: false });
+  });
+});
+
+describe("cmdServe unknown subcommand", () => {
+  it("fails fast instead of starting a foreground server", async () => {
+    const writes: string[] = [];
+    const orig = process.stderr.write.bind(process.stderr);
+    process.stderr.write = ((c: string | Uint8Array) => {
+      writes.push(String(c));
+      return true;
+    }) as typeof process.stderr.write;
+    try {
+      expect(await cmdServe(["bogus-subcommand"])).toBe(2);
+    } finally {
+      process.stderr.write = orig;
+    }
+    expect(writes.join("")).toContain("unknown subcommand 'bogus-subcommand'");
+    expect(writes.join("")).toContain("restart");
+  });
 });

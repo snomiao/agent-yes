@@ -52,7 +52,16 @@ describe("planRustServe", () => {
   });
 
   it("never delegates the daemon subcommands — ayrs has its own supervisor", () => {
-    for (const sub of ["install", "uninstall", "status", "logs", "start", "stop", "healthcheck"]) {
+    for (const sub of [
+      "install",
+      "uninstall",
+      "status",
+      "logs",
+      "start",
+      "stop",
+      "restart",
+      "healthcheck",
+    ]) {
       expect(planRustServe([sub, "--webrtc"], env)).toMatchObject({
         kind: "ts",
         reason: `\`ay serve ${sub}\``,

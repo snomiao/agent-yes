@@ -34,7 +34,7 @@
  *   - the bare `ay serve` (Portless HTTPS on agent-yes.localhost has no ayrs
  *     equivalent — `--port` is a plain loopback listener)
  *   - the daemon subcommands (install/uninstall/status/logs/start/stop/
- *     healthcheck) and -d/--daemon: ayrs has its own OS-supervisor install and
+ *     restart/healthcheck) and -d/--daemon: ayrs has its own OS-supervisor install and
  *     the two must not manage each other's registration
  *   - --share (http+webrtc over Portless), --http without --port (Portless),
  *     a non-loopback --host (ayrs listens on loopback only), --token, --tls-*,
@@ -51,6 +51,7 @@ export const SERVE_SUBCOMMANDS = new Set([
   "logs",
   "start",
   "stop",
+  "restart",
   "healthcheck",
 ]);
 
