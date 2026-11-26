@@ -341,6 +341,15 @@ describe("parsePm2Daemon", () => {
       online: true,
     });
   });
+  it("drops the script path pm2 lists before serve (seen on a real sym102 daemon)", () => {
+    const out = jlist([
+      {
+        name: "agent-yes",
+        pm2_env: { args: ["/x/agent-yes.js", "serve", "--webrtc"], status: "online" },
+      },
+    ]);
+    expect(parsePm2Daemon(out)?.args).toEqual(["--webrtc"]);
+  });
   it("reports a stopped daemon and missing args", () => {
     expect(parsePm2Daemon(jlist([{ name: "agent-yes", pm2_env: { status: "stopped" } }]))).toEqual({
       args: [],

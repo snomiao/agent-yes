@@ -809,7 +809,8 @@ export function parsePm2Daemon(
       ),
     );
     return {
-      args: a[0] === "serve" ? a.slice(1) : a,
+      // pm2 may list the script path first (script, "serve", ...flags): keep what follows "serve"
+      args: a.includes("serve") ? a.slice(a.indexOf("serve") + 1) : a,
       env,
       online: proc.pm2_env?.status === "online",
     };
