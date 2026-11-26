@@ -10,6 +10,8 @@ import {
   probeDaemon,
   isNoNodeExecError,
   oxmgrVersionHasWindowsFix,
+  parsePm2Daemon,
+  shouldBootstrapOxmgrOverPm2,
   parseGitUrl,
   portlessConsoleUrl,
 } from "./serve.ts";
@@ -314,5 +316,77 @@ describe("cmdServe unknown subcommand", () => {
     }
     expect(writes.join("")).toContain("unknown subcommand 'bogus-subcommand'");
     expect(writes.join("")).toContain("restart");
+  });
+});
+
+// pm2 -> oxmgr migration: `ay serve install` reads a daemon still held by pm2
+// (args + forwarded env) so oxmgr re-creates the same daemon.
+describe("parsePm2Daemon", () => {
+  const jlist = (procs: unknown[]) => JSON.stringify(procs);
+  it("reads args (leading serve stripped), env and online status", () => {
+    const out = jlist([
+      { name: "other", pm2_env: { args: ["x"], status: "online" } },
+      {
+        name: "agent-yes",
+        pm2_env: {
+          args: ["serve", "--webrtc"],
+          status: "online",
+          env: { AGENT_YES_FOO: "1", N: 3 },
+        },
+      },
+    ]);
+    expect(parsePm2Daemon(out)).toEqual({
+      args: ["--webrtc"],
+      env: { AGENT_YES_FOO: "1" },
+      online: true,
+    });
+  });
+  it("drops the script path pm2 lists before serve (seen on a real sym102 daemon)", () => {
+    const out = jlist([
+      {
+        name: "agent-yes",
+        pm2_env: { args: ["/x/agent-yes.js", "serve", "--webrtc"], status: "online" },
+      },
+    ]);
+    expect(parsePm2Daemon(out)?.args).toEqual(["--webrtc"]);
+  });
+  it("reports a stopped daemon and missing args", () => {
+    expect(parsePm2Daemon(jlist([{ name: "agent-yes", pm2_env: { status: "stopped" } }]))).toEqual({
+      args: [],
+      env: {},
+      online: false,
+    });
+  });
+  it("returns null when absent or unparsable", () => {
+    expect(parsePm2Daemon(jlist([{ name: "other" }]))).toBeNull();
+    expect(parsePm2Daemon("not json")).toBeNull();
+    expect(parsePm2Daemon("{}")).toBeNull();
+  });
+});
+
+describe("shouldBootstrapOxmgrOverPm2", () => {
+  const base = {
+    resolved: "pm2" as const,
+    oxmgrPresent: false,
+    platform: "linux" as const,
+    env: {},
+  };
+  it("installs oxmgr when pm2 won only because oxmgr is absent", () => {
+    expect(shouldBootstrapOxmgrOverPm2(base)).toBe(true);
+    expect(shouldBootstrapOxmgrOverPm2({ ...base, platform: "darwin" })).toBe(true);
+  });
+  it("leaves oxmgr / no-manager / present-oxmgr cases alone", () => {
+    expect(shouldBootstrapOxmgrOverPm2({ ...base, resolved: "oxmgr" })).toBe(false);
+    expect(shouldBootstrapOxmgrOverPm2({ ...base, resolved: null })).toBe(false);
+    expect(shouldBootstrapOxmgrOverPm2({ ...base, oxmgrPresent: true })).toBe(false);
+  });
+  it("respects Windows, a forced manager and the bootstrap opt-out", () => {
+    expect(shouldBootstrapOxmgrOverPm2({ ...base, platform: "win32" })).toBe(false);
+    expect(shouldBootstrapOxmgrOverPm2({ ...base, env: { AGENT_YES_DAEMON_MANAGER: "pm2" } })).toBe(
+      false,
+    );
+    expect(shouldBootstrapOxmgrOverPm2({ ...base, env: { AGENT_YES_NO_PM_BOOTSTRAP: "1" } })).toBe(
+      false,
+    );
   });
 });
