@@ -1,6 +1,9 @@
+import { existsSync } from "fs";
 import { readFile } from "fs/promises";
+import path from "path";
 import { describe, expect, it } from "vitest";
 import {
+  ayrsServeEnv,
   installerArgv,
   LEGACY_AYRS_TASK,
   legacyAyrsTaskArgv,
@@ -385,5 +388,23 @@ describe("legacyAyrsTaskArgv", () => {
       LEGACY_AYRS_TASK,
       "/f",
     ]);
+  });
+});
+
+// ayrs runs from a version cache with no lab/ui beside it, so the launcher must
+// hand it the package's console assets or the HTTP console 404s.
+describe("ayrsServeEnv", () => {
+  it("points ayrs at the package's lab/ui by default", () => {
+    const env = ayrsServeEnv({ PATH: "/usr/bin" });
+    expect(env.PATH).toBe("/usr/bin");
+    expect(path.basename(env.AGENT_YES_UI_DIR!)).toBe("ui");
+    expect(existsSync(path.join(env.AGENT_YES_UI_DIR!, "index.html"))).toBe(true);
+  });
+
+  it("keeps a caller-supplied AGENT_YES_UI_DIR", () => {
+    expect(ayrsServeEnv({ AGENT_YES_UI_DIR: "/custom/ui" }, "/pkg/lab/ui").AGENT_YES_UI_DIR).toBe(
+      "/custom/ui",
+    );
+    expect(ayrsServeEnv({}, "/pkg/lab/ui").AGENT_YES_UI_DIR).toBe("/pkg/lab/ui");
   });
 });
