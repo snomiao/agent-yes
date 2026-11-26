@@ -3,10 +3,15 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } f
 import os from "node:os";
 import path from "node:path";
 import {
+  _setPlatformPackageFromForTesting,
   chmodExtractedBinaries,
   ensureExecutable,
   extractZipWindows,
+  findInPlatformPackage,
   gcOldBinaryDirs,
+  getPlatformPackageBinDir,
+  NATIVE_RUNNER,
+  platformKey,
 } from "./rustBinary.ts";
 import { _setInstalledPackageForTesting } from "./versionChecker.ts";
 
@@ -176,5 +181,68 @@ describe.skipIf(process.platform !== "win32")("extractZipWindows", () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// bun:test port of the npm platform package cases in rustBinary.spec.ts: the
+// launcher runs under bun, so the lookup is checked under bun as well.
+describe("npm platform package", () => {
+  const ext = process.platform === "win32" ? ".exe" : "";
+  const key = platformKey();
+  const pkgName = `agent-yes-${key}`;
+  let base: string;
+  function install(layout: "nested" | "hoisted", version: string, bins: string[]): string {
+    const prefix = path.join(base, layout, "node_modules");
+    const main = path.join(prefix, "agent-yes");
+    mkdirSync(path.join(main, "dist"), { recursive: true });
+    const platformDir =
+      layout === "nested" ? path.join(main, "node_modules", pkgName) : path.join(prefix, pkgName);
+    mkdirSync(path.join(platformDir, "bin"), { recursive: true });
+    writeFileSync(
+      path.join(platformDir, "package.json"),
+      JSON.stringify({ name: "agent-yes", version }),
+    );
+    for (const b of bins)
+      writeFileSync(path.join(platformDir, "bin", b + ext), "bin", { mode: 0o755 });
+    return path.join(main, "dist");
+  }
+
+  beforeAll(() => {
+    base = mkdtempSync(path.join(os.tmpdir(), "ay-platform-"));
+  });
+  afterAll(() => {
+    _setPlatformPackageFromForTesting(null);
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it("finds a nested platform package of this version", () => {
+    const dist = install("nested", `1.272.0-${key}`, [NATIVE_RUNNER, "ayrs"]);
+    _setPlatformPackageFromForTesting(dist);
+    const bin = path.join(path.dirname(dist), "node_modules", pkgName, "bin");
+    expect(getPlatformPackageBinDir()).toBe(bin);
+    expect(findInPlatformPackage("ayrs")).toBe(path.join(bin, "ayrs" + ext));
+    expect(findInPlatformPackage("ay-spawn-hidden")).toBeUndefined();
+  });
+
+  it("finds a hoisted platform package of this version", () => {
+    const dist = install("hoisted", `1.272.0-${key}`, [NATIVE_RUNNER]);
+    _setPlatformPackageFromForTesting(dist);
+    expect(getPlatformPackageBinDir()).toBe(
+      path.join(path.dirname(path.dirname(dist)), pkgName, "bin"),
+    );
+  });
+
+  it("ignores a platform package of another version", () => {
+    const dist = install("nested", `1.271.0-${key}`, [NATIVE_RUNNER, "ayrs"]);
+    _setPlatformPackageFromForTesting(dist);
+    expect(getPlatformPackageBinDir()).toBeUndefined();
+    expect(findInPlatformPackage("ayrs")).toBeUndefined();
+  });
+
+  it("finds nothing when no platform package is installed", () => {
+    const dist = path.join(base, "bare", "node_modules", "agent-yes", "dist");
+    mkdirSync(dist, { recursive: true });
+    _setPlatformPackageFromForTesting(dist);
+    expect(getPlatformPackageBinDir()).toBeUndefined();
   });
 });

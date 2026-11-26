@@ -206,6 +206,10 @@ describe("npm platform package", () => {
   const devBuildPresent = ["release", "debug"].some((p) =>
     existsSync(path.resolve(import.meta.dirname, `../rs/target/${p}/agent-yes${ext}`)),
   );
+  // getBinDir() is the checkout's own bin/ when that exists (it holds real
+  // downloaded binaries there); the test below writes a stand-in into
+  // getBinDir(), so it only runs when that is the temp cache set up above.
+  const repoBinDirPresent = existsSync(path.resolve(import.meta.dirname, "../bin"));
   const supported = (() => {
     try {
       getBinaryName();
@@ -279,12 +283,13 @@ describe("npm platform package", () => {
     expect(getPlatformPackageBinDir()).toBeUndefined();
   });
 
-  it.skipIf(!supported || devBuildPresent)(
+  it.skipIf(!supported || devBuildPresent || repoBinDirPresent)(
     "findRustBinary takes the runner from the platform package before the download cache",
     () => {
       const dist = install("nested", `1.272.0-${key}`, [NATIVE_RUNNER]);
       _setPlatformPackageFromForTesting(dist);
       const cached = path.join(getBinDir(), getBinaryName());
+      expect(cached.startsWith(root)).toBe(true);
       mkdirSync(path.dirname(cached), { recursive: true });
       writeFileSync(cached, "bin");
       try {
