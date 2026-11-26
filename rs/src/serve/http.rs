@@ -46,17 +46,41 @@ fn token_eq(a: &str, b: &str) -> bool {
         == 0
 }
 
-/// Directory holding the console assets, next to the installed binary or in the
-/// source tree during development.
+/// Env var naming the console asset directory. The JS launcher (`ay serve` in
+/// ts/serve.ts) sets it to the npm package's `lab/ui`: the binary it runs often
+/// lives in a version cache (`~/.cache/agent-yes/bin/<ver>/ayrs`) with no
+/// `lab/ui` anywhere near it, so the exe-relative guess alone finds nothing.
+pub const UI_DIR_ENV: &str = "AGENT_YES_UI_DIR";
+
+/// Directory holding the console assets: `$AGENT_YES_UI_DIR` when it points at
+/// a directory, else next to the installed binary, else the source tree
+/// during development.
 fn ui_dir() -> Option<std::path::PathBuf> {
+    ui_dir_from(
+        std::env::var_os(UI_DIR_ENV),
+        std::env::current_exe().ok(),
+        std::env::current_dir().ok(),
+    )
+}
+
+fn ui_dir_from(
+    env: Option<std::ffi::OsString>,
+    exe: Option<std::path::PathBuf>,
+    cwd: Option<std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
     let mut roots: Vec<std::path::PathBuf> = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        // installed: <prefix>/bin/ayrs → <prefix>/lab/ui
-        if let Some(p) = exe.parent().and_then(|d| d.parent()) {
-            roots.push(p.join("lab").join("ui"));
-        }
+    if let Some(d) = env.filter(|v| !v.is_empty()) {
+        roots.push(std::path::PathBuf::from(d));
     }
-    if let Ok(cwd) = std::env::current_dir() {
+    // installed: <prefix>/bin/ayrs → <prefix>/lab/ui
+    if let Some(p) = exe
+        .as_deref()
+        .and_then(|e| e.parent())
+        .and_then(|d| d.parent())
+    {
+        roots.push(p.join("lab").join("ui"));
+    }
+    if let Some(cwd) = cwd {
         roots.push(cwd.join("lab").join("ui"));
     }
     roots.into_iter().find(|p| p.is_dir())
@@ -351,6 +375,43 @@ mod tests {
         for p in ["../../etc/passwd", "a/../../b", "..", "foo//bar"] {
             assert_eq!(serve_ui_file(p).status(), StatusCode::NOT_FOUND, "{p}");
         }
+    }
+
+    #[test]
+    fn ui_dir_prefers_the_launcher_supplied_dir() {
+        let base = std::env::temp_dir().join(format!("ayrs-ui-dir-{}", std::process::id()));
+        let pkg_ui = base.join("pkg").join("lab").join("ui");
+        let cwd_ui = base.join("cwd").join("lab").join("ui");
+        std::fs::create_dir_all(&pkg_ui).unwrap();
+        std::fs::create_dir_all(&cwd_ui).unwrap();
+        // A version-cache binary: nothing at <exe>/../../lab/ui.
+        let exe = Some(base.join("cache").join("bin").join("1.0.0").join("ayrs"));
+        let cwd = Some(base.join("cwd"));
+
+        let got = ui_dir_from(
+            Some(pkg_ui.clone().into_os_string()),
+            exe.clone(),
+            cwd.clone(),
+        );
+        assert_eq!(got.as_deref(), Some(pkg_ui.as_path()));
+        // Unset, empty, or pointing nowhere: fall through to the other roots.
+        assert_eq!(
+            ui_dir_from(None, exe.clone(), cwd.clone()).as_deref(),
+            Some(cwd_ui.as_path())
+        );
+        assert_eq!(
+            ui_dir_from(Some("".into()), exe.clone(), cwd.clone()).as_deref(),
+            Some(cwd_ui.as_path())
+        );
+        assert_eq!(
+            ui_dir_from(
+                Some(base.join("missing").into_os_string()),
+                exe.clone(),
+                None
+            ),
+            None
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
