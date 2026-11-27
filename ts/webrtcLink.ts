@@ -116,3 +116,21 @@ export function isWebrtcSpec(spec: string): boolean {
   // `ay share` console link (…/#k=<token>) is an http remote, not a room.
   return spec.startsWith("webrtc://") || parseRaw(spec) !== null;
 }
+
+/**
+ * The room link a daemon's serve args name with --webrtc/--share, in the
+ * internal webrtc:// form without any join secret, or undefined for a bare
+ * flag (which hosts the runtime's persisted room instead). Works over the raw
+ * arg list a daemon manager holds: oxmgr splits the command on whitespace
+ * (`--webrtc url`), pm2 keeps `--webrtc=url`.
+ */
+export function explicitWebrtcUrl(args: string[]): string | undefined {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    for (const flag of ["--webrtc", "--share"]) {
+      const v = a === flag ? args[i + 1] : a.startsWith(`${flag}=`) ? a.slice(flag.length + 1) : "";
+      if (v && isWebrtcSpec(v)) return toWebrtcUrl(v) ?? undefined;
+    }
+  }
+  return undefined;
+}
