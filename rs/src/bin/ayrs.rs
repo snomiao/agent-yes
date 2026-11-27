@@ -52,7 +52,8 @@ enum Command {
     /// Serve local agents to the browser console
     Serve {
         /// Host a WebRTC share room (webrtc://room:e1.<hex>@sighost to pin an
-        /// explicit room; omit the value to load/mint the persisted one)
+        /// explicit room; omit the value to load/mint the persisted one, or to
+        /// take the link from AY_WEBRTC_URL, which keeps it out of `ps`)
         #[arg(long, num_args = 0..=1, default_missing_value = "")]
         webrtc: Option<String>,
         /// Host the --webrtc room as one more member next to its other hosts.
@@ -94,8 +95,23 @@ enum ServeAction {
     JoinSecret,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // Read the room link out of the environment BEFORE the runtime starts any
+    // thread (removing an env var is only sound single-threaded), so no agent
+    // or shell this daemon spawns inherits it. It arrives in the env rather
+    // than as `--webrtc <link>` because a command line is public: `ps` shows
+    // it to every local user.
+    let env_room = std::env::var(serve::service::ROOM_LINK_ENV)
+        .ok()
+        .filter(|v| !v.is_empty());
+    std::env::remove_var(serve::service::ROOM_LINK_ENV);
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run(env_room))
+}
+
+async fn run(env_room: Option<String>) -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Command::Serve {
@@ -105,6 +121,8 @@ async fn main() -> anyhow::Result<()> {
             action,
             port,
         } => {
+            // A bare --webrtc takes the link from the env when one was given.
+            let webrtc = serve::service::resolve_webrtc(webrtc, env_room);
             match action {
                 // Service management never needs a room up front: the unit
                 // re-runs `ayrs serve --webrtc` which loads/mints as usual.
@@ -159,10 +177,10 @@ async fn main() -> anyhow::Result<()> {
                     // restart. Only the WebRTC path writes it — that's the shape
                     // the installed service unit runs, so the args match exactly
                     // what `install` recomputes for the same webrtc/sighost.
-                    serve::service::write_run_receipt(&serve::service::service_args(
+                    serve::service::write_run_receipt(
+                        &serve::service::service_args(&sighost),
                         &Some(webrtc.clone()),
-                        &sighost,
-                    ));
+                    );
                     let url = if webrtc.is_empty() {
                         None
                     } else {

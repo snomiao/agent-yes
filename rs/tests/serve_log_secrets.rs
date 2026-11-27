@@ -82,5 +82,8 @@ fn piped_serve_output_carries_neither_the_token_nor_the_room_secret() {
 
     let mode = fs::metadata(&receipt).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode, 0o600, "receipt mode {mode:o}");
-    assert!(fs::read_to_string(&receipt).unwrap().contains("rlogtest"));
+    // Rewritten by this run: it records a fingerprint of the room, never the link.
+    let body = fs::read_to_string(&receipt).unwrap();
+    assert!(body.contains("\"room\":\""), "{body}");
+    assert!(!body.contains(&secret), "{body}");
 }

@@ -76,7 +76,14 @@ import { SUPPORTED_CLIS } from "./SUPPORTED_CLIS.ts";
 import { getInstalledPackage } from "./versionChecker.ts";
 import { negotiateSize, sanitizeCap, type SizeCap } from "./sizeNego.ts";
 import { listStrayServeProcesses } from "./strayServe.ts";
-import { explicitWebrtcUrl, isWebrtcSpec, toWebrtcUrl } from "./webrtcLink.ts";
+import {
+  explicitWebrtcUrl,
+  isWebrtcSpec,
+  ROOM_LINK_ENV,
+  splitRoomLink,
+  toWebrtcUrl,
+  withRoomLink,
+} from "./webrtcLink.ts";
 import {
   getProvisionHook,
   getProvisionRoot,
@@ -1259,6 +1266,45 @@ async function readOxmgrDaemonEnv(): Promise<Record<string, string>> {
   }
 }
 
+/**
+ * What `ay serve install` registers with the daemon manager:
+ * - `logical`: the args as the user means them, room link included: the
+ *   given args, else the previous registration's;
+ * - `args`: the args the manager runs;
+ * - `env`: the env oxmgr hands the daemon (pm2 captures the shell's own).
+ *
+ * Under oxmgr the room link goes into `env` (ROOM_LINK_ENV) next to a bare
+ * --webrtc, because a command line shows it to every local user. An older
+ * registration with the link in its args then differs, so a re-install
+ * moves the link over. New args replace a registered link; without one, a
+ * bare --webrtc hosts the runtime's persisted room.
+ */
+export function daemonRegistration(o: {
+  manager: DaemonManager["id"];
+  args: string[];
+  priorArgs: string[] | null;
+  priorEnv: Record<string, string>;
+  env: Record<string, string | undefined>;
+}): { logical: string[]; args: string[]; env: Record<string, string> } {
+  const logical = o.args.length
+    ? o.args
+    : withRoomLink(o.priorArgs ?? [], o.priorEnv[ROOM_LINK_ENV]);
+  if (o.manager !== "oxmgr") return { logical, args: logical, env: {} };
+  const split = splitRoomLink(logical);
+  // "" removes the name in daemonEnv, so a dropped link does not linger.
+  const link = o.args.length || split.link ? { [ROOM_LINK_ENV]: split.link ?? "" } : {};
+  return { logical, args: split.args, env: daemonEnv({ ...o.env, ...link }, o.priorEnv) };
+}
+
+// The daemon's serve args with its room link in place. Under oxmgr the link
+// is registered in the daemon's env (ROOM_LINK_ENV) next to a bare --webrtc,
+// not in its command line; put it back so callers read the room as before.
+async function readDaemonLogicalArgs(mgr: DaemonManager): Promise<string[] | null> {
+  const args = await readDaemonServeArgs(mgr);
+  if (args === null || mgr.id !== "oxmgr") return args;
+  return withRoomLink(args, (await readOxmgrDaemonEnv())[ROOM_LINK_ENV]);
+}
+
 // Whether the daemon PROCESS is currently online per the manager. Distinct from
 // `readDaemonServeArgs` (registered?) and from the HTTP probe (reachable?) — a
 // webrtc-only daemon opens no port, so the manager's own view is the only way to
@@ -1333,7 +1379,7 @@ export async function inspectServeDaemon(): Promise<{
   consoleUrl: string | null;
 }> {
   const mgr = await resolveActiveManager();
-  const args = mgr ? await readDaemonServeArgs(mgr) : null;
+  const args = mgr ? await readDaemonLogicalArgs(mgr) : null;
   const token = await loadOrCreateToken(undefined);
   const portless = args !== null && argsUsePortless(args);
   const port = args === null ? null : portless ? await portlessAppPort() : portFromArgs(args);
@@ -1552,12 +1598,15 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
     // new args are given. The persisted room + token mean the share link is
     // unchanged across the restart.
     const priorArgs = await readDaemonServeArgs(mgr);
-    const effArgs = args.length ? args : (priorArgs ?? []);
     // oxmgr does not hand this shell's env to the process it runs, so forward
     // ay's own settings explicitly (see daemonEnv) and treat a changed set as a
     // config change. pm2 already captures the starting shell's env itself.
     const priorEnv = mgr.id === "oxmgr" && priorArgs !== null ? await readOxmgrDaemonEnv() : {};
-    const effEnv = mgr.id === "oxmgr" ? daemonEnv(process.env, priorEnv) : {};
+    const {
+      logical: logicalArgs,
+      args: effArgs,
+      env: effEnv,
+    } = daemonRegistration({ manager: mgr.id, args, priorArgs, priorEnv, env: process.env });
     const current = getInstalledPackage().version;
 
     // WebRTC daemon: resolve the share link up front so we can print it on every
@@ -1580,9 +1629,9 @@ async function cmdServeDaemon(sub: string, args: string[]): Promise<number> {
       try {
         const { loadOrCreateShareRoom, shareLinkFromRoomUrl, shareRoomFileName } =
           await import("./share.ts");
-        const runtime = await daemonShareRuntime(effArgs);
+        const runtime = await daemonShareRuntime(logicalArgs);
         roomFile = shareRoomFileName(runtime);
-        const explicit = explicitWebrtcUrl(effArgs);
+        const explicit = explicitWebrtcUrl(logicalArgs);
         shareLink = shareLinkFromRoomUrl(
           explicit ?? (await loadOrCreateShareRoom(undefined, runtime)),
         );
@@ -1852,7 +1901,7 @@ async function cmdServeStatus(args: string[]): Promise<number> {
   const token = await loadTokenReadOnly();
 
   // A non-null arg list means the daemon is registered with the manager.
-  const daemonArgs = mgr ? await readDaemonServeArgs(mgr) : null;
+  const daemonArgs = mgr ? await readDaemonLogicalArgs(mgr) : null;
   const installed = daemonArgs !== null;
   // The link of the room the registered daemon HOSTS: derived read-only from
   // the room file of its runtime (ayrs by default — a different file from the
@@ -2020,9 +2069,12 @@ async function runAyrsServe(
 ): Promise<number> {
   const { iceEnv } = await import("./serveRust.ts");
   const extra = iceEnv(ice, tailscaleIp4);
-  const child = Bun.spawn([ayrs, ...argv], {
+  // The room link goes to ayrs in its env, not its argv, where `ps` would
+  // show it to every local user. ayrs removes it from its own env on start.
+  const { args, link } = splitRoomLink(argv);
+  const child = Bun.spawn([ayrs, ...args], {
     stdio: ["inherit", "inherit", "inherit"],
-    env: { ...ayrsServeEnv(), ...extra },
+    env: { ...ayrsServeEnv(), ...extra, ...(link ? { [ROOM_LINK_ENV]: link } : {}) },
     cwd: process.cwd(),
   });
   const forward = (sig: NodeJS.Signals) => () => {
@@ -2126,6 +2178,20 @@ export async function cmdServe(rest: string[]): Promise<number> {
           `  run 'ay serve --help' for flags\n`,
       );
       return 2;
+    }
+  }
+
+  // An installed daemon gets its room link from ROOM_LINK_ENV next to a bare
+  // --webrtc, not from its command line (see install). Take it out of
+  // process.env, so no agent this server spawns inherits it, and put it
+  // back on the flag for the parsers below. Subcommands leave it alone:
+  // `install` forwards ay's settings from this env (daemonEnv).
+  {
+    const { SERVE_SUBCOMMANDS } = await import("./serveRust.ts");
+    const envLink = process.env[ROOM_LINK_ENV];
+    if (envLink !== undefined && !SERVE_SUBCOMMANDS.has(rest[0] ?? "")) {
+      delete process.env[ROOM_LINK_ENV];
+      rest = withRoomLink(rest, envLink);
     }
   }
 
@@ -2277,7 +2343,8 @@ export async function cmdServe(rest: string[]): Promise<number> {
     explicitRoomUrl = (isWebrtcSpec(webrtcArg) && toWebrtcUrl(webrtcArg)) || undefined;
     if (!explicitRoomUrl) {
       process.stderr.write(
-        `ay serve: --webrtc: not a room link: ${webrtcArg}\n` +
+        // Up to the fragment only: a malformed link still carries its secret.
+        `ay serve: --webrtc: not a room link: ${webrtcArg.replace(/#.*/, "#…")}\n` +
           `  want  https://agent-yes.com/room/#room=<id>&s=e1.<secret>\n` +
           `  or a bare --webrtc to mint a room of your own\n`,
       );

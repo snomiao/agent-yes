@@ -4,6 +4,7 @@ import path from "path";
 import { describe, expect, it } from "vitest";
 import {
   ayrsServeEnv,
+  daemonRegistration,
   installerArgv,
   LEGACY_AYRS_TASK,
   legacyAyrsTaskArgv,
@@ -462,5 +463,62 @@ describe("oxmgrStatePath", () => {
     expect(oxmgrStatePath({}, "darwin", "/Users/alice")).toBe(
       path.join("/Users/alice", "Library", "Application Support", "oxmgr", "state.json"),
     );
+  });
+});
+
+describe("daemonRegistration", () => {
+  const link = `https://agent-yes.com/w/#r1:e1.${"ab".repeat(32)}:j1.${"cd".repeat(32)}`;
+  const base = { priorArgs: null, priorEnv: {}, env: {} };
+
+  it("registers a bare --webrtc and moves the link into the oxmgr env", () => {
+    const r = daemonRegistration({
+      ...base,
+      manager: "oxmgr",
+      args: ["--webrtc", link, "--join", "--port", "7432"],
+    });
+    expect(r.args).toEqual(["--webrtc", "--join", "--port", "7432"]);
+    expect(r.args.join(" ")).not.toContain("e1.");
+    expect(r.env.AY_WEBRTC_URL).toBe(link);
+    expect(r.logical).toEqual(["--webrtc", link, "--join", "--port", "7432"]);
+  });
+
+  it("keeps a re-install of the same registration unchanged", () => {
+    const prior = { priorArgs: ["--webrtc", "--port", "7432"], priorEnv: { AY_WEBRTC_URL: link } };
+    const r = daemonRegistration({ ...base, ...prior, manager: "oxmgr", args: [] });
+    expect(r.args).toEqual(prior.priorArgs);
+    expect(r.env).toEqual(prior.priorEnv);
+    expect(r.logical).toEqual(["--webrtc", link, "--port", "7432"]);
+  });
+
+  it("moves the link out of an older registration's args", () => {
+    const r = daemonRegistration({
+      ...base,
+      manager: "oxmgr",
+      args: [],
+      priorArgs: ["--webrtc", link, "--port", "7432"],
+    });
+    expect(r.args).toEqual(["--webrtc", "--port", "7432"]);
+    expect(r.env.AY_WEBRTC_URL).toBe(link);
+  });
+
+  it("drops the registered link when new args name none", () => {
+    const r = daemonRegistration({
+      ...base,
+      manager: "oxmgr",
+      args: ["--webrtc"],
+      priorArgs: ["--webrtc"],
+      priorEnv: { AY_WEBRTC_URL: link, AY_NAME: "alpha" },
+    });
+    expect(r.args).toEqual(["--webrtc"]);
+    expect(r.env).toEqual({ AY_NAME: "alpha" });
+  });
+
+  it("leaves pm2 registrations as they were", () => {
+    const args = ["--webrtc", link];
+    expect(daemonRegistration({ ...base, manager: "pm2", args })).toEqual({
+      logical: args,
+      args,
+      env: {},
+    });
   });
 });

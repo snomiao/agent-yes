@@ -115,17 +115,47 @@ fn log_dir() -> Result<PathBuf> {
     Ok(dir)
 }
 
-/// Args the service should run, after the executable path.
-pub fn service_args(webrtc: &Option<String>, sighost: &str) -> Vec<String> {
-    let mut args = vec!["serve".to_string(), "--webrtc".to_string()];
-    if let Some(v) = webrtc {
-        if !v.is_empty() {
-            args.push(v.clone());
-        }
+/// The env name `ayrs serve --webrtc` takes its room link from (the TS side
+/// uses the same name, ts/webrtcLink.ts ROOM_LINK_ENV). A command line is
+/// public: `ps` shows it to every local user. A process's environment is not.
+pub const ROOM_LINK_ENV: &str = "AY_WEBRTC_URL";
+
+/// The `--webrtc` value to run with: a bare flag (`Some("")`) takes the link
+/// from the env when one was given; an explicit value or no flag wins.
+pub fn resolve_webrtc(flag: Option<String>, env_room: Option<String>) -> Option<String> {
+    match (flag, env_room) {
+        (Some(v), Some(e)) if v.is_empty() => Some(e),
+        (flag, _) => flag,
     }
-    args.push("--sighost".to_string());
-    args.push(sighost.to_string());
-    args
+}
+
+/// Args the service should run, after the executable path. Never the room
+/// link: that goes into the service's env ([`service_env`]).
+pub fn service_args(sighost: &str) -> Vec<String> {
+    vec![
+        "serve".to_string(),
+        "--webrtc".to_string(),
+        "--sighost".to_string(),
+        sighost.to_string(),
+    ]
+}
+
+/// The env the service needs: the room link for an explicit room, nothing
+/// for the persisted one.
+pub fn service_env(webrtc: &Option<String>) -> Vec<(String, String)> {
+    match webrtc {
+        Some(v) if !v.is_empty() => vec![(ROOM_LINK_ENV.to_string(), v.clone())],
+        _ => Vec::new(),
+    }
+}
+
+/// A one-way fingerprint of the room link, so the receipt can tell two rooms
+/// apart without holding the secret.
+fn room_fingerprint(webrtc: &Option<String>) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let v = webrtc.as_deref().filter(|v| !v.is_empty())?;
+    let d = Sha256::digest(v.as_bytes());
+    Some(d.iter().take(8).map(|b| format!("{b:02x}")).collect())
 }
 
 // --- run receipt ----------------------------------------------------------
@@ -145,6 +175,10 @@ struct RunReceipt {
     pid: u32,
     /// The `service_args` the daemon was launched with, to compare config.
     args: Vec<String>,
+    /// [`room_fingerprint`] of its explicit room link: the link itself is not
+    /// in `args`. Absent in older receipts, which then never match.
+    #[serde(default)]
+    room: Option<String>,
 }
 
 fn receipt_path() -> Result<PathBuf> {
@@ -154,11 +188,12 @@ fn receipt_path() -> Result<PathBuf> {
 /// Record what this process is running so a later `ayrs serve install` can skip
 /// a redundant teardown+reinstall when we're already the current version+config.
 /// Best-effort: a missing/unwritable receipt just means `install` won't no-op.
-pub fn write_run_receipt(args: &[String]) {
+pub fn write_run_receipt(args: &[String], webrtc: &Option<String>) {
     let receipt = RunReceipt {
         version: env!("CARGO_PKG_VERSION").to_string(),
         pid: std::process::id(),
         args: args.to_vec(),
+        room: room_fingerprint(webrtc),
     };
     // Owner-only: the args hold the --webrtc room link and its secret.
     if let (Ok(path), Ok(body)) = (receipt_path(), serde_json::to_string(&receipt)) {
@@ -175,17 +210,22 @@ fn read_run_receipt() -> Option<RunReceipt> {
 /// THESE exact service args? Split out from [`already_current`] (which reads the
 /// file) so the version/args/liveness logic is unit-testable without touching
 /// the real receipt path. Mirrors the TS `runningVer === current && sameConfig`.
-fn receipt_is_current(r: &RunReceipt, desired_args: &[String]) -> bool {
+fn receipt_is_current(
+    r: &RunReceipt,
+    desired_args: &[String],
+    desired_room: &Option<String>,
+) -> bool {
     r.version == env!("CARGO_PKG_VERSION")
         && r.args == desired_args
+        && r.room == room_fingerprint(desired_room)
         && crate::pid_store::is_process_alive(r.pid)
 }
 
 /// True when a daemon is already running THIS binary's version with THESE exact
-/// service args — the condition under which `install` is a no-op. Minus the TS
+/// service args and room — the condition under which `install` is a no-op. Minus the TS
 /// boot-autostart re-assert, which native launchd/systemd units already guarantee.
-fn already_current(desired_args: &[String]) -> bool {
-    read_run_receipt().is_some_and(|r| receipt_is_current(&r, desired_args))
+fn already_current(desired_args: &[String], desired_room: &Option<String>) -> bool {
+    read_run_receipt().is_some_and(|r| receipt_is_current(&r, desired_args, desired_room))
 }
 
 #[cfg(target_os = "macos")]
@@ -231,10 +271,28 @@ fn xml_escape(s: &str) -> String {
 }
 
 #[cfg(target_os = "macos")]
-fn render_unit(exe: &str, args: &[String], out_log: &str, err_log: &str) -> String {
+fn render_unit(
+    exe: &str,
+    args: &[String],
+    env: &[(String, String)],
+    out_log: &str,
+    err_log: &str,
+) -> String {
     let mut prog = String::new();
     for a in std::iter::once(&exe.to_string()).chain(args.iter()) {
         prog.push_str(&format!("    <string>{}</string>\n", xml_escape(a)));
+    }
+    let mut vars = String::new();
+    if !env.is_empty() {
+        vars.push_str("  <key>EnvironmentVariables</key>\n  <dict>\n");
+        for (k, v) in env {
+            vars.push_str(&format!(
+                "    <key>{}</key><string>{}</string>\n",
+                xml_escape(k),
+                xml_escape(v)
+            ));
+        }
+        vars.push_str("  </dict>\n");
     }
     format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
@@ -245,7 +303,7 @@ fn render_unit(exe: &str, args: &[String], out_log: &str, err_log: &str) -> Stri
   <key>ProgramArguments</key>
   <array>
 {prog}  </array>
-  <key>RunAtLoad</key><true/>
+{vars}  <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ProcessType</key><string>Background</string>
   <key>SoftResourceLimits</key>
@@ -256,6 +314,7 @@ fn render_unit(exe: &str, args: &[String], out_log: &str, err_log: &str) -> Stri
 </plist>
 "#,
         prog = prog,
+        vars = vars,
         nofile = WANTED_NOFILE,
         out = xml_escape(out_log),
         err = xml_escape(err_log),
@@ -263,10 +322,28 @@ fn render_unit(exe: &str, args: &[String], out_log: &str, err_log: &str) -> Stri
 }
 
 #[cfg(target_os = "linux")]
-fn render_unit(exe: &str, args: &[String], _out: &str, _err: &str) -> String {
+fn render_unit(
+    exe: &str,
+    args: &[String],
+    env: &[(String, String)],
+    _out: &str,
+    _err: &str,
+) -> String {
     let quoted: Vec<String> = args
         .iter()
         .map(|a| format!("'{}'", a.replace('\'', "'\\''")))
+        .collect();
+    // `Environment="K=V"`: backslash and quote are escaped inside the quotes,
+    // and `%` is doubled so systemd does not read it as a specifier.
+    let vars: String = env
+        .iter()
+        .map(|(k, v)| {
+            let kv = format!("{k}={v}")
+                .replace('\\', "\\\\")
+                .replace('"', "\\\"")
+                .replace('%', "%%");
+            format!("Environment=\"{kv}\"\n")
+        })
         .collect();
     format!(
         "[Unit]\n\
@@ -274,6 +351,7 @@ fn render_unit(exe: &str, args: &[String], _out: &str, _err: &str) -> String {
          After=network-online.target\n\n\
          [Service]\n\
          Type=simple\n\
+         {vars}\
          ExecStart='{exe}' {args}\n\
          Restart=always\n\
          RestartSec=5\n\
@@ -329,15 +407,27 @@ fn task_action(script: &std::path::Path) -> (String, String) {
 /// The `.cmd` the task runs: the daemon with its output appended to the same
 /// log files launchd names via StandardOutPath/StandardErrorPath.
 #[cfg(windows)]
-fn render_launcher_cmd(exe: &str, args: &[String], out_log: &str, err_log: &str) -> String {
+fn render_launcher_cmd(
+    exe: &str,
+    args: &[String],
+    env: &[(String, String)],
+    out_log: &str,
+    err_log: &str,
+) -> String {
     // `%` is the one character batch re-interprets inside a quoted token.
     let q = |s: &str| format!("\"{}\"", s.replace('%', "%%"));
     let argv: Vec<String> = args.iter().map(|a| q(a)).collect();
+    let vars: String = env
+        .iter()
+        .map(|(k, v)| format!("set {}\r\n", q(&format!("{k}={v}"))))
+        .collect();
     format!(
         "@echo off\r\n\
          rem Generated by `ayrs serve install` — regenerated on every install.\r\n\
          rem Task Scheduler cannot redirect stdio, so the redirect lives here.\r\n\
+         {vars}\
          {exe} {args} >> {out} 2>> {err}\r\n",
+        vars = vars,
         exe = q(exe),
         args = argv.join(" "),
         out = q(out_log),
@@ -408,11 +498,17 @@ fn render_task_xml(user: &str, command: &str, arguments: &str) -> String {
 }
 
 #[cfg(windows)]
-fn render_unit(exe: &str, args: &[String], out_log: &str, err_log: &str) -> String {
+fn render_unit(
+    exe: &str,
+    args: &[String],
+    env: &[(String, String)],
+    out_log: &str,
+    err_log: &str,
+) -> String {
     // The XML names the shim; the shim's script is written separately by
-    // install() from the same exe/args, so both stay in sync.
+    // install() from the same exe/args/env, so both stay in sync.
     let script = script_path().unwrap_or_else(|_| PathBuf::from(format!("{LABEL}.cmd")));
-    let _ = (exe, args, out_log, err_log);
+    let _ = (exe, args, env, out_log, err_log);
     let (command, arguments) = task_action(&script);
     render_task_xml(&current_user(), &command, &arguments)
 }
@@ -473,7 +569,7 @@ fn write_utf16(path: &std::path::Path, body: &str) -> Result<()> {
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
-fn render_unit(_e: &str, _a: &[String], _o: &str, _r: &str) -> String {
+fn render_unit(_e: &str, _a: &[String], _v: &[(String, String)], _o: &str, _r: &str) -> String {
     String::new()
 }
 
@@ -627,10 +723,14 @@ fn oxmgr_command(exe: &str, args: &[String]) -> String {
 /// `.serve-heartbeat` (serve/heartbeat.rs) so a daemon installed by the
 /// TypeScript `ay serve install` — which registers `ay serve healthcheck` and
 /// then delegates to this binary — is seen as alive rather than wedged.
-fn oxmgr_install(oxmgr: &str, exe: &str, args: &[String]) -> Result<()> {
+fn oxmgr_install(oxmgr: &str, exe: &str, args: &[String], env: &[(String, String)]) -> Result<()> {
     let _ = Command::new(oxmgr).args(["delete", OXMGR_NAME]).output(); // idempotent
     let cmd = oxmgr_command(exe, args);
-    let env_flags = daemon_env_flags(std::env::vars());
+    let mut env_flags = daemon_env_flags(std::env::vars());
+    env_flags.extend(
+        env.iter()
+            .flat_map(|(k, v)| ["--env".to_string(), format!("{k}={v}")]),
+    );
     let mut argv: Vec<&str> = vec![
         "start",
         &cmd,
@@ -649,14 +749,15 @@ fn oxmgr_install(oxmgr: &str, exe: &str, args: &[String]) -> Result<()> {
 pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
     let path = unit_path()?;
     let exe = exe()?;
-    let args = service_args(webrtc, sighost);
+    let args = service_args(sighost);
+    let env = service_env(webrtc);
 
     // Idempotent re-run: if the daemon is already up on THIS binary's version
     // with THESE exact args, skip the teardown+reinstall entirely — restarting
     // it would drop every connected browser to re-assert what's already true.
     // (Mirrors `ay serve install`'s up-to-date no-op.) An upgraded binary or a
     // config change fails this check and falls through to the roll-forward below.
-    if already_current(&args) {
+    if already_current(&args, webrtc) {
         println!(
             "{LABEL} already running v{} (up to date)",
             env!("CARGO_PKG_VERSION")
@@ -672,6 +773,7 @@ pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
     let body = render_unit(
         &exe,
         &args,
+        &env,
         &out_log.to_string_lossy(),
         &err_log.to_string_lossy(),
     );
@@ -698,6 +800,7 @@ pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
                 render_launcher_cmd(
                     &exe,
                     &args,
+                    &env,
                     &out_log.to_string_lossy(),
                     &err_log.to_string_lossy(),
                 ),
@@ -738,7 +841,7 @@ pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
             // instead of writing an inert unit that never loads. Also clear any
             // stray unit a prior systemd attempt may have left behind.
             let _ = std::fs::remove_file(&path);
-            oxmgr_install(&oxmgr, &exe, &args)?;
+            oxmgr_install(&oxmgr, &exe, &args, &env)?;
             println!("no systemd --user bus — registered with oxmgr as '{OXMGR_NAME}'");
             println!("installed {OXMGR_NAME} ({exe} {})", args.join(" "));
         } else {
@@ -1056,7 +1159,7 @@ mod tests {
     #[test]
     fn service_args_defaults_to_persisted_room() {
         assert_eq!(
-            service_args(&Some(String::new()), "s.agent-yes.com"),
+            service_args("s.agent-yes.com"),
             vec!["serve", "--webrtc", "--sighost", "s.agent-yes.com"]
         );
     }
@@ -1065,7 +1168,8 @@ mod tests {
         RunReceipt {
             version: version.to_string(),
             pid,
-            args: service_args(&Some(String::new()), "s.agent-yes.com"),
+            args: service_args("s.agent-yes.com"),
+            room: None,
         }
     }
 
@@ -1073,8 +1177,8 @@ mod tests {
     fn receipt_current_when_version_args_and_pid_all_match() {
         // Our own pid is reliably alive; version + args match → up to date.
         let r = receipt(env!("CARGO_PKG_VERSION"), std::process::id());
-        let args = service_args(&Some(String::new()), "s.agent-yes.com");
-        assert!(receipt_is_current(&r, &args));
+        let args = service_args("s.agent-yes.com");
+        assert!(receipt_is_current(&r, &args, &None));
     }
 
     #[test]
@@ -1082,16 +1186,16 @@ mod tests {
         // An upgraded binary: the running daemon still reports the old version,
         // so install must NOT no-op (it should roll the daemon forward).
         let r = receipt("0.0.0-old", std::process::id());
-        let args = service_args(&Some(String::new()), "s.agent-yes.com");
-        assert!(!receipt_is_current(&r, &args));
+        let args = service_args("s.agent-yes.com");
+        assert!(!receipt_is_current(&r, &args, &None));
     }
 
     #[test]
     fn receipt_stale_when_config_differs() {
         // Same version, but a different sighost → a config change must reinstall.
         let r = receipt(env!("CARGO_PKG_VERSION"), std::process::id());
-        let other = service_args(&Some(String::new()), "other.example.com");
-        assert!(!receipt_is_current(&r, &other));
+        let other = service_args("other.example.com");
+        assert!(!receipt_is_current(&r, &other, &None));
     }
 
     #[test]
@@ -1100,8 +1204,8 @@ mod tests {
         // service isn't actually running, so install must (re)start it.
         let dead = 4_194_303; // implausibly high pid, not us
         let r = receipt(env!("CARGO_PKG_VERSION"), dead);
-        let args = service_args(&Some(String::new()), "s.agent-yes.com");
-        assert!(!receipt_is_current(&r, &args));
+        let args = service_args("s.agent-yes.com");
+        assert!(!receipt_is_current(&r, &args, &None));
     }
 
     #[test]
@@ -1117,10 +1221,7 @@ mod tests {
     #[test]
     fn oxmgr_command_joins_exe_and_args() {
         // oxmgr's `start <COMMAND>` positional takes one string it splits itself.
-        let cmd = oxmgr_command(
-            "/root/.cargo/bin/ayrs",
-            &service_args(&Some(String::new()), "s.agent-yes.com"),
-        );
+        let cmd = oxmgr_command("/root/.cargo/bin/ayrs", &service_args("s.agent-yes.com"));
         assert_eq!(
             cmd,
             "/root/.cargo/bin/ayrs serve --webrtc --sighost s.agent-yes.com"
@@ -1208,7 +1309,8 @@ mod tests {
     fn launchd_unit_requests_the_open_files_limit() {
         let plist = render_unit(
             "/x/bin/ayrs",
-            &service_args(&Some(String::new()), "s.agent-yes.com"),
+            &service_args("s.agent-yes.com"),
+            &[],
             "/x/out.log",
             "/x/err.log",
         );
@@ -1223,20 +1325,96 @@ mod tests {
     fn systemd_unit_requests_the_open_files_limit() {
         let unit = render_unit(
             "/x/bin/ayrs",
-            &service_args(&Some(String::new()), "s.agent-yes.com"),
+            &service_args("s.agent-yes.com"),
+            &[],
             "/x/out.log",
             "/x/err.log",
         );
         assert!(unit.contains(&format!("\nLimitNOFILE={WANTED_NOFILE}\n")));
     }
 
+    const ROOM: &str = "webrtc://r1:e1.abab@s.agent-yes.com";
+
     #[test]
-    fn service_args_pins_explicit_room() {
-        let a = service_args(
-            &Some("webrtc://r1:e1.ab@s.agent-yes.com".into()),
-            "s.agent-yes.com",
+    fn an_explicit_room_goes_into_the_service_env_never_its_args() {
+        let a = service_args("s.agent-yes.com");
+        assert_eq!(a, ["serve", "--webrtc", "--sighost", "s.agent-yes.com"]);
+        assert_eq!(
+            service_env(&Some(ROOM.into())),
+            [(ROOM_LINK_ENV.to_string(), ROOM.to_string())]
         );
-        assert_eq!(a[2], "webrtc://r1:e1.ab@s.agent-yes.com");
+        assert!(service_env(&Some(String::new())).is_empty());
+        assert!(service_env(&None).is_empty());
+    }
+
+    #[test]
+    fn a_bare_webrtc_flag_takes_the_link_from_the_env() {
+        let env = Some(ROOM.to_string());
+        assert_eq!(resolve_webrtc(Some(String::new()), env.clone()), env);
+        // An explicit value wins, and without --webrtc there is no room.
+        assert_eq!(
+            resolve_webrtc(Some("webrtc://r2:e1.cd@h".into()), env.clone()).as_deref(),
+            Some("webrtc://r2:e1.cd@h")
+        );
+        assert_eq!(resolve_webrtc(None, env), None);
+        assert_eq!(
+            resolve_webrtc(Some(String::new()), None).as_deref(),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn receipt_tells_rooms_apart_without_holding_the_link() {
+        let args = service_args("s.agent-yes.com");
+        let mut r = receipt(env!("CARGO_PKG_VERSION"), std::process::id());
+        r.room = room_fingerprint(&Some(ROOM.into()));
+        assert!(receipt_is_current(&r, &args, &Some(ROOM.into())));
+        assert!(!receipt_is_current(
+            &r,
+            &args,
+            &Some("webrtc://r2:e1.cd@h".into())
+        ));
+        assert!(!receipt_is_current(&r, &args, &None));
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("e1.abab"), "{json}");
+        // A receipt from before this field never matches an explicit room.
+        let old: RunReceipt = serde_json::from_str(r#"{"version":"0","pid":1,"args":[]}"#).unwrap();
+        assert_eq!(old.room, None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn plist_sets_the_room_link_in_its_environment() {
+        let env = service_env(&Some(ROOM.into()));
+        let u = render_unit("/bin/ayrs", &service_args("h"), &env, "/o", "/e");
+        let (args, rest) = u.split_once("</array>").unwrap();
+        assert!(!args.contains("e1.abab"), "{args}");
+        assert!(rest.contains(&format!(
+            "<key>EnvironmentVariables</key>\n  <dict>\n    <key>{ROOM_LINK_ENV}</key><string>{ROOM}</string>"
+        )));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn systemd_unit_sets_the_room_link_in_its_environment() {
+        let env = vec![(ROOM_LINK_ENV.to_string(), "a%b\"c".to_string())];
+        let u = render_unit("/bin/ayrs", &service_args("h"), &env, "/o", "/e");
+        assert!(
+            u.contains("\nEnvironment=\"AY_WEBRTC_URL=a%%b\\\"c\"\nExecStart="),
+            "{u}"
+        );
+        let exec = u.lines().find(|l| l.starts_with("ExecStart=")).unwrap();
+        assert!(!exec.contains("a%"), "{exec}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn launcher_cmd_sets_the_room_link_before_the_daemon_line() {
+        let env = service_env(&Some(ROOM.into()));
+        let s = render_launcher_cmd("C:\\a\\ayrs.exe", &service_args("h"), &env, "o", "e");
+        let set = format!("set \"{ROOM_LINK_ENV}={ROOM}\"\r\n");
+        let at = s.find(&set).expect("set line");
+        assert!(at < s.find("\"C:\\a\\ayrs.exe\"").unwrap());
     }
 
     #[test]
@@ -1271,7 +1449,8 @@ mod tests {
     fn launcher_cmd_quotes_paths_and_redirects_both_streams() {
         let s = render_launcher_cmd(
             "C:\\Program Files\\ayrs.exe",
-            &service_args(&Some(String::new()), "s.agent-yes.com"),
+            &service_args("s.agent-yes.com"),
+            &[],
             "C:\\logs\\o.log",
             "C:\\logs\\e.log",
         );
@@ -1286,6 +1465,7 @@ mod tests {
         let s = render_launcher_cmd(
             "C:\\a\\ayrs.exe",
             &["serve".into(), "%PATH%".into()],
+            &[],
             "o",
             "e",
         );
@@ -1334,12 +1514,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn plist_escapes_and_lists_every_arg() {
-        let u = render_unit(
-            "/bin/ayrs",
-            &service_args(&Some(String::new()), "a&b"),
-            "/o",
-            "/e",
-        );
+        let u = render_unit("/bin/ayrs", &service_args("a&b"), &[], "/o", "/e");
         assert!(u.contains("<string>/bin/ayrs</string>"));
         assert!(u.contains("<string>--webrtc</string>"));
         assert!(u.contains("<string>a&amp;b</string>"));
