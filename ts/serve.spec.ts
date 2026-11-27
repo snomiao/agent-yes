@@ -16,6 +16,7 @@ import {
   oxmgrVersionHasWindowsFix,
   parseGitUrl,
   portlessConsoleUrl,
+  serveBanner,
   shareLinkStatus,
   vendorAssetType,
 } from "./serve.ts";
@@ -24,6 +25,40 @@ describe("portlessConsoleUrl", () => {
   it("uses the stable local HTTPS hostname and keeps auth in the fragment", () => {
     expect(portlessConsoleUrl()).toBe("https://agent-yes.localhost/");
     expect(portlessConsoleUrl("a b")).toBe("https://agent-yes.localhost/#k=a%20b");
+  });
+});
+
+describe("serveBanner", () => {
+  const base = {
+    scheme: "http",
+    host: "0.0.0.0",
+    uiHost: "127.0.0.1",
+    port: 7432,
+    token: "tok-1111",
+    tokenFile: "/x/state/.serve-token",
+    portless: false,
+    https: false,
+  };
+  it("shows the token to a terminal", () => {
+    const b = serveBanner({ ...base, tty: true });
+    expect(b).toContain("token:    tok-1111\n");
+    expect(b).toContain("  http://127.0.0.1:7432/#k=tok-1111\n");
+    expect(b).toContain("  ay remote add <alias> http://tok-1111@<host>:7432\n");
+  });
+  it("keeps the token out of a log and says where it is", () => {
+    for (const portless of [false, true]) {
+      const b = serveBanner({ ...base, portless, tty: false });
+      expect(b).not.toContain("tok-1111");
+      expect(b).not.toContain("#k=");
+      expect(b).toContain("token:    not logged; it is in /x/state/.serve-token (mode 0600)\n");
+      expect(b).toContain("  ay ls   <token>@<host>:7432\n");
+    }
+    expect(serveBanner({ ...base, tty: false })).toContain("  http://127.0.0.1:7432/\n");
+  });
+  it("names --token as the source when the token did not come from the file", () => {
+    const b = serveBanner({ ...base, tokenFile: null, tty: false });
+    expect(b).not.toContain("tok-1111");
+    expect(b).toContain("token:    not logged; it is the --token value\n");
   });
 });
 

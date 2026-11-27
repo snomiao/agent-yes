@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "fs/promises";
 import { homedir } from "os";
 import path from "path";
 import yaml from "yaml";
@@ -48,21 +48,27 @@ export async function readRemotes(): Promise<Map<string, RemoteConfig>> {
   return map;
 }
 
-export async function writeRemoteAlias(alias: string, config: RemoteConfig): Promise<void> {
-  const remotes = await readRemotes();
-  remotes.set(alias, config);
+// Owner-only: every entry holds a token or a room link with its secret.
+// writeFile's mode applies only when it creates the file, so narrow an
+// existing (older, 0644) file too.
+async function writeRemotes(remotes: Map<string, RemoteConfig>): Promise<void> {
   const doc: Record<string, any> = {};
   for (const [k, v] of remotes) doc[k] = v;
   await mkdir(path.dirname(remotesPath()), { recursive: true });
-  await writeFile(remotesPath(), yaml.stringify({ remotes: doc }));
+  await writeFile(remotesPath(), yaml.stringify({ remotes: doc }), { mode: 0o600 });
+  if (process.platform !== "win32") await chmod(remotesPath(), 0o600);
+}
+
+export async function writeRemoteAlias(alias: string, config: RemoteConfig): Promise<void> {
+  const remotes = await readRemotes();
+  remotes.set(alias, config);
+  await writeRemotes(remotes);
 }
 
 export async function deleteRemoteAlias(alias: string): Promise<void> {
   const remotes = await readRemotes();
   remotes.delete(alias);
-  const doc: Record<string, any> = {};
-  for (const [k, v] of remotes) doc[k] = v;
-  await writeFile(remotesPath(), yaml.stringify({ remotes: doc }));
+  await writeRemotes(remotes);
 }
 
 /** Parse token@host:port[:keyword] — the `@` is a hard signal this is remote. */

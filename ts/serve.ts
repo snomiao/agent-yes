@@ -176,6 +176,47 @@ function tokenPath(): string {
   return path.join(agentYesHome(), ".serve-token");
 }
 
+/**
+ * The foreground `ay serve` connection banner. Only a terminal gets the
+ * token: under a daemon stdout is a log file, and the banner is written again
+ * at every restart, so there it gets `<token>` and the path to the token file.
+ */
+export function serveBanner(o: {
+  scheme: string;
+  host: string;
+  uiHost: string;
+  port: number | undefined; // Bun's server.port type
+  token: string;
+  /** null when the token came from --token rather than the token file */
+  tokenFile: string | null;
+  portless: boolean;
+  https: boolean;
+  tty: boolean;
+}): string {
+  const t = o.tty ? o.token : "<token>";
+  const consoleUrl = o.portless
+    ? portlessConsoleUrl(o.tty ? o.token : undefined)
+    : `${o.scheme}://${o.uiHost}:${o.port}/${o.tty ? `#k=${o.token}` : ""}`;
+  return (
+    `ay serve  ${o.scheme}://${o.host}:${o.port}\n` +
+    (o.tty
+      ? `token:    ${o.token}\n\n`
+      : `token:    not logged; ${o.tokenFile ? `it is in ${o.tokenFile} (mode 0600)` : "it is the --token value"}\n\n`) +
+    `web console (token in the # is eaten on open):\n` +
+    `  ${consoleUrl}\n\n` +
+    `connect from another machine:\n` +
+    `  ay ls   ${t}@<host>:${o.port}\n` +
+    `  ay tail ${t}@<host>:${o.port}:<keyword>\n` +
+    `  ay send ${t}@<host>:${o.port}:<keyword> "message"\n\n` +
+    `save as alias:\n` +
+    `  ay remote add <alias> ${o.scheme}://${t}@<host>:${o.port}\n\n` +
+    (o.https
+      ? ""
+      : `for HTTPS: ay serve --tls-cert cert.pem --tls-key key.pem\n` +
+        `  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'\n\n`)
+  );
+}
+
 // Liveness heartbeat for the WebRTC daemon. The native WebRTC stack
 // (node-datachannel) has been observed to freeze the entire JS event loop after
 // long uptime — main thread stuck in a pthread rendezvous — so signaling stays
@@ -5622,26 +5663,19 @@ export async function cmdServe(rest: string[]): Promise<number> {
     // server is null only when we degraded to WebRTC-only above (port wedged);
     // skip the HTTP connection banner since nothing is listening on the port.
     if (server) {
-      const listenPort = server.port;
-      const uiHost = host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host;
-      process.stdout.write(`ay serve  ${scheme}://${host}:${listenPort}\n`);
-      process.stdout.write(`token:    ${token}\n\n`);
-      process.stdout.write(`web console (token in the # is eaten on open):\n`);
       process.stdout.write(
-        `  ${usePortless ? portlessConsoleUrl(token) : `${scheme}://${uiHost}:${listenPort}/#k=${token}`}\n\n`,
+        serveBanner({
+          scheme,
+          host,
+          uiHost: host === "0.0.0.0" || host === "::" ? "127.0.0.1" : host,
+          port: server.port,
+          token,
+          tokenFile: tokenFlag ? null : tokenPath(),
+          portless: usePortless,
+          https: useHttps,
+          tty: !!process.stdout.isTTY,
+        }),
       );
-      process.stdout.write(`connect from another machine:\n`);
-      process.stdout.write(`  ay ls   ${token}@<host>:${listenPort}\n`);
-      process.stdout.write(`  ay tail ${token}@<host>:${listenPort}:<keyword>\n`);
-      process.stdout.write(`  ay send ${token}@<host>:${listenPort}:<keyword> "message"\n\n`);
-      process.stdout.write(`save as alias:\n`);
-      process.stdout.write(`  ay remote add <alias> ${scheme}://${token}@<host>:${listenPort}\n\n`);
-      if (!useHttps) {
-        process.stdout.write(
-          `for HTTPS: ay serve --tls-cert cert.pem --tls-key key.pem\n` +
-            `  openssl req -x509 -newkey rsa:2048 -keyout key.pem -out cert.pem -days 365 -nodes -subj '/CN=localhost'\n\n`,
-        );
-      }
     }
   }
 

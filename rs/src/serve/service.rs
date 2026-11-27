@@ -195,8 +195,9 @@ pub fn write_run_receipt(args: &[String], webrtc: &Option<String>) {
         args: args.to_vec(),
         room: room_fingerprint(webrtc),
     };
+    // Owner-only: the args hold the --webrtc room link and its secret.
     if let (Ok(path), Ok(body)) = (receipt_path(), serde_json::to_string(&receipt)) {
-        let _ = std::fs::write(path, body);
+        let _ = crate::serve::write_private(&path, &body);
     }
 }
 
@@ -807,8 +808,9 @@ pub fn install(webrtc: &Option<String>, sighost: &str) -> Result<()> {
             println!("wrote {}", script.display());
             write_utf16(&path, &body)?;
         }
+        // Owner-only: the args hold the --webrtc room link and its secret.
         #[cfg(not(windows))]
-        std::fs::write(&path, &body)?;
+        crate::serve::write_private(&path, &body)?;
         println!("wrote {}", path.display());
         Ok(())
     };
