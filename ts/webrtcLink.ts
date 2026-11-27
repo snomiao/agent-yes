@@ -134,3 +134,47 @@ export function explicitWebrtcUrl(args: string[]): string | undefined {
   }
   return undefined;
 }
+
+/**
+ * The env name a serve daemon gets its room link from. A command line is
+ * public: `ps` shows it to every local user. A process's environment is not.
+ * ayrs reads the same name (rs/src/bin/ayrs.rs).
+ */
+export const ROOM_LINK_ENV = "AY_WEBRTC_URL";
+
+const ROOM_FLAGS = ["--webrtc", "--share"];
+
+/**
+ * Take the room link off the --webrtc/--share value, leaving the bare flag:
+ * `["--webrtc", L, "--port", "1"]` → `{ args: ["--webrtc", "--port", "1"], link: L }`.
+ * The link is returned as given (any spelling, join secret included).
+ */
+export function splitRoomLink(args: string[]): { args: string[]; link?: string } {
+  const out: string[] = [];
+  let link: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i]!;
+    const flag = ROOM_FLAGS.find((f) => a === f || a.startsWith(`${f}=`));
+    const v = flag === undefined ? undefined : a === flag ? args[i + 1] : a.slice(flag.length + 1);
+    if (flag === undefined || v === undefined || !isWebrtcSpec(v)) {
+      out.push(a);
+      continue;
+    }
+    link ??= v;
+    out.push(flag);
+    if (a === flag) i++;
+  }
+  return link === undefined ? { args: out } : { args: out, link };
+}
+
+/**
+ * The inverse of splitRoomLink: give a bare --webrtc/--share flag its link
+ * back. Args that already name a link, or have no bare flag, stay as they are.
+ */
+export function withRoomLink(args: string[], link: string | undefined): string[] {
+  if (!link || splitRoomLink(args).link !== undefined) return args;
+  const i = args.findIndex(
+    (a, j) => ROOM_FLAGS.includes(a) && (args[j + 1] === undefined || args[j + 1]!.startsWith("-")),
+  );
+  return i === -1 ? args : [...args.slice(0, i + 1), link, ...args.slice(i + 1)];
+}

@@ -5,7 +5,9 @@ import {
   hasJoinSecret,
   isWebrtcSpec,
   parseWebrtcLink,
+  splitRoomLink,
   toWebrtcUrl,
+  withRoomLink,
 } from "./webrtcLink.ts";
 
 // A representative v2 share secret (e1.<64 hex>); parseSecret keeps the hex `s`.
@@ -141,5 +143,45 @@ describe("explicitWebrtcUrl", () => {
     expect(explicitWebrtcUrl(["--webrtc", "--port", "7432"])).toBeUndefined();
     expect(explicitWebrtcUrl(["--webrtc"])).toBeUndefined();
     expect(explicitWebrtcUrl(["--port", "7432"])).toBeUndefined();
+  });
+});
+
+describe("splitRoomLink / withRoomLink", () => {
+  const v = `e1.${"ab".repeat(32)}`;
+  const link = `https://agent-yes.com/w/#r1:${v}:j1.${"cd".repeat(32)}`;
+
+  it("leaves the bare flag in the args and returns the link as given", () => {
+    expect(splitRoomLink(["--webrtc", link, "--join", "--port", "7432"])).toEqual({
+      args: ["--webrtc", "--join", "--port", "7432"],
+      link,
+    });
+    expect(splitRoomLink([`--share=${link}`])).toEqual({ args: ["--share"], link });
+  });
+
+  it("keeps args without a link as they are", () => {
+    expect(splitRoomLink(["--webrtc", "--port", "7432"])).toEqual({
+      args: ["--webrtc", "--port", "7432"],
+    });
+    // Not a room link: left for the parsers, which reject it loudly.
+    expect(splitRoomLink(["--webrtc", "nope"])).toEqual({ args: ["--webrtc", "nope"] });
+  });
+
+  it("puts the link back on the bare flag, and round-trips", () => {
+    const args = ["--webrtc", link, "--join", "--port", "7432"];
+    const { args: bare, link: l } = splitRoomLink(args);
+    expect(withRoomLink(bare, l)).toEqual(args);
+    expect(withRoomLink(["--port", "7432", "--webrtc"], link)).toEqual([
+      "--port",
+      "7432",
+      "--webrtc",
+      link,
+    ]);
+  });
+
+  it("never overrides a link the args already name, nor adds a flag", () => {
+    const own = `webrtc://r2:${v}@s.agent-yes.com`;
+    expect(withRoomLink(["--webrtc", own], link)).toEqual(["--webrtc", own]);
+    expect(withRoomLink(["--port", "7432"], link)).toEqual(["--port", "7432"]);
+    expect(withRoomLink(["--webrtc"], undefined)).toEqual(["--webrtc"]);
   });
 });
