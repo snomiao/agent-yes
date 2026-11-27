@@ -213,11 +213,18 @@ pub fn format_room_url(room: &RoomUrl) -> String {
     format!("webrtc://{}:{}@{}", room.room, room.token, room.host)
 }
 
+/// What a log gets instead of a room link: the room id, without its secret.
+fn link_not_logged(room: &str) -> String {
+    format!("room {room} (the link carries its secret, so it is not logged; `ay serve status` prints it)")
+}
+
+// The errors below never echo `s`: it carries the room secret, and they land
+// in the service log.
 pub fn parse_share_url(s: &str) -> Result<RoomUrl> {
     // webrtc://room:token@host
     let rest = s
         .strip_prefix("webrtc://")
-        .ok_or_else(|| anyhow!("bad --webrtc url: {s} (want webrtc://room:token@host)"))?;
+        .ok_or_else(|| anyhow!("bad --webrtc url (want webrtc://room:token@host)"))?;
     let (roomtok, host) = rest
         .rsplit_once('@')
         .ok_or_else(|| anyhow!("bad --webrtc url: missing @host"))?;
@@ -225,7 +232,7 @@ pub fn parse_share_url(s: &str) -> Result<RoomUrl> {
         .split_once(':')
         .ok_or_else(|| anyhow!("bad --webrtc url: missing :token"))?;
     if room.is_empty() || token.is_empty() || host.is_empty() {
-        bail!("bad --webrtc url: {s}");
+        bail!("bad --webrtc url: empty room, token or host");
     }
     let (token, join) = match token.split_once(":j1.") {
         Some((t, j)) => (t, Some(format!("j1.{j}"))),
@@ -728,6 +735,22 @@ mod claim_tests {
     }
 
     #[test]
+    fn neither_a_parse_error_nor_the_logged_line_carries_the_secret() {
+        let v = format!("e1.{}", "ab".repeat(32));
+        for bad in [
+            format!("https://agent-yes.com/w/#r1:{v}"),
+            format!("webrtc://:{v}@s.example"),
+            format!("webrtc://r1:{v}@"),
+        ] {
+            let err = format!("{:#}", parse_share_url(&bad).err().expect("must not parse"));
+            assert!(!err.contains(&v), "{err}");
+        }
+        let logged = link_not_logged("r1");
+        assert!(logged.starts_with("room r1 "), "{logged}");
+        assert!(!logged.contains("e1."), "{logged}");
+    }
+
+    #[test]
     fn claims_a_free_room_and_records_our_pid() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("lock.pid");
@@ -876,7 +899,14 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
 
     let link = format_share_link(&room.room, &secret, &room.host);
     eprintln!("[ayrs share] room {} via {}", room.room, room.host);
-    println!("{link}");
+    println!(
+        "{}",
+        super::secret_line(
+            &link,
+            &link_not_logged(&room.room),
+            super::stdout_is_terminal()
+        )
+    );
     // Fails here, before any signaling, when --join has no join secret.
     let me = super::room_member::for_room(&room.room, &room.host, cfg.join, room.join.as_deref())?;
     eprintln!(
@@ -957,7 +987,14 @@ pub async fn run_share(cfg: ShareConfig) -> Result<()> {
                 // and lands on the PARKING startup claim instead.
                 claim_room_at(&room_lock_path(&room.room), &room.room)?;
                 let link = format_share_link(&room.room, &secret, &room.host);
-                eprintln!("[ayrs share] room rotated: {link}");
+                eprintln!(
+                    "[ayrs share] room rotated: {}",
+                    super::secret_line(
+                        &link,
+                        &link_not_logged(&room.room),
+                        super::stderr_is_terminal()
+                    )
+                );
             }
             Ok(SessionEnd::Cancelled) => unreachable!("master room has no canceller"),
             Ok(SessionEnd::Dropped) => {

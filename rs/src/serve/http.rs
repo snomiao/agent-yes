@@ -338,7 +338,18 @@ pub async fn run(port: u16) -> Result<()> {
         .await
         .with_context(|| format!("bind {addr}"))?;
     let local = listener.local_addr()?;
-    println!("http://127.0.0.1:{}/#k={}", local.port(), token);
+    // The first line starts `http://127.0.0.1:<port>/` either way: callers
+    // read the bound port from it.
+    let full = format!("http://127.0.0.1:{}/#k={}", local.port(), token);
+    let redacted = format!(
+        "http://127.0.0.1:{}/ (console token not logged; it is in {})",
+        local.port(),
+        api::token_path().display()
+    );
+    println!(
+        "{}",
+        crate::serve::secret_line(&full, &redacted, crate::serve::stdout_is_terminal())
+    );
     loop {
         let (stream, _) = listener.accept().await?;
         let token = token.clone();

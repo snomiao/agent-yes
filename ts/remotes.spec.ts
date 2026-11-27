@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from "fs/promises";
+import { chmod, mkdtemp, rm, stat } from "fs/promises";
 import { tmpdir } from "os";
 import path from "path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -102,6 +102,16 @@ describe("ay remote ls", () => {
     await rm(home, { recursive: true, force: true });
   });
 
+  it.skipIf(process.platform === "win32")(
+    "keeps remotes.yaml owner-only, also when an older copy was world-readable",
+    async () => {
+      const file = path.join(home, "remotes.yaml");
+      expect((await stat(file)).mode & 0o777).toBe(0o600);
+      await chmod(file, 0o644);
+      await writeRemoteAlias("other", { url: "http://192.0.2.9:7432", token: TOKEN });
+      expect((await stat(file)).mode & 0o777).toBe(0o600);
+    },
+  );
   it("masks every secret by default", async () => {
     expect(await cmdRemote(["ls"])).toBe(0);
     expect(out).not.toContain(SECRET);
