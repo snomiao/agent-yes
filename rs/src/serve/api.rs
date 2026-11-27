@@ -72,8 +72,12 @@ fn global_dir() -> PathBuf {
 
 /// Load or mint the serve API bearer token — same file the TS daemon uses
 /// (`~/.agent-yes/.serve-token`), so links/tokens stay interchangeable.
+pub fn token_path() -> PathBuf {
+    global_dir().join(".serve-token")
+}
+
 pub fn load_or_create_token() -> std::io::Result<String> {
-    let path = global_dir().join(".serve-token");
+    let path = token_path();
     if let Ok(t) = std::fs::read_to_string(&path) {
         let t = t.trim().to_string();
         if !t.is_empty() {
