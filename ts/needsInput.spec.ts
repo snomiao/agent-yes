@@ -191,3 +191,40 @@ test("prose mentioning the trust dialog is not a trust prompt", () => {
   ];
   expect(classifyNeedsInput(screen, claude)).toBeNull();
 });
+
+// First-run onboarding: a fresh HOME (no hasCompletedOnboarding) shows the
+// theme picker before the prompt; a HOME with no credentials then shows the
+// login-method menu. Captured screen text (claude 2.1.x).
+const THEME_PICKER =
+  "Let's get started.\n Choose the text style that looks best with your terminal\n To change this later, run /theme\n   Auto (match terminal)\n ❯ ✔ Dark mode\n   Light mode\n   Dark mode (colorblind-friendly)";
+const LOGIN_MENU = [
+  "Select login method:",
+  "",
+  " ❯ 1. Claude account with subscription · Individual, Team, or Enterprise",
+  "   2. Anthropic Console account · API usage billing",
+  "   3. 3rd-party platform · Bedrock, Microsoft Foundry, Google Vertex AI",
+];
+const claudeEnter = (defaults.claude?.enter ?? []) as RegExp[];
+const matchesAny = (res: RegExp[], text: string) =>
+  text
+    .split("\n")
+    .some((line) => res.some((re) => new RegExp(re.source, re.flags.replace("g", "")).test(line)));
+
+test("claude first-run theme picker is auto-answered with Enter (default theme)", () => {
+  expect(matchesAny(claudeEnter, THEME_PICKER)).toBe(true);
+  // The default-cursor variant on a fresh HOME.
+  expect(matchesAny(claudeEnter, " ❯ ✔ Auto (match terminal)")).toBe(true);
+});
+
+test("claude theme picker left on screen is needs_input, not idle", () => {
+  const r = classifyNeedsInput(THEME_PICKER.split("\n"), claude);
+  expect(r).not.toBeNull();
+  expect(r!.question).toContain("text style");
+});
+
+test("claude login-method menu is needs_input and is never auto-answered", () => {
+  const r = classifyNeedsInput(LOGIN_MENU, claude);
+  expect(r).not.toBeNull();
+  expect(r!.question).toContain("Select login method");
+  expect(matchesAny(claudeEnter, LOGIN_MENU.join("\n"))).toBe(false);
+});
