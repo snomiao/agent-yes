@@ -7,6 +7,7 @@ import {
   claimPending,
   classifyComposer,
   composerBoxed,
+  isKnownComposerHint,
   ownEnvelopeNonce,
   DUPLICATE_WINDOW_MS,
   enqueuePending,
@@ -227,6 +228,21 @@ describe("agy's ASCII `>` prompt", () => {
   it("reads agy's gray mode notice in an empty box as ghost text, not a draft", async () => {
     const notice = " \x1b[90mAuto mode: edits & safe commands auto-approved\x1b[0m";
     expect(await classify(agyBox(notice), 60, "agy")).toEqual({ kind: "empty", ghost: true });
+  });
+  it("reads agy's mode hint as ghost text when the screen has no colour (TERM=dumb)", async () => {
+    const hint = " Auto mode: edits & safe commands auto-approved (shift+tab to cycle)";
+    expect(await classify(agyBox(hint), 100, "agy")).toEqual({ kind: "empty", ghost: true });
+  });
+  it("still reads a draft that merely contains the hint text as a draft", async () => {
+    const typed = " Auto mode: edits & safe commands auto-approved (shift+tab to cycle) please";
+    expect((await classify(agyBox(typed), 120, "agy")).kind).toBe("draft");
+  });
+  it("only applies a CLI's known hints to that CLI", () => {
+    const hint = "Auto mode: edits & safe commands auto-approved (shift+tab to cycle)";
+    expect(isKnownComposerHint(hint, "agy")).toBe(true);
+    expect(isKnownComposerHint(hint, "claude")).toBe(false);
+    expect(isKnownComposerHint(hint)).toBe(false);
+    expect(isKnownComposerHint("", "agy")).toBe(false);
   });
   it("reads typed text in agy's box as a draft", async () => {
     expect(await classify(agyBox(" hi"), 60, "agy")).toEqual({ kind: "draft", chars: 2 });

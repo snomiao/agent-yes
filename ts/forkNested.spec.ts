@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   buildSpawnTutorial,
   confirmAgentStarted,
+  detachedChildEnv,
   predictedLogPath,
   shouldForkNested,
   stripDetachFlag,
@@ -277,5 +278,23 @@ describe("buildSpawnTutorial — the parent's half of the contract", () => {
     const out = buildSpawnTutorial("codex", 7);
     expect(out).toContain("ay tail 7");
     expect(out).toContain(`ay send 7 "..."`);
+  });
+});
+
+describe("detachedChildEnv", () => {
+  it("replaces TERM=dumb with a colour-capable terminal", () => {
+    expect(detachedChildEnv({ TERM: "dumb", A: "1" })).toEqual({ TERM: "xterm-256color", A: "1" });
+  });
+  it("fills in a missing or blank TERM", () => {
+    expect(detachedChildEnv({}).TERM).toBe("xterm-256color");
+    expect(detachedChildEnv({ TERM: "  " }).TERM).toBe("xterm-256color");
+  });
+  it("keeps a TERM the user set", () => {
+    expect(detachedChildEnv({ TERM: "screen-256color" }).TERM).toBe("screen-256color");
+  });
+  it("does not mutate the input", () => {
+    const env = { TERM: "dumb" };
+    detachedChildEnv(env);
+    expect(env.TERM).toBe("dumb");
   });
 });

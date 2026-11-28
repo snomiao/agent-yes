@@ -237,6 +237,7 @@ if (config.useRust) {
       waitForRegistration,
       confirmAgentStarted,
       predictedLogPath,
+      detachedChildEnv,
     } = await import("./forkNested.ts");
     if (
       shouldForkNested({
@@ -249,7 +250,7 @@ if (config.useRust) {
       const forked = spawn(rustBinary, rustArgs, {
         detached: true,
         stdio: "ignore",
-        env: process.env,
+        env: detachedChildEnv(process.env),
         cwd: process.cwd(),
       });
       const forkedPid = forked.pid;

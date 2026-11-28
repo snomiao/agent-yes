@@ -3,6 +3,7 @@ import { closeSync, mkdirSync, openSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { detachedChildEnv } from "../forkNested.ts";
 import { readGlobalPids, type GlobalPidRecord } from "../globalPidIndex.ts";
 
 /** Start a TS wrapper and return only once its canonical CLI pid is discoverable. */
@@ -20,7 +21,7 @@ export async function detachStream(options: {
     cwd: options.cwd,
     detached: true,
     stdio: ["ignore", "ignore", errorFd],
-    env: { ...process.env, AGENT_YES_ATTACH: "1", AGENT_YES_NO_CWD_WARN: "1" },
+    env: { ...detachedChildEnv(process.env), AGENT_YES_ATTACH: "1", AGENT_YES_NO_CWD_WARN: "1" },
   });
   closeSync(errorFd);
   let failure: string | undefined;

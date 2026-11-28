@@ -73,6 +73,22 @@ const ASCII_PROMPT_CLIS = new Set(["agy"]);
 export function stripPromptGlyph(line: string, cli?: string): string {
   return line.replace(cli && ASCII_PROMPT_CLIS.has(cli) ? /^\s*[❯›>]\s*/u : /^\s*[❯›]\s*/u, "");
 }
+/**
+ * Known placeholder/hint texts per CLI, matched by text when the screen carries
+ * no colour info (TERM=dumb draws no SGR at all, so a gray/dim hint reads as
+ * typed input). Only an exact match of the whole input row counts, so a real
+ * draft that merely contains the hint is still a draft.
+ */
+export const KNOWN_COMPOSER_HINTS: Record<string, RegExp[]> = {
+  agy: [/^Auto mode: edits & safe commands auto-approved \(shift\+tab to cycle\)$/u],
+  claude: [/^Press up to edit queued messages$/u],
+};
+
+/** Is this prompt-row text (glyph already stripped) a known hint of this CLI? */
+export function isKnownComposerHint(text: string, cli?: string): boolean {
+  const t = text.trim();
+  return !!cli && t !== "" && (KNOWN_COMPOSER_HINTS[cli] ?? []).some((re) => re.test(t));
+}
 /** The input-row matcher for a CLI (see ASCII_PROMPT_CLIS). */
 export function promptRe(cli?: string): RegExp {
   return cli && ASCII_PROMPT_CLIS.has(cli) ? ASCII_PROMPT_RE : PROMPT_RE;
@@ -222,6 +238,11 @@ export function classifyComposer(rows: ComposerRow[], cli?: string): ComposerSta
       let glyph = cells.findIndex((c) => c.ch.trim() !== "");
       if (glyph >= 0 && !promptRe(cli).test(cells[glyph]!.ch)) glyph = -1;
       cells = glyph >= 0 ? cells.slice(glyph + 1) : cells;
+    }
+    // No colour info (TERM=dumb): fall back to the CLI's known hint texts.
+    if (i === prompt && isKnownComposerHint(stripPromptGlyph(row.text, cli), cli)) {
+      ghost = true;
+      continue;
     }
     for (const c of cells) {
       if (!c.ch.trim() || c.ch === "\u00a0") continue;
