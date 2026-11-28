@@ -116,7 +116,26 @@ describe("planRustServe", () => {
       argv: ["serve", "--webrtc", "webrtc://r1:e1.ab@s.example", "--join"],
       feature: "--join",
     });
-    expect(planRustServe(["--webrtc", "--join"], env)).toMatchObject({ kind: "ts" });
+    // bare --webrtc: ayrs reads the link from AY_ROOM_URL / AY_ROOM
+    expect(planRustServe(["--webrtc", "--join"], env)).toEqual({
+      kind: "rust-only",
+      argv: ["serve", "--webrtc", "--join"],
+      feature: "--join",
+    });
+    expect(planRustServe(["--join"], env)).toMatchObject({ kind: "ts" });
+    expect(planRustServe(["join-secret", "--new"], env)).toEqual({
+      kind: "rust-only",
+      argv: ["serve", "join-secret", "--new"],
+      feature: "join-secret",
+    });
+    expect(planRustServe(["join-secret", "--new", "--sighost", "s.example"], env)).toEqual({
+      kind: "rust-only",
+      argv: ["serve", "--sighost", "s.example", "join-secret", "--new"],
+      feature: "join-secret",
+    });
+    expect(
+      planRustServe(["join-secret", "--new", "--webrtc", "webrtc://r1:e1.ab@s.example"], env),
+    ).toMatchObject({ kind: "ts" });
     expect(planRustServe(["join-secret"], env)).toEqual({
       kind: "rust-only",
       argv: ["serve", "join-secret"],
