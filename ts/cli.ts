@@ -299,6 +299,17 @@ if (config.useRust) {
       process.exit(0);
     }
 
+    // Become the native binary (execve) instead of idling as its parent: a
+    // resident bun launcher costs ~11 MB per lane for nothing. Falls through to
+    // the spawn below where exec is unsupported or fails (AGENT_YES_NO_EXEC=1
+    // forces the spawn path).
+    // Loading the helper itself resolves bun:ffi. Node must reach spawn
+    // without evaluating that module.
+    if (process.versions.bun && (process.platform === "linux" || process.platform === "darwin")) {
+      const { execReplace } = await import("./execReplace.ts");
+      execReplace(rustBinary, rustArgs, process.env);
+    }
+
     const child = spawn(rustBinary, rustArgs, {
       stdio: "inherit",
       env: process.env,
