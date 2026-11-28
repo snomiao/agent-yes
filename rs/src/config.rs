@@ -325,6 +325,28 @@ mod tests {
         assert_eq!(config.prompt_arg, "--prompt");
     }
 
+    /// First-run onboarding (fresh HOME): the theme picker is auto-answered
+    /// with Enter and reads as needs_input while on screen; the login-method
+    /// menu is needs_input and is never auto-answered.
+    #[test]
+    fn test_claude_first_run_onboarding_patterns() {
+        let theme = "Let's get started.\n Choose the text style that looks best with your terminal\n To change this later, run /theme\n   Auto (match terminal)\n ❯ ✔ Dark mode\n   Light mode\n   Dark mode (colorblind-friendly)";
+        let login = "Select login method:\n\n ❯ 1. Claude account with subscription · Individual, Team, or Enterprise\n   2. Anthropic Console account · API usage billing";
+        for cli in ["claude", "glm"] {
+            let c = get_cli_config(cli).unwrap();
+            assert!(c.enter.iter().any(|rx| rx.is_match(theme)), "{cli}");
+            assert!(
+                c.enter
+                    .iter()
+                    .any(|rx| rx.is_match(" ❯ ✔ Auto (match terminal)")),
+                "{cli}"
+            );
+            assert!(c.needs_input.iter().any(|rx| rx.is_match(theme)), "{cli}");
+            assert!(c.needs_input.iter().any(|rx| rx.is_match(login)), "{cli}");
+            assert!(!c.enter.iter().any(|rx| rx.is_match(login)), "{cli}");
+        }
+    }
+
     #[test]
     fn test_claude_patterns() {
         let config = get_cli_config("claude").unwrap();

@@ -46,6 +46,15 @@ clis:
       # and `ay ls` called it idle — a lane silently stuck on the dialog.
       - pattern: '(❯|>) ?(\d\. ?)?(Yes, I trust this folder|No, exit)'
         flags: m
+      # First-run onboarding (fresh HOME / ~/.claude.json without
+      # hasCompletedOnboarding): the theme picker. Normally auto-answered by the
+      # `enter` pattern below; if it lingers it is needs_input, not idle.
+      - pattern: "Choose the text style that looks best with your terminal"
+        flags: m
+      # First-run login screen. Never auto-answered (choosing an account /
+      # signing in is the operator's call) — surface it as needs_input.
+      - pattern: "Select login method"
+        flags: m
     typingRespond:
       "1\n":
         - '│ Do you want to use this API key\?'
@@ -63,6 +72,10 @@ clis:
         flags: m
       # Trust dialog, current layout — after the Down above moved the cursor.
       - pattern: "❯ ?Yes, I trust this folder"
+        flags: m
+      # First-run theme picker, current un-numbered layout
+      # ("❯ ✔ Auto (match terminal)" / "❯ ✔ Dark mode"): accept the default.
+      - pattern: '❯ ?✔ ?(Auto \(match terminal\)|(Dark|Light) mode)'
         flags: m
       - pattern: '❯ ?1\. ?Dark mode ?✔'
         flags: m
@@ -214,6 +227,15 @@ clis:
       # and `ay ls` called it idle — a lane silently stuck on the dialog.
       - pattern: '(❯|>) ?(\d\. ?)?(Yes, I trust this folder|No, exit)'
         flags: m
+      # First-run onboarding (fresh HOME / ~/.claude.json without
+      # hasCompletedOnboarding): the theme picker. Normally auto-answered by the
+      # `enter` pattern below; if it lingers it is needs_input, not idle.
+      - pattern: "Choose the text style that looks best with your terminal"
+        flags: m
+      # First-run login screen. Never auto-answered (choosing an account /
+      # signing in is the operator's call) — surface it as needs_input.
+      - pattern: "Select login method"
+        flags: m
     typingRespond:
       "1\n":
         - '│ Do you want to use this API key\?'
@@ -231,6 +253,10 @@ clis:
         flags: m
       # Trust dialog, current layout — after the Down above moved the cursor.
       - pattern: "❯ ?Yes, I trust this folder"
+        flags: m
+      # First-run theme picker, current un-numbered layout
+      # ("❯ ✔ Auto (match terminal)" / "❯ ✔ Dark mode"): accept the default.
+      - pattern: '❯ ?✔ ?(Auto \(match terminal\)|(Dark|Light) mode)'
         flags: m
       - pattern: '❯ ?1\. ?Dark mode ?✔'
         flags: m
