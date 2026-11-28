@@ -42,7 +42,19 @@
         agent, change a terminal's permissions, or replace a room's access token.
       </p>
       <h2>Optional device sync</h2>
-      <p>Choosing Sync now on two signed-in browsers exchanges saved room credentials, agent status, and schedule times over a direct device connection. The account service helps the browsers connect. Copies are saved in each browser for offline viewing. Clear saved copies in Sync devices or sign out to remove the received snapshots. Rooms you explicitly connect to become saved rooms in the console and can be forgotten there.</p>
+      <p>
+        Check Sync beside a saved room to share its credentials, agent status and schedule times
+        automatically with other open consoles signed in to the same account. New rooms start
+        unchecked. Browsers exchange the selected data directly over encrypted WebRTC connections
+        and save copies locally for offline use. Jobs keep running on their original hosts.
+      </p>
+      <p>
+        The account service verifies your session and relays connection setup messages. Room
+        identifiers, credentials, host details and schedules are never written to the account
+        database. Unchecking stops future sharing of that room when devices next connect. Signing
+        out clears received copies and sync selections on this browser. Rooms you saved yourself
+        stay available locally.
+      </p>
       <h2>Signing out</h2>
       <p>
         Signing out ends this browser session. It does not delete your account records or revoke

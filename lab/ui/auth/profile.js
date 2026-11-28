@@ -1,3 +1,5 @@
+import { clearDeviceCopies } from "../w/sync-storage.js";
+
 const API = "/api/auth";
 
 export function safeReturnTo(value, origin = location.origin) {
@@ -59,8 +61,7 @@ export async function signOut() {
   } catch {
     throw new Error("Sign-out could not be confirmed. Please try again.");
   }
-  for (const key of Object.keys(localStorage)) if (key.startsWith("ay.peerCopy.")) localStorage.removeItem(key);
-  localStorage.removeItem("ay.peerOwner");
+  clearDeviceCopies();
   localStorage.setItem("ay.peerSignout", String(Date.now()));
   window.dispatchEvent(new Event("ay-auth-changed"));
 }
