@@ -10,6 +10,7 @@ import {
   existsSync,
   mkdirSync,
   readdirSync,
+  readFileSync,
   rmSync,
   statSync,
   unlinkSync,
@@ -44,6 +45,80 @@ export function getBinaryName(): string {
   }
 
   return binaryName + (platform === "win32" ? ".exe" : "");
+}
+
+/**
+ * npm platform packages. A release can carry this version's native binaries
+ * as `agent-yes@<version>-<platform>` packages, which the main package pulls
+ * in as optional dependencies named `agent-yes-<platform>` (rustify's packer,
+ * `rustify` in package.json). The package manager then installs the one for
+ * this machine, so nothing has to be downloaded on the first run.
+ *
+ * Its binaries sit in its `bin/` under fixed names: the runner as
+ * `agent-yes-native`, plus `ayrs` and (Windows) `ay-spawn-hidden.exe`. The
+ * runner is deliberately NOT called `agent-yes`: ayrs uses a sibling named
+ * `agent-yes` as the `ay` command (rs/src/serve/control.rs `ay_bin`), and here
+ * that command must stay the JavaScript one on PATH, as it is for a download.
+ */
+export const PLATFORM_PACKAGE = "agent-yes";
+export const NATIVE_RUNNER = "agent-yes-native";
+
+/** This machine's platform key as the platform packages name it (`darwin-arm64`). */
+export function platformKey(): string {
+  const os = process.platform === "android" ? "linux" : process.platform;
+  return `${os}-${process.arch}`;
+}
+
+let platformPackageFrom: string | null = null;
+
+/** Test-only: search for the platform package from `dir` instead of this module's own dir. */
+export function _setPlatformPackageFromForTesting(dir: string | null): void {
+  platformPackageFrom = dir;
+}
+
+/**
+ * The `bin/` dir of the platform package installed for this machine, or
+ * undefined when there is none: a release that predates the platform
+ * packages, optional dependencies left out (`--omit=optional`), a platform
+ * without a build, or a dev checkout. Only a package of exactly this version
+ * counts — a stale one elsewhere on the lookup path must never be run.
+ *
+ * Looks the package up the way Node resolves a dependency: `node_modules/`
+ * in this module's dir and in every dir above it. That covers the nested
+ * (`agent-yes/node_modules/agent-yes-<platform>`) and the hoisted layout.
+ */
+export function getPlatformPackageBinDir(): string | undefined {
+  const key = platformKey();
+  const name = `${PLATFORM_PACKAGE}-${key}`;
+  const want = `${getInstalledPackage().version}-${key}`;
+  let dir = platformPackageFrom ?? import.meta.dirname ?? import.meta.dir;
+  for (;;) {
+    if (path.basename(dir) !== "node_modules") {
+      const manifest = path.join(dir, "node_modules", name, "package.json");
+      try {
+        const pkg = JSON.parse(readFileSync(manifest, "utf8")) as { version?: string };
+        // The nearest one is the one Node would load; if it is not this
+        // version's, do not look further for one that is.
+        return pkg.version === want ? path.join(path.dirname(manifest), "bin") : undefined;
+      } catch {
+        /* not here (or unreadable) — keep walking up */
+      }
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return undefined;
+    dir = parent;
+  }
+}
+
+/**
+ * `name` (no extension) from this machine's platform package, or undefined
+ * when the package is not installed or did not ship it.
+ */
+export function findInPlatformPackage(name: string): string | undefined {
+  const dir = getPlatformPackageBinDir();
+  if (!dir) return undefined;
+  const p = path.join(dir, name + (process.platform === "win32" ? ".exe" : ""));
+  return existsSync(p) ? ensureExecutable(p) : undefined;
 }
 
 /**
@@ -163,21 +238,31 @@ export function findRustBinary(verbose = false): string | undefined {
   const binaryName = getBinaryName();
 
   const ext = process.platform === "win32" ? ".exe" : "";
+  const platformBinDir = getPlatformPackageBinDir();
+  const platformRunner = platformBinDir && path.join(platformBinDir, `${NATIVE_RUNNER}${ext}`);
   const searchPaths = [
     // 1. Check relative to this script (in the repo during development)
     path.resolve(import.meta.dirname ?? import.meta.dir, `../rs/target/release/agent-yes${ext}`),
     path.resolve(import.meta.dirname ?? import.meta.dir, `../rs/target/debug/agent-yes${ext}`),
 
-    // 2. Check in npm package bin directory
+    // 2. This version's npm platform package, installed with the package
+    ...(platformRunner ? [platformRunner] : []),
+
+    // 3. Check in npm package bin directory
     path.join(getBinDir(), binaryName),
 
-    // 3. Check in user's cache directory
+    // 4. Check in user's cache directory
     path.join(getBinDir(), binaryName),
   ];
 
   if (verbose) {
     console.log(`[rust] Looking for binary: ${binaryName}`);
     console.log(`[rust] Search paths:`);
+    if (!platformRunner) {
+      console.log(
+        `[rust]   - npm platform package ${PLATFORM_PACKAGE}-${platformKey()}: not installed`,
+      );
+    }
   }
 
   for (const p of searchPaths) {
@@ -185,7 +270,7 @@ export function findRustBinary(verbose = false): string | undefined {
       console.log(`[rust]   - ${p}: ${existsSync(p) ? "FOUND" : "not found"}`);
     }
     if (existsSync(p)) {
-      return p;
+      return p === platformRunner ? ensureExecutable(p) : p;
     }
   }
 
@@ -209,10 +294,12 @@ export function findSpawnHiddenLauncher(): string | undefined {
     // 1. Dev build, right next to the target/release agent-yes.exe
     path.resolve(dir, "../rs/target/release/ay-spawn-hidden.exe"),
     path.resolve(dir, "../rs/target/debug/ay-spawn-hidden.exe"),
-    // 2. npm package bin / version-scoped download cache (getBinDir), where the
+    // 2. This version's npm platform package (the Windows ones carry it).
+    findInPlatformPackage("ay-spawn-hidden") ?? "",
+    // 3. npm package bin / version-scoped download cache (getBinDir), where the
     //    win32 release zip extracts it beside agent-yes-win32-x64.exe.
     path.join(getBinDir(), "ay-spawn-hidden.exe"),
-    // 3. cargo-installed (`bun run build:rs`) → on PATH.
+    // 4. cargo-installed (`bun run build:rs`) → on PATH.
     Bun.which("ay-spawn-hidden") ?? "",
   ];
 
@@ -246,10 +333,11 @@ export function findTrayLauncher(): string | undefined {
 
 /**
  * Locate the `ayrs` binary (the Rust `serve` daemon). Same install shapes as
- * the agent runtime — a dev `rs/target` build, the downloaded release bin dir
- * (CI ships ayrs in every platform bundle since #473), or `~/.cargo/bin` on
- * PATH after `bun run build:rs`. Undefined when absent (an older release, or a
- * platform whose bundle predates it) — callers fall back to the TS server.
+ * the agent runtime — a dev `rs/target` build, this version's npm platform
+ * package, the downloaded release bin dir (CI ships ayrs in every platform
+ * bundle since #473), or `~/.cargo/bin` on PATH after `bun run build:rs`.
+ * Undefined when absent (an older release, or a platform whose bundle
+ * predates it) — callers fall back to the TS server.
  */
 export function findAyrsBinary(): string | undefined {
   const exe = process.platform === "win32" ? "ayrs.exe" : "ayrs";
@@ -257,6 +345,7 @@ export function findAyrsBinary(): string | undefined {
   const searchPaths = [
     path.resolve(dir, `../rs/target/release/${exe}`),
     path.resolve(dir, `../rs/target/debug/${exe}`),
+    findInPlatformPackage("ayrs") ?? "",
     path.join(getBinDir(), exe),
     Bun.which("ayrs") ?? "",
   ];
